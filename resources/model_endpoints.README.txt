@@ -1,0 +1,46 @@
+Timem model endpoint store (model_endpoints.json)
+=================================================
+
+This directory holds model_endpoints.json: the Web host store of reusable model
+endpoint presets. Prefer editing presets through the Web host endpoint UI/API
+(it validates fields, enforces unique names, and re-applies to sessions) rather
+than hand-writing the JSON. This note is regenerated only when missing.
+
+File: model_endpoints.json
+  - Format: pretty JSON array of endpoint objects; permissions 0600.
+  - Written atomically via a .json.tmp file then rename.
+  - A corrupt file is quarantined to a timestamped backup and reset to [].
+
+Each endpoint object:
+  id                          string, stable identifier
+  name                        string, unique display name
+  model                       string
+  api_protocol                openai-compatible | openai-responses | anthropic
+  response_protocol           xml | json
+  base_url                    string
+  api_key                     string (kept only in this 0600 file)
+  max_llm_input_tokens        integer, default 100000
+  max_llm_output_tokens       integer, default 10000
+  stream                      bool, default false
+  http_headers                object of extra request headers, default {}
+  request_fields              object of extra request body fields, default {}
+  allow_cross_origin_redirects  bool, default false
+  private_ca_pem              string PEM bundle, default empty
+
+Authentication header is derived from api_protocol, not set freely:
+  openai-compatible / openai-responses -> Authorization: Bearer <api_key>
+  anthropic                            -> x-api-key: <api_key> (+ anthropic-version)
+A gateway that only accepts Authorization: Bearer must use api_protocol
+openai-compatible, or override the header via http_headers (custom headers
+override the protocol default case-insensitively).
+
+Import: the Web host can scan Codex CLI (config.toml/auth.json) and Claude Code
+(settings.json/settings.local.json) directories and add their parsed profiles,
+profile overlays, and providers as endpoints; scanned keys stay host-side until
+an explicit import applies them.
+For a standard ~/.codex layout, a CHJ provider using CHJ_API_KEY falls back to
+the EPT portal token in ~/.config/ept/auth_session.json when Timem was not
+launched with that environment variable.
+
+For TIMEM_* environment configuration (model, protocol, base_url, key fallbacks,
+etc.) see env_template in the Timem source tree and docs/install-and-configuration.md.

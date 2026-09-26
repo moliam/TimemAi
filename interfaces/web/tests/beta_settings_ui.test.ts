@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { zh } from "../src/i18n/strings.zh";
+import { en } from "../src/i18n/strings.en";
 
 const mainSource = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
 const protocolSource = readFileSync(
@@ -14,19 +16,21 @@ describe("Beta settings UI contract", () => {
     );
     expect(mainSource).not.toContain('| "toolgen"');
     expect(mainSource).toContain('onClick={() => selectSettingsSection("beta")}');
-    expect(mainSource).toContain("<strong>Beta</strong>");
-    expect(mainSource).toContain("<strong>Enable ToolGen</strong>");
-    expect(mainSource).toContain("<strong>Claude/Codex 工具发现</strong>");
+    expect(mainSource).toContain('<strong>{t("settings.beta")}</strong>');
+    expect(mainSource).toContain('<strong>{t("beta.enableToolGen")}</strong>');
+    expect(mainSource).toContain('<strong>{t("beta.toolDiscovery")}</strong>');
+    expect(zh.beta.title).toBe("Beta");
+    expect(zh.beta.enableToolGen).toBe("启用 ToolGen");
+    expect(zh.beta.toolDiscovery).toContain("Claude/Codex 工具发现");
   });
 
   it("keeps discovery Host-authoritative and effective from the next request", () => {
     expect(mainSource).toContain(
       'type: "beta_claude_codex_tool_discovery_update"',
     );
-    expect(mainSource).toContain(
-      "Waiting for the Host to persist and apply this setting.",
-    );
-    expect(mainSource).toContain("从下一次模型 API 请求开始生效");
+    expect(mainSource).toContain('t("beta.pendingWait")');
+    expect(en.beta.pendingWait).toContain("Waiting for the Host to persist and apply this setting.");
+    expect(zh.beta.toolDiscoveryDesc).toContain("从下一次模型 API 请求开始生效");
     expect(mainSource).toContain(
       "server?.mem?.claude_codex_tool_discovery ?? false",
     );

@@ -5,8 +5,8 @@ use crate::response_protocol::KNOWN_PROMPT_BOUNDARIES;
 use crate::tool_schema_renderer::{render_tool_input_schema, ToolSchemaDialect};
 use crate::{
     plan_prompt_cache, redact_value, stable_text_fingerprint, CacheControl, CoreProfile,
-    LlmResponse, ModelInteractionRequest, NativeToolCall, PromptBlock, PromptBlockRole,
-    ResponseProtocolKind, ToolDefinition, UsageStats,
+    LlmResponse, ModelImagePart, ModelInteractionRequest, NativeToolCall, PromptBlock,
+    PromptBlockRole, ResponseProtocolKind, ToolDefinition, UsageStats,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,6 +200,8 @@ pub enum StructuredOutputHint {
     JsonObject,
 }
 
+pub const REASONING_EFFORT_DISABLED: &str = "disabled";
+
 pub fn plan_structured_output(config: &ModelServiceConfig) -> StructuredOutputHint {
     if config.response_protocol != ResponseProtocolKind::Json {
         return StructuredOutputHint::None;
@@ -215,11 +217,22 @@ pub fn build_model_request(
     blocks: &[ModelPromptBlock],
     structured_output: StructuredOutputHint,
 ) -> Value {
+    build_model_request_with_reasoning(config, blocks, structured_output, false)
+}
+
+pub fn build_model_request_with_reasoning(
+    config: &ModelServiceConfig,
+    blocks: &[ModelPromptBlock],
+    structured_output: StructuredOutputHint,
+    critical_reasoning: bool,
+) -> Value {
     let mut body = match config.api_protocol {
         ApiProtocol::OpenAiCompatible => {
-            build_openai_compatible_request(config, blocks, structured_output)
+            build_openai_compatible_request(config, blocks, structured_output, critical_reasoning)
         }
-        ApiProtocol::OpenAiResponses => build_openai_responses_request(config, blocks),
+        ApiProtocol::OpenAiResponses => {
+            build_openai_responses_request(config, blocks, critical_reasoning)
+        }
         ApiProtocol::Anthropic => build_anthropic_request(config, blocks),
     };
     if let Some(object) = body.as_object_mut() {
@@ -232,10 +245,23 @@ pub fn prepare_model_request(
     config: &ModelServiceConfig,
     rendered_prompt: &str,
 ) -> PreparedModelRequest {
+    prepare_model_request_with_reasoning(config, rendered_prompt, false)
+}
+
+pub fn prepare_model_request_with_reasoning(
+    config: &ModelServiceConfig,
+    rendered_prompt: &str,
+    critical_reasoning: bool,
+) -> PreparedModelRequest {
     let prompt_blocks = plan_prompt_cache(rendered_prompt);
     let structured_output = plan_structured_output(config);
     let model_blocks = model_prompt_blocks(&prompt_blocks);
-    let mut body = build_model_request(config, &model_blocks, structured_output);
+    let mut body = build_model_request_with_reasoning(
+        config,
+        &model_blocks,
+        structured_output,
+        critical_reasoning,
+    );
     if config.api_protocol == ApiProtocol::Anthropic {
         enforce_anthropic_cache_control_limit(&mut body);
     }
@@ -265,7 +291,15 @@ pub fn prepare_model_interaction_http_request(
     config: &ModelServiceConfig,
     interaction: &ModelInteractionRequest,
 ) -> PreparedModelHttpRequest {
-    let mut request = prepare_model_http_request(config, &interaction.rendered_prompt);
+    let mut request = PreparedModelHttpRequest {
+        endpoint: config.endpoint(),
+        headers: model_http_headers(config),
+        model_request: prepare_model_request_with_reasoning(
+            config,
+            &interaction.rendered_prompt,
+            interaction.critical_reasoning,
+        ),
+    };
     if interaction.is_native() {
         apply_native_interaction(config, &mut request.model_request.body, interaction);
         if config.api_protocol == ApiProtocol::Anthropic {
@@ -280,7 +314,162 @@ pub fn prepare_model_interaction_http_request(
             .as_object_mut()
             .map(|body| body.remove("response_format"));
     }
+    if !interaction.images.is_empty() {
+        attach_interaction_images(
+            &mut request.model_request.body,
+            config.api_protocol,
+            interaction.is_native(),
+            &interaction.images,
+        );
+    }
     request
+}
+
+/// Append this turn's images as one trailing user message so provider cache
+/// prefixes (system + earlier history, including tool-result messages) stay
+/// byte-identical across rounds and Anthropic tool_result ordering rules are
+/// never violated. Runs after text/native assembly and only touches the tail.
+fn attach_interaction_images(
+    body: &mut Value,
+    protocol: ApiProtocol,
+    is_native: bool,
+    images: &[ModelImagePart],
+) {
+    let data_urls = images
+        .iter()
+        .map(|image| format!("data:{};base64,{}", image.media_type, image.data))
+        .collect::<Vec<_>>();
+    let parts = match protocol {
+        ApiProtocol::OpenAiCompatible => data_urls
+            .into_iter()
+            .map(|url| json!({"type": "image_url", "image_url": {"url": url}}))
+            .collect::<Vec<_>>(),
+        ApiProtocol::OpenAiResponses => data_urls
+            .into_iter()
+            .map(|url| json!({"type": "input_image", "image_url": url}))
+            .collect::<Vec<_>>(),
+        ApiProtocol::Anthropic => images
+            .iter()
+            .map(|image| {
+                json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": image.media_type,
+                        "data": image.data,
+                    },
+                })
+            })
+            .collect::<Vec<_>>(),
+    };
+    let image_message = json!({"role": "user", "content": parts});
+    match protocol {
+        ApiProtocol::OpenAiResponses => {
+            let input = body
+                .as_object_mut()
+                .and_then(|body| body.get_mut("input"))
+                .expect("responses body must keep an input field");
+            if !input.is_array() {
+                let text = input.take();
+                *input = Value::Array(Vec::from([json!({
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                })]));
+            }
+            input
+                .as_array_mut()
+                .expect("input array")
+                .push(image_message);
+        }
+        ApiProtocol::OpenAiCompatible => {
+            let messages = body
+                .as_object_mut()
+                .and_then(|body| body.get_mut("messages"))
+                .and_then(Value::as_array_mut)
+                .expect("chat body must keep a messages array");
+            messages.push(image_message);
+        }
+        ApiProtocol::Anthropic => {
+            let messages = body
+                .as_object_mut()
+                .and_then(|body| body.get_mut("messages"))
+                .and_then(Value::as_array_mut)
+                .expect("anthropic body must keep a messages array");
+            if is_native {
+                // Native history already contains consecutive user messages
+                // (tool results followed by pending deltas); one more trailing
+                // user message keeps the marked cache prefix untouched.
+                messages.push(image_message);
+            } else {
+                // Inline builds exactly one user message; Anthropic requires
+                // alternating roles, so the image parts join that message.
+                let last = messages
+                    .last_mut()
+                    .and_then(|message| message.get_mut("content"))
+                    .and_then(Value::as_array_mut)
+                    .expect("anthropic inline user content array");
+                last.extend(
+                    image_message
+                        .get("content")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+            }
+        }
+    }
+}
+
+/// Replace image part payloads with bounded placeholders so multimodal audit
+/// events stay readable and bounded.
+fn redact_image_payloads_for_audit(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let image_part = map
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| matches!(kind, "image_url" | "input_image" | "image"));
+            let mut next = serde_json::Map::new();
+            for (key, val) in map {
+                let redacted = if image_part && matches!(key.as_str(), "image_url" | "source") {
+                    match val {
+                        Value::String(url) if url.starts_with("data:") => Value::String(format!(
+                            "[data image redacted; {} chars]",
+                            url.chars().count()
+                        )),
+                        Value::Object(map) => {
+                            let mut map = map.clone();
+                            for nested_key in ["url", "data"] {
+                                if let Some(payload) = map.get(nested_key).and_then(Value::as_str) {
+                                    if payload.starts_with("data:")
+                                        || (nested_key == "data" && !payload.is_empty())
+                                    {
+                                        map.insert(
+                                            nested_key.to_string(),
+                                            Value::String(format!(
+                                                "[image payload redacted; {} chars]",
+                                                payload.chars().count()
+                                            )),
+                                        );
+                                    }
+                                }
+                            }
+                            Value::Object(map)
+                        }
+                        other => other.clone(),
+                    }
+                } else {
+                    redact_image_payloads_for_audit(val)
+                };
+                next.insert(key.clone(), redacted);
+            }
+            Value::Object(next)
+        }
+        Value::Array(items) => {
+            Value::Array(items.iter().map(redact_image_payloads_for_audit).collect())
+        }
+        other => other.clone(),
+    }
 }
 
 fn apply_native_interaction(
@@ -682,6 +871,7 @@ pub fn model_request_audit_event(
     config: &ModelServiceConfig,
     prepared_request: &PreparedModelRequest,
 ) -> Value {
+    let body = redact_image_payloads_for_audit(&prepared_request.body);
     json!({
         "type": "llm_request",
         "model": config.model,
@@ -694,7 +884,7 @@ pub fn model_request_audit_event(
             "mark_count": prepared_request.cache_mark_count,
             "fallback": prepared_request.cache_fallback,
         },
-        "body": redact_value(&prepared_request.body),
+        "body": redact_value(&body),
     })
 }
 
@@ -771,6 +961,7 @@ fn build_openai_compatible_request(
     config: &ModelServiceConfig,
     blocks: &[ModelPromptBlock],
     structured_output: StructuredOutputHint,
+    critical_reasoning: bool,
 ) -> Value {
     let messages = blocks
         .iter()
@@ -791,10 +982,14 @@ fn build_openai_compatible_request(
         "max_tokens": config.max_llm_output_tokens
     });
     if let Some(enable_thinking) = config.openai_compatible.enable_thinking {
-        body["enable_thinking"] = json!(enable_thinking);
+        body["enable_thinking"] = json!(enable_thinking && critical_reasoning);
     }
     if let Some(reasoning_effort) = &config.openai_compatible.reasoning_effort {
-        body["reasoning_effort"] = json!(reasoning_effort);
+        if !critical_reasoning || reasoning_effort == REASONING_EFFORT_DISABLED {
+            body["thinking"] = json!({ "type": "disabled" });
+        } else {
+            body["reasoning_effort"] = json!(reasoning_effort);
+        }
     }
     if config.openai_compatible.stream {
         body["stream"] = json!(true);
@@ -807,6 +1002,7 @@ fn build_openai_compatible_request(
 fn build_openai_responses_request(
     config: &ModelServiceConfig,
     blocks: &[ModelPromptBlock],
+    critical_reasoning: bool,
 ) -> Value {
     let instructions = blocks
         .iter()
@@ -820,12 +1016,21 @@ fn build_openai_responses_request(
         .map(|block| block.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    json!({
+    let mut body = json!({
         "model": config.model,
         "instructions": instructions,
         "input": input,
         "max_output_tokens": config.max_llm_output_tokens
-    })
+    });
+    if let Some(reasoning_effort) = &config.openai_compatible.reasoning_effort {
+        let effort = if critical_reasoning && reasoning_effort != REASONING_EFFORT_DISABLED {
+            reasoning_effort.as_str()
+        } else {
+            "none"
+        };
+        body["reasoning"] = json!({ "effort": effort });
+    }
+    body
 }
 
 fn build_anthropic_request(config: &ModelServiceConfig, blocks: &[ModelPromptBlock]) -> Value {

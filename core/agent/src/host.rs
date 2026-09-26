@@ -19,6 +19,7 @@ pub use timem_ui_contract::projections::{
 };
 
 pub const DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+pub const USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct TurnInput<'a> {
     pub input: &'a str,
@@ -27,6 +28,9 @@ pub struct TurnInput<'a> {
     pub runtime: &'a str,
     pub run_bash_target: &'a str,
     pub additional_context: Option<&'a str>,
+    /// Images the user attached to this turn's input. They stay attached to
+    /// every model request of this turn; later turns see only the text history.
+    pub images: &'a [crate::ModelImagePart],
 }
 
 #[derive(Debug, Clone)]
@@ -1699,6 +1703,14 @@ pub trait TurnUi {
             .into_iter()
             .map(UserSupplement::from)
             .collect()
+    }
+
+    /// Returns the wait age of the oldest accepted user supplement when it has
+    /// reached the model-dispatch deadline. The flag remains asserted until the
+    /// supplement is drained, allowing a blocked model transport to interrupt
+    /// itself and build the next authoritative prompt.
+    fn take_user_supplement_model_dispatch_timeout(&mut self) -> Option<Duration> {
+        None
     }
 
     /// Whether supplements discovered after a final model response may reopen

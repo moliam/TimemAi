@@ -157,6 +157,7 @@ export type Session = {
   tools: ToolSummary[];
   mcp_server_ids: string[];
   runtime_profile?: {
+    model_endpoint_id?: string | null;
     model: string;
     api_protocol: string;
     response_protocol: string;
@@ -240,7 +241,16 @@ export type SessionWorker = {
   parent_worker_id?: string | null;
 };
 
+export type ResponsePreview = {
+  attempt: number;
+  revision: number;
+  interruption?: string | null;
+  response?: { attempt: number; revision: number; text: string; status: "streaming" | "intermediate" | "final" } | null;
+  chat: { index: number; task: string; answer: string }[];
+};
+
 export type WebTurn = {
+  preview?: ResponsePreview | null;
   turn_id: string;
   state: string;
   created_at_ms: number;
@@ -253,6 +263,8 @@ export type WebTurn = {
 };
 
 export type WebSubAnswer = {
+  preview_attempt?: number;
+  preview_index?: number;
   sub_answer_id: string;
   ordinal: number;
   task: string;
@@ -328,6 +340,8 @@ export type Activity = {
   interval_ms?: number;
   pid?: number;
   execution_started?: boolean;
+  execution_order?: number;
+  settled_order?: number;
   kind?: "context_compact" | "toolgen" | "free_talk" | "user_supplement";
   toolgen_phase?: string;
   before_tokens?: number;
@@ -361,6 +375,22 @@ export type ModelEndpoint = {
   request_fields: Record<string, unknown>;
   allow_cross_origin_redirects: boolean;
   private_ca_configured: boolean;
+  reasoning_effort?: string | null;
+};
+
+export type ModelEndpointImportCandidate = {
+  id: string;
+  source: string;
+  name: string;
+  model: string;
+  api_protocol: string;
+  response_protocol: string;
+  base_url: string;
+  max_llm_input_tokens: number;
+  max_llm_output_tokens: number;
+  stream: boolean;
+  api_key_configured: boolean;
+  reasoning_effort?: string | null;
 };
 
 export type MemTemporaryItem = {
@@ -609,6 +639,11 @@ export type WireEvent =
     }
   | { type: "model_endpoints_updated"; endpoints: ModelEndpoint[] }
   | {
+      type: "model_endpoint_import_scanned";
+      candidates: ModelEndpointImportCandidate[];
+      issues: string[];
+    }
+  | {
       type: "model_endpoint_secret_revealed";
       endpoint_id: string;
       api_key: string;
@@ -774,10 +809,21 @@ export type ClientCommand =
         request_fields: Record<string, unknown>;
         allow_cross_origin_redirects: boolean;
         private_ca_pem?: string;
+        reasoning_effort?: string | null;
       };
-    }
+  }
   | { type: "model_endpoint_delete"; endpoint_id: string }
+  | { type: "model_endpoint_delete_many"; endpoint_ids: string[] }
   | { type: "model_endpoint_apply"; session_id: string; endpoint_id: string }
+  | {
+      type: "model_endpoint_import_scan";
+      codex_dir?: string | null;
+      claude_dir?: string | null;
+    }
+  | {
+      type: "model_endpoint_import_apply";
+      candidate_ids: string[];
+    }
   | { type: "model_endpoint_secret_reveal"; endpoint_id: string }
   | { type: "mcp_server_upsert"; session_id: string; config: McpServerConfig }
   | { type: "mcp_server_delete"; server_id: string }

@@ -4,6 +4,23 @@ use std::fmt;
 
 pub const DEFAULT_MAX_TOOL_CALLS_PER_RESPONSE: usize = 64;
 
+/// One image attached to this turn's model input. `data` is base64 without
+/// the data-URL prefix; the protocol layer wraps it per provider format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelImagePart {
+    pub media_type: String,
+    pub data: String,
+}
+
+impl ModelImagePart {
+    pub fn new(media_type: impl Into<String>, data: impl Into<String>) -> Self {
+        Self {
+            media_type: media_type.into(),
+            data: data.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCallMode {
@@ -124,6 +141,11 @@ pub struct NativeExchange {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelInteractionRequest {
     pub rendered_prompt: String,
+    /// Images attached to this turn (typically pasted/uploaded screenshots).
+    /// They ride outside the rendered prompt so prompt-cache planning and the
+    /// text pipeline stay unchanged; the protocol layer appends them to the
+    /// final user message of the request body.
+    pub images: Vec<ModelImagePart>,
     /// Number of leading tool definitions that are stable built-in
     /// capabilities. Any request-scoped tools follow this cacheable prefix.
     pub static_tool_count: usize,
@@ -132,18 +154,24 @@ pub struct ModelInteractionRequest {
     pub resolved_mode: ToolCallMode,
     pub parallel_tool_calls: bool,
     pub tool_choice: NativeToolChoice,
+    /// Marks a critical request (currently: forced context compaction).
+    /// The endpoint's reasoning effort applies only to critical requests;
+    /// ordinary requests disable thinking to save latency and cost.
+    pub critical_reasoning: bool,
 }
 
 impl ModelInteractionRequest {
     pub fn inline(rendered_prompt: impl Into<String>) -> Self {
         Self {
             rendered_prompt: rendered_prompt.into(),
+            images: Vec::new(),
             static_tool_count: 0,
             tools: Vec::new(),
             native_exchanges: Vec::new(),
             resolved_mode: ToolCallMode::Inline,
             parallel_tool_calls: false,
             tool_choice: NativeToolChoice::Auto,
+            critical_reasoning: false,
         }
     }
 

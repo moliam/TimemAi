@@ -21,8 +21,8 @@ describe("tool activity row layout", () => {
     expect(styles).not.toContain("grid-template-columns: 16px max-content max-content minmax(0, 1fr) 14px;");
   });
   it("keeps the top-level background status before the shrinkable tool counts", () => {
-    expect(source).toContain('toolActivityGroupStatusLabel(summary)');
-    expect(source).toContain('activeParts.push(`bg ${summary.backgroundRunningCount}`)');
+    expect(source).toContain('toolActivityGroupStatusLabel(summary, showResults)');
+    expect(source).toContain('activeParts.push(t("tools.bgCount", { count: summary.backgroundRunningCount }));');
     expect(source).toMatch(
       /className="tool-activity-group-status"[\s\S]*className="tool-activity-group-counts"/,
     );
@@ -35,15 +35,64 @@ describe("tool activity row layout", () => {
   });
 
   it("uses compact aligned terminal labels and always includes the failure count", () => {
-    expect(source).toContain('summary.status === "completed") return "Succ"');
-    expect(source).toContain('return `Fail(${summary.failedCount})`');
+    expect(source).toContain('summary.status === "completed") return "✓"');
+    expect(source).toContain('return `✗(${summary.failedCount})`');
     expect(source).not.toContain('summary.failedCount > 1');
   });
 
   it("renders live wait-budget countdowns and clarifies timeout handoff", () => {
     expect(source).toContain('className="tool-activity-countdown"');
     expect(source).toContain("formatRemainingDuration(remainingWaitMs)");
-    expect(source).toContain("wait ended · process still running · pid");
+    expect(source).toContain('t("tools.waitEndedRunning", { pid: activity.pid })');
   });
 
+});
+
+describe("stream tool status continuity", () => {
+  it("keeps the dot and terminal status in one leading cell before the name", () => {
+    const row = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
+    expect(row).toMatch(/className="stream-tool-status-slot"[\s\S]*className="stream-tool-dot"[\s\S]*<ActionStatus[\s\S]*<b>\{toolName\}<\/b>/);
+    expect(styles).toContain("min-width: 14px; align-self: center;");
+    expect(row).toContain('className="stream-tool-background">(bg)');
+    expect(styles).toContain(".stream-tool-background { color: #98afbc; opacity: .65; }");
+  });
+  it("folds retired tools away entirely with a compact elapsed label", () => {
+    const row = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
+    expect(row).toContain("stream-tool-elapsed");
+    expect(row).toContain("formatToolElapsed(activity.elapsed_ms)");
+    expect(row).not.toContain("summarized");
+    expect(styles).toContain(".stream-tool-merged-item.merged { grid-template-rows: 0fr; opacity: 0; }");
+    expect(styles).not.toContain(".stream-tool-run { position: relative; }");
+    expect(styles).not.toContain("stream-tool-row::before");
+    expect(styles).toContain(".stream-tool-elapsed { color: #98afbc; font-variant-numeric: tabular-nums; flex: none; }");
+  });
+});
+
+
+describe("collapsed tool summary", () => {
+  it("labels prior tools explicitly and aligns the disclosure with live rows", () => {
+    expect(source).toContain('<span>{t("tools.toolsLabel")}</span>');
+    expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*font-weight: 400;/);
+    expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*padding: 2px 4px;/);
+  });
+});
+
+it("keeps automatic tool absorption free of page-wide height animation", () => {
+  const rule = styles.match(/\.stream-tool-merged-item \{([^}]*)\}/)?.[1];
+  expect(rule).toBeDefined();
+  expect(rule).not.toContain("transition:");
+  expect(styles).toContain(".stream-tool-count.incremented { animation:");
+});
+
+it("keeps the running dot static without pulsing animations", () => {
+  expect(styles).not.toContain("stream-tool-breathe");
+  expect(styles).not.toContain("stream-tool-glow");
+  expect(styles).not.toMatch(/\.stream-tool-row\.running \.stream-tool-dot \{[^}]*animation/);
+});
+
+it("keeps live text/tool spacing compact without shrinking touch targets", () => {
+  expect(styles).toContain("clamp(.125rem, calc(var(--content-size) * .125), .25rem)");
+  expect(styles).toContain(".turn-stream-tools > .stream-thought-text { margin-bottom: 0; }");
+  expect(styles).toMatch(/\.stream-tool-row \{[^}]*padding: 2px 0;/);
+  expect(styles).toContain("min-height: 44px; min-width: 44px;");
 });

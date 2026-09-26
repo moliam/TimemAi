@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
+import { zh } from "../src/i18n/strings.zh";
 import { applyWorkerRoleMutation, replayWorkerRoleMutations } from "../src/worker_roles_ui";
 import { WorkerRoleLibrary } from "../src/protocol";
 
@@ -62,9 +63,11 @@ describe("optimistic worker role UI", () => {
     const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
     const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 
-    expect(source).toContain('aria-label="展开编辑 Role 描述"');
-    expect(source).toContain('aria-label="展开编辑用户信息"');
-    expect(source).toContain('输入内容会在完成编辑时一次性同步；不会自动保存或发送');
+    expect(source).toContain('aria-label={t("roles.expandDescEditor")}');
+    expect(source).toContain('aria-label={t("composer.expandEditUserMessage")}');
+    expect(zh.roles.expandDescEditor).toBe("展开编辑 Role 描述");
+    expect(zh.composer.expandEditUserMessage).toBe("展开编辑用户信息");
+    expect(zh.composer.editCommitNote).toBe("输入内容会在完成编辑时一次性同步；不会自动保存或发送。");
     expect(source).toContain('const [draft, setDraft] = useState(value);');
     expect(source).toMatch(/const finish = \(\) => \{\s*onCommit\(draft\);\s*onClose\(\);\s*\};/);
     expect(source).toMatch(/spellCheck=\{false\}\s+placeholder=\{placeholder\}\s+onChange=\{\(event\) => setDraft\(event\.target\.value\)\}/);

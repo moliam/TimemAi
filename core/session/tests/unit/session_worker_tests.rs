@@ -243,6 +243,60 @@ struct ImmediateFinalPromptCaptureModel {
     prompts: Arc<Mutex<Vec<String>>>,
 }
 
+struct SupplementDispatchTimeoutModel {
+    prompts: Arc<Mutex<Vec<String>>>,
+    entered_first_call: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ModelClient for SupplementDispatchTimeoutModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        prompt: &str,
+        _audit_file: &std::path::Path,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        let call_no = {
+            let mut prompts = self.prompts.lock().unwrap();
+            prompts.push(prompt.to_string());
+            prompts.len()
+        };
+        let _ = should_cancel;
+        if call_no == 1 {
+            self.entered_first_call
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            return Ok(LlmResponse {
+                tool_calls: Vec::new(),
+                content: r#"{"status":"working","free_talk":"开始长时间本地动作。","working_still_action":[{"run_bash":{"loop_cmd":"exit 1","interval_ms":20,"loop_timeout_ms":600000}}]}"#.to_string(),
+                model_name: "test-model".to_string(),
+                usage: UsageStats {
+                    llm_calls: 1,
+                    prompt_tokens: 1_000,
+                    completion_tokens: 10,
+                    total_tokens: 1_010,
+                    ..UsageStats::zero()
+                },
+                truncated: false,
+            });
+        }
+
+        let has_dispatch_timeout = prompt.contains("USER_SUPPLEMENT_ACTION_DISPATCH_TIMEOUT")
+            && prompt.contains("WORKER_SUPPLEMENT_AFTER_TIMEOUT");
+        Ok(LlmResponse {
+            tool_calls: Vec::new(),
+            content: if has_dispatch_timeout {
+                r#"{"status":"ALL_FINISHED","final_answer":"WORKER_DISPATCH_TIMEOUT_OK"}"#
+            } else {
+                r#"{"status":"ALL_FINISHED","final_answer":"STALE"}"#
+            }
+            .to_string(),
+            model_name: "test-model".to_string(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        })
+    }
+}
+
 #[cfg(unix)]
 struct BackgroundThenFinalModel {
     calls: u32,
@@ -706,6 +760,76 @@ fn initial_supplement_batch_is_visible_before_an_immediate_final_can_close_the_m
             other => panic!("unexpected event while stopping worker: {other:?}"),
         }
     }
+}
+
+#[test]
+fn worker_forces_dispatch_when_a_live_supplement_times_out_during_local_action() {
+    let dir = tmp_dir("live_supplement_dispatch_timeout");
+    let mut core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    core.set_bash_approval_mode(agent_core::BashApprovalMode::Approve);
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let entered_first_call = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut worker_config = test_worker_config(&dir, "live_supplement_dispatch_timeout", 1);
+    worker_config.user_supplement_model_dispatch_timeout = Duration::from_millis(10);
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        worker_config,
+        SupplementDispatchTimeoutModel {
+            prompts: Arc::clone(&prompts),
+            entered_first_call: Arc::clone(&entered_first_call),
+        },
+    );
+    let handle = worker.handle();
+    let _lifecycle = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker should emit lifecycle topic");
+
+    handle
+        .run_turn("initial worker task", None)
+        .expect("worker should start turn");
+    let started = Instant::now();
+    while !entered_first_call.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(started.elapsed() < Duration::from_secs(2));
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(handle.try_add_user_supplement("WORKER_SUPPLEMENT_AFTER_TIMEOUT"));
+
+    let outcome = loop {
+        match worker
+            .events()
+            .recv_timeout(Duration::from_secs(3))
+            .expect("worker should finish dispatched supplement turn")
+        {
+            CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
+            CoreSessionWorkerEvent::Topics(_)
+            | CoreSessionWorkerEvent::TurnProjection(_)
+            | CoreSessionWorkerEvent::CommandAccepted { .. }
+            | CoreSessionWorkerEvent::TurnStarted { .. }
+            | CoreSessionWorkerEvent::ModelRequest { .. }
+            | CoreSessionWorkerEvent::ModelResponse { .. }
+            | CoreSessionWorkerEvent::ModelRequestCompleted { .. }
+            | CoreSessionWorkerEvent::ModelResponseParsed { .. } => {}
+            other => panic!("unexpected worker event: {other:?}"),
+        }
+    };
+
+    assert_eq!(outcome.text, "WORKER_DISPATCH_TIMEOUT_OK");
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 2);
+    assert!(!prompts[0].contains("WORKER_SUPPLEMENT_AFTER_TIMEOUT"));
+    assert!(prompts[1].contains("USER_SUPPLEMENT_ACTION_DISPATCH_TIMEOUT"));
+    assert!(prompts[1].contains("do not invent it"));
+    assert!(prompts[1].contains("WORKER_SUPPLEMENT_AFTER_TIMEOUT"));
+
+    let _ = worker.shutdown();
 }
 
 struct TerminalRepairModel {
@@ -1679,6 +1803,8 @@ fn toolgen_approval_topic_keeps_session_context_and_worker_scope() {
         current_turn_active: None,
         phase: Some("toolgen".to_string()),
         accept_supplements: false,
+        user_supplement_model_dispatch_timeout: agent_core::USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT,
+        supplement_dispatch_timeout: None,
         continue_supplements_after_final_answer: true,
         pending_bash_always_allow: false,
         pending_runtime_updates: Arc::new(Mutex::new(Vec::new())),

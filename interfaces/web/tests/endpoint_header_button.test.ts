@@ -9,14 +9,25 @@ describe("header endpoint selector", () => {
     expect(source).toMatch(
       /className={`header-model[\s\S]*<span title={headerModelLabel}>{headerModelLabel}<\/span>[\s\S]*<ChevronDown/,
     );
+    expect(source).toMatch(/headerModelEndpoint[\s\S]*apiProtocolShort\(headerModelEndpoint\.api_protocol\)/);
+    expect(source).toMatch(/headerModelEndpoint\.reasoning_effort &&/);
+    expect(source).toMatch(/className="header-model-meta"/);
     expect(source).toContain("aria-expanded={showRuntime}");
   });
 
   it("uses a deep borderless surface with the same height as the ctx/cache readout", () => {
-    expect(styles).toContain(".header-context-actions { align-self: end; }");
-    expect(styles).toContain(".header-context { min-height: 28px; }");
+    expect(styles).toContain(
+      ".header-context-actions { align-self: center; border-left: 1px solid #2a3944; padding-left: 12px; margin-left: 2px; height: 38px; }",
+    );
+    expect(styles).toContain(
+      ':root[data-theme="light"] .header-context-actions { border-left-color: #ccd9dd; }',
+    );
+    expect(styles).toContain(".header-context { min-height: 38px; }");
     expect(styles).toMatch(
-      /\.header-session-cluster \.header-model \{[\s\S]*height: 28px;[\s\S]*border: 0;[\s\S]*background: #244a40;[\s\S]*color: #fff;[\s\S]*box-shadow: none;/,
+      /\.header-session-cluster \.header-model \{[\s\S]*font-size: 13px;/,
+    );
+    expect(styles).toMatch(
+      /\.header-session-cluster \.header-model \{[\s\S]*height: 38px;[\s\S]*border: 0;[\s\S]*background: #244a40;[\s\S]*color: #fff;[\s\S]*box-shadow: none;/,
     );
     expect(styles).toMatch(
       /:root\[data-theme="light"\] \.header-session-cluster \.header-model \{[\s\S]*border: 0;[\s\S]*background: #315f52;[\s\S]*color: #fff;[\s\S]*box-shadow: none;/,
@@ -45,4 +56,26 @@ describe("header endpoint selector", () => {
     );
   });
 
+});
+
+it("keeps editor checkboxes compact instead of styled as text inputs", () => {
+  expect(styles).toContain('.endpoint-transport-toggle > span { display: flex; align-items: center; gap: 7px; }');
+  expect(styles).toContain('.endpoint-transport-toggle input { width: 14px; height: 14px; margin: 0; accent-color: #64bbaa; }');
+  const bareTextInputRules =
+    styles.match(/\.endpoint-editor-grid input(?!:not)/g) ?? [];
+  expect(bareTextInputRules).toEqual([]);
+});
+
+it("explains the redirect impact in plain language for both toggle states", () => {
+  expect(source).toContain('endpoints.redirectImpact');
+  expect(source).toMatch(/draft\.allow_cross_origin_redirects[\s\S]*endpoint-redirect-impact on/);
+  expect(styles).toContain('.endpoint-redirect-impact.on { color: #d4b25f; font-weight: 700; }');
+});
+
+it("orders basic endpoint fields before optional transport settings", () => {
+  const editor = source.slice(source.indexOf('<div className="endpoint-editor-grid">'));
+  const fields = ['value={draft.name}', 'value={draft.model}', 'value={draft.base_url}', 'value={apiKey}', 'value={draft.api_protocol}', 'value={draft.max_llm_input_tokens}', 'checked={draft.allow_cross_origin_redirects}'];
+  const positions = fields.map((field) => editor.indexOf(field));
+  expect(positions.every((position) => position >= 0)).toBe(true);
+  expect(positions).toEqual([...positions].sort((a, b) => a - b));
 });

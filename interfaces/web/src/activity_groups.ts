@@ -1,6 +1,22 @@
 import { Activity } from "./protocol";
 import { toolActivityDisplayName } from "./view_model";
-import { isToolActivityFailed, isToolActivityRunning } from "./tool_status";
+import {
+  isToolActivityFailed,
+  isToolActivityRunning,
+  TOOL_STATUS_RUNNING,
+} from "./tool_status";
+
+/** True while a tool call has started but not reached a terminal status. */
+export function isRunningToolActivity(
+  activity: Activity | null | undefined,
+): boolean {
+  return (
+    !!activity &&
+    activity.tone === "action" &&
+    activity.kind !== "toolgen" &&
+    isToolActivityRunning(activity.tool_status || TOOL_STATUS_RUNNING)
+  );
+}
 
 export type ToolActivityGroupStatus = "running" | "failed" | "completed";
 
@@ -105,4 +121,76 @@ export function summarizeConsecutiveToolActivities(
   flush();
 
   return runs;
+}
+
+export type StreamRetention = {
+  /** Non-null activities kept in the live stream area, in order. */
+  retained: Activity[];
+  /** Latest thought snapshot kept in the stream; null when none exists. */
+  thought: Activity | null;
+  /** Historical frame membership is independent of the live thought fallback. */
+  isFramed: (activity: Activity | null | undefined) => boolean;
+  /** Membership test by object identity; nulls are never retained. */
+  isRetained: (activity: Activity | null | undefined) => boolean;
+};
+
+/** All rounds remain in place until the caller archives the confirmed final answer. */
+export function computeStreamRetention(
+  activities: readonly (Activity | null)[],
+): StreamRetention {
+  const retained = activities.filter((activity): activity is Activity => !!activity &&
+    (activity.kind === "free_talk" || activity.tone === "action" || activity.kind === "user_supplement"));
+  const retainedSet = new Set(retained);
+  return {
+    retained,
+    thought: [...retained].reverse().find(activity => activity.kind === "free_talk") ?? null,
+    isFramed: activity => !!activity && !retainedSet.has(activity),
+    isRetained: activity => !!activity && retainedSet.has(activity),
+  };
+}
+
+/**
+ * Collapses each consecutive run of free-talk snapshots (null activities are
+ * transparent) into its latest item, so both the frame and the stream show
+ * one growing thought instead of stacking redundant snapshots.
+ */
+export function coalesceFreeTalkItems<T extends { activity: Activity | null }>(
+  items: readonly T[],
+): T[] {
+  const out: T[] = [];
+  let run: T[] = [];
+  const flush = () => {
+    if (run.length === 0) return;
+    const thoughts = run.filter((item) => item.activity !== null);
+    out.push(...run.filter((item) => item.activity === null));
+    if (thoughts.length > 0) out.push(thoughts[thoughts.length - 1]);
+    run = [];
+  };
+  for (const item of items) {
+    if (item.activity?.kind === "free_talk") run.push(item);
+    else { flush(); out.push(item); }
+  }
+  flush();
+  return out;
+}
+
+/** 逻辑时序 +1（工具入口）：旧工具结束后，新 call 实际开始执行才触发退场。
+ * 同轮串行也适用；proposal/start 不等于 execution_start，完成事件本身不推进。
+ * Presentation order comes from Host lifecycle events, never wall-clock guesses.
+ * 防回退：不可改成 Turn 结束统一收起，否则积累高度并在最终交付时大幅跳动。
+ * 比较 A.settled < B.execution，不是工具数组索引或完成先后：并行 A/B 开始后
+ * A 才结束，不表示 B 是新时序。不可用墙钟猜测，同毫秒事件和恢复快照均可能出现。
+ * O(n), bounded by the current turn. A finish after a parallel start does not
+ * qualify; it waits for another logical step. Missing history fails closed.
+ */
+export function streamToolHandoffIds(activities: Activity[]): Set<string> {
+  let latestExecution = -1;
+  for (const activity of activities) {
+    if (activity.tone === "action" && activity.execution_order !== undefined)
+      latestExecution = Math.max(latestExecution, activity.execution_order);
+  }
+  return new Set(activities.filter(activity => activity.tone === "action" &&
+    !isToolActivityRunning(activity.tool_status || TOOL_STATUS_RUNNING) &&
+    activity.settled_order !== undefined && activity.settled_order < latestExecution
+  ).map(activity => activity.id));
 }

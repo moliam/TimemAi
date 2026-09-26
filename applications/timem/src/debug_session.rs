@@ -2085,6 +2085,7 @@ mod tests {
             .unwrap();
         let native_request = agent_core::ModelInteractionRequest {
             rendered_prompt: "second prompt".to_string(),
+            images: Vec::new(),
             static_tool_count: 1,
             tools: vec![
                 agent_core::ToolDefinition {
@@ -2121,6 +2122,7 @@ mod tests {
             resolved_mode: agent_core::ToolCallMode::Native,
             parallel_tool_calls: true,
             tool_choice: agent_core::NativeToolChoice::Auto,
+            critical_reasoning: false,
         };
         store
             .record_prompt(
@@ -2191,6 +2193,7 @@ mod tests {
         let session_dir = store.session_dir("session_native_timeline").unwrap();
         let request = agent_core::ModelInteractionRequest {
             rendered_prompt: "rendered prompt before native messages".to_string(),
+            images: Vec::new(),
             static_tool_count: 0,
             tools: Vec::new(),
             native_exchanges: vec![
@@ -2230,6 +2233,7 @@ mod tests {
             resolved_mode: agent_core::ToolCallMode::Native,
             parallel_tool_calls: false,
             tool_choice: agent_core::NativeToolChoice::Auto,
+            critical_reasoning: false,
         };
         store
             .record_prompt(

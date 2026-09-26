@@ -14,9 +14,13 @@ use std::time::{Duration, Instant};
 pub enum LaunchMode {
     Web(Vec<String>),
     Shell(Vec<String>),
+    Attach(Vec<String>),
 }
 
 pub fn dispatch_mode(args: Vec<String>) -> Result<LaunchMode, String> {
+    if args.first().map(String::as_str) == Some("attach") {
+        return Ok(LaunchMode::Attach(args.into_iter().skip(1).collect()));
+    }
     let shell_count = args.iter().filter(|arg| arg.as_str() == "--shell").count();
     if shell_count > 1 {
         return Err("duplicate_option:--shell".to_string());

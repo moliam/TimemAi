@@ -159,3 +159,41 @@ latency targets and not proof of browser rendering smoothness. Compare repeated
 runs on the same machine/build. Use command-correlated JSONL stages and a browser
 Performance profile to isolate render, reveal-layout, scroll-listener, or
 synchronous-geometry work; timestamp order alone does not establish causality.
+
+## Low-cost streaming presentation
+
+Provisional Markdown reveal uses one 40ms timer (at most 25 scheduled ticks/s
+per growing text component), rather than a callback on every display frame.
+Each tick retains the existing bounded character credit and memoized blocks;
+retractions, reduced motion and hidden-document updates show the delivered text
+without replaying a backlog. No semantic event is throttled or discarded.
+
+Worker/sidebar duplicate running markers are static; the main working cue
+and short status/count feedback remain. Markdown blocks do not each fade in.
+Tool entry lasts 160ms without a retained animation fill layer. Sticky/floating
+conversation navigation no longer blurs moving content behind it. This reduces
+unnecessary animation/compositing work without changing scrolling or tool state.
+
+Regression commands:
+
+```bash
+pnpm --dir interfaces/web test
+pnpm --dir interfaces/web build
+STREAM_CPU_BENCH=1 TIMEM_PERF_GUARD=1 node interfaces/web/tests/browser/stream-preview-acceptance.mjs
+node interfaces/web/tests/browser/stream-preview-acceptance.mjs
+```
+
+The CPU scenario publishes 120 provisional updates, 40ms apart, and reports CDP
+main-thread/style/layout work. It is a synthetic fixed-window test, not a full
+text-drain benchmark or macOS WindowServer/thermal measurement. Compare repeated
+runs under the same conditions; a process-list CPU snapshot cannot identify a
+specific Chrome tab or prove a WindowServer reduction.
+
+### Running tool breathing indicator
+
+Running and background-running tool dots breathe from scale .65 to 1 over a
+1.2s cycle using only transform and opacity. Their 8px layout size and status
+slot stay fixed; terminal tools use result markers instead. Reduced motion
+disables breathing. Tool absorption remains free of height animation. Chrome
+coverage seeks animation time to verify changing dot size with a stable slot
+for bash/readfile and both running states, plus reduced-motion behavior.

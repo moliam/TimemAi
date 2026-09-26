@@ -229,15 +229,13 @@ fn openai_compatible_request_supports_official_thinking_stream_options() {
         cache_mode: OpenAiCompatibleCacheMode::Auto,
     };
 
-    let body = build_model_request(
-        &config,
-        &[ModelPromptBlock {
-            role: ModelPromptRole::User,
-            text: "hello".to_string(),
-            cache: ModelCacheControl::None,
-        }],
-        StructuredOutputHint::None,
-    );
+    let blocks = &[ModelPromptBlock {
+        role: ModelPromptRole::User,
+        text: "hello".to_string(),
+        cache: ModelCacheControl::None,
+    }];
+    let body =
+        build_model_request_with_reasoning(&config, blocks, StructuredOutputHint::None, true);
 
     assert_eq!(body["enable_thinking"], true);
     assert_eq!(body["reasoning_effort"], "max");
@@ -362,6 +360,76 @@ fn openai_responses_request_uses_official_shape() {
     assert!(body["input"].as_str().unwrap().contains("[BEGIN DELTA]"));
     assert!(body.get("messages").is_none());
     assert!(body.get("max_llm_output_tokens").is_none());
+    assert!(body.get("reasoning").is_none());
+}
+
+#[test]
+fn openai_compatible_reasoning_effort_disabled_turns_thinking_off() {
+    let mut config = config(ApiProtocol::OpenAiCompatible);
+    config.openai_compatible.reasoning_effort = Some("disabled".to_string());
+
+    let body = build_model_request(
+        &config,
+        &[ModelPromptBlock {
+            role: ModelPromptRole::User,
+            text: "hello".to_string(),
+            cache: ModelCacheControl::None,
+        }],
+        StructuredOutputHint::None,
+    );
+
+    assert_eq!(body["thinking"]["type"], "disabled");
+    assert!(body.get("reasoning_effort").is_none());
+}
+
+#[test]
+fn openai_responses_reasoning_effort_disabled_maps_to_none() {
+    let mut config = config(ApiProtocol::OpenAiResponses);
+    config.openai_compatible.reasoning_effort = Some("disabled".to_string());
+
+    let prepared = prepare_model_request(&config, "hello");
+
+    assert_eq!(prepared.body["reasoning"]["effort"], "none");
+}
+
+#[test]
+fn openai_responses_request_carries_reasoning_effort_only_for_critical_requests() {
+    let mut config = config(ApiProtocol::OpenAiResponses);
+    config.openai_compatible.reasoning_effort = Some("high".to_string());
+
+    let ordinary = prepare_model_request(&config, "hello");
+    assert_eq!(ordinary.body["reasoning"]["effort"], "none");
+
+    let critical = prepare_model_request_with_reasoning(&config, "hello", true);
+    assert_eq!(critical.body["reasoning"]["effort"], "high");
+}
+
+#[test]
+fn ordinary_requests_disable_reasoning_by_default() {
+    let mut config = config(ApiProtocol::OpenAiCompatible);
+    config.openai_compatible = OpenAiCompatibleOptions {
+        enable_thinking: Some(true),
+        reasoning_effort: Some("high".to_string()),
+        stream: false,
+        cache_mode: OpenAiCompatibleCacheMode::Auto,
+    };
+    let blocks = &[ModelPromptBlock {
+        role: ModelPromptRole::User,
+        text: "hello".to_string(),
+        cache: ModelCacheControl::None,
+    }];
+
+    let ordinary =
+        build_model_request_with_reasoning(&config, blocks, StructuredOutputHint::None, false);
+    assert_eq!(ordinary["enable_thinking"], false);
+    assert_eq!(ordinary["thinking"]["type"], "disabled");
+    assert!(ordinary.get("reasoning_effort").is_none());
+
+    let critical =
+        build_model_request_with_reasoning(&config, blocks, StructuredOutputHint::None, true);
+    assert_eq!(critical["enable_thinking"], true);
+    assert_eq!(critical["reasoning_effort"], "high");
+    assert!(critical.get("thinking").is_none());
 }
 
 #[test]
@@ -994,6 +1062,7 @@ fn model_http_error_is_resilient_to_unusual_bodies() {
 fn native_request() -> ModelInteractionRequest {
     ModelInteractionRequest {
         rendered_prompt: "SYSTEM PROMPT\n\n---USER---\ncount files".to_string(),
+        images: Vec::new(),
         static_tool_count: 1,
         tools: vec![ToolDefinition {
             name: "count_lines".to_string(),
@@ -1008,7 +1077,155 @@ fn native_request() -> ModelInteractionRequest {
         resolved_mode: ToolCallMode::Native,
         parallel_tool_calls: true,
         tool_choice: NativeToolChoice::Auto,
+        critical_reasoning: false,
     }
+}
+
+fn image_interaction_request(resolved_mode: ToolCallMode) -> ModelInteractionRequest {
+    ModelInteractionRequest {
+        rendered_prompt: "SYSTEM PROMPT
+
+---USER---
+What is in this screenshot?"
+            .to_string(),
+        images: vec![ModelImagePart::new("image/png", "QUJD")],
+        static_tool_count: 0,
+        tools: Vec::new(),
+        native_exchanges: Vec::new(),
+        resolved_mode,
+        parallel_tool_calls: false,
+        tool_choice: NativeToolChoice::Auto,
+        critical_reasoning: false,
+    }
+}
+
+#[test]
+fn attached_images_reach_every_provider_wire_format() {
+    // OpenAI chat: trailing user message with image_url parts.
+    let body = prepare_model_interaction_http_request(
+        &config(ApiProtocol::OpenAiCompatible),
+        &image_interaction_request(ToolCallMode::Inline),
+    )
+    .model_request
+    .body;
+    let messages = body["messages"].as_array().unwrap();
+    let last = messages.last().unwrap();
+    assert_eq!(last["role"], "user");
+    assert_eq!(last["content"].as_array().unwrap().len(), 1);
+    assert_eq!(last["content"][0]["type"], "image_url");
+    assert_eq!(
+        last["content"][0]["image_url"]["url"],
+        "data:image/png;base64,QUJD"
+    );
+
+    // OpenAI responses: input item with input_image; string input is promoted.
+    let body = prepare_model_interaction_http_request(
+        &config(ApiProtocol::OpenAiResponses),
+        &image_interaction_request(ToolCallMode::Inline),
+    )
+    .model_request
+    .body;
+    let input = body["input"].as_array().unwrap();
+    let last = input.last().unwrap();
+    assert_eq!(last["role"], "user");
+    assert_eq!(last["content"][0]["type"], "input_image");
+    assert_eq!(
+        last["content"][0]["image_url"],
+        "data:image/png;base64,QUJD"
+    );
+
+    // Anthropic inline: parts merge into the single user message (no
+    // consecutive user messages).
+    let body = prepare_model_interaction_http_request(
+        &config(ApiProtocol::Anthropic),
+        &image_interaction_request(ToolCallMode::Inline),
+    )
+    .model_request
+    .body;
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    let content = messages[0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[1]["type"], "image");
+    assert_eq!(content[1]["source"]["media_type"], "image/png");
+    assert_eq!(content[1]["source"]["data"], "QUJD");
+}
+
+#[test]
+fn attached_images_append_after_native_history_without_touching_cache_marks() {
+    let mut request = image_interaction_request(ToolCallMode::Native);
+    request.native_exchanges = vec![NativeExchange {
+        delta_id: "pd_1".to_string(),
+        assistant_text: "looking".to_string(),
+        calls: vec![NativeToolCall {
+            id: "call_1".to_string(),
+            name: "count_lines".to_string(),
+            arguments: json!({}),
+            raw_arguments: "{}".to_string(),
+        }],
+        results: vec![NativeToolResult {
+            call_id: "call_1".to_string(),
+            name: "count_lines".to_string(),
+            content: "42".to_string(),
+            is_error: false,
+        }],
+    }];
+    request.rendered_prompt = concat!(
+        "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n",
+        "[BEGIN DELTA delta_id: pd_1, time_ms: 1]\n\n## USER\nWhat is in this screenshot?\n\n",
+        "Continue the work and express thought in the user's language. Call API tools when more evidence or actions (including intermediate answer to user) are needed; otherwise give the final user-facing answer with no tool invocation:"
+    )
+    .to_string();
+    let body = prepare_model_interaction_http_request(&config(ApiProtocol::Anthropic), &request)
+        .model_request
+        .body;
+    let messages = body["messages"].as_array().unwrap();
+    let message_type = |message: &Value| -> String {
+        message["content"]
+            .as_array()
+            .and_then(|parts| parts.first())
+            .and_then(|part| part.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("text")
+            .to_string()
+    };
+    let types = messages.iter().map(&message_type).collect::<Vec<_>>();
+    let result_index = types
+        .iter()
+        .position(|kind| kind == "tool_result")
+        .expect("projected tool result message");
+    assert_eq!(types.last().unwrap(), "image", "images ride last");
+    assert!(
+        result_index < messages.len() - 1,
+        "tool result must stay before the image message"
+    );
+    // The cache-marked user delta block keeps its cache_control untouched.
+    let first_user = messages
+        .iter()
+        .find(|message| message_type(message) == "text")
+        .unwrap();
+    assert!(first_user["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|part| part.get("cache_control").is_some()));
+}
+
+#[test]
+fn multimodal_audit_events_redact_image_payloads() {
+    let request = image_interaction_request(ToolCallMode::Inline);
+    let prepared =
+        prepare_model_interaction_http_request(&config(ApiProtocol::OpenAiCompatible), &request)
+            .model_request;
+    let audit = model_request_audit_event(&config(ApiProtocol::OpenAiCompatible), &prepared);
+    let body = audit["body"].to_string();
+    assert!(!body.contains("QUJD"), "base64 payload leaked into audit");
+    assert!(
+        !body.contains("data:image/png"),
+        "data URL leaked into audit"
+    );
+    assert!(body.contains("[image payload redacted;"));
 }
 
 #[test]
@@ -1085,12 +1302,14 @@ fn builtin_tool_schemas_render_per_protocol_without_weakening_registry_validatio
 
     let request = ModelInteractionRequest {
         rendered_prompt: "SYSTEM PROMPT\n\n---USER---\nuse tools".to_string(),
+        images: Vec::new(),
         static_tool_count: original_tools.len(),
         tools: original_tools.clone(),
         native_exchanges: Vec::new(),
         resolved_mode: ToolCallMode::Native,
         parallel_tool_calls: true,
         tool_choice: NativeToolChoice::Auto,
+        critical_reasoning: false,
     };
 
     let anthropic =
@@ -1340,7 +1559,7 @@ fn native_exchanges_follow_owning_delta_order_for_all_providers() {
         "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n",
         "[BEGIN DELTA delta_id: pd_1, time_ms: 1]\n\n## USER\nQ1\n",
         "[BEGIN DELTA delta_id: pd_2, time_ms: 2]\n\n## USER\nQ2\n\n",
-        "Continue the work and express thought in the user's language. Call API tools when more evidence or actions are needed; otherwise give the final user-facing answer:"
+        "Continue the work and express thought in the user's language. Call API tools when more evidence or actions (including intermediate answer to user) are needed; otherwise give the final user-facing answer with no tool invocation:"
     ).to_string();
     let exchange = |delta_id: &str, call_id: &str, result: &str| NativeExchange {
         delta_id: delta_id.to_string(),
@@ -1359,6 +1578,7 @@ fn native_exchanges_follow_owning_delta_order_for_all_providers() {
         }],
     };
     let request = ModelInteractionRequest {
+        images: Vec::new(),
         rendered_prompt,
         static_tool_count: 0,
         tools: Vec::new(),
@@ -1369,6 +1589,7 @@ fn native_exchanges_follow_owning_delta_order_for_all_providers() {
         resolved_mode: ToolCallMode::Native,
         parallel_tool_calls: false,
         tool_choice: NativeToolChoice::Auto,
+        critical_reasoning: false,
     };
     for protocol in [
         ApiProtocol::OpenAiCompatible,

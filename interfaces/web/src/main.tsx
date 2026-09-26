@@ -1,3 +1,6 @@
+import { applyBetaDebugDefault } from "./beta_preferences";
+import { StreamUiModeSetting, useStreamUiMode, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
+import { StreamText } from "./stream_reveal";
 import {
   AssistantRuntimeProvider,
   ThreadMessageLike,
@@ -55,10 +58,12 @@ import {
   Menu,
   Minimize2,
   Palette,
+  FolderInput,
   Paperclip,
   Pencil,
   Plug,
   Plus,
+  Minus,
   RefreshCw,
   Search,
   Send,
@@ -91,6 +96,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
+import { getLocale, setLocale, t, useT } from "./i18n";
 import { RestartCwdGate } from "./restart_cwd_gate";
 import {
   MemSwitchCandidate,
@@ -112,6 +118,7 @@ import {
   McpTransport,
   MemTemporaryItem,
   ModelEndpoint,
+  ModelEndpointImportCandidate,
   Session,
   Snapshot,
   ToolDetail,
@@ -142,7 +149,7 @@ import {
   UserMessageNavigationDirection,
   wheelDeltaPixels,
 } from "./scroll";
-import { newestInterimAnswersFirst } from "./interim_answers";
+import { interimAnswerPresentation } from "./interim_answers";
 import {
   applyTurnProjection,
   activeModelRetryStatus,
@@ -169,7 +176,6 @@ import {
   finishTurn,
   groupDecisionsBySessionTurn,
   manualToolGenCommand,
-  normalizeCopiedUserMessageText,
   prependHistoryRecords,
   pruneSessionDrafts,
   pruneSessionSubmissionLocks,
@@ -230,14 +236,17 @@ import {
   commandSessionId,
   isModelSubmissionCommand,
   modelDisplayName,
+  noModelEndpointsIssue,
   modelServiceIssue,
-  NO_MODEL_ENDPOINTS_ISSUE,
-  UNCONFIGURED_MODEL_LABEL,
 } from "./model_service_ui";
 import {
   endpointDraftValid,
+  REASONING_EFFORT_DISABLED,
+  REASONING_EFFORT_OPTIONS,
   endpointMatchesProfile,
-  endpointNameForProfile,
+  endpointLabelForProfile,
+  apiProtocolShort,
+  formatContextWindowTokens,
   MODEL_CONTEXT_WINDOW_OPTIONS,
   MODEL_OUTPUT_TOKEN_OPTIONS,
   ModelEndpointDraft,
@@ -245,6 +254,8 @@ import {
 import { createFrameEventQueue } from "./frame_event_queue";
 import { formatTokens } from "./token_format";
 import {
+  computeStreamRetention,
+  streamToolHandoffIds,
   summarizeConsecutiveToolActivities,
   ToolActivitySummary,
 } from "./activity_groups";
@@ -263,7 +274,9 @@ import {
 } from "./wire_delivery";
 import { clipboardImageFiles } from "./clipboard_images";
 import {
+  formatToolElapsed,
   humanizeToolStatus,
+  toolResultCountsLabel,
   isToolActivityRunning,
   TOOL_STATUS_RUNNING,
 } from "./tool_status";
@@ -272,7 +285,7 @@ import { BrowserPerformanceTrace } from "./performance_trace";
 import { createFrameTask, FrameTask } from "./frame_task";
 import { reconcileSessionTimelineCache } from "./session_timeline_cache";
 import { requestTimelineNavigationWork } from "./timeline_navigation_work";
-import { useTimedClipboardCopy } from "./clipboard_copy";
+import { selectedUserMessageText, useTimedClipboardCopy } from "./clipboard_copy";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 import "katex/dist/katex.min.css";
@@ -387,6 +400,13 @@ function queryToken() {
   return accessToken;
 }
 
+function debugBrowseUrl(sessionId: string) {
+  const params = new URLSearchParams({ session_id: sessionId });
+  const token = queryToken();
+  if (token) params.set("token", token);
+  return `/api/debug-browse?${params.toString()}`;
+}
+
 function makeMessage(
   role: ChatMessage["role"],
   text: string,
@@ -460,6 +480,7 @@ function saveSidebarLayout(layout: SidebarLayout) {
 }
 
 function TimemApp() {
+  useT();
   useDialogFocusTrap();
   const [appearance, setAppearance] = useState<Appearance>(loadAppearance);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -497,6 +518,9 @@ function TimemApp() {
     runtimeUnavailableDialogDismissed,
     setRuntimeUnavailableDialogDismissed,
   ] = useState(false);
+  const [runtimeShutdownSeconds, setRuntimeShutdownSeconds] = useState<
+    number | null
+  >(null);
   const [showToolRepo, setShowToolRepo] = useState(false);
   const [chatLibraryMode, setChatLibraryMode] = useState<
     "search" | "favorites" | null
@@ -550,8 +574,14 @@ function TimemApp() {
   const [endpointEditor, setEndpointEditor] = useState<
     ModelEndpoint | "new" | null
   >(null);
-  const [deleteEndpointCandidate, setDeleteEndpointCandidate] =
-    useState<ModelEndpoint | null>(null);
+  const [deleteEndpointCandidates, setDeleteEndpointCandidates] = useState<
+    ModelEndpoint[]
+  >([]);
+  const [pendingEndpointDelete, setPendingEndpointDelete] = useState(false);
+  const [endpointImportCandidates, setEndpointImportCandidates] = useState<
+    ModelEndpointImportCandidate[]
+  >([]);
+  const [endpointImportIssues, setEndpointImportIssues] = useState<string[]>([]);
   const [revealedEndpointApiKeys, setRevealedEndpointApiKeys] = useState<
     Record<string, string>
   >({});
@@ -688,6 +718,8 @@ function TimemApp() {
     new Map(),
   );
   const pendingMcpKeysRef = useRef<Set<string>>(new Set());
+  const pendingEndpointDeleteIdsRef = useRef<Set<string>>(new Set());
+  const pendingEndpointDeleteCommandRef = useRef("");
   const pendingHistorySessionIdsRef = useRef<Set<string>>(new Set());
   const pendingUploadSessionIdsRef = useRef<Set<string>>(new Set());
   const pendingToolgenRequestsRef = useRef<Set<string>>(new Set());
@@ -1030,6 +1062,57 @@ function TimemApp() {
     },
     [sendCommand],
   );
+  const scanModelEndpointImport = useCallback(
+    (codexDir: string, claudeDir: string) => {
+      sendCommand({
+        type: "model_endpoint_import_scan",
+        codex_dir: codexDir.trim() || null,
+        claude_dir: claudeDir.trim() || null,
+      });
+    },
+    [sendCommand],
+  );
+  const importModelEndpoints = useCallback(
+    (candidateIds: string[]) => {
+      sendCommand({
+        type: "model_endpoint_import_apply",
+        candidate_ids: candidateIds,
+      });
+    },
+    [sendCommand],
+  );
+  const confirmModelEndpointDelete = useCallback(
+    (endpoints: ModelEndpoint[]) => {
+      const endpointIds = endpoints.map((endpoint) => endpoint.id);
+      if (endpointIds.length === 0) return;
+      const commandId = clientId("endpoint-delete");
+      pendingEndpointDeleteIdsRef.current = new Set(endpointIds);
+      pendingEndpointDeleteCommandRef.current = commandId;
+      setPendingEndpointDelete(true);
+      const sent = sendCommand(
+        {
+          type: "model_endpoint_delete_many",
+          endpoint_ids: endpointIds,
+        },
+        commandId,
+      );
+      // The confirmation dialog is browser-local transient UI. Close it as
+      // soon as the user confirms; endpoint rows still change only from the
+      // authoritative ModelEndpointsUpdated event.
+      setDeleteEndpointCandidates([]);
+      if (!sent) {
+        pendingEndpointDeleteIdsRef.current.clear();
+        pendingEndpointDeleteCommandRef.current = "";
+        setPendingEndpointDelete(false);
+        reportUiError(
+          t("errors.endpointDeleteTitle"),
+          t("errors.checkConnection"),
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand, t],
+  );
   const saveMemTemporaryPolicy = useCallback(
     (days: 1 | 5 | 10 | null, maxBytes: number | null) => {
       setPendingMemRetention(true);
@@ -1259,6 +1342,8 @@ function TimemApp() {
     pendingSessionApiKeyCommandsRef.current.clear();
     pendingSessionApiKeyCommandIdsRef.current.clear();
     pendingMcpKeysRef.current.clear();
+    pendingEndpointDeleteIdsRef.current.clear();
+    pendingEndpointDeleteCommandRef.current = "";
     pendingHistorySessionIdsRef.current.clear();
     pendingUploadSessionIdsRef.current.clear();
     pendingToolgenRequestsRef.current.clear();
@@ -1271,6 +1356,8 @@ function TimemApp() {
     setPendingRuntimeKeys(new Set());
     setPendingSessionCredentialIds(new Set());
     setPendingMcpKeys(new Set());
+    setPendingEndpointDelete(false);
+    setDeleteEndpointCandidates([]);
     setRevealedSessionApiKeys({});
     setRevealedMcpSecrets({});
     setPendingHistorySessionIds(new Set());
@@ -1418,6 +1505,7 @@ function TimemApp() {
       ]),
     );
     setServer(snapshot.server);
+    applyBetaDebugDefault(snapshot.server.debug_mode);
     performanceTraceRef.current.setEnabled(snapshot.server.performance_trace);
     if (!snapshot.server.debug_mode) setExpandedSessionIds(new Set());
     const authoritativeRoleLibrary = snapshot.role_library ?? {
@@ -1487,6 +1575,22 @@ function TimemApp() {
         if (event.status === "accepted") return;
         const completed = sentCommandsRef.current.get(event.command_id);
         sentCommandsRef.current.delete(event.command_id);
+        if (
+          event.status === "committed" &&
+          completed?.type === "model_endpoint_delete_many" &&
+          pendingEndpointDeleteCommandRef.current === event.command_id
+        ) {
+          pendingEndpointDeleteIdsRef.current.clear();
+          pendingEndpointDeleteCommandRef.current = "";
+          setPendingEndpointDelete(false);
+        }
+        if (
+          event.status === "committed" &&
+          completed?.type === "model_endpoint_import_apply"
+        ) {
+          setEndpointImportCandidates([]);
+          setEndpointImportIssues([]);
+        }
         const pendingCredential = pendingSessionApiKeyCommandsRef.current.get(
           event.command_id,
         );
@@ -1567,6 +1671,30 @@ function TimemApp() {
             setMemTemporaryItemsLoading(false);
           if (completed?.type === "mem_temporary_items_delete")
             setMemTemporaryItemsDeleting(false);
+          if (completed?.type === "model_endpoint_upsert") {
+            // The editor stays open on rejection; only the authoritative
+            // model_endpoints_updated event closes it after a commit.
+            reportUiError(
+              t("errors.endpointSaveTitle"),
+              event.error || t("errors.endpointSaveRetry"),
+              "system",
+            );
+            return;
+          }
+          if (completed?.type === "model_endpoint_delete_many") {
+            if (pendingEndpointDeleteCommandRef.current === event.command_id) {
+              pendingEndpointDeleteIdsRef.current.clear();
+              pendingEndpointDeleteCommandRef.current = "";
+              setPendingEndpointDelete(false);
+              setDeleteEndpointCandidates([]);
+            }
+            reportUiError(
+              t("errors.endpointDeleteTitle"),
+              event.error || t("errors.endpointDeleteRetry"),
+              "system",
+            );
+            return;
+          }
           if (memSwitchNeedsConfirmation) {
             // The confirmation dialog is the actionable authoritative response.
           } else if (pendingCredential) {
@@ -1583,7 +1711,7 @@ function TimemApp() {
             reportUiError(issue.title, issue.detail, sessionId);
           } else if (completed?.type === "favorite_capacity_update") {
             setFavoriteCapacityUpdating(false);
-            reportUiError("无法调整收藏夹空间", "请稍后重试。", sessionId);
+            reportUiError(t("errors.favoritesResizeTitle"), t("errors.retryLater"), sessionId);
           } else if (
             completed?.type === "favorite_create" ||
             completed?.type === "favorite_delete" ||
@@ -1591,10 +1719,10 @@ function TimemApp() {
           ) {
             setFavoritesLoading(false);
             setPendingFavoriteSourceKeys(new Set());
-            reportUiError("收藏夹暂时不可用", "请稍后重试。", sessionId);
+            reportUiError(t("errors.favoritesUnavailableTitle"), t("errors.retryLater"), sessionId);
           } else if (completed?.type === "chat_search") {
             setChatSearchPending(false);
-            reportUiError("搜索暂时不可用", "请稍后重试。", sessionId);
+            reportUiError(t("errors.searchUnavailableTitle"), t("errors.retryLater"), sessionId);
           } else {
             reportUiError(
               "Command rejected",
@@ -2111,12 +2239,35 @@ function TimemApp() {
         }));
         return;
       }
+      if (event.type === "model_endpoint_import_scanned") {
+        setEndpointImportCandidates(event.candidates);
+        setEndpointImportIssues(event.issues);
+        return;
+      }
       if (event.type === "model_endpoints_updated") {
         setServer((current) =>
           current ? { ...current, model_endpoints: event.endpoints } : current,
         );
         setEndpointEditor(null);
-        setDeleteEndpointCandidate(null);
+        const availableEndpointIds = new Set(
+          event.endpoints.map((endpoint) => endpoint.id),
+        );
+        const pendingDeleteIds = pendingEndpointDeleteIdsRef.current;
+        const pendingDeleteCompleted =
+          pendingDeleteIds.size > 0 &&
+          [...pendingDeleteIds].every(
+            (endpointId) => !availableEndpointIds.has(endpointId),
+          );
+        if (pendingDeleteCompleted) {
+          pendingEndpointDeleteIdsRef.current.clear();
+          pendingEndpointDeleteCommandRef.current = "";
+          setPendingEndpointDelete(false);
+          setDeleteEndpointCandidates([]);
+        } else {
+          setDeleteEndpointCandidates((current) =>
+            current.filter((endpoint) => availableEndpointIds.has(endpoint.id)),
+          );
+        }
         setRevealedEndpointApiKeys({});
         setRevealedEndpointHeaders({});
         setRevealedEndpointRequestFields({});
@@ -2358,7 +2509,7 @@ function TimemApp() {
         if (sessionIndex < 0) return current;
         const session = current[sessionIndex];
         const nextSession = applyCoreTopicToSession(
-          appendTurnEvent(session, event.turn_id, {
+          topic.topic.name === "core.model.preview" ? session : appendTurnEvent(session, event.turn_id, {
             event_id: event.turn_event_id ?? clientId(),
             source: "core_topic",
             payload: topic as unknown as Record<string, unknown>,
@@ -2621,7 +2772,7 @@ function TimemApp() {
           id: clientId(),
           sessionId,
           tone: "notice",
-          ...NO_MODEL_ENDPOINTS_ISSUE,
+          ...noModelEndpointsIssue(),
           createdAt: Date.now(),
         });
         return false;
@@ -2956,6 +3107,29 @@ function TimemApp() {
   useEffect(() => {
     if (!runtimeUnavailable) setRuntimeUnavailableDialogDismissed(false);
   }, [runtimeUnavailable]);
+  // When the runtime stays unreachable, stop burning CPU on reconnect loops
+  // and countdown to closing the page instead of spinning forever.
+  useEffect(() => {
+    if (!runtimeUnavailable) {
+      setRuntimeShutdownSeconds(null);
+      return;
+    }
+    setRuntimeShutdownSeconds(15);
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      const remaining = 15 - Math.floor((Date.now() - startedAt) / 1000);
+      if (remaining <= 0) {
+        window.clearInterval(timer);
+        window.close();
+        // window.close() is only honored for script-opened tabs; fall back to
+        // replacing the document so no React tree keeps rendering/polling.
+        window.location.replace("about:blank");
+        return;
+      }
+      setRuntimeShutdownSeconds(remaining);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [runtimeUnavailable]);
   const sessionInteractionLockReason = sessionInteractionLockReasonForState(
     pendingMemSwitch,
     connected,
@@ -2967,7 +3141,7 @@ function TimemApp() {
   const restartCwdDecision = activeSession?.restart_cwd_decision ?? null;
   const sessionWorkLocked = runtimeLocked || restartCwdDecision !== null;
   const sessionWorkLockReason = restartCwdDecision
-    ? "请先选择本 Session 在 Timem 重启后的工作目录"
+    ? t("sessions.restartGatePrompt")
     : sessionInteractionLockReason;
   const connectionLabel = runtimeConnectionLabel(
     connected,
@@ -2976,17 +3150,20 @@ function TimemApp() {
     reconnectAttempt,
   );
   const settingsTitle = !runtimeReady
-    ? "Wait for the runtime snapshot before opening settings"
+    ? t("nav.settingsLocked")
     : pendingMemSwitch
-      ? "Memory switch is in progress"
-      : "Open settings";
+      ? t("nav.settingsMemSwitch")
+      : t("nav.settingsOpen");
   const modelEndpointsUnavailable =
     !!server && server.model_endpoints.length === 0;
   const headerModelLabel =
-    endpointNameForProfile(
+    endpointLabelForProfile(
       server?.model_endpoints ?? [],
       activeSession?.runtime_profile,
-    ) ?? UNCONFIGURED_MODEL_LABEL;
+    );
+  const headerModelEndpoint = (server?.model_endpoints ?? []).find(
+    (endpoint) => endpointMatchesProfile(endpoint, activeSession?.runtime_profile),
+  );
   const openEndpointSettings = () => {
     setShowRuntime(false);
     setShowMcp(false);
@@ -3292,7 +3469,7 @@ function TimemApp() {
           <button
             type="button"
             className="mobile-sidebar-backdrop"
-            aria-label="Close session navigation"
+            aria-label={t("sessions.closeNavigation")}
             onClick={() => closeMobileSidebar()}
           />
         )}
@@ -3300,7 +3477,7 @@ function TimemApp() {
           id="session-navigation"
           ref={mobileSidebarRef}
           className={`sidebar ${leftSidebarCollapsed ? "collapsed" : ""} ${showMobileSessions ? "mobile-open" : ""}`}
-          aria-label="Session navigation"
+          aria-label={t("sessions.navigation")}
           tabIndex={-1}
         >
           {leftSidebarCollapsed && (
@@ -3309,7 +3486,7 @@ function TimemApp() {
                 type="button"
                 className="collapsed-brand brand-logo-toggle brand-logo-restore"
                 title="Show session navigation"
-                aria-label="Show session navigation"
+                aria-label={t("sessions.showNavigation")}
                 onClick={() =>
                   setSidebarLayout((current) => ({
                     ...current,
@@ -3348,7 +3525,7 @@ function TimemApp() {
               type="button"
               className="sidebar-resize-handle left"
               title="Resize session navigation"
-              aria-label="Resize session navigation"
+              aria-label={t("sessions.resizeNavigation")}
               onPointerDown={(event) => startSidebarResize("left", event)}
             />
           )}
@@ -3357,7 +3534,7 @@ function TimemApp() {
               type="button"
               className="brand-logo-toggle"
               title="Hide session navigation"
-              aria-label="Hide session navigation"
+              aria-label={t("sessions.hideNavigation")}
               onClick={() =>
                 setSidebarLayout((current) => ({
                   ...current,
@@ -3384,7 +3561,7 @@ function TimemApp() {
               type="button"
               className="mobile-sidebar-close"
               title="Close sessions"
-              aria-label="Close sessions"
+              aria-label={t("sessions.closePanel")}
               onClick={() => closeMobileSidebar()}
             >
               <X size={17} />
@@ -3398,7 +3575,7 @@ function TimemApp() {
                 type="button"
                 className="new-session-group"
                 title="New session group"
-                aria-label="New session group"
+                aria-label={t("sessions.newGroup")}
                 disabled={runtimeLocked || sessionDeleteMode}
                 onClick={() => setSessionGroupEditor({ name: "" })}
               >
@@ -3410,8 +3587,8 @@ function TimemApp() {
                 <button
                   type="button"
                   className="session-delete-cancel"
-                  title="取消删除 Session"
-                  aria-label="取消删除 Session"
+                  title={t("sessions.cancelDelete")}
+                  aria-label={t("sessions.cancelDelete")}
                   onClick={cancelSessionDeleteMode}
                 >
                   <X size={14} strokeWidth={3} />
@@ -3423,16 +3600,16 @@ function TimemApp() {
                 title={
                   sessionDeleteMode
                     ? selectedDeleteSessionId
-                      ? "确认删除选中的 Session"
-                      : "请选择要删除的 Session"
-                    : "选择要删除的 Session"
+                      ? t("sessions.confirmDeleteSelected")
+                      : t("sessions.selectToDeletePrompt")
+                    : t("sessions.selectToDelete")
                 }
                 aria-label={
                   sessionDeleteMode
                     ? selectedDeleteSessionId
-                      ? "确认删除选中的 Session"
-                      : "请选择要删除的 Session"
-                    : "选择要删除的 Session"
+                      ? t("sessions.confirmDeleteSelected")
+                      : t("sessions.selectToDeletePrompt")
+                    : t("sessions.selectToDelete")
                 }
                 disabled={
                   runtimeLocked ||
@@ -3468,8 +3645,8 @@ function TimemApp() {
               <input
                 autoFocus
                 value={sessionGroupEditor.name}
-                placeholder="Group name"
-                aria-label="New session group name"
+                placeholder={t("sessions.newGroupNamePlaceholder")}
+                aria-label={t("sessions.newGroupNameAria")}
                 onChange={(event) =>
                   setSessionGroupEditor({ name: event.target.value })
                 }
@@ -3490,7 +3667,7 @@ function TimemApp() {
           )}
           <nav
             className="session-list"
-            aria-label="Sessions"
+            aria-label={t("nav.sessions")}
             aria-busy={!snapshotReady}
           >
             <DndContext
@@ -3737,10 +3914,10 @@ function TimemApp() {
                                       const visuallyWorking =
                                         sessionVisuallyWorking(session);
                                       const sessionEndpointName =
-                                        endpointNameForProfile(
+                                        endpointLabelForProfile(
                                           server?.model_endpoints ?? [],
                                           session.runtime_profile,
-                                        ) ?? UNCONFIGURED_MODEL_LABEL;
+                                        );
                                       return (
                                         <Fragment key={session.session_id}>
                                           <SortableSessionRow
@@ -3912,9 +4089,9 @@ function TimemApp() {
                                                 }}
                                               >
                                                 {visuallyWorking ? (
-                                                  <LoaderCircle
+                                                  <span
                                                     className="session-working-icon"
-                                                    size={15}
+                                                    role="img"
                                                     aria-label="Session working"
                                                   />
                                                 ) : session.state ===
@@ -3995,8 +4172,8 @@ function TimemApp() {
                                               <button
                                                 type="button"
                                                 className={`session-delete-select ${selectedDeleteSessionId === session.session_id ? "selected" : ""}`}
-                                                title={`选择删除 ${session.display_name}`}
-                                                aria-label={`选择删除 ${session.display_name}`}
+                                                title={t("sessions.selectForDelete", { name: session.display_name })}
+                                                aria-label={t("sessions.selectForDelete", { name: session.display_name })}
                                                 aria-pressed={
                                                   selectedDeleteSessionId ===
                                                   session.session_id
@@ -4110,8 +4287,8 @@ function TimemApp() {
             <button
               type="button"
               className={`sidebar-library-button ${chatLibraryMode === "search" ? "active" : ""}`}
-              title="Search chats"
-              aria-label="Search chats"
+              title={t("nav.searchChats")}
+              aria-label={t("nav.searchChats")}
               aria-expanded={chatLibraryMode === "search"}
               aria-controls="chat-library-center"
               disabled={!runtimeReady || pendingMemSwitch}
@@ -4126,13 +4303,13 @@ function TimemApp() {
               }}
             >
               <Search size={17} aria-hidden="true" />
-              {!leftSidebarCollapsed && <span>Search</span>}
+              {!leftSidebarCollapsed && <span>{t("nav.search")}</span>}
             </button>
             <button
               type="button"
               className={`sidebar-library-button ${chatLibraryMode === "favorites" ? "active" : ""}`}
-              title="Favorite answers"
-              aria-label="Favorite answers"
+              title={t("nav.favoriteAnswers")}
+              aria-label={t("nav.favoriteAnswers")}
               aria-expanded={chatLibraryMode === "favorites"}
               aria-controls="chat-library-center"
               disabled={!runtimeReady || pendingMemSwitch}
@@ -4152,7 +4329,7 @@ function TimemApp() {
               }}
             >
               <Star size={17} aria-hidden="true" />
-              {!leftSidebarCollapsed && <span>Favorite</span>}
+              {!leftSidebarCollapsed && <span>{t("nav.favorites")}</span>}
             </button>
             <button
               type="button"
@@ -4170,7 +4347,7 @@ function TimemApp() {
               }}
             >
               <Settings size={17} aria-hidden="true" />
-              {!leftSidebarCollapsed && <span>Settings</span>}
+              {!leftSidebarCollapsed && <span>{t("nav.settings")}</span>}
             </button>
           </div>
         </aside>
@@ -4211,6 +4388,7 @@ function TimemApp() {
               </button>
             </div>
             <div className="header-session-cluster">
+              <div className="header-session-model-row">
               <div className="header-model-guide-anchor">
                 <button
                   type="button"
@@ -4238,15 +4416,36 @@ function TimemApp() {
                       <Sparkles size={14} />
                     </span>
                     <div className="endpoint-guide-copy">
-                      <strong>尚未配置模型接入点</strong>
-                      <span>添加一个接入点，即可开始使用当前 Session。</span>
+                      <strong>{t("modelService.unconfiguredTitle")}</strong>
+                      <span>{t("modelService.unconfiguredDetail")}</span>
                     </div>
                     <button type="button" onClick={openEndpointCreator}>
                       <Plus size={13} />
-                      <span>立即配置</span>
+                      <span>{t("modelService.configureNow")}</span>
                     </button>
                   </div>
                 )}
+              </div>
+              {headerModelEndpoint && (
+                <div className="header-model-meta">
+                  <span
+                    className="header-model-meta-model"
+                    title={headerModelEndpoint.model}
+                  >
+                    {headerModelEndpoint.model}
+                  </span>
+                  <div className="header-model-meta-row">
+                    <span className="endpoint-chip endpoint-chip-protocol">
+                      {apiProtocolShort(headerModelEndpoint.api_protocol)}
+                    </span>
+                    {headerModelEndpoint.reasoning_effort && (
+                      <span className="endpoint-chip endpoint-chip-effort">
+                        {headerModelEndpoint.reasoning_effort}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
               </div>
             </div>
             <div className="header-actions">
@@ -4334,6 +4533,10 @@ function TimemApp() {
               temporaryItemsError={memTemporaryItemsError}
               endpoints={server?.model_endpoints ?? []}
               endpointEditor={endpointEditor}
+              endpointImportCandidates={endpointImportCandidates}
+              endpointImportIssues={endpointImportIssues}
+              onScanEndpointImport={scanModelEndpointImport}
+              onImportEndpoints={importModelEndpoints}
               revealedEndpointApiKeys={revealedEndpointApiKeys}
               revealedEndpointHeaders={revealedEndpointHeaders}
               revealedEndpointRequestFields={revealedEndpointRequestFields}
@@ -4342,7 +4545,8 @@ function TimemApp() {
               onRefreshTemporaryItems={refreshMemTemporaryItems}
               onDeleteTemporaryItems={deleteMemTemporaryItems}
               onEditEndpoint={setEndpointEditor}
-              onDeleteEndpoint={setDeleteEndpointCandidate}
+              onDeleteEndpoint={setDeleteEndpointCandidates}
+              endpointDeletePending={pendingEndpointDelete}
               onRevealEndpoint={revealModelEndpoint}
               onSaveEndpoint={saveModelEndpoint}
               onSaveTemporaryPolicy={saveMemTemporaryPolicy}
@@ -4846,16 +5050,12 @@ function TimemApp() {
             }}
           />
         )}
-        {deleteEndpointCandidate && (
+        {deleteEndpointCandidates.length > 0 && (
           <ModelEndpointDeleteDialog
-            endpoint={deleteEndpointCandidate}
-            onClose={() => setDeleteEndpointCandidate(null)}
-            onConfirm={() =>
-              sendCommand({
-                type: "model_endpoint_delete",
-                endpoint_id: deleteEndpointCandidate.id,
-              })
-            }
+            endpoints={deleteEndpointCandidates}
+            pending={pendingEndpointDelete}
+            onClose={() => setDeleteEndpointCandidates([])}
+            onConfirm={() => confirmModelEndpointDelete(deleteEndpointCandidates)}
           />
         )}
         {deleteSessionCandidate && (
@@ -4918,8 +5118,8 @@ function TimemApp() {
               ) {
                 setFavoriteCapacityUpdating(false);
                 reportUiError(
-                  "无法调整收藏夹空间",
-                  "请检查连接后重试。",
+                  t("errors.favoritesResizeTitle"),
+                  t("errors.checkConnection"),
                   "system",
                 );
               }
@@ -4977,6 +5177,7 @@ function TimemApp() {
         {showRuntimeUnavailableDialog && (
           <RuntimeUnavailableDialog
             detail={runtimeDisconnectedDetail}
+            shutdownSeconds={runtimeShutdownSeconds}
             onClose={() => setRuntimeUnavailableDialogDismissed(true)}
           />
         )}
@@ -5203,6 +5404,7 @@ function ExpandedTextEditor({
   onCommit: (value: string) => void;
   onClose: () => void;
 }) {
+  useT();
   // Keep high-frequency typing local to the fullscreen editor. Updating the
   // thread-level session draft for every key would rerender the entire chat UI.
   const [draft, setDraft] = useState(value);
@@ -5229,13 +5431,13 @@ function ExpandedTextEditor({
           <div>
             <span className="eyebrow">{eyebrow}</span>
             <h2>{title}</h2>
-            <p>输入内容会在完成编辑时一次性同步；不会自动保存或发送。</p>
+            <p>{t("composer.editCommitNote")}</p>
           </div>
           <button
             type="button"
             className="expanded-text-collapse"
-            title="收起编辑器"
-            aria-label="收起编辑器"
+            title={t("composer.collapseEditor")}
+            aria-label={t("composer.collapseEditor")}
             onClick={finish}
           >
             <Minimize2 size={16} />
@@ -5254,14 +5456,14 @@ function ExpandedTextEditor({
           <span>
             {maxLength
               ? `${draft.length.toLocaleString()} / ${maxLength.toLocaleString()}`
-              : `${draft.length.toLocaleString()} 字符`}
+              : t("composer.charCount", { count: draft.length.toLocaleString() })}
           </span>
           <div>
             <button type="button" className="secondary" onClick={onClose}>
-              取消修改
+              {t("composer.discardChanges")}
             </button>
             <button type="button" className="primary" onClick={finish}>
-              完成编辑
+              {t("composer.finishEdit")}
             </button>
           </div>
         </footer>
@@ -5298,6 +5500,7 @@ function WorkerRolePanel({
   onSelect: (roleId: string) => void;
   onCommand: (command: ClientCommand) => boolean;
 }) {
+  useT();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -5445,8 +5648,8 @@ function WorkerRolePanel({
             type="button"
             className="worker-role-drag"
             disabled={disabled || roleDeleteMode}
-            title={`拖动 ${role.name}`}
-            aria-label={`拖动 ${role.name}`}
+            title={t("roles.dragRole", { name: role.name })}
+            aria-label={t("roles.dragRole", { name: role.name })}
             {...attributes}
             {...listeners}
           >
@@ -5455,8 +5658,8 @@ function WorkerRolePanel({
           <label
             title={
               roleDeleteMode
-                ? `选择删除 ${role.name}`
-                : `Use ${role.name} for the next message`
+                ? t("roles.selectForDelete", { name: role.name })
+                : t("roles.useForNextMessage", { name: role.name })
             }
           >
             <input
@@ -5547,8 +5750,8 @@ function WorkerRolePanel({
                 <button
                   type="button"
                   className="worker-role-delete-cancel"
-                  title="取消删除 Role"
-                  aria-label="取消删除 Role"
+                  title={t("roles.cancelDelete")}
+                  aria-label={t("roles.cancelDelete")}
                   onClick={() => {
                     setRoleDeleteMode(false);
                     setSelectedDeleteRoleId("");
@@ -5563,16 +5766,16 @@ function WorkerRolePanel({
                 title={
                   roleDeleteMode
                     ? selectedDeleteRoleId
-                      ? "确认删除选中的 Role"
-                      : "请选择要删除的 Role"
-                    : "选择要删除的 Role"
+                      ? t("roles.confirmDeleteSelected")
+                      : t("roles.selectToDeletePrompt")
+                    : t("roles.selectToDelete")
                 }
                 aria-label={
                   roleDeleteMode
                     ? selectedDeleteRoleId
-                      ? "确认删除选中的 Role"
-                      : "请选择要删除的 Role"
-                    : "选择要删除的 Role"
+                      ? t("roles.confirmDeleteSelected")
+                      : t("roles.selectToDeletePrompt")
+                    : t("roles.selectToDelete")
                 }
                 disabled={
                   disabled ||
@@ -5621,8 +5824,8 @@ function WorkerRolePanel({
             className={`worker-role-help ${roleDeleteMode ? "delete-mode" : ""}`}
           >
             {roleDeleteMode
-              ? "勾选一个 Role，然后点击顶部对勾确认删除。"
-              : "拖动 Role 可排序或归入分组。"}
+              ? t("roles.deleteHint")
+              : t("roles.reorderHint")}
           </p>
           <DndContext
             sensors={sensors}
@@ -5675,8 +5878,8 @@ function WorkerRolePanel({
                           aria-controls={`worker-role-group-list-${group.id}`}
                           title={
                             collapsed
-                              ? `展开 ${group.name}`
-                              : `折叠 ${group.name}`
+                              ? t("roles.expandGroup", { name: group.name })
+                              : t("roles.collapseGroup", { name: group.name })
                           }
                           onClick={() => toggleRoleGroup(group.id)}
                         >
@@ -5729,7 +5932,7 @@ function WorkerRolePanel({
                           .map(roleItem)}
                         {group.role_ids.length === 0 && (
                           <span className="worker-role-drop-hint">
-                            拖动 Role 到这里
+                            {t("roles.dropHere")}
                           </span>
                         )}
                       </div>
@@ -5750,13 +5953,13 @@ function WorkerRolePanel({
                     aria-controls="worker-role-group-list-ungrouped"
                     title={
                       collapsedRoleGroupIds.has("ungrouped")
-                        ? "展开未分组"
-                        : "折叠未分组"
+                        ? t("roles.expandUngrouped")
+                        : t("roles.collapseUngrouped")
                     }
                     onClick={() => toggleRoleGroup("ungrouped")}
                   >
                     <ChevronRight size={12} />
-                    <strong>未分组</strong>
+                    <strong>{t("roles.ungrouped")}</strong>
                     <small>{ungroupedRoles.length}</small>
                   </button>
                 </header>
@@ -5769,7 +5972,7 @@ function WorkerRolePanel({
                     {ungroupedRoles.length === 0 &&
                       library.roles.length > 0 && (
                         <span className="worker-role-drop-hint">
-                          所有 Role 已归组
+                          {t("roles.allGrouped")}
                         </span>
                       )}
                   </div>
@@ -5777,7 +5980,7 @@ function WorkerRolePanel({
               </WorkerRoleDropGroup>
               {library.roles.length === 0 && (
                 <div className="worker-role-empty">
-                  还没有 Role。创建一个，供所有 Session 使用。
+                  {t("roles.emptyHint")}
                 </div>
               )}
               {!session && (
@@ -5829,8 +6032,8 @@ function WorkerRolePanel({
                 value={newGroupName}
                 maxLength={80}
                 disabled={disabled}
-                placeholder="新分组名称"
-                aria-label="Role group name"
+                placeholder={t("roles.newGroupName")}
+                aria-label={t("roles.groupNameAria")}
                 onChange={(event) => setNewGroupName(event.target.value)}
               />
               <button
@@ -5838,7 +6041,7 @@ function WorkerRolePanel({
                 className="worker-role-group-create"
                 disabled={disabled || !newGroupName.trim()}
               >
-                <Plus size={12} /> 分组
+                <Plus size={12} /> {t("roles.createGroup")}
               </button>
             </form>
           )}
@@ -5850,12 +6053,12 @@ function WorkerRolePanel({
                 submit();
               }}
             >
-              <strong>{editingId ? "编辑 Role" : "新建 Role"}</strong>
+              <strong>{editingId ? t("roles.editRole") : t("roles.newRole")}</strong>
               <input
                 value={name}
                 maxLength={80}
                 disabled={disabled}
-                placeholder="称呼，例如：严谨审查员"
+                placeholder={t("roles.namePlaceholder")}
                 aria-label="Role name"
                 onChange={(event) => setName(event.target.value)}
               />
@@ -5864,15 +6067,15 @@ function WorkerRolePanel({
                   value={description}
                   maxLength={16384}
                   disabled={disabled}
-                  placeholder="描述工作要求、步骤和约束…"
+                  placeholder={t("roles.descPlaceholder")}
                   aria-label="Role description"
                   onChange={(event) => setDescription(event.target.value)}
                 />
                 <button
                   type="button"
                   className="text-field-expand"
-                  title="展开编辑 Role 描述"
-                  aria-label="展开编辑 Role 描述"
+                  title={t("roles.expandDescEditor")}
+                  aria-label={t("roles.expandDescEditor")}
                   disabled={disabled}
                   onClick={() => setDescriptionExpanded(true)}
                 >
@@ -5885,26 +6088,26 @@ function WorkerRolePanel({
                   className="worker-role-primary-action"
                   disabled={disabled || !name.trim() || !description.trim()}
                 >
-                  {editingId ? "保存" : "创建"}
+                  {editingId ? t("common.save") : t("common.create")}
                 </button>
                 {editingId && (
                   <button type="button" onClick={resetEditor}>
-                    取消
+                    {t("common.cancel")}
                   </button>
                 )}
               </div>
               {descriptionExpanded && (
                 <ExpandedTextEditor
-                  eyebrow="ROLE DESCRIPTION"
+                  eyebrow={t("roles.descEyebrow")}
                   title={
                     editingId
-                      ? `编辑 ${name.trim() || "Role"} 的描述`
-                      : "编写 Role 描述"
+                      ? t("roles.editDescFor", { name: name.trim() || "Role" })
+                      : t("roles.writeDesc")
                   }
                   value={description}
                   maxLength={16384}
                   disabled={disabled}
-                  placeholder="描述工作要求、步骤和约束…"
+                  placeholder={t("roles.descPlaceholder")}
                   onCommit={setDescription}
                   onClose={() => setDescriptionExpanded(false)}
                 />
@@ -6196,11 +6399,11 @@ function ChatLibraryPanel({
   const loading = showingFavorites ? favoritesLoading : searchPending;
   const emptyLabel = showingFavorites
     ? normalizedFavoriteQuery
-      ? "No matching favorites."
-      : "Favorite final answers to keep them close."
+      ? t("chatLibrary.noMatchingFavorites")
+      : t("chatLibrary.favoritePrompt")
     : query.trim()
-      ? "No matching messages."
-      : "Search across user messages and final answers.";
+      ? t("chatLibrary.noMatchingMessages")
+      : t("chatLibrary.searchPrompt");
   const toggleFavoriteSelection = useCallback(
     (favoriteId: string) =>
       setSelectedFavoriteIds((current) => {
@@ -6256,14 +6459,14 @@ function ChatLibraryPanel({
       >
         <header className="chat-library-header">
           <div>
-            <span className="eyebrow">CHAT LIBRARY</span>
-            <strong>Search</strong>
+            <span className="eyebrow">{t("nav.chatLibrary")}</span>
+            <strong>{t("chatLibrary.title")}</strong>
           </div>
           <button
             type="button"
             className="icon-button"
-            title="Close chat library"
-            aria-label="Close chat library"
+            title={t("chatLibrary.close")}
+            aria-label={t("chatLibrary.close")}
             onClick={onClose}
           >
             <X size={16} />
@@ -6282,19 +6485,19 @@ function ChatLibraryPanel({
               autoFocus
               value={query}
               maxLength={256}
-              placeholder={showingFavorites ? "Filter favorites" : "Keywords"}
+              placeholder={showingFavorites ? t("chatLibrary.filterFavorites") : t("chatLibrary.keywords")}
               aria-label={
                 showingFavorites
-                  ? "Filter favorite answers"
-                  : "Search chat history"
+                  ? t("chatLibrary.filterFavoritesAria")
+                  : t("chatLibrary.searchHistory")
               }
               onChange={(event) => onQueryChange(event.target.value)}
             />
             {query && (
               <button
                 type="button"
-                title="Clear search"
-                aria-label="Clear search"
+                title={t("chatLibrary.clearSearch")}
+                aria-label={t("chatLibrary.clearSearch")}
                 onClick={() => onQueryChange("")}
               >
                 <X size={12} />
@@ -6303,9 +6506,9 @@ function ChatLibraryPanel({
           </label>
           <div className="chat-library-scope">
             <label>
-              <span>Search scope</span>
+              <span>{t("nav.searchScope")}</span>
               <select
-                aria-label="Search scope"
+                aria-label={t("nav.searchScope")}
                 value={scope}
                 onChange={(event) =>
                   onScopeChange(
@@ -6313,11 +6516,11 @@ function ChatLibraryPanel({
                   )
                 }
               >
-                <option value="all">All Sessions</option>
+                <option value="all">{t("nav.scopeAll")}</option>
                 <option value="session" disabled={!activeSession}>
-                  Current Session
+                  {t("chatLibrary.scopeSession")}
                 </option>
-                <option value="favorites">Favorites</option>
+                <option value="favorites">{t("nav.scopeFavorites")}</option>
               </select>
             </label>
             {!showingFavorites && (
@@ -6331,7 +6534,7 @@ function ChatLibraryPanel({
                 ) : (
                   <ArrowDown className="chat-library-submit-arrow" size={13} />
                 )}
-                <span>Search</span>
+                <span>{t("chatLibrary.submit")}</span>
               </button>
             )}
           </div>
@@ -6361,10 +6564,10 @@ function ChatLibraryPanel({
                       setFavoriteSort(event.target.value as typeof favoriteSort)
                     }
                   >
-                    <option value="time-desc">Newest</option>
-                    <option value="time-asc">Oldest</option>
-                    <option value="size-desc">Largest</option>
-                    <option value="size-asc">Smallest</option>
+                    <option value="time-desc">{t("nav.sortNewest")}</option>
+                    <option value="time-asc">{t("nav.sortOldest")}</option>
+                    <option value="size-desc">{t("nav.sortLargest")}</option>
+                    <option value="size-asc">{t("nav.sortSmallest")}</option>
                   </select>
                 </label>
               )}
@@ -6634,7 +6837,7 @@ function ToolRepoPanel({
     ? `Loading ${pendingTool.name} tool directory`
     : "";
   const sortLabel = sort === "time" ? "recent update" : sort;
-  const sortControlLabel = `Sort ToolRepo by ${sortLabel}`;
+  const sortControlLabel = t("toolRepo.sortBy", { sort: sortLabel });
   return (
     <aside
       id="toolrepo-panel"
@@ -6653,7 +6856,7 @@ function ToolRepoPanel({
       <header className="side-panel-header">
         <div className="side-panel-title">
           <Wrench size={15} />
-          <strong>ToolRepo</strong>
+          <strong>{t("toolRepo.title")}</strong>
         </div>
         <button
           type="button"
@@ -6709,9 +6912,9 @@ function ToolRepoPanel({
             title={sortControlLabel}
             aria-label={sortControlLabel}
           >
-            <option value="time">Recent</option>
-            <option value="type">Type</option>
-            <option value="language">Language</option>
+            <option value="time">{t("toolRepo.sortRecent")}</option>
+            <option value="type">{t("toolRepo.sortType")}</option>
+            <option value="language">{t("toolRepo.sortLanguage")}</option>
           </select>
         </div>
         {session && (
@@ -6737,8 +6940,8 @@ function ToolRepoPanel({
                 const renamingTool = pendingToolRenameIds.has(tool.tool_id);
                 const expanded = selectedTool?.summary.tool_id === tool.tool_id;
                 const toolToggleLabel = expanded
-                  ? `收起 ${tool.name} 详情`
-                  : `展开 ${tool.name} 详情`;
+                  ? t("tools.toolDetailCollapse", { name: tool.name })
+                  : t("tools.toolDetailExpand", { name: tool.name });
                 return (
                   <div
                     className={`toolrepo-item ${selectedTool?.summary.tool_id === tool.tool_id ? "selected" : ""} ${loadingDetail ? "loading-detail" : ""} ${renamingTool ? "renaming-tool" : ""}`}
@@ -6805,13 +7008,13 @@ function ToolRepoPanel({
                         <strong>{tool.name}</strong>
                         <small>
                           {renamingTool
-                            ? "Renaming..."
+                            ? t("toolRepo.renaming")
                             : loadingDetail
-                              ? "Loading details..."
+                              ? t("toolRepo.loadingDetails")
                               : `${tool.language} · ${tool.tool_type}`}
                         </small>
                         <em className="toolrepo-toggle-state">
-                          {expanded ? "收起" : "展开"}
+                          {expanded ? t("common.collapse") : t("common.expand")}
                         </em>
                       </span>
                     </button>
@@ -6894,7 +7097,7 @@ function ToolRepoPanel({
                       aria-label={`Stop viewing ${pendingTool.name} details`}
                       onClick={onCollapseTool}
                     >
-                      收起详情
+                      {t("tools.collapseDetails")}
                     </button>
                   </div>
                 </header>
@@ -6941,7 +7144,7 @@ function ToolRepoPanel({
                         aria-label="Collapse tool detail"
                         onClick={onCollapseTool}
                       >
-                        收起详情
+                        {t("tools.collapseDetails")}
                       </button>
                     </div>
                   </header>
@@ -6993,7 +7196,7 @@ function ToolRepoPanel({
             }}
           >
             <Terminal size={14} />
-            在命令行中打开目录
+            {t("tools.openInTerminal")}
           </button>
         </div>
       )}
@@ -7425,7 +7628,7 @@ function TimemThread({
           reason:
             activeSession.message_queue.continuation.state === "blocked"
               ? activeSession.message_queue.continuation.reason
-              : "用户关闭了自动发送",
+              : t("composer.autoSendDisabledByUser"),
           stoppedAtMs: 0,
         }
       : null;
@@ -7495,16 +7698,16 @@ function TimemThread({
     ? ""
     : "Create a session before using Timem";
   const uploadingAttachmentText = uploadingAttachmentFile
-    ? `Uploading ${uploadingAttachmentFile.name}`
-    : "Uploading file…";
+    ? t("composer.uploading", { name: uploadingAttachmentFile.name })
+    : t("composer.uploadingFile");
   const composerHint =
     missingSessionHint ||
     lockedControlHint ||
     (uploadingAttachment
-      ? `${uploadingAttachmentText} · send is paused until it finishes`
+      ? t("composer.uploadingHint", { text: uploadingAttachmentText })
       : activeSession?.state === "working"
-        ? "Enter to queue safely in Timem · use 立即 to supplement this turn"
-        : "Enter to send · Shift+Enter for newline");
+        ? t("composer.queueSupplementHint")
+        : t("composer.sendHint"));
   const attachTitle =
     missingSessionHint ||
     lockedControlHint ||
@@ -7538,7 +7741,7 @@ function TimemThread({
       ? "Loading earlier history…"
       : `Load ${STORED_HISTORY_PAGE_SIZE} older stored tasks`;
   const latestTurn = turns.at(-1);
-  const latestTurnVersion = `${latestTurn?.turn_id ?? ""}:${latestTurn?.events.length ?? 0}:${latestTurn?.user_entries.length ?? 0}:${latestTurn?.final_answer?.length ?? 0}:${latestTurn?.completion ? 1 : 0}`;
+  const latestTurnVersion = `${latestTurn?.turn_id ?? ""}:${latestTurn?.events.length ?? 0}:${latestTurn?.user_entries.length ?? 0}:${latestTurn?.final_answer?.length ?? 0}:${latestTurn?.completion ? 1 : 0}:${latestTurn?.preview?.revision ?? 0}`;
   const liveSessionKey = sessionIds.join("\u0000");
   const liveSessionIds = useMemo(() => new Set(sessionIds), [liveSessionKey]);
   const [recentTimelineSessionIds, setRecentTimelineSessionIds] = useState<
@@ -8146,7 +8349,7 @@ function TimemThread({
   const submitDraft = () => {
     if (uploadingAttachment || sessionInteractionLocked) return;
     if (activeSession && activeSession.state !== "working" && !draft.trim()) {
-      if (!window.confirm("未输入内容，是否让Timem直接继续")) return;
+      if (!window.confirm(t("composer.emptyContinueConfirm"))) return;
       onSendForSession(
         activeSession.session_id,
         "",
@@ -8291,6 +8494,13 @@ function TimemThread({
       <ThreadPrimitive.Viewport
         ref={viewportRef}
         className="chat-scroll aui-thread-viewport"
+        onCopy={(event) => {
+          if (event.defaultPrevented) return;
+          const text = selectedUserMessageText(event.currentTarget, window.getSelection());
+          if (text === null) return;
+          event.clipboardData.setData("text/plain", text);
+          event.preventDefault();
+        }}
         autoScroll={false}
         scrollToBottomOnInitialize={false}
         scrollToBottomOnRunStart={false}
@@ -8371,7 +8581,7 @@ function TimemThread({
               aria-live="polite"
             >
               <header>
-                <span>待发送</span>
+                <span>{t("composer.queueTitle")}</span>
                 {queuePanelCollapsed ? (
                   <div
                     className={`queued-message-summary ${firstQueuedMessage?.deliveryError ? "delivery-error" : ""}`}
@@ -8389,29 +8599,35 @@ function TimemThread({
                         </small>
                       )}
                     <small className="queued-message-summary-count">
-                      {displayQueuedMessages.length} 条
+                      {t("composer.countLabel", { count: displayQueuedMessages.length })}
                     </small>
                   </div>
                 ) : (
                   <small title={queuedMessagesPause?.reason}>
                     {queuedMessagesPause
-                      ? `自动发送已停止${queuedMessagesPause.reason ? `：${queuedMessagesPause.reason}` : ""}`
-                      : "正在迁移到 Timem 运行时队列"}
+                      ? queuedMessagesPause.reason
+                        ? t("composer.autoSendStoppedReason", { reason: queuedMessagesPause.reason })
+                        : t("composer.autoSendStopped")
+                      : t("composer.migratingToQueue")}
                   </small>
                 )}
                 <div className="queued-message-header-actions">
                   <label className="queued-auto-send-control">
-                    <span>自动发送</span>
+                    <span>{t("composer.autoSend")}</span>
                     <button
                       type="button"
                       role="switch"
                       className="queued-auto-send-switch"
                       aria-checked={!queuedMessagesPause}
                       aria-label={
-                        queuedMessagesPause ? "开启自动发送" : "停止自动发送"
+                        queuedMessagesPause
+                          ? t("composer.enableAutoSend")
+                          : t("composer.pauseAutoSend")
                       }
                       title={
-                        queuedMessagesPause ? "开启自动发送" : "停止自动发送"
+                        queuedMessagesPause
+                          ? t("composer.enableAutoSend")
+                          : t("composer.pauseAutoSend")
                       }
                       onClick={() => {
                         if (!activeSessionId) return;
@@ -8432,8 +8648,8 @@ function TimemThread({
                       aria-expanded={queueExpanded}
                       title={
                         queueExpanded
-                          ? "收起待发送消息"
-                          : `向上展开全部 ${displayQueuedMessages.length} 条待发送消息`
+                          ? t("composer.collapseQueue")
+                          : t("composer.expandAllQueue", { count: displayQueuedMessages.length })
                       }
                       onClick={toggleQueuedMessages}
                     >
@@ -8444,8 +8660,8 @@ function TimemThread({
                       )}
                       <span>
                         {queueExpanded
-                          ? "收起"
-                          : `展开 ${hiddenQueuedMessageCount} 条`}
+                          ? t("composer.collapseOne")
+                          : t("composer.expandCount", { count: hiddenQueuedMessageCount })}
                       </span>
                     </button>
                   )}
@@ -8456,8 +8672,8 @@ function TimemThread({
                     aria-controls={`queued-message-items-${activeSession.session_id}`}
                     title={
                       queuePanelCollapsed
-                        ? "展开待发送队列"
-                        : "折叠待发送队列为一行"
+                        ? t("composer.expandQueuePanel")
+                        : t("composer.collapseQueuePanel")
                     }
                     onClick={toggleQueuedMessagePanel}
                   >
@@ -8466,7 +8682,7 @@ function TimemThread({
                     ) : (
                       <ChevronUp size={14} />
                     )}
-                    <span>{queuePanelCollapsed ? "展开" : "折叠"}</span>
+                    <span>{queuePanelCollapsed ? t("composer.toggleQueuePanel") : t("composer.collapsePanel")}</span>
                   </button>
                 </div>
               </header>
@@ -8541,8 +8757,8 @@ function TimemThread({
                                   type="button"
                                   className="queued-message-drag"
                                   disabled={dragDisabled}
-                                  title={`拖动调整第 ${index + 1} 条消息的顺序`}
-                                  aria-label={`拖动调整第 ${index + 1} 条消息的顺序`}
+                                  title={t("composer.reorderItem", { index: index + 1 })}
+                                  aria-label={t("composer.reorderItem", { index: index + 1 })}
                                   {...attributes}
                                   {...listeners}
                                 >
@@ -8550,7 +8766,7 @@ function TimemThread({
                                 </button>
                                 <span
                                   className="queued-message-order"
-                                  aria-label={`Queue position ${index + 1}`}
+                                  aria-label={t("composer.queuePosition", { index: index + 1 })}
                                 >
                                   {index + 1}
                                 </span>
@@ -8588,7 +8804,7 @@ function TimemThread({
                                       className="queued-message-editor"
                                       autoFocus
                                       value={editingQueuedMessage.text}
-                                      aria-label={`编辑第 ${index + 1} 条待发送消息`}
+                                      aria-label={t("composer.editItem", { index: index + 1 })}
                                       onChange={(event) =>
                                         setEditingQueuedMessage({
                                           ...editingQueuedMessage,
@@ -8621,7 +8837,7 @@ function TimemThread({
                                   {message.attachmentIds.length > 0 && (
                                     <small className="queued-message-attachments">
                                       <Paperclip size={11} />
-                                      {message.attachmentIds.length} 个附件
+                                      {t("composer.attachmentCount", { count: message.attachmentIds.length })}
                                     </small>
                                   )}
                                   {message.deliveryError && (
@@ -8642,7 +8858,7 @@ function TimemThread({
                                         }
                                         onClick={saveQueuedMessageEdit}
                                       >
-                                        保存
+                                        {t("common.save")}
                                       </button>
                                       <button
                                         type="button"
@@ -8652,7 +8868,7 @@ function TimemThread({
                                           setEditingQueuedMessage(undefined)
                                         }
                                       >
-                                        取消
+                                        {t("common.cancel")}
                                       </button>
                                     </>
                                   ) : (
@@ -8660,8 +8876,8 @@ function TimemThread({
                                       <button
                                         type="button"
                                         className="queued-message-edit"
-                                        title="重新编辑这条待发送消息"
-                                        aria-label={`重新编辑第 ${index + 1} 条待发送消息`}
+                                        title={t("composer.reEditItem")}
+                                        aria-label={t("composer.reEditItemIndex", { index: index + 1 })}
                                         disabled={claimed}
                                         onClick={() => {
                                           setEditingQueuedMessage({
@@ -8684,10 +8900,10 @@ function TimemThread({
                                         className="queued-message-supplement"
                                         title={
                                           message.deliveryError
-                                            ? "重试发送这条消息"
+                                            ? t("composer.retryThisMessage")
                                             : sendAsNewTurn
-                                              ? "作为新消息开始任务"
-                                              : "立即发送为当前任务的补充"
+                                              ? t("composer.startAsNewTask")
+                                              : t("composer.sendAsSupplement")
                                         }
                                         disabled={
                                           claimed ||
@@ -8703,7 +8919,7 @@ function TimemThread({
                                           });
                                         }}
                                       >
-                                        立即
+                                        {t("composer.sendNow")}
                                       </button>
                                       <button
                                         type="button"
@@ -8758,7 +8974,7 @@ function TimemThread({
                           {draggedQueuedMessage.attachmentIds.length > 0 && (
                             <small className="queued-message-attachments">
                               <Paperclip size={11} />
-                              {draggedQueuedMessage.attachmentIds.length} 个附件
+                              {t("composer.attachmentCount", { count: draggedQueuedMessage.attachmentIds.length })}
                             </small>
                           )}
                         </div>
@@ -8862,14 +9078,14 @@ function TimemThread({
                   value={draft}
                   placeholder={
                     !activeSession
-                      ? "Create a session to start…"
+                      ? t("composer.createSessionFirst")
                       : sessionInteractionLocked
                         ? sessionInteractionLockReason
                         : activeSession.state === "working"
-                          ? "在 Timem思考时继续输入补充对话..."
-                          : "输入问题，或按发送直接继续..."
+                          ? t("composer.placeholderQueue")
+                          : t("composer.placeholderDirect")
                   }
-                  aria-label="Message Timem"
+                  aria-label={t("composer.messageAria")}
                   aria-describedby={composerHintId}
                   title={composerHint}
                   disabled={!activeSession || sessionInteractionLocked}
@@ -8882,6 +9098,18 @@ function TimemThread({
                       ),
                     )
                   }
+                  onPaste={(event) => {
+                    const images = clipboardImageFiles(
+                      Array.from(event.clipboardData?.items ?? []),
+                    );
+                    if (images.length === 0) return;
+                    event.preventDefault();
+                    void (async () => {
+                      for (const image of images) {
+                        await onUpload(image);
+                      }
+                    })();
+                  }}
                   onKeyDown={(event) => {
                     if (event.key !== "Enter" || event.nativeEvent.isComposing)
                       return;
@@ -8899,8 +9127,8 @@ function TimemThread({
                 <button
                   type="button"
                   className="text-field-expand"
-                  title="展开编辑用户信息"
-                  aria-label="展开编辑用户信息"
+                  title={t("composer.expandEditUserMessage")}
+                  aria-label={t("composer.expandEditUserMessage")}
                   disabled={!activeSession || sessionInteractionLocked}
                   onClick={() => setComposerExpanded(true)}
                 >
@@ -8909,14 +9137,14 @@ function TimemThread({
               </div>
               {composerExpanded && activeSession && (
                 <ExpandedTextEditor
-                  eyebrow="MESSAGE"
-                  title="编辑用户信息"
+                  eyebrow={t("composer.eyebrowMessage")}
+                  title={t("composer.editUserMessage")}
                   value={draft}
                   disabled={sessionInteractionLocked}
                   placeholder={
                     activeSession.state === "working"
-                      ? "在 Timem思考时继续输入补充对话..."
-                      : "输入问题，或按发送直接继续..."
+                      ? t("composer.placeholderQueue")
+                      : t("composer.placeholderDirect")
                   }
                   onCommit={(value) =>
                     setDraftsBySession((current) =>
@@ -8935,7 +9163,7 @@ function TimemThread({
                 >
                   <BriefcaseBusiness size={14} />
                   <span>
-                    本条将使用{" "}
+                    {t("composer.usingRoles")}{" "}
                     <strong>
                       {selectedRoles.map((role) => role.name).join("、")}
                     </strong>
@@ -8964,13 +9192,16 @@ function TimemThread({
                     </span>
                   )}
                   {activeSession?.debug_dir && (
-                    <span
-                      className="composer-cwd-inline composer-debug-inline"
+                    <a
+                      className="composer-cwd-inline composer-debug-inline composer-debug-link"
                       title={activeSession.debug_dir}
+                      href={debugBrowseUrl(activeSession.session_id)}
+                      target="_blank"
+                      rel="noopener noreferrer"
                     >
                       <b>DEBUG:</b>
                       <span>{activeSession.debug_dir}</span>
-                    </span>
+                    </a>
                   )}
                 </div>
                 <span
@@ -9067,14 +9298,14 @@ function TimemThread({
             ? undefined
             : { left: `${userMessageNavigationLayout.left}px` }
         }
-        aria-label="用户消息导航"
+        aria-label={t("messageNav.userMessages")}
         onPointerEnter={lockUserMessageNavigationLayout}
         onPointerLeave={unlockUserMessageNavigationLayout}
       >
         <button
           type="button"
-          title="上一条用户消息"
-          aria-label="上一条用户消息"
+          title={t("messageNav.previousMessage")}
+          aria-label={t("messageNav.previousMessage")}
           disabled={!userMessageNavigation.previous}
           onClick={() => navigateUserMessage("previous")}
         >
@@ -9083,10 +9314,10 @@ function TimemThread({
         <button
           type="button"
           title={
-            userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"
+            userMessageNavigation.next ? t("messageNav.nextMessage") : t("messageNav.jumpToBottom")
           }
           aria-label={
-            userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"
+            userMessageNavigation.next ? t("messageNav.nextMessage") : t("messageNav.jumpToBottom")
           }
           disabled={
             !userMessageNavigation.next && !userMessageNavigation.bottom
@@ -9105,20 +9336,20 @@ function TimemThread({
             title={
               activeSession.state === "working"
                 ? threadAwayFromBottom
-                  ? "工作仍在继续，跳转到最新内容"
-                  : "工作仍在继续，当前已是最新内容"
+                  ? t("messageNav.workingJumpLatest")
+                  : t("messageNav.workingAtLatest")
                 : threadAwayFromBottom
-                  ? "跳转到聊天最下方"
-                  : "当前已是聊天最下方"
+                  ? t("messageNav.jumpToChatBottom")
+                  : t("messageNav.atChatBottom")
             }
             aria-label={
               activeSession.state === "working"
                 ? threadAwayFromBottom
-                  ? "工作仍在继续，跳转到最新内容"
-                  : "工作仍在继续，当前已是最新内容"
+                  ? t("messageNav.workingJumpLatest")
+                  : t("messageNav.workingAtLatest")
                 : threadAwayFromBottom
-                  ? "跳转到聊天最下方"
-                  : "当前已是聊天最下方"
+                  ? t("messageNav.jumpToChatBottom")
+                  : t("messageNav.atChatBottom")
             }
             onClick={navigateWorkingToThreadBottom}
           >
@@ -9252,10 +9483,13 @@ const TurnInteraction = memo(function TurnInteraction({
     () =>
       lifecycleEvents.map((event) => ({
         type: "event" as const,
-        key: event.event_id,
-        createdAt: event.created_at_ms,
+        key: event.presentation_id ?? event.event_id,
+        createdAt: event.presentation_created_at_ms ?? event.created_at_ms,
         event,
-        activity: activityFromTurnEvent(event, sessionId),
+        activity: (() => {
+          const activity = activityFromTurnEvent({ ...event, event_id: event.presentation_id ?? event.event_id }, sessionId);
+          return activity ? { ...activity, execution_order: event.execution_order, settled_order: event.settled_order } : activity;
+        })(),
       })),
     [lifecycleEvents, sessionId],
   );
@@ -9273,7 +9507,7 @@ const TurnInteraction = memo(function TurnInteraction({
             sessionId,
             tone: "thinking" as const,
             kind: "user_supplement" as const,
-            title: "[用户补充]",
+            title: t("composer.supplementTitle"),
             detail: entry.text,
             createdAt: entry.created_at_ms,
           },
@@ -9288,13 +9522,6 @@ const TurnInteraction = memo(function TurnInteraction({
     [lifecycleItems, supplementItems],
   );
   const visibleItems = timelineItems;
-  const processActivities = useMemo(
-    () =>
-      timelineItems
-        .map(({ activity }) => activity)
-        .filter((activity): activity is Activity => activity !== null),
-    [timelineItems],
-  );
   const modelRetryStatus = useMemo(() => activeModelRetryStatus(turn), [turn]);
   const persistentToolGenItems = useMemo(
     () =>
@@ -9315,20 +9542,65 @@ const TurnInteraction = memo(function TurnInteraction({
       visibleItems.filter((item) => !persistentToolGenItemKeys.has(item.key)),
     [persistentToolGenItemKeys, visibleItems],
   );
+  const isWorking = turn.state === "working" && !isCancelling;
+  const streamUiMode = useStreamUiMode();
+  // 整段归档与单项折叠是两件事：容器在 Turn 结束才归档，但 StreamToolRun
+  // 必须在新逻辑时序进入时逐项收起旧工具。不可把单项折叠也绑定到 streamArchived，
+  // 否则重新出现工具平铺积高、最终一次性大幅收起的问题。
+  // Archive only after the authoritative working state ends, never at a round boundary.
+  const [streamArchived, setStreamArchived] = useState(turn.state !== "working");
+  const archiveStream = useCallback(() => setStreamArchived(true), []);
+  useEffect(() => { if (turn.state === "working") setStreamArchived(false); }, [turn.state]);
+  const streamRetentionActive = streamUiMode && !streamArchived;
+  const latestThoughtTime = lifecycleItems.reduce((time, item) => item.activity?.kind === "free_talk" ? Math.max(time, item.createdAt) : time, -1);
+  const streamRetention = useMemo(
+    () => streamRetentionActive ? computeStreamRetention(scrollItems.map(({ activity }) => activity)) : null,
+    [streamRetentionActive, scrollItems],
+  );
+  const workItems = useMemo(
+    () => streamRetention ? scrollItems.filter(item => streamRetention.isFramed(item.activity)) : scrollItems,
+    [scrollItems, streamRetention],
+  );
   const toolActivityRuns = useMemo(
     () =>
       summarizeConsecutiveToolActivities(
-        scrollItems.map(({ activity }) => activity),
+        workItems.map(({ activity }) => activity),
       ),
-    [scrollItems],
+    [workItems],
+  );
+  // Runs contain lifecycle-coalesced calls belonging to the collapsible frame.
+  const framedToolCount = toolActivityRuns.reduce(
+    (count, run) => count + run.summary.activities.length,
+    0,
   );
   const toolActivityRunByStartIndex = useMemo(
     () => new Map(toolActivityRuns.map((run) => [run.startIndex, run.summary])),
     [toolActivityRuns],
   );
   const hasVisibleProcess =
-    scrollItems.some((item) => item.activity !== null) || decisions.length > 0;
-  const isWorking = turn.state === "working" && !isCancelling;
+    scrollItems.some((item) => item.activity !== null) || decisions.length > 0 || turn.sub_answers.length > 0;
+  const runningStreamTools = useMemo(() => streamRetention
+    ? scrollItems.filter(item => item.activity && streamRetention.isRetained(item.activity) && (item.activity as Activity).tool_name !== "sub_answer").map(item => ({ ...item.activity!, createdAt: item.createdAt }))
+    : [], [streamRetention, scrollItems]);
+  const streamThoughtId = streamRetention?.thought?.id ?? null;
+  const [thoughtPulseKey, setThoughtPulseKey] = useState<string | null>(null);
+  const lastStreamThoughtIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const previousId = lastStreamThoughtIdRef.current;
+    lastStreamThoughtIdRef.current = streamThoughtId;
+    // A thought run migrates into the frame when the next thought run
+    // replaces it or when the turn ends; pulse the row it settled into.
+    if (!previousId || previousId === streamThoughtId) return;
+    const migrated = workItems.find(
+      (item) => item.activity?.id === previousId,
+    );
+    if (migrated) setThoughtPulseKey(migrated.key);
+  }, [streamThoughtId, workItems]);
+  useEffect(() => {
+    if (!thoughtPulseKey) return;
+    const timer = window.setTimeout(() => setThoughtPulseKey(null), 800);
+    return () => window.clearTimeout(timer);
+  }, [thoughtPulseKey]);
   const hasLiveUsage = isWorking && turnLiveUsage(turn) !== undefined;
   const showWorkFrame = shouldRenderTurnWorkFrame(
     turn.state,
@@ -9339,7 +9611,7 @@ const TurnInteraction = memo(function TurnInteraction({
     isCancelling ||
     turn.completion?.stop_reason?.toLowerCase() === "cancelledbyuser";
   const interrupted = cancelled || turn.state === "interrupted";
-  const [showWorkStream, setShowWorkStream] = useState(() => isWorking);
+  const [showWorkStream, setShowWorkStream] = useState(() => !streamUiMode && isWorking);
   const isToolGenTurn =
     turn.turn_id.startsWith("web_toolgen_turn_") ||
     turn.user_entries.some((entry) => entry.kind === "toolgen_instruction") ||
@@ -9360,10 +9632,10 @@ const TurnInteraction = memo(function TurnInteraction({
     const finalArrived = !previousFinalAnswer.current && !!turn.final_answer;
     previousTurnState.current = isWorking ? "working" : turn.state;
     previousFinalAnswer.current = !!turn.final_answer;
-    if (!wasWorking && isWorking) setShowWorkStream(true);
-    if (finalArrived || (wasWorking && turn.state === "interrupted"))
+    if (!wasWorking && isWorking) setShowWorkStream(!streamUiMode);
+    if (finalArrived || (wasWorking && turn.state !== "working"))
       setShowWorkStream(false);
-  }, [isWorking, turn.final_answer, turn.state]);
+  }, [isWorking, turn.final_answer, turn.state, streamUiMode]);
 
   useLayoutEffect(() => {
     const scroll = workScrollRef.current;
@@ -9450,27 +9722,6 @@ const TurnInteraction = memo(function TurnInteraction({
                 <div
                   className={`turn-user-entry ${entry.kind}`}
                   key={`${entry.created_at_ms}-${roleIndex}`}
-                  onCopy={(event) => {
-                    const selection = window.getSelection();
-                    if (
-                      !selection ||
-                      selection.rangeCount === 0 ||
-                      selection.isCollapsed ||
-                      !selection.anchorNode ||
-                      !selection.focusNode
-                    )
-                      return;
-                    if (
-                      !event.currentTarget.contains(selection.anchorNode) ||
-                      !event.currentTarget.contains(selection.focusNode)
-                    )
-                      return;
-                    const copiedText = normalizeCopiedUserMessageText(
-                      selection.toString(),
-                    );
-                    event.clipboardData.setData("text/plain", copiedText);
-                    event.preventDefault();
-                  }}
                 >
                   <button
                     type="button"
@@ -9490,7 +9741,7 @@ const TurnInteraction = memo(function TurnInteraction({
                   >
                     <Trash2 size={13} />
                   </button>
-                  {entry.kind === "supplement" && <span>[补充]</span>}
+                  {entry.kind === "supplement" && <span>{t("composer.supplementTag")}</span>}
                   <MarkdownContent text={entry.text} />
                   {(
                     entry.worker_roles ??
@@ -9498,7 +9749,7 @@ const TurnInteraction = memo(function TurnInteraction({
                   ).length > 0 && (
                     <div
                       className="turn-entry-roles"
-                      aria-label={`使用 Role：${(entry.worker_roles ?? (entry.worker_role ? [entry.worker_role] : [])).map((role) => role.name).join("、")}`}
+                      aria-label={t("roles.appliedAria", { names: (entry.worker_roles ?? (entry.worker_role ? [entry.worker_role] : [])).map((role) => role.name).join("、") })}
                     >
                       <BriefcaseBusiness size={12} />
                       <span>Role</span>
@@ -9529,7 +9780,7 @@ const TurnInteraction = memo(function TurnInteraction({
           </div>
         </section>
       )}
-      {showWorkFrame && (
+      {showWorkFrame && (!streamRetentionActive || turn.state !== "working" || decisions.length > 0) && (
         <section
           className={`turn-assistant-frame ${isWorking ? "working" : interrupted ? "interrupted" : turn.state} ${workStreamVisible ? "" : "collapsed-work"}`}
         >
@@ -9564,6 +9815,11 @@ const TurnInteraction = memo(function TurnInteraction({
                 ) : (
                   "Thought/Action"
                 )}
+                {!workStreamVisible && !isToolGenTurn && framedToolCount > 0 && (
+                  <span className="work-tool-count">
+                    (+{framedToolCount} {framedToolCount === 1 ? "tool" : "tools"})
+                  </span>
+                )}
                 {isWorking && (
                   <WorkingElapsed createdAtMs={turn.created_at_ms} />
                 )}
@@ -9577,7 +9833,7 @@ const TurnInteraction = memo(function TurnInteraction({
                   )}
                 {interrupted && (
                   <span className="work-title-status">
-                    ({cancelled ? "Cancelled" : "Interrupted"})
+                    ({cancelled ? t("turn.cancelled") : t("turn.interrupted")})
                   </span>
                 )}
               </button>
@@ -9586,8 +9842,8 @@ const TurnInteraction = memo(function TurnInteraction({
                   className={`model-retry-status ${modelRetryStatus.kind}`}
                 >
                   <summary
-                    title={`展开 ${modelRetryStatus.label} 详情`}
-                    aria-label={`展开 ${modelRetryStatus.label} 详情`}
+                    title={t("retry.detailExpand", { name: modelRetryStatus.label })}
+                    aria-label={t("retry.detailExpand", { name: modelRetryStatus.label })}
                   >
                     <ChevronRight size={12} aria-hidden="true" />
                     <span>{modelRetryStatus.label}</span>
@@ -9628,7 +9884,7 @@ const TurnInteraction = memo(function TurnInteraction({
               >
                 <div className="turn-work-content" ref={workContentRef}>
                   {" "}
-                  {scrollItems.map((item, index) => {
+                  {workItems.map((item, index) => {
                     const { activity } = item;
                     if (activity?.tone === "action") {
                       const summary = toolActivityRunByStartIndex.get(index);
@@ -9636,11 +9892,16 @@ const TurnInteraction = memo(function TurnInteraction({
                         <ToolActivityGroup
                           key={`tool-activity-group-${item.key}`}
                           summary={summary}
+                          enterPulse={item.key === thoughtPulseKey}
                         />
                       ) : null;
                     }
                     return activity ? (
-                      <ActivityView key={item.key} activity={activity} />
+                      <ActivityView
+                        key={item.key}
+                        activity={activity}
+                        enterPulse={item.key === thoughtPulseKey}
+                      />
                     ) : null;
                   })}{" "}
                   {decisions.map((decision, index) => (
@@ -9681,9 +9942,17 @@ const TurnInteraction = memo(function TurnInteraction({
           )}
         </div>
       )}
-      {(turn.sub_answers.length > 0 || turn.final_answer) && (
+      {(streamUiMode || turn.sub_answers.length > 0 ||
+        turn.final_answer ||
+        turn.preview ||
+        runningStreamTools.length > 0) && (
         <TurnAnswerDelivery
           turn={turn}
+          streamTools={runningStreamTools}
+          streamWorking={isWorking}
+          latestThoughtTime={latestThoughtTime}
+          streamRetained={streamRetentionActive}
+          onStreamArchived={archiveStream}
           toolGenPending={toolGenPending}
           toolGenBlocked={toolGenBlocked}
           onToolGen={
@@ -9753,8 +10022,276 @@ function areTurnInteractionPropsEqual(
   });
 }
 
+// Shared interaction subscriptions avoid two document listeners per tool row/run.
+const streamInteractionSubscribers = new Set<() => void>();
+const notifyStreamInteraction = () => { for (const update of streamInteractionSubscribers) update(); };
+function subscribeStreamInteraction(update: () => void) {
+  if (streamInteractionSubscribers.size === 0) {
+    document.addEventListener("selectionchange", notifyStreamInteraction);
+    document.addEventListener("focusin", notifyStreamInteraction);
+  }
+  streamInteractionSubscribers.add(update);
+  return () => {
+    streamInteractionSubscribers.delete(update);
+    if (streamInteractionSubscribers.size === 0) {
+      document.removeEventListener("selectionchange", notifyStreamInteraction);
+      document.removeEventListener("focusin", notifyStreamInteraction);
+    }
+  };
+}
+
+/** Height collapse keeps the live nodes mounted until the final handoff finishes. */
+function StreamProcess({ closing, onArchived, children }: {
+  closing: boolean; onArchived: () => void; children: ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (!closing || !node) return;
+    const destination = node.closest("article")?.querySelector<HTMLButtonElement>("button.work-title-chip");
+    if (node.contains(document.activeElement)) destination?.focus({ preventScroll: true });
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      onArchived();
+      return;
+    }
+    const viewport = node.closest<HTMLElement>(".chat-scroll");
+    let followBottom = !!viewport && viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 100;
+    let frame = 0;
+    const stopFollowing = () => { followBottom = false; cancelAnimationFrame(frame); };
+    viewport?.addEventListener("wheel", stopFollowing, { passive: true });
+    viewport?.addEventListener("touchstart", stopFollowing, { passive: true });
+    const stopOnKey = (event: KeyboardEvent) => {
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) stopFollowing();
+    };
+    viewport?.addEventListener("keydown", stopOnKey);
+    const height = node.getBoundingClientRect().height;
+    const duration = Math.min(700, Math.max(320, 320 + Math.sqrt(height) * 5));
+    const animation = node.animate([
+      { height: `${height}px`, opacity: 1 },
+      { height: "0px", opacity: 0 },
+    ], { duration, easing: "cubic-bezier(.22, 1, .36, 1)", fill: "forwards" });
+    const follow = () => {
+      if (!followBottom || !viewport) return;
+      viewport.scrollTop = viewport.scrollHeight;
+      frame = requestAnimationFrame(follow);
+    };
+    if (followBottom) frame = requestAnimationFrame(follow);
+    animation.onfinish = () => { cancelAnimationFrame(frame); onArchived(); };
+    return () => { cancelAnimationFrame(frame); animation.cancel(); viewport?.removeEventListener("wheel", stopFollowing); viewport?.removeEventListener("touchstart", stopFollowing); viewport?.removeEventListener("keydown", stopOnKey); };
+  }, [closing, onArchived]);
+  return <div ref={ref} className={`stream-continuous-process${closing ? " archiving" : ""}`}>{children}</div>;
+}
+
+function StreamActivityPresentation({ thoughtText, activities, answers, responseArriving }: {
+  responseArriving: boolean;
+  thoughtText: string;
+  activities: Activity[];
+  answers: ReturnType<typeof interimAnswerPresentation>;
+}) {
+  const entries = [
+    ...activities.map(activity => ({ key: activity.id, time: activity.createdAt, activity, answer: undefined as typeof answers[number] | undefined })),
+    ...answers.map(answer => ({ key: answer.key, time: answer.createdAt, activity: undefined as Activity | undefined, answer })),
+  ].sort((a, b) => a.time - b.time);
+  const groups: (typeof entries)[] = [];
+  for (const entry of entries) {
+    const previous = groups.at(-1);
+    if (entry.activity?.tone === "action" && previous?.[0].activity?.tone === "action") previous.push(entry);
+    else groups.push([entry]);
+  }
+  // One reverse scan, rather than rescanning the suffix for every tool group.
+  let lastReplyIndex = -1;
+  for (let index = groups.length - 1; index >= 0; index--) {
+    if (groups[index].some(entry => !!entry.answer || (entry.activity?.kind === "free_talk" && !!entry.activity.detail))) {
+      lastReplyIndex = index;
+      break;
+    }
+  }
+  const handoffIds = streamToolHandoffIds(activities);
+  return <section className="turn-stream-tools" aria-label="Live model activity">
+    {groups.map((group, index) => {
+      const { key, activity, answer } = group[0];
+      if (activity?.tone === "action") {
+        // 逻辑时序 +1 有两种入口：后续 AI 回复内容，或新 call 实际开始执行。
+        // 此处处理 AI 内容入口；串行 call 入口由 handoffIds 按执行事件顺序判定。
+        // 工具完成、用户补充本身不推进时序，不得仅据此折叠旧结果。
+        const superseded = responseArriving || !!thoughtText || index < lastReplyIndex;
+        return <StreamToolRun key={key} activities={group.map(entry => entry.activity!)} superseded={superseded} handoffIds={handoffIds} />;
+      }
+      return answer
+        ? <StreamChatAnswer key={key} answer={answer} superseded={!answer.provisional && (responseArriving || !!thoughtText || index < lastReplyIndex)} />
+        : activity?.kind === "free_talk"
+          ? <div key={key} className="stream-thought-text"><MarkdownContent text={activity.detail ?? ""} /></div>
+          : activity?.kind === "user_supplement" ? <ActivityView key={key} activity={activity} /> : null;
+    })}
+    {thoughtText && <div className="stream-thought-text" aria-label="Model thought preview"><StreamText text={thoughtText} /></div>}
+  </section>;
+}
+
+/** Chat disclosure is presentation-only; delivery stays owned by core.sub_answer. */
+function StreamChatAnswer({ answer, superseded }: {
+  answer: ReturnType<typeof interimAnswerPresentation>[number];
+  superseded: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+  useT();
+  // Keep provisional Chat readable; later AI content may fold confirmed Chat.
+  // Manual disclosure remains available; archival must preserve a Chat entry.
+  const open = expanded || (!superseded && !collapsed);
+  return <section className={`turn-chat-delivery${open ? " expanded" : " collapsed"}`}>
+    <button type="button" className="working-chip work-title-chip work-collapse-toggle chat-title-chip"
+      aria-label={open ? t("tools.hideChatAria") : t("tools.showChatAria")}
+      aria-expanded={open} onClick={() => { setExpanded(!open); setCollapsed(open); }}>
+      <ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true" />Chat{!open && " (+1)"}
+    </button>
+    {open && <div className={`live-interim-answer${answer.provisional ? " provisional-chat" : ""}`}>
+      {answer.provisional ? <StreamText text={answer.answer} /> : <MarkdownContent text={answer.answer} />}
+    </div>}
+  </section>;
+}
+
+function StreamToolRun({ activities, superseded, handoffIds }: { activities: Activity[]; superseded: boolean; handoffIds: Set<string> }) {
+  const showResults = useToolResultStatus();
+  const [expanded, setExpanded] = useState(false);
+  // 视觉契约：工具完成不立即折叠；逻辑时序 +1 才将旧的非 running 工具收起。
+  // +1 包括同轮串行新 call 实际开始执行，以及后续 AI 回复内容到来。
+  // 前台/后台 running 始终保留；折叠与新内容进入在同一次 render 中完成。
+  // 保持既有 DOM 与阅读/选择保护，避免先增高再收起造成二次页面跳动。
+  // 与新内容同次 render 判定，不能用延迟定时器或后续 effect 先增高再收起。
+  // background_running 仍在执行；手动展开、选择/焦点保护优先，不能为压低高度
+  // 强制中断用户阅读。保持行节点身份，避免状态变化导致整行重新入场。
+  const completed = activities.filter(activity =>
+    !isToolActivityRunning(activity.tool_status || TOOL_STATUS_RUNNING) &&
+    (superseded || handoffIds.has(activity.id)));
+  const completedIds = new Set(completed.map(activity => activity.id));
+  const succeededCount = completed.filter(activity => activity.tool_status === "completed").length;
+  const failedCount = completed.length - succeededCount;
+  const runRef = useRef<HTMLDivElement>(null);
+  const [interactionHeld, setInteractionHeld] = useState(false);
+  useEffect(() => {
+    const update = () => {
+      const run = runRef.current;
+      const selection = window.getSelection();
+      setInteractionHeld(!!run && (
+        (!!selection && !selection.isCollapsed && !!selection.anchorNode && run.contains(selection.anchorNode)) ||
+        (!!document.activeElement?.closest(".stream-tool-merged-item") && run.contains(document.activeElement))
+      ));
+    };
+    return subscribeStreamInteraction(update);
+  }, []);
+  const merged = completed.length > 0 && !expanded && !interactionHeld;
+  // Visual contract: pulse when NEW results actually enter collapsed Tools,
+  // including deferred handoff after completion. Completion alone must not pulse.
+  // Initial history, duplicate snapshots and manual reopen/reclose must not replay.
+  // Keep the disclosure/rows mounted; animate only the count to avoid scroll jumps.
+  const previousMergedCount = useRef(merged ? completed.length : 0);
+  const [countRevision, setCountRevision] = useState(0);
+  useEffect(() => {
+    if (merged && completed.length > previousMergedCount.current) {
+      setCountRevision(value => value + 1);
+    }
+    if (merged) previousMergedCount.current = Math.max(previousMergedCount.current, completed.length);
+  }, [merged, completed.length]);
+  useLayoutEffect(() => {
+    if (!merged) return;
+    const focused = document.activeElement;
+    const run = runRef.current;
+    if (focused instanceof HTMLElement && run?.contains(focused) && focused.closest(".stream-tool-merged-item.merged")) {
+      run.querySelector<HTMLButtonElement>(".stream-tool-run-toggle")?.focus({ preventScroll: true });
+    }
+  }, [merged, completed.length]);
+  // 控件契约：收起显示 + tools，展开显示 − tools，与 aria-expanded 一致。
+  // +/- 不表达成功失败；计数另用 ✓ / ✗。保留按钮与行节点，仅新计数可重放反馈。
+  return <div ref={runRef} className="stream-tool-run">
+    {completed.length > 0 && <button className="stream-tool-run-toggle" type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
+      {expanded ? <Minus size={13} aria-hidden="true" /> : <Plus size={13} aria-hidden="true" />}<span>{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
+    </button>}
+    {activities.map(activity => <div key={activity.id} className={`stream-tool-merged-item${merged && completedIds.has(activity.id) ? " merged" : ""}`} inert={merged && completedIds.has(activity.id)}>
+      <div><StreamToolRow activity={activity} /></div>
+    </div>)}
+  </div>;
+
+}
+
+/** Only the status field announces and highlights lifecycle updates. */
+function ActionStatus({ status, label, className }: { status: string; label: string; className: string }) {
+  const showResults = useToolResultStatus();
+  const previous = useRef(status);
+  const [revision, setRevision] = useState(0);
+  useEffect(() => {
+    if (previous.current !== status) {
+      previous.current = status;
+      setRevision(value => value + 1);
+    }
+  }, [status]);
+  return <span className={className} role="status" aria-live="polite" aria-atomic="true" aria-label={!showResults && !isToolActivityRunning(status) ? t("tools.done") : status === "completed" ? t("tools.succeeded") : status === "failed" ? t("tools.failed") : undefined}>
+    <span key={revision} className={revision ? "action-status-changed" : undefined}>{!showResults && !isToolActivityRunning(status) ? t("tools.done") : label}</span>
+  </span>;
+}
+
+const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Activity }) {
+  useT();
+  const status = activity.tool_status || TOOL_STATUS_RUNNING;
+  const running = isToolActivityRunning(status);
+  const toolName = toolActivityDisplayName(
+    activity.tool_name || activity.title,
+    activity.tool_mode,
+  );
+  const command =
+    activity.code?.trim() || toolInvocationPreview(activity) || "";
+  const detail = activity.detail?.trim();
+  const [expanded, setExpanded] = useState(false);
+  const rowRef = useRef<HTMLDivElement>(null);
+  const [interactionHeld, setInteractionHeld] = useState(false);
+  useEffect(() => {
+    const update = () => {
+      const row = rowRef.current;
+      const selection = window.getSelection();
+      setInteractionHeld(!!row && (
+        (!!selection && !selection.isCollapsed && !!selection.anchorNode && row.contains(selection.anchorNode)) ||
+        (!!document.activeElement?.closest(".stream-tool-fold") && row.contains(document.activeElement))
+      ));
+    };
+    return subscribeStreamInteraction(update);
+  }, []);
+  const open = expanded || interactionHeld;
+  return (
+    <div ref={rowRef} className={`stream-tool-row${running ? " running" : ""}`}>
+      <div className="stream-tool-head">
+        <button type="button" className="stream-tool-toggle" aria-expanded={open} aria-label={open ? t("tools.collapseOutput") : t("tools.expandOutput")} onClick={() => setExpanded(!open)}><ChevronRight size={13} /></button>
+        {/* One fixed leading slot keeps execution and result markers in place. */}
+        <span className="stream-tool-status-slot" aria-label={running ? (status === "background_running" ? t("tools.runningBg") : t("tools.running")) : undefined}>
+          {running && <span className="stream-tool-dot" aria-hidden="true" />}
+          <ActionStatus status={status} label={running ? "" : humanizeToolStatus(status)} className="stream-tool-status" />
+        </span>
+        <b>{toolName}</b>
+        {status === "background_running" && <span className="stream-tool-background">(bg)</span>}
+        {command && <span className="stream-tool-command-preview" title={command}>{command.replace(/\s+/g, " ")}</span>}
+        {activity.elapsed_ms !== undefined && <span className="stream-tool-elapsed">{formatToolElapsed(activity.elapsed_ms)}</span>}
+      </div>
+      <div className={`stream-tool-fold${open ? " expanded" : ""}`} inert={!open}>
+        <div>
+          {command && <pre className="stream-tool-command">{command}</pre>}
+          {detail && <div className="stream-tool-detail">{detail}</div>}
+        </div>
+      </div>
+    </div>
+  );
+}, (previous, next) => {
+  const a = previous.activity;
+  const b = next.activity;
+  return a.id === b.id && a.tool_status === b.tool_status && a.tool_name === b.tool_name &&
+    a.tool_mode === b.tool_mode && a.title === b.title && a.code === b.code && a.detail === b.detail &&
+    a.elapsed_ms === b.elapsed_ms;
+});
+
 function TurnAnswerDelivery({
+  streamRetained,
+  onStreamArchived,
+  latestThoughtTime,
   turn,
+  streamTools,
+  streamWorking,
   toolGenPending,
   toolGenBlocked,
   favorite,
@@ -9764,6 +10301,11 @@ function TurnAnswerDelivery({
   onDelete,
 }: {
   turn: WebTurn;
+  streamTools: Activity[];
+  streamWorking: boolean;
+  latestThoughtTime: number;
+  streamRetained: boolean;
+  onStreamArchived: () => void;
   toolGenPending: boolean;
   toolGenBlocked: boolean;
   favorite?: ChatFavorite;
@@ -9772,20 +10314,44 @@ function TurnAnswerDelivery({
   onToolGen?: () => void;
   onDelete?: () => void;
 }) {
+  useT();
+  const streamUiMode = useStreamUiMode();
+  const preview = streamUiMode ? turn.preview : undefined;
+  const previewChat = preview?.chat ?? [];
+  const retainedThought = [...streamTools].reverse().find((activity) => activity.kind === "free_talk");
+  const intermediate = preview?.response?.status === "intermediate";
+  const previewText = intermediate ? "" : preview?.response?.text ?? "";
+  // A response has one text home: live preview supersedes the retained thought.
+  const thoughtText = previewText ? "" : retainedThought?.detail ??
+    (streamWorking && intermediate ? preview?.response?.text ?? "" : "");
+  const hasPreview = !!previewText || previewChat.length > 0;
   const hasFinal = !!turn.final_answer;
-  const hasChat = turn.sub_answers.length > 0;
-  const [chatExpanded, setChatExpanded] = useState(() => !hasFinal);
+  const items = interimAnswerPresentation(turn.sub_answers, preview);
+  const newest = items[0];
+  const [collapsedAnswer, setCollapsedAnswer] = useState<string | null>(null);
+  const liveAnswer = !streamUiMode && streamWorking && !hasFinal && newest &&
+    newest.key !== collapsedAnswer && newest.createdAt >= latestThoughtTime &&
+    (!previewText || newest.provisional)
+    ? newest : undefined;
+  const chatItems = streamUiMode && streamRetained ? [] : items.filter(item => item !== liveAnswer);
+  const hasChat = chatItems.length > 0;
+  const [chatExpanded, setChatExpanded] = useState(false);
   const previousFinal = useRef(hasFinal);
   const chatPanelId = `turn-chat-${turn.turn_id}`;
-  const chatItems = newestInterimAnswersFirst(turn.sub_answers);
   useEffect(() => {
     const finalArrived = !previousFinal.current && !!turn.final_answer;
     previousFinal.current = !!turn.final_answer;
     if (finalArrived) setChatExpanded(false);
   }, [turn.final_answer]);
-  if (!hasChat && !hasFinal) return null;
   return (
     <section className="turn-answer-delivery">
+      {streamRetained && <StreamProcess closing={turn.state !== "working"} onArchived={onStreamArchived}>
+        <StreamActivityPresentation thoughtText={intermediate && !retainedThought ? thoughtText : ""} activities={streamTools} answers={items} responseArriving={!!previewText} />
+      </StreamProcess>}
+      {liveAnswer && <div className={`stream-thought-text live-interim-answer${liveAnswer.provisional ? " provisional-chat" : ""}`} aria-label={t("interim.currentAnswer")}>
+        {liveAnswer.provisional ? <StreamText text={liveAnswer.answer} /> : <MarkdownContent text={liveAnswer.answer} />}
+        <button type="button" className="working-chip" aria-label={t("tools.collapseToChatAria")} onClick={() => setCollapsedAnswer(liveAnswer.key)}>{t("tools.collapseToChat")}</button>
+      </div>}
       {hasChat && (
         <section
           className={`turn-chat-delivery${chatExpanded ? " expanded" : " collapsed"}`}
@@ -9794,10 +10360,8 @@ function TurnAnswerDelivery({
             <button
               type="button"
               className="working-chip work-title-chip work-collapse-toggle chat-title-chip"
-              title={chatExpanded ? "Hide chat answers" : "Show chat answers"}
-              aria-label={
-                chatExpanded ? "Hide chat answers" : "Show chat answers"
-              }
+              title={chatExpanded ? t("tools.hideChatAria") : t("tools.showChatAria")}
+              aria-label={chatExpanded ? t("tools.hideChatAria") : t("tools.showChatAria")}
               aria-expanded={chatExpanded}
               aria-controls={chatPanelId}
               onClick={() => setChatExpanded((expanded) => !expanded)}
@@ -9807,7 +10371,7 @@ function TurnAnswerDelivery({
                 size={13}
                 aria-hidden="true"
               />
-              Chat
+              Chat{!chatExpanded && ` (+${chatItems.length})`}
             </button>
           </div>
           {chatExpanded && (
@@ -9818,17 +10382,10 @@ function TurnAnswerDelivery({
               aria-label="Chat answers"
             >
               <div className="turn-interim-list">
-                {chatItems.map(({ item, ordinal }) => (
-                  <section
-                    className="turn-interim-item"
-                    key={item.sub_answer_id}
-                  >
-                    <h3>
-                      <span>{ordinal}.</span> {item.task}
-                    </h3>
-                    <div className="message-content">
-                      <MarkdownContent text={item.answer} />
-                    </div>
+                {chatItems.map((item) => (
+                  <section className={`turn-interim-item${item.provisional ? " provisional-chat" : ""}${item.provisional && !preview?.interruption ? " streaming" : ""}`} key={item.key} data-preview-index={item.index}>
+                    {item.task && <h3>{item.ordinal !== undefined && <span>{item.ordinal}.</span>} {item.task}</h3>}
+                    <div className="message-content">{item.provisional ? <StreamText text={item.answer} /> : <MarkdownContent text={item.answer} />}</div>
                   </section>
                 ))}
               </div>
@@ -9836,9 +10393,12 @@ function TurnAnswerDelivery({
           )}
         </section>
       )}
-      {hasFinal && turn.final_answer && (
+      {hasPreview && preview?.interruption && <div className="response-preview-interruption" role="status">{preview.interruption === "cancelled" ? "Stopped — partial response" : preview.interruption === "network_error" ? "Network error — partial response" : "Model error — partial response"}</div>}
+      {(hasFinal || !!previewText) && (
         <FinalAnswerDelivery
-          text={turn.final_answer}
+          text={turn.final_answer || previewText}
+          provisional={!hasFinal}
+          streaming={!hasFinal && preview?.response?.status === "streaming"}
           completion={turn.completion}
           toolGenPending={toolGenPending}
           toolGenBlocked={toolGenBlocked}
@@ -9849,12 +10409,19 @@ function TurnAnswerDelivery({
           onDelete={onDelete}
         />
       )}
+      {streamUiMode && streamWorking && (
+        <div className="stream-working-trailer" role="status" aria-label="Working">
+          <span className="stream-working-dot" aria-hidden="true" />
+        </div>
+      )}
     </section>
   );
 }
 
 function FinalAnswerDelivery({
   text,
+  provisional = false,
+  streaming = false,
   completion,
   toolGenPending,
   toolGenBlocked,
@@ -9865,6 +10432,8 @@ function FinalAnswerDelivery({
   onDelete,
 }: {
   text: string;
+  provisional?: boolean;
+  streaming?: boolean;
   completion: WebTurn["completion"];
   toolGenPending: boolean;
   toolGenBlocked: boolean;
@@ -9933,9 +10502,9 @@ function FinalAnswerDelivery({
     </div>
   );
   return (
-    <section className="turn-final-delivery">
-      <FinalAnswerContent text={text} />
-      {completion ? (
+    <section className={provisional ? `response-preview${streaming ? " streaming" : ""}` : "turn-final-delivery"}>
+      <FinalAnswerContent text={text} provisional={provisional} />
+      {provisional ? null : completion ? (
         <CompletionCard
           completion={completion}
           toolGenPending={toolGenPending}
@@ -9959,7 +10528,7 @@ const FINAL_ANSWER_OUTLINE_EDGE_GUARD = 12;
 const FINAL_ANSWER_OUTLINE_VIEWPORT_RATIO = 0.15;
 const FINAL_ANSWER_OUTLINE_TOGGLE_HEIGHT = 52;
 
-function FinalAnswerContent({ text }: { text: string }) {
+function FinalAnswerContent({ text, provisional = false }: { text: string; provisional?: boolean }) {
   const timelineActive = useContext(SessionTimelineActiveContext);
   const outline = useMemo(() => {
     try {
@@ -10033,6 +10602,7 @@ function FinalAnswerContent({ text }: { text: string }) {
     const viewport = root?.closest<HTMLElement>(".chat-scroll");
     const chatShell = viewport?.closest<HTMLElement>(".chat-shell");
     if (
+      provisional ||
       !timelineActive ||
       !root ||
       !content ||
@@ -10101,12 +10671,17 @@ function FinalAnswerContent({ text }: { text: string }) {
     observer?.observe(content);
     observer?.observe(viewport);
     observer?.observe(chatShell);
+    // Sibling work panels can collapse without resizing the answer itself.
+    // Keep the portaled outline aligned so its old absolute top cannot retain
+    // phantom scroll space below the now-shorter turn.
+    const turnContainer = root.closest(".turn-interaction");
+    if (turnContainer) observer?.observe(turnContainer);
     return () => {
       window.removeEventListener("resize", scheduleUpdate);
       observer?.disconnect();
       if (updateFrame !== null) cancelAnimationFrame(updateFrame);
     };
-  }, [outline, outlineCollapsed, text, timelineActive]);
+  }, [outline, outlineCollapsed, text, timelineActive, provisional]);
 
   useEffect(() => {
     setOutlineCollapsed(outlinePlacement === "overlay");
@@ -10360,7 +10935,7 @@ function FinalAnswerContent({ text }: { text: string }) {
                         strokeWidth={1.8}
                         aria-hidden="true"
                       />
-                      Contents
+                      {t("outline.contents")}
                     </span>
                   </header>
                   <nav ref={outlineNavRef}>
@@ -10372,11 +10947,11 @@ function FinalAnswerContent({ text }: { text: string }) {
                           ? "location"
                           : undefined
                       }
-                      title="Go to the start of this answer"
+                      title={t("outline.goToStart")}
                       onClick={navigateToStart}
                     >
                       <CornerUpLeft size={11} aria-hidden="true" />
-                      <span>Start</span>
+                      <span>{t("outline.start")}</span>
                     </button>
                     {outline.map((item) => (
                       <button
@@ -10411,14 +10986,18 @@ function FinalAnswerContent({ text }: { text: string }) {
       className={`message-content final-answer-reading${showOutline ? " has-outline" : ""}`}
     >
       {outlineElement}
-      <MarkdownContent
-        text={text}
-        headingIdPrefix={
-          outline.length >= FINAL_ANSWER_OUTLINE_MIN_SECTIONS
-            ? headingPrefix
-            : undefined
-        }
-      />
+      {provisional ? (
+        <StreamText text={text} />
+      ) : (
+        <MarkdownContent
+          text={text}
+          headingIdPrefix={
+            outline.length >= FINAL_ANSWER_OUTLINE_MIN_SECTIONS
+              ? headingPrefix
+              : undefined
+          }
+        />
+      )}
     </div>
   );
 }
@@ -10463,25 +11042,25 @@ function LiveTurnUsage({ turn }: { turn: WebTurn }) {
   const usage = turnLiveUsage(turn);
   if (!usage) return null;
   return (
-    <div className="live-turn-usage" aria-label="Current task token usage">
+    <div className="live-turn-usage" aria-label={t("usage.aria")}>
       <span>
-        <b>Task</b> ▲{formatTokens(usage.total.prompt_tokens) ?? "0"} ▼
+        <b>{t("usage.task")}</b> ▲{formatTokens(usage.total.prompt_tokens) ?? "0"} ▼
         {formatTokens(usage.total.completion_tokens) ?? "0"}
       </span>
       <span>
-        <b>Latest</b> △{formatTokens(usage.latest.prompt_tokens) ?? "0"} ▽
+        <b>{t("usage.latest")}</b> △{formatTokens(usage.latest.prompt_tokens) ?? "0"} ▽
         {formatTokens(usage.latest.completion_tokens) ?? "0"}
       </span>
       {!!usage.total.cached_tokens && (
         <span>
-          <b>KVC</b> {formatTokens(usage.total.cached_tokens)}
+          <b>{t("usage.kvc")}</b> {formatTokens(usage.total.cached_tokens)}
         </span>
       )}
     </div>
   );
 }
 
-function ActivityView({ activity }: { activity: Activity }) {
+function ActivityView({ activity, enterPulse = false }: { activity: Activity; enterPulse?: boolean }) {
   if (activity.kind === "context_compact")
     return <ContextCompactNotice activity={activity} />;
   if (activity.kind === "toolgen") return <ToolGenNotice activity={activity} />;
@@ -10493,14 +11072,14 @@ function ActivityView({ activity }: { activity: Activity }) {
         </span>
         <div className="user-supplement-line">
           <strong>{activity.title}</strong>
-          {activity.detail && <span>{activity.detail}</span>}
+          {activity.detail && <MarkdownContent text={activity.detail} />}
         </div>
       </div>
     );
   if (activity.tone === "action") return <ToolActivity activity={activity} />;
   return (
     <div
-      className={`turn-work-item ${activity.tone}${activity.kind === "free_talk" ? " free-talk" : ""}`}
+      className={`turn-work-item ${activity.tone}${activity.kind === "free_talk" ? " free-talk" : ""}${enterPulse ? " thought-run-enter" : ""}`}
     >
       <span className="activity-mark">
         {activity.tone === "thinking" ? (
@@ -10540,7 +11119,12 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
       </blockquote>
     );
   const collapse = () => setOpen(false);
-  const summaryLabel = `${open ? "收起" : "展开"} ToolGen 详情${activity.title ? `：${activity.title}` : ""}`;
+  const toolgenBaseLabel = open
+    ? t("tools.toolgenCollapse")
+    : t("tools.toolgenExpand");
+  const summaryLabel = activity.title
+    ? `${toolgenBaseLabel}：${activity.title}`
+    : toolgenBaseLabel;
   return (
     <details
       className={`toolgen-notice ${activity.toolgen_phase ?? ""}`}
@@ -10548,8 +11132,10 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
       <summary
-        title={open ? "收起 ToolGen 详情" : "展开 ToolGen 详情"}
+        title={open ? t("tools.toolgenCollapse") : t("tools.toolgenExpand")}
         aria-label={summaryLabel}
+        data-expanded-label={t("common.collapse")}
+        data-collapsed-label={t("common.expand")}
       >
         <ChevronRight size={13} />
         <span>{activity.title}</span>
@@ -10562,7 +11148,7 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
           aria-label="Collapse ToolGen details"
           onClick={collapse}
         >
-          收起详情
+          {t("tools.collapseDetails")}
         </button>
         <MarkdownContent text={activity.detail ?? ""} />
         <button
@@ -10572,30 +11158,32 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
           aria-label="Collapse ToolGen details"
           onClick={collapse}
         >
-          收起详情
+          {t("tools.collapseDetails")}
         </button>
       </div>
     </details>
   );
 }
 
-function toolActivityGroupStatusLabel(summary: ToolActivitySummary) {
-  if (summary.status === "completed") return "Succ";
-  if (summary.status === "failed") return `Fail(${summary.failedCount})`;
+function toolActivityGroupStatusLabel(summary: ToolActivitySummary, showResults: boolean) {
+  if (!showResults && summary.status !== "running") return t("tools.done");
+  if (summary.status === "completed") return "✓";
+  if (summary.status === "failed") return `✗(${summary.failedCount})`;
 
   const activeParts: string[] = [];
   if (summary.foregroundRunningCount > 0)
-    activeParts.push(`fg ${summary.foregroundRunningCount}`);
+    activeParts.push(t("tools.fgCount", { count: summary.foregroundRunningCount }));
   if (summary.backgroundRunningCount > 0)
-    activeParts.push(`bg ${summary.backgroundRunningCount}`);
-  if (summary.failedCount > 0)
-    activeParts.push(`failed ${summary.failedCount}`);
+    activeParts.push(t("tools.bgCount", { count: summary.backgroundRunningCount }));
+  if (showResults && summary.failedCount > 0)
+    activeParts.push(t("tools.failedCount", { count: summary.failedCount }));
   return activeParts.length > 0
-    ? `running (${activeParts.join(" · ")})`
-    : "running";
+    ? t("tools.runningWith", { parts: activeParts.join(" · ") })
+    : t("tools.running");
 }
 
-function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
+function ToolActivityGroup({ summary, enterPulse = false }: { summary: ToolActivitySummary; enterPulse?: boolean }) {
+  const showResults = useToolResultStatus();
   const [open, setOpen] = useState(false);
   const singleActivity =
     summary.activities.length === 1 ? summary.activities[0] : undefined;
@@ -10606,18 +11194,22 @@ function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
   )
     return <ToolActivity activity={singleActivity} />;
   const running = summary.status === "running";
-  const groupStatusLabel = toolActivityGroupStatusLabel(summary);
-  const summaryLabel = `${open ? "收起" : "展开"}工具活动：${summary.label}，${groupStatusLabel}`;
+  const groupStatusLabel = toolActivityGroupStatusLabel(summary, showResults);
+  const summaryLabel = t("tools.groupSummary", {
+    action: open ? t("tools.groupCollapse") : t("tools.groupExpand"),
+    label: summary.label,
+    status: groupStatusLabel,
+  });
   return (
     <details
-      className={`tool-activity-group ${summary.status}`}
+      className={`tool-activity-group ${!showResults && summary.status !== "running" ? "settled" : summary.status}${enterPulse ? " thought-run-enter" : ""}`}
       open={open}
       aria-busy={running || undefined}
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
       <summary
         aria-label={summaryLabel}
-        title={open ? "收起工具活动" : "展开工具活动"}
+        title={open ? t("tools.groupCollapse") : t("tools.groupExpand")}
       >
         <ChevronRight
           className="tool-activity-group-icon tool-activity-chevron"
@@ -10668,7 +11260,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
     const timer = window.setInterval(updateElapsed, 1_000);
     return () => window.clearInterval(timer);
   }, [activity.createdAt, pollingActivity, running, waitBudgetMs]);
-  const invocationPreview = toolInvocationPreview(activity);
+  const invocationPreview = activity.tool_name === "sub_answer" ? undefined : toolInvocationPreview(activity);
   const detail = activity.detail?.trim();
   const code = activity.code?.trim();
   const hasExpandableDetail = !!detail || !!code;
@@ -10685,10 +11277,13 @@ function ToolActivity({ activity }: { activity: Activity }) {
   const statusLabel =
     status === "timeout" && bashActivity
       ? activity.pid !== undefined
-        ? `wait ended · process still running · pid ${activity.pid}`
-        : "wait ended · process may still be running"
+        ? t("tools.waitEndedRunning", { pid: activity.pid })
+        : t("tools.waitEndedMaybe")
       : humanizeToolStatus(status);
-  const summaryLabel = `${open ? "收起" : "展开"}工具详情：${toolName}`;
+  const summaryLabel = t("tools.detailSummary", {
+    action: open ? t("tools.detailCollapse") : t("tools.detailExpand"),
+    name: toolName,
+  });
   const summaryContent = (
     <>
       {hasExpandableDetail ? (
@@ -10707,16 +11302,16 @@ function ToolActivity({ activity }: { activity: Activity }) {
       )}
       <b>{toolName}</b>
       <span className="tool-activity-meta">
-        <span className="tool-activity-status">{statusLabel}</span>
+        <ActionStatus status={status} label={statusLabel} className="tool-activity-status" />
         {remainingWaitMs !== undefined && (
           <span className="tool-activity-countdown">
-            {formatRemainingDuration(remainingWaitMs)} remaining
+            {t("tools.remaining", { time: formatRemainingDuration(remainingWaitMs) })}
           </span>
         )}
         {displayedElapsedMs !== undefined && (pollingActivity || !running) && (
           <span className="tool-activity-duration">
             {pollingActivity
-              ? `${formatClockDuration(displayedElapsedMs)} elapsed`
+              ? t("tools.elapsed", { time: formatClockDuration(displayedElapsedMs) })
               : formatDuration(displayedElapsedMs)}
           </span>
         )}
@@ -10745,7 +11340,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
       <summary
-        title={open ? "收起工具详情" : "展开工具详情"}
+        title={open ? t("tools.detailCollapse") : t("tools.detailExpand")}
         aria-label={summaryLabel}
       >
         {summaryContent}
@@ -10852,9 +11447,18 @@ function ContextCompactNotice({ activity }: { activity: Activity }) {
     activity.text_before_tokens !== undefined ||
     activity.native_before_tokens !== undefined;
   const breakdown = hasBreakdown
-    ? `Text ${formatTokens(activity.text_before_tokens) ?? "?"} → ${formatTokens(activity.text_after_tokens) ?? "?"}; Tool ${formatTokens(activity.native_before_tokens) ?? "?"} → ${formatTokens(activity.native_after_tokens) ?? "?"}`
+    ? t("context.textToolBreakdown", {
+        textBefore: formatTokens(activity.text_before_tokens) ?? "?",
+        textAfter: formatTokens(activity.text_after_tokens) ?? "?",
+        toolBefore: formatTokens(activity.native_before_tokens) ?? "?",
+        toolAfter: formatTokens(activity.native_after_tokens) ?? "?",
+      })
     : undefined;
-  const label = `Dynamic context compacted: ${formatTokens(before) ?? "unknown"} to ${formatTokens(after) ?? "unknown"}${breakdown ? `. ${breakdown}` : ""}`;
+  const label = t("context.compactedAria", {
+    before: formatTokens(before) ?? t("context.unknown"),
+    after: formatTokens(after) ?? t("context.unknown"),
+    suffix: breakdown ? t("context.compactedSuffix", { breakdown }) : "",
+  });
   return (
     <section
       className="context-compact-notice"
@@ -10865,7 +11469,7 @@ function ContextCompactNotice({ activity }: { activity: Activity }) {
         <Gauge size={13} />
       </div>
       <div className="compact-copy">
-        <span>Dynamic context</span>
+        <span>{t("context.dynamic")}</span>
         <strong>
           {formatTokens(before) ?? "?"} → {formatTokens(after) ?? "?"}
         </strong>
@@ -10968,8 +11572,8 @@ function McpPanel({
             <button
               type="button"
               className="mcp-delete-cancel"
-              title="取消删除 MCP"
-              aria-label="取消删除 MCP"
+              title={t("mcp.cancelDelete")}
+              aria-label={t("mcp.cancelDelete")}
               onClick={cancelDeleteMode}
             >
               <X size={14} strokeWidth={3} />
@@ -10982,16 +11586,16 @@ function McpPanel({
               title={
                 deleteMode
                   ? selectedDeleteServerId
-                    ? "确认删除选中的 MCP"
-                    : "请选择要删除的 MCP"
-                  : "选择要删除的 MCP"
+                    ? t("mcp.confirmDeleteSelected")
+                    : t("mcp.selectToDeletePrompt")
+                  : t("mcp.selectToDelete")
               }
               aria-label={
                 deleteMode
                   ? selectedDeleteServerId
-                    ? "确认删除选中的 MCP"
-                    : "请选择要删除的 MCP"
-                  : "选择要删除的 MCP"
+                    ? t("mcp.confirmDeleteSelected")
+                    : t("mcp.selectToDeletePrompt")
+                  : t("mcp.selectToDelete")
               }
               disabled={
                 servers.length === 0 ||
@@ -11057,7 +11661,7 @@ function McpPanel({
             {servers.length === 0 ? (
               <div className="mcp-empty">
                 <Plug size={20} />
-                <strong>No MCP servers</strong>
+                <strong>{t("mcp.noServers")}</strong>
                 <span>Add local stdio, Streamable HTTP, or legacy SSE.</span>
               </div>
             ) : (
@@ -11077,14 +11681,14 @@ function McpPanel({
                   connectionState === "connected"
                     ? `${server.tools.length} tools`
                     : connectionState === "failed"
-                      ? "⚠️无法连接"
+                      ? t("mcp.connectFailed")
                       : connectionState === "connecting"
-                        ? "连接中…"
+                        ? t("mcp.connecting")
                         : "";
                 const connectionTitle =
                   connectionState === "failed" && server.error
                     ? `${connectionLabel}：${server.error}`
-                    : connectionLabel || "未启用";
+                    : connectionLabel || t("mcp.disabled");
                 return (
                   <article
                     className={`mcp-server ${connectionState} ${active && !deleteMode ? "selected" : ""} ${deleteMode ? "delete-selecting" : ""} ${selectedDeleteServerId === server.config.id ? "delete-selected" : ""}`}
@@ -11136,8 +11740,8 @@ function McpPanel({
                       <button
                         type="button"
                         className={`mcp-delete-select ${selectedDeleteServerId === server.config.id ? "selected" : ""}`}
-                        title={`选择删除 ${server.config.name}`}
-                        aria-label={`选择删除 ${server.config.name}`}
+                        title={t("mcp.selectForDelete", { name: server.config.name })}
+                        aria-label={t("mcp.selectForDelete", { name: server.config.name })}
                         aria-pressed={
                           selectedDeleteServerId === server.config.id
                         }
@@ -11256,15 +11860,15 @@ function parseRequestFieldRows(rows: StructuredRow[]): {
     const key = row.key.trim();
     if (!key) continue;
     if (RESERVED_REQUEST_FIELDS.has(key.toLowerCase()))
-      return { value: {}, error: `${key} 由 Timem 管理，不能覆盖。` };
+      return { value: {}, error: t("mcp.managedKeyError", { key }) };
     if (!row.value.trim())
-      return { value: {}, error: `${key} 的 Value 不能为空。` };
+      return { value: {}, error: t("mcp.emptyValueError", { key }) };
     try {
       value[key] = JSON.parse(row.value);
     } catch {
       return {
         value: {},
-        error: `${key} 的 Value 必须是合法 JSON。字符串请使用双引号，例如 \"fast\"。`,
+        error: t("mcp.invalidJsonError", { key }),
       };
     }
   }
@@ -11343,8 +11947,8 @@ function StructuredKeyValueEditor({
             <button
               type="button"
               className="structured-field-delete"
-              title={`删除这一项 ${label}`}
-              aria-label={`删除 ${label}`}
+              title={t("mcp.deleteEntry", { label })}
+              aria-label={t("mcp.deleteEntryAria", { label })}
               onClick={() =>
                 onChange(rows.filter((item) => item.id !== row.id))
               }
@@ -11356,7 +11960,7 @@ function StructuredKeyValueEditor({
       </div>
       {duplicateKeys && (
         <small className="structured-field-error" role="alert">
-          {keyLabel} 不能重复。
+          {t("mcp.duplicateKey", { key: keyLabel })}
         </small>
       )}
       <button
@@ -11416,8 +12020,8 @@ function StructuredListEditor({
             <button
               type="button"
               className="structured-field-delete"
-              title={`删除第 ${index + 1} 项`}
-              aria-label={`删除 ${label} ${index + 1}`}
+              title={t("mcp.deleteIndexed", { index: index + 1 })}
+              aria-label={t("mcp.deleteIndexedAria", { label, index: index + 1 })}
               onClick={() =>
                 onChange(rows.filter((item) => item.id !== row.id))
               }
@@ -11553,7 +12157,7 @@ function McpEditor({
       }}
     >
       <fieldset className="mcp-transport">
-        <legend>Transport</legend>
+        <legend>{t("mcp.transport")}</legend>
         <div>
           {(["stdio", "streamable_http", "sse"] as const).map((type) => (
             <button
@@ -11607,19 +12211,19 @@ function McpEditor({
           </label>
           <StructuredListEditor
             label="Arguments"
-            description="每个命令参数单独一项，不需要手动编排多行格式。"
+            description={t("mcp.argsDescription")}
             rows={argumentRows}
-            placeholder="例如：-y 或 @modelcontextprotocol/server-filesystem"
-            addLabel="添加参数"
+            placeholder={t("mcp.argsPlaceholder")}
+            addLabel={t("mcp.addArg")}
             onChange={setArgumentRows}
           />
           <StructuredKeyValueEditor
             label="Environment"
-            description="环境变量使用独立的 Key / Value 输入。"
+            description={t("mcp.envDescription")}
             rows={envRows}
-            keyPlaceholder="例如：GITHUB_TOKEN"
+            keyPlaceholder={t("mcp.envKeyPlaceholder")}
             valuePlaceholder="Environment value"
-            addLabel="添加环境变量"
+            addLabel={t("mcp.addEnv")}
             showValues={showSecrets || !draft.id}
             revealAction={revealAction}
             onChange={setEnvRows}
@@ -11649,16 +12253,16 @@ function McpEditor({
           </label>
           <StructuredKeyValueEditor
             label="Headers"
-            description={`每个 Header 单独填写；Value 中可使用 ${"${NAME}"} 引用环境变量。`}
+            description={t("mcp.headerDescription", { name: "${NAME}" })}
             rows={
               transport.type === "streamable_http"
                 ? httpHeaderRows
                 : sseHeaderRows
             }
             keyLabel="Name"
-            keyPlaceholder="例如：Authorization"
-            valuePlaceholder={`例如：Bearer ${"${MCP_TOKEN}"}`}
-            addLabel="添加 Header"
+            keyPlaceholder={t("mcp.headerKeyPlaceholder")}
+            valuePlaceholder={t("mcp.headerValuePlaceholder", { token: "${MCP_TOKEN}" })}
+            addLabel={t("mcp.addHeader")}
             showValues={showSecrets || !draft.id}
             revealAction={revealAction}
             onChange={
@@ -11736,6 +12340,10 @@ type SettingsCenterProps = {
   temporaryItemsError: string;
   endpoints: ModelEndpoint[];
   endpointEditor: ModelEndpoint | "new" | null;
+  endpointImportCandidates: ModelEndpointImportCandidate[];
+  endpointImportIssues: string[];
+  onScanEndpointImport: (codexDir: string, claudeDir: string) => void;
+  onImportEndpoints: (candidateIds: string[]) => void;
   revealedEndpointApiKeys: Record<string, string>;
   revealedEndpointHeaders: Record<string, Record<string, string>>;
   revealedEndpointRequestFields: Record<string, Record<string, unknown>>;
@@ -11751,7 +12359,8 @@ type SettingsCenterProps = {
   onRefreshTemporaryItems: () => void;
   onDeleteTemporaryItems: (ids: string[]) => void;
   onEditEndpoint: (endpoint: ModelEndpoint | "new" | null) => void;
-  onDeleteEndpoint: (endpoint: ModelEndpoint) => void;
+  onDeleteEndpoint: (endpoints: ModelEndpoint[]) => void;
+  endpointDeletePending: boolean;
   onRevealEndpoint: (endpointId: string) => void;
   onSaveEndpoint: (endpoint: ModelEndpointDraft) => void;
 };
@@ -11759,6 +12368,7 @@ type SettingsCenterProps = {
 const SettingsCenter = memo(function SettingsCenter(
   props: SettingsCenterProps,
 ) {
+  useT();
   const {
     panelRef,
     section,
@@ -11788,6 +12398,10 @@ const SettingsCenter = memo(function SettingsCenter(
     temporaryItemsError,
     endpoints,
     endpointEditor,
+    endpointImportCandidates,
+    endpointImportIssues,
+    onScanEndpointImport,
+    onImportEndpoints,
     revealedEndpointApiKeys,
     revealedEndpointHeaders,
     revealedEndpointRequestFields,
@@ -11801,6 +12415,7 @@ const SettingsCenter = memo(function SettingsCenter(
     onDeleteTemporaryItems,
     onEditEndpoint,
     onDeleteEndpoint,
+    endpointDeletePending,
     onRevealEndpoint,
     onSaveEndpoint,
   } = props;
@@ -11901,7 +12516,7 @@ const SettingsCenter = memo(function SettingsCenter(
     <div
       className="settings-center-backdrop"
       role="presentation"
-      aria-label="Dismiss settings"
+      aria-label={t("settings.dismiss")}
       onClick={closeIfIdle}
     >
       <section
@@ -11916,8 +12531,8 @@ const SettingsCenter = memo(function SettingsCenter(
       >
         <header className="settings-center-header">
           <div>
-            <span className="eyebrow">SETTINGS</span>
-            <h2 id="settings-center-title">Settings</h2>
+            <span className="eyebrow">{t("settings.eyebrow")}</span>
+            <h2 id="settings-center-title">{t("settings.title")}</h2>
             <div
               className="settings-runtime-status"
               role="status"
@@ -11933,8 +12548,8 @@ const SettingsCenter = memo(function SettingsCenter(
           <button
             type="button"
             className="icon-button"
-            title="Close settings"
-            aria-label="Close settings"
+            title={t("settings.close")}
+            aria-label={t("settings.close")}
             disabled={busy}
             onClick={closeIfIdle}
           >
@@ -11942,7 +12557,7 @@ const SettingsCenter = memo(function SettingsCenter(
           </button>
         </header>
         <div className="settings-center-layout">
-          <nav className="settings-center-nav" aria-label="Settings categories">
+          <nav className="settings-center-nav" aria-label={t("settings.categories")}>
             <button
               type="button"
               className={section === "appearance" ? "active" : ""}
@@ -11952,7 +12567,7 @@ const SettingsCenter = memo(function SettingsCenter(
             >
               <Palette size={16} />
               <span>
-                <strong>Appearance</strong>
+                <strong>{t("settings.appearance")}</strong>
               </span>
             </button>
             <button
@@ -11964,7 +12579,7 @@ const SettingsCenter = memo(function SettingsCenter(
             >
               <Sparkles size={16} />
               <span>
-                <strong>Model Endpoints</strong>
+                <strong>{t("settings.endpoints")}</strong>
               </span>
             </button>
             <button
@@ -11976,7 +12591,7 @@ const SettingsCenter = memo(function SettingsCenter(
             >
               <Database size={16} />
               <span>
-                <strong>Memory</strong>
+                <strong>{t("settings.memory")}</strong>
               </span>
             </button>
             <button
@@ -11988,7 +12603,7 @@ const SettingsCenter = memo(function SettingsCenter(
             >
               <TriangleAlert size={16} />
               <span>
-                <strong>Beta</strong>
+                <strong>{t("settings.beta")}</strong>
               </span>
             </button>
           </nav>
@@ -11999,22 +12614,22 @@ const SettingsCenter = memo(function SettingsCenter(
                 aria-labelledby="appearance-settings-title"
               >
                 <div className="settings-pane-heading">
-                  <h3 id="appearance-settings-title">Appearance</h3>
+                  <h3 id="appearance-settings-title">{t("settings.appearance")}</h3>
                   <Palette size={19} aria-hidden="true" />
                 </div>
                 <fieldset>
-                  <legend>Theme</legend>
+                  <legend>{t("settings.theme")}</legend>
                   <div className="segmented-control">
                     {(["dark", "light"] as const).map((theme) => (
                       <button
                         type="button"
-                        title={`Use ${theme} theme`}
+                        title={t("settings.themeAria", { theme: theme === "dark" ? t("settings.themeDark") : t("settings.themeLight") })}
                         className={appearance.theme === theme ? "active" : ""}
                         aria-pressed={appearance.theme === theme}
                         key={theme}
                         onClick={() => updateAppearance("theme", theme)}
                       >
-                        {theme === "dark" ? "Dark" : "Light"}
+                        {theme === "dark" ? t("settings.themeDark") : t("settings.themeLight")}
                       </button>
                     ))}
                   </div>
@@ -12023,13 +12638,13 @@ const SettingsCenter = memo(function SettingsCenter(
                   className="appearance-role-fonts"
                   aria-labelledby="appearance-user-fonts-title"
                 >
-                  <h4 id="appearance-user-fonts-title">User</h4>
+                  <h4 id="appearance-user-fonts-title">{t("settings.userFonts")}</h4>
                   <div className="appearance-font-selects">
                     <label>
-                      <span>汉语字体</span>
+                      <span>{t("settings.cjkFont")}</span>
                       <select
                         value={appearance.userChineseFont}
-                        aria-label="User Chinese font"
+                        aria-label={t("settings.userChineseFontAria")}
                         onChange={(event) =>
                           updateAppearance(
                             "userChineseFont",
@@ -12037,17 +12652,17 @@ const SettingsCenter = memo(function SettingsCenter(
                           )
                         }
                       >
-                        <option value="system">系统</option>
-                        <option value="heiti">黑体</option>
-                        <option value="kaiti">楷体</option>
-                        <option value="songti">宋体</option>
+                        <option value="system">{t("appearance.cjkSystem")}</option>
+                        <option value="heiti">{t("appearance.cjkHeiti")}</option>
+                        <option value="kaiti">{t("appearance.cjkKaiti")}</option>
+                        <option value="songti">{t("appearance.cjkSongti")}</option>
                       </select>
                     </label>
                     <label>
-                      <span>其他语言字体</span>
+                      <span>{t("settings.otherFont")}</span>
                       <select
                         value={appearance.userFont}
-                        aria-label="User other language font"
+                        aria-label={t("settings.userOtherFontAria")}
                         onChange={(event) =>
                           updateAppearance(
                             "userFont",
@@ -12055,9 +12670,9 @@ const SettingsCenter = memo(function SettingsCenter(
                           )
                         }
                       >
-                        <option value="system">System</option>
-                        <option value="serif">Serif</option>
-                        <option value="mono">Mono</option>
+                        <option value="system">{t("appearance.fontSystem")}</option>
+                        <option value="serif">{t("appearance.fontSerif")}</option>
+                        <option value="mono">{t("appearance.fontMono")}</option>
                       </select>
                     </label>
                   </div>
@@ -12072,20 +12687,20 @@ const SettingsCenter = memo(function SettingsCenter(
                     <span className="appearance-checkbox" aria-hidden="true">
                       <Check size={12} strokeWidth={3} />
                     </span>
-                    <span>粗体</span>
+                    <span>{t("settings.bold")}</span>
                   </label>
                 </section>
                 <section
                   className="appearance-role-fonts"
                   aria-labelledby="appearance-agent-fonts-title"
                 >
-                  <h4 id="appearance-agent-fonts-title">Agent</h4>
+                  <h4 id="appearance-agent-fonts-title">{t("settings.agentFonts")}</h4>
                   <div className="appearance-font-selects">
                     <label>
-                      <span>汉语字体</span>
+                      <span>{t("settings.cjkFont")}</span>
                       <select
                         value={appearance.agentChineseFont}
-                        aria-label="Agent Chinese font"
+                        aria-label={t("settings.agentChineseFontAria")}
                         onChange={(event) =>
                           updateAppearance(
                             "agentChineseFont",
@@ -12094,17 +12709,17 @@ const SettingsCenter = memo(function SettingsCenter(
                           )
                         }
                       >
-                        <option value="system">系统</option>
-                        <option value="heiti">黑体</option>
-                        <option value="kaiti">楷体</option>
-                        <option value="songti">宋体</option>
+                        <option value="system">{t("appearance.cjkSystem")}</option>
+                        <option value="heiti">{t("appearance.cjkHeiti")}</option>
+                        <option value="kaiti">{t("appearance.cjkKaiti")}</option>
+                        <option value="songti">{t("appearance.cjkSongti")}</option>
                       </select>
                     </label>
                     <label>
-                      <span>其他语言字体</span>
+                      <span>{t("settings.otherFont")}</span>
                       <select
                         value={appearance.agentFont}
-                        aria-label="Agent other language font"
+                        aria-label={t("settings.agentOtherFontAria")}
                         onChange={(event) =>
                           updateAppearance(
                             "agentFont",
@@ -12112,9 +12727,9 @@ const SettingsCenter = memo(function SettingsCenter(
                           )
                         }
                       >
-                        <option value="system">System</option>
-                        <option value="serif">Serif</option>
-                        <option value="mono">Mono</option>
+                        <option value="system">{t("appearance.fontSystem")}</option>
+                        <option value="serif">{t("appearance.fontSerif")}</option>
+                        <option value="mono">{t("appearance.fontMono")}</option>
                       </select>
                     </label>
                   </div>
@@ -12129,26 +12744,44 @@ const SettingsCenter = memo(function SettingsCenter(
                     <span className="appearance-checkbox" aria-hidden="true">
                       <Check size={12} strokeWidth={3} />
                     </span>
-                    <span>粗体</span>
+                    <span>{t("settings.bold")}</span>
                   </label>
                 </section>
                 <fieldset>
-                  <legend>Text size</legend>
+                  <legend>{t("settings.textSize")}</legend>
                   <div className="segmented-control text-size-control">
                     {(["small", "medium", "large"] as const).map((size) => (
                       <button
                         type="button"
-                        title={`Use ${size === "medium" ? "default" : size} text size`}
+                        title={t("settings.textSizeAria", { size: size === "medium" ? t("settings.textDefault") : size === "small" ? t("settings.textSizeSmall") : t("settings.textSizeLarge") })}
                         className={appearance.textSize === size ? "active" : ""}
                         aria-pressed={appearance.textSize === size}
                         key={size}
                         onClick={() => updateAppearance("textSize", size)}
                       >
                         {size === "small"
-                          ? "Small"
+                          ? t("settings.textSizeSmall")
                           : size === "medium"
-                            ? "Default"
-                            : "Large"}
+                            ? t("settings.textDefault")
+                            : t("settings.textSizeLarge")}
+                      </button>
+                    ))}
+                  </div>
+                </fieldset>
+                <fieldset>
+                  <legend>{t("common.language")}</legend>
+                  <div className="segmented-control">
+                    {(["zh", "en"] as const).map((locale) => (
+                      <button
+                        type="button"
+                        key={locale}
+                        title={locale === "zh" ? t("common.zhName") : t("common.enName")}
+                        aria-label={locale === "zh" ? t("common.zhName") : t("common.enName")}
+                        aria-pressed={getLocale() === locale}
+                        className={getLocale() === locale ? "active" : ""}
+                        onClick={() => setLocale(locale)}
+                      >
+                        {locale === "zh" ? t("common.zhName") : t("common.enName")}
                       </button>
                     ))}
                   </div>
@@ -12159,12 +12792,17 @@ const SettingsCenter = memo(function SettingsCenter(
               <EndpointSettingsPane
                 endpoints={endpoints}
                 endpointEditor={endpointEditor}
+                importCandidates={endpointImportCandidates}
+                importIssues={endpointImportIssues}
+                onScanImport={onScanEndpointImport}
+                onImport={onImportEndpoints}
                 revealedEndpointApiKeys={revealedEndpointApiKeys}
                 revealedEndpointHeaders={revealedEndpointHeaders}
                 revealedEndpointRequestFields={revealedEndpointRequestFields}
                 revealedEndpointPrivateCas={revealedEndpointPrivateCas}
                 onEdit={onEditEndpoint}
                 onDelete={onDeleteEndpoint}
+                deletePending={endpointDeletePending}
                 onReveal={onRevealEndpoint}
                 onSave={onSaveEndpoint}
               />
@@ -12175,25 +12813,23 @@ const SettingsCenter = memo(function SettingsCenter(
                 aria-labelledby="beta-settings-title"
               >
                 <div className="settings-pane-heading">
-                  <h3 id="beta-settings-title">Beta</h3>
+                  <h3 id="beta-settings-title">{t("beta.title")}</h3>
                   <TriangleAlert size={19} aria-hidden="true" />
                 </div>
+                <StreamUiModeSetting />
+                <ToolResultStatusSetting />
                 <section className="settings-group toolgen-beta-card">
                   <div className="settings-group-heading">
                     <div>
-                      <strong>Enable ToolGen</strong>
-                      <p>
-                        When enabled, completed answers show a ToolGen action
-                        and can start the generation workflow. This preference
-                        is stored only in this browser.
-                      </p>
+                      <strong>{t("beta.enableToolGen")}</strong>
+                      <p>{t("beta.enableToolGenDesc")}</p>
                     </div>
                     <button
                       type="button"
                       role="switch"
                       className="settings-feature-switch"
                       aria-checked={toolGenEnabled}
-                      aria-label="Enable ToolGen Beta"
+                      aria-label={t("beta.enableToolGenAria")}
                       disabled={toolGenToggleDisabled}
                       onClick={() => onToolGenEnabledChange(!toolGenEnabled)}
                     >
@@ -12207,33 +12843,29 @@ const SettingsCenter = memo(function SettingsCenter(
                   >
                     <span className={toolGenEnabled ? "enabled" : "disabled"} />
                     <strong>
-                      {toolGenEnabled ? "Enabled" : "Disabled by default"}
+                      {toolGenEnabled ? t("beta.enabled") : t("beta.disabledByDefault")}
                     </strong>
                     <small>
                       {toolGenToggleDisabled
-                        ? "A ToolGen task is active; wait for it to finish before changing this setting."
+                        ? t("beta.toolGenActiveWait")
                         : toolGenEnabled
-                          ? "ToolGen actions and generation UI are available."
-                          : "ToolGen actions and generation UI are hidden."}
+                          ? t("beta.toolGenAvailable")
+                          : t("beta.toolGenHidden")}
                     </small>
                   </div>
                 </section>
                 <section className="settings-group toolgen-beta-card">
                   <div className="settings-group-heading">
                     <div>
-                      <strong>Claude/Codex 工具发现</strong>
-                      <p>
-                        引导模型在任务适合本地 Skill 或工具时，搜索 Claude 和
-                        Codex 的内置 Skill、工具目录，并采用合适的现有工具。
-                        设置由当前 MEM 保存，并从下一次模型 API 请求开始生效。
-                      </p>
+                      <strong>{t("beta.toolDiscovery")}</strong>
+                      <p>{t("beta.toolDiscoveryDesc")}</p>
                     </div>
                     <button
                       type="button"
                       role="switch"
                       className="settings-feature-switch"
                       aria-checked={claudeCodexToolDiscoveryEnabled}
-                      aria-label="Enable Claude Codex tool discovery Beta"
+                      aria-label={t("beta.toolDiscoveryAria")}
                       disabled={claudeCodexToolDiscoveryPending || !connected}
                       onClick={() =>
                         onClaudeCodexToolDiscoveryChange(
@@ -12256,28 +12888,25 @@ const SettingsCenter = memo(function SettingsCenter(
                     />
                     <strong>
                       {claudeCodexToolDiscoveryPending
-                        ? "Saving…"
+                        ? t("beta.saving")
                         : claudeCodexToolDiscoveryEnabled
-                          ? "Enabled"
-                          : "Disabled by default"}
+                          ? t("beta.enabled")
+                          : t("beta.disabledByDefault")}
                     </strong>
                     <small>
                       {claudeCodexToolDiscoveryPending
-                        ? "Waiting for the Host to persist and apply this setting."
+                        ? t("beta.pendingWait")
                         : claudeCodexToolDiscoveryEnabled
-                          ? "The discovery instruction is present in the System Prompt."
-                          : "The discovery instruction is absent from the System Prompt."}
+                          ? t("beta.instructionPresent")
+                          : t("beta.instructionAbsent")}
                     </small>
                   </div>
                 </section>
                 <section className="toolgen-beta-note">
                   <TriangleAlert size={16} />
                   <div>
-                    <strong>Beta capability</strong>
-                    <p>
-                      Generated tools should be reviewed before relying on them
-                      in important workflows.
-                    </p>
+                    <strong>{t("beta.capabilityTitle")}</strong>
+                    <p>{t("beta.capabilityDesc")}</p>
                   </div>
                 </section>
               </section>
@@ -12293,7 +12922,7 @@ const SettingsCenter = memo(function SettingsCenter(
                 </div>
                 <section
                   className="memory-identity-card"
-                  aria-label="Current MEM"
+                  aria-label={t("beta.currentMemAria")}
                 >
                   <div className="memory-identity-icon" aria-hidden="true">
                     <Database size={20} />
@@ -12836,36 +13465,73 @@ const SettingsCenter = memo(function SettingsCenter(
 function EndpointSettingsPane({
   endpoints,
   endpointEditor,
+  importCandidates,
+  importIssues,
+  onScanImport,
+  onImport,
   revealedEndpointApiKeys,
   revealedEndpointHeaders,
   revealedEndpointRequestFields,
   revealedEndpointPrivateCas,
   onEdit,
   onDelete,
+  deletePending,
   onReveal,
   onSave,
 }: {
   endpoints: ModelEndpoint[];
   endpointEditor: ModelEndpoint | "new" | null;
+  importCandidates: ModelEndpointImportCandidate[];
+  importIssues: string[];
+  onScanImport: (codexDir: string, claudeDir: string) => void;
+  onImport: (candidateIds: string[]) => void;
   revealedEndpointApiKeys: Record<string, string>;
   revealedEndpointHeaders: Record<string, Record<string, string>>;
   revealedEndpointRequestFields: Record<string, Record<string, unknown>>;
   revealedEndpointPrivateCas: Record<string, string>;
   onEdit: (endpoint: ModelEndpoint | "new" | null) => void;
-  onDelete: (endpoint: ModelEndpoint) => void;
+  onDelete: (endpoints: ModelEndpoint[]) => void;
+  deletePending: boolean;
   onReveal: (endpointId: string) => void;
   onSave: (endpoint: ModelEndpointDraft) => void;
 }) {
   const [deleteMode, setDeleteMode] = useState(false);
-  const [selectedEndpointId, setSelectedEndpointId] = useState("");
+  const [selectedEndpointIds, setSelectedEndpointIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [showImport, setShowImport] = useState(false);
+  const [codexDir, setCodexDir] = useState("");
+  const [claudeDir, setClaudeDir] = useState("");
+  const [selectedImportIds, setSelectedImportIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   useEffect(() => {
-    if (
-      selectedEndpointId &&
-      !endpoints.some((endpoint) => endpoint.id === selectedEndpointId)
-    )
-      setSelectedEndpointId("");
+    setSelectedEndpointIds((current) => {
+      const next = new Set(
+        [...current].filter((endpointId) =>
+          endpoints.some((endpoint) => endpoint.id === endpointId),
+        ),
+      );
+      return next.size === current.size ? current : next;
+    });
     if (deleteMode && endpoints.length === 0) setDeleteMode(false);
-  }, [deleteMode, endpoints, selectedEndpointId]);
+  }, [deleteMode, endpoints, selectedEndpointIds]);
+  useEffect(() => {
+    if (!deletePending) return;
+    setDeleteMode(false);
+    setSelectedEndpointIds(new Set());
+  }, [deletePending]);
+  useEffect(() => {
+    setSelectedImportIds(new Set(importCandidates.map((item) => item.id)));
+  }, [importCandidates]);
+  const toggleImportCandidate = (id: string) => {
+    setSelectedImportIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
   if (endpointEditor)
     return (
       <section
@@ -12899,8 +13565,8 @@ function EndpointSettingsPane({
         />
       </section>
     );
-  const selected = endpoints.find(
-    (endpoint) => endpoint.id === selectedEndpointId,
+  const selectedEndpoints = endpoints.filter((endpoint) =>
+    selectedEndpointIds.has(endpoint.id),
   );
   return (
     <section
@@ -12913,34 +13579,91 @@ function EndpointSettingsPane({
       </div>
       <div className="endpoint-settings-toolbar">
         <span>
-          {endpoints.length} endpoint{endpoints.length === 1 ? "" : "s"}
+          {deleteMode
+            ? t("endpoints.selectedCount", {
+                count: selectedEndpointIds.size,
+              })
+            : t("endpoints.count", { count: endpoints.length })}
         </span>
         <div>
           {deleteMode && (
             <button
               type="button"
               className="secondary compact"
+              disabled={selectedEndpointIds.size === endpoints.length}
+              onClick={() =>
+                setSelectedEndpointIds(
+                  new Set(endpoints.map((endpoint) => endpoint.id)),
+                )
+              }
+            >
+              {t("endpoints.selectAll")}
+            </button>
+          )}
+          {deleteMode && (
+            <button
+              type="button"
+              className="secondary compact"
+              disabled={selectedEndpointIds.size === 0}
+              onClick={() => setSelectedEndpointIds(new Set())}
+            >
+              {t("endpoints.clearSelection")}
+            </button>
+          )}
+          {deleteMode && (
+            <button
+              type="button"
+              className="secondary compact"
               onClick={() => {
                 setDeleteMode(false);
-                setSelectedEndpointId("");
+                setSelectedEndpointIds(new Set());
               }}
             >
-              Cancel
+              {t("common.cancel")}
             </button>
           )}
           <button
             type="button"
             className={`danger compact ${deleteMode ? "confirm" : ""}`}
-            disabled={endpoints.length === 0 || (deleteMode && !selected)}
+            disabled={
+              deletePending ||
+              endpoints.length === 0 ||
+              (deleteMode && selectedEndpoints.length === 0)
+            }
             onClick={() => {
               if (!deleteMode) {
                 setDeleteMode(true);
-                setSelectedEndpointId("");
-              } else if (selected) onDelete(selected);
+                setSelectedEndpointIds(new Set());
+              } else if (selectedEndpoints.length > 0) {
+                onDelete(selectedEndpoints);
+              }
             }}
           >
-            {deleteMode ? <Check size={14} /> : <Trash2 size={14} />}{" "}
-            {deleteMode ? "Delete selected" : "Delete"}
+            {deletePending ? (
+              <LoaderCircle size={14} />
+            ) : deleteMode ? (
+              <Check size={14} />
+            ) : (
+              <Trash2 size={14} />
+            )}{" "}
+            {deletePending
+              ? t("endpoints.deleting")
+              : deleteMode
+                ? t("endpoints.deleteSelected", {
+                    count: selectedEndpoints.length,
+                  })
+                : t("common.delete")}
+          </button>
+          <button
+            type="button"
+            className="secondary compact"
+            disabled={deleteMode}
+            onClick={() => setShowImport((current) => !current)}
+          >
+            <FolderInput size={14} />{" "}
+            {showImport
+              ? t("endpoints.importHide")
+              : t("endpoints.importButton")}
           </button>
           <button
             type="button"
@@ -12948,33 +13671,158 @@ function EndpointSettingsPane({
             disabled={deleteMode}
             onClick={() => onEdit("new")}
           >
-            <Plus size={14} /> Add endpoint
+            <Plus size={14} /> {t("endpoints.addEndpoint")}
           </button>
         </div>
       </div>
+      {showImport && (
+        <div className="endpoint-import-panel">
+          <div className="endpoint-import-heading">
+            <strong>{t("endpoints.importTitle")}</strong>
+            <p>{t("endpoints.importHint")}</p>
+          </div>
+          <div className="endpoint-import-fields">
+            <label>
+              {t("endpoints.importCodexDir")}
+              <input
+                value={codexDir}
+                placeholder="~/.codex"
+                spellCheck={false}
+                onChange={(event) => setCodexDir(event.target.value)}
+              />
+            </label>
+            <label>
+              {t("endpoints.importClaudeDir")}
+              <input
+                value={claudeDir}
+                placeholder="~/.claude"
+                spellCheck={false}
+                onChange={(event) => setClaudeDir(event.target.value)}
+              />
+            </label>
+          </div>
+          <button
+            type="button"
+            className="primary compact endpoint-import-scan"
+            disabled={!codexDir.trim() && !claudeDir.trim()}
+            onClick={() => onScanImport(codexDir, claudeDir)}
+          >
+            <Search size={14} /> {t("endpoints.importScan")}
+          </button>
+          {importIssues.length > 0 && (
+            <ul className="endpoint-import-issues">
+              {importIssues.map((issue) => (
+                <li key={issue}>{issue}</li>
+              ))}
+            </ul>
+          )}
+          {importCandidates.length > 0 ? (
+            <div className="endpoint-import-candidates">
+              {importCandidates.map((candidate) => (
+                <label
+                  className="endpoint-import-candidate"
+                  key={candidate.id}
+                >
+                  <span className="endpoint-import-candidate-check">
+                    <input
+                      type="checkbox"
+                      checked={selectedImportIds.has(candidate.id)}
+                      onChange={() => toggleImportCandidate(candidate.id)}
+                    />
+                  </span>
+                  <span className="endpoint-import-candidate-body">
+                    <strong>
+                      {candidate.name}
+                      <small>{candidate.source}</small>
+                    </strong>
+                    <small>
+                      {candidate.model} ·{" "}
+                      {apiProtocolShort(candidate.api_protocol)} ·{" "}
+                      {candidate.api_key_configured
+                        ? t("endpoints.importKeyConfigured")
+                        : t("endpoints.importKeyMissing")}
+                      {candidate.reasoning_effort
+                        ? ` · ${t("endpoints.reasoningEffort")}: ${candidate.reasoning_effort}`
+                        : ""}
+                    </small>
+                    <code title={candidate.base_url}>{candidate.base_url}</code>
+                  </span>
+                </label>
+              ))}
+              <button
+                type="button"
+                className="primary compact"
+                disabled={selectedImportIds.size === 0}
+                onClick={() => onImport([...selectedImportIds])}
+              >
+                <Check size={14} />{" "}
+                {t("endpoints.importSelected", {
+                  count: selectedImportIds.size,
+                })}
+              </button>
+            </div>
+          ) : (
+            importIssues.length === 0 && (
+              <div className="endpoint-import-empty">
+                {t("endpoints.importEmpty")}
+              </div>
+            )
+          )}
+        </div>
+      )}
       <div className="endpoint-settings-list">
         {endpoints.length === 0 ? (
           <div className="endpoint-empty">
-            No model endpoints yet. Add one to configure model access.
+            {t("endpoints.settingsEmpty")}
           </div>
         ) : (
           endpoints.map((endpoint) => {
-            const selectedForDelete = selectedEndpointId === endpoint.id;
+            const selectedForDelete = selectedEndpointIds.has(endpoint.id);
+            const endpointDetails = (
+              <>
+                <span>
+                  <strong>{endpoint.name}</strong>
+                </span>
+                <small>
+                  {endpoint.model} · {apiProtocolShort(endpoint.api_protocol)}
+                  {endpoint.reasoning_effort
+                    ? ` · ${endpoint.reasoning_effort}`
+                    : ""}{" "}
+                  · {formatContextWindowTokens(endpoint.max_llm_input_tokens)} /{" "}
+                  {endpoint.max_llm_output_tokens / 1_000}K
+                </small>
+                <code title={endpoint.base_url}>{endpoint.base_url}</code>
+              </>
+            );
             return (
               <div
                 className={`endpoint-settings-row ${deleteMode ? "delete-selecting" : ""} ${selectedForDelete ? "delete-selected" : ""}`}
                 key={endpoint.id}
               >
-                <button
-                  type="button"
-                  className="endpoint-settings-select"
-                  aria-pressed={deleteMode ? selectedForDelete : undefined}
-                  onClick={() => {
-                    if (deleteMode)
-                      setSelectedEndpointId((current) =>
-                        current === endpoint.id ? "" : endpoint.id,
-                      );
-                    else {
+                {deleteMode ? (
+                  <label className="endpoint-settings-select endpoint-settings-select-label">
+                    <input
+                      type="checkbox"
+                      className="endpoint-delete-checkbox"
+                      checked={selectedForDelete}
+                      onChange={() =>
+                        setSelectedEndpointIds((current) => {
+                          const next = new Set(current);
+                          if (next.has(endpoint.id)) next.delete(endpoint.id);
+                          else next.add(endpoint.id);
+                          return next;
+                        })
+                      }
+                    />
+                    <span className="endpoint-settings-select-body">
+                      {endpointDetails}
+                    </span>
+                  </label>
+                ) : (
+                  <button
+                    type="button"
+                    className="endpoint-settings-select"
+                    onClick={() => {
                       onEdit(endpoint);
                       if (
                         (endpoint.api_key_configured ||
@@ -12983,30 +13831,17 @@ function EndpointSettingsPane({
                         revealedEndpointApiKeys[endpoint.id] === undefined
                       )
                         onReveal(endpoint.id);
-                    }
                   }}
-                >
-                  <span>
-                    <strong>{endpoint.name}</strong>
-                    {deleteMode && (
-                      <span className="endpoint-delete-select">
-                        {selectedForDelete && <Check size={13} />}
-                      </span>
-                    )}
-                  </span>
-                  <small>
-                    {endpoint.model} · {endpoint.api_protocol} ·{" "}
-                    {endpoint.max_llm_input_tokens / 1_000}K /{" "}
-                    {endpoint.max_llm_output_tokens / 1_000}K
-                  </small>
-                  <code title={endpoint.base_url}>{endpoint.base_url}</code>
-                </button>
+                  >
+                    {endpointDetails}
+                  </button>
+                )}
                 {!deleteMode && (
                   <button
                     type="button"
                     className="endpoint-settings-edit"
-                    title={`Edit ${endpoint.name}`}
-                    aria-label={`Edit ${endpoint.name}`}
+                    title={t("endpoints.editEndpoint")}
+                    aria-label={t("endpoints.editEndpoint")}
                     onClick={() => {
                       onEdit(endpoint);
                       if (
@@ -13236,20 +14071,20 @@ function ModelEndpointPanel({
     >
       <div className="endpoint-menu-heading">
         <div>
-          <span className="eyebrow">MODEL ENDPOINTS</span>
+          <span className="eyebrow">{t("endpoints.panel")}</span>
           <strong>
-            {session ? `用于 ${session.display_name}` : "选择 Session 后应用"}
+            {session ? t("sessions.applyForSession", { name: session.display_name }) : t("sessions.applyNeedSession")}
           </strong>
         </div>
         <button type="button" className="endpoint-menu-edit" onClick={onEdit}>
           <Pencil size={13} />
-          <span>编辑</span>
+          <span>{t("common.edit")}</span>
         </button>
       </div>
       <div className="endpoint-list">
         {endpoints.length === 0 ? (
           <div className="endpoint-empty">
-            还没有可用接入点。请在 Settings 中添加后再选择。
+            {t("endpoints.empty")}
           </div>
         ) : (
           endpoints.map((endpoint) => {
@@ -13269,19 +14104,29 @@ function ModelEndpointPanel({
                   <span className="endpoint-copy">
                     <span className="endpoint-name-line">
                       <strong>{endpoint.name}</strong>
+                      <span className="endpoint-chip endpoint-chip-protocol">
+                        {apiProtocolShort(endpoint.api_protocol)}
+                      </span>
+                      {endpoint.reasoning_effort && (
+                        <span className="endpoint-chip endpoint-chip-effort">
+                          {endpoint.reasoning_effort}
+                        </span>
+                      )}
                     </span>
                     <small className="endpoint-model-summary">
                       <Sparkles
-                        size={10}
+                        size={11}
                         className="session-model-icon"
                         aria-hidden="true"
                       />
+                      <span>{endpoint.model}</span>
+                      <span className="endpoint-meta-sep" aria-hidden="true">
+                        ·
+                      </span>
                       <span>
-                        {endpoint.model} · {endpoint.api_protocol}
-                        {endpoint.stream ? " · stream" : ""} ·{" "}
-                        {endpoint.max_llm_input_tokens === 1_000_000
-                          ? "1M"
-                          : `${endpoint.max_llm_input_tokens / 1_000}K`}{" "}
+                        {formatContextWindowTokens(
+                          endpoint.max_llm_input_tokens,
+                        )}{" "}
                         / {endpoint.max_llm_output_tokens / 1_000}K
                       </span>
                     </small>
@@ -13301,7 +14146,7 @@ function ModelEndpointPanel({
       </div>
       {session?.state === "working" && (
         <p className="endpoint-note">
-          当前 Session 工作中，结束或停止任务后才能切换接入点。
+          {t("endpoints.workingNote")}
         </p>
       )}
     </section>
@@ -13341,6 +14186,7 @@ function ModelEndpointEditor({
     allow_cross_origin_redirects:
       endpoint?.allow_cross_origin_redirects ?? false,
     private_ca_pem: revealedPrivateCaPem,
+    reasoning_effort: endpoint?.reasoning_effort ?? null,
   }));
   const [headerRows, setHeaderRows] = useState<StructuredRow[]>(() =>
     structuredRows(endpoint?.http_headers ?? {}),
@@ -13391,12 +14237,12 @@ function ModelEndpointEditor({
   const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(
     apiKey,
     {
-      idle: "复制 API Key",
-      copied: "API Key 已复制",
-      failed: "API Key 复制失败",
+      idle: t("endpoints.apiKeyCopy"),
+      copied: t("endpoints.apiKeyCopied"),
+      failed: t("endpoints.apiKeyCopyFailed"),
     },
   );
-  const apiKeyVisibilityLabel = showApiKey ? "隐藏 API Key" : "显示 API Key";
+  const apiKeyVisibilityLabel = showApiKey ? t("endpoints.apiKeyHide") : t("endpoints.apiKeyShow");
   const headers = structuredRecord(headerRows);
   const parsedRequestFields = parseRequestFieldRows(requestRows);
   const endpointDraft = {
@@ -13417,10 +14263,10 @@ function ModelEndpointEditor({
   return (
     <div className="endpoint-editor">
       <div className="endpoint-editor-heading">
-        <strong>{endpoint ? "编辑接入点" : "新增接入点"}</strong>
+        <strong>{endpoint ? t("endpoints.editEndpoint") : t("endpoints.newEndpoint")}</strong>
         <button
           type="button"
-          aria-label="Close endpoint editor"
+          aria-label={t("endpoints.closeEditor")}
           onClick={onClose}
         >
           <X size={14} />
@@ -13428,18 +14274,18 @@ function ModelEndpointEditor({
       </div>
       <div className="endpoint-editor-grid">
         <label>
-          名称
+          {t("endpoints.nameLabel")}
           <input
             autoFocus
             value={draft.name}
-            placeholder="例如：生产环境 GPT"
+            placeholder={t("endpoints.namePlaceholder")}
             onChange={(event) =>
               setDraft({ ...draft, name: event.target.value })
             }
           />
         </label>
         <label>
-          模型
+          {t("endpoints.modelIdLabel")}
           <input
             value={draft.model}
             placeholder="gpt-4.1"
@@ -13447,52 +14293,6 @@ function ModelEndpointEditor({
               setDraft({ ...draft, model: event.target.value })
             }
           />
-        </label>
-        <div className="endpoint-api-protocol">
-          <label>
-            API 协议
-            <select
-              value={draft.api_protocol}
-              onChange={(event) => {
-                const api_protocol = event.target.value;
-                setDraft({
-                  ...draft,
-                  api_protocol,
-                  stream: api_protocol === "openai-compatible",
-                });
-              }}
-            >
-              <option value="openai-compatible">openai-compatible</option>
-              <option value="openai-responses">openai-responses</option>
-              <option value="anthropic">anthropic</option>
-            </select>
-          </label>
-          <label
-            className="endpoint-stream-toggle"
-            title="以流式 SSE 接收 OpenAI-compatible 响应"
-          >
-            <input
-              type="checkbox"
-              checked={draft.stream}
-              disabled={draft.api_protocol !== "openai-compatible"}
-              onChange={(event) =>
-                setDraft({ ...draft, stream: event.target.checked })
-              }
-            />
-            <span>Stream</span>
-          </label>
-        </div>
-        <label>
-          响应协议
-          <select
-            value={draft.response_protocol}
-            onChange={(event) =>
-              setDraft({ ...draft, response_protocol: event.target.value })
-            }
-          >
-            <option value="xml">xml</option>
-            <option value="json">json</option>
-          </select>
         </label>
         <label className="wide">
           Base URL
@@ -13504,78 +14304,6 @@ function ModelEndpointEditor({
             }
           />
         </label>
-        <label className="wide endpoint-transport-toggle">
-          <span>
-            <input
-              type="checkbox"
-              checked={draft.allow_cross_origin_redirects}
-              onChange={(event) =>
-                setDraft({
-                  ...draft,
-                  allow_cross_origin_redirects: event.target.checked,
-                })
-              }
-            />
-            允许跨 Origin / 跨协议重定向
-          </span>
-          <small>
-            默认关闭。开启后会跟随跳转，但跨 Origin 时不会转发 API Key 或自定义 Headers。
-          </small>
-        </label>
-        <label className="wide">
-          私有 CA（PEM）
-          <textarea
-            className="endpoint-private-ca"
-            spellCheck={false}
-            value={draft.private_ca_pem ?? ""}
-            placeholder={
-              endpoint?.private_ca_configured &&
-              revealedPrivateCaPem === undefined
-                ? "正在读取…"
-                : "可选：-----BEGIN CERTIFICATE-----"
-            }
-            onChange={(event) =>
-              setDraft({ ...draft, private_ca_pem: event.target.value })
-            }
-          />
-          <small>仅用于此接入点的模型 HTTPS 连接，不替换系统根证书。</small>
-        </label>
-        <label>
-          最大上下文窗口
-          <select
-            value={draft.max_llm_input_tokens}
-            onChange={(event) =>
-              setDraft({
-                ...draft,
-                max_llm_input_tokens: Number(event.target.value),
-              })
-            }
-          >
-            {MODEL_CONTEXT_WINDOW_OPTIONS.map((tokens) => (
-              <option key={tokens} value={tokens}>
-                {tokens === 1_000_000 ? "1M" : `${tokens / 1_000}K`}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          最大输出
-          <select
-            value={draft.max_llm_output_tokens}
-            onChange={(event) =>
-              setDraft({
-                ...draft,
-                max_llm_output_tokens: Number(event.target.value),
-              })
-            }
-          >
-            {MODEL_OUTPUT_TOKEN_OPTIONS.map((tokens) => (
-              <option key={tokens} value={tokens}>
-                {tokens / 1_000}K
-              </option>
-            ))}
-          </select>
-        </label>
         <label className="wide">
           API Key
           <div className="endpoint-api-key">
@@ -13586,8 +14314,8 @@ function ModelEndpointEditor({
               value={apiKey}
               placeholder={
                 endpoint?.api_key_configured && revealedApiKey === undefined
-                  ? "正在读取…"
-                  : "可留空"
+                  ? t("common.loading")
+                  : t("common.optionalLeaveEmpty")
               }
               onChange={(event) =>
                 setDraft({ ...draft, api_key: event.target.value })
@@ -13619,15 +14347,206 @@ function ModelEndpointEditor({
             </div>
           </div>
         </label>
+        <div className="endpoint-api-protocol">
+          <label>
+            {t("endpoints.apiProtocol")}
+            <select
+              value={draft.api_protocol}
+              onChange={(event) => {
+                const api_protocol = event.target.value;
+                setDraft({
+                  ...draft,
+                  api_protocol,
+                  stream: api_protocol === "openai-compatible",
+                });
+              }}
+            >
+              <option value="openai-compatible">openai-compatible</option>
+              <option value="openai-responses">openai-responses</option>
+              <option value="anthropic">anthropic</option>
+            </select>
+          </label>
+          <label
+            className="endpoint-stream-toggle"
+            title={t("endpoints.sseTitle")}
+          >
+            <input
+              type="checkbox"
+              checked={draft.stream}
+              disabled={draft.api_protocol !== "openai-compatible"}
+              onChange={(event) =>
+                setDraft({ ...draft, stream: event.target.checked })
+              }
+            />
+            <span>{t("endpoints.streamLabel")}</span>
+          </label>
+        </div>
+        <label>
+          {t("endpoints.responseProtocol")}
+          <select
+            value={draft.response_protocol}
+            onChange={(event) =>
+              setDraft({ ...draft, response_protocol: event.target.value })
+            }
+          >
+            <option value="xml">xml</option>
+            <option value="json">json</option>
+          </select>
+        </label>
+
+        <label>
+          {t("endpoints.contextWindow")}
+          <select
+            value={
+              MODEL_CONTEXT_WINDOW_OPTIONS.includes(
+                draft.max_llm_input_tokens as (typeof MODEL_CONTEXT_WINDOW_OPTIONS)[number],
+              )
+                ? draft.max_llm_input_tokens
+                : "custom"
+            }
+            onChange={(event) => {
+              const value = event.target.value;
+              if (value === "custom") {
+                setDraft((current) => ({
+                  ...current,
+                  max_llm_input_tokens: current.max_llm_input_tokens + 1,
+                }));
+                return;
+              }
+              setDraft({
+                ...draft,
+                max_llm_input_tokens: Number(value),
+              });
+            }}
+          >
+            {MODEL_CONTEXT_WINDOW_OPTIONS.map((tokens) => (
+              <option key={tokens} value={tokens}>
+                {formatContextWindowTokens(tokens)}
+              </option>
+            ))}
+            <option value="custom">{t("endpoints.contextWindowCustom")}</option>
+          </select>
+          {!MODEL_CONTEXT_WINDOW_OPTIONS.includes(
+            draft.max_llm_input_tokens as (typeof MODEL_CONTEXT_WINDOW_OPTIONS)[number],
+          ) && (
+            <input
+              className="endpoint-context-custom-input"
+              type="number"
+              inputMode="numeric"
+              min={1}
+              step={1}
+              value={draft.max_llm_input_tokens}
+              onChange={(event) => {
+                const parsed = Number(event.target.value);
+                if (!Number.isInteger(parsed)) return;
+                setDraft({
+                  ...draft,
+                  max_llm_input_tokens: parsed,
+                });
+              }}
+            />
+          )}
+        </label>
+        <label>
+          {t("endpoints.maxOutput")}
+          <select
+            value={draft.max_llm_output_tokens}
+            onChange={(event) =>
+              setDraft({
+                ...draft,
+                max_llm_output_tokens: Number(event.target.value),
+              })
+            }
+          >
+            {MODEL_OUTPUT_TOKEN_OPTIONS.map((tokens) => (
+              <option key={tokens} value={tokens}>
+                {tokens / 1_000}K
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          {t("endpoints.reasoningEffort")}
+          <select
+            value={draft.reasoning_effort ?? ""}
+            disabled={
+              draft.api_protocol !== "openai-compatible" &&
+              draft.api_protocol !== "openai-responses"
+            }
+            onChange={(event) =>
+              setDraft({
+                ...draft,
+                reasoning_effort: event.target.value || null,
+              })
+            }
+          >
+            <option value="">{t("endpoints.reasoningEffortDefault")}</option>
+            {REASONING_EFFORT_OPTIONS.map((effort) => (
+              <option key={effort} value={effort}>
+                {effort}
+              </option>
+            ))}
+            <option value={REASONING_EFFORT_DISABLED}>
+              {t("endpoints.reasoningEffortDisabled")}
+            </option>
+          </select>
+        </label>
+        <label className="wide endpoint-transport-toggle">
+          <span>
+            <input
+              type="checkbox"
+              checked={draft.allow_cross_origin_redirects}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  allow_cross_origin_redirects: event.target.checked,
+                })
+              }
+            />
+            {t("endpoints.redirectLabel")}
+          </span>
+          <small>
+            {t("endpoints.redirectWarning")}
+          </small>
+          <small
+            className={
+              draft.allow_cross_origin_redirects
+                ? "endpoint-redirect-impact on"
+                : "endpoint-redirect-impact"
+            }
+          >
+            {t("endpoints.redirectImpact")}
+          </small>
+        </label>
+        <label className="wide">
+          {t("endpoints.privateCa")}
+          <textarea
+            className="endpoint-private-ca"
+            spellCheck={false}
+            value={draft.private_ca_pem ?? ""}
+            placeholder={
+              endpoint?.private_ca_configured &&
+              revealedPrivateCaPem === undefined
+                ? t("common.loading")
+                : t("endpoints.certPlaceholder")
+            }
+            onChange={(event) =>
+              setDraft({ ...draft, private_ca_pem: event.target.value })
+            }
+          />
+          <small>{t("endpoints.certNote")}</small>
+        </label>
+
+
         <div className="wide endpoint-structured-headers">
           <StructuredKeyValueEditor
             label="Headers"
-            description="可选。每个 HTTP Header 单独填写，无需输入 JSON 或多行格式文本。"
+            description={t("endpoints.headersOptional")}
             rows={headerRows}
             keyLabel="Name"
             keyPlaceholder="Header name"
             valuePlaceholder="Header value"
-            addLabel="添加 Header"
+            addLabel={t("endpoints.addHeader")}
             showValues={showHeaders}
             revealAction={
               headerRows.length > 0 ? (
@@ -13635,10 +14554,14 @@ function ModelEndpointEditor({
                   type="button"
                   className="structured-field-visibility"
                   title={
-                    showHeaders ? "隐藏 Header Value" : "显示 Header Value"
+                    showHeaders
+                      ? t("endpoints.hideHeaderValues")
+                      : t("endpoints.showHeaderValues")
                   }
                   aria-label={
-                    showHeaders ? "隐藏 Header Value" : "显示 Header Value"
+                    showHeaders
+                      ? t("endpoints.hideHeaderValues")
+                      : t("endpoints.showHeaderValues")
                   }
                   onClick={() => setShowHeaders((visible) => !visible)}
                 >
@@ -13654,15 +14577,15 @@ function ModelEndpointEditor({
         </div>
         <div className="wide endpoint-structured-headers">
           <StructuredKeyValueEditor
-            label="Request Fields"
+            label={t("endpoints.requestFields")}
             description={
-              '可选。作为 JSON 请求体顶层字段发送；字符串需写成 "fast"，也支持数字、布尔值、数组和对象。'
+              t("endpoints.requestFieldsHint")
             }
             rows={requestRows}
             keyLabel="Field"
-            keyPlaceholder="例如：service_tier"
-            valuePlaceholder={'例如："fast"'}
-            addLabel="Add Req Field"
+            keyPlaceholder={t("endpoints.fieldKeyPlaceholder")}
+            valuePlaceholder={t("endpoints.fieldValuePlaceholder")}
+            addLabel={t("endpoints.addReqField")}
             showValues={showRequestFields}
             revealAction={
               requestRows.length > 0 ? (
@@ -13671,13 +14594,13 @@ function ModelEndpointEditor({
                   className="structured-field-visibility"
                   title={
                     showRequestFields
-                      ? "隐藏 Request Field Value"
-                      : "显示 Request Field Value"
+                      ? t("endpoints.hideFieldValues")
+                      : t("endpoints.showFieldValues")
                   }
                   aria-label={
                     showRequestFields
-                      ? "隐藏 Request Field Value"
-                      : "显示 Request Field Value"
+                      ? t("endpoints.hideFieldValues")
+                      : t("endpoints.showFieldValues")
                   }
                   onClick={() => setShowRequestFields((visible) => !visible)}
                 >
@@ -13699,7 +14622,7 @@ function ModelEndpointEditor({
       </div>
       <div className="endpoint-editor-buttons">
         <button type="button" className="secondary compact" onClick={onClose}>
-          取消
+          {t("common.cancel")}
         </button>
         <button
           type="button"
@@ -13707,7 +14630,7 @@ function ModelEndpointEditor({
           disabled={saveDisabled}
           onClick={save}
         >
-          保存接入点
+          {t("endpoints.saveEndpoint")}
         </button>
       </div>
     </div>
@@ -14068,7 +14991,7 @@ const SESSION_RUNTIME_FIELDS = [
 const FAVORITE_CAPACITY_OPTIONS = [
   { label: "256 MB", bytes: 256 * 1024 * 1024 },
   { label: "1 GB", bytes: 1024 * 1024 * 1024 },
-  { label: "不限", bytes: null },
+  { label: "unlimited", bytes: null },
 ] as const;
 
 function FavoriteCapacityDialog({
@@ -14087,10 +15010,10 @@ function FavoriteCapacityDialog({
   const capacity = notice.capacity;
   const percent = capacity.used_percent ?? 0;
   const limitLabel = formatFavoriteCapacityLimit(capacity.limit_bytes);
-  const title = notice.full ? "收藏夹已满" : "收藏夹空间快满了";
+  const title = notice.full ? t("favorites.full") : t("favorites.nearFull");
   const message = notice.full
-    ? `这条回复还没有收藏。当前收藏夹上限为 ${limitLabel}，已使用 ${percent}%。请扩大空间或删除一些收藏后再试。`
-    : `这条回复已收藏。当前收藏夹上限为 ${limitLabel}，已使用 ${percent}%。建议现在扩大空间，或删除不再需要的收藏。`;
+    ? t("favorites.nearFullBody", { limit: limitLabel, percent })
+    : t("favorites.fullBody", { limit: limitLabel, percent });
   return (
     <div
       className="modal-backdrop favorite-capacity-backdrop"
@@ -14114,7 +15037,7 @@ function FavoriteCapacityDialog({
       >
         <div className="modal-titlebar">
           <div>
-            <span className="eyebrow">收藏夹空间</span>
+            <span className="eyebrow">{t("favorites.eyebrow")}</span>
             <h2 id="favorite-capacity-title">
               <Star size={19} fill="currentColor" /> {title}
             </h2>
@@ -14122,8 +15045,8 @@ function FavoriteCapacityDialog({
           <button
             type="button"
             className="icon-button"
-            title="关闭"
-            aria-label="关闭"
+            title={t("common.close")}
+            aria-label={t("common.close")}
             disabled={updating}
             onClick={onClose}
           >
@@ -14133,18 +15056,18 @@ function FavoriteCapacityDialog({
         <p>{message}</p>
         <div
           className="favorite-capacity-meter"
-          aria-label={`收藏夹已使用 ${percent}%`}
+          aria-label={t("favorites.usageAria", { percent })}
         >
           <span style={{ width: `${Math.min(100, percent)}%` }} />
         </div>
         <div className="favorite-capacity-usage">
           <strong>{percent}%</strong>
           <span>
-            已使用约 {formatFavoriteCapacityUsed(capacity.used_bytes)}
+            {t("favorites.usedApprox", { amount: formatFavoriteCapacityUsed(capacity.used_bytes) })}
           </span>
         </div>
         <fieldset disabled={updating}>
-          <legend>扩大收藏夹空间</legend>
+          <legend>{t("favorites.capacityLegend")}</legend>
           <div className="favorite-capacity-options">
             {FAVORITE_CAPACITY_OPTIONS.map((option) => {
               const selected =
@@ -14157,8 +15080,8 @@ function FavoriteCapacityDialog({
                   key={option.label}
                   onClick={() => onSelectLimit(option.bytes)}
                 >
-                  <span>{option.label}</span>
-                  {selected && <small>当前</small>}
+                  <span>{option.bytes === null ? t("favorites.unlimited") : option.label}</span>
+                  {selected && <small>{t("favorites.current")}</small>}
                 </button>
               );
             })}
@@ -14171,12 +15094,12 @@ function FavoriteCapacityDialog({
             disabled={updating}
             onClick={onClose}
           >
-            {notice.full ? "稍后处理" : "知道了"}
+            {notice.full ? t("common.later") : t("common.gotIt")}
           </button>
           {updating && (
             <span className="favorite-capacity-updating" role="status">
               <LoaderCircle size={14} />
-              正在调整…
+              {t("favorites.adjusting")}
             </span>
           )}
         </div>
@@ -14186,7 +15109,7 @@ function FavoriteCapacityDialog({
 }
 
 function formatFavoriteCapacityLimit(bytes?: number | null) {
-  if (bytes == null) return "不限";
+  if (bytes == null) return t("favorites.unlimited");
   return bytes >= 1024 * 1024 * 1024 ? "1 GB" : "256 MB";
 }
 
@@ -14200,9 +15123,11 @@ function formatFavoriteCapacityUsed(bytes: number) {
 
 function RuntimeUnavailableDialog({
   detail,
+  shutdownSeconds,
   onClose,
 }: {
   detail: string;
+  shutdownSeconds: number | null;
   onClose: () => void;
 }) {
   return (
@@ -14248,6 +15173,12 @@ function RuntimeUnavailableDialog({
           reconnects. After you close this dialog, the warning banner will
           remain visible.
         </p>
+        {shutdownSeconds !== null && (
+          <p className="runtime-unavailable-hint" role="timer">
+            This page will close itself in {shutdownSeconds} second
+            {shutdownSeconds === 1 ? "" : "s"} because the runtime is gone.
+          </p>
+        )}
       </section>
     </div>
   );
@@ -14396,12 +15327,9 @@ function NewSessionDialog({
               ))}
             </datalist>
           </label>
-          <p className="mem-hint">
-            Choose a suggested workspace or type an absolute directory path that
-            exists on the Timem host.
-          </p>
+          <p className="mem-hint">{t("beta.workspaceHint")}</p>
           <details className="session-runtime-overrides">
-            <summary>Runtime environment</summary>
+            <summary data-expanded-label={t("sessions.overridesHide")} data-collapsed-label={t("sessions.overridesShow")}>{t("beta.runtimeEnv")}</summary>
             <div className="session-runtime-grid">
               {SESSION_RUNTIME_FIELDS.map(([key, label, kind]) => (
                 <label key={key}>
@@ -14536,50 +15464,98 @@ function NewSessionDialog({
 }
 
 function ModelEndpointDeleteDialog({
-  endpoint,
+  endpoints,
+  pending,
   onClose,
   onConfirm,
 }: {
-  endpoint: ModelEndpoint;
+  endpoints: ModelEndpoint[];
+  pending: boolean;
   onClose: () => void;
   onConfirm: () => void;
 }) {
-  return (
+  const descriptionId = "endpoint-delete-dialog-description";
+  const close = () => onClose();
+  const visibleNames = endpoints.slice(0, 8).map((endpoint) => endpoint.name);
+  const hiddenCount = endpoints.length - visibleNames.length;
+  return createPortal(
     <div
       className="modal-backdrop endpoint-delete-backdrop"
       role="presentation"
-      onClick={onClose}
+      onClick={close}
     >
       <section
         className="decision-modal session-delete-dialog"
         role="dialog"
         aria-modal="true"
-        aria-label={`Delete ${endpoint.name}`}
+        aria-label={t("endpoints.deleteDialogTitle", {
+          count: endpoints.length,
+        })}
+        aria-describedby={descriptionId}
         onClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            close();
+          }
+        }}
       >
         <div className="modal-titlebar">
           <div>
-            <span className="eyebrow">DELETE ENDPOINT</span>
-            <h2>Delete “{endpoint.name}”?</h2>
+            <span className="eyebrow">
+              {t("endpoints.deleteDialogEyebrow")}
+            </span>
+            <h2>
+              {t("endpoints.deleteDialogTitle", {
+                count: endpoints.length,
+              })}
+            </h2>
           </div>
-          <button type="button" className="icon-button" onClick={onClose}>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={close}
+          >
             <X size={16} />
           </button>
         </div>
-        <p>
-          This removes the shared endpoint from every Session dropdown. Existing
-          Session settings are not changed.
-        </p>
+        <p id={descriptionId}>{t("endpoints.deleteDialogDescription")}</p>
+        <ul className="endpoint-delete-list">
+          {visibleNames.map((name) => (
+            <li key={name}>{name}</li>
+          ))}
+          {hiddenCount > 0 && (
+            <li>{t("endpoints.deleteMore", { count: hiddenCount })}</li>
+          )}
+        </ul>
         <div className="decision-actions">
-          <button type="button" className="secondary" onClick={onClose}>
-            Cancel
+          <button
+            type="button"
+            className="secondary"
+            onClick={close}
+          >
+            {t("common.cancel")}
           </button>
-          <button type="button" className="danger" onClick={onConfirm}>
-            <Trash2 size={15} /> Delete endpoint
+          <button
+            type="button"
+            className="danger"
+            disabled={pending || endpoints.length === 0}
+            onClick={onConfirm}
+          >
+            {pending ? (
+              <LoaderCircle size={15} />
+            ) : (
+              <Trash2 size={15} />
+            )}{" "}
+            {pending
+              ? t("endpoints.deleting")
+              : t("endpoints.deleteConfirm", { count: endpoints.length })}
           </button>
         </div>
       </section>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

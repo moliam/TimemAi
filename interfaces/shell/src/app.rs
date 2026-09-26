@@ -198,6 +198,7 @@ pub fn run(args: Vec<String>) {
             scratch_file: absolute_path(memory_dir.join("scratch_notes.jsonl")),
             api_audit_file: absolute_path(audit_file.clone()),
             action_audit_file: absolute_path(action_audit_file.clone()),
+            config_paths: Vec::new(),
         },
     );
     if let Some(capabilities_dir) =
@@ -252,6 +253,7 @@ pub fn run(args: Vec<String>) {
                 runtime: "timem_native_shell",
                 run_bash_target: "user_local_machine",
                 additional_context: context.as_deref(),
+                images: &[],
             },
             &mut ui,
             Some(&mut profiler),
@@ -516,6 +518,7 @@ pub fn run(args: Vec<String>) {
                 runtime: "timem_native_shell",
                 run_bash_target: "user_local_machine",
                 additional_context: turn_additional_context.as_deref(),
+                images: &[],
             },
             &mut turn_ui,
             Some(&mut profiler),
@@ -633,6 +636,7 @@ fn new_shell_session(
 ) -> StoredSession {
     let session_id = "shell_default".to_string();
     StoredSession {
+        model_endpoint_id: None,
         session_id: session_id.clone(),
         display_name: "ShellSession".to_string(),
         group_id: None,
@@ -3452,6 +3456,28 @@ fn render_startup_banner(
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
 ) -> String {
+    render_startup_banner_at_width(
+        space,
+        config,
+        audit_file,
+        action_audit_file,
+        bash_approval_mode,
+        work_instruction_mode,
+        terminal_width().saturating_sub(1),
+    )
+}
+
+// Banner layout must not depend on the ambient terminal width: tests pin the
+// width so content assertions stay stable regardless of the host terminal.
+fn render_startup_banner_at_width(
+    space: &str,
+    config: &crate::ModelServiceConfig,
+    audit_file: &std::path::Path,
+    action_audit_file: &std::path::Path,
+    bash_approval_mode: BashApprovalMode,
+    work_instruction_mode: WorkInstructionLoadMode,
+    terminal_width: usize,
+) -> String {
     let report = crate::runtime_config_report(
         config,
         crate::RuntimeConfigReportInput {
@@ -3467,7 +3493,7 @@ fn render_startup_banner(
         .into_iter()
         .map(config_report_item_to_table_item)
         .collect::<Vec<_>>();
-    boxed_config_table(&items)
+    boxed_config_table_at_width(&items, terminal_width)
 }
 
 fn config_report_item_to_table_item(item: crate::RuntimeConfigReportItem) -> ConfigTableItem {
@@ -3506,10 +3532,6 @@ fn config_row_description(kind: crate::RuntimeConfigRowKind) -> &'static str {
         crate::RuntimeConfigRowKind::ApiAudit => "payload 记录",
         crate::RuntimeConfigRowKind::ActionAudit => "action 记录",
     }
-}
-
-fn boxed_config_table(items: &[ConfigTableItem]) -> String {
-    boxed_config_table_at_width(items, terminal_width().saturating_sub(1))
 }
 
 fn boxed_config_table_at_width(items: &[ConfigTableItem], terminal_width: usize) -> String {

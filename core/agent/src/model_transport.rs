@@ -50,6 +50,7 @@ struct NativeHttpResponse {
     elapsed: Duration,
     response_bytes: usize,
     redirect_count: usize,
+    stream_error: Option<(String, serde_json::Value)>,
 }
 
 impl NativeHttpTransport {
@@ -97,6 +98,7 @@ impl NativeHttpTransport {
         request: &PreparedModelHttpRequest,
         inactivity_timeout: Duration,
         should_cancel: &mut dyn FnMut() -> bool,
+        on_content: Option<&mut dyn FnMut(&serde_json::Value)>,
     ) -> Result<NativeHttpResponse, String> {
         let client = self.client_for(config)?;
         let headers = request_headers(request)?;
@@ -111,10 +113,12 @@ impl NativeHttpTransport {
             config.http_transport.allow_cross_origin_redirects,
             inactivity_timeout,
             should_cancel,
+            on_content,
         ))
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_with_redirects(
     client: &reqwest::Client,
     mut url: Url,
@@ -123,6 +127,7 @@ async fn execute_with_redirects(
     allow_cross_origin_redirects: bool,
     inactivity_timeout: Duration,
     should_cancel: &mut dyn FnMut() -> bool,
+    mut on_content: Option<&mut dyn FnMut(&serde_json::Value)>,
 ) -> Result<NativeHttpResponse, String> {
     let started = Instant::now();
     let mut redirect_count = 0;
@@ -197,6 +202,19 @@ async fn execute_with_redirects(
         {
             return Err(model_response_too_large());
         }
+        let is_sse = (200..300).contains(&status)
+            && response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| {
+                    v.split(';')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .eq_ignore_ascii_case("text/event-stream")
+                });
+        let mut stream = crate::model_stream::OpenAiContentStream::default();
         let mut response_body = Vec::new();
         loop {
             let chunk = wait_for_progress(
@@ -213,6 +231,22 @@ async fn execute_with_redirects(
                         return Err(model_response_too_large());
                     }
                     response_body.extend_from_slice(&bytes);
+                    if is_sse {
+                        if let Some(observer) = on_content.as_deref_mut() {
+                            if let Err(error) = stream.push_events(&bytes, observer) {
+                                return Ok(NativeHttpResponse {
+                                    status,
+                                    body: String::new(), // Never retain failed response content in audit.
+                                    request_id,
+                                    ttfb,
+                                    elapsed: started.elapsed(),
+                                    response_bytes: response_body.len(),
+                                    redirect_count,
+                                    stream_error: Some((error, stream.diagnostics())),
+                                });
+                            }
+                        }
+                    }
                 }
                 None => break,
             }
@@ -226,6 +260,7 @@ async fn execute_with_redirects(
             elapsed: started.elapsed(),
             response_bytes,
             redirect_count,
+            stream_error: None,
         });
     }
 }
@@ -403,10 +438,13 @@ fn map_reqwest_error(error: reqwest::Error, stage: &str) -> String {
         format!("model_connect_error: stage={stage} {detail}")
     } else if error.is_body() || error.is_decode() {
         format!("model_body_error: stage={stage} {detail}")
+    } else if error.is_request() && stage == "response_headers" {
+        // URL parsing, headers, request serialization, and client construction
+        // are validated before this mapper is called. An is_request() failure
+        // while awaiting response headers therefore happened during send/I/O,
+        // even when reqwest/hyper does not expose a more specific error kind.
+        format!("model_network_error: stage={stage} {detail}")
     } else if has_retryable_socket_error(&error) || is_transient_connection_failure(&lower) {
-        // reqwest/hyper can mark a socket failure while sending a request as
-        // is_request(). Preserve non-retryable request-construction errors, but
-        // normalize known local/peer transport failures as retryable network I/O.
         format!("model_network_error: stage={stage} {detail}")
     } else if error.is_request() {
         format!("model_request_error: stage={stage} {detail}")
@@ -419,7 +457,19 @@ fn has_retryable_socket_error(error: &(dyn std::error::Error + 'static)) -> bool
     let mut current = Some(error);
     while let Some(item) = current {
         if let Some(io_error) = item.downcast_ref::<std::io::Error>() {
-            if matches!(io_error.kind(), std::io::ErrorKind::AddrNotAvailable) {
+            if matches!(
+                io_error.kind(),
+                std::io::ErrorKind::AddrNotAvailable
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::WouldBlock
+            ) {
                 return true;
             }
         }
@@ -441,6 +491,7 @@ fn is_transient_connection_failure(error_chain: &str) -> bool {
         "peer closed connection",
         "broken pipe",
         "unexpected eof",
+        "unexpected end of file",
         "incomplete message",
         "http2 framing",
         "h2 protocol error",
@@ -475,14 +526,26 @@ impl HttpModelClient {
         http_request: PreparedModelHttpRequest,
         audit_file: &Path,
         should_cancel: &mut dyn FnMut() -> bool,
+        mut on_content: Option<&mut dyn FnMut(&serde_json::Value)>,
     ) -> Result<LlmResponse, String> {
-        let first =
-            self.execute_model_http_request(config, &http_request, audit_file, should_cancel)?;
+        let first = self.execute_model_http_request(
+            config,
+            &http_request,
+            audit_file,
+            should_cancel,
+            &mut on_content,
+        )?;
 
         if should_retry_without_openai_cache_control(config, &http_request, &first) {
             let fallback_request = without_openai_compatible_cache_control(&http_request);
             return self
-                .execute_model_http_request(config, &fallback_request, audit_file, should_cancel)?
+                .execute_model_http_request(
+                    config,
+                    &fallback_request,
+                    audit_file,
+                    should_cancel,
+                    &mut on_content,
+                )?
                 .result;
         }
 
@@ -495,19 +558,45 @@ impl HttpModelClient {
         http_request: &PreparedModelHttpRequest,
         audit_file: &Path,
         should_cancel: &mut dyn FnMut() -> bool,
+        on_content: &mut Option<&mut dyn FnMut(&serde_json::Value)>,
     ) -> Result<ModelHttpResponseInterpretation, String> {
-        let _ = append_audit_event(
-            audit_file,
-            &model_request_audit_event(config, &http_request.model_request),
-        );
+        let audit_request_id = crate::unique_id("model_request");
+        let mut request_audit = model_request_audit_event(config, &http_request.model_request);
+        request_audit["audit_request_id"] = serde_json::json!(audit_request_id);
+        append_audit_event(audit_file, &request_audit)
+            .map_err(|_| "model_audit_write_failed:request".to_string())?;
         let timeout = Duration::from_secs(config.timeout_secs);
-        let response = self
-            .transport()?
-            .execute(config, http_request, timeout, should_cancel)?;
+        let observer = on_content
+            .as_mut()
+            .map(|callback| &mut **callback as &mut dyn FnMut(&serde_json::Value));
+        let response =
+            self.transport()?
+                .execute(config, http_request, timeout, should_cancel, observer)?;
+        if let Some((error, diagnostics)) = &response.stream_error {
+            let event = serde_json::json!({
+                "type": "llm_response", "time_ms": crate::now_ms(),
+                "audit_request_id": audit_request_id,
+                "status": response.status, "error_kind": "stream_decode_error",
+                "error": error, "content_type": "text/event-stream",
+                "stream_diagnostics": diagnostics,
+                "transport": {
+                    "request_id": response.request_id.as_deref().filter(|id| id.len() <= 128 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))),
+                    "ttfb_ms": response.ttfb.as_millis(),
+                    "elapsed_ms": response.elapsed.as_millis(),
+                    "response_bytes": response.response_bytes,
+                    "redirect_count": response.redirect_count,
+                },
+                "body_omitted": true,
+            });
+            append_audit_event(audit_file, &event)
+                .map_err(|_| format!("{error}; model_audit_write_failed:stream_failure"))?;
+            return Err(error.clone());
+        }
         let interpreted =
             interpret_model_http_response(config, response.status, &response.body, "");
         let mut response_audit =
             model_response_audit_event(interpreted.status, &interpreted.raw_json);
+        response_audit["audit_request_id"] = serde_json::json!(audit_request_id);
         if let Some(object) = response_audit.as_object_mut() {
             object.insert(
                 "transport".to_string(),
@@ -539,6 +628,7 @@ impl ModelClient for HttpModelClient {
             http_request,
             audit_file,
             should_cancel,
+            None,
         )
     }
 
@@ -555,6 +645,32 @@ impl ModelClient for HttpModelClient {
             http_request,
             audit_file,
             should_cancel,
+            None,
+        )
+    }
+
+    fn call_model_interaction_streaming(
+        &mut self,
+        config: &ModelServiceConfig,
+        request: &ModelInteractionRequest,
+        audit_file: &Path,
+        should_cancel: &mut dyn FnMut() -> bool,
+        on_content: &mut dyn FnMut(&serde_json::Value),
+    ) -> Result<LlmResponse, String> {
+        // This entry point promises incremental delivery. Do not depend on a
+        // separately configured TIMEM_STREAM flag: the browser preference only
+        // controls presentation, while transport streaming is Core-owned.
+        let mut streaming_config = config.clone();
+        if streaming_config.api_protocol == ApiProtocol::OpenAiCompatible {
+            streaming_config.openai_compatible.stream = true;
+        }
+        let http_request = prepare_model_interaction_http_request(&streaming_config, request);
+        self.execute_prepared_request_with_cache_fallback(
+            &streaming_config,
+            http_request,
+            audit_file,
+            should_cancel,
+            Some(on_content),
         )
     }
 }

@@ -25,7 +25,7 @@ impl PromptComponentRole {
     pub(crate) fn prompt_type_hint(&self, kind: &str) -> String {
         match self {
             PromptComponentRole::User => match kind {
-                "user_supplement" => "user_supplement".to_string(),
+                "user_supplement" | "user_resume_directly" => kind.to_string(),
                 _ => "user_question".to_string(),
             },
             PromptComponentRole::Assistant { .. } => match kind {

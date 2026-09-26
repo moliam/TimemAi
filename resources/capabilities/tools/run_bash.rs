@@ -532,7 +532,10 @@ impl ShellJobManager {
                 }
             }
             let elapsed = started.elapsed();
-            let handoff = if elapsed >= self.long_running_prompt_after && elapsed < timeout {
+            let force_handoff = runtime.should_force_handoff() && elapsed < timeout;
+            let handoff = if force_handoff
+                || (elapsed >= self.long_running_prompt_after && elapsed < timeout)
+            {
                 Some((
                     true,
                     format!(
@@ -1545,6 +1548,7 @@ pub(crate) fn execute_run_bash_action(
     let turn_id = core.current_action_turn_id();
     let cwd = core.current_prompt_cwd().to_path_buf();
     let tail_out = action.input_bool("tail_out");
+    let edited_files = action.input_list("edit");
     let tool_call_id = action.call_id.as_str();
     execute_run_bash_with_tail(
         &command_to_run,
@@ -1553,6 +1557,7 @@ pub(crate) fn execute_run_bash_action(
         timeout_ms,
         interval_ms,
         action.input_u64("once_timeout_ms").unwrap_or(5000),
+        edited_files,
         core.bash_approval_mode,
         &core.shell_jobs,
         &session_id,
@@ -1587,6 +1592,7 @@ pub(crate) fn execute_run_bash(
         timeout_ms,
         interval_ms,
         once_timeout_ms,
+        Vec::new(),
         approval_mode,
         shell_jobs,
         session_id,
@@ -1606,6 +1612,7 @@ pub(crate) fn execute_run_bash_with_tail(
     timeout_ms: i64,
     interval_ms: Option<u64>,
     once_timeout_ms: u64,
+    edited_files: Vec<String>,
     approval_mode: BashApprovalMode,
     shell_jobs: &ShellJobManager,
     session_id: &str,
@@ -1708,6 +1715,7 @@ pub(crate) fn execute_run_bash_with_tail(
                 timeout_ms,
                 interval_ms,
                 once_timeout_ms,
+                edited_files,
                 session_id: session_id.to_string(),
                 turn_id: turn_id.to_string(),
                 tool_call_id: tool_call_id.to_string(),
@@ -1719,18 +1727,17 @@ pub(crate) fn execute_run_bash_with_tail(
             continuation: None,
         });
     }
-    if background {
-        return ActionExecution::Completed(shell_jobs.spawn_background_outcome(
+    let mut outcome = if background {
+        shell_jobs.spawn_background_outcome(
             command_to_run,
             cwd,
             session_id,
             turn_id,
             tool_call_id,
             tail_out,
-        ));
-    }
-    if let Some(interval_ms) = interval_ms {
-        return ActionExecution::Completed(execute_polling_bash_outcome_with_tail(
+        )
+    } else if let Some(interval_ms) = interval_ms {
+        execute_polling_bash_outcome_with_tail(
             command_to_run,
             cwd,
             interval_ms,
@@ -1738,18 +1745,32 @@ pub(crate) fn execute_run_bash_with_tail(
             once_timeout_ms,
             tail_out,
             runtime,
-        ));
+        )
+    } else {
+        shell_jobs.run_with_timeout_outcome(
+            command_to_run,
+            cwd,
+            timeout_ms,
+            session_id,
+            turn_id,
+            tool_call_id,
+            tail_out,
+            runtime,
+        )
+    };
+    append_edited_files_note(&mut outcome.text, &edited_files);
+    ActionExecution::Completed(outcome)
+}
+
+fn append_edited_files_note(text: &mut String, edited_files: &[String]) {
+    if edited_files.is_empty() {
+        return;
     }
-    ActionExecution::Completed(shell_jobs.run_with_timeout_outcome(
-        command_to_run,
-        cwd,
-        timeout_ms,
-        session_id,
-        turn_id,
-        tool_call_id,
-        tail_out,
-        runtime,
-    ))
+    text.push_str(
+        "
+edited_files: ",
+    );
+    text.push_str(&edited_files.join(", "));
 }
 
 #[cfg(all(test, unix))]
@@ -1780,6 +1801,7 @@ pub(crate) fn execute_approved_bash(
         "unknown_tool_call",
         is_regular_command,
         false,
+        &[],
         request,
         shell_jobs,
         runtime,
@@ -1799,6 +1821,7 @@ pub(crate) fn execute_approved_bash_with_tail(
     tool_call_id: &str,
     _is_regular_command: bool,
     tail_out: bool,
+    edited_files: &[String],
     request: &ApprovalRequest,
     shell_jobs: &ShellJobManager,
     runtime: &mut dyn ActionRuntime,
@@ -1858,6 +1881,7 @@ pub(crate) fn execute_approved_bash_with_tail(
         "\napproval_id: {}\napproval_status: approved_by_user",
         request.approval_id
     ));
+    append_edited_files_note(&mut outcome.text, edited_files);
     outcome
 }
 
@@ -1968,6 +1992,21 @@ pub(crate) fn execute_polling_bash_outcome_with_tail(
                 last_error.as_deref(),
             );
         }
+        if runtime.should_force_handoff() {
+            return polling_result(
+                command,
+                "dispatch_timeout_interrupted",
+                attempts,
+                started.elapsed(),
+                last_status,
+                last_signal,
+                &last_stdout,
+                &last_stderr,
+                &last_output,
+                tail_out,
+                last_error.as_deref(),
+            );
+        }
 
         attempts = attempts.saturating_add(1);
         let result = execute_one_bash_structured(command, cwd, once_timeout_ms as i64, runtime);
@@ -2035,6 +2074,7 @@ fn polling_result(
         "finished" => "The polling command finished because the check command exited with code 0.",
         "timeout" => "The polling command stopped because the total wait budget was reached before the check command exited with code 0.",
         "cancelled" => "The polling command was cancelled before the check command exited with code 0.",
+        "dispatch_timeout_interrupted" => "The polling wait was interrupted because an accepted user supplement reached its dispatch deadline; the waited task was not cancelled by the user.",
         _ => "The polling command stopped.",
     };
     let mut out = format!(
@@ -2058,7 +2098,7 @@ fn polling_result(
     let status = match state {
         "finished" => ActionStatus::Completed,
         "timeout" => ActionStatus::Timeout,
-        "cancelled" => ActionStatus::Cancelled,
+        "cancelled" | "dispatch_timeout_interrupted" => ActionStatus::Cancelled,
         _ => ActionStatus::Failed,
     };
     ActionOutcome::new(status, out).with_bash_result(BashResultEvidence {
@@ -2070,7 +2110,7 @@ fn polling_result(
         timed_out: false,
         pid_kind: None,
         error_type: match state {
-            "cancelled" => Some("Cancelled".to_string()),
+            "cancelled" | "dispatch_timeout_interrupted" => Some("Cancelled".to_string()),
             "not_executed" => Some("InvalidInput".to_string()),
             _ => None,
         },
