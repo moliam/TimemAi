@@ -39,6 +39,20 @@ const USAGE_FIELDS = [
   "shrunk_tokens",
 ] as const;
 
+function sortMessagesStable<T extends { created_at_ms: number }>(
+  messages: T[],
+): T[] {
+  if (messages.length < 2) return messages;
+  return messages
+    .map((message, index) => ({ message, index }))
+    .sort(
+      (left, right) =>
+        left.message.created_at_ms - right.message.created_at_ms ||
+        left.index - right.index,
+    )
+    .map((entry) => entry.message);
+}
+
 export function trimMessages<T>(messages: T[]) {
   return messages.length > MAX_RENDERED_MESSAGES
     ? messages.slice(-MAX_RENDERED_MESSAGES)
@@ -843,7 +857,11 @@ function withActionElapsed(
 export function boundSessionHistory(session: Session): Session {
   return {
     ...session,
-    messages: trimMessages(session.messages),
+    // Host may append a queued turn's user message only when it is dispatched
+    // ("next bus"), which is later than its submit time. Present the message
+    // stream by authoritative creation time so an earlier submitted question
+    // never renders below a later one. Stable sort keeps equal-time order.
+    messages: trimMessages(sortMessagesStable(session.messages)),
     turns: trimTurns(session.turns).map((turn) => ({
       ...turn,
       events: turn.events,
