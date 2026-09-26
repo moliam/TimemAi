@@ -200,6 +200,11 @@ await evaluate(`(() => {
   for (const row of imported) row.querySelector('.endpoint-delete-checkbox').click();
   return true;
 })()`);
+const checkboxesAligned = await evaluate(`(() => {
+  const boxes = [...document.querySelectorAll('.endpoint-delete-checkbox')];
+  return boxes.length === 2 && boxes.every(box => box.getBoundingClientRect().x === boxes[0].getBoundingClientRect().x);
+})()`);
+assert(checkboxesAligned === true, "endpoint delete checkboxes share the same horizontal position");
 await waitFor(() => evaluate(`(() => {
   const button = [...document.querySelectorAll('.endpoint-settings-toolbar button')].find(b => /delete selected|删除所选/i.test(b.textContent || ''));
   return !!button && !button.disabled && /2/.test(button.textContent || '');
@@ -209,6 +214,23 @@ await evaluate(`(() => {
   button.click(); return true;
 })()`);
 await waitFor(() => evaluate("!!document.querySelector('.endpoint-delete-backdrop')"), "endpoint delete confirmation appears");
+const cancelClosed = await evaluate(`(() => {
+  const button = [...document.querySelectorAll('.endpoint-delete-backdrop .decision-actions button')].find(b => /cancel|取消/i.test(b.textContent || ''));
+  if (!button || button.disabled) throw new Error('cancel button unavailable');
+  button.click();
+  return new Promise(resolve => setTimeout(() => resolve(!document.querySelector('.endpoint-delete-backdrop')), 0));
+})()`);
+assert(cancelClosed === true, "endpoint delete confirmation closes on cancel");
+await waitFor(() => evaluate(`(() => {
+  const boxes = [...document.querySelectorAll('.endpoint-delete-checkbox')];
+  return boxes.length === 2 && boxes.every(box => box.checked);
+})()`), "cancel preserves delete selection");
+await evaluate(`(() => {
+  const button = [...document.querySelectorAll('.endpoint-settings-toolbar button')].find(b => /delete selected|删除所选/i.test(b.textContent || ''));
+  if (!button || button.disabled) throw new Error('delete selected button unavailable after cancel');
+  button.click(); return true;
+})()`);
+await waitFor(() => evaluate("!!document.querySelector('.endpoint-delete-backdrop')"), "endpoint delete confirmation reopens after cancel");
 const confirmationClosedWithoutWaitingForHost = await evaluate(`(() => {
   const button = [...document.querySelectorAll('.endpoint-delete-backdrop .decision-actions button')].find(b => /delete 2 endpoints|删除 2 个接入点/i.test(b.textContent || ''));
   if (!button || button.disabled) throw new Error('confirm batch delete button unavailable');

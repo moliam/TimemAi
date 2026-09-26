@@ -4284,6 +4284,10 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
   gap: 10px;
   cursor: pointer;
 }
+.endpoint-settings-select-label > .endpoint-settings-select-body {
+  display: grid;
+  align-items: start;
+}
 .endpoint-settings-select-body { min-width: 0; display: grid; gap: 5px; }
 .endpoint-delete-checkbox {
   width: 15px;

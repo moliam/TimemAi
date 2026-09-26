@@ -135,6 +135,8 @@ for one confirmation and removes the batch atomically from the shared store.
 The confirmation closes immediately after the user confirms it, and a
 non-blocking pending indicator remains until the authoritative endpoint update
 arrives.
+Cancel, Escape, and the backdrop remain available while a deletion is pending,
+and cancel preserves the current selection for adjustment.
 
 ### Importing endpoints from other CLI ecosystems
 
