@@ -532,7 +532,10 @@ impl ShellJobManager {
                 }
             }
             let elapsed = started.elapsed();
-            let handoff = if elapsed >= self.long_running_prompt_after && elapsed < timeout {
+            let force_handoff = runtime.should_force_handoff() && elapsed < timeout;
+            let handoff = if force_handoff
+                || (elapsed >= self.long_running_prompt_after && elapsed < timeout)
+            {
                 Some((
                     true,
                     format!(
@@ -1968,6 +1971,21 @@ pub(crate) fn execute_polling_bash_outcome_with_tail(
                 last_error.as_deref(),
             );
         }
+        if runtime.should_force_handoff() {
+            return polling_result(
+                command,
+                "dispatch_timeout_interrupted",
+                attempts,
+                started.elapsed(),
+                last_status,
+                last_signal,
+                &last_stdout,
+                &last_stderr,
+                &last_output,
+                tail_out,
+                last_error.as_deref(),
+            );
+        }
 
         attempts = attempts.saturating_add(1);
         let result = execute_one_bash_structured(command, cwd, once_timeout_ms as i64, runtime);
@@ -2035,6 +2053,7 @@ fn polling_result(
         "finished" => "The polling command finished because the check command exited with code 0.",
         "timeout" => "The polling command stopped because the total wait budget was reached before the check command exited with code 0.",
         "cancelled" => "The polling command was cancelled before the check command exited with code 0.",
+        "dispatch_timeout_interrupted" => "The polling wait was interrupted because an accepted user supplement reached its dispatch deadline; the waited task was not cancelled by the user.",
         _ => "The polling command stopped.",
     };
     let mut out = format!(
@@ -2058,7 +2077,7 @@ fn polling_result(
     let status = match state {
         "finished" => ActionStatus::Completed,
         "timeout" => ActionStatus::Timeout,
-        "cancelled" => ActionStatus::Cancelled,
+        "cancelled" | "dispatch_timeout_interrupted" => ActionStatus::Cancelled,
         _ => ActionStatus::Failed,
     };
     ActionOutcome::new(status, out).with_bash_result(BashResultEvidence {
@@ -2070,7 +2089,7 @@ fn polling_result(
         timed_out: false,
         pid_kind: None,
         error_type: match state {
-            "cancelled" => Some("Cancelled".to_string()),
+            "cancelled" | "dispatch_timeout_interrupted" => Some("Cancelled".to_string()),
             "not_executed" => Some("InvalidInput".to_string()),
             _ => None,
         },

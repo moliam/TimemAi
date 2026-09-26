@@ -85,6 +85,7 @@ pub struct CoreSessionWorkerConfig {
     pub workspace: CoreSessionWorkerWorkspace,
     pub assistant_speaker_name: Option<String>,
     pub continue_supplements_after_final_answer: bool,
+    pub user_supplement_model_dispatch_timeout: Duration,
 }
 
 impl CoreSessionWorkerConfig {
@@ -94,6 +95,8 @@ impl CoreSessionWorkerConfig {
             workspace,
             assistant_speaker_name: None,
             continue_supplements_after_final_answer: true,
+            user_supplement_model_dispatch_timeout:
+                agent_core::USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT,
         }
     }
 
@@ -387,6 +390,7 @@ struct QueuedSupplement {
     text: String,
     additional_context: Option<String>,
     command_id: Option<String>,
+    queued_at: Instant,
 }
 
 enum PendingRuntimeUpdate {
@@ -633,6 +637,7 @@ impl CoreSessionWorkerHandle {
                         text: supplement.text,
                         additional_context: supplement.additional_context,
                         command_id,
+                        queued_at: Instant::now(),
                     })
                     .collect(),
                 direct_resume,
@@ -704,6 +709,7 @@ impl CoreSessionWorkerHandle {
                     text: supplement.into(),
                     additional_context: None,
                     command_id: None,
+                    queued_at: Instant::now(),
                 });
                 true
             })
@@ -733,6 +739,7 @@ impl CoreSessionWorkerHandle {
             text: supplement.into(),
             additional_context: None,
             command_id: None,
+            queued_at: Instant::now(),
         });
         Ok(true)
     }
@@ -792,6 +799,7 @@ impl CoreSessionWorkerHandle {
             text: supplement.into(),
             additional_context,
             command_id,
+            queued_at: Instant::now(),
         });
         Ok(true)
     }
@@ -1603,6 +1611,9 @@ impl CoreSessionWorker {
                 current_turn_active: None,
                 phase: None,
                 accept_supplements: true,
+                user_supplement_model_dispatch_timeout: worker_config
+                    .user_supplement_model_dispatch_timeout,
+                supplement_dispatch_timeout: None,
                 continue_supplements_after_final_answer,
                 pending_bash_always_allow: false,
                 pending_runtime_updates,
@@ -1988,6 +1999,8 @@ struct WorkerTurnUi {
     current_turn_active: Option<Arc<AtomicBool>>,
     phase: Option<String>,
     accept_supplements: bool,
+    user_supplement_model_dispatch_timeout: Duration,
+    supplement_dispatch_timeout: Option<Duration>,
     continue_supplements_after_final_answer: bool,
     pending_bash_always_allow: bool,
     pending_runtime_updates: Arc<Mutex<Vec<PendingRuntimeUpdate>>>,
@@ -2273,6 +2286,7 @@ impl TurnUi for WorkerTurnUi {
     }
 
     fn drain_user_supplements_with_context(&mut self) -> Vec<agent_core::UserSupplement> {
+        self.supplement_dispatch_timeout = None;
         if !self.accept_supplements {
             return Vec::new();
         }
@@ -2280,6 +2294,23 @@ impl TurnUi for WorkerTurnUi {
             .lock()
             .map(|mut mailbox| self.accept_queued_supplements(std::mem::take(&mut mailbox.queue)))
             .unwrap_or_default()
+    }
+
+    fn take_user_supplement_model_dispatch_timeout(&mut self) -> Option<Duration> {
+        if !self.accept_supplements {
+            self.supplement_dispatch_timeout = None;
+            return None;
+        }
+        if self.supplement_dispatch_timeout.is_some() {
+            return self.supplement_dispatch_timeout;
+        }
+        let timeout = self.supplement_mailbox.lock().ok().and_then(|mailbox| {
+            let oldest = mailbox.queue.first()?;
+            let waited = oldest.queued_at.elapsed();
+            (waited >= self.user_supplement_model_dispatch_timeout).then_some(waited)
+        });
+        self.supplement_dispatch_timeout = timeout;
+        timeout
     }
 
     fn continue_supplements_after_final_answer(&self) -> bool {
@@ -2452,6 +2483,7 @@ impl WorkerTurnUi {
     }
 
     fn take_or_close_supplements_for_main_context(&mut self) -> Vec<agent_core::UserSupplement> {
+        self.supplement_dispatch_timeout = None;
         self.supplement_mailbox
             .lock()
             .map(|mut mailbox| {
@@ -2465,6 +2497,7 @@ impl WorkerTurnUi {
     }
 
     fn close_supplements_for_main_context(&mut self) -> Vec<agent_core::UserSupplement> {
+        self.supplement_dispatch_timeout = None;
         self.supplement_mailbox
             .lock()
             .map(|mut mailbox| {

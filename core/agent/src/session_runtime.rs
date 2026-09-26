@@ -497,6 +497,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
                             && (!matches!(step, CoreStep::Final(_))
                                 || continue_supplements_after_final_answer)
                         {
+                            let dispatch_waited = action_runtime.dispatch_timeout;
                             let mut all_supplements = action_runtime
                                 .take_pending_supplements()
                                 .into_iter()
@@ -506,6 +507,14 @@ fn run_session_turn_with_model_client_and_reminder_override(
                                 ui.drain_user_supplements_with_context(),
                             ));
                             if !all_supplements.is_empty() {
+                                if let Some(waited) = dispatch_waited {
+                                    core.submit_prompt_component(
+                                        PromptComponentRole::system(),
+                                        "user_supplement_action_dispatch_timeout",
+                                        user_supplement_dispatch_timeout_component_text(waited),
+                                        "turn_runtime",
+                                    );
+                                }
                                 if let Some(next_step) = core
                                     .append_user_supplements_with_context_and_audit(
                                         all_supplements,
@@ -593,6 +602,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
                 user_wait_this_turn =
                     user_wait_this_turn.saturating_add(action_runtime.user_wait());
                 if !is_terminal_stop(&step) {
+                    let dispatch_waited = action_runtime.dispatch_timeout;
                     let mut all_supplements = action_runtime
                         .take_pending_supplements()
                         .into_iter()
@@ -602,6 +612,14 @@ fn run_session_turn_with_model_client_and_reminder_override(
                         ui.drain_user_supplements_with_context(),
                     ));
                     if !all_supplements.is_empty() {
+                        if let Some(waited) = dispatch_waited {
+                            core.submit_prompt_component(
+                                PromptComponentRole::system(),
+                                "user_supplement_action_dispatch_timeout",
+                                user_supplement_dispatch_timeout_component_text(waited),
+                                "turn_runtime",
+                            );
+                        }
                         if let Some(next_step) = core
                             .append_user_supplements_with_context_and_audit(
                                 all_supplements,
@@ -718,6 +736,13 @@ fn run_session_turn_with_model_client_and_reminder_override(
     outcome
 }
 
+fn user_supplement_dispatch_timeout_component_text(waited: Duration) -> String {
+    format!(
+        "USER_SUPPLEMENT_ACTION_DISPATCH_TIMEOUT\nThe next model dispatch was delayed because the oldest accepted user supplement waited {} ms while local work held the turn. That local work may have been interrupted and its result may be missing or partial; do not invent it. Reassess the authoritative runtime state below, including still-running work, then apply the following user input.",
+        waited.as_millis()
+    )
+}
+
 fn publish_turn_projection(ui: &mut dyn TurnUi, projection: Option<TurnProjection>) {
     if let Some(projection) = projection {
         ui.on_turn_projection(&projection);
@@ -761,6 +786,7 @@ struct TurnActionRuntime<'a> {
     user_wait: Duration,
     model_response_progress: Option<(bool, bool)>,
     preview: Option<(&'a mut TurnResponsePreview, &'a str, &'a str)>,
+    dispatch_timeout: Option<Duration>,
 }
 
 impl<'a> TurnActionRuntime<'a> {
@@ -771,6 +797,7 @@ impl<'a> TurnActionRuntime<'a> {
             user_wait: Duration::ZERO,
             model_response_progress: None,
             preview: None,
+            dispatch_timeout: None,
         }
     }
 
@@ -797,6 +824,13 @@ impl ActionRuntime for TurnActionRuntime<'_> {
 
     fn should_cancel(&mut self) -> bool {
         self.ui.is_cancel_requested()
+    }
+
+    fn should_force_handoff(&mut self) -> bool {
+        if self.dispatch_timeout.is_none() {
+            self.dispatch_timeout = self.ui.take_user_supplement_model_dispatch_timeout();
+        }
+        self.dispatch_timeout.is_some()
     }
 
     fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
@@ -899,6 +933,7 @@ fn call_model_with_system_retries(
             },
         );
         if let Err(error) = &result {
+            let error = error.as_str();
             if error.starts_with("invalid_model_stream_") || error == "model_stream_event_too_large"
             {
                 preview.retract();
