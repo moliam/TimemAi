@@ -399,6 +399,13 @@ function queryToken() {
   return accessToken;
 }
 
+function debugBrowseUrl(sessionId: string) {
+  const params = new URLSearchParams({ session_id: sessionId });
+  const token = queryToken();
+  if (token) params.set("token", token);
+  return `/api/debug-browse?${params.toString()}`;
+}
+
 function makeMessage(
   role: ChatMessage["role"],
   text: string,
@@ -510,6 +517,9 @@ function TimemApp() {
     runtimeUnavailableDialogDismissed,
     setRuntimeUnavailableDialogDismissed,
   ] = useState(false);
+  const [runtimeShutdownSeconds, setRuntimeShutdownSeconds] = useState<
+    number | null
+  >(null);
   const [showToolRepo, setShowToolRepo] = useState(false);
   const [chatLibraryMode, setChatLibraryMode] = useState<
     "search" | "favorites" | null
@@ -3096,6 +3106,29 @@ function TimemApp() {
   useEffect(() => {
     if (!runtimeUnavailable) setRuntimeUnavailableDialogDismissed(false);
   }, [runtimeUnavailable]);
+  // When the runtime stays unreachable, stop burning CPU on reconnect loops
+  // and countdown to closing the page instead of spinning forever.
+  useEffect(() => {
+    if (!runtimeUnavailable) {
+      setRuntimeShutdownSeconds(null);
+      return;
+    }
+    setRuntimeShutdownSeconds(15);
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      const remaining = 15 - Math.floor((Date.now() - startedAt) / 1000);
+      if (remaining <= 0) {
+        window.clearInterval(timer);
+        window.close();
+        // window.close() is only honored for script-opened tabs; fall back to
+        // replacing the document so no React tree keeps rendering/polling.
+        window.location.replace("about:blank");
+        return;
+      }
+      setRuntimeShutdownSeconds(remaining);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [runtimeUnavailable]);
   const sessionInteractionLockReason = sessionInteractionLockReasonForState(
     pendingMemSwitch,
     connected,
@@ -5118,6 +5151,7 @@ function TimemApp() {
         {showRuntimeUnavailableDialog && (
           <RuntimeUnavailableDialog
             detail={runtimeDisconnectedDetail}
+            shutdownSeconds={runtimeShutdownSeconds}
             onClose={() => setRuntimeUnavailableDialogDismissed(true)}
           />
         )}
@@ -9132,13 +9166,16 @@ function TimemThread({
                     </span>
                   )}
                   {activeSession?.debug_dir && (
-                    <span
-                      className="composer-cwd-inline composer-debug-inline"
+                    <a
+                      className="composer-cwd-inline composer-debug-inline composer-debug-link"
                       title={activeSession.debug_dir}
+                      href={debugBrowseUrl(activeSession.session_id)}
+                      target="_blank"
+                      rel="noopener noreferrer"
                     >
                       <b>DEBUG:</b>
                       <span>{activeSession.debug_dir}</span>
-                    </span>
+                    </a>
                   )}
                 </div>
                 <span
@@ -15048,9 +15085,11 @@ function formatFavoriteCapacityUsed(bytes: number) {
 
 function RuntimeUnavailableDialog({
   detail,
+  shutdownSeconds,
   onClose,
 }: {
   detail: string;
+  shutdownSeconds: number | null;
   onClose: () => void;
 }) {
   return (
@@ -15096,6 +15135,12 @@ function RuntimeUnavailableDialog({
           reconnects. After you close this dialog, the warning banner will
           remain visible.
         </p>
+        {shutdownSeconds !== null && (
+          <p className="runtime-unavailable-hint" role="timer">
+            This page will close itself in {shutdownSeconds} second
+            {shutdownSeconds === 1 ? "" : "s"} because the runtime is gone.
+          </p>
+        )}
       </section>
     </div>
   );
