@@ -4304,17 +4304,6 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
   box-shadow: -7px 0 16px #0003;
 }
 .endpoint-settings-edit:hover { background: #26302c; color: #e0ebe6; }
-.endpoint-delete-select {
-  border: 0;
-  background: #161b19;
-  box-shadow: 0 3px 9px #0004;
-}
-.endpoint-delete-select.selected {
-  border: 0;
-  background: #a74b45;
-  color: #fff;
-  box-shadow: 0 4px 12px #0005;
-}
 .endpoint-editor { border: 0; }
 .endpoint-editor-heading { padding-bottom: 3px; }
 .endpoint-editor-heading strong { font-family: inherit; font-size: 15px; font-weight: 680; }
