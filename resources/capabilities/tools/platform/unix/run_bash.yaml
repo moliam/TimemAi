@@ -11,10 +11,10 @@ prompt_synopsis: |
 description: |
   RUNTIME's local command environment is ({{RUN_BASH_HOST_ENVIRONMENT}}).
   `run_bash` runs a shell command on the local machine and captures its result.
-  Timem applies the shared result gate before adding command evidence to model
-  context. It supports normal, background, and polling execution. Bash is a
+  It supports normal, background, and polling execution. Bash is a
   powerful action through which you can execute programs in the user's system
-  environment.
+  environment. However, prefer `readfile` over shell commands when reading text
+  files.
   `timeout_ms` is only how long Timem waits for a normal command. It is not a
   kill deadline. If the wait budget is reached, Timem returns the pid and stops
   waiting while the process may still be running. Set `tail_out=true` to

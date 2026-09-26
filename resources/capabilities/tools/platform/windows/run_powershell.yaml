@@ -11,9 +11,9 @@ prompt_synopsis: |
 description: |
   RUNTIME's local command environment is ({{RUN_POWERSHELL_HOST_ENVIRONMENT}}).
   `run_powershell` runs a PowerShell command on the local Windows machine and
-  captures its result. Use PowerShell syntax and Windows paths.
-  Timem applies the shared result gate before adding command evidence to model
-  context. It supports normal, background, and polling execution.
+  captures its result. Prefer `readfile` over shell commands when reading
+  text files. Use PowerShell syntax and Windows paths.
+  It supports normal, background, and polling execution.
   `timeout_ms` is only how long Timem waits for a normal command. It is not a
   kill deadline. If the wait budget is reached, Timem returns the pid and stops
   waiting while the process may still be running. Set `tail_out=true` to retain
