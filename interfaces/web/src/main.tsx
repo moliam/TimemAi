@@ -245,6 +245,7 @@ import {
   REASONING_EFFORT_OPTIONS,
   endpointMatchesProfile,
   endpointLabelForProfile,
+  apiProtocolShort,
   formatContextWindowTokens,
   MODEL_CONTEXT_WINDOW_OPTIONS,
   MODEL_OUTPUT_TOKEN_OPTIONS,
@@ -3160,6 +3161,9 @@ function TimemApp() {
       server?.model_endpoints ?? [],
       activeSession?.runtime_profile,
     );
+  const headerModelEndpoint = (server?.model_endpoints ?? []).find(
+    (endpoint) => endpointMatchesProfile(endpoint, activeSession?.runtime_profile),
+  );
   const openEndpointSettings = () => {
     setShowRuntime(false);
     setShowMcp(false);
@@ -4384,6 +4388,7 @@ function TimemApp() {
               </button>
             </div>
             <div className="header-session-cluster">
+              <div className="header-session-model-row">
               <div className="header-model-guide-anchor">
                 <button
                   type="button"
@@ -4420,6 +4425,27 @@ function TimemApp() {
                     </button>
                   </div>
                 )}
+              </div>
+              {headerModelEndpoint && (
+                <div className="header-model-meta">
+                  <span
+                    className="header-model-meta-model"
+                    title={headerModelEndpoint.model}
+                  >
+                    {headerModelEndpoint.model}
+                  </span>
+                  <div className="header-model-meta-row">
+                    <span className="endpoint-chip endpoint-chip-protocol">
+                      {apiProtocolShort(headerModelEndpoint.api_protocol)}
+                    </span>
+                    {headerModelEndpoint.reasoning_effort && (
+                      <span className="endpoint-chip endpoint-chip-effort">
+                        {headerModelEndpoint.reasoning_effort}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
               </div>
             </div>
             <div className="header-actions">
@@ -13710,7 +13736,8 @@ function EndpointSettingsPane({
                       <small>{candidate.source}</small>
                     </strong>
                     <small>
-                      {candidate.model} · {candidate.api_protocol} ·{" "}
+                      {candidate.model} ·{" "}
+                      {apiProtocolShort(candidate.api_protocol)} ·{" "}
                       {candidate.api_key_configured
                         ? t("endpoints.importKeyConfigured")
                         : t("endpoints.importKeyMissing")}
@@ -13757,7 +13784,7 @@ function EndpointSettingsPane({
                   <strong>{endpoint.name}</strong>
                 </span>
                 <small>
-                  {endpoint.model} · {endpoint.api_protocol}
+                  {endpoint.model} · {apiProtocolShort(endpoint.api_protocol)}
                   {endpoint.reasoning_effort
                     ? ` · ${endpoint.reasoning_effort}`
                     : ""}{" "}
@@ -14077,19 +14104,30 @@ function ModelEndpointPanel({
                   <span className="endpoint-copy">
                     <span className="endpoint-name-line">
                       <strong>{endpoint.name}</strong>
+                      <span className="endpoint-chip endpoint-chip-protocol">
+                        {apiProtocolShort(endpoint.api_protocol)}
+                      </span>
+                      {endpoint.reasoning_effort && (
+                        <span className="endpoint-chip endpoint-chip-effort">
+                          {endpoint.reasoning_effort}
+                        </span>
+                      )}
                     </span>
                     <small className="endpoint-model-summary">
                       <Sparkles
-                        size={10}
+                        size={11}
                         className="session-model-icon"
                         aria-hidden="true"
                       />
+                      <span>{endpoint.model}</span>
+                      <span className="endpoint-meta-sep" aria-hidden="true">
+                        ·
+                      </span>
                       <span>
-                        {endpoint.model} · {endpoint.api_protocol}
-                        {endpoint.stream ? " · stream" : ""} ·{" "}
                         {formatContextWindowTokens(
                           endpoint.max_llm_input_tokens,
-                        )} / {endpoint.max_llm_output_tokens / 1_000}K
+                        )}{" "}
+                        / {endpoint.max_llm_output_tokens / 1_000}K
                       </span>
                     </small>
                     <small title={endpoint.base_url}>{endpoint.base_url}</small>

@@ -560,6 +560,7 @@ pub(crate) enum PendingApprovedAction {
         tool_call_id: String,
         cwd: PathBuf,
         tail_out: bool,
+        edited_files: Vec<String>,
     },
     ToolgenPublish {
         repo: SessionToolRepo,
@@ -594,6 +595,7 @@ impl PendingApprovedAction {
                 tool_call_id,
                 cwd,
                 tail_out,
+                edited_files,
             } => json!({
                 "command": command,
                 "background": background,
@@ -606,6 +608,7 @@ impl PendingApprovedAction {
                 "tool_call_id": tool_call_id,
                 "cwd": cwd,
                 "tail_out": tail_out,
+                "edit": edited_files,
                 "approval_id": approval_id,
                 "risk": risk,
                 "reason": reason,
@@ -4102,6 +4105,7 @@ impl AgentCore {
                     tool_call_id,
                     cwd,
                     tail_out,
+                    edited_files,
                 } => shell_exec::execute_approved_bash_with_tail(
                     command,
                     cwd,
@@ -4114,6 +4118,7 @@ impl AgentCore {
                     tool_call_id,
                     interval_ms.is_none(),
                     *tail_out,
+                    edited_files,
                     &pending.request,
                     &self.shell_jobs,
                     runtime,
@@ -5183,26 +5188,53 @@ Runtime tool_call ids:",
         if outcome.status != ActionStatus::Completed || evidence.error_type.is_some() {
             return String::new();
         }
-        let path = Path::new(&evidence.path);
-        let mut notes = Vec::new();
-        if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
-            if self.touched_paths.insert(dir.to_path_buf()) {
-                let dir_text = dir.to_string_lossy();
-                let dir_text = if dir_text.ends_with('/') {
-                    dir_text.into_owned()
+        self.first_touch_note_for_paths(vec![PathBuf::from(&evidence.path)])
+    }
+
+    fn local_shell_first_touch_notes(&mut self, action: &ParsedAction) -> String {
+        let edited_files = action.input_list("edit");
+        if edited_files.is_empty() {
+            return String::new();
+        }
+        // The model declares `edit` paths; they anchor first-touch reminders
+        // even when the command itself later fails validation or execution.
+        let cwd = self.current_prompt_cwd.clone();
+        let paths = edited_files
+            .iter()
+            .map(|file| {
+                let path = Path::new(file);
+                if path.is_absolute() {
+                    path.to_path_buf()
                 } else {
-                    format!("{dir_text}/")
-                };
+                    cwd.join(path)
+                }
+            })
+            .collect::<Vec<_>>();
+        self.first_touch_note_for_paths(paths)
+    }
+
+    fn first_touch_note_for_paths(&mut self, paths: Vec<PathBuf>) -> String {
+        let mut notes = Vec::new();
+        for path in paths {
+            if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+                if self.touched_paths.insert(dir.to_path_buf()) {
+                    let dir_text = dir.to_string_lossy();
+                    let dir_text = if dir_text.ends_with('/') {
+                        dir_text.into_owned()
+                    } else {
+                        format!("{dir_text}/")
+                    };
+                    notes.push(format!(
+                        "Reminder: This seems the first time to touch dir {dir_text}, need properly understand the module boundary of this dir, so that your work can be consistent with the architecture, avoiding local blindness."
+                    ));
+                }
+            }
+            if self.touched_paths.insert(path.clone()) {
                 notes.push(format!(
-                    "[!!!NOTE] This seems the first time to touch dir {dir_text}, need to understand the module boundary of this dir, so that your work can be consistent with the architecture, avoiding local blindness."
+                    "Reminder: This seems the first time to touch file {}, need to understand the module function of this file, so that your work can be globally consistent, avoiding local blindness.",
+                    path.display()
                 ));
             }
-        }
-        if self.touched_paths.insert(path.to_path_buf()) {
-            notes.push(format!(
-                "[!!!NOTE] This seems the first time to touch file {}, need to understand the module function of this file, so that your work can be globally consistent, avoiding local blindness.",
-                path.display()
-            ));
         }
         notes.join("\n")
     }
@@ -5217,6 +5249,8 @@ Runtime tool_call ids:",
         // tool-result truncation gate and always reach the model in full.
         let first_touch_note = if action.action == "readfile" {
             self.readfile_first_touch_notes(outcome)
+        } else if shell_exec::is_local_shell_action(&action.action) {
+            self.local_shell_first_touch_notes(action)
         } else {
             String::new()
         };
@@ -5452,6 +5486,7 @@ Runtime tool_call ids:",
                     tool_call_id,
                     cwd,
                     tail_out,
+                    edited_files,
                 } => {
                     let mut should_cancel = || cancel_requested.load(Ordering::SeqCst);
                     let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
@@ -5467,6 +5502,7 @@ Runtime tool_call ids:",
                         tool_call_id,
                         interval_ms.is_none(),
                         *tail_out,
+                        edited_files,
                         &pending_for_thread.request,
                         &shell_jobs,
                         &mut runtime,
@@ -5526,6 +5562,7 @@ Runtime tool_call ids:",
                     },
                     action.input_u64("interval_ms"),
                     action.input_u64("once_timeout_ms").unwrap_or(5000),
+                    action.input_list("edit"),
                     BashApprovalMode::Approve,
                     &shell_jobs,
                     &session_id,

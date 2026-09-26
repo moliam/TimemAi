@@ -15196,6 +15196,22 @@ fn html_escape_covers_markup_characters() {
 }
 
 #[test]
+fn is_html_debug_file_matches_html_suffixes_only() {
+    let dir = std::env::temp_dir().join("timem_debug_browse_html_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("page.html"), "<p>hi</p>").unwrap();
+    std::fs::write(dir.join("page.htm"), "<p>hi</p>").unwrap();
+    std::fs::write(dir.join("notes.txt"), "text").unwrap();
+    std::fs::write(dir.join("weird.HTML"), "<p>hi</p>").unwrap();
+    assert!(is_html_debug_file(&dir.join("page.html"), "page.html"));
+    assert!(is_html_debug_file(&dir.join("page.htm"), "page.htm"));
+    assert!(!is_html_debug_file(&dir.join("notes.txt"), "notes.txt"));
+    assert!(is_html_debug_file(&dir.join("weird.HTML"), "weird.HTML"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn debug_browse_listing_renders_links_and_parent() {
     let dir = std::env::temp_dir().join("timem_debug_browse_listing_test");
     let _ = std::fs::remove_dir_all(&dir);

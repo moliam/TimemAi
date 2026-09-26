@@ -1933,6 +1933,7 @@ fn foreground_run_bash_preserves_raw_output_and_tail_policy_for_the_gate() {
         5000,
         None,
         5000,
+        Vec::new(),
         BashApprovalMode::Approve,
         &store,
         "session_tail",
@@ -2034,6 +2035,7 @@ fn approval_pending_action_preserves_tail_out() {
         5000,
         None,
         5000,
+        Vec::new(),
         BashApprovalMode::Ask,
         &store,
         "session_approval_tail",
@@ -2051,4 +2053,70 @@ fn approval_pending_action_preserves_tail_out() {
         PendingApprovedAction::RunBash { tail_out, .. } => assert!(tail_out),
         other => panic!("unexpected pending action: {other:?}"),
     }
+}
+
+#[test]
+fn edited_files_declaration_reaches_outcome_and_pending_approval() {
+    let store = ShellJobManager::new(&tmp_memory_dir("edited_files"));
+    let cwd = tmp_cwd("edited_files");
+    let edited = vec!["/tmp/edited_files/target.txt".to_string()];
+
+    let result = execute_run_bash_with_tail(
+        "printf hi > target.txt",
+        &cwd,
+        false,
+        5000,
+        None,
+        5000,
+        edited.clone(),
+        BashApprovalMode::Approve,
+        &store,
+        "session_edited",
+        "turn_edited",
+        "test_call",
+        true,
+        false,
+        &mut NeverCancelRuntime,
+    );
+    let ActionExecution::Completed(outcome) = result else {
+        panic!("approve mode should execute directly");
+    };
+    assert!(outcome
+        .text
+        .contains("edited_files: /tmp/edited_files/target.txt"));
+
+    let pending_result = execute_run_bash_with_tail(
+        "printf hi > target.txt",
+        &cwd,
+        false,
+        5000,
+        None,
+        5000,
+        edited,
+        BashApprovalMode::Ask,
+        &store,
+        "session_edited",
+        "turn_edited",
+        "test_call",
+        true,
+        false,
+        &mut NeverCancelRuntime,
+    );
+    let ActionExecution::NeedsApproval(pending) = pending_result else {
+        panic!("ask mode should return an approval request");
+    };
+    match &pending.approved_action {
+        PendingApprovedAction::RunBash { edited_files, .. } => {
+            assert_eq!(
+                edited_files,
+                &vec!["/tmp/edited_files/target.txt".to_string()]
+            );
+        }
+        other => panic!("unexpected pending action: {other:?}"),
+    }
+    assert!(pending
+        .approved_action
+        .audit_input("approval_x", "risk", "reason")["edit"]
+        .is_array());
+    let _ = std::fs::remove_dir_all(cwd);
 }
