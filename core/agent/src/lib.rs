@@ -2868,9 +2868,10 @@ impl AgentCore {
     }
 
     pub fn import_dynamic_context(&mut self, snapshot: DynamicContextSnapshot) {
-        // The memo restores even when the context is empty: it is the
-        // authoritative reminder state saved next to that context.
-        self.active_memo = snapshot.active_memo;
+        // The memo is intentionally NOT reactivated: after a restart the
+        // reminder must go inactive and the model is told to recreate it if
+        // still necessary. The snapshot value is consumed by the Host for
+        // the resume notice instead.
         if snapshot.deltas.is_empty() {
             return;
         }

@@ -7652,6 +7652,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         turn_projection: TurnProjectionCache::default(),
         active_memo: None,
         context_cleared_at_ms: None,
+        previous_memo_for_notice: None,
         message_queue: SessionMessageQueue::new(MAX_NEXT_TURN_INTENTS),
         pending_completion_message_id: None,
         pending_unconsumed_supplements: Vec::new(),
