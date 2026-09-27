@@ -11,6 +11,17 @@ pub struct LocalTimeParts {
     pub weekday: i32,
 }
 
+pub fn local_datetime_label() -> String {
+    local_time_parts()
+        .map(|parts| {
+            format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second
+            )
+        })
+        .unwrap_or_else(|| "local_time_unavailable".to_string())
+}
+
 pub fn local_time_label() -> String {
     local_time_parts()
         .map(|parts| format!("{:02}:{:02}:{:02}", parts.hour, parts.minute, parts.second))

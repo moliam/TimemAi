@@ -1037,12 +1037,13 @@ fn resume_notice_references_history_format_without_web_specific_language() {
     let notice = SessionResumeNotice {
         history_path: PathBuf::from("/tmp/session/raw_chat_history.jsonl"),
         current_dir: PathBuf::from("/work/project"),
+        restarted_at: "2026-09-27 09:00:00".to_string(),
     };
     let rendered = notice.render();
-    assert!(rendered.starts_with("Runtime just restarted."));
+    assert!(rendered.starts_with("Runtime restarted at 2026-09-27 09:00:00 (local time)."));
     assert!(!rendered.contains("## RUNTIME"));
     assert!(!rendered.contains("<RUNTIME>"));
-    assert!(rendered.contains("Runtime just restarted. Previous runtime/job state may be stale."));
+    assert!(rendered.contains("Previous runtime/job state may be stale."));
     assert!(rendered.contains("If the user asks to continue or recover prior work"));
     assert!(rendered.contains("first inspect this Session's recent history below"));
     assert!(rendered.contains("use raw_chat search when more transcript context is needed"));

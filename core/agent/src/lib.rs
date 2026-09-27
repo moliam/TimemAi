@@ -193,7 +193,9 @@ pub use retry_policy::{
     ModelCallOutcome, ModelRetryDecision, ModelSystemRetryPolicy,
     DEFAULT_MODEL_SYSTEM_ERROR_RETRIES, DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY,
 };
-pub use runtime_context::{local_time_label, runtime_time_context, LocalTimeParts};
+pub use runtime_context::{
+    local_datetime_label, local_time_label, runtime_time_context, LocalTimeParts,
+};
 use self_tool::{SelfToolAbout, SelfToolPaths, SelfToolProcess, SelfToolState};
 pub use session_runtime::{
     cancelled_turn_result, run_direct_resume_turn, run_direct_resume_turn_with_model_client,
@@ -492,6 +494,13 @@ pub(crate) struct PromptSlice {
     pub(crate) slice_index: usize,
     pub(crate) slice_count: usize,
 }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DynamicContextSnapshot {
+    pub deltas: Vec<PromptDelta>,
+    pub native_exchanges: Vec<NativeExchange>,
+    pub last_observed_prompt_tokens: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryRecord {
     pub id: String,
@@ -2839,6 +2848,32 @@ impl AgentCore {
     pub fn dynamic_context_estimated_tokens(&self) -> u32 {
         self.dynamic_context_summary().estimated_tokens
     }
+    pub fn export_dynamic_context(&self) -> DynamicContextSnapshot {
+        DynamicContextSnapshot {
+            deltas: self.deltas.clone(),
+            native_exchanges: self.native_exchanges.clone(),
+            last_observed_prompt_tokens: self.last_observed_prompt_tokens,
+        }
+    }
+
+    pub fn import_dynamic_context(&mut self, snapshot: DynamicContextSnapshot) {
+        if snapshot.deltas.is_empty() {
+            return;
+        }
+        self.deltas = snapshot.deltas;
+        self.native_exchanges = snapshot.native_exchanges;
+        self.last_observed_prompt_tokens = snapshot.last_observed_prompt_tokens;
+        if let Some(max_seq) = self
+            .deltas
+            .iter()
+            .map(|delta| delta.delta_id.rsplit('_').next())
+            .filter_map(|tail| tail.and_then(|t| t.parse::<u64>().ok()))
+            .max()
+        {
+            self.next_delta_sequence = self.next_delta_sequence.max(max_seq + 1);
+        }
+    }
+
     pub fn clear_dynamic_context(&mut self) {
         self.deltas.clear();
         self.last_observed_prompt_tokens = 0;
