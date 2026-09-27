@@ -1,5 +1,47 @@
 # Changelog
 
+## [2.3.0] - 2026-09-27
+
+### Added
+
+- Add the `task_finished` tool (renamed from `turn_finished`); plain text no
+  longer ends a turn, and the sub_answer interim tool is removed.
+- Add the `memo` tool with a runtime-held long-task reminder, a `core.memo`
+  topic, a WebUI memo indicator with hover content, and a finish guard that
+  intercepts premature task_finished calls while a memo is active.
+- Persist the active memo beside the prompt-context snapshot; after a restart
+  it goes inactive by design and the resume notice tells the model to recreate
+  it if necessary.
+- Make `timem attach` a full interactive client: session selector, live
+  streaming, supplement submission, decision replies, cancel and stop
+  commands, and theme-matched prompts.
+- Ship a self-describing model endpoint store with import from codex and
+  claude CLI configs, batch deletion, and custom max-context options.
+- Add first-touch readfile path reminders and edited-file tracking.
+- Show a dim elapsed-time label with hour/day tiers beside the stream working
+  trailer dot.
+- Browse the debug directory in a new tab; render HTML debug files natively.
+
+### Changed
+
+- Render the task_finished summary as the turn's authoritative final answer in
+  the Web answer area and attach.
+- Reset the context meter immediately when the working context is cleared, with
+  a compact clear action at the end of the ctx line.
+- Apply endpoint reasoning effort only to critical model requests; add an Off
+  option.
+- Align the context_compact checklist with the runtime prompt.
+
+### Fixed
+
+- Publish turn_updated after sub-answers land so attach always renders them.
+- Order the chat message stream by creation time.
+- Keep attach from stalling silently on >16MiB hello snapshots; surface
+  recoverable socket errors.
+- Make the memo indicator chip theme-neutral and open its tooltip away from
+  the sidebar.
+- Relax model-endpoint input token limit validation and show save errors.
+
 ## [Unreleased]
 
 ### Added
