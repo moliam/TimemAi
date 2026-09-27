@@ -46,6 +46,8 @@ pub mod host;
 pub mod interaction;
 #[path = "../../../resources/capabilities/tools/memmgr.rs"]
 pub mod memmgr;
+#[path = "../../../resources/capabilities/tools/memo.rs"]
+pub mod memo;
 pub mod model_api;
 pub mod model_service_config;
 pub mod model_stream;
@@ -75,8 +77,8 @@ pub mod session_store;
 pub mod shell_exec;
 pub mod status_summary;
 pub mod status_view;
-#[path = "../../../resources/capabilities/tools/sub_answer.rs"]
-pub mod sub_answer;
+#[path = "../../../resources/capabilities/tools/task_finished.rs"]
+pub mod task_finished;
 pub mod tool_jobs;
 #[path = "../../../resources/capabilities/tools/registry.rs"]
 pub(crate) mod tool_registry;
@@ -85,8 +87,6 @@ mod tool_result_gate;
 mod tool_schema_renderer;
 #[path = "../../../resources/capabilities/tools/toolgen.rs"]
 pub mod toolgen;
-#[path = "../../../resources/capabilities/tools/turn_finished.rs"]
-pub mod turn_finished;
 pub mod turn_state;
 pub mod work_instructions;
 pub mod workspace;
@@ -135,11 +135,12 @@ pub use host::{
     OutputExpansionResolution, RoundLimitDecisionRequest, RoundLimitResolution, StoppedTurn,
     TopicReply, TopicReplyError, TurnInput, TurnOutcome, TurnStopDetail, TurnStopReason,
     TurnStopSummary, TurnUi, UserSupplement, CORE_TOPIC_ACTION, CORE_TOPIC_CONTEXT_COMPACT,
-    CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST, CORE_TOPIC_MODEL_REPAIR,
-    CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
-    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_SUB_ANSWER,
-    CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
-    DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT, USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT,
+    CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST, CORE_TOPIC_MEMO,
+    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST,
+    CORE_TOPIC_ROUND_LIMIT_REQUEST, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP,
+    CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST,
+    CORE_TOPIC_WORK_INSTRUCTION_LOAD, DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
+    USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT,
 };
 pub use interaction::{
     parse_parallel_tool_calls, parse_tool_call_mode, CapabilityProbeSource, InteractionConfig,
@@ -1759,9 +1760,9 @@ pub struct AgentCore {
     resolved_tool_call_mode: ToolCallMode,
     native_parallel_tool_calls: bool,
     native_exchanges: Vec<NativeExchange>,
-    sub_answer_enabled: bool,
-    sub_answer_count: u64,
     turn_finished_summary: Option<String>,
+    active_memo: Option<String>,
+    memo_finish_guard_used: bool,
     pending_native_exchange: Option<(String, String, Vec<NativeToolCall>, Vec<String>)>,
 }
 impl AgentCore {
@@ -1862,9 +1863,9 @@ impl AgentCore {
             resolved_tool_call_mode: ToolCallMode::Inline,
             native_parallel_tool_calls: false,
             native_exchanges: Vec::new(),
-            sub_answer_enabled: true,
-            sub_answer_count: 0,
             turn_finished_summary: None,
+            active_memo: None,
+            memo_finish_guard_used: false,
             pending_native_exchange: None,
         }
     }
@@ -2892,7 +2893,6 @@ impl AgentCore {
         self.current_session_id = None;
         self.current_action_user_question.clear();
         self.last_notifications.clear();
-        self.sub_answer_count = 0;
         self.turn_finished_summary = None;
         self.loaded_work_instruction_fingerprints.clear();
     }
@@ -3037,16 +3037,17 @@ impl AgentCore {
         self.pending_user_interruption_note = true;
     }
 
-    pub fn set_sub_answer_enabled(&mut self, enabled: bool) {
-        self.sub_answer_enabled = enabled;
+    /// The single runtime-held memo for long-running work, if any.
+    pub fn active_memo(&self) -> Option<&str> {
+        self.active_memo.as_deref()
     }
 
-    pub(crate) fn sub_answer_enabled(&self) -> bool {
-        self.sub_answer_enabled
+    pub(crate) fn set_active_memo(&mut self, text: String) {
+        self.active_memo = Some(text);
     }
-    pub(crate) fn record_sub_answer(&mut self) -> u64 {
-        self.sub_answer_count = self.sub_answer_count.saturating_add(1);
-        self.sub_answer_count
+
+    pub(crate) fn clear_active_memo(&mut self) {
+        self.active_memo = None;
     }
 
     pub(crate) fn record_turn_finished(&mut self, summary: String) {
@@ -3081,8 +3082,8 @@ impl AgentCore {
         self.last_repair_issue = None;
         self.pending_approval = None;
         self.last_notifications.clear();
-        self.sub_answer_count = 0;
         self.turn_finished_summary = None;
+        self.memo_finish_guard_used = false;
         // A final assistant replay may already be pending from the previous turn.
         // Keep it before the marker below; both may share a transport delta because
         // BEGIN TURN, rather than delta batching, defines logical ownership.
@@ -3546,10 +3547,17 @@ impl AgentCore {
             );
         }
         if compacted_successfully {
+            // The runtime-held memo survives compaction; restate it so the
+            // next submission still carries the long-task reminder.
+            let memo_line = self
+                .active_memo
+                .as_ref()
+                .map(|memo| format!("\nmemo active: {memo}"))
+                .unwrap_or_default();
             slices.push((
                 "context_compacted".to_string(),
                 format!(
-                    "context compacted successfully.\nCWD: {}",
+                    "context compacted successfully.\nCWD: {}{memo_line}",
                     self.current_prompt_cwd.display()
                 ),
             ));
@@ -3589,6 +3597,29 @@ impl AgentCore {
                 }
             }
             let final_text = parsed.final_text();
+            // The inline-protocol final answer (status:ALL_FINISHED) must pass
+            // the same memo guard as the explicit task_finished tool.
+            if let Some(memo) = self.active_memo.clone() {
+                if !self.memo_finish_guard_used && self.remaining_rounds() > 0 {
+                    self.memo_finish_guard_used = true;
+                    slices.extend(self.assistant_replay_slices(
+                        &raw_model_output,
+                        Some(&parsed),
+                        Some(&final_text),
+                    ));
+                    slices.push((
+                        "memo_finish_guard".to_string(),
+                        format!(
+                            "Just now you gave a final answer indicating all tasks are done. But there is still memo active: {memo}. All user's requirements really achieved? If yes, delete the memo (memo op=delete) before giving the final answer."
+                        ),
+                    ));
+                    self.append_delta_with_action_output_budget(slices);
+                    return CoreStep::NeedModel {
+                        prompt: self.render_prompt(),
+                        rounds_remaining: self.remaining_rounds(),
+                    };
+                }
+            }
             slices.extend(self.assistant_replay_slices(
                 &raw_model_output,
                 Some(&parsed),
@@ -3650,7 +3681,42 @@ impl AgentCore {
                 ));
             }
             if let Some(stop_summary) = self.take_turn_finished_summary() {
-                // turn_finished was executed among the actions above. Its native
+                if let Some(memo) = self.active_memo.clone() {
+                    if !self.memo_finish_guard_used && self.remaining_rounds() > 0 {
+                        // A still-active memo contradicts "all work done".
+                        // Send the reminder back once per turn instead of ending.
+                        self.memo_finish_guard_used = true;
+                        slices.push((
+                            "memo_finish_guard".to_string(),
+                            format!(
+                                "Just now you gave a final answer indicating all tasks are done. But there is still memo active: {memo}. All user's requirements really achieved? If yes, delete the memo (memo op=delete) before giving the final answer."
+                            ),
+                        ));
+                        if !native_calls.is_empty() {
+                            self.native_exchanges.push(NativeExchange {
+                                delta_id: self.current_native_delta_id(),
+                                assistant_text: response.content.clone(),
+                                results: native_calls
+                                    .iter()
+                                    .zip(result_lines.iter())
+                                    .map(|(call, result)| NativeToolResult {
+                                        call_id: call.id.clone(),
+                                        name: call.name.clone(),
+                                        content: result.clone(),
+                                        is_error: result.contains("\nerror:"),
+                                    })
+                                    .collect(),
+                                calls: native_calls,
+                            });
+                        }
+                        self.append_delta_with_action_output_budget(slices);
+                        return CoreStep::NeedModel {
+                            prompt: self.render_prompt(),
+                            rounds_remaining: self.remaining_rounds(),
+                        };
+                    }
+                }
+                // task_finished was executed among the actions above. Its native
                 // tool exchange is still recorded below so the provider message
                 // sequence stays valid; the turn ends here regardless.
                 if !native_calls.is_empty() {
@@ -3737,7 +3803,7 @@ impl AgentCore {
         if self.resolved_tool_call_mode == ToolCallMode::Native {
             // Native mode: a plain-text response without tool calls no longer
             // finishes the turn. Keep the text as visible thought and ask the
-            // model to either continue working or call turn_finished.
+            // model to either continue working or call task_finished.
             slices.extend(self.assistant_replay_slices(
                 &raw_model_output,
                 Some(&parsed),
@@ -3745,7 +3811,7 @@ impl AgentCore {
             ));
             slices.push((
                 "runtime_note".to_string(),
-                "A plain-text response without tool calls does not finish the turn. Continue working with tool calls, or call the turn_finished tool with the complete final answer when all work is done.".to_string(),
+                "A plain-text response without tool calls does not finish the turn. Continue working with tool calls, or call the task_finished tool with the complete final answer when all work is done.".to_string(),
             ));
             self.append_delta_with_action_output_budget(slices);
             if self.remaining_rounds() == 0 {
@@ -3818,7 +3884,7 @@ impl AgentCore {
         };
         ParsedEnvelope {
             // A no-tool-call response no longer finishes the turn: only the
-            // explicit turn_finished tool does. Plain text is retained as
+            // explicit task_finished tool does. Plain text is retained as
             // thought so the loop continues.
             final_answer: String::new(),
             toolgen_retrospect: String::new(),

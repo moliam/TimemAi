@@ -44,7 +44,7 @@ const turn = (id, text = "Long task") => ({
     ...(id === "turn-1" ? { command_id: "submit-original" } : {}),
     created_at_ms: Date.now(),
   }],
-  events: [], sub_answers: [], final_answer: null, completion: null,
+  events: [], final_answer: null, completion: null,
 });
 const makeSession = (extra = {}) => ({
   session_id: "session-1", display_name: "Stop acceptance", ordinal: 0,
@@ -379,9 +379,7 @@ async function main() {
     if (protocol === "native") {
       if (requests === 1) {
         write("HTTP early response");
-        res.write(`data: ${JSON.stringify({choices:[{delta:{tool_calls:[{index:0,id:"chat-call",type:"function",function:{name:"sub_answer",arguments:'{"task":"HTTP interim","answer":"HTTP early chat'}}]}}]})}\n\n`);
         await new Promise(resolve => { release = resolve; });
-        res.write(`data: ${JSON.stringify({choices:[{delta:{tool_calls:[{index:0,function:{arguments:'"}'}}]}}]})}\n\n`);
       } else {
         if (scenario === "normal" || scenario === "tools") await new Promise(resolve => { releaseFinal = resolve; });
         write("HTTP final");
@@ -389,12 +387,12 @@ async function main() {
       res.end("data: [DONE]\n\n"); return;
     }
     if (requests === 1) {
-      write(protocol === "json" ? '{"status":"working","free_talk":"HTTP early response","working_still_action":[{"sub_answer":{"task":"HTTP interim","answer":"HTTP early chat' : '<ASSISTANT><free_talk>HTTP early response</free_talk><actions><sub_answer><task>HTTP interim</task><answer>HTTP early chat');
+      write(protocol === "json" ? '{"status":"working","free_talk":"HTTP early response","working_still_action":[{"readfile":{"path":"Cargo.toml","max_bytes":200}}' : '<ASSISTANT><free_talk>HTTP early response</free_talk><actions><readfile><path>Cargo.toml</path><max_bytes>200</max_bytes>');
       await new Promise(resolve => { release = resolve; });
       if (scenario === 'network') { res.destroy(); return; }
-      if (scenario === 'invalid') write('</answer></sub_answer></actions><invalid></ASSISTANT>');
-      else if (scenario === "tools") write('</answer></sub_answer><readfile><path>Cargo.toml</path><max_bytes>200</max_bytes></readfile><readfile><path>Cargo.toml</path><max_bytes>100</max_bytes></readfile></actions></ASSISTANT>');
-      else write(protocol === "json" ? '"}}]}' : '</answer></sub_answer></actions></ASSISTANT>');
+      if (scenario === 'invalid') write('</readfile></actions><invalid></ASSISTANT>');
+      else if (scenario === "tools") write('</readfile><readfile><path>Cargo.toml</path><max_bytes>200</max_bytes></readfile><readfile><path>Cargo.toml</path><max_bytes>100</max_bytes></readfile></actions></ASSISTANT>');
+      else write(protocol === "json" ? ']}' : '</readfile></actions></ASSISTANT>');
     } else {
       if (scenario === "normal" || scenario === "tools") await new Promise(resolve => { releaseFinal = resolve; });
       write(protocol === "json" ? JSON.stringify({status:"all_finished",final_answer:"HTTP final"}) : "<ASSISTANT><finish_confirm>Now let me think seriously twice before I announce stop. Review user's task list. Is my delivery consistent with user's demand?</finish_confirm><final_answer>HTTP final</final_answer></ASSISTANT>");
@@ -425,15 +423,10 @@ async function main() {
     socket.send(JSON.stringify({type:"turn_submit",session_id:sessionId,text:"HTTP streaming acceptance"}));
     if (!streamMode) {
       await waitFor(() => !!release, "initial model request missing");
-      assert(await browser.evaluate(`!document.querySelector('.response-preview, .provisional-chat, .turn-stream-tools')`), "non-stream mode leaked provisional UI");
+      assert(await browser.evaluate(`!document.querySelector('.response-preview, .turn-stream-tools')`), "non-stream mode leaked provisional UI");
       await waitFor(() => browser.evaluate(`document.querySelector('button.work-title-chip')?.getAttribute('aria-expanded') === 'true'`), "non-stream working panel not expanded");
       release();
       await waitFor(() => !!releaseFinal, "next model request missing");
-      await waitFor(() => browser.evaluate(`document.querySelector('.live-interim-answer')?.textContent.includes('HTTP early chat')`), "non-stream accepted interim missing");
-      await browser.evaluate(`document.querySelector('button[aria-label="Collapse interim answer into Chat"]').click()`);
-      await waitFor(() => browser.evaluate(`!document.querySelector('.live-interim-answer') && !!document.querySelector('button[aria-label="Show chat answers"]')`), "non-stream interim did not collapse");
-      await browser.evaluate(`document.querySelector('button[aria-label="Show chat answers"]').click()`);
-      await waitFor(() => browser.evaluate(`document.querySelector('.turn-interim-item')?.textContent.includes('HTTP early chat')`), "non-stream Chat cannot reopen");
       if (scenario === "tools") await waitFor(() => browser.evaluate(`document.querySelector('.turn-work-content')?.textContent.includes('readfile')`), "non-stream tool missing");
       releaseFinal();
       await waitFor(() => browser.evaluate(`document.querySelector('.turn-final-delivery')?.textContent.includes('HTTP final')`), "non-stream final missing");
@@ -442,38 +435,38 @@ async function main() {
       await waitFor(() => browser.evaluate(`!!document.querySelector('button.session[title="HTTP streaming acceptance"]')`), "non-stream session missing after reload");
       await browser.evaluate(`document.querySelector('button.session[title="HTTP streaming acceptance"]').click()`);
       await waitFor(() => browser.evaluate(`document.querySelector('.turn-final-delivery')?.textContent.includes('HTTP final')`), "non-stream reload lost final");
-      assert(await browser.evaluate(`!document.querySelector('.response-preview, .provisional-chat, .turn-stream-tools')`), "non-stream reload leaked stream UI");
-      console.log(`PASS actual Host + HTTP SSE + Chrome: non-stream protocol=${protocol} scenario=${scenario}; interim collapse/reopen, final and reload`);
+      assert(await browser.evaluate(`!document.querySelector('.response-preview, .turn-stream-tools')`), "non-stream reload leaked stream UI");
+      console.log(`PASS actual Host + HTTP SSE + Chrome: non-stream protocol=${protocol} scenario=${scenario}; final and reload`);
       return;
     }
     await waitFor(()=>browser.evaluate(`document.querySelector('.response-preview')?.textContent.includes('HTTP early response')`),"real HTTP response preview absent");
-    await waitFor(()=>browser.evaluate(`document.querySelector('.provisional-chat')?.textContent.includes('HTTP early chat')`),"real HTTP Chat preview absent");
+    await waitFor(()=>browser.evaluate(`document.querySelector('.response-preview')?.textContent.includes('HTTP early response')`),"real HTTP response preview absent");
     assert(requests===1,"response finished before browser observed preview");
     if (scenario === "interaction") {
       appendStreaming("\n\n" + Array.from({length:180}, (_,i) => `Paragraph ${i} streaming text.`).join("\n\n"));
-      await waitFor(() => browser.evaluate(`document.querySelector('.provisional-chat')?.textContent.includes('Paragraph 179')`), "long streamed Chat missing", 60000);
+      await waitFor(() => browser.evaluate(`document.querySelector('.response-preview')?.textContent.includes('Paragraph 179')`), "long streamed response missing", 60000);
       await browser.call("Browser.grantPermissions", {origin:"http://127.0.0.1:18987", permissions:["clipboardReadWrite", "clipboardSanitizedWrite"]});
-      await browser.evaluate(`(() => { const node=document.querySelector('.provisional-chat .markdown-body p');const r=document.createRange();r.selectNodeContents(node);const sel=window.getSelection();sel.removeAllRanges();sel.addRange(r); })()`);
+      await browser.evaluate(`(() => { const node=document.querySelector('.response-preview .markdown-body p');const r=document.createRange();r.selectNodeContents(node);const sel=window.getSelection();sel.removeAllRanges();sel.addRange(r); })()`);
       await browser.call("Input.dispatchKeyEvent", {type:"keyDown",key:"c",code:"KeyC",modifiers:4,commands:["copy"]});
       await browser.call("Input.dispatchKeyEvent", {type:"keyUp",key:"c",code:"KeyC",modifiers:4});
-      assert((await browser.evaluate(`navigator.clipboard.readText()`)).includes("HTTP early chat"), "streamed Chat clipboard copy failed");
-      const before = await browser.evaluate(`(() => { const sc=document.querySelector('[data-session-timeline-active="true"] .provisional-chat').closest('.chat-scroll');sc.scrollTop=100;return sc.scrollTop; })()`);
+      assert((await browser.evaluate(`navigator.clipboard.readText()`)).includes("HTTP early response"), "streamed response clipboard copy failed");
+      const before = await browser.evaluate(`(() => { const sc=document.querySelector('[data-session-timeline-active="true"] .response-preview').closest('.chat-scroll');sc.scrollTop=100;return sc.scrollTop; })()`);
       appendStreaming("\n\nCONTINUED_AFTER_COPY");
-      await waitFor(() => browser.evaluate(`document.querySelector('.provisional-chat')?.textContent.includes('CONTINUED_AFTER_COPY')`), "stream did not continue after copy");
-      const after = await browser.evaluate(`document.querySelector('.provisional-chat').closest('.chat-scroll').scrollTop`);
+      await waitFor(() => browser.evaluate(`document.querySelector('.response-preview')?.textContent.includes('CONTINUED_AFTER_COPY')`), "stream did not continue after copy");
+      const after = await browser.evaluate(`document.querySelector('.response-preview').closest('.chat-scroll').scrollTop`);
       assert(Math.abs(after-before)<8, `stream moved reading position: ${before} -> ${after}`);
-      assert((await browser.evaluate(`navigator.clipboard.readText()`)).includes("HTTP early chat"), "stream update changed clipboard");
+      assert((await browser.evaluate(`navigator.clipboard.readText()`)).includes("HTTP early response"), "stream update changed clipboard");
     }
     if (scenario === "normal") {
       await browser.call("Page.reload", {ignoreCache:true});
       await waitFor(() => browser.evaluate(`!!document.querySelector('button.session[title="HTTP streaming acceptance"]')`), "session missing after reload");
       await browser.evaluate(`document.querySelector('button.session[title="HTTP streaming acceptance"]')?.click()`);
-      await waitFor(()=>browser.evaluate(`document.querySelector('.provisional-chat')?.textContent.includes('HTTP early chat')`), "HTTP streaming reload lost Chat");
+      await waitFor(()=>browser.evaluate(`document.querySelector('.response-preview')?.textContent.includes('HTTP early response')`), "HTTP streaming reload lost response preview");
       await browser.evaluate(`document.querySelector('button.session[title="Untitled 1"]')?.click()`);
-      await waitFor(()=>browser.evaluate(`!document.querySelector('[data-session-timeline-active="true"] .provisional-chat')`), "preview leaked into other Session");
+      await waitFor(()=>browser.evaluate(`!document.querySelector('[data-session-timeline-active="true"] .response-preview')`), "preview leaked into other Session");
       await browser.evaluate(`document.querySelector('button.session[title="HTTP streaming acceptance"]')?.click()`);
-      await waitFor(()=>browser.evaluate(`document.querySelector('.provisional-chat')?.textContent.includes('HTTP early chat')`), "switch back lost Chat");
-      assert(await browser.evaluate(`(() => { const node=document.querySelector('.provisional-chat .markdown-body');const range=document.createRange();range.selectNodeContents(node);const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);return selection.toString()==='HTTP early chat'; })()`), "partial Chat text cannot be selected");
+      await waitFor(()=>browser.evaluate(`document.querySelector('.response-preview')?.textContent.includes('HTTP early response')`), "switch back lost response preview");
+      assert(await browser.evaluate(`(() => { const node=document.querySelector('.response-preview .markdown-body');const range=document.createRange();range.selectNodeContents(node);const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);return selection.toString()==='HTTP early response'; })()`), "partial response text cannot be selected");
     }
 
     if (scenario === "stop") {
@@ -491,12 +484,11 @@ async function main() {
       await waitFor(() => received.some(raw => JSON.stringify(raw).includes("SUPPLEMENT_STREAM_CHECK")), "supplement admission missing");
       assert(!modelInputs[0].includes("SUPPLEMENT_STREAM_CHECK"), "supplement attributed to already-sent request");
     }
-    await browser.evaluate(`window.__previewNode = document.querySelector(".response-preview"); window.__chatNode = document.querySelector(".provisional-chat"); true`);
+    await browser.evaluate(`window.__previewNode = document.querySelector(".response-preview"); true`);
     release();
     if (scenario === "normal" || scenario === "tools") {
       await waitFor(() => !!releaseFinal, "next model request missing");
-      await waitFor(() => browser.evaluate(`window.__chatNode?.isConnected && !window.__chatNode.classList.contains('provisional-chat')`), "Chat confirmation replaced its DOM node");
-      assert(await browser.evaluate(`document.querySelectorAll('.live-interim-answer').length === 1`), "Chat confirmation duplicated the answer");
+      assert(await browser.evaluate(`!document.querySelector('.live-interim-answer')`), "stale interim UI remained");
       if (scenario === "tools") {
         await waitFor(() => browser.evaluate(`document.querySelector('.turn-stream-tools')?.textContent.includes('readfile')`), "executed readfile missing while preview enabled");
         await waitFor(() => received.some(raw => { const e = raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.action" && e.event.payload.action === "readfile" && e.event.payload.event === "finish"; }), "readfile execution evidence missing");
@@ -508,7 +500,7 @@ async function main() {
     }
     if (scenario === "network") {
       await waitFor(()=>browser.evaluate(`document.querySelector('.response-preview-interruption')?.textContent.includes('Network error')`), "network lost partial output");
-      assert(await browser.evaluate(`document.querySelector('.provisional-chat')?.textContent.includes('HTTP early chat')`), "network lost partial Chat");
+      assert(await browser.evaluate(`document.querySelector('.response-preview')?.textContent.includes('HTTP early response')`), "network lost partial Chat");
       console.log("PASS actual Host + HTTP SSE + Chrome: broken HTTP retains partial response and Chat");
       return;
     }
@@ -530,11 +522,9 @@ async function main() {
       assert(modelInputs.slice(1).some(body => body.includes("SUPPLEMENT_STREAM_CHECK")), "next request did not consume supplement");
     }
     if (scenario === "invalid") {
-      assert(!received.some(raw => { const e = raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.sub_answer"; }), "invalid response executed sub_answer");
-      assert(await browser.evaluate(`document.querySelectorAll('.provisional-chat').length === 0`), "invalid chat survived repair");
-      assert(received.some(raw => { const e = raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.model.preview" && e.event.payload.attempt === 1 && e.event.payload.response === null && e.event.payload.chat.length === 0; }), "invalid attempt did not retract all previews");
+      assert(received.some(raw => { const e = raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.model.preview" && e.event.payload.attempt === 1 && e.event.payload.response === null; }), "invalid attempt did not retract all previews");
     }
-    console.log(`PASS actual Host + HTTP SSE + Chrome: protocol=${protocol} scenario=${scenario}; response and Chat visible before HTTP completion, final delivered`);
+    console.log(`PASS actual Host + HTTP SSE + Chrome: protocol=${protocol} scenario=${scenario}; response visible before HTTP completion, final delivered`);
   } catch(error) { console.error(logs); console.error("requests",requests); console.error("action evidence", JSON.stringify(received.flatMap(raw => { const e=raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.action" ? [e.event.payload] : []; }))); console.error("host errors", JSON.stringify(received.filter(e => JSON.stringify(e).includes("host_error")))); if(browser)console.error(await browser.evaluate("document.body.innerText")); throw error; }
   finally {
     release?.(); releaseFinal?.(); socket?.close(); if(browser)await browser.close();

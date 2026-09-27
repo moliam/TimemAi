@@ -1,0 +1,37 @@
+kind: tool
+id: memo
+binding_type: builtin
+binding_name: memo
+summary: Let the runtime hold one persistent reminder memo for long-running work so it can remind you after interruption or compaction.
+prompt_synopsis: |
+  {"memo":{"op":"create","text":"refined long-task reminder"}}
+description: |
+  Use this tool to record your goal with the help of the runtime, especially when the user's task needs long run, step by step, multi turns of work. Distill
+  the user's demand, constraints, methodology, into one concise memo
+  sentence and ask the runtime to remember it for you. An agent holds at most ONE memo.
+
+  ops:
+  - create: create a new memo. Any existing memo is replaced.
+  - update: overwrite/refresh the current memo content.
+  - delete: delete the current memo. No error if none exists.
+
+  IMPORTANT: before all work is fully done and you stop (final answer), you MUST
+  delete the memo. If a memo is still active when you try to finish, the runtime
+  will actively keep reminding you and ask you to confirm completion.
+prompt_input: |
+  Provide `op` ("create" | "update" | "delete") and `text` (required for
+  create/update: the refined reminder; ignored for delete).
+prompt_result: |
+  Success reports the current memo state (created/updated/deleted, active or none).
+input_schema: |
+  {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "op": {"type":"string","enum":["create","update","delete"],"description":"Memo operation."},
+      "text": {"type":"string","description":"Refined long-task reminder text. Required for create/update."}
+    },
+    "required": ["op"]
+  }
+example_json: |
+  {"memo":{"op":"create","text":"Long task: migrate docs; user requires docs/migration.md updated and all gates green before finish."}}

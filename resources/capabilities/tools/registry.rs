@@ -1,18 +1,18 @@
 use crate::response_protocol::ParsedAction;
-use crate::{capmgr, memmgr, readfile, self_tool, shell_exec, sub_answer, toolgen, turn_finished};
+use crate::{capmgr, memmgr, memo, readfile, self_tool, shell_exec, task_finished, toolgen};
 use crate::{ActionExecution, ActionRuntime, AgentCore};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 pub(crate) const BUILTIN_TOOL_BINDINGS: &[&str] = &[
     "memmgr",
     "capmgr",
+    "memo",
     "context_compact",
     "readfile",
     "run_bash",
     "run_powershell",
     "self_tool",
-    "sub_answer",
-    "turn_finished",
+    "task_finished",
     "toolgen",
 ];
 
@@ -44,12 +44,14 @@ where
 fn builtin_tool_callback(binding_name: &str) -> Option<BuiltinToolCallback> {
     match binding_name {
         "capmgr" => Some(execute_capmgr),
+        "memo" => Some(execute_memo),
         "context_compact" => Some(execute_context_compact),
         "memmgr" => Some(execute_memmgr),
         "readfile" => Some(execute_readfile),
         "self_tool" => Some(execute_self_tool),
-        "sub_answer" => Some(execute_sub_answer),
-        "turn_finished" => Some(execute_turn_finished),
+        "task_finished" => Some(execute_task_finished),
+        // Pre-rename alias so in-flight contexts keep working.
+        "turn_finished" => Some(execute_task_finished),
         "run_bash" | "run_powershell" => Some(execute_local_shell),
         "toolgen" => Some(execute_toolgen),
         _ => None,
@@ -101,20 +103,20 @@ fn execute_self_tool(
     ActionExecution::Completed(self_tool::execute_action_outcome(core, action))
 }
 
-fn execute_turn_finished(
+fn execute_memo(
     core: &mut crate::AgentCore,
     action: &crate::response_protocol::ParsedAction,
     runtime: &mut dyn crate::ActionRuntime,
 ) -> crate::ActionExecution {
-    turn_finished::execute_action(core, action, runtime)
+    memo::execute_action(core, action, runtime)
 }
 
-fn execute_sub_answer(
-    core: &mut AgentCore,
-    action: &ParsedAction,
-    runtime: &mut dyn ActionRuntime,
-) -> ActionExecution {
-    sub_answer::execute_action(core, action, runtime)
+fn execute_task_finished(
+    core: &mut crate::AgentCore,
+    action: &crate::response_protocol::ParsedAction,
+    runtime: &mut dyn crate::ActionRuntime,
+) -> crate::ActionExecution {
+    task_finished::execute_action(core, action, runtime)
 }
 
 fn execute_readfile(

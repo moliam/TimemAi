@@ -191,6 +191,8 @@ export type Session = {
   turn_projection?: VersionedTurnProjection | null;
   /** Authoritative Session-owned future-message queue. */
   message_queue: MessageQueueProjection;
+  /** Active long-task memo text from the core.memo topic. */
+  active_memo?: string | null;
 };
 
 export type McpTransport =
@@ -247,7 +249,6 @@ export type ResponsePreview = {
   revision: number;
   interruption?: string | null;
   response?: { attempt: number; revision: number; text: string; status: "streaming" | "intermediate" | "final" } | null;
-  chat: { index: number; task: string; answer: string }[];
 };
 
 export type WebTurn = {
@@ -258,20 +259,10 @@ export type WebTurn = {
   interrupted_at_ms?: number | null;
   user_entries: WebTurnUserEntry[];
   events: WebTurnEvent[];
-  sub_answers: WebSubAnswer[];
   final_answer?: string | null;
   completion?: TurnCompletion | null;
 };
 
-export type WebSubAnswer = {
-  preview_attempt?: number;
-  preview_index?: number;
-  sub_answer_id: string;
-  ordinal: number;
-  task: string;
-  answer: string;
-  created_at_ms: number;
-};
 
 export type WebTurnUserEntry = {
   command_id?: string;
@@ -486,6 +477,11 @@ export type WireEvent =
     }
   | { type: "session_created"; session: Session }
   | { type: "session_renamed"; session_id: string; display_name: string }
+  | {
+      type: "session_memo_updated";
+      session_id: string;
+      memo_text: string | null;
+    }
   | { type: "session_restart_cwd_resolved"; session: Session }
   | { type: "session_deleted"; session_id: string }
   | { type: "session_groups_updated"; groups: SessionGroup[] }

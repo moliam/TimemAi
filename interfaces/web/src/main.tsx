@@ -150,7 +150,6 @@ import {
   UserMessageNavigationDirection,
   wheelDeltaPixels,
 } from "./scroll";
-import { interimAnswerPresentation } from "./interim_answers";
 import {
   applyTurnProjection,
   activeModelRetryStatus,
@@ -1815,6 +1814,16 @@ function TimemApp() {
         );
         return;
       }
+      if (event.type === "session_memo_updated") {
+        setSessions((current) =>
+          current.map((session) =>
+            session.session_id === event.session_id
+              ? { ...session, active_memo: event.memo_text ?? null }
+              : session,
+          ),
+        );
+        return;
+      }
       if (event.type === "session_deleted") {
         removePendingKey(
           pendingDeleteSessionIdsRef,
@@ -2492,9 +2501,12 @@ function TimemApp() {
                     session,
                     event.outcome.message_id,
                     event.outcome.completion ?? {},
+                    event.outcome.text,
+                    (text, id) => makeMessage("assistant", text, id),
                   ),
                   event.turn_id,
                   event.outcome.completion ?? {},
+                  event.outcome.text,
                 )
               : session,
           ),
@@ -9406,6 +9418,25 @@ function TimemThread({
             </span>
           </button>
         )}
+        {activeSession?.active_memo && (
+          <span
+            className="thread-memo-indicator"
+            role="status"
+            tabIndex={0}
+            title={t("messageNav.memoIndicator")}
+            aria-label={t("messageNav.memoIndicator")}
+          >
+            <span className="thread-memo-icon" aria-hidden="true">
+              📌
+            </span>
+            <span className="thread-memo-tooltip" role="tooltip">
+              <span className="thread-memo-caption">
+                {t("messageNav.memoIndicator")}
+              </span>
+              <span className="thread-memo-text">{activeSession.active_memo}</span>
+            </span>
+          </span>
+        )}
       </nav>
     </ThreadPrimitive.Root>
   );
@@ -9606,7 +9637,7 @@ const TurnInteraction = memo(function TurnInteraction({
     [toolActivityRuns],
   );
   const hasVisibleProcess =
-    scrollItems.some((item) => item.activity !== null) || decisions.length > 0 || turn.sub_answers.length > 0;
+    scrollItems.some((item) => item.activity !== null) || decisions.length > 0;
   const runningStreamTools = useMemo(() => streamRetention
     ? scrollItems.filter(item => item.activity && streamRetention.isRetained(item.activity) && (item.activity as Activity).tool_name !== "sub_answer").map(item => ({ ...item.activity!, createdAt: item.createdAt }))
     : [], [streamRetention, scrollItems]);
@@ -9970,7 +10001,7 @@ const TurnInteraction = memo(function TurnInteraction({
           )}
         </div>
       )}
-      {(streamUiMode || turn.sub_answers.length > 0 ||
+      {(streamUiMode ||
         turn.final_answer ||
         turn.preview ||
         runningStreamTools.length > 0) && (
@@ -10008,7 +10039,6 @@ const TurnInteraction = memo(function TurnInteraction({
         />
       )}
       {!turn.final_answer &&
-        turn.sub_answers.length === 0 &&
         (turn.completion || cancelled) && (
           <section className="turn-completion-only">
             <CompletionCard
@@ -10110,15 +10140,13 @@ function StreamProcess({ closing, onArchived, children }: {
   return <div ref={ref} className={`stream-continuous-process${closing ? " archiving" : ""}`}>{children}</div>;
 }
 
-function StreamActivityPresentation({ thoughtText, activities, answers, responseArriving }: {
+function StreamActivityPresentation({ thoughtText, activities, responseArriving }: {
   responseArriving: boolean;
   thoughtText: string;
   activities: Activity[];
-  answers: ReturnType<typeof interimAnswerPresentation>;
 }) {
   const entries = [
-    ...activities.map(activity => ({ key: activity.id, time: activity.createdAt, activity, answer: undefined as typeof answers[number] | undefined })),
-    ...answers.map(answer => ({ key: answer.key, time: answer.createdAt, activity: undefined as Activity | undefined, answer })),
+    ...activities.map(activity => ({ key: activity.id, time: activity.createdAt, activity })),
   ].sort((a, b) => a.time - b.time);
   const groups: (typeof entries)[] = [];
   for (const entry of entries) {
@@ -10129,7 +10157,7 @@ function StreamActivityPresentation({ thoughtText, activities, answers, response
   // One reverse scan, rather than rescanning the suffix for every tool group.
   let lastReplyIndex = -1;
   for (let index = groups.length - 1; index >= 0; index--) {
-    if (groups[index].some(entry => !!entry.answer || (entry.activity?.kind === "free_talk" && !!entry.activity.detail))) {
+    if (groups[index].some(entry => entry.activity?.kind === "free_talk" && !!entry.activity.detail)) {
       lastReplyIndex = index;
       break;
     }
@@ -10137,7 +10165,7 @@ function StreamActivityPresentation({ thoughtText, activities, answers, response
   const handoffIds = streamToolHandoffIds(activities);
   return <section className="turn-stream-tools" aria-label="Live model activity">
     {groups.map((group, index) => {
-      const { key, activity, answer } = group[0];
+      const { key, activity } = group[0];
       if (activity?.tone === "action") {
         // 逻辑时序 +1 有两种入口：后续 AI 回复内容，或新 call 实际开始执行。
         // 此处处理 AI 内容入口；串行 call 入口由 handoffIds 按执行事件顺序判定。
@@ -10145,36 +10173,11 @@ function StreamActivityPresentation({ thoughtText, activities, answers, response
         const superseded = responseArriving || !!thoughtText || index < lastReplyIndex;
         return <StreamToolRun key={key} activities={group.map(entry => entry.activity!)} superseded={superseded} handoffIds={handoffIds} />;
       }
-      return answer
-        ? <StreamChatAnswer key={key} answer={answer} superseded={!answer.provisional && (responseArriving || !!thoughtText || index < lastReplyIndex)} />
-        : activity?.kind === "free_talk"
+      return activity?.kind === "free_talk"
           ? <div key={key} className="stream-thought-text"><MarkdownContent text={activity.detail ?? ""} /></div>
           : activity?.kind === "user_supplement" ? <ActivityView key={key} activity={activity} /> : null;
     })}
     {thoughtText && <div className="stream-thought-text" aria-label="Model thought preview"><StreamText text={thoughtText} /></div>}
-  </section>;
-}
-
-/** Chat disclosure is presentation-only; delivery stays owned by core.sub_answer. */
-function StreamChatAnswer({ answer, superseded }: {
-  answer: ReturnType<typeof interimAnswerPresentation>[number];
-  superseded: boolean;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
-  useT();
-  // Keep provisional Chat readable; later AI content may fold confirmed Chat.
-  // Manual disclosure remains available; archival must preserve a Chat entry.
-  const open = expanded || (!superseded && !collapsed);
-  return <section className={`turn-chat-delivery${open ? " expanded" : " collapsed"}`}>
-    <button type="button" className="working-chip work-title-chip work-collapse-toggle chat-title-chip"
-      aria-label={open ? t("tools.hideChatAria") : t("tools.showChatAria")}
-      aria-expanded={open} onClick={() => { setExpanded(!open); setCollapsed(open); }}>
-      <ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true" />Chat{!open && " (+1)"}
-    </button>
-    {open && <div className={`live-interim-answer${answer.provisional ? " provisional-chat" : ""}`}>
-      {answer.provisional ? <StreamText text={answer.answer} /> : <MarkdownContent text={answer.answer} />}
-    </div>}
   </section>;
 }
 
@@ -10345,82 +10348,19 @@ function TurnAnswerDelivery({
   useT();
   const streamUiMode = useStreamUiMode();
   const preview = streamUiMode ? turn.preview : undefined;
-  const previewChat = preview?.chat ?? [];
   const retainedThought = [...streamTools].reverse().find((activity) => activity.kind === "free_talk");
   const intermediate = preview?.response?.status === "intermediate";
   const previewText = intermediate ? "" : preview?.response?.text ?? "";
   // A response has one text home: live preview supersedes the retained thought.
   const thoughtText = previewText ? "" : retainedThought?.detail ??
     (streamWorking && intermediate ? preview?.response?.text ?? "" : "");
-  const hasPreview = !!previewText || previewChat.length > 0;
+  const hasPreview = !!previewText;
   const hasFinal = !!turn.final_answer;
-  const items = interimAnswerPresentation(turn.sub_answers, preview);
-  const newest = items[0];
-  const [collapsedAnswer, setCollapsedAnswer] = useState<string | null>(null);
-  const liveAnswer = !streamUiMode && streamWorking && !hasFinal && newest &&
-    newest.key !== collapsedAnswer && newest.createdAt >= latestThoughtTime &&
-    (!previewText || newest.provisional)
-    ? newest : undefined;
-  const chatItems = streamUiMode && streamRetained ? [] : items.filter(item => item !== liveAnswer);
-  const hasChat = chatItems.length > 0;
-  const [chatExpanded, setChatExpanded] = useState(false);
-  const previousFinal = useRef(hasFinal);
-  const chatPanelId = `turn-chat-${turn.turn_id}`;
-  useEffect(() => {
-    const finalArrived = !previousFinal.current && !!turn.final_answer;
-    previousFinal.current = !!turn.final_answer;
-    if (finalArrived) setChatExpanded(false);
-  }, [turn.final_answer]);
   return (
     <section className="turn-answer-delivery">
       {streamRetained && <StreamProcess closing={turn.state !== "working"} onArchived={onStreamArchived}>
-        <StreamActivityPresentation thoughtText={intermediate && !retainedThought ? thoughtText : ""} activities={streamTools} answers={items} responseArriving={!!previewText} />
+        <StreamActivityPresentation thoughtText={intermediate && !retainedThought ? thoughtText : ""} activities={streamTools} responseArriving={!!previewText} />
       </StreamProcess>}
-      {liveAnswer && <div className={`stream-thought-text live-interim-answer${liveAnswer.provisional ? " provisional-chat" : ""}`} aria-label={t("interim.currentAnswer")}>
-        {liveAnswer.provisional ? <StreamText text={liveAnswer.answer} /> : <MarkdownContent text={liveAnswer.answer} />}
-        <button type="button" className="working-chip" aria-label={t("tools.collapseToChatAria")} onClick={() => setCollapsedAnswer(liveAnswer.key)}>{t("tools.collapseToChat")}</button>
-      </div>}
-      {hasChat && (
-        <section
-          className={`turn-chat-delivery${chatExpanded ? " expanded" : " collapsed"}`}
-        >
-          <div className="turn-chat-heading">
-            <button
-              type="button"
-              className="working-chip work-title-chip work-collapse-toggle chat-title-chip"
-              title={chatExpanded ? t("tools.hideChatAria") : t("tools.showChatAria")}
-              aria-label={chatExpanded ? t("tools.hideChatAria") : t("tools.showChatAria")}
-              aria-expanded={chatExpanded}
-              aria-controls={chatPanelId}
-              onClick={() => setChatExpanded((expanded) => !expanded)}
-            >
-              <ChevronRight
-                className="work-collapse-arrow"
-                size={13}
-                aria-hidden="true"
-              />
-              Chat{!chatExpanded && ` (+${chatItems.length})`}
-            </button>
-          </div>
-          {chatExpanded && (
-            <div
-              id={chatPanelId}
-              className="turn-chat-panel"
-              role="region"
-              aria-label="Chat answers"
-            >
-              <div className="turn-interim-list">
-                {chatItems.map((item) => (
-                  <section className={`turn-interim-item${item.provisional ? " provisional-chat" : ""}${item.provisional && !preview?.interruption ? " streaming" : ""}`} key={item.key} data-preview-index={item.index}>
-                    {item.task && <h3>{item.ordinal !== undefined && <span>{item.ordinal}.</span>} {item.task}</h3>}
-                    <div className="message-content">{item.provisional ? <StreamText text={item.answer} /> : <MarkdownContent text={item.answer} />}</div>
-                  </section>
-                ))}
-              </div>
-            </div>
-          )}
-        </section>
-      )}
       {hasPreview && preview?.interruption && <div className="response-preview-interruption" role="status">{preview.interruption === "cancelled" ? "Stopped — partial response" : preview.interruption === "network_error" ? "Network error — partial response" : "Model error — partial response"}</div>}
       {(hasFinal || !!previewText) && (
         <FinalAnswerDelivery

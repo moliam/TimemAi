@@ -5,12 +5,11 @@ use crate::{
     host_start_audit_event, load_reminder_tips_config, load_workspace_dirs_from_path,
     local_datetime_label, local_time_label, model_service_config_from_env,
     observation_events_from_core_topic_events, observation_panel_width_for_terminal,
-    parse_cli_args, render_final_answer_markdown, render_final_response_at,
-    render_prof_report_data, render_shell_status_bar, render_thinking_view_at,
-    render_turn_outcome_text, resolve_memory_dir, resume_in_process_turn, run_in_process_turn,
-    runtime_active_elapsed_secs, runtime_profile_report, shell_status_message_from_core_topic,
-    stale_context_decision_request, topic_event_status_hint, work_instruction_load_report,
-    work_instruction_load_request, work_instruction_load_topic_event,
+    parse_cli_args, render_final_response_at, render_prof_report_data, render_shell_status_bar,
+    render_thinking_view_at, render_turn_outcome_text, resolve_memory_dir, resume_in_process_turn,
+    run_in_process_turn, runtime_active_elapsed_secs, runtime_profile_report,
+    shell_status_message_from_core_topic, stale_context_decision_request, topic_event_status_hint,
+    work_instruction_load_report, work_instruction_load_request, work_instruction_load_topic_event,
     work_instruction_mode_from_sources, workspace_config_file, workspace_reference_context,
     CoreMemoryActivity, CoreTopicEvent, HostDecision, HostDecisionRequest, HostStatusMessage,
     ModelDirection, NoopTurnUi, ObservationEvent, ObservationPanel, OutputExpansionRequest,
@@ -1003,15 +1002,6 @@ impl TurnUi for CliTurnUi<'_> {
             return;
         }
         if let Some(status) = self.status.as_deref_mut() {
-            for event in events {
-                if event.topic.name == timem_in_process::agent_api::CORE_TOPIC_SUB_ANSWER {
-                    let task = event.payload["task"].as_str().unwrap_or_default();
-                    let answer = event.payload["answer"].as_str().unwrap_or_default();
-                    if !task.trim().is_empty() && !answer.trim().is_empty() {
-                        status.show_sub_answer(task, answer);
-                    }
-                }
-            }
             if let Some(hint) = topic_event_status_hint(events) {
                 status.set_intent(&hint.action, hint.memory_activity);
             }
@@ -1243,22 +1233,6 @@ impl ThinkingStatus {
     fn settle_active_observations(&mut self) {
         if let Ok(mut state) = self.state.lock() {
             state.observations.apply(ObservationEvent::SettleActive);
-            rerender_thinking(&state, &self.rendered_lines);
-        }
-    }
-
-    fn show_sub_answer(&mut self, task: &str, answer: &str) {
-        if let Ok(state) = self.state.lock() {
-            clear_thinking_block(&self.rendered_lines);
-            let rendered = render_final_answer_markdown(answer);
-            println!(
-                "To: {}
-{}
-",
-                task.trim(),
-                rendered.trim_end()
-            );
-            let _ = io::stdout().flush();
             rerender_thinking(&state, &self.rendered_lines);
         }
     }

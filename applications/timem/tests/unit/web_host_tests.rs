@@ -331,56 +331,6 @@ fn worker_role_snapshots_survive_raw_history_reconstruction() {
 }
 
 #[test]
-fn structured_sub_answers_survive_raw_history_reconstruction() {
-    let records = vec![
-        ChatHistoryRecord::Message {
-            role: ChatHistoryRole::User,
-            turn_id: "turn_sub_answer".to_string(),
-            created_at_ms: 1,
-            kind: Some("task".to_string()),
-            command_id: None,
-            delivery_state: None,
-            content: "answer both questions".to_string(),
-        },
-        ChatHistoryRecord::Event {
-            role: ChatHistoryRole::System,
-            turn_id: "turn_sub_answer".to_string(),
-            created_at_ms: 2,
-            kind: ChatHistoryEventKind::SubAnswer,
-            content: "shown".to_string(),
-            extra: BTreeMap::from([
-                (
-                    "source".to_string(),
-                    Value::String("core_topic".to_string()),
-                ),
-                (
-                    "payload".to_string(),
-                    json!({
-                        "session_id": "session_a",
-                        "topic": {"name": CORE_TOPIC_SUB_ANSWER},
-                        "state": {"name": "running"},
-                        "payload": {
-                            "sub_answer_id": "sub_answer_1",
-                            "ordinal": 1,
-                            "task": "First question",
-                            "answer": "First answer"
-                        }
-                    }),
-                ),
-            ]),
-        },
-    ];
-
-    let restored = restored_turns_from_history_records(&records);
-    assert_eq!(restored.len(), 1);
-    assert_eq!(restored[0].sub_answers.len(), 1);
-    assert_eq!(restored[0].sub_answers[0].sub_answer_id, "sub_answer_1");
-    assert_eq!(restored[0].sub_answers[0].ordinal, 1);
-    assert_eq!(restored[0].sub_answers[0].task, "First question");
-    assert_eq!(restored[0].sub_answers[0].answer, "First answer");
-}
-
-#[test]
 fn multiple_worker_roles_resolve_in_message_order_and_render_all_contexts() {
     let state = routing_test_state();
     let roles = vec![
@@ -1584,7 +1534,6 @@ fn restored_interrupted_session_marks_every_unfinished_turn() {
             interrupted_at_ms: None,
             user_entries: Vec::new(),
             events: Vec::new(),
-            sub_answers: Vec::new(),
             final_answer: None,
             completion: None,
         },
@@ -1596,7 +1545,6 @@ fn restored_interrupted_session_marks_every_unfinished_turn() {
             interrupted_at_ms: None,
             user_entries: Vec::new(),
             events: Vec::new(),
-            sub_answers: Vec::new(),
             final_answer: None,
             completion: None,
         },
@@ -1623,7 +1571,6 @@ fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn(
         interrupted_at_ms: None,
         user_entries: Vec::new(),
         events: Vec::new(),
-        sub_answers: Vec::new(),
         final_answer: None,
         completion: Some(json!({"stop_reason": "model_error"})),
     };
@@ -1635,7 +1582,6 @@ fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn(
         interrupted_at_ms: None,
         user_entries: Vec::new(),
         events: Vec::new(),
-        sub_answers: Vec::new(),
         final_answer: None,
         completion: None,
     };
@@ -1654,7 +1600,6 @@ fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn(
         interrupted_at_ms: None,
         user_entries: Vec::new(),
         events: Vec::new(),
-        sub_answers: Vec::new(),
         final_answer: None,
         completion: None,
     }];
@@ -1729,7 +1674,6 @@ fn interrupted_session_persists_without_an_active_or_pending_turn() {
         interrupted_at_ms: None,
         user_entries: Vec::new(),
         events: Vec::new(),
-        sub_answers: Vec::new(),
         final_answer: None,
         completion: None,
     });
@@ -1760,7 +1704,6 @@ fn stale_turn_started_without_command_id_cannot_revive_an_interrupted_session() 
             interrupted_at_ms: None,
             user_entries: Vec::new(),
             events: Vec::new(),
-            sub_answers: Vec::new(),
             final_answer: None,
             completion: None,
         });
@@ -1829,7 +1772,6 @@ fn stale_turn_started_cannot_revive_an_interrupted_turn_but_new_pending_turn_can
                 worker_roles: Vec::new(),
             }],
             events: Vec::new(),
-            sub_answers: Vec::new(),
             final_answer: None,
             completion: None,
         });
@@ -4215,7 +4157,6 @@ fn session_runtime_update_is_allowed_during_an_active_turn() {
             interrupted_at_ms: None,
             user_entries: Vec::new(),
             events: Vec::new(),
-            sub_answers: Vec::new(),
             final_answer: None,
             completion: None,
         });
@@ -4280,7 +4221,6 @@ fn session_api_key_update_is_rejected_during_an_active_turn() {
         interrupted_at_ms: None,
         user_entries: Vec::new(),
         events: Vec::new(),
-        sub_answers: Vec::new(),
         final_answer: None,
         completion: None,
     });
@@ -7710,6 +7650,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         cancelling_turn_id: None,
         pending_turn_id: None,
         turn_projection: TurnProjectionCache::default(),
+        active_memo: None,
         message_queue: SessionMessageQueue::new(MAX_NEXT_TURN_INTENTS),
         pending_completion_message_id: None,
         pending_unconsumed_supplements: Vec::new(),
@@ -11669,7 +11610,6 @@ fn background_exit_event_is_appended_to_its_original_turn() {
             interrupted_at_ms: None,
             user_entries: Vec::new(),
             events: Vec::new(),
-            sub_answers: Vec::new(),
             final_answer: None,
             completion: None,
         });
@@ -14951,7 +14891,6 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
             interrupted_at_ms: None,
             user_entries: Vec::new(),
             events: Vec::new(),
-            sub_answers: Vec::new(),
             final_answer: None,
             preview: None,
             completion: None,
@@ -15228,4 +15167,67 @@ fn debug_browse_listing_renders_links_and_parent() {
     assert!(nested.contains("../"));
     assert!(nested.contains("api.json"));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// --- task_finished summary persists as final answer across Host restore ---
+
+#[test]
+fn task_finished_outcome_persists_assistant_history_and_turn_final_answer() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    start_web_turn(&state, session_id, "long task").unwrap();
+
+    // Simulate a task_finished outcome: text carries the final summary and the
+    // stop reason marks an explicit TurnFinished.
+    let outcome = {
+        let mut outcome = TurnOutcome::final_response(
+            "task_finished summary as final answer",
+            UsageStats::zero(),
+            None,
+            None,
+            Duration::ZERO,
+        );
+        outcome.stop_reason = Some(agent_core::TurnStopReason::TurnFinished);
+        outcome
+    };
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnFinished { outcome },
+    );
+
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[session_id];
+        let turn = session.turns.last().unwrap();
+        assert_eq!(turn.state, "finished");
+        assert_eq!(
+            turn.final_answer.as_deref(),
+            Some("task_finished summary as final answer")
+        );
+        assert!(session.messages.iter().any(|message| message.text
+            == "task_finished summary as final answer"
+            && message.role == "assistant"));
+    }
+
+    // Raw-history reconstruction must restore the final answer for a restarted
+    // Host or a later attach snapshot.
+    let history_path = current_session_store(&state)
+        .unwrap()
+        .history_path_for_session(session_id);
+    let records = std::fs::read_to_string(&history_path)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<ChatHistoryRecord>(line).unwrap())
+        .collect::<Vec<_>>();
+    let restored = restored_turns_from_history_records(&records);
+    let restored_turn = restored
+        .iter()
+        .find(|turn| turn.final_answer.is_some())
+        .expect("final answer restored from history");
+    assert_eq!(
+        restored_turn.final_answer.as_deref(),
+        Some("task_finished summary as final answer")
+    );
 }

@@ -5324,3 +5324,76 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .turn-stream-tools > .stream-thought-text { margin-bottom: 0; }
 .composer-debug-inline.composer-debug-link { cursor: pointer; color: inherit; text-decoration: none; }
 .composer-debug-inline.composer-debug-link:hover { text-decoration: underline; }
+
+/* Active long-task memo indicator below the working navigation button. */
+.thread-memo-indicator {
+  position: relative;
+  margin-top: 2px;
+  justify-self: center;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid #2e443f66;
+  border-radius: 9px;
+  background: #242424d9;
+  box-shadow: inset 0 1px 0 #ffffff0d, inset 0 -7px 14px #00000024, 0 9px 24px #0000002e;
+  cursor: default;
+  outline: none;
+  backdrop-filter: blur(16px) saturate(115%);
+  transition: background .16s, box-shadow .16s;
+}
+.thread-memo-indicator:hover,
+.thread-memo-indicator:focus-visible {
+  background: #2a302edb;
+  border-color: #3a524b;
+  box-shadow: inset 0 1px 0 #c7e4dc1c, inset 0 -8px 16px #07100e29, 0 11px 28px #00000038;
+}
+.thread-memo-indicator .thread-memo-icon {
+  filter: sepia(.28) saturate(.62) hue-rotate(96deg) brightness(1.06);
+}
+.thread-memo-icon {
+  font-size: 13px;
+  line-height: 1;
+}
+.user-message-navigation:has(.thread-memo-indicator:hover),
+.user-message-navigation:has(.thread-memo-indicator:focus-visible) {
+  z-index: 41;
+}
+.thread-memo-tooltip {
+  position: absolute;
+  z-index: 42;
+  right: 38px;
+  top: 50%;
+  transform: translateY(-50%) translateX(4px);
+  width: max-content;
+  max-width: 320px;
+  padding: 8px 10px;
+  border: 1px solid #33473f99;
+  border-radius: 8px;
+  background: #1c2220f2;
+  color: #cfd6db;
+  font-size: 11px;
+  line-height: 1.5;
+  box-shadow: 0 2px 10px #00000052;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .15s ease, transform .15s ease;
+  white-space: normal;
+}
+.thread-memo-caption {
+  display: block;
+  color: #8db6d1;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.thread-memo-text {
+  display: block;
+  word-break: break-word;
+  user-select: text;
+}
+.thread-memo-indicator:hover .thread-memo-tooltip,
+.thread-memo-indicator:focus-visible .thread-memo-tooltip {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+}
