@@ -5400,26 +5400,23 @@ body.workspace-modal-open .app-shell { user-select: none; }
 
 /* Inline ctx clear action inside the header context usage line. */
 .context-clear-inline {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-left: 8px;
-  padding: 3px 8px;
-  border: 1px solid #3a4a44;
-  border-radius: 6px;
+  display: inline-grid;
+  place-items: center;
+  margin-left: 6px;
+  padding: 3px;
+  border: 0;
+  border-radius: 5px;
   background: transparent;
-  color: #9fb4ac;
-  font-size: 11px;
-  line-height: 1;
+  color: #7d918a;
+  line-height: 0;
   cursor: pointer;
-  transition: background .15s, color .15s, border-color .15s;
+  transition: background .15s, color .15s;
 }
 .context-clear-inline:hover {
   background: #2a302edb;
   color: #dcb8b0;
-  border-color: #6b5a54;
 }
 .context-clear-inline:focus-visible {
   outline: 2px solid #66b9ad;
-  outline-offset: 2px;
+  outline-offset: 1px;
 }
