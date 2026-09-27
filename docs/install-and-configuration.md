@@ -154,8 +154,8 @@ directory on every supported platform.
   `*.config.toml` profile overlays are scanned as explicit candidates. A provider
   without a model source is reported as missing instead of borrowing the default
   model from an unrelated provider. An `env_key` is read from the Timem process
-  environment first. For the standard `~/.codex` layout, a CHJ provider using
-  `CHJ_API_KEY` also falls back to the EPT portal token in
+  environment first. For the standard `~/.codex` layout, an EPT portal provider using
+  `EPT_PORTAL_TOKEN` also falls back to the EPT portal token in
   `~/.config/ept/auth_session.json`, matching the launcher that injects that
   environment variable for Codex.
 - Claude Code (`settings.json`, `settings.local.json` with local overrides):

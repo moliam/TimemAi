@@ -13682,10 +13682,10 @@ base_url = "https://zai.example.test/v1"
 experimental_bearer_token = "zai-provider-secret"
 wire_api = "responses"
 
-[model_providers.chj]
-name = "CHJ"
-base_url = "https://chj.example.test/v1"
-env_key = "TIMEM_TEST_CHJ_KEY"
+[model_providers.ept-portal]
+name = "EptPortal"
+base_url = "https://ept-portal.example.test/v1"
+env_key = "TIMEM_TEST_PORTAL_KEY"
 wire_api = "responses"
 
 [profiles.fast]
@@ -13714,9 +13714,9 @@ model_reasoning_effort = "high"
     )
     .unwrap();
     std::fs::write(
-        codex_dir.join("chj.config.toml"),
+        codex_dir.join("portal.config.toml"),
         r#"
-model_provider = "chj"
+model_provider = "ept-portal"
 model = "andes-glm-5.x-auto"
 model_reasoning_effort = "high"
 "#,
@@ -13748,7 +13748,7 @@ model_reasoning_effort = "medium"
     .unwrap();
     std::env::set_var("TIMEM_TEST_OPENROUTER_KEY", "openrouter-secret-key");
     std::env::set_var("TIMEM_TEST_TENANT", "tenant-one");
-    std::env::set_var("TIMEM_TEST_CHJ_KEY", "chj-secret-key");
+    std::env::set_var("TIMEM_TEST_PORTAL_KEY", "portal-secret-key");
 
     let scan = scan_model_endpoint_imports(
         Some(codex_dir.to_str().unwrap()),
@@ -13758,7 +13758,7 @@ model_reasoning_effort = "medium"
     std::env::remove_var("TIMEM_TEST_OPENROUTER_KEY");
     std::env::remove_var("TIMEM_TEST_TENANT");
     std::env::remove_var("TIMEM_TEST_TENANT");
-    std::env::remove_var("TIMEM_TEST_CHJ_KEY");
+    std::env::remove_var("TIMEM_TEST_PORTAL_KEY");
     assert_eq!(scan.candidates.len(), 6);
     let openrouter = scan
         .candidates
@@ -13789,13 +13789,13 @@ model_reasoning_effort = "medium"
         .unwrap();
     assert_eq!(zai.model, "glm-5.3");
     assert_eq!(zai.reasoning_effort.as_deref(), Some("high"));
-    let chj = scan
+    let portal = scan
         .candidates
         .iter()
-        .find(|candidate| candidate.name == "CHJ")
+        .find(|candidate| candidate.name == "EptPortal")
         .unwrap();
-    assert_eq!(chj.model, "andes-glm-5.x-auto");
-    assert_eq!(chj.api_key, "chj-secret-key");
+    assert_eq!(portal.model, "andes-glm-5.x-auto");
+    assert_eq!(portal.api_key, "portal-secret-key");
     let inline = scan
         .candidates
         .iter()
@@ -13833,7 +13833,7 @@ model_reasoning_effort = "medium"
     assert!(!serialized.contains("openrouter-secret-key"));
     assert!(!serialized.contains("inline-provider-secret"));
     assert!(!serialized.contains("zai-provider-secret"));
-    assert!(!serialized.contains("chj-secret-key"));
+    assert!(!serialized.contains("portal-secret-key"));
     assert!(!serialized.contains("claude-secret-key"));
     assert!(!serialized.contains("codex-auth-key"));
 
@@ -13863,7 +13863,7 @@ model_reasoning_effort = "medium"
 }
 
 #[test]
-fn model_endpoint_import_resolves_ept_portal_token_for_chj() {
+fn model_endpoint_import_resolves_ept_portal_token_for_ept_portal() {
     let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_import_ept"));
     let codex_dir = root.join(".codex");
     let ept_dir = root.join(".config").join("ept");
@@ -13881,18 +13881,18 @@ base_url = "https://zai.example.test/v1"
 experimental_bearer_token = "zai-secret-key"
 wire_api = "responses"
 
-[model_providers.chj]
-name = "CHJ"
-base_url = "https://chj.example.test/v1"
-env_key = "CHJ_API_KEY"
+[model_providers.ept-portal]
+name = "EptPortal"
+base_url = "https://ept-portal.example.test/v1"
+env_key = "EPT_PORTAL_TOKEN"
 wire_api = "responses"
 "#,
     )
     .unwrap();
     std::fs::write(
-        codex_dir.join("chj.config.toml"),
+        codex_dir.join("portal.config.toml"),
         r#"
-model_provider = "chj"
+model_provider = "ept-portal"
 model = "andes-glm-5.x-auto"
 model_reasoning_effort = "high"
 "#,
@@ -13904,38 +13904,38 @@ model_reasoning_effort = "high"
     )
     .unwrap();
 
-    let previous_key = std::env::var("CHJ_API_KEY").ok();
-    std::env::remove_var("CHJ_API_KEY");
+    let previous_key = std::env::var("EPT_PORTAL_TOKEN").ok();
+    std::env::remove_var("EPT_PORTAL_TOKEN");
     let valid_scanned = scan_model_endpoint_imports(Some(codex_dir.to_str().unwrap()), None);
     std::fs::write(ept_dir.join("auth_session.json"), r#"{"portal_token":""}"#).unwrap();
     let missing_token_scanned =
         scan_model_endpoint_imports(Some(codex_dir.to_str().unwrap()), None);
     if let Some(key) = previous_key {
-        std::env::set_var("CHJ_API_KEY", key);
+        std::env::set_var("EPT_PORTAL_TOKEN", key);
     }
     let scan = valid_scanned.expect("valid EPT auth session scan");
     let missing_token_scan = missing_token_scanned.expect("EPT auth session scan");
-    let chj = scan
+    let portal = scan
         .candidates
         .iter()
-        .find(|candidate| candidate.name == "CHJ")
-        .expect("CHJ profile overlay candidate");
-    assert_eq!(chj.model, "andes-glm-5.x-auto");
-    assert_eq!(chj.reasoning_effort.as_deref(), Some("high"));
-    assert_eq!(chj.api_key, "ept-portal-token");
-    let report = ModelEndpointImportCandidateReport::from(chj);
+        .find(|candidate| candidate.name == "EptPortal")
+        .expect("EptPortal profile overlay candidate");
+    assert_eq!(portal.model, "andes-glm-5.x-auto");
+    assert_eq!(portal.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(portal.api_key, "ept-portal-token");
+    let report = ModelEndpointImportCandidateReport::from(portal);
     assert!(report.api_key_configured);
     let serialized = serde_json::to_string(&report).unwrap();
     assert!(!serialized.contains("ept-portal-token"));
     assert!(!serialized.contains("not-the-codex-key"));
 
     let scan = missing_token_scan;
-    let chj = scan
+    let portal = scan
         .candidates
         .iter()
-        .find(|candidate| candidate.name == "CHJ")
+        .find(|candidate| candidate.name == "EptPortal")
         .unwrap();
-    assert_eq!(chj.api_key, "");
+    assert_eq!(portal.api_key, "");
     assert!(scan
         .issues
         .iter()

@@ -188,7 +188,7 @@ struct CodexProvider {
 /// EPT's standard Codex launcher injects the portal token through this
 /// environment name. Keep the mapping explicit so the portal token is never
 /// sent to an unrelated provider that happens to lack an environment value.
-const EPT_CODEX_PORTAL_TOKEN_ENV_KEY: &str = "CHJ_API_KEY";
+const EPT_CODEX_PORTAL_TOKEN_ENV_KEY: &str = "EPT_PORTAL_TOKEN";
 
 /// Lazily resolved EPT portal token. Resolution is attempted only when a Codex
 /// provider explicitly asks for the known EPT environment name.
