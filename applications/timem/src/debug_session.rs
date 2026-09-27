@@ -77,7 +77,6 @@ struct LlmResponseDumpEntry {
     worker_id: String,
     round: u32,
     received_at_ms: u128,
-    used_reasoning: bool,
     content: String,
     tool_calls: Vec<agent_core::NativeToolCall>,
 }
@@ -143,6 +142,7 @@ struct EndpointDebug {
 }
 
 const MAX_METRIC_SAMPLES: usize = 2_000;
+const MAX_RESPONSE_REASONING_FLAGS: usize = 200;
 
 #[derive(Debug, Default)]
 struct SessionDebug {
@@ -150,6 +150,9 @@ struct SessionDebug {
     response_sequence: u64,
     reasoning_requests: u64,
     last_request_reasoning_by_worker: BTreeMap<String, bool>,
+    /// Bounded ring of per-response reasoning flags (newest first), decoupled
+    /// from the heavy response dump so prompt markers survive longer histories.
+    recent_response_reasoning: VecDeque<bool>,
     latest_request: Option<LlmRequestDumpEntry>,
     responses: VecDeque<LlmResponseDumpEntry>,
     started_at_ms: u128,
@@ -552,13 +555,16 @@ impl DebugStore {
                 .last_request_reasoning_by_worker
                 .remove(worker_id)
                 .unwrap_or(false);
+            stats.recent_response_reasoning.push_front(used_reasoning);
+            stats
+                .recent_response_reasoning
+                .truncate(MAX_RESPONSE_REASONING_FLAGS);
             stats.responses.push_front(LlmResponseDumpEntry {
                 sequence: stats.response_sequence,
                 request_sequence,
                 worker_id: worker_id.to_string(),
                 round,
                 received_at_ms,
-                used_reasoning,
                 content: content.to_string(),
                 tool_calls: tool_calls.to_vec(),
             });
@@ -751,7 +757,11 @@ impl DebugStore {
                 .get(session_id)
                 .ok_or_else(|| "debug_session_not_found".to_string())?;
             (
-                render_llm_prompt_html(session_id, stats.latest_request.as_ref(), &stats.responses),
+                render_llm_prompt_html(
+                    session_id,
+                    stats.latest_request.as_ref(),
+                    &stats.recent_response_reasoning,
+                ),
                 render_tool_schema_dump(session_id, stats.latest_request.as_ref()),
             )
         };
@@ -795,7 +805,7 @@ fn take_in_flight_endpoint(stats: &mut SessionDebug, worker_id: &str) -> Option<
 fn render_llm_prompt_html(
     _session_id: &str,
     request: Option<&LlmRequestDumpEntry>,
-    responses: &VecDeque<LlmResponseDumpEntry>,
+    recent_response_reasoning: &VecDeque<bool>,
 ) -> String {
     let mut out = String::new();
     out.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
@@ -821,8 +831,8 @@ fn render_llm_prompt_html(
         let mut reasoning_by_offset = vec![false; assistant_count];
         for (offset, _) in assistant_positions.iter().enumerate() {
             let reverse_index = assistant_count - 1 - offset;
-            if let Some(response) = responses.get(reverse_index) {
-                reasoning_by_offset[offset] = response.used_reasoning;
+            if let Some(flag) = recent_response_reasoning.get(reverse_index) {
+                reasoning_by_offset[offset] = *flag;
             }
         }
         for (index, entry) in entries.iter().enumerate() {
