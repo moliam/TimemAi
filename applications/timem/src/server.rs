@@ -9767,11 +9767,16 @@ fn session_context_with_roles(
         .suite()
         .prompt_boundaries();
     let resume_notice = if session.resume_notice_pending {
+        let history_path = current_session_store(state)?.history_path_for_session(session_id);
         Some(
             SessionResumeNotice {
-                history_path: current_session_store(state)?.history_path_for_session(session_id),
+                history_path: history_path.clone(),
                 current_dir: PathBuf::from(&current_dir),
                 restarted_at: state.runtime_started_at.clone(),
+                // The runtime-held memo does not survive a restart. If the
+                // pre-restart history ended with an active memo, tell the
+                // model it must recreate the reminder if still relevant.
+                previous_active_memo: previous_active_memo_from_history(&history_path),
             }
             .render(),
         )
@@ -9820,6 +9825,63 @@ fn session_context_with_roles(
         worker_roles.as_deref(),
         tool_repo_hint.as_deref(),
     ]))
+}
+
+/// Scans the raw chat history tail for the latest core.memo topic state.
+/// Returns the memo text when the session ended with an active memo.
+fn previous_active_memo_from_history(history_path: &std::path::Path) -> Option<String> {
+    use std::io::BufRead;
+    const TAIL_LINES: usize = 4000;
+    let file = std::fs::File::open(history_path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    let mut ring: std::collections::VecDeque<String> =
+        std::collections::VecDeque::with_capacity(TAIL_LINES);
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
+        if ring.len() == TAIL_LINES {
+            ring.pop_front();
+        }
+        ring.push_back(line);
+    }
+    for line in ring.iter().rev() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        // History event content carries a "core_topic: {json}" style prefix.
+        let content = value.get("content").and_then(Value::as_str).unwrap_or("");
+        let Some(json_start) = content.find('{') else {
+            continue;
+        };
+        let Ok(payload) = serde_json::from_str::<Value>(&content[json_start..]) else {
+            continue;
+        };
+        // core.memo topic payloads carry {"active": bool, "text": ...}
+        if payload
+            .get("topic")
+            .and_then(|t| t.get("name"))
+            .and_then(Value::as_str)
+            == Some("core.memo")
+            || payload
+                .get("payload")
+                .and_then(|p| p.get("active"))
+                .is_some()
+        {
+            let text = payload
+                .get("payload")
+                .and_then(|p| p.get("text"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let active = payload
+                .get("payload")
+                .and_then(|p| p.get("active"))
+                .and_then(Value::as_bool);
+            return match (active, text) {
+                (Some(true), Some(text)) if !text.is_empty() => Some(text),
+                _ => None,
+            };
+        }
+    }
+    None
 }
 
 fn uploaded_files_context(

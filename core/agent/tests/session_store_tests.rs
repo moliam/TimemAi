@@ -1038,6 +1038,7 @@ fn resume_notice_references_history_format_without_web_specific_language() {
         history_path: PathBuf::from("/tmp/session/raw_chat_history.jsonl"),
         current_dir: PathBuf::from("/work/project"),
         restarted_at: "2026-09-27 09:00:00".to_string(),
+        previous_active_memo: None,
     };
     let rendered = notice.render();
     assert!(rendered.starts_with("Runtime restarted at 2026-09-27 09:00:00 (local time)."));

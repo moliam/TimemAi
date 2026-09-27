@@ -785,6 +785,7 @@ fn take_shell_resume_notice(
             history_path: session_store.history_path_for_session(session_id),
             current_dir: current_dir.to_path_buf(),
             restarted_at: local_datetime_label(),
+            previous_active_memo: None,
         }
         .render(),
     )
