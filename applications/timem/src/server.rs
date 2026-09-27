@@ -1578,11 +1578,13 @@ pub async fn run(
         None
     };
     let debug = if launch.debug {
-        let store = Arc::new(DebugStore::with_root(
+        let statistics_persistence = template.data_dir.join("debug-statistics.json");
+        let store = Arc::new(DebugStore::with_root_and_persistence(
             diagnostic_root
                 .as_ref()
                 .expect("debug launch creates a diagnostic root")
                 .clone(),
+            Some(statistics_persistence),
         ));
         println!("Timem Web debug directory: {}", store.root().display());
         Some(store)
@@ -2183,6 +2185,23 @@ fn client_command_trace_fields(command: &ClientCommand) -> (&'static str, Option
     }
 }
 
+async fn debug_reset_statistics(
+    State((state, _)): State<(AppState, u16)>,
+    Query(query): Query<UploadQuery>,
+    headers: HeaderMap,
+) -> StatusCode {
+    if !authorized_api_request(&state, query.token.as_deref(), &headers) {
+        return StatusCode::UNAUTHORIZED;
+    }
+    let Some(debug) = state.debug.as_ref() else {
+        return StatusCode::NOT_FOUND;
+    };
+    match debug.reset_statistics(&query.session_id) {
+        Ok(()) => StatusCode::OK,
+        Err(_) => StatusCode::BAD_REQUEST,
+    }
+}
+
 fn build_router(state: AppState, port: u16) -> Router {
     build_browser_router(
         (state, port),
@@ -2193,6 +2212,7 @@ fn build_router(state: AppState, port: u16) -> Router {
             upload: post(upload_file),
             performance_trace: post(performance_trace),
             debug_browse: get(debug_browse),
+            debug_reset_statistics: post(debug_reset_statistics),
             websocket: get(websocket),
             static_assets: get(static_asset),
         },

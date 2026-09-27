@@ -26,11 +26,48 @@ pub(crate) struct TemporaryDebugRoot {
     root: PathBuf,
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct PersistedEndpoint {
+    profile: Option<agent_core::InteractionProfile>,
+    requests: u64,
+    successes: u64,
+    failures: u64,
+    action_cpu_ns: Vec<u64>,
+    action_cpu_unavailable: u64,
+    llm_latency_ms: Vec<u64>,
+    length_finish_response_bytes: Vec<u64>,
+    tools_per_response: Vec<u64>,
+    repairs: BTreeMap<String, u64>,
+    runtime_root_repair_help: u64,
+    prompt_tokens: u64,
+    cached_tokens: u64,
+    cache_created_tokens: u64,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct PersistedSession {
+    request_sequence: u64,
+    response_sequence: u64,
+    started_at_ms: u64,
+    updated_at_ms: u64,
+    reasoning_requests: u64,
+    endpoints: Vec<(EndpointKey, PersistedEndpoint)>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct PersistedStore {
+    sessions: BTreeMap<String, PersistedSession>,
+}
+
 #[derive(Debug)]
 pub(crate) struct DebugStore {
     root: std::sync::Arc<TemporaryDebugRoot>,
     sessions: Mutex<BTreeMap<String, SessionDebug>>,
     file_render_lock: Mutex<()>,
+    persistence_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
@@ -40,6 +77,7 @@ struct LlmResponseDumpEntry {
     worker_id: String,
     round: u32,
     received_at_ms: u128,
+    used_reasoning: bool,
     content: String,
     tool_calls: Vec<agent_core::NativeToolCall>,
 }
@@ -61,7 +99,7 @@ struct LlmRequestDumpEntry {
     api_payload: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 struct EndpointKey {
     model: String,
     gateway: String,
@@ -92,10 +130,10 @@ struct EndpointDebug {
     requests: u64,
     successes: u64,
     failures: u64,
-    action_cpu_ns: Vec<u64>,
+    action_cpu_ns: VecDeque<u64>,
     action_cpu_unavailable: u64,
-    llm_latency_ms: Vec<u64>,
-    length_finish_response_bytes: Vec<u64>,
+    llm_latency_ms: VecDeque<u64>,
+    length_finish_response_bytes: VecDeque<u64>,
     tools_per_response: [u64; 11],
     repairs: BTreeMap<String, u64>,
     runtime_root_repair_help: u64,
@@ -104,10 +142,14 @@ struct EndpointDebug {
     cache_created_tokens: u64,
 }
 
+const MAX_METRIC_SAMPLES: usize = 2_000;
+
 #[derive(Debug, Default)]
 struct SessionDebug {
     request_sequence: u64,
     response_sequence: u64,
+    reasoning_requests: u64,
+    last_request_reasoning_by_worker: BTreeMap<String, bool>,
     latest_request: Option<LlmRequestDumpEntry>,
     responses: VecDeque<LlmResponseDumpEntry>,
     started_at_ms: u128,
@@ -180,12 +222,185 @@ impl DebugStore {
         )))
     }
 
+    #[cfg(test)]
     pub(crate) fn with_root(root: std::sync::Arc<TemporaryDebugRoot>) -> Self {
-        Self {
+        Self::with_root_and_persistence(root, None)
+    }
+
+    pub(crate) fn with_root_and_persistence(
+        root: std::sync::Arc<TemporaryDebugRoot>,
+        persistence_path: Option<std::path::PathBuf>,
+    ) -> Self {
+        let mut store = Self {
             root,
             sessions: Mutex::new(BTreeMap::new()),
             file_render_lock: Mutex::new(()),
+            persistence_path: None,
+        };
+        if let Some(path) = persistence_path.as_ref() {
+            store.load_persisted(path);
         }
+        store.persistence_path = persistence_path;
+        store
+    }
+
+    fn load_persisted(&mut self, path: &std::path::Path) {
+        let Ok(text) = fs::read_to_string(path) else {
+            return;
+        };
+        let Ok(persisted) = serde_json::from_str::<PersistedStore>(&text) else {
+            eprintln!("[timem_debug_statistics] persisted statistics unreadable, starting fresh");
+            return;
+        };
+        if let Ok(mut sessions) = self.sessions.lock() {
+            *sessions = persisted
+                .sessions
+                .into_iter()
+                .map(|(id, session)| {
+                    (
+                        id,
+                        SessionDebug {
+                            request_sequence: session.request_sequence,
+                            response_sequence: session.response_sequence,
+                            started_at_ms: session.started_at_ms as u128,
+                            updated_at_ms: session.updated_at_ms as u128,
+                            reasoning_requests: session.reasoning_requests,
+                            endpoints: session
+                                .endpoints
+                                .into_iter()
+                                .map(|(key, endpoint)| {
+                                    let mut tools = [0u64; 11];
+                                    for (index, value) in
+                                        endpoint.tools_per_response.iter().enumerate().take(11)
+                                    {
+                                        tools[index] = *value;
+                                    }
+                                    (
+                                        key,
+                                        EndpointDebug {
+                                            profile: endpoint.profile,
+                                            requests: endpoint.requests,
+                                            successes: endpoint.successes,
+                                            failures: endpoint.failures,
+                                            action_cpu_ns: endpoint.action_cpu_ns.into(),
+                                            action_cpu_unavailable: endpoint.action_cpu_unavailable,
+                                            llm_latency_ms: endpoint.llm_latency_ms.into(),
+                                            length_finish_response_bytes: endpoint
+                                                .length_finish_response_bytes
+                                                .into(),
+                                            tools_per_response: tools,
+                                            repairs: endpoint.repairs,
+                                            runtime_root_repair_help: endpoint
+                                                .runtime_root_repair_help,
+                                            prompt_tokens: endpoint.prompt_tokens,
+                                            cached_tokens: endpoint.cached_tokens,
+                                            cache_created_tokens: endpoint.cache_created_tokens,
+                                        },
+                                    )
+                                })
+                                .collect(),
+                            ..SessionDebug::default()
+                        },
+                    )
+                })
+                .collect();
+        }
+    }
+
+    fn save_persisted(&self) {
+        let Some(path) = self.persistence_path.as_ref() else {
+            return;
+        };
+        let Ok(sessions) = self.sessions.lock() else {
+            return;
+        };
+        let persisted = PersistedStore {
+            sessions: sessions
+                .iter()
+                .map(|(id, stats)| {
+                    (
+                        id.clone(),
+                        PersistedSession {
+                            request_sequence: stats.request_sequence,
+                            response_sequence: stats.response_sequence,
+                            started_at_ms: stats.started_at_ms.min(u64::MAX as u128) as u64,
+                            updated_at_ms: stats.updated_at_ms.min(u64::MAX as u128) as u64,
+                            reasoning_requests: stats.reasoning_requests,
+                            endpoints: stats
+                                .endpoints
+                                .iter()
+                                .map(|(key, endpoint)| {
+                                    (
+                                        key.clone(),
+                                        PersistedEndpoint {
+                                            profile: endpoint.profile.clone(),
+                                            requests: endpoint.requests,
+                                            successes: endpoint.successes,
+                                            failures: endpoint.failures,
+                                            action_cpu_ns: endpoint
+                                                .action_cpu_ns
+                                                .iter()
+                                                .copied()
+                                                .collect(),
+                                            action_cpu_unavailable: endpoint.action_cpu_unavailable,
+                                            llm_latency_ms: endpoint
+                                                .llm_latency_ms
+                                                .iter()
+                                                .copied()
+                                                .collect(),
+                                            length_finish_response_bytes: endpoint
+                                                .length_finish_response_bytes
+                                                .iter()
+                                                .copied()
+                                                .collect(),
+                                            tools_per_response: endpoint
+                                                .tools_per_response
+                                                .to_vec(),
+                                            repairs: endpoint.repairs.clone(),
+                                            runtime_root_repair_help: endpoint
+                                                .runtime_root_repair_help,
+                                            prompt_tokens: endpoint.prompt_tokens,
+                                            cached_tokens: endpoint.cached_tokens,
+                                            cache_created_tokens: endpoint.cache_created_tokens,
+                                        },
+                                    )
+                                })
+                                .collect(),
+                        },
+                    )
+                })
+                .collect(),
+        };
+        drop(sessions);
+        let Ok(text) = serde_json::to_string(&persisted) else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = atomic_private_write(path, text.as_bytes());
+    }
+
+    /// Clears cumulative statistics for one session (reset button).
+    pub(crate) fn reset_statistics(&self, session_id: &str) -> Result<(), String> {
+        {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .map_err(|_| "debug_store_poisoned".to_string())?;
+            let now = now_ms();
+            if let Some(stats) = sessions.get_mut(session_id) {
+                *stats = SessionDebug {
+                    started_at_ms: now,
+                    updated_at_ms: now,
+                    ..SessionDebug::default()
+                };
+            }
+        }
+        self.save_persisted();
+        self.render_statistics(session_id)?;
+        self.render_llm_prompts(session_id)?;
+        self.render_llm_responses(session_id)
     }
 
     #[cfg(test)]
@@ -271,6 +486,15 @@ impl DebugStore {
             stats
                 .latest_request_sequence_by_worker
                 .insert(worker_id.to_string(), stats.request_sequence);
+            let reasoning_request = interaction_request
+                .map(|interaction| interaction.critical_reasoning)
+                .unwrap_or(false);
+            if reasoning_request {
+                stats.reasoning_requests = stats.reasoning_requests.saturating_add(1);
+            }
+            stats
+                .last_request_reasoning_by_worker
+                .insert(worker_id.to_string(), reasoning_request);
             stats.latest_request = Some(LlmRequestDumpEntry {
                 sequence: stats.request_sequence,
                 worker_id: worker_id.to_string(),
@@ -324,12 +548,17 @@ impl DebugStore {
                 .latest_request_sequence_by_worker
                 .get(worker_id)
                 .copied();
+            let used_reasoning = stats
+                .last_request_reasoning_by_worker
+                .remove(worker_id)
+                .unwrap_or(false);
             stats.responses.push_front(LlmResponseDumpEntry {
                 sequence: stats.response_sequence,
                 request_sequence,
                 worker_id: worker_id.to_string(),
                 round,
                 received_at_ms,
+                used_reasoning,
                 content: content.to_string(),
                 tool_calls: tool_calls.to_vec(),
             });
@@ -347,11 +576,15 @@ impl DebugStore {
             if truncated {
                 endpoint
                     .length_finish_response_bytes
-                    .push(u64::try_from(content.len()).unwrap_or(u64::MAX));
+                    .push_back(u64::try_from(content.len()).unwrap_or(u64::MAX));
+                endpoint
+                    .length_finish_response_bytes
+                    .truncate(MAX_METRIC_SAMPLES);
             }
             stats.updated_at_ms = received_at_ms;
         }
         self.render_llm_responses(session_id)?;
+        self.render_llm_prompts(session_id)?;
         self.render_statistics(session_id)
     }
 
@@ -367,7 +600,8 @@ impl DebugStore {
                 endpoint.successes = endpoint.successes.saturating_add(1);
                 endpoint
                     .llm_latency_ms
-                    .push(latency.as_millis().min(u64::MAX as u128) as u64);
+                    .push_back(latency.as_millis().min(u64::MAX as u128) as u64);
+                endpoint.llm_latency_ms.truncate(MAX_METRIC_SAMPLES);
             }
         })
     }
@@ -447,9 +681,13 @@ impl DebugStore {
         cpu_time: Option<Duration>,
     ) -> Result<(), String> {
         self.update(session_id, |stats| match cpu_time {
-            Some(duration) => endpoint_for_worker(stats, worker_id)
-                .action_cpu_ns
-                .push(duration.as_nanos().min(u64::MAX as u128) as u64),
+            Some(duration) => {
+                let endpoint = endpoint_for_worker(stats, worker_id);
+                endpoint
+                    .action_cpu_ns
+                    .push_back(duration.as_nanos().min(u64::MAX as u128) as u64);
+                endpoint.action_cpu_ns.truncate(MAX_METRIC_SAMPLES);
+            }
             None => {
                 let endpoint = endpoint_for_worker(stats, worker_id);
                 endpoint.action_cpu_unavailable = endpoint.action_cpu_unavailable.saturating_add(1);
@@ -493,7 +731,9 @@ impl DebugStore {
                 .ok_or_else(|| "debug_session_not_found".to_string())?;
             render_statistics_html(session_id, stats)
         };
-        atomic_private_write(&dir.join("statistics.html"), body.as_bytes())
+        atomic_private_write(&dir.join("statistics.html"), body.as_bytes())?;
+        self.save_persisted();
+        Ok(())
     }
 
     fn render_llm_prompts(&self, session_id: &str) -> Result<(), String> {
@@ -511,7 +751,7 @@ impl DebugStore {
                 .get(session_id)
                 .ok_or_else(|| "debug_session_not_found".to_string())?;
             (
-                render_llm_prompt_html(session_id, stats.latest_request.as_ref()),
+                render_llm_prompt_html(session_id, stats.latest_request.as_ref(), &stats.responses),
                 render_tool_schema_dump(session_id, stats.latest_request.as_ref()),
             )
         };
@@ -552,15 +792,45 @@ fn take_in_flight_endpoint(stats: &mut SessionDebug, worker_id: &str) -> Option<
     stats.in_flight_by_worker.remove(worker_id)
 }
 
-fn render_llm_prompt_html(_session_id: &str, request: Option<&LlmRequestDumpEntry>) -> String {
+fn render_llm_prompt_html(
+    _session_id: &str,
+    request: Option<&LlmRequestDumpEntry>,
+    responses: &VecDeque<LlmResponseDumpEntry>,
+) -> String {
     let mut out = String::new();
     out.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
     out.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     out.push_str("<title>LLM Prompt Payload</title><style>");
     out.push_str(PROMPT_DUMP_CSS);
-    out.push_str("</style></head><body><main class=\"shell\"><h1>LLM Prompt Payload</h1><div class=\"timeline\">");
+    out.push_str(".thinking-tag{border:1px solid #b48ead;background:rgba(180,142,173,.12);padding:.1rem .4rem;margin-left:.4rem;font-weight:700;color:#b48ead;font-size:.8em}</style></head><body><main class=\"shell\"><h1>LLM Prompt Payload</h1><div class=\"timeline\">");
     if let Some(payload) = request.and_then(|request| request.api_payload.as_ref()) {
-        for (index, entry) in api_payload_message_entries(payload).iter().enumerate() {
+        // The newest assistant message in the payload corresponds to the newest
+        // retained response dump; older reasoning flags map onto earlier
+        // assistant messages in reverse order.
+        let entries = api_payload_message_entries(payload);
+        let assistant_positions: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                let role = payload_entry_role(entry);
+                role == "assistant" || role == "message"
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let assistant_count = assistant_positions.len();
+        let mut reasoning_by_offset = vec![false; assistant_count];
+        for (offset, _) in assistant_positions.iter().enumerate() {
+            let reverse_index = assistant_count - 1 - offset;
+            if let Some(response) = responses.get(reverse_index) {
+                reasoning_by_offset[offset] = response.used_reasoning;
+            }
+        }
+        for (index, entry) in entries.iter().enumerate() {
+            let used_reasoning = assistant_positions
+                .iter()
+                .position(|p| *p == index)
+                .map(|offset| reasoning_by_offset[offset])
+                .unwrap_or(false);
             let entry = slim_prompt_payload_entry(entry);
             out.push_str(
                 "<article class=\"message\"><div class=\"message-head\"><span class=\"ordinal\">",
@@ -568,6 +838,9 @@ fn render_llm_prompt_html(_session_id: &str, request: Option<&LlmRequestDumpEntr
             out.push_str(&(index + 1).to_string());
             out.push_str("</span><strong>");
             html_text(&mut out, &payload_entry_role(&entry));
+            if used_reasoning {
+                out.push_str(" <span class=\"thinking-tag\">USED THINKING HERE</span>");
+            }
             out.push_str("</strong></div><pre>");
             let json = serde_json::to_string_pretty(&entry)
                 .unwrap_or_else(|error| format!("{{\"dump_error\":{error:?}}}"));
@@ -790,7 +1063,7 @@ fn render_statistics_html(session_id: &str, stats: &SessionDebug) -> String {
         "</p></div><div class=\"freshness\"><span class=\"live-dot\"></span>Auto-refresh · ",
     );
     html_text(&mut out, &format_timestamp_ms(stats.updated_at_ms));
-    out.push_str("</div></header><section class=\"summary-grid\" aria-label=\"Session overview\">");
+    out.push_str(" · <button type=\"button\" id=\"reset-stats\">Reset statistics</button></div></header><section class=\"summary-grid\" aria-label=\"Session overview\">");
     summary_card(
         &mut out,
         "Endpoints",
@@ -820,6 +1093,12 @@ fn render_statistics_html(session_id: &str, stats: &SessionDebug) -> String {
         "Repairs",
         total_repairs.to_string(),
         "protocol repair events",
+    );
+    summary_card(
+        &mut out,
+        "Reasoning",
+        stats.reasoning_requests.to_string(),
+        "requests with reasoning effort",
     );
     out.push_str("</section><section class=\"panel overview\"><div class=\"section-head\"><div><p class=\"eyebrow\">OVERVIEW</p><h2>Endpoint matrix</h2></div><div class=\"time-range\">Started ");
     html_text(&mut out, &format_timestamp_ms(stats.started_at_ms));
@@ -873,6 +1152,9 @@ fn render_statistics_html(session_id: &str, stats: &SessionDebug) -> String {
     out.push_str(&format!(
         "setTimeout(()=>location.reload(),{STATISTICS_REFRESH_MS});"
     ));
+    out.push_str(
+        "document.getElementById('reset-stats')?.addEventListener('click',async(ev)=>{ev.preventDefault();if(!confirm('Reset cumulative statistics for this session?'))return;ev.target.disabled=true;const params=new URLSearchParams(location.search);params.delete('path');params.delete('download');await fetch('/api/debug/reset?'+params.toString(),{method:'POST'});location.reload();});",
+    );
     out.push_str("</script></body></html>");
     out
 }
@@ -934,7 +1216,12 @@ fn render_endpoint_panel(
         &format_tokens(endpoint.cache_created_tokens),
     );
     out.push_str("</div>");
-    render_length_finish_metrics(out, &endpoint.length_finish_response_bytes);
+    let length_finish: Vec<u64> = endpoint
+        .length_finish_response_bytes
+        .iter()
+        .copied()
+        .collect();
+    render_length_finish_metrics(out, &length_finish);
     if let Some(profile) = endpoint.profile.as_ref() {
         out.push_str("<dl class=\"profile-grid\">");
         profile_item(out, "API protocol", &profile.api_protocol);
@@ -980,7 +1267,8 @@ fn render_endpoint_panel(
         .map(|value| value / 1_000_000)
         .collect::<Vec<_>>();
     let action_counts = fixed_histogram(&action_ms, ACTION_BUCKET_MS, ACTION_LAST_BUCKET_MS);
-    let latency_counts = latency_histogram(&endpoint.llm_latency_ms);
+    let latency_values: Vec<u64> = endpoint.llm_latency_ms.iter().copied().collect();
+    let latency_counts = latency_histogram(&latency_values);
     out.push_str("<div class=\"metric-pair\"><article class=\"panel metric-panel\"><div class=\"section-head compact\"><div><p class=\"eyebrow\">LOCAL EXECUTION</p><h3>Action on-CPU time</h3></div></div><div class=\"mini-kpis\">");
     mini_kpi(out, "Total", &format_duration_ns(action_total_ns));
     mini_kpi(
@@ -1991,8 +2279,8 @@ mod tests {
                 requests: 3,
                 successes: 2,
                 failures: 1,
-                action_cpu_ns: vec![1_000_000, 2_000_000],
-                llm_latency_ms: vec![100, 250],
+                action_cpu_ns: vec![1_000_000, 2_000_000].into(),
+                llm_latency_ms: vec![100, 250].into(),
                 repairs: BTreeMap::from([("invalid_action<script>".to_string(), 2)]),
                 ..EndpointDebug::default()
             },
@@ -2328,7 +2616,11 @@ mod tests {
             })),
         };
 
-        let html = render_llm_prompt_html("session_responses_input", Some(&request));
+        let html = render_llm_prompt_html(
+            "session_responses_input",
+            Some(&request),
+            &Default::default(),
+        );
         let instructions = html.find("responses system instructions").unwrap();
         let first = html.find("first").unwrap();
         let call = html.find("call_1").unwrap();
@@ -2385,5 +2677,71 @@ mod tests {
         assert!(dump.contains("call_latest"));
         assert!(dump.contains("raw_arguments"));
         store.cleanup().unwrap();
+    }
+
+    #[test]
+    fn reasoning_usage_is_counted_and_marked_in_prompt_dump() {
+        let store = DebugStore::create().unwrap();
+        let interaction = agent_core::ModelInteractionRequest {
+            rendered_prompt: "p".to_string(),
+            critical_reasoning: true,
+            ..agent_core::ModelInteractionRequest::inline("p")
+        };
+        let payload = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "thinking answer"}
+            ]
+        });
+        store
+            .record_prompt("s", "w", 1, "p", Some(&interaction), Some(&payload))
+            .unwrap();
+        let response = DebugLlmResponse {
+            usage: &agent_core::UsageStats::zero(),
+            content: "thinking answer",
+            tool_calls: &[],
+            truncated: false,
+        };
+        store.record_llm_response("s", "w", 1, response).unwrap();
+        let dir = store.root().join("s");
+        let stats_html = fs::read_to_string(dir.join("statistics.html")).unwrap();
+        assert!(stats_html.contains("Reasoning"));
+        assert!(stats_html.contains("requests with reasoning effort"));
+        let prompt_html = fs::read_to_string(dir.join("llm_prompt.html")).unwrap();
+        assert!(prompt_html.contains("USED THINKING HERE"));
+        store.cleanup().unwrap();
+    }
+
+    #[test]
+    fn statistics_persist_across_store_rebuild_and_reset_clears_them() {
+        let root = std::sync::Arc::new(TemporaryDebugRoot::create().unwrap());
+        let persistence = root.path().join("stats.json");
+        {
+            let store =
+                DebugStore::with_root_and_persistence(root.clone(), Some(persistence.clone()));
+            store.record_prompt("s", "w", 1, "p", None, None).unwrap();
+        }
+        {
+            let store =
+                DebugStore::with_root_and_persistence(root.clone(), Some(persistence.clone()));
+            let html_path = store.root().join("s").join("statistics.html");
+            let html = fs::read_to_string(&html_path).unwrap();
+            assert!(
+                html.contains("Requests"),
+                "statistics rendered after reload"
+            );
+            let sessions = store.sessions.lock().unwrap();
+            let stats = sessions.get("s").unwrap();
+            assert_eq!(
+                stats.request_sequence, 1,
+                "persisted counters survive rebuild"
+            );
+            drop(sessions);
+            store.reset_statistics("s").unwrap();
+            let sessions = store.sessions.lock().unwrap();
+            let stats = sessions.get("s").unwrap();
+            assert_eq!(stats.request_sequence, 0, "reset clears counters");
+        }
+        root.cleanup().unwrap();
     }
 }

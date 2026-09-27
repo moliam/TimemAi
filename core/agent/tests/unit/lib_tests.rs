@@ -2372,3 +2372,87 @@ fn only_structured_resume_accepts_an_empty_user_component() {
         )
         .is_some());
 }
+
+#[test]
+fn periodic_reasoning_review_triggers_after_round_interval_with_enough_messages() {
+    let mut core = test_core("periodic_reasoning_review");
+    for i in 0..31 {
+        core.submit_prompt_component(
+            PromptComponentRole::User,
+            "user_question",
+            format!("message {i}"),
+            "user_input",
+        );
+    }
+    for _ in 0..35 {
+        let prompt = core.build_next_prompt();
+        assert!(!prompt.contains(prompt_render::REASONING_REVIEW_TRAILER));
+        assert!(!core.reasoning_critical());
+    }
+    let prompt = core.build_next_prompt();
+    assert!(prompt.contains(prompt_render::REASONING_REVIEW_TRAILER));
+    assert_eq!(
+        prompt
+            .matches(prompt_render::REASONING_REVIEW_TRAILER)
+            .count(),
+        1
+    );
+    assert!(core.reasoning_critical());
+    let prompt = core.build_next_prompt();
+    assert!(!prompt.contains(prompt_render::REASONING_REVIEW_TRAILER));
+    assert!(!core.reasoning_critical());
+}
+
+#[test]
+fn periodic_reasoning_review_requires_enough_messages() {
+    let mut core = test_core("periodic_reasoning_few_messages");
+    for i in 0..10 {
+        core.submit_prompt_component(
+            PromptComponentRole::User,
+            "user_question",
+            format!("message {i}"),
+            "user_input",
+        );
+    }
+    for _ in 0..40 {
+        let prompt = core.build_next_prompt();
+        assert!(!prompt.contains(prompt_render::REASONING_REVIEW_TRAILER));
+    }
+    assert!(!core.reasoning_critical());
+}
+
+#[test]
+fn context_message_element_count_counts_user_and_assistant_messages() {
+    let mut core = test_core("message_element_count");
+    for i in 0..5 {
+        core.submit_prompt_component(
+            PromptComponentRole::User,
+            "user_question",
+            format!("u{i}"),
+            "user_input",
+        );
+        core.submit_prompt_component(
+            PromptComponentRole::system(),
+            "result_of_llm_action",
+            format!("action {i}"),
+            "previous_model_response",
+        );
+        core.submit_prompt_component(
+            PromptComponentRole::assistant("Timem"),
+            "llm_response",
+            format!("a{i}"),
+            "previous_model_response",
+        );
+    }
+    core.submit_prompt_component(
+        PromptComponentRole::assistant("Timem"),
+        "context_compaction_summary",
+        "compacted",
+        "runtime",
+    );
+    core.flush_pending_prompt_components();
+    assert_eq!(
+        prompt_render::context_message_element_count(core.deltas_for_test()),
+        11
+    );
+}
