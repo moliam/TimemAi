@@ -10390,6 +10390,7 @@ function TurnAnswerDelivery({
       {streamUiMode && streamWorking && (
         <div className="stream-working-trailer" role="status" aria-label="Working">
           <span className="stream-working-dot" aria-hidden="true" />
+          <WorkingElapsed createdAtMs={turn.created_at_ms} />
         </div>
       )}
     </section>

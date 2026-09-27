@@ -5420,3 +5420,15 @@ body.workspace-modal-open .app-shell { user-select: none; }
   outline: 2px solid #66b9ad;
   outline-offset: 1px;
 }
+
+/* Stream working trailer: breathing dot with a dim elapsed label beside it. */
+.stream-working-trailer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.stream-working-trailer .working-elapsed {
+  color: #77857e;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
