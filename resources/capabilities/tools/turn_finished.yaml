@@ -6,12 +6,11 @@ summary: Explicitly declare that all work for the current user turn is complete 
 prompt_synopsis: |
   {"turn_finished":{"summary":"final user-facing answer"}}
 description: |
-  A response without any tool calls no longer finishes the turn. When everything the
-  user asked for is fully done, call this tool exactly once with the polished,
-  user-facing final answer as `summary`. The turn ends only after this call. Do not
-  call it while any work, verification, or pending question remains; keep working
-  with other tools instead. The summary must be the complete final answer, not a
-  placeholder or progress note.
+  Call this tool exactly once when, and only when, everything the user asked for is
+  fully done. Put the polished, user-facing final answer in `summary`. Do not call it
+  while any work, verification, or pending question remains; keep using other tools
+  instead. The summary must be the complete final answer, not a placeholder or
+  progress note.
 prompt_input: |
   Provide a non-empty `summary` containing the complete final user-facing answer
   in the user's language.
