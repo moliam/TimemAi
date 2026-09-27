@@ -51,6 +51,7 @@ pub(super) fn publish(state: &AppState, session_id: &str, worker_id: &str, event
         state,
         session_id,
         WireEvent::CoreTopic {
+            session_id: session_id.to_string(),
             turn_id: Some(web_turn_id),
             turn_event_id: None,
             event: event.wire_payload(),

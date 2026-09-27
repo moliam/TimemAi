@@ -154,6 +154,7 @@ export type Session = {
   } | null;
   debug_dir?: string | null;
   max_llm_input_tokens: number;
+  restored_context_prompt_tokens?: number | null;
   tools: ToolSummary[];
   mcp_server_ids: string[];
   runtime_profile?: {
@@ -674,6 +675,7 @@ export type ClientCommand =
   | { type: "session_api_key_update"; session_id: string; api_key: string }
   | { type: "session_api_key_reveal"; session_id: string }
   | { type: "session_stop"; session_id: string }
+  | { type: "session_clear_context"; session_id: string }
   | { type: "session_delete"; session_id: string }
   | {
       type: "chat_message_delete";
