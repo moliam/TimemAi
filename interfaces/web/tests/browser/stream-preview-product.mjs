@@ -382,15 +382,22 @@ async function main() {
         await new Promise(resolve => { release = resolve; });
       } else {
         if (scenario === "normal" || scenario === "tools") await new Promise(resolve => { releaseFinal = resolve; });
-        write("HTTP final");
+        // Native turns must end via the task_finished tool call; plain text
+        // deltas alone never terminate the turn.
+        res.write(`data: ${JSON.stringify({choices:[{delta:{tool_calls:[{index:0,id:"call_final",type:"function",function:{name:"task_finished",arguments:JSON.stringify({summary:"HTTP final"})}}]}}]})}\n\n`);
       }
       res.end("data: [DONE]\n\n"); return;
     }
     if (requests === 1) {
-      write(protocol === "json" ? '{"status":"working","free_talk":"HTTP early response","working_still_action":[{"readfile":{"path":"Cargo.toml","max_bytes":200}}' : '<ASSISTANT><free_talk>HTTP early response</free_talk><actions><readfile><path>Cargo.toml</path><max_bytes>200</max_bytes>');
+      // For the interaction scenario keep <free_talk> open so appended
+      // streaming text stays previewable (only free_talk/final_answer text is
+      // forwarded by the XML preview stream).
+      const interactionXml = protocol === "xml" && scenario === "interaction";
+      write(protocol === "json" ? '{"status":"working","free_talk":"HTTP early response","working_still_action":[{"readfile":{"path":"Cargo.toml","max_bytes":200}}' : interactionXml ? '<ASSISTANT><free_talk>HTTP early response' : '<ASSISTANT><free_talk>HTTP early response</free_talk><actions><readfile><path>Cargo.toml</path><max_bytes>200</max_bytes>');
       await new Promise(resolve => { release = resolve; });
       if (scenario === 'network') { res.destroy(); return; }
       if (scenario === 'invalid') write('</readfile></actions><invalid></ASSISTANT>');
+      else if (interactionXml) write('</free_talk><actions><readfile><path>Cargo.toml</path><max_bytes>200</max_bytes></readfile></actions></ASSISTANT>');
       else if (scenario === "tools") write('</readfile><readfile><path>Cargo.toml</path><max_bytes>200</max_bytes></readfile><readfile><path>Cargo.toml</path><max_bytes>100</max_bytes></readfile></actions></ASSISTANT>');
       else write(protocol === "json" ? ']}' : '</readfile></actions></ASSISTANT>');
     } else {
@@ -415,7 +422,15 @@ async function main() {
     socket.send(JSON.stringify({type:"session_create",display_name:"HTTP streaming acceptance",workspace_dir:mem}));
     await waitFor(()=>sessionId,"session creation failed");
     browser = await startBrowser("http://127.0.0.1:18987/");
-    await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1",${JSON.stringify(String(streamMode))})`);
+    // The CDP target may still be on about:blank right after creation, where
+    // localStorage access is denied; wait until the app origin is live.
+    await waitFor(async () => {
+      try {
+        await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1",${JSON.stringify(String(streamMode))})`);
+        return true;
+      } catch { return false; }
+    }, "app origin never became storage-capable");
+    
     await browser.call("Page.reload",{ignoreCache:true});
     await waitFor(()=>browser.evaluate(`!!document.querySelector('textarea[aria-label="Message Timem"]')`),"composer missing");
     await waitFor(() => browser.evaluate(`!!document.querySelector('button.session[title="HTTP streaming acceptance"]')`), "session button missing");
