@@ -310,7 +310,7 @@ proc run_edited_paste_recovery_ctrl_c_smoke {} {
             send "\033\[24;1R"
             exp_continue
         }
-        -re "可能被误编辑" {}
+        -re "误编辑" {}
         timeout {
             error "timeout waiting for paste recovery confirmation"
         }
@@ -351,7 +351,7 @@ proc run_edited_paste_recovery_esc_smoke {} {
             send "\033\[24;1R"
             exp_continue
         }
-        -re "可能被误编辑" {}
+        -re "误编辑" {}
         timeout {
             error "timeout waiting for paste recovery confirmation before Esc"
         }
