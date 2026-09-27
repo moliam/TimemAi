@@ -6,7 +6,7 @@ summary: Let the runtime hold one persistent reminder memo for long-running work
 prompt_synopsis: |
   {"memo":{"op":"create","text":"refined long-task reminder"}}
 description: |
-  Use this tool to record your goal with the help of the runtime, especially when the user's task needs long run, step by step, multi turns of work. Distill
+  Use this tool to record/update your goal with the help of the runtime, especially when the user's task needs long run, step by step, multi turns of work. Distill
   the user's demand, constraints, methodology, into one concise memo
   sentence and ask the runtime to remember it for you. An agent holds at most ONE memo.
 
