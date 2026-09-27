@@ -2140,15 +2140,7 @@ async fn debug_browse(
                 .unwrap_or(false);
             if !too_large {
                 if let Ok(bytes) = std::fs::read(&target) {
-                    return (
-                        StatusCode::OK,
-                        [(
-                            header::CONTENT_TYPE,
-                            HeaderValue::from_static("text/html; charset=utf-8"),
-                        )],
-                        bytes,
-                    )
-                        .into_response();
+                    return debug_html_response(bytes.into());
                 }
             }
         }
@@ -2164,15 +2156,30 @@ async fn debug_browse(
             &format!("<p class=\"err\">{}</p>", html_escape(&error)),
         ),
     };
-    (
+    debug_html_response(html.into())
+}
+
+/// Debug browse pages embed inline scripts (auto-refresh, reset button);
+/// the default `script-src 'self'` policy would block them.
+fn debug_html_response(body: axum::body::Bytes) -> Response {
+    let mut response = (
         StatusCode::OK,
         [(
             header::CONTENT_TYPE,
             HeaderValue::from_static("text/html; charset=utf-8"),
         )],
-        html,
+        body,
     )
-        .into_response()
+        .into_response();
+    // Debug pages embed inline scripts (auto-refresh, reset button); set the
+    // relaxed policy here so the default security-header middleware keeps it.
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; font-src 'self' data:; form-action 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+        ),
+    );
+    response
 }
 fn client_command_trace_fields(command: &ClientCommand) -> (&'static str, Option<String>) {
     match command {
