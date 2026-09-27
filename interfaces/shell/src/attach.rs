@@ -529,6 +529,12 @@ fn topic_summary(payload: &Value) -> Option<String> {
     if topic == "core.action" {
         return action_detail(payload.get("payload")?);
     }
+    if topic == "core.model.preview" {
+        // Streaming text deltas: keep them silent. Progress is already
+        // conveyed by the projection dots; per-delta lines would flood
+        // the terminal.
+        return None;
+    }
     let event_name = payload.get("event").and_then(Value::as_str).unwrap_or("");
     Some(format!("- [{topic}] {event_name}").trim_end().to_string())
 }
