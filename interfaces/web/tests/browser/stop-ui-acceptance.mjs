@@ -375,8 +375,10 @@ async function main() {
     await browser.evaluate(`document.querySelector('.sidebar-settings-button').click()`);
     await waitFor(() => exists('.settings-center-nav'), "settings navigation missing");
     await browser.evaluate(`[...document.querySelectorAll('.settings-center-nav button')].find(b => b.textContent.includes('模型接入点')).click()`);
-    await waitFor(() => contains('button', 'Add endpoint'), "add endpoint button missing");
-    await browser.evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('Add endpoint')).click()`);
+    // Locale-agnostic: the UI follows the browser language (zh here); locate the
+    // add-endpoint button by its stable primary/compact classes instead of text.
+    await waitFor(() => exists('button.primary.compact:not(:disabled)'), "add endpoint button missing");
+    await browser.evaluate(`[...document.querySelectorAll('button.primary.compact')].find(b => b.textContent.includes('Add endpoint') || b.textContent.includes('新增接入点')).click()`);
     await waitFor(() => exists('.endpoint-editor-grid'), "endpoint editor missing");
     for (const theme of ['dark', 'light']) {
       for (const width of [1440, 390]) {
