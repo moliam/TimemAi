@@ -1323,6 +1323,17 @@ export function turnLiveUsage(turn: WebTurn):
   return turnLiveUsageSince(turn);
 }
 
+// The ctx meter floor is the later of the latest runtime restart and the
+// latest explicit context clear: usage events at or before it belong to a
+// context that no longer exists.
+function sessionContextUsageFloorMs(session: Session): number | undefined {
+  const restart = sessionRuntimeRestartAtMs(session);
+  const cleared = session.context_cleared_at_ms ?? undefined;
+  if (restart === undefined) return cleared;
+  if (cleared === undefined) return restart;
+  return Math.max(restart, cleared);
+}
+
 function sessionRuntimeRestartAtMs(session: Session): number | undefined {
   return session.messages.reduce<number | undefined>(
     (latest, message) =>
@@ -1338,7 +1349,7 @@ function sessionRuntimeRestartAtMs(session: Session): number | undefined {
 export function sessionContextUsage(
   session: Session,
 ): import("./protocol").UsageStats | undefined {
-  const runtimeRestartAtMs = sessionRuntimeRestartAtMs(session);
+  const runtimeRestartAtMs = sessionContextUsageFloorMs(session);
 
   for (let index = session.turns.length - 1; index >= 0; index -= 1) {
     const turn = session.turns[index];

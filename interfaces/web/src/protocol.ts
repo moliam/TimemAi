@@ -193,6 +193,8 @@ export type Session = {
   message_queue: MessageQueueProjection;
   /** Active long-task memo text from the core.memo topic. */
   active_memo?: string | null;
+  /** Wall-clock ms of the latest explicit context clear. */
+  context_cleared_at_ms?: number | null;
 };
 
 export type McpTransport =
@@ -481,6 +483,11 @@ export type WireEvent =
       type: "session_memo_updated";
       session_id: string;
       memo_text: string | null;
+    }
+  | {
+      type: "session_context_cleared";
+      session_id: string;
+      cleared_at_ms: number;
     }
   | { type: "session_restart_cwd_resolved"; session: Session }
   | { type: "session_deleted"; session_id: string }

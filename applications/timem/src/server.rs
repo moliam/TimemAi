@@ -560,6 +560,10 @@ struct WebSession {
     /// Active long-task memo text (core.memo topic). None when no memo is set.
     #[serde(skip_serializing_if = "Option::is_none")]
     active_memo: Option<String>,
+    /// Wall-clock ms of the latest explicit context clear; usage events at or
+    /// before it must not feed the ctx meter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_cleared_at_ms: Option<u128>,
     message_queue: SessionMessageQueue<WebNextTurnPayload>,
     #[serde(skip)]
     pending_completion_message_id: Option<String>,
@@ -736,6 +740,10 @@ enum WireEvent {
     SessionMemoUpdated {
         session_id: String,
         memo_text: Option<String>,
+    },
+    SessionContextCleared {
+        session_id: String,
+        cleared_at_ms: u128,
     },
     SessionRestartCwdResolved {
         session: Box<WebSession>,
@@ -5218,6 +5226,7 @@ fn create_session_in_group(
                 pending_turn_id: None,
                 turn_projection: TurnProjectionCache::default(),
                 active_memo: None,
+                context_cleared_at_ms: None,
                 message_queue: SessionMessageQueue::new(MAX_NEXT_TURN_INTENTS),
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
@@ -5777,6 +5786,7 @@ fn restore_stored_session(
                 pending_turn_id: None,
                 turn_projection: TurnProjectionCache::default(),
                 active_memo: None,
+                context_cleared_at_ms: None,
                 message_queue,
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
@@ -7095,7 +7105,10 @@ fn restore_prompt_context_snapshot(state: &AppState, session_id: &str) -> Result
 /// Authoritative context reset: drops the worker's dynamic prompt context and
 /// the persisted snapshot so the next turn starts from the tool-owned system
 /// prompt only, exactly like a fresh runtime restart.
-fn clear_session_prompt_context(state: &AppState, session_id: &str) -> Result<(), String> {
+fn clear_session_prompt_context(
+    state: &AppState,
+    session_id: &str,
+) -> Result<Option<WireEvent>, String> {
     {
         let sessions = state
             .sessions
@@ -7107,6 +7120,7 @@ fn clear_session_prompt_context(state: &AppState, session_id: &str) -> Result<()
     }
     let handle = session_worker_handle(state, session_id, None)?;
     handle.clear_dynamic_context()?;
+    let cleared_at_ms = now_ms();
     {
         let mut sessions = state
             .sessions
@@ -7114,6 +7128,7 @@ fn clear_session_prompt_context(state: &AppState, session_id: &str) -> Result<()
             .map_err(|_| "session_store_poisoned")?;
         if let Some(session) = sessions.get_mut(session_id) {
             session.restored_context_prompt_tokens = None;
+            session.context_cleared_at_ms = Some(cleared_at_ms);
         }
     }
     // Drop the persisted snapshot too, or a restart would restore what the
@@ -7124,7 +7139,15 @@ fn clear_session_prompt_context(state: &AppState, session_id: &str) -> Result<()
         std::fs::remove_file(&path)
             .map_err(|error| format!("prompt_context_remove_failed:{error}"))?;
     }
-    Ok(())
+    // Clients derive the ctx meter from historical usage events; notify them
+    // so the meter resets immediately instead of waiting for the next model
+    // response.
+    let event = WireEvent::SessionContextCleared {
+        session_id: session_id.to_string(),
+        cleared_at_ms,
+    };
+    publish_semantic(state, event.clone());
+    Ok(Some(event))
 }
 
 fn attach_worker_to_session_context(
