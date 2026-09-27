@@ -11013,23 +11013,22 @@ function HeaderContextUsage({
           <span style={{ width: `${ratio}%` }} />
         </span>
         <span>{limit ? `${ratio}%/${formatTokens(limit)}` : "—"}</span>
+        {onClear && (
+          <button
+            type="button"
+            className="context-clear-inline"
+            title={t("context.clearTitle")}
+            aria-label={t("context.clearTitle")}
+            onClick={onClear}
+          >
+            <Eraser size={12} aria-hidden="true" />
+          </button>
+        )}
       </span>
       <span className="header-cache-rate">
         <span aria-hidden="true">· </span>
         {cacheLabel}
       </span>
-      {onClear && (
-        <button
-          type="button"
-          className="context-clear-inline"
-          title={t("context.clearTitle")}
-          aria-label={t("context.clearTitle")}
-          onClick={onClear}
-        >
-          <Eraser size={12} aria-hidden="true" />
-          {t("context.clearAction")}
-        </button>
-      )}
     </span>
   );
 }
