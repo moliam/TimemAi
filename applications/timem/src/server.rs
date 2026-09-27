@@ -564,6 +564,10 @@ struct WebSession {
     /// before it must not feed the ctx meter.
     #[serde(skip_serializing_if = "Option::is_none")]
     context_cleared_at_ms: Option<u128>,
+    /// Memo text saved in the restored prompt-context snapshot. A restart
+    /// makes the memo inactive; this value only feeds the resume notice.
+    #[serde(skip)]
+    previous_memo_for_notice: Option<String>,
     message_queue: SessionMessageQueue<WebNextTurnPayload>,
     #[serde(skip)]
     pending_completion_message_id: Option<String>,
@@ -5227,6 +5231,7 @@ fn create_session_in_group(
                 turn_projection: TurnProjectionCache::default(),
                 active_memo: None,
                 context_cleared_at_ms: None,
+                previous_memo_for_notice: None,
                 message_queue: SessionMessageQueue::new(MAX_NEXT_TURN_INTENTS),
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
@@ -5787,6 +5792,7 @@ fn restore_stored_session(
                 turn_projection: TurnProjectionCache::default(),
                 active_memo: None,
                 context_cleared_at_ms: None,
+                previous_memo_for_notice: None,
                 message_queue,
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
@@ -7091,7 +7097,7 @@ fn restore_prompt_context_snapshot(state: &AppState, session_id: &str) -> Result
         .handle(&worker_id)
         .ok_or_else(|| "session_worker_not_found".to_string())?;
     let baseline = snapshot.last_observed_prompt_tokens;
-    let restored_memo = snapshot.active_memo.clone();
+    let previous_memo = snapshot.active_memo.clone();
     handle.import_dynamic_context(snapshot)?;
     let mut sessions = state
         .sessions
@@ -7099,11 +7105,12 @@ fn restore_prompt_context_snapshot(state: &AppState, session_id: &str) -> Result
         .map_err(|_| "session_store_poisoned")?;
     if let Some(session) = sessions.get_mut(session_id) {
         session.restored_context_prompt_tokens = Some(baseline);
-        // The memo restored with its context keeps the WebUI indicator and
-        // suppresses the "memo turns inactive" resume hint.
-        if restored_memo.is_some() {
-            session.active_memo = restored_memo;
-        }
+        // A restart makes the memo inactive by design. The snapshot value is
+        // kept as the authoritative "previous active memo" for the resume
+        // notice; the WebUI indicator stays hidden until the model recreates
+        // the memo.
+        session.active_memo = None;
+        session.previous_memo_for_notice = previous_memo;
     }
     Ok(())
 }
@@ -9779,14 +9786,13 @@ fn session_context_with_roles(
                 history_path: history_path.clone(),
                 current_dir: PathBuf::from(&current_dir),
                 restarted_at: state.runtime_started_at.clone(),
-                // A memo restored from the prompt-context snapshot is still
-                // active. Otherwise, if the pre-restart history ended with an
-                // active memo, tell the model it must recreate the reminder.
-                previous_active_memo: if session.active_memo.is_some() {
-                    None
-                } else {
-                    previous_active_memo_from_history(&history_path)
-                },
+                // A restart makes the memo inactive by design. Prefer the
+                // snapshot-saved memo (survives chat-log deletion); fall back
+                // to a history scan when no snapshot memo exists.
+                previous_active_memo: session
+                    .previous_memo_for_notice
+                    .clone()
+                    .or_else(|| previous_active_memo_from_history(&history_path)),
             }
             .render(),
         )
