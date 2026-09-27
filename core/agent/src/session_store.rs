@@ -118,6 +118,8 @@ pub enum ChatHistoryEventKind {
     ActionResult,
     ContextCompact,
     Repair,
+    /// Legacy `core.sub_answer` records from before the tool was removed.
+    /// Kept so existing raw history keeps deserializing; no new records.
     SubAnswer,
     RuntimeNotice,
     Stats,

@@ -13,7 +13,6 @@ function turn(commandId: string): WebTurn {
     created_at_ms: 1,
     user_entries: [{ command_id: commandId, kind: "supplement", text: "more", created_at_ms: 2 }],
     events: [{ event_id: "event-1", source: "core_topic", payload: {}, created_at_ms: 3 }],
-    sub_answers: [],
     final_answer: null,
     completion: null,
   };

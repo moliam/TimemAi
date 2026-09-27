@@ -44,7 +44,7 @@ const turn = (id, text = "Long task") => ({
     ...(id === "turn-1" ? { command_id: "submit-original" } : {}),
     created_at_ms: Date.now(),
   }],
-  events: [], sub_answers: [], final_answer: null, completion: null,
+  events: [], final_answer: null, completion: null,
 });
 const makeSession = (extra = {}) => ({
   session_id: "session-1", display_name: "Stop acceptance", ordinal: 0,

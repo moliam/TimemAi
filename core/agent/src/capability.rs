@@ -19,11 +19,10 @@ const RUN_POWERSHELL_MANIFEST: &str =
     include_str!("../../../resources/capabilities/tools/platform/windows/run_powershell.yaml");
 const SELF_TOOL_MANIFEST: &str =
     include_str!("../../../resources/capabilities/tools/self_tool.yaml");
-const SUB_ANSWER_MANIFEST: &str =
-    include_str!("../../../resources/capabilities/tools/sub_answer.yaml");
+const MEMO_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/memo.yaml");
 const TOOLGEN_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/toolgen.yaml");
 const TURN_FINISHED_MANIFEST: &str =
-    include_str!("../../../resources/capabilities/tools/turn_finished.yaml");
+    include_str!("../../../resources/capabilities/tools/task_finished.yaml");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityBinding {
@@ -394,7 +393,7 @@ impl CapabilityRegistry {
                 RUN_BASH_MANIFEST,
                 RUN_POWERSHELL_MANIFEST,
                 SELF_TOOL_MANIFEST,
-                SUB_ANSWER_MANIFEST,
+                MEMO_MANIFEST,
                 TOOLGEN_MANIFEST,
                 TURN_FINISHED_MANIFEST,
             ],

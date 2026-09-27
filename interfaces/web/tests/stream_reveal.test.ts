@@ -43,7 +43,6 @@ describe("stream reveal integration", () => {
     expect(streamRevealDelta(0, 1, 40)).toBe(1);
   });
   it("keeps reading handoff mounted and defaults stream details closed", () => {
-    expect(mainSource).toContain("streamUiMode || turn.sub_answers.length");
     expect(mainSource).toContain("useState(() => !streamUiMode && isWorking)");
     expect(mainSource).not.toContain("stream-reading-hold");
     expect(mainSource).not.toContain("stream-thought-card");
@@ -75,20 +74,12 @@ describe("stream reveal integration", () => {
 
   it("keeps provisional DOM classes and routes only provisional text through StreamText", () => {
     expect(mainSource).toContain(
-      'turn-interim-item${item.provisional ? " provisional-chat" : ""}',
-    );
-    expect(mainSource).toContain(
       'provisional ? `response-preview${streaming ? " streaming" : ""}` : "turn-final-delivery"',
     );
-    expect(mainSource.match(/<StreamText /g)?.length).toBe(5);
-    expect(mainSource).toContain("liveAnswer.provisional ? <StreamText text={liveAnswer.answer} /> : <MarkdownContent text={liveAnswer.answer} />");
-    expect(mainSource).toContain("{item.provisional ? <StreamText text={item.answer} />");
+    expect(mainSource.match(/<StreamText /g)?.length).toBe(2);
   });
 
   it("marks actively streaming containers and drops the marker on interruption", () => {
-    expect(mainSource).toContain(
-      '${item.provisional && !preview?.interruption ? " streaming" : ""}',
-    );
     expect(mainSource).toContain(
       'streaming={!hasFinal && preview?.response?.status === "streaming"}',
     );

@@ -56,7 +56,7 @@ const turn = (id, text = "Long task") => ({
     ...(id === "turn-1" ? { command_id: "submit-original" } : {}),
     created_at_ms: Date.now(),
   }],
-  events: [], sub_answers: [], final_answer: null, completion: null,
+  events: [], final_answer: null, completion: null,
 });
 const makeSession = (extra = {}) => ({
   session_id: "session-1", display_name: "Stop acceptance", ordinal: 0,
@@ -434,7 +434,7 @@ async function main() {
     const setRound = async (events, text, working = true) => {
       const base = host.getSession();
       host.setSession({ ...base, turns: base.turns.map(t => ({ ...t,
-        state: working ? "working" : "ready", events, sub_answers: [], final_answer: null, completion: null,
+        state: working ? "working" : "ready", events, final_answer: null, completion: null,
         user_entries: [...t.user_entries.filter(entry => entry.kind !== "supplement"),
           { kind: "supplement", text: "Chronological supplement", created_at_ms: 2.5 }],
         preview: { attempt: 2, revision: 20, chat: [], response: { attempt: 2, revision: 20, text, status: "intermediate" } },
@@ -640,20 +640,13 @@ async function main() {
       }
     }
     await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", "true")`);
-    const answer = (id, ordinal, time) => ({ sub_answer_id: id, ordinal, task: "Hidden task metadata", answer: `Interim body ${ordinal}`, created_at_ms: time, preview_attempt: 3, preview_index: ordinal - 1 });
     const interimSession = { ...host.getSession(), state: "working", active_turn_id: "turn-1", turns: [{
-      ...turn("turn-1"), events: [thoughtEvent("prior", "Prior thought archived", 1),
-        { ...toolEvent("delivery", 2), payload: { ...toolEvent("delivery", 2).payload,
-          payload: { action: "sub_answer", status: "completed", input: { answer: "Interim body 2", task: "Hidden task metadata" } } } }],
-      sub_answers: [answer("a1", 1, 3), answer("a2", 2, 4)],
-      preview: { attempt: 3, revision: 1, chat: [{ index: 1, task: "Hidden task metadata", answer: "Interim body 2" }], response: null },
+      ...turn("turn-1"), events: [thoughtEvent("prior", "Prior thought archived", 1)] ,
+      preview: { attempt: 3, revision: 1, response: null },
     }] };
     host.setSession(interimSession);
     await browser.call("Page.reload", { ignoreCache: true });
-    await waitFor(() => contains(".live-interim-answer", "Interim body 2"), "latest answer not live");
-    assert(!(await contains(".turn-stream-tools", "sub_answer")), "delivery tool leaked into stream");
     assert(await contains(".turn-stream-tools", "Prior thought archived"), "prior thought disappeared");
-    assert(await browser.evaluate(`document.querySelectorAll('.live-interim-answer').length === 1`), "only latest answer should remain live");
     for (const status of ["completed", "failed", "timeout", "cancelled", "cancelled_by_user", "running", "background_running"]) {
       for (const name of ["run_bash", "readfile"]) {
         const event = toolEvent(name, 6);
@@ -675,19 +668,10 @@ async function main() {
     host.setSession(next);
     await browser.call("Page.reload", { ignoreCache: true });
     await waitFor(() => contains(".stream-thought-text", "Next thought focus"), "next thought not focused");
-    assert(await browser.evaluate(`document.querySelectorAll('.live-interim-answer').length === 0`), "next reply must collapse prior answers into Chat");
-    assert(await browser.evaluate(`document.querySelectorAll('.turn-stream-tools .chat-title-chip[aria-expanded="false"]').length === 2`), "reload lost collapsed Chat entries");
-    await browser.evaluate(`document.querySelector('.turn-stream-tools .chat-title-chip').click()`);
-    await waitFor(() => contains(".live-interim-answer", "Interim body 1"), "Chat could not reopen delivered answer");
-    await browser.evaluate(`document.querySelector('.turn-stream-tools .chat-title-chip').click()`);
-    assert(await browser.evaluate(`document.querySelectorAll('.live-interim-answer').length === 0`), "Chat could not collapse again");
     const finishedInterim = { ...next, state: "ready", active_turn_id: null, turns: next.turns.map(t => ({ ...t, state: "finished", final_answer: "Final after interim" })) };
     host.setSession(finishedInterim);
     await browser.call("Page.reload", { ignoreCache: true });
-    await waitFor(() => contains(".turn-chat-delivery", "Chat (+2)"), "finished history lost Chat disclosure");
-    await browser.evaluate(`document.querySelector('.chat-title-chip').click()`);
-    await waitFor(() => contains(".turn-chat-panel", "Interim body 1"), "finished Chat lost first answer");
-    assert(await contains(".turn-chat-panel", "Interim body 2"), "finished Chat lost second answer");
+    await waitFor(() => contains(".turn-final-delivery", "Final after interim"), "finished history lost final answer");
     host.setSession(next);
     await browser.call("Page.reload", { ignoreCache: true });
     await waitFor(() => contains(".stream-thought-text", "Next thought focus"), "active fixture not restored");

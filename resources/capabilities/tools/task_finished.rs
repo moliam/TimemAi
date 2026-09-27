@@ -23,10 +23,10 @@ pub(crate) fn execute_action(
 
 fn failed(error: &str) -> ActionExecution {
     ActionExecution::Completed(ActionOutcome::failed(format!(
-        "Action result: turn_finished\nerror: {error}"
+        "Action result: task_finished\nerror: {error}"
     )))
 }
 
 #[cfg(test)]
-#[path = "../../../core/agent/tests/unit/capability_tool_turn_finished_tests.rs"]
+#[path = "../../../core/agent/tests/unit/capability_tool_task_finished_tests.rs"]
 mod tests;

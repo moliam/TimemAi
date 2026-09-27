@@ -5455,7 +5455,7 @@ impl ModelClient for TruncatedNativeRecoveryModel {
                 Ok(LlmResponse {
                     tool_calls: vec![crate::NativeToolCall {
                         id: "call_finish_3".to_string(),
-                        name: "turn_finished".to_string(),
+                        name: "task_finished".to_string(),
                         arguments: serde_json::json!({"summary": "恢复成功，分块执行得到正确结果：42。"}),
                         raw_arguments: "{\"summary\":\"恢复成功，分块执行得到正确结果：42。\"}"
                             .to_string(),
@@ -5631,7 +5631,7 @@ impl ModelClient for NativeRoundTripModel {
         Ok(LlmResponse {
             tool_calls: vec![crate::NativeToolCall {
                 id: format!("call_finish_{}", self.business_calls),
-                name: "turn_finished".to_string(),
+                name: "task_finished".to_string(),
                 arguments: serde_json::json!({"summary": summary}),
                 raw_arguments: format!("{{\"summary\":\"{summary}\"}}"),
             }],
@@ -5706,4 +5706,199 @@ fn native_mode_round_trips_structured_calls_and_results_before_final_text() {
     assert_eq!(follow_up.text, "上一轮结果仍是 Rust 42 行。");
     assert_eq!(model.business_calls, 3);
     assert!(model.observed_previous_turn_tool_history);
+}
+
+// --- memo tool end-to-end quality gates ---
+
+#[test]
+fn memo_finish_guard_blocks_inline_final_until_memo_deleted() {
+    let dir = tmp_dir("memo_guard_inline");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    let mut model = ReplayModel::new(vec![
+        Ok(llm(
+            r#"{"free_talk":"记下长任务。","working_still_action":[{"memo":{"op":"create","text":"长任务：完成数据迁移并全量绿灯"}}]}"#,
+            1_000,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"全部完成"}"#,
+            1_200,
+            false,
+        )),
+        Ok(llm(
+            r#"{"free_talk":"按要求删除 memo。","working_still_action":[{"memo":{"op":"delete"}}]}"#,
+            1_300,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"全部完成（memo 已删除）"}"#,
+            1_400,
+            false,
+        )),
+    ]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "长任务请求",
+            session: "memo_guard_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "全部完成（memo 已删除）");
+    assert_eq!(model.prompts.len(), 4);
+    // The request after the guarded final must carry the memo guard reminder.
+    assert!(model.prompts[2].contains("still memo active: 长任务：完成数据迁移并全量绿灯"));
+    assert!(model.prompts[2].contains("delete the memo"));
+    // After deletion the turn ends with the last final answer; the
+    // append-only timeline keeps the earlier guard text, but no new guard
+    // slice was appended (4 requests total, not 5).
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn memo_finish_guard_fires_only_once_per_turn() {
+    let dir = tmp_dir("memo_guard_once");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    let mut model = ReplayModel::new(vec![
+        Ok(llm(
+            r#"{"free_talk":"记下。","working_still_action":[{"memo":{"op":"create","text":"持续任务提醒"}}]}"#,
+            1_000,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"坚持完成的答复"}"#,
+            1_200,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"坚持完成的答复"}"#,
+            1_300,
+            false,
+        )),
+    ]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "长任务请求",
+            session: "memo_guard_once_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    // Guard fired once (prompt[2] carries it); the repeated final is allowed
+    // through so the turn cannot loop forever.
+    assert!(model.prompts[2].contains("still memo active"));
+    assert_eq!(outcome.text, "坚持完成的答复");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn memo_survives_context_compaction_and_rides_next_prompt() {
+    let dir = tmp_dir("memo_compact");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    struct MemoCompactModel {
+        prompts: Vec<String>,
+        calls: usize,
+    }
+    impl ModelClient for MemoCompactModel {
+        fn call_model(
+            &mut self,
+            _config: &ModelServiceConfig,
+            prompt: &str,
+            _audit_file: &Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.prompts.push(prompt.to_string());
+            self.calls += 1;
+            match self.calls {
+                1 => Ok(llm(
+                    r#"{"free_talk":"先记 memo。","working_still_action":[{"memo":{"op":"create","text":"压缩后仍需继续的长任务"}}]}"#,
+                    1_000,
+                    false,
+                )),
+                2 => {
+                    let delta_id = prompt_field_values(prompt, "delta_id")
+                        .into_iter()
+                        .next()
+                        .expect("delta id in prompt");
+                    Ok(llm(
+                        format!(
+                            r#"{{"free_talk":"整理上下文。","context_compact":{{"discard":[{}],"summary":"保留任务目标。"}}}}"#,
+                            serde_json::to_string(&delta_id).unwrap()
+                        ),
+                        3_000,
+                        false,
+                    ))
+                }
+                3 => Ok(llm(
+                    r#"{"free_talk":"删除 memo。","working_still_action":[{"memo":{"op":"delete"}}]}"#,
+                    1_200,
+                    false,
+                )),
+                4 => Ok(llm(
+                    r#"{"status":"ALL_FINISHED","final_answer":"压缩链路验证完成"}"#,
+                    1_300,
+                    false,
+                )),
+                _ => Err("unexpected_extra_model_call".to_string()),
+            }
+        }
+    }
+    let mut model = MemoCompactModel {
+        prompts: Vec::new(),
+        calls: 0,
+    };
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "OLD_DYNAMIC_CONTEXT_TO_COMPACT",
+            session: "memo_compact_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "压缩链路验证完成");
+    // The post-compaction replacement context must restate the active memo.
+    assert!(
+        model.prompts[2].contains("memo active: 压缩后仍需继续的长任务"),
+        "memo must ride the post-compaction prompt"
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }

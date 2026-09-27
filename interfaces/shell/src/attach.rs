@@ -236,7 +236,6 @@ fn fetch_attach_sessions(host: &HostEndpoint) -> Result<Vec<AttachSession>, Atta
 fn select_session(sessions: &[AttachSession]) -> Option<AttachSession> {
     use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
     println!("{ANSI_BRIGHT_TIMEM}{TIMEM_LOGO}{ANSI_RESET} {ANSI_DIM}attach{ANSI_RESET}");
-    println!("{ANSI_DIM}选择一个 session（↑/↓ 移动，Enter attach，Esc 退出）{ANSI_RESET}");
     let mut selected = 0usize;
     let _ = enable_raw_mode();
     let line_count = sessions.len() + 1;
@@ -425,7 +424,6 @@ fn register_decision_request(
 struct AttachTurnView {
     printed_event_ids: std::collections::HashSet<String>,
     printed_user_entries: usize,
-    printed_sub_answers: usize,
     final_answer_printed: bool,
     seen_decision_ids: std::collections::HashSet<String>,
 }
@@ -444,7 +442,6 @@ impl AttachTurnView {
         Self {
             printed_event_ids: std::collections::HashSet::new(),
             printed_user_entries: 0,
-            printed_sub_answers: 0,
             final_answer_printed: false,
             seen_decision_ids: std::collections::HashSet::new(),
         }
@@ -475,15 +472,6 @@ impl AttachTurnView {
                 }
                 register_decision_request(event, pending, &mut self.seen_decision_ids);
                 print_turn_event(event);
-            }
-        }
-        if let Some(sub_answers) = turn.get("sub_answers").and_then(Value::as_array) {
-            while self.printed_sub_answers < sub_answers.len() {
-                let sub = &sub_answers[self.printed_sub_answers];
-                self.printed_sub_answers += 1;
-                let task = sub.get("task").and_then(Value::as_str).unwrap_or("");
-                let answer = sub.get("answer").and_then(Value::as_str).unwrap_or("");
-                println!("\n[sub-answer: {task}]\n{answer}");
             }
         }
         let final_answer = turn
@@ -662,8 +650,17 @@ fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), At
     let request = url
         .into_client_request()
         .map_err(|e| AttachError::Protocol(e.to_string()))?;
-    let (mut ws, _response) =
-        tungstenite::connect(request).map_err(|e| AttachError::HostUnreachable(e.to_string()))?;
+    // The Host hello snapshot carries full session history and can exceed the
+    // tungstenite default 16MiB single-frame limit for long-running sessions
+    // (observed ~19MB). Raise both frame and message limits; the Host is a
+    // trusted local endpoint bounded by MAX_BROWSER_COMMAND/snapshot sizes.
+    let ws_config = tungstenite::protocol::WebSocketConfig {
+        max_frame_size: Some(256 << 20),
+        max_message_size: Some(256 << 20),
+        ..Default::default()
+    };
+    let (mut ws, _response) = tungstenite::client::connect_with_config(request, Some(ws_config), 3)
+        .map_err(|e| AttachError::HostUnreachable(e.to_string()))?;
 
     // Terminal input on a worker thread; the main loop multiplexes stdin and
     // the socket. The underlying stream uses a short read timeout so an idle
@@ -860,10 +857,21 @@ fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), At
                 // Read timeout: loop back to poll input again.
                 thread::sleep(Duration::from_millis(20));
             }
-            Err(_) => {
+            Err(other) => {
                 // A quiet socket after detach input ends the loop naturally.
                 if input_rx.try_recv().is_err() && !ws.can_read() {
                     println!("{}", dim_line("[attach disconnected]"));
+                    return Ok(());
+                }
+                // Capacity/protocol errors never recover on retry; surface
+                // them instead of spinning silently behind the prompt.
+                if matches!(
+                    other,
+                    tungstenite::Error::Capacity(_)
+                        | tungstenite::Error::Protocol(_)
+                        | tungstenite::Error::Utf8
+                ) {
+                    println!("[attach error] {other}");
                     return Ok(());
                 }
                 thread::sleep(Duration::from_millis(50));

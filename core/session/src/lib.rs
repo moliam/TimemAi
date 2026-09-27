@@ -1413,10 +1413,6 @@ impl CoreSessionWorkerManager {
                 return Err("parent_worker_session_mismatch".to_string());
             }
         }
-        let is_primary_worker = !self
-            .workers
-            .values()
-            .any(|worker| worker.identity.session_id == session_id);
         let ordinal = self.next_worker_ordinal;
         self.next_worker_ordinal = self
             .next_worker_ordinal
@@ -1431,8 +1427,6 @@ impl CoreSessionWorkerManager {
             display_name,
             parent_worker_id,
         );
-        let mut core = core;
-        core.set_sub_answer_enabled(is_primary_worker);
         let worker = CoreSessionWorker::spawn_with_runtime_model_client(
             core,
             config,

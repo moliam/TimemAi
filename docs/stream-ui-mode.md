@@ -4,7 +4,7 @@ Settings → Beta → **Stream UI Mode** is disabled by default and stored only 
 
 Core emits a provisional `core.model.preview` snapshot scoped to the current response attempt. The Host validates the active Core Turn and primary Worker, maps it to the existing Web turn, and retains only the latest preview. Preview chunks do not become chat history events. Browser reload restores the Host snapshot; a Host restart is not a resumable model request.
 
-Public content is routed separately from interim Chat (`sub_answer.task` and `sub_answer.answer`). Other tool arguments and reasoning are not display content. Provisional display never permits tool execution. Complete protocol validation remains the execution gate. Invalid responses retract their provisional windows; network interruption and Stop retain partial text with an interruption notice. Confirmed Chat is delivered by `core.sub_answer`, with preview correlation metadata used to replace provisional content.
+Public response text (`free_talk` / `final_answer`) streams into a provisional response preview. Tool arguments and reasoning are not display content. Provisional display never permits tool execution. Complete protocol validation remains the execution gate. Invalid responses retract their provisional preview; network interruption and Stop retain partial text with an interruption notice.
 
 ## Running tools and typography
 

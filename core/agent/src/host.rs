@@ -381,8 +381,8 @@ pub const CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP: &str = "core.runtime_root_repair_
 pub const CORE_TOPIC_ACTION: &str = "core.action";
 pub const CORE_TOPIC_CONTEXT_COMPACT: &str = "core.context.compact";
 pub const CORE_TOPIC_TOOLGEN: &str = "core.toolgen";
-pub const CORE_TOPIC_SUB_ANSWER: &str = "core.sub_answer";
 pub const CORE_TOPIC_LIFECYCLE: &str = "core.lifecycle";
+pub const CORE_TOPIC_MEMO: &str = "core.memo";
 pub const CORE_TOPIC_USER_APPROVAL_REQUEST: &str = "core.user.approval.request";
 pub const CORE_TOPIC_ROUND_LIMIT_REQUEST: &str = "core.user.round_limit.request";
 pub const CORE_TOPIC_OUTPUT_EXPAND_REQUEST: &str = "core.user.output_expand.request";
@@ -828,29 +828,21 @@ pub fn context_compact_topic_event(
     )
 }
 
-pub fn sub_answer_topic_event(
-    session_id: impl Into<String>,
-    sub_answer_id: impl Into<String>,
-    ordinal: u64,
-    task: impl Into<String>,
-    answer: impl Into<String>,
-) -> CoreTopicEvent {
-    let sub_answer_id = sub_answer_id.into();
+/// Authoritative memo state for a session: `text` is Some while a memo is
+/// active and None after it was deleted.
+pub fn memo_topic_event(session_id: impl Into<String>, text: Option<&str>) -> CoreTopicEvent {
     CoreTopicEvent::new(
         session_id,
         CoreTopic::new(
-            CORE_TOPIC_SUB_ANSWER,
+            CORE_TOPIC_MEMO,
             json!({
-                "name": CORE_TOPIC_SUB_ANSWER,
-                "sub_answer_id": &sub_answer_id,
+                "name": CORE_TOPIC_MEMO,
             }),
         ),
         CoreSessionState::Running,
         json!({
-            "sub_answer_id": sub_answer_id,
-            "ordinal": ordinal,
-            "task": task.into(),
-            "answer": answer.into(),
+            "active": text.is_some(),
+            "text": text,
         }),
     )
 }

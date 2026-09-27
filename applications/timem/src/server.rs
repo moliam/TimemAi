@@ -58,8 +58,8 @@ use agent_core::{
     ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind, RuntimeDataLayout,
     SessionToolRepo, ToolDetail, ToolSummary, TopicReply, TurnProjection, WorkInstructionLoadMode,
     CORE_TOPIC_ACTION, CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE,
-    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_SUB_ANSWER, CORE_TOPIC_TOOLGEN,
-    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST,
+    CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use agent_core::{
     capability::CapabilityRegistry, rolling_file_store::RollingCapacity, self_tool::SelfToolPaths,
@@ -557,6 +557,9 @@ struct WebSession {
     /// Latest complete Core-owned lifecycle projection. Pod caches and delivers
     /// this value but never reconstructs it from worker or topic events.
     turn_projection: TurnProjectionCache,
+    /// Active long-task memo text (core.memo topic). None when no memo is set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_memo: Option<String>,
     message_queue: SessionMessageQueue<WebNextTurnPayload>,
     #[serde(skip)]
     pending_completion_message_id: Option<String>,
@@ -643,22 +646,8 @@ struct WebTurn {
     interrupted_at_ms: Option<u128>,
     user_entries: Vec<WebTurnUserEntry>,
     events: Vec<WebTurnEvent>,
-    sub_answers: Vec<WebSubAnswer>,
     final_answer: Option<String>,
     completion: Option<Value>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct WebSubAnswer {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    preview_attempt: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    preview_index: Option<u64>,
-    sub_answer_id: String,
-    ordinal: u64,
-    task: String,
-    answer: String,
-    created_at_ms: u128,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -743,6 +732,10 @@ enum WireEvent {
     SessionRenamed {
         session_id: String,
         display_name: String,
+    },
+    SessionMemoUpdated {
+        session_id: String,
+        memo_text: Option<String>,
     },
     SessionRestartCwdResolved {
         session: Box<WebSession>,
@@ -5224,6 +5217,7 @@ fn create_session_in_group(
                 cancelling_turn_id: None,
                 pending_turn_id: None,
                 turn_projection: TurnProjectionCache::default(),
+                active_memo: None,
                 message_queue: SessionMessageQueue::new(MAX_NEXT_TURN_INTENTS),
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
@@ -5559,7 +5553,6 @@ fn interrupted_turn_from_queued_message(
                 worker_roles: payload.worker_roles.clone(),
             }],
             events: Vec::new(),
-            sub_answers: Vec::new(),
             final_answer: None,
             completion: None,
         },
@@ -5783,6 +5776,7 @@ fn restore_stored_session(
                 cancelling_turn_id: None,
                 pending_turn_id: None,
                 turn_projection: TurnProjectionCache::default(),
+                active_memo: None,
                 message_queue,
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
@@ -5961,19 +5955,6 @@ fn persist_restored_session_runtime_cache(
     current_session_store(state)?.upsert_session(&migrated)
 }
 
-fn web_sub_answer_from_topic_payload(payload: &Value, created_at_ms: u128) -> Option<WebSubAnswer> {
-    let body = payload.get("payload")?;
-    Some(WebSubAnswer {
-        preview_attempt: body.get("preview_attempt").and_then(Value::as_u64),
-        preview_index: body.get("preview_index").and_then(Value::as_u64),
-        sub_answer_id: body.get("sub_answer_id")?.as_str()?.to_string(),
-        ordinal: body.get("ordinal")?.as_u64()?,
-        task: body.get("task")?.as_str()?.to_string(),
-        answer: body.get("answer")?.as_str()?.to_string(),
-        created_at_ms,
-    })
-}
-
 fn restored_messages_from_history_records(records: &[ChatHistoryRecord]) -> Vec<WebChatMessage> {
     records
         .iter()
@@ -6006,7 +5987,6 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     interrupted_at_ms: None,
                     user_entries: Vec::new(),
                     events: Vec::new(),
-                    sub_answers: Vec::new(),
                     final_answer: None,
                     completion: None,
                 });
@@ -6108,7 +6088,6 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     interrupted_at_ms: None,
                     user_entries: Vec::new(),
                     events: Vec::new(),
-                    sub_answers: Vec::new(),
                     final_answer: None,
                     completion: None,
                 });
@@ -6116,26 +6095,6 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                 if let Some(completion) = completion {
                     turn.state = "completed".to_string();
                     turn.completion = Some(completion);
-                }
-                if source == "core_topic"
-                    && payload
-                        .get("topic")
-                        .and_then(|topic| topic.get("name"))
-                        .and_then(Value::as_str)
-                        == Some(CORE_TOPIC_SUB_ANSWER)
-                {
-                    if let Some(sub_answer) =
-                        web_sub_answer_from_topic_payload(&payload, created_at_ms as u128)
-                    {
-                        if !turn
-                            .sub_answers
-                            .iter()
-                            .any(|existing| existing.sub_answer_id == sub_answer.sub_answer_id)
-                        {
-                            turn.sub_answers.push(sub_answer);
-                            turn.sub_answers.sort_by_key(|item| item.ordinal);
-                        }
-                    }
                 }
                 turn.events.push(WebTurnEvent {
                     event_id: format!(
@@ -9086,7 +9045,6 @@ fn start_web_turn_with_selected_attachments_and_roles(
             worker_roles,
         }],
         events: Vec::new(),
-        sub_answers: Vec::new(),
         final_answer: None,
         completion: None,
     };
@@ -9257,7 +9215,6 @@ fn start_web_toolgen_turn(
         interrupted_at_ms: None,
         user_entries,
         events: Vec::new(),
-        sub_answers: Vec::new(),
         final_answer: None,
         completion: None,
     };
@@ -9710,9 +9667,6 @@ fn chat_history_kind_for_source(source: &str, payload: &Value) -> ChatHistoryEve
         }
         if topic_name == CORE_TOPIC_MODEL_RESPONSE {
             return ChatHistoryEventKind::Progress;
-        }
-        if topic_name == CORE_TOPIC_SUB_ANSWER {
-            return ChatHistoryEventKind::SubAnswer;
         }
     }
     ChatHistoryEventKind::RuntimeNotice
@@ -10346,7 +10300,6 @@ fn activate_core_started_turn(
                     worker_roles: payload.worker_roles.clone(),
                 }],
                 events: Vec::new(),
-                sub_answers: Vec::new(),
                 final_answer: None,
                 completion: None,
             };
@@ -10720,6 +10673,28 @@ fn handle_scoped_worker_event(
                         );
                     }
                 }
+                if event.topic.name == agent_core::CORE_TOPIC_MEMO {
+                    // Authoritative memo state: persist on the session projection
+                    // (survives restart via snapshot) and notify clients.
+                    let memo_text = event
+                        .payload
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    if let Ok(mut sessions) = state.sessions.lock() {
+                        if let Some(session) = sessions.get_mut(session_id) {
+                            session.active_memo = memo_text.clone();
+                        }
+                    }
+                    let _ = persist_web_session(state, session_id);
+                    publish_semantic(
+                        state,
+                        WireEvent::SessionMemoUpdated {
+                            session_id: session_id.to_string(),
+                            memo_text,
+                        },
+                    );
+                }
                 if event.topic.name == CORE_TOPIC_TOOLGEN {
                     if let Ok(repo) = session_tool_repo(state, session_id) {
                         if let Ok(tools) = repo.list() {
@@ -10755,61 +10730,6 @@ fn handle_scoped_worker_event(
                         }
                     }
                     set_worker_state(state, session_id, worker_id, "ready");
-                }
-                if event.topic.name == CORE_TOPIC_SUB_ANSWER {
-                    let mut pending_sub_answer_turn = None;
-                    if let Some(sub_answer) =
-                        web_sub_answer_from_topic_payload(&wire_payload, now_ms())
-                    {
-                        if let Ok(mut sessions) = state.sessions.lock() {
-                            if let Some(session) = sessions.get_mut(session_id) {
-                                let turn_id = current_turn_id(session).map(str::to_string);
-                                if let Some(turn) = turn_id.as_deref().and_then(|turn_id| {
-                                    session
-                                        .turns
-                                        .iter_mut()
-                                        .find(|turn| turn.turn_id == turn_id)
-                                }) {
-                                    if !turn.sub_answers.iter().any(|existing| {
-                                        existing.sub_answer_id == sub_answer.sub_answer_id
-                                    }) {
-                                        if let (Some(attempt), Some(index), Some(preview)) = (
-                                            sub_answer.preview_attempt,
-                                            sub_answer.preview_index,
-                                            turn.preview.as_mut(),
-                                        ) {
-                                            if preview.get("attempt").and_then(Value::as_u64)
-                                                == Some(attempt)
-                                            {
-                                                if let Some(chat) = preview
-                                                    .get_mut("chat")
-                                                    .and_then(Value::as_array_mut)
-                                                {
-                                                    chat.retain(|item| {
-                                                        item.get("index").and_then(Value::as_u64)
-                                                            != Some(index)
-                                                    });
-                                                }
-                                            }
-                                        }
-                                        turn.sub_answers.push(sub_answer);
-                                        turn.sub_answers.sort_by_key(|item| item.ordinal);
-                                        pending_sub_answer_turn =
-                                            Some((session_id.to_string(), turn.clone()));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if let Some((session_id, turn)) = pending_sub_answer_turn.take() {
-                        publish_semantic(
-                            state,
-                            WireEvent::TurnUpdated {
-                                session_id,
-                                turn,
-                            },
-                        );
-                    }
                 }
                 let turn_ref = if event.topic.name == agent_core::CORE_TOPIC_LIFECYCLE {
                     None
@@ -11044,6 +10964,25 @@ fn handle_scoped_worker_event(
                 "stop_reason": outcome.stop_reason.map(|reason| format!("{reason:?}")),
                 "toolgen_retrospect": outcome.toolgen_retrospect,
             });
+            // The task_finished summary rides on outcome.text as the
+            // authoritative final answer. Persist it as an Assistant history
+            // record when no completion message was recorded yet, so a Host
+            // restart or attach snapshot can restore the final answer.
+            let existing_completion_message_id = state.sessions.lock().ok().and_then(|sessions| {
+                sessions
+                    .get(session_id)
+                    .and_then(|session| session.pending_completion_message_id.clone())
+            });
+            let finished_by_task_summary =
+                outcome.stop_reason == Some(agent_core::TurnStopReason::TurnFinished);
+            let summary_message_id = if finished_by_task_summary
+                && !outcome.text.is_empty()
+                && existing_completion_message_id.is_none()
+            {
+                append_message(state, session_id, "assistant", outcome.text.clone()).ok()
+            } else {
+                None
+            };
             let (message_id, turn_id) = if let Ok(mut sessions) = state.sessions.lock() {
                 sessions
                     .get_mut(session_id)
@@ -11094,6 +11033,18 @@ fn handle_scoped_worker_event(
                                 "ready"
                             }
                             .to_string();
+                        if let Some(summary_id) = summary_message_id.as_deref() {
+                            session.pending_completion_message_id = Some(summary_id.to_string());
+                            if let Some(active_turn_id) = turn_id.as_deref() {
+                                if let Some(turn) = session
+                                    .turns
+                                    .iter_mut()
+                                    .find(|turn| turn.turn_id == active_turn_id)
+                                {
+                                    turn.final_answer = Some(outcome.text.clone());
+                                }
+                            }
+                        }
                         let message_id =
                             session
                                 .pending_completion_message_id

@@ -351,8 +351,6 @@ pub struct XmlPublicTextStream {
     cdata: bool,
     failed: bool,
     total_bytes: usize,
-    chat_count: usize,
-    active_chat: Option<(usize, usize)>,
 }
 impl XmlPublicTextStream {
     pub fn push(&mut self, text: &str, emit: &mut dyn FnMut(&str)) -> Result<(), String> {
@@ -369,13 +367,7 @@ impl XmlPublicTextStream {
         {
             return Some(PublicTextTarget::Response);
         }
-        self.active_chat
-            .filter(|(depth, _)| self.stack.len() == depth + 1)
-            .and_then(|(_, index)| match self.stack.last().map(String::as_str) {
-                Some("task") => Some(PublicTextTarget::ChatTask { index }),
-                Some("answer") => Some(PublicTextTarget::ChatAnswer { index }),
-                _ => None,
-            })
+        None
     }
     pub fn push_typed(
         &mut self,
@@ -430,12 +422,6 @@ impl XmlPublicTextStream {
                 };
                 let raw = self.pending[1..end].trim();
                 if let Some(close) = raw.strip_prefix('/') {
-                    if self
-                        .active_chat
-                        .is_some_and(|(depth, _)| depth == self.stack.len())
-                    {
-                        self.active_chat = None;
-                    }
                     if self.stack.pop().as_deref()
                         != Some(close.trim().to_ascii_lowercase().as_str())
                     {
@@ -455,18 +441,7 @@ impl XmlPublicTextStream {
                         if self.stack.len() >= 64 {
                             return Err("model_preview_xml_depth".into());
                         }
-                        let is_chat = name == "sub_answer"
-                            && self.stack.first().is_some_and(|s| s == "assistant")
-                            && (self.stack.as_slice() == ["assistant", "actions"]
-                                || self.stack.as_slice() == ["assistant", "actions", "parallel"]);
                         self.stack.push(name);
-                        if is_chat {
-                            if self.chat_count >= 128 {
-                                return Err("model_preview_chat_limit".into());
-                            }
-                            self.active_chat = Some((self.stack.len(), self.chat_count));
-                            self.chat_count += 1;
-                        }
                     }
                 }
                 self.pending.drain(..=end);
@@ -504,341 +479,17 @@ impl XmlPublicTextStream {
     }
 }
 
-/// Typed provisional destinations. Chat fields are an explicit display allowlist,
-/// not generic tool argument disclosure or permission to execute a tool.
+/// Typed provisional destinations for public text preview.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PublicTextTarget {
     Response,
-    ChatTask { index: usize },
-    ChatAnswer { index: usize },
-}
-
-#[derive(Default)]
-pub struct JsonChatTextStream {
-    stack: Vec<(bool, String, usize)>,
-    key: String,
-    token: String,
-    in_string: bool,
-    escaped: bool,
-    reading_key: bool,
-    expecting_key: bool,
-    target: Option<PublicTextTarget>,
-    chat_count: usize,
-    active_chat: Option<(usize, usize)>,
-    total_bytes: usize,
-    failed: bool,
-}
-
-impl JsonChatTextStream {
-    pub fn push(
-        &mut self,
-        text: &str,
-        emit: &mut dyn FnMut(PublicTextTarget, &str),
-    ) -> Result<(), String> {
-        if self.failed {
-            return Ok(());
-        }
-        self.total_bytes = self.total_bytes.saturating_add(text.len());
-        if self.total_bytes > MAX_EVENT_BYTES {
-            self.failed = true;
-            return Err("model_preview_text_too_large".into());
-        }
-        for ch in text.chars() {
-            if self.in_string {
-                if ch == '"' && !self.escaped {
-                    self.in_string = false;
-                    if self.reading_key {
-                        match serde_json::from_str::<String>(&format!("\"{}\"", self.token)) {
-                            Ok(key) => self.key = key,
-                            Err(_) => {
-                                self.failed = true;
-                                return Err("invalid_preview_json_string".into());
-                            }
-                        }
-                    } else if !self.token.is_empty() {
-                        self.failed = true;
-                        return Err("invalid_preview_json_string".into());
-                    }
-                    self.token.clear();
-                    self.target = None;
-                    continue;
-                }
-                if self.reading_key || self.target.is_some() {
-                    self.token.push(ch);
-                    if let Some(target) = &self.target {
-                        if let Ok(value) =
-                            serde_json::from_str::<String>(&format!("\"{}\"", self.token))
-                        {
-                            emit(target.clone(), &value);
-                            self.token.clear();
-                        }
-                    }
-                }
-                self.escaped = ch == '\\' && !self.escaped;
-                continue;
-            }
-            match ch {
-                '"' => {
-                    self.in_string = true;
-                    self.escaped = false;
-                    self.token.clear();
-                    self.reading_key = self.expecting_key;
-                    self.expecting_key = false;
-                    self.target = if !self.reading_key {
-                        self.active_chat
-                            .filter(|(depth, _)| *depth == self.stack.len())
-                            .and_then(|(_, index)| match self.key.as_str() {
-                                "task" => Some(PublicTextTarget::ChatTask { index }),
-                                "answer" => Some(PublicTextTarget::ChatAnswer { index }),
-                                _ => None,
-                            })
-                    } else {
-                        None
-                    };
-                }
-                '{' | '[' => {
-                    let path_key = std::mem::take(&mut self.key);
-                    let is_chat = ch == '{'
-                        && path_key == "sub_answer"
-                        && self.stack.len() >= 2
-                        && self.stack[1..]
-                            .iter()
-                            .any(|(_, key, _)| key == "working_still_action")
-                        && self.stack[1..]
-                            .iter()
-                            .all(|(_, key, _)| key.is_empty() || key == "working_still_action");
-                    if self.stack.len() >= 64 {
-                        self.failed = true;
-                        return Err("model_preview_json_depth".into());
-                    }
-                    self.stack.push((ch == '{', path_key, 0));
-                    if is_chat {
-                        if self.chat_count >= 128 {
-                            self.failed = true;
-                            return Err("model_preview_chat_limit".into());
-                        }
-                        self.active_chat = Some((self.stack.len(), self.chat_count));
-                        self.chat_count += 1;
-                    }
-                    self.expecting_key = ch == '{';
-                }
-                '}' | ']' => {
-                    if self
-                        .active_chat
-                        .is_some_and(|(depth, _)| depth == self.stack.len())
-                    {
-                        self.active_chat = None;
-                    }
-                    self.stack.pop();
-                    self.key.clear();
-                    self.expecting_key = false;
-                }
-                ',' => {
-                    self.expecting_key = self.stack.last().is_some_and(|(object, _, _)| *object);
-                    self.key.clear();
-                }
-                ':' => self.expecting_key = false,
-                _ => {}
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Default)]
-pub struct NativeChatTextStream {
-    calls: std::collections::BTreeMap<usize, NativeChatCall>,
-    total_bytes: usize,
-    failed: bool,
-}
-#[derive(Default)]
-struct NativeChatCall {
-    name: String,
-    pending: String,
-    decoder: JsonChatTextStream,
-    started: bool,
-}
-impl NativeChatTextStream {
-    pub fn push(
-        &mut self,
-        event: &Value,
-        emit: &mut dyn FnMut(PublicTextTarget, &str),
-    ) -> Result<(), String> {
-        if self.failed {
-            return Ok(());
-        }
-        let result = self.push_inner(event, emit);
-        if result.is_err() {
-            self.failed = true;
-            self.calls.clear();
-        }
-        result
-    }
-    fn push_inner(
-        &mut self,
-        event: &Value,
-        emit: &mut dyn FnMut(PublicTextTarget, &str),
-    ) -> Result<(), String> {
-        let Some(calls) = event
-            .pointer("/choices/0/delta/tool_calls")
-            .and_then(Value::as_array)
-        else {
-            return Ok(());
-        };
-        for call in calls {
-            let Some(index) = call
-                .get("index")
-                .and_then(Value::as_u64)
-                .and_then(|i| usize::try_from(i).ok())
-            else {
-                return Err("model_preview_tool_index_required".into());
-            };
-            if index >= 128 {
-                return Err("model_preview_chat_limit".into());
-            }
-            let name = call
-                .pointer("/function/name")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let args = call
-                .pointer("/function/arguments")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            self.total_bytes = self
-                .total_bytes
-                .saturating_add(name.len())
-                .saturating_add(args.len());
-            if self.total_bytes > MAX_EVENT_BYTES {
-                return Err("model_preview_text_too_large".into());
-            }
-            let state = self.calls.entry(index).or_default();
-            state.name.push_str(name);
-            if state.started && !name.is_empty() {
-                return Err("model_preview_tool_name_changed".into());
-            }
-            if !state.started {
-                state.pending.push_str(args);
-                if state.name != "sub_answer" {
-                    continue;
-                }
-                state
-                    .decoder
-                    .push(r#"{"working_still_action":{"sub_answer":"#, &mut |_, _| {})?;
-                state.started = true;
-            } else {
-                state.pending.push_str(args);
-            }
-            state
-                .decoder
-                .push(&std::mem::take(&mut state.pending), &mut |target, text| {
-                    let target = match target {
-                        PublicTextTarget::ChatTask { .. } => PublicTextTarget::ChatTask { index },
-                        PublicTextTarget::ChatAnswer { .. } => {
-                            PublicTextTarget::ChatAnswer { index }
-                        }
-                        PublicTextTarget::Response => return,
-                    };
-                    emit(target, text);
-                })?;
-        }
-        Ok(())
-    }
-}
-
-/// One attempt owns all provisional chat windows. Confirmed chat is delivered
-/// through core.sub_answer and is never stored in this provisional collection.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ProvisionalChat {
-    pub index: usize,
-    pub task: String,
-    pub answer: String,
-}
-
-#[derive(Default)]
-pub struct ChatPreviewState {
-    attempt: u64,
-    accepting: bool,
-    bytes: usize,
-    windows: std::collections::BTreeMap<usize, ProvisionalChat>,
-}
-impl ChatPreviewState {
-    pub fn begin(&mut self, attempt: u64) {
-        self.attempt = attempt;
-        self.accepting = true;
-        self.bytes = 0;
-        self.windows.clear();
-    }
-    pub fn windows(&self) -> impl Iterator<Item = &ProvisionalChat> {
-        self.windows.values()
-    }
-    pub fn append(
-        &mut self,
-        attempt: u64,
-        target: PublicTextTarget,
-        text: &str,
-    ) -> Result<bool, String> {
-        if !self.accepting || attempt != self.attempt || text.is_empty() {
-            return Ok(false);
-        }
-        let (index, task) = match target {
-            PublicTextTarget::ChatTask { index } => (index, true),
-            PublicTextTarget::ChatAnswer { index } => (index, false),
-            PublicTextTarget::Response => return Ok(false),
-        };
-        if index >= 128 || self.bytes.saturating_add(text.len()) > MAX_EVENT_BYTES {
-            self.retract(attempt);
-            return Err("model_preview_chat_limit".into());
-        }
-        self.bytes += text.len();
-        let window = self
-            .windows
-            .entry(index)
-            .or_insert_with(|| ProvisionalChat {
-                index,
-                ..Default::default()
-            });
-        if task {
-            window.task.push_str(text);
-        } else {
-            window.answer.push_str(text);
-        }
-        Ok(true)
-    }
-    /// Validation alone does not confirm chat delivery. Hold the window until
-    /// the actual sub_answer success event replaces it in the same UI position.
-    pub fn validated(&mut self, attempt: u64, accepted: bool) {
-        if attempt != self.attempt {
-            return;
-        }
-        self.accepting = false;
-        if !accepted {
-            self.retract(attempt);
-        }
-    }
-    pub fn delivered(&mut self, attempt: u64, index: usize) -> bool {
-        if attempt != self.attempt {
-            return false;
-        }
-        self.windows.remove(&index).is_some()
-    }
-    pub fn retract(&mut self, attempt: u64) -> bool {
-        if attempt != self.attempt {
-            return false;
-        }
-        self.accepting = false;
-        self.bytes = 0;
-        let changed = !self.windows.is_empty();
-        self.windows.clear();
-        changed
-    }
 }
 
 /// Per-Turn provisional projection; never decides authoritative Turn lifecycle.
 #[derive(Default)]
 pub struct TurnResponsePreview {
     response: ResponsePreviewState,
-    chat: ChatPreviewState,
     attempt: u64,
     revision: u64,
     failed: bool,
@@ -851,20 +502,16 @@ impl TurnResponsePreview {
         self.awaiting_first_text = true;
         self.failed = false;
     }
-    pub fn append(&mut self, target: PublicTextTarget, text: &str) -> Result<bool, String> {
+    pub fn append(&mut self, _target: PublicTextTarget, text: &str) -> Result<bool, String> {
         if self.failed {
             return Ok(false);
         }
         if self.awaiting_first_text && !text.is_empty() {
             self.awaiting_first_text = false;
             self.response.replace_prior(self.attempt);
-            self.chat.begin(self.attempt);
             self.interruption = None;
         }
-        let result = match target {
-            PublicTextTarget::Response => self.response.append(self.attempt, text),
-            target => self.chat.append(self.attempt, target, text),
-        };
+        let result = self.response.append(self.attempt, text);
         if result.is_err() {
             self.retract();
         }
@@ -879,30 +526,15 @@ impl TurnResponsePreview {
             return;
         }
         self.response.settle(self.attempt, final_response);
-        self.chat.validated(self.attempt, true);
     }
     pub fn interrupt(&mut self, reason: &str) {
         self.failed = true;
         self.interruption = Some(reason.to_string());
-        self.chat.validated(self.attempt, true);
     }
     pub fn retract(&mut self) {
         self.failed = true;
         self.interruption = None;
         self.response.retract(self.attempt);
-        self.chat.retract(self.attempt);
-    }
-    pub fn confirm_chat(&mut self, task: &str, answer: &str) -> Option<(u64, usize)> {
-        let index = self
-            .chat
-            .windows()
-            .find(|window| window.task.trim() == task && window.answer.trim() == answer)
-            .map(|window| window.index)?;
-        self.chat.delivered(self.attempt, index);
-        Some((self.attempt, index))
-    }
-    pub fn clear_chat(&mut self) {
-        self.chat.retract(self.attempt);
     }
     pub fn publish(&mut self, ui: &mut dyn crate::TurnUi, session: &str, turn_id: &str) {
         self.revision = self.revision.saturating_add(1);
@@ -911,8 +543,7 @@ impl TurnResponsePreview {
             crate::host::CoreTopic::new("core.model.preview", serde_json::json!({})),
             crate::host::CoreSessionState::WaitingModel,
             serde_json::json!({"turn_id": turn_id, "attempt": self.attempt,
-                "revision": self.revision, "interruption": self.interruption, "response": self.response.visible(),
-                "chat": self.chat.windows().collect::<Vec<_>>() }),
+                "revision": self.revision, "interruption": self.interruption, "response": self.response.visible() }),
         )]);
     }
 }

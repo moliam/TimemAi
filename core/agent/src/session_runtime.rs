@@ -1,6 +1,5 @@
 use crate::model_stream::{
-    JsonChatTextStream, JsonPublicTextStream, NativeChatTextStream, PublicTextTarget,
-    TurnResponsePreview, XmlPublicTextStream,
+    JsonPublicTextStream, PublicTextTarget, TurnResponsePreview, XmlPublicTextStream,
 };
 use crate::turn_state::{allocate_turn_token, TurnProjectionState};
 use crate::{
@@ -483,7 +482,6 @@ fn run_session_turn_with_model_client_and_reminder_override(
                             &mut action_runtime,
                         );
                         if let Some((preview, session, turn_id)) = action_runtime.preview.as_mut() {
-                            preview.clear_chat();
                             preview.publish(action_runtime.ui, session, turn_id);
                         }
                         if let Some((has_tool_call, has_free_talk)) =
@@ -667,7 +665,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
             }
             CoreStep::Final(turn) => {
                 if let Some(stop) = turn.stop_summary {
-                    // turn_finished keeps its summary as the user-visible
+                    // task_finished keeps its summary as the user-visible
                     // final answer text; stop metadata still records why.
                     let text = match stop.detail {
                         crate::host::TurnStopDetail::TurnFinished { .. } => turn.final_answer,
@@ -841,20 +839,7 @@ impl ActionRuntime for TurnActionRuntime<'_> {
     }
 
     fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
-        for event in events {
-            let mut event = event.clone();
-            if event.topic.name == crate::host::CORE_TOPIC_SUB_ANSWER {
-                if let Some((preview, _, _)) = self.preview.as_mut() {
-                    let task = event.payload["task"].as_str().unwrap_or_default();
-                    let answer = event.payload["answer"].as_str().unwrap_or_default();
-                    if let Some((attempt, index)) = preview.confirm_chat(task, answer) {
-                        event.payload["preview_attempt"] = serde_json::json!(attempt);
-                        event.payload["preview_index"] = serde_json::json!(index);
-                    }
-                }
-            }
-            self.ui.on_core_topic_events(&[event]);
-        }
+        self.ui.on_core_topic_events(events);
     }
 
     fn on_model_response_parsed(
@@ -894,9 +879,7 @@ fn call_model_with_system_retries(
         let model_wait_start = Instant::now();
         preview.begin();
         let mut json = JsonPublicTextStream::default();
-        let mut json_chat = JsonChatTextStream::default();
         let mut xml = XmlPublicTextStream::default();
-        let mut native_chat = NativeChatTextStream::default();
         let shared_ui = std::cell::RefCell::new(&mut *ui);
         let mut preview_error = false;
         let result = model_client.call_model_interaction_streaming(
@@ -920,12 +903,11 @@ fn call_model_with_system_retries(
                     .unwrap_or("");
                 let parsed = if request.is_native() {
                     emit(PublicTextTarget::Response, content);
-                    native_chat.push(event, &mut emit)
+                    Ok(())
                 } else if config.response_protocol
                     == crate::response_protocol::ResponseProtocolKind::Json
                 {
                     json.push(content, &mut |text| emit(PublicTextTarget::Response, text))
-                        .and_then(|_| json_chat.push(content, &mut emit))
                 } else {
                     xml.push_typed(content, &mut emit)
                 };

@@ -21,7 +21,7 @@ fn setup(name: &str) -> (AgentCore, std::path::PathBuf) {
 
 fn action(summary: &str) -> ParsedAction {
     ParsedAction {
-        action: "turn_finished".into(),
+        action: "task_finished".into(),
         name: None,
         call_id: "call_tf".into(),
         raw_input: json!({"summary": summary}),
@@ -75,4 +75,33 @@ fn summary_reset_on_new_turn() {
     assert!(core.take_turn_finished_summary().is_some());
     let _ = core.begin_turn("next", None);
     assert_eq!(core.take_turn_finished_summary(), None);
+}
+
+#[test]
+fn legacy_turn_finished_alias_still_dispatches() {
+    let (mut core, _dir) = setup("alias");
+    let mut runtime = NoopRuntime;
+    let action = ParsedAction {
+        action: "turn_finished".into(),
+        name: None,
+        call_id: "call_alias".into(),
+        raw_input: json!({"summary": "别名路径最终答复"}),
+    };
+    let outcome = crate::tool_registry::execute_builtin_tool(
+        &mut core,
+        "turn_finished",
+        &action,
+        &mut runtime,
+    )
+    .expect("builtin dispatch")
+    .expect("binding matched");
+    let text = match outcome {
+        crate::ActionExecution::Completed(outcome) => outcome.text,
+        _ => panic!("unexpected approval"),
+    };
+    assert!(!text.contains("error"));
+    assert_eq!(
+        core.take_turn_finished_summary().as_deref(),
+        Some("别名路径最终答复")
+    );
 }

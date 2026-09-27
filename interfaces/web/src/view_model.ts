@@ -104,7 +104,6 @@ export function turnShouldRenderInTimeline(turn: WebTurn): boolean {
     ) ||
     turn.events.length > 0 ||
     turn.user_entries.some((entry) => entry.kind === "approval") ||
-    turn.sub_answers.length > 0 ||
     !!turn.final_answer ||
     !!turn.completion
   );
@@ -1020,7 +1019,6 @@ export function turnsFromHistoryRecords(
       created_at_ms: record.created_at_ms,
       user_entries: [],
       events: [],
-      sub_answers: [],
       final_answer: null,
       completion: null,
     };
@@ -1048,20 +1046,6 @@ export function turnsFromHistoryRecords(
           : { kind: record.kind, content: record.content };
       const source =
         typeof record.source === "string" ? record.source : "history";
-      const subAnswer = subAnswerFromTurnEventPayload(
-        payload,
-        record.created_at_ms,
-      );
-      if (
-        source === "core_topic" &&
-        subAnswer &&
-        !turn.sub_answers.some(
-          (item) => item.sub_answer_id === subAnswer.sub_answer_id,
-        )
-      ) {
-        turn.sub_answers.push(subAnswer);
-        turn.sub_answers.sort((left, right) => left.ordinal - right.ordinal);
-      }
       turn.events.push({
         event_id: `history_event_${record.turn_id}_${record.created_at_ms}_${turn.events.length}`,
         source,
@@ -1139,25 +1123,8 @@ export function appendTurnEvent(
   if (target.events.some((existing) => existing.event_id === event.event_id))
     return session;
   const turns = [...session.turns];
-  const subAnswer = subAnswerFromTurnEventPayload(
-    event.payload,
-    event.created_at_ms,
-  );
-  const subAnswers =
-    subAnswer &&
-    !target.sub_answers.some(
-      (item) => item.sub_answer_id === subAnswer.sub_answer_id,
-    )
-      ? [...target.sub_answers, subAnswer].sort(
-          (left, right) => left.ordinal - right.ordinal,
-        )
-      : target.sub_answers;
   turns[turnIndex] = {
     ...target,
-    sub_answers: subAnswers,
-    preview: subAnswer?.preview_attempt === target.preview?.attempt && subAnswer?.preview_index !== undefined && target.preview
-      ? { ...target.preview, chat: target.preview.chat.filter(item => item.index !== subAnswer.preview_index) }
-      : target.preview,
     final_answer:
       finalAnswerFromTurnEvent(session, event) ?? target.final_answer,
     events: [...target.events, event],
@@ -1204,39 +1171,6 @@ function turnEventBelongsToSession(
   return true;
 }
 
-function subAnswerFromTurnEventPayload(
-  payload: Record<string, unknown>,
-  createdAtMs: number,
-) {
-  const topic = payload.topic;
-  const body = payload.payload;
-  if (
-    !topic ||
-    typeof topic !== "object" ||
-    (topic as Record<string, unknown>).name !== "core.sub_answer"
-  )
-    return undefined;
-  if (!body || typeof body !== "object") return undefined;
-  const item = body as Record<string, unknown>;
-  if (
-    typeof item.sub_answer_id !== "string" ||
-    typeof item.ordinal !== "number" ||
-    typeof item.task !== "string" ||
-    typeof item.answer !== "string"
-  )
-    return undefined;
-  if (!item.sub_answer_id.trim() || !item.task.trim() || !item.answer.trim())
-    return undefined;
-  return {
-    preview_attempt: typeof item.preview_attempt === "number" ? item.preview_attempt : undefined,
-    preview_index: typeof item.preview_index === "number" ? item.preview_index : undefined,
-    sub_answer_id: item.sub_answer_id,
-    ordinal: item.ordinal,
-    task: item.task,
-    answer: item.answer,
-    created_at_ms: createdAtMs,
-  };
-}
 
 function finalAnswerFromTurnEvent(session: Session, event: WebTurnEvent) {
   if (event.source !== "core_topic") return undefined;
@@ -1268,12 +1202,17 @@ export function finishTurn(
   session: Session,
   turnId: string | null | undefined,
   completion: TurnCompletion,
+  outcomeText?: string,
 ): Session {
   const workers = session.workers.map((worker) =>
     worker.state === "working" ? { ...worker, state: "ready" } : worker,
   );
   const state = aggregateSessionState(workers, "ready");
   if (!turnId) return { ...session, workers, state };
+  // A task_finished turn delivers its authoritative summary only via the
+  // turn_finished outcome; the answer area renders turn.final_answer, so
+  // materialize it here when no streamed final answer arrived.
+  const summary = outcomeText?.trim() ?? "";
   return {
     ...session,
     workers,
@@ -1286,7 +1225,12 @@ export function finishTurn(
       session.cancelling_turn_id === turnId ? null : session.cancelling_turn_id,
     turns: session.turns.map((turn) =>
       turn.turn_id === turnId
-        ? { ...turn, state: "finished", completion }
+        ? {
+            ...turn,
+            state: "finished",
+            completion,
+            final_answer: turn.final_answer ?? (summary || undefined),
+          }
         : turn,
     ),
   };
@@ -1581,7 +1525,7 @@ export function applyCoreTopicToSession(
     if (event.payload.runtime_phase === "toolgen") return session;
     const id = turnId ?? event.payload.turn_id;
     const preview = event.payload as unknown as NonNullable<WebTurn["preview"]>;
-    if (!Number.isSafeInteger(preview.revision) || !Array.isArray(preview.chat)) return session;
+    if (!Number.isSafeInteger(preview.revision)) return session;
     return { ...session, turns: session.turns.map((turn) =>
       turn.turn_id === id && preview.revision > (turn.preview?.revision ?? 0)
         ? { ...turn, preview } : turn) };
@@ -1738,11 +1682,19 @@ export function applyCoreTopicToSession(
     : { ...session, contexts, current_dir: currentDir };
 }
 
-/** Attaches completion telemetry to the exact final answer produced by this turn. */
+/**
+ * Attaches completion telemetry to the exact final answer produced by this
+ * turn. When the Host finished the turn via a task_finished summary, the
+ * authoritative answer message was created Host-side but never streamed as a
+ * chat message; `outcomeText` then materializes it here so the summary shows
+ * as the final answer instead of staying hidden in tool history.
+ */
 export function attachTurnCompletion(
   session: Session,
   messageId: string | null | undefined,
   completion: TurnCompletion,
+  outcomeText?: string,
+  makeAssistantMessage?: (text: string, id?: string) => ChatMessage,
 ): Session {
   const state = aggregateSessionState(session.workers, "ready");
   if (!messageId) return { ...session, state };
@@ -1752,6 +1704,14 @@ export function attachTurnCompletion(
     updated = true;
     return { ...message, completion };
   });
+  const summary = outcomeText?.trim() ?? "";
+  if (!updated && summary && makeAssistantMessage) {
+    return {
+      ...session,
+      state,
+      messages: [...messages, makeAssistantMessage(summary, messageId)],
+    };
+  }
   return updated ? { ...session, state, messages } : { ...session, state };
 }
 
