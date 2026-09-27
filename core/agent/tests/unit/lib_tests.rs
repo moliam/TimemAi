@@ -166,6 +166,7 @@ fn native_final_keeps_structured_tool_history_before_final_replay() {
         }],
     });
 
+    // Plain text without tool calls no longer finalizes: the turn continues.
     let step = core.apply_model_response(LlmResponse {
         content: "Final answer based on PROJECT-EVIDENCE-42".to_string(),
         tool_calls: Vec::new(),
@@ -173,9 +174,23 @@ fn native_final_keeps_structured_tool_history_before_final_replay() {
         usage: UsageStats::zero(),
         truncated: false,
     });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![crate::NativeToolCall {
+            id: "call_finish".to_string(),
+            name: "turn_finished".to_string(),
+            arguments: serde_json::json!({"summary": "Final answer based on PROJECT-EVIDENCE-42"}),
+            raw_arguments: r#"{"summary":"Final answer based on PROJECT-EVIDENCE-42"}"#.to_string(),
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
 
     assert!(matches!(step, CoreStep::Final(_)));
-    assert_eq!(core.native_exchanges.len(), 1);
+    assert_eq!(core.native_exchanges.len(), 2);
     assert_eq!(core.native_exchanges[0].delta_id, "pd_1");
     let prompt = core.build_next_prompt();
     assert!(!prompt.contains("Tool calls:"));
@@ -194,7 +209,9 @@ fn native_final_keeps_structured_tool_history_before_final_replay() {
     )]);
     let next_prompt = core.render_prompt();
     let next_request = core.model_interaction_request(next_prompt.clone());
-    assert_eq!(next_request.native_exchanges.len(), 1);
+    // pd_1 readfile exchange + pd_2 turn_finished exchange survive into the
+    // next turn's structured history.
+    assert_eq!(next_request.native_exchanges.len(), 2);
     assert_eq!(next_request.native_exchanges[0].delta_id, "pd_1");
     assert!(!next_prompt.contains("Tool calls:"));
     assert!(!next_prompt.contains("I will inspect it."));

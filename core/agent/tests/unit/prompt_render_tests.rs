@@ -1313,7 +1313,7 @@ fn native_prompt_encourages_progress_updates_without_changing_finalization_seman
         "{rendered}"
     );
     assert!(
-        rendered.contains("text without tool calls finishes the loop"),
+        rendered.contains("text without tool calls keeps the loop running"),
         "{rendered}"
     );
 }

@@ -22,6 +22,8 @@ const SELF_TOOL_MANIFEST: &str =
 const SUB_ANSWER_MANIFEST: &str =
     include_str!("../../../resources/capabilities/tools/sub_answer.yaml");
 const TOOLGEN_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/toolgen.yaml");
+const TURN_FINISHED_MANIFEST: &str =
+    include_str!("../../../resources/capabilities/tools/turn_finished.yaml");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityBinding {
@@ -394,6 +396,7 @@ impl CapabilityRegistry {
                 SELF_TOOL_MANIFEST,
                 SUB_ANSWER_MANIFEST,
                 TOOLGEN_MANIFEST,
+                TURN_FINISHED_MANIFEST,
             ],
             &[],
             profile,

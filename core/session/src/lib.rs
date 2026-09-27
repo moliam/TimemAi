@@ -2253,6 +2253,9 @@ fn toolgen_failure_detail(outcome: &TurnOutcome) -> Option<String> {
         } => format!(
             "toolgen_protocol_repair_failed:first_issue={first_issue},final_issue={final_issue},truncated={truncated}"
         ),
+        TurnStopDetail::TurnFinished { .. } => {
+            format!("toolgen_run_stopped:{:?}", summary.stop_reason)
+        }
         TurnStopDetail::None => format!("toolgen_run_stopped:{:?}", summary.stop_reason),
     })
 }
