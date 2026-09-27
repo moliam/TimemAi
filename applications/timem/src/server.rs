@@ -10757,6 +10757,7 @@ fn handle_scoped_worker_event(
                     set_worker_state(state, session_id, worker_id, "ready");
                 }
                 if event.topic.name == CORE_TOPIC_SUB_ANSWER {
+                    let mut pending_sub_answer_turn = None;
                     if let Some(sub_answer) =
                         web_sub_answer_from_topic_payload(&wire_payload, now_ms())
                     {
@@ -10793,10 +10794,21 @@ fn handle_scoped_worker_event(
                                         }
                                         turn.sub_answers.push(sub_answer);
                                         turn.sub_answers.sort_by_key(|item| item.ordinal);
+                                        pending_sub_answer_turn =
+                                            Some((session_id.to_string(), turn.clone()));
                                     }
                                 }
                             }
                         }
+                    }
+                    if let Some((session_id, turn)) = pending_sub_answer_turn.take() {
+                        publish_semantic(
+                            state,
+                            WireEvent::TurnUpdated {
+                                session_id,
+                                turn,
+                            },
+                        );
                     }
                 }
                 let turn_ref = if event.topic.name == agent_core::CORE_TOPIC_LIFECYCLE {
