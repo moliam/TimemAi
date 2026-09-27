@@ -171,13 +171,22 @@ pub struct SessionResumeNotice {
     /// Local time label captured when the runtime restarted, so the notice
     /// reports the restart moment even if the next turn starts much later.
     pub restarted_at: String,
+    /// Set when the pre-restart history ended with an active memo; the
+    /// runtime-held memo did not survive the restart.
+    pub previous_active_memo: Option<String>,
 }
 
 impl SessionResumeNotice {
     pub fn render(&self) -> String {
         format!(
-            "Runtime restarted at {} (local time). Previous runtime/job state may be stale. If the user asks to continue or recover prior work, first inspect this Session's recent history below; use raw_chat search when more transcript context is needed, and scratch search/read when a prior checkpoint may exist. Before acting, verify the current cwd, files, and processes instead of assuming old runtime state is still valid.\n\n{}\n\nCurrent cwd: {}",
+            "Runtime restarted at {} (local time). Previous runtime/job state may be stale. If the user asks to continue or recover prior work, first inspect this Session's recent history below; use raw_chat search when more transcript context is needed, and scratch search/read when a prior checkpoint may exist. Before acting, verify the current cwd, files, and processes instead of assuming old runtime state is still valid.{}\n\n{}\n\nCurrent cwd: {}",
             self.restarted_at,
+            self.previous_active_memo
+                .as_deref()
+                .map(|memo| format!(
+                    "\nPrevious active memo turns inactive: {memo}. You need to recreate it if necessary."
+                ))
+                .unwrap_or_default(),
             chat_history_prompt_format_hint(&self.history_path),
             self.current_dir.display()
         )
