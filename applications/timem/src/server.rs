@@ -9855,31 +9855,29 @@ fn previous_active_memo_from_history(history_path: &std::path::Path) -> Option<S
         let Ok(payload) = serde_json::from_str::<Value>(&content[json_start..]) else {
             continue;
         };
-        // core.memo topic payloads carry {"active": bool, "text": ...}
+        // Only the core.memo topic carries the memo state. core.action
+        // events also expose an unrelated "active" flag; never match those.
         if payload
             .get("topic")
             .and_then(|t| t.get("name"))
             .and_then(Value::as_str)
-            == Some("core.memo")
-            || payload
-                .get("payload")
-                .and_then(|p| p.get("active"))
-                .is_some()
+            != Some("core.memo")
         {
-            let text = payload
-                .get("payload")
-                .and_then(|p| p.get("text"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            let active = payload
-                .get("payload")
-                .and_then(|p| p.get("active"))
-                .and_then(Value::as_bool);
-            return match (active, text) {
-                (Some(true), Some(text)) if !text.is_empty() => Some(text),
-                _ => None,
-            };
+            continue;
         }
+        let text = payload
+            .get("payload")
+            .and_then(|p| p.get("text"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let active = payload
+            .get("payload")
+            .and_then(|p| p.get("active"))
+            .and_then(Value::as_bool);
+        return match (active, text) {
+            (Some(true), Some(text)) if !text.is_empty() => Some(text),
+            _ => None,
+        };
     }
     None
 }
