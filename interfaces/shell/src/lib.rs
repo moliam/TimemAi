@@ -33,7 +33,7 @@ pub use timem_in_process::agent_api::{
     compact_runtime_status_text, create_memory_dir, default_api_protocol, default_base_url,
     default_config_root, default_model, estimate_prompt_context_tokens, host_start_audit_event,
     is_default_base_url, is_default_model, layout_for_space, load_reminder_tips_config,
-    load_workspace_dirs_from_path, local_time_label, meaningful_latest_usage,
+    load_workspace_dirs_from_path, local_datetime_label, local_time_label, meaningful_latest_usage,
     model_retry_audit_event, normalize_workspace_dir, parse_api_protocol, parse_token_count,
     resolve_memory_dir, resolve_topic_reply, runtime_active_elapsed_secs,
     runtime_config_apply_report, runtime_config_field_value, runtime_config_menu_report,
@@ -96,7 +96,7 @@ fn timem_prefix_with_worker(time_label: &str, worker_label: Option<&str>) -> Str
     format!("{ANSI_BRIGHT_TIMEM}[{time_label}] {TIMEM_LOGO}{worker}  ⬇{ANSI_RESET}")
 }
 
-fn dim_line(text: &str) -> String {
+pub fn dim_line(text: &str) -> String {
     format!("{ANSI_RESET}{ANSI_DIM}{text}{ANSI_RESET}")
 }
 

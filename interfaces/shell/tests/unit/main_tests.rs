@@ -1135,6 +1135,9 @@ fn cli_help_lists_all_env_backed_options() {
         "Ctrl+C also cancels an active model turn",
         "one Ctrl+C never exits Timem by itself",
         "Use Ctrl+D or /exit",
+        "timem                     start Web Host",
+        "timem --shell [options]   start interactive shell",
+        "timem attach [--space <absolute-path>]   attach a terminal to a running Web Host session",
     ] {
         assert!(help.contains(expected), "missing help item: {expected}");
     }
@@ -2246,7 +2249,8 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
     let mut pending = true;
     let notice = take_shell_resume_notice(&store, &loaded.session_id, &workspace, &mut pending)
         .expect("first restored shell turn should include resume notice");
-    assert!(notice.contains("Runtime just restarted. Previous runtime/job state may be stale."));
+    assert!(notice.contains("Previous runtime/job state may be stale."));
+    assert!(notice.contains("(local time). Previous runtime/job state"));
     assert!(notice.contains("first inspect this Session's recent history below"));
     assert!(notice.contains("use raw_chat search when more transcript context is needed"));
     assert!(notice.contains("scratch search/read when a prior checkpoint may exist"));
