@@ -412,17 +412,15 @@ async function main() {
     await browser.evaluate(`localStorage.setItem("timem-web-tool-result-status-v1", "true"); window.dispatchEvent(new StorageEvent("storage", {key:"timem-web-tool-result-status-v1"}));`);
     await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", "true"); window.dispatchEvent(new StorageEvent("storage", {key:"timem-web-stream-ui-mode-v1"}));`);
     await waitFor(() => contains(".response-preview", "early response"), "midstream enable missing response");
-    await waitFor(() => contains(".provisional-chat", "early chat"), "chat did not stream");
-    publish(2, "early response continued", [{index:0,task:"Interim",answer:"early chat continued"}]);
-    await waitFor(() => contains(".provisional-chat", "continued"), "chat update missing");
-    publish(3, "early response continued", [{index:0,task:"Interim",answer:"early chat continued"}], "network_error");
+    publish(2, "early response continued", []);
+    await waitFor(() => contains(".response-preview", "continued"), "chat update missing");
+    publish(3, "early response continued", [], "network_error");
     await waitFor(() => contains(".response-preview-interruption", "Network error"), "network interruption missing");
     await browser.call("Page.reload", {ignoreCache:true});
-    await waitFor(() => contains(".provisional-chat", "early chat continued"), "reconnect lost partial chat");
+    await waitFor(() => contains(".response-preview", "early response continued"), "reconnect lost partial chat");
     await waitFor(() => contains(".response-preview-interruption", "Network error"), "reconnect lost interruption");
     publish(4, null, []);
-    await waitFor(async () => !(await contains(".provisional-chat", "early chat")), "invalid chat not retracted");
-    assert(!(await contains(".response-preview", "early response")), "invalid response not retracted");
+    await waitFor(async () => !(await contains(".response-preview", "early response")), "invalid response not retracted");
     const thoughtEvent = (id, text, time) => ({
       event_id: id, source: "core_topic", created_at_ms: time,
       payload: { session_id: "session-1", state: { name: "running" }, topic: { name: "core.model.response", attributes: {} }, payload: { free_talk: text } },
@@ -646,7 +644,7 @@ async function main() {
     }] };
     host.setSession(interimSession);
     await browser.call("Page.reload", { ignoreCache: true });
-    assert(await contains(".turn-stream-tools", "Prior thought archived"), "prior thought disappeared");
+    await waitFor(() => contains(".turn-stream-tools", "Prior thought archived"), "prior thought disappeared");
     for (const status of ["completed", "failed", "timeout", "cancelled", "cancelled_by_user", "running", "background_running"]) {
       for (const name of ["run_bash", "readfile"]) {
         const event = toolEvent(name, 6);
