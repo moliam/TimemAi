@@ -1969,15 +1969,22 @@ fn paste_recovery_prompt_and_choices_are_keyboard_driven() {
         first_dirty_marker: "[ pasted 5 lin ]".to_string(),
     };
     let prompt = render_paste_recovery_prompt(&summary);
-    assert!(prompt.contains("粘贴关联标签"));
-    assert!(prompt.contains("可能被误编辑"));
+    // The note box wraps to the ambient terminal width, which may split CJK
+    // phrases across lines and interleave box-border glyphs; compare against
+    // text stripped of whitespace and box drawing characters.
+    let flat: String = prompt
+        .chars()
+        .filter(|c| !c.is_whitespace() && !matches!(c, '┃' | '┏' | '┓' | '┗' | '┛' | '━'))
+        .collect();
+    assert!(flat.contains("粘贴关联标签"));
+    assert!(flat.contains("可能被误编辑"));
     assert!(prompt.contains("\x1b[7m[ pasted 5 lin ]\x1b[0m"));
     assert!(prompt.contains("┏━ Note"));
     assert!(prompt.contains('┗'));
-    assert!(prompt.contains("继续/恢复粘贴/返回编辑"));
-    assert!(prompt.contains("原始粘贴内容共 5 行"));
-    assert!(prompt.contains("使用 ←/→ 或 ↑/↓ 选择"));
-    assert!(prompt.contains("Ctrl+C/Esc 取消当前输入"));
+    assert!(flat.contains("继续/恢复粘贴/返回编辑"));
+    assert!(flat.contains("原始粘贴内容共5行"));
+    assert!(flat.contains("使用←/→或↑/↓选择"));
+    assert!(flat.contains("Ctrl+C/Esc取消当前输入"));
     let submit_selected = render_paste_recovery_choices(PasteRecoveryChoice::SubmitEdited);
     assert!(submit_selected.contains("\x1b[7m[ 继续 ]\x1b[0m"));
     assert!(submit_selected.contains("恢复粘贴"));
