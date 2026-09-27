@@ -5334,23 +5334,23 @@ body.workspace-modal-open .app-shell { user-select: none; }
   place-items: center;
   width: 30px;
   height: 30px;
-  border: 1px solid #2e443f66;
+  border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
   border-radius: 9px;
-  background: #242424d9;
-  box-shadow: inset 0 1px 0 #ffffff0d, inset 0 -7px 14px #00000024, 0 9px 24px #0000002e;
+  /* Neutral translucent chip: blends with any theme surface (dark, light,
+     warm) instead of hardcoding a near-black panel. */
+  background: color-mix(in srgb, currentColor 12%, transparent);
   cursor: default;
   outline: none;
-  backdrop-filter: blur(16px) saturate(115%);
-  transition: background .16s, box-shadow .16s;
+  backdrop-filter: blur(14px) saturate(115%);
+  transition: background .16s, border-color .16s;
 }
 .thread-memo-indicator:hover,
 .thread-memo-indicator:focus-visible {
-  background: #2a302edb;
-  border-color: #3a524b;
-  box-shadow: inset 0 1px 0 #c7e4dc1c, inset 0 -8px 16px #07100e29, 0 11px 28px #00000038;
+  background: color-mix(in srgb, currentColor 20%, transparent);
+  border-color: color-mix(in srgb, currentColor 34%, transparent);
 }
 .thread-memo-indicator .thread-memo-icon {
-  filter: sepia(.28) saturate(.62) hue-rotate(96deg) brightness(1.06);
+  opacity: .9;
 }
 .thread-memo-icon {
   font-size: 13px;
@@ -5363,9 +5363,11 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .thread-memo-tooltip {
   position: absolute;
   z-index: 42;
-  right: 38px;
+  /* The indicator sits near the chat area's left edge: opening leftwards
+     slides under the session sidebar. Open to the right instead. */
+  left: 38px;
   top: 50%;
-  transform: translateY(-50%) translateX(4px);
+  transform: translateY(-50%) translateX(-4px);
   width: max-content;
   max-width: 320px;
   padding: 8px 10px;
@@ -5397,6 +5399,12 @@ body.workspace-modal-open .app-shell { user-select: none; }
   opacity: 1;
   transform: translateY(-50%) translateX(0);
 }
+:root[data-theme="light"] .thread-memo-tooltip {
+  background: #ffffffef;
+  border-color: #9aa8a2;
+  color: #33413c;
+}
+:root[data-theme="light"] .thread-memo-caption { color: #1f6f5f; }
 
 /* Inline ctx clear action inside the header context usage line. */
 .context-clear-inline {
