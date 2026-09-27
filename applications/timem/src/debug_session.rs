@@ -1150,10 +1150,10 @@ fn render_statistics_html(session_id: &str, stats: &SessionDebug) -> String {
     out.push_str("<footer>Request counts cover logical model-turn requests; retry attempts are folded into their final outcome. Capability-probe traffic is reported in endpoint negotiation details.</footer></main><script>");
     out.push_str(STATISTICS_JS);
     out.push_str(&format!(
-        "setTimeout(()=>location.reload(),{STATISTICS_REFRESH_MS});"
+        "window.__timemStatsRefresh=setTimeout(()=>location.reload(),{STATISTICS_REFRESH_MS});"
     ));
     out.push_str(
-        "document.getElementById('reset-stats')?.addEventListener('click',async(ev)=>{ev.preventDefault();if(!confirm('Reset cumulative statistics for this session?'))return;ev.target.disabled=true;const params=new URLSearchParams(location.search);params.delete('path');params.delete('download');await fetch('/api/debug/reset?'+params.toString(),{method:'POST'});location.reload();});",
+        "document.getElementById('reset-stats')?.addEventListener('click',async(ev)=>{ev.preventDefault();clearTimeout(window.__timemStatsRefresh);if(!confirm('Reset cumulative statistics for this session?')){window.__timemStatsRefresh=setTimeout(()=>location.reload(),2000);return;}ev.target.disabled=true;const params=new URLSearchParams(location.search);params.delete('path');params.delete('download');try{await fetch('/api/debug/reset?'+params.toString(),{method:'POST'});}catch(e){alert('Reset request failed: '+e);return;}location.reload();});",
     );
     out.push_str("</script></body></html>");
     out
