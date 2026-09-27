@@ -1814,6 +1814,20 @@ function TimemApp() {
         );
         return;
       }
+      if (event.type === "session_context_cleared") {
+        setSessions((current) =>
+          current.map((session) =>
+            session.session_id === event.session_id
+              ? {
+                  ...session,
+                  context_cleared_at_ms: event.cleared_at_ms,
+                  restored_context_prompt_tokens: null,
+                }
+              : session,
+          ),
+        );
+        return;
+      }
       if (event.type === "session_memo_updated") {
         setSessions((current) =>
           current.map((session) =>
@@ -4370,28 +4384,24 @@ function TimemApp() {
         <main className="chat-shell">
           <header className="chat-header">
             <div className="header-context-actions">
-              <HeaderContextUsage session={activeSession} />
-              <button
-                type="button"
-                className="icon-button context-clear-button"
-                title={clearContextLabel}
-                aria-label={clearContextLabel}
-                disabled={!activeSession || sessionBusy}
-                onClick={() => {
-                  if (!activeSession) return;
-                  if (
-                    window.confirm(
-                      t("context.clearConfirm"),
-                    )
-                  )
-                    sendCommand({
-                      type: "session_clear_context",
-                      session_id: activeSession.session_id,
-                    });
-                }}
-              >
-                <Eraser size={13} />
-              </button>
+              <HeaderContextUsage
+                session={activeSession}
+                onClear={
+                  activeSession && !sessionBusy
+                    ? () => {
+                        if (
+                          window.confirm(
+                            t("context.clearConfirm"),
+                          )
+                        )
+                          sendCommand({
+                            type: "session_clear_context",
+                            session_id: activeSession.session_id,
+                          });
+                      }
+                    : null
+                }
+              />
               <button
                 type="button"
                 ref={mcpButtonRef}
@@ -10970,7 +10980,13 @@ function FinalAnswerContent({ text, provisional = false }: { text: string; provi
   );
 }
 
-function HeaderContextUsage({ session }: { session: Session | undefined }) {
+function HeaderContextUsage({
+  session,
+  onClear,
+}: {
+  session: Session | undefined;
+  onClear: (() => void) | null;
+}) {
   const usage = session ? sessionContextUsage(session) : undefined;
   const cacheHitPercent = session ? sessionCacheHitPercent(session) : undefined;
   const limit = session?.max_llm_input_tokens || undefined;
@@ -11002,6 +11018,18 @@ function HeaderContextUsage({ session }: { session: Session | undefined }) {
         <span aria-hidden="true">· </span>
         {cacheLabel}
       </span>
+      {onClear && (
+        <button
+          type="button"
+          className="context-clear-inline"
+          title={t("context.clearTitle")}
+          aria-label={t("context.clearTitle")}
+          onClick={onClear}
+        >
+          <Eraser size={12} aria-hidden="true" />
+          {t("context.clearAction")}
+        </button>
+      )}
     </span>
   );
 }
