@@ -120,7 +120,7 @@ pub struct NativeToolCall {
     pub raw_arguments: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NativeToolResult {
     pub call_id: String,
     pub name: String,
@@ -128,7 +128,7 @@ pub struct NativeToolResult {
     pub is_error: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NativeExchange {
     /// Prompt delta that was open when this provider-native exchange was created.
     /// The exchange is projected immediately after that delta in model input order.

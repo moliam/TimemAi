@@ -377,6 +377,19 @@ enum CoreSessionWorkerCommand {
         tools: Vec<agent_core::mcp::McpTool>,
         instructions: BTreeMap<String, String>,
     },
+    /// Host-initiated export of the worker dynamic prompt context. The
+    /// worker answers on result_tx, which also acts as a barrier: the Host
+    /// must not persist the snapshot before the worker has gone idle.
+    ExportContext {
+        result_tx: Sender<Result<agent_core::DynamicContextSnapshot, String>>,
+    },
+    /// Drops the dynamic prompt context so the next turn starts from the
+    /// tool-owned system prompt only, mirroring a fresh runtime restart.
+    ClearContext,
+    /// Restores a persisted dynamic prompt context snapshot into the worker.
+    ImportContext {
+        snapshot: agent_core::DynamicContextSnapshot,
+    },
     Shutdown,
 }
 
@@ -821,6 +834,39 @@ impl CoreSessionWorkerHandle {
     pub fn reply_to_request(&self, reply: TopicReply) -> Result<(), String> {
         self.reply_tx
             .send(reply)
+            .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    /// Exports the worker dynamic prompt context. Blocks until the worker
+    /// answers, so a persisted snapshot always reflects an idle worker.
+    pub fn export_dynamic_context(
+        &self,
+    ) -> Result<Result<agent_core::DynamicContextSnapshot, String>, String> {
+        let (result_tx, result_rx) = mpsc::channel();
+        self.command_tx
+            .send(CoreSessionWorkerCommand::ExportContext { result_tx })
+            .map_err(|_| "core_session_worker_stopped".to_string())?;
+        // A busy worker dequeues commands only between turns; waiting for it
+        // would delay Ctrl+C shutdown behind an active model call. The short
+        // timeout keeps shutdown latency bounded; on timeout the Host simply
+        // skips persisting that session's context.
+        result_rx
+            .recv_timeout(Duration::from_millis(150))
+            .map_err(|_| "prompt_context_export_timeout".to_string())
+    }
+
+    pub fn import_dynamic_context(
+        &self,
+        snapshot: agent_core::DynamicContextSnapshot,
+    ) -> Result<(), String> {
+        self.command_tx
+            .send(CoreSessionWorkerCommand::ImportContext { snapshot })
+            .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    pub fn clear_dynamic_context(&self) -> Result<(), String> {
+        self.command_tx
+            .send(CoreSessionWorkerCommand::ClearContext)
             .map_err(|_| "core_session_worker_stopped".to_string())
     }
 
@@ -1657,6 +1703,9 @@ impl CoreSessionWorker {
                     | CoreSessionWorkerCommand::UpdateRequestFields { .. }
                     | CoreSessionWorkerCommand::UpdateModelHttpTransport { .. }
                     | CoreSessionWorkerCommand::UpdateMcp { .. }
+                    | CoreSessionWorkerCommand::ExportContext { .. }
+                    | CoreSessionWorkerCommand::ClearContext
+                    | CoreSessionWorkerCommand::ImportContext { .. }
                         if shutdown_requested.load(Ordering::SeqCst) =>
                     {
                         break;
@@ -1937,6 +1986,43 @@ impl CoreSessionWorker {
                         ) {
                             let _ = event_tx.send(CoreSessionWorkerEvent::ModelError { error });
                         }
+                    }
+                    CoreSessionWorkerCommand::ImportContext { snapshot } => {
+                        core.import_dynamic_context(snapshot);
+                        let event = core_initialized_topic_event_with_worker(
+                            &identity.session_id,
+                            core.profile(),
+                            core.response_protocol_name(),
+                            core.max_llm_input_tokens(),
+                            core.configured_round_budget(),
+                            core.capability_tool_count(),
+                            core.capability_skill_count(),
+                            Some(&identity),
+                            Some(&workspace),
+                            Some(core.dynamic_context_summary()),
+                        )
+                        .with_worker_scope(&identity.context_id, &identity.worker_id);
+                        let _ = event_tx.send(CoreSessionWorkerEvent::Topics(vec![event]));
+                    }
+                    CoreSessionWorkerCommand::ExportContext { result_tx } => {
+                        let _ = result_tx.send(Ok(core.export_dynamic_context()));
+                    }
+                    CoreSessionWorkerCommand::ClearContext => {
+                        core.clear_dynamic_context();
+                        let event = core_initialized_topic_event_with_worker(
+                            &identity.session_id,
+                            core.profile(),
+                            core.response_protocol_name(),
+                            core.max_llm_input_tokens(),
+                            core.configured_round_budget(),
+                            core.capability_tool_count(),
+                            core.capability_skill_count(),
+                            Some(&identity),
+                            Some(&workspace),
+                            Some(core.dynamic_context_summary()),
+                        )
+                        .with_worker_scope(&identity.context_id, &identity.worker_id);
+                        let _ = event_tx.send(CoreSessionWorkerEvent::Topics(vec![event]));
                     }
                     CoreSessionWorkerCommand::Shutdown => break,
                 }

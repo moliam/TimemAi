@@ -4901,7 +4901,8 @@ fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
     let context = session_context(&restarted, &session_id, &[])
         .unwrap()
         .expect("restored session should inject resume context");
-    assert!(context.contains("Runtime just restarted. Previous runtime/job state may be stale."));
+    assert!(context.contains("Previous runtime/job state may be stale."));
+    assert!(context.contains("(local time). Previous runtime/job state"));
     assert!(context.contains("first inspect this Session's recent history below"));
     assert!(context.contains("use raw_chat search when more transcript context is needed"));
     assert!(context.contains("scratch search/read when a prior checkpoint may exist"));
@@ -4913,7 +4914,7 @@ fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
     let context_after_first_use = session_context(&restarted, &session_id, &[])
         .unwrap()
         .unwrap_or_default();
-    assert!(!context_after_first_use.contains("Runtime just restarted."));
+    assert!(!context_after_first_use.contains("runtime/job state may be stale"));
     assert!(!context_after_first_use.contains("This session was restored"));
 }
 
@@ -7574,6 +7575,7 @@ fn routing_test_state() -> AppState {
         debug: None,
         runtime_log: RuntimeLog::default(),
         lifecycle_diagnostics: LifecycleDiagnostics::disabled(),
+        runtime_started_at: agent_core::local_datetime_label(),
     }
 }
 
@@ -7713,6 +7715,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         pending_unconsumed_supplements: Vec::new(),
         reported_session_working_worker_count: None,
         work_instruction_mode: WorkInstructionLoadMode::Off,
+        restored_context_prompt_tokens: None,
         work_instruction_allowed: None,
         pending_work_instruction_turn: None,
         runtime: WebSessionRuntime {
@@ -10282,6 +10285,7 @@ fn turn_completion_stats_are_attached_to_the_matching_final_answer() {
             turn_id,
             turn_event_id,
             event,
+            ..
         } => {
             assert_eq!(turn_id.as_deref(), Some(turn.turn_id.as_str()));
             assert!(turn_event_id.as_deref().is_some_and(|id| !id.is_empty()));
