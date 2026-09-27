@@ -1,5 +1,5 @@
 use crate::response_protocol::ParsedAction;
-use crate::{capmgr, memmgr, readfile, self_tool, shell_exec, sub_answer, toolgen};
+use crate::{capmgr, memmgr, readfile, self_tool, shell_exec, sub_answer, toolgen, turn_finished};
 use crate::{ActionExecution, ActionRuntime, AgentCore};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -12,6 +12,7 @@ pub(crate) const BUILTIN_TOOL_BINDINGS: &[&str] = &[
     "run_powershell",
     "self_tool",
     "sub_answer",
+    "turn_finished",
     "toolgen",
 ];
 
@@ -48,6 +49,7 @@ fn builtin_tool_callback(binding_name: &str) -> Option<BuiltinToolCallback> {
         "readfile" => Some(execute_readfile),
         "self_tool" => Some(execute_self_tool),
         "sub_answer" => Some(execute_sub_answer),
+        "turn_finished" => Some(execute_turn_finished),
         "run_bash" | "run_powershell" => Some(execute_local_shell),
         "toolgen" => Some(execute_toolgen),
         _ => None,
@@ -97,6 +99,14 @@ fn execute_self_tool(
     _runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
     ActionExecution::Completed(self_tool::execute_action_outcome(core, action))
+}
+
+fn execute_turn_finished(
+    core: &mut crate::AgentCore,
+    action: &crate::response_protocol::ParsedAction,
+    runtime: &mut dyn crate::ActionRuntime,
+) -> crate::ActionExecution {
+    turn_finished::execute_action(core, action, runtime)
 }
 
 fn execute_sub_answer(

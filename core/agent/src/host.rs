@@ -97,6 +97,7 @@ impl TurnOutcome {
 pub enum TurnStopReason {
     CancelledByUser,
     ModelError,
+    TurnFinished,
     OutputLimitStoppedByUser,
     RoundLimitReached,
     ProtocolRepairFailed,
@@ -108,6 +109,9 @@ pub enum TurnStopDetail {
     None,
     ModelError {
         error: String,
+    },
+    TurnFinished {
+        summary: String,
     },
     OutputLimit {
         current_tokens: u32,
@@ -148,6 +152,18 @@ impl TurnStopSummary {
             repair_issue: None,
             stop_reason: TurnStopReason::CancelledByUser,
             detail: TurnStopDetail::None,
+        }
+    }
+
+    pub fn turn_finished(summary: impl Into<String>, stats: UsageStats) -> Self {
+        Self {
+            stats,
+            latest_usage: None,
+            repair_issue: None,
+            stop_reason: TurnStopReason::TurnFinished,
+            detail: TurnStopDetail::TurnFinished {
+                summary: summary.into(),
+            },
         }
     }
 

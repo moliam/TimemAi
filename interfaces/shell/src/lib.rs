@@ -303,6 +303,7 @@ pub fn render_turn_stop_summary(stop: &TurnStopSummary) -> String {
                 format!("模型的回复不符合本地协议，已拦截原始报文展示。原因：{issue}。请重试或换一个更具体的问题。")
             }
         }
+        TurnStopDetail::TurnFinished { summary } => summary.clone(),
         TurnStopDetail::None => format!("本轮已停止：{:?}", stop.stop_reason),
     }
 }

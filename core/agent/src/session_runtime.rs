@@ -667,7 +667,13 @@ fn run_session_turn_with_model_client_and_reminder_override(
             }
             CoreStep::Final(turn) => {
                 if let Some(stop) = turn.stop_summary {
-                    break turn_stop_parts(stop);
+                    // turn_finished keeps its summary as the user-visible
+                    // final answer text; stop metadata still records why.
+                    let text = match stop.detail {
+                        crate::host::TurnStopDetail::TurnFinished { .. } => turn.final_answer,
+                        _ => String::new(),
+                    };
+                    break (text, Some(stop.into_stopped_turn()), None);
                 }
                 if ui.continue_supplements_after_final_answer() {
                     let supplements = normalize_user_supplements_with_context(
@@ -761,6 +767,7 @@ fn projection_outcome_from_turn_outcome(outcome: &TurnOutcome) -> TurnProjection
     match outcome.stop_reason {
         None => TurnProjectionOutcome::Completed,
         Some(TurnStopReason::CancelledByUser) => TurnProjectionOutcome::Cancelled,
+        Some(TurnStopReason::TurnFinished) => TurnProjectionOutcome::Completed,
         Some(TurnStopReason::ModelError) => TurnProjectionOutcome::Failed {
             code: "model_error".to_string(),
         },

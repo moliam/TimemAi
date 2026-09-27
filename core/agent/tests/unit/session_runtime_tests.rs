@@ -5453,8 +5453,14 @@ impl ModelClient for TruncatedNativeRecoveryModel {
                     return Err("missing_small_step_tool_result".to_string());
                 }
                 Ok(LlmResponse {
-                    tool_calls: Vec::new(),
-                    content: "恢复成功，分块执行得到正确结果：42。".to_string(),
+                    tool_calls: vec![crate::NativeToolCall {
+                        id: "call_finish_3".to_string(),
+                        name: "turn_finished".to_string(),
+                        arguments: serde_json::json!({"summary": "恢复成功，分块执行得到正确结果：42。"}),
+                        raw_arguments: "{\"summary\":\"恢复成功，分块执行得到正确结果：42。\"}"
+                            .to_string(),
+                    }],
+                    content: String::new(),
                     model_name: config.model.clone(),
                     usage: usage(140, 12),
                     truncated: false,
@@ -5503,7 +5509,10 @@ fn truncated_native_sse_recovery_guides_small_tool_iteration_to_correct_answer()
     );
 
     assert_eq!(outcome.text, "恢复成功，分块执行得到正确结果：42。");
-    assert_eq!(outcome.stop_reason, None);
+    assert_eq!(
+        outcome.stop_reason,
+        Some(crate::TurnStopReason::TurnFinished)
+    );
     assert_eq!(model.business_calls, 3);
     assert!(model.saw_repair_context);
     assert!(model.saw_tool_result);
@@ -5605,7 +5614,7 @@ impl ModelClient for NativeRoundTripModel {
                     .content
                     .contains("Rust 42");
         } else {
-            self.observed_previous_turn_tool_history = request.native_exchanges.len() == 1
+            self.observed_previous_turn_tool_history = request.native_exchanges.len() == 2
                 && request.native_exchanges[0].delta_id == "pd_1"
                 && request.native_exchanges[0].calls[0].id == "call_count"
                 && request.native_exchanges[0].results[0]
@@ -5614,13 +5623,19 @@ impl ModelClient for NativeRoundTripModel {
                 && !request.rendered_prompt.contains("Tool calls:")
                 && request.rendered_prompt.contains("再说一次结果");
         }
+        let summary = if self.business_calls == 2 {
+            "统计完成：Rust 42 行。"
+        } else {
+            "上一轮结果仍是 Rust 42 行。"
+        };
         Ok(LlmResponse {
-            tool_calls: Vec::new(),
-            content: if self.business_calls == 2 {
-                "统计完成：Rust 42 行。".to_string()
-            } else {
-                "上一轮结果仍是 Rust 42 行。".to_string()
-            },
+            tool_calls: vec![crate::NativeToolCall {
+                id: format!("call_finish_{}", self.business_calls),
+                name: "turn_finished".to_string(),
+                arguments: serde_json::json!({"summary": summary}),
+                raw_arguments: format!("{{\"summary\":\"{summary}\"}}"),
+            }],
+            content: String::new(),
             model_name: config.model.clone(),
             usage: usage(120, 10),
             truncated: false,

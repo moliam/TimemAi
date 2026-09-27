@@ -85,6 +85,8 @@ mod tool_result_gate;
 mod tool_schema_renderer;
 #[path = "../../../resources/capabilities/tools/toolgen.rs"]
 pub mod toolgen;
+#[path = "../../../resources/capabilities/tools/turn_finished.rs"]
+pub mod turn_finished;
 pub mod turn_state;
 pub mod work_instructions;
 pub mod workspace;
@@ -1759,6 +1761,7 @@ pub struct AgentCore {
     native_exchanges: Vec<NativeExchange>,
     sub_answer_enabled: bool,
     sub_answer_count: u64,
+    turn_finished_summary: Option<String>,
     pending_native_exchange: Option<(String, String, Vec<NativeToolCall>, Vec<String>)>,
 }
 impl AgentCore {
@@ -1861,6 +1864,7 @@ impl AgentCore {
             native_exchanges: Vec::new(),
             sub_answer_enabled: true,
             sub_answer_count: 0,
+            turn_finished_summary: None,
             pending_native_exchange: None,
         }
     }
@@ -2889,6 +2893,7 @@ impl AgentCore {
         self.current_action_user_question.clear();
         self.last_notifications.clear();
         self.sub_answer_count = 0;
+        self.turn_finished_summary = None;
         self.loaded_work_instruction_fingerprints.clear();
     }
     pub fn resolve_stale_context_with_audit(
@@ -3044,6 +3049,16 @@ impl AgentCore {
         self.sub_answer_count
     }
 
+    pub(crate) fn record_turn_finished(&mut self, summary: String) {
+        if self.turn_finished_summary.is_none() {
+            self.turn_finished_summary = Some(summary);
+        }
+    }
+
+    pub(crate) fn take_turn_finished_summary(&mut self) -> Option<String> {
+        self.turn_finished_summary.take()
+    }
+
     pub fn begin_direct_resume_turn(&mut self, supporting_context: Option<&str>) -> CoreStep {
         self.begin_turn_with_input_kind("", supporting_context, true)
     }
@@ -3067,6 +3082,7 @@ impl AgentCore {
         self.pending_approval = None;
         self.last_notifications.clear();
         self.sub_answer_count = 0;
+        self.turn_finished_summary = None;
         // A final assistant replay may already be pending from the previous turn.
         // Keep it before the marker below; both may share a transport delta because
         // BEGIN TURN, rather than delta batching, defines logical ownership.
@@ -3604,7 +3620,8 @@ impl AgentCore {
         }
 
         if !parsed.action_groups.is_empty() {
-            let result_lines = match self.execute_action_groups(parsed.action_groups, runtime) {
+            let parsed_action_groups = parsed.action_groups.clone();
+            let result_lines = match self.execute_action_groups(parsed_action_groups, runtime) {
                 Ok(result_lines) => result_lines,
                 Err((result_lines, pending)) => {
                     if !native_calls.is_empty() {
@@ -3631,6 +3648,43 @@ impl AgentCore {
                     "result_of_llm_action".to_string(),
                     result_lines.join("\n\n"),
                 ));
+            }
+            if let Some(stop_summary) = self.take_turn_finished_summary() {
+                // turn_finished was executed among the actions above. Its native
+                // tool exchange is still recorded below so the provider message
+                // sequence stays valid; the turn ends here regardless.
+                if !native_calls.is_empty() {
+                    self.native_exchanges.push(NativeExchange {
+                        delta_id: self.current_native_delta_id(),
+                        assistant_text: response.content.clone(),
+                        results: native_calls
+                            .iter()
+                            .zip(result_lines.iter())
+                            .map(|(call, result)| NativeToolResult {
+                                call_id: call.id.clone(),
+                                name: call.name.clone(),
+                                content: result.clone(),
+                                is_error: result.contains("\nerror:"),
+                            })
+                            .collect(),
+                        calls: native_calls,
+                    });
+                }
+                slices.extend(self.assistant_replay_slices(
+                    &raw_model_output,
+                    Some(&parsed),
+                    Some(&stop_summary),
+                ));
+                self.defer_next_turn_slices(slices);
+                let stats = self.current_stats.clone();
+                return CoreStep::Final(TurnFinal {
+                    final_answer: stop_summary.clone(),
+                    toolgen_retrospect: parsed.toolgen_retrospect,
+                    stats: stats.clone(),
+                    profile_label: self.profile.label(),
+                    repair_issue: None,
+                    stop_summary: Some(TurnStopSummary::turn_finished(stop_summary, stats)),
+                });
             }
             if !native_calls.is_empty() {
                 self.native_exchanges.push(NativeExchange {
@@ -3670,6 +3724,30 @@ impl AgentCore {
             self.submit_running_job_updates_for_session(&self.current_session_id(), runtime);
             self.append_delta_with_action_output_budget(slices);
             self.append_in_turn_shrink_review_if_needed();
+            if self.remaining_rounds() == 0 {
+                return CoreStep::RoundLimitReached {
+                    max_rounds: self.round_budget,
+                };
+            }
+            return CoreStep::NeedModel {
+                prompt: self.render_prompt(),
+                rounds_remaining: self.remaining_rounds(),
+            };
+        }
+        if self.resolved_tool_call_mode == ToolCallMode::Native {
+            // Native mode: a plain-text response without tool calls no longer
+            // finishes the turn. Keep the text as visible thought and ask the
+            // model to either continue working or call turn_finished.
+            slices.extend(self.assistant_replay_slices(
+                &raw_model_output,
+                Some(&parsed),
+                Some(&response.content),
+            ));
+            slices.push((
+                "runtime_note".to_string(),
+                "A plain-text response without tool calls does not finish the turn. Continue working with tool calls, or call the turn_finished tool with the complete final answer when all work is done.".to_string(),
+            ));
+            self.append_delta_with_action_output_budget(slices);
             if self.remaining_rounds() == 0 {
                 return CoreStep::RoundLimitReached {
                     max_rounds: self.round_budget,
@@ -3738,17 +3816,15 @@ impl AgentCore {
                 actions,
             }]
         };
-        let has_calls = !response.tool_calls.is_empty();
         ParsedEnvelope {
-            final_answer: if has_calls {
-                String::new()
-            } else {
-                response.content.clone()
-            },
+            // A no-tool-call response no longer finishes the turn: only the
+            // explicit turn_finished tool does. Plain text is retained as
+            // thought so the loop continues.
+            final_answer: String::new(),
             toolgen_retrospect: String::new(),
-            continue_work: has_calls,
+            continue_work: true,
             thought: response.content.clone(),
-            thought_keep_in_context: has_calls && !response.content.trim().is_empty(),
+            thought_keep_in_context: !response.content.trim().is_empty(),
             next_actions: Vec::new(),
             action_groups,
             context_compacts: Vec::new(),

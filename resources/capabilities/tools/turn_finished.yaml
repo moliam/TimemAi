@@ -1,0 +1,30 @@
+kind: tool
+id: turn_finished
+binding_type: builtin
+binding_name: turn_finished
+summary: Explicitly declare that all work for the current user turn is complete and deliver the final answer.
+prompt_synopsis: |
+  {"turn_finished":{"summary":"final user-facing answer"}}
+description: |
+  A response without any tool calls no longer finishes the turn. When everything the
+  user asked for is fully done, call this tool exactly once with the polished,
+  user-facing final answer as `summary`. The turn ends only after this call. Do not
+  call it while any work, verification, or pending question remains; keep working
+  with other tools instead. The summary must be the complete final answer, not a
+  placeholder or progress note.
+prompt_input: |
+  Provide a non-empty `summary` containing the complete final user-facing answer
+  in the user's language.
+prompt_result: |
+  Success ends the turn and shows the summary to the user as the final answer.
+input_schema: |
+  {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "summary": {"type":"string","minLength":1,"pattern":"\\S","description":"The complete final user-facing answer."}
+    },
+    "required": ["summary"]
+  }
+example_json: |
+  {"turn_finished":{"summary":"All checks passed; the report is saved at docs/report.md."}}
