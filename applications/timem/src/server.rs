@@ -7091,6 +7091,7 @@ fn restore_prompt_context_snapshot(state: &AppState, session_id: &str) -> Result
         .handle(&worker_id)
         .ok_or_else(|| "session_worker_not_found".to_string())?;
     let baseline = snapshot.last_observed_prompt_tokens;
+    let restored_memo = snapshot.active_memo.clone();
     handle.import_dynamic_context(snapshot)?;
     let mut sessions = state
         .sessions
@@ -7098,6 +7099,11 @@ fn restore_prompt_context_snapshot(state: &AppState, session_id: &str) -> Result
         .map_err(|_| "session_store_poisoned")?;
     if let Some(session) = sessions.get_mut(session_id) {
         session.restored_context_prompt_tokens = Some(baseline);
+        // The memo restored with its context keeps the WebUI indicator and
+        // suppresses the "memo turns inactive" resume hint.
+        if restored_memo.is_some() {
+            session.active_memo = restored_memo;
+        }
     }
     Ok(())
 }
@@ -9773,10 +9779,14 @@ fn session_context_with_roles(
                 history_path: history_path.clone(),
                 current_dir: PathBuf::from(&current_dir),
                 restarted_at: state.runtime_started_at.clone(),
-                // The runtime-held memo does not survive a restart. If the
-                // pre-restart history ended with an active memo, tell the
-                // model it must recreate the reminder if still relevant.
-                previous_active_memo: previous_active_memo_from_history(&history_path),
+                // A memo restored from the prompt-context snapshot is still
+                // active. Otherwise, if the pre-restart history ended with an
+                // active memo, tell the model it must recreate the reminder.
+                previous_active_memo: if session.active_memo.is_some() {
+                    None
+                } else {
+                    previous_active_memo_from_history(&history_path)
+                },
             }
             .render(),
         )

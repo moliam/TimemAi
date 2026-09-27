@@ -502,6 +502,11 @@ pub struct DynamicContextSnapshot {
     pub deltas: Vec<PromptDelta>,
     pub native_exchanges: Vec<NativeExchange>,
     pub last_observed_prompt_tokens: u32,
+    /// The runtime-held memo at snapshot time. It is part of the same
+    /// consistency unit as the context: restoring one without the other
+    /// would desynchronize the long-task reminder from its context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_memo: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2858,10 +2863,14 @@ impl AgentCore {
             deltas: self.deltas.clone(),
             native_exchanges: self.native_exchanges.clone(),
             last_observed_prompt_tokens: self.last_observed_prompt_tokens,
+            active_memo: self.active_memo.clone(),
         }
     }
 
     pub fn import_dynamic_context(&mut self, snapshot: DynamicContextSnapshot) {
+        // The memo restores even when the context is empty: it is the
+        // authoritative reminder state saved next to that context.
+        self.active_memo = snapshot.active_memo;
         if snapshot.deltas.is_empty() {
             return;
         }
@@ -2895,6 +2904,9 @@ impl AgentCore {
         self.last_notifications.clear();
         self.turn_finished_summary = None;
         self.loaded_work_instruction_fingerprints.clear();
+        // The memo is persisted beside the dynamic context as one consistency
+        // unit; clearing the context clears the reminder with it.
+        self.active_memo = None;
     }
     pub fn resolve_stale_context_with_audit(
         &mut self,
