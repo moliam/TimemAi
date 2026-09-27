@@ -19,12 +19,19 @@ pub fn apply_browser_security_headers(response: &mut Response) {
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    response.headers_mut().insert(
-        HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static(
-            "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; font-src 'self' data:; form-action 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
-        ),
-    );
+    // Handlers may set a page-specific CSP (e.g. debug pages allowing inline
+    // scripts); never clobber an explicit handler-provided policy.
+    if !response
+        .headers()
+        .contains_key(HeaderName::from_static("content-security-policy"))
+    {
+        response.headers_mut().insert(
+            HeaderName::from_static("content-security-policy"),
+            HeaderValue::from_static(
+                "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; font-src 'self' data:; form-action 'none'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+            ),
+        );
+    }
     response.headers_mut().insert(
         HeaderName::from_static("referrer-policy"),
         HeaderValue::from_static("no-referrer"),
