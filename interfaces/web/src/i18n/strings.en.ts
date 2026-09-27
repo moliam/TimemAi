@@ -511,6 +511,8 @@ export const en: Strings = {
     kvc: "KVC",
   },
   context: {
+    clearTitle: "Clear working context (restart-fresh state, system prompt only)",
+    clearConfirm: "Force-clear this session's working context? The next turn starts from a fresh state; chat history is kept.",
     dynamic: "Dynamic context",
     unknown: "unknown",
     compactedAria: "Dynamic context compacted: {before} to {after}{suffix}",

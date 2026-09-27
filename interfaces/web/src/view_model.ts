@@ -1416,6 +1416,13 @@ export function sessionContextUsage(
     const latest = turn.completion?.latest_usage;
     if (latest) return latest;
   }
+  // No model usage from the new runtime instance yet. If the restart
+  // restored the persisted prompt context, show its token baseline so the
+  // meter reflects the live context instead of reading as 0.
+  const restored = session.restored_context_prompt_tokens;
+  if (restored && restored > 0) {
+    return { prompt_tokens: restored };
+  }
   return undefined;
 }
 

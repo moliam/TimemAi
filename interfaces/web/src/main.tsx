@@ -67,6 +67,7 @@ import {
   RefreshCw,
   Search,
   Send,
+  Eraser,
   Settings,
   Sparkles,
   Star,
@@ -3191,6 +3192,9 @@ function TimemApp() {
     (item) =>
       item.state !== "connected" && (item.state === "error" || !!item.error),
   ).length;
+  const clearContextLabel = t("context.clearTitle");
+  const sessionBusy =
+    activeSession?.state === "working" || !!activeSession?.pending_turn_id;
   const mcpLabel = `Manage MCP servers · ${connectedMcpCount} connected${failedMcpCount ? ` · ${failedMcpCount} failed` : ""}`;
   const selectedRoleIdsForSession = activeSession
     ? (selectedRoleIds[activeSession.session_id] ?? [])
@@ -4357,6 +4361,27 @@ function TimemApp() {
               <HeaderContextUsage session={activeSession} />
               <button
                 type="button"
+                className="icon-button context-clear-button"
+                title={clearContextLabel}
+                aria-label={clearContextLabel}
+                disabled={!activeSession || sessionBusy}
+                onClick={() => {
+                  if (!activeSession) return;
+                  if (
+                    window.confirm(
+                      t("context.clearConfirm"),
+                    )
+                  )
+                    sendCommand({
+                      type: "session_clear_context",
+                      session_id: activeSession.session_id,
+                    });
+                }}
+              >
+                <Eraser size={13} />
+              </button>
+              <button
+                type="button"
                 ref={mcpButtonRef}
                 title={mcpLabel}
                 aria-label={mcpLabel}
@@ -4371,7 +4396,10 @@ function TimemApp() {
                   else setShowMcp(true);
                 }}
               >
-                <Plug size={16} />
+                <span className="mcp-button-stack" aria-hidden="true">
+                  <span className="mcp-button-label">MCP</span>
+                  <Plug size={11} />
+                </span>
                 {connectedMcpCount > 0 && (
                   <span
                     className="mcp-count mcp-count-connected"

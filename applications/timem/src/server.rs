@@ -139,6 +139,10 @@ const MAX_SESSION_MESSAGES: usize = 2_000;
 const MAX_SESSION_TURNS: usize = 200;
 const MAX_TURN_USER_ENTRIES: usize = 200;
 const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
+/// Hard cap for a persisted per-session prompt context snapshot. When the
+/// serialized snapshot exceeds it, the context is not restored after restart
+/// (the session starts from an empty dynamic context instead of failing).
+const MAX_PROMPT_CONTEXT_SNAPSHOT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SESSION_UPLOADS: usize = 20;
 const MAX_BROWSER_COMMAND_BYTES: usize = 1024 * 1024;
 const BROWSER_COMMAND_QUEUE_CAPACITY: usize = 32;
@@ -172,6 +176,9 @@ struct AppState {
     debug: Option<Arc<DebugStore>>,
     runtime_log: RuntimeLog,
     lifecycle_diagnostics: LifecycleDiagnostics,
+    /// Local time label captured at process start; used by the session resume
+    /// notice so it reports the actual restart moment, not the turn moment.
+    runtime_started_at: String,
 }
 
 #[derive(Clone)]
@@ -557,6 +564,11 @@ struct WebSession {
     pending_unconsumed_supplements: Vec<String>,
     #[serde(skip)]
     reported_session_working_worker_count: Option<usize>,
+    /// Prompt-token baseline restored from the persisted context snapshot.
+    /// The ctx meter shows this until the new runtime instance produces its
+    /// first real model usage, so a restored context does not read as 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    restored_context_prompt_tokens: Option<u32>,
     #[serde(skip)]
     work_instruction_mode: WorkInstructionLoadMode,
     #[serde(skip)]
@@ -793,6 +805,7 @@ enum WireEvent {
         api_key: String,
     },
     CoreTopic {
+        session_id: String,
         turn_id: Option<String>,
         turn_event_id: Option<String>,
         event: Value,
@@ -985,6 +998,9 @@ struct DebugBrowseQuery {
     session_id: String,
     /// Sub-path inside the session's debug directory. Empty lists the root.
     path: Option<String>,
+    /// When set, serve the file as an attachment instead of a preview.
+    #[serde(default)]
+    download: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1118,6 +1134,9 @@ enum ClientCommand {
         session_id: String,
     },
     SessionStop {
+        session_id: String,
+    },
+    SessionClearContext {
         session_id: String,
     },
     SessionDelete {
@@ -1390,6 +1409,7 @@ impl ClientCommand {
             | Self::SessionRestartCwdResolve { session_id, .. }
             | Self::SessionApiKeyUpdate { session_id, .. }
             | Self::SessionStop { session_id }
+            | Self::SessionClearContext { session_id }
             | Self::SessionDelete { session_id }
             | Self::ChatMessageDelete { session_id, .. }
             | Self::TurnSubmit { session_id, .. }
@@ -1596,6 +1616,7 @@ pub async fn run(
         debug,
         runtime_log,
         lifecycle_diagnostics: diagnostics.clone(),
+        runtime_started_at: agent_core::local_datetime_label(),
     };
     let cleanup_guard = WebRuntimeCleanupGuard::new(&state);
 
@@ -1766,12 +1787,94 @@ impl Drop for WebRuntimeCleanupGuard {
     }
 }
 
+/// Exports each live worker's dynamic prompt context and atomically persists
+/// it next to the session history so a restarted runtime can resume the model
+/// context. Called before worker shutdown; the worker answer acts as a barrier
+/// so the snapshot always reflects an idle worker.
+fn persist_prompt_context_snapshots(
+    state: &AppState,
+    manager: &CoreSessionWorkerManager,
+) -> Result<(), String> {
+    let mut first_error = None;
+    let mut by_session: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for status in manager.statuses() {
+        by_session
+            .entry(status.identity.session_id.clone())
+            .or_default()
+            .push(status.identity.worker_id.clone());
+    }
+    for (session_id, worker_ids) in by_session {
+        let Some(primary) = worker_ids.first() else {
+            continue;
+        };
+        let Some(handle) = manager.handle(primary) else {
+            continue;
+        };
+        match handle.export_dynamic_context() {
+            Ok(Ok(snapshot)) => {
+                if let Err(error) = write_prompt_context_snapshot(state, &session_id, &snapshot) {
+                    first_error.get_or_insert(error);
+                }
+            }
+            // Export failure (including timeout on a busy worker) never blocks
+            // shutdown: the session simply resumes from an empty context.
+            Ok(Err(error)) | Err(error) => {
+                eprintln!(
+                    "[timem_web_warning] prompt_context_export_skipped session_id={session_id:?} reason={error}"
+                );
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+fn write_prompt_context_snapshot(
+    state: &AppState,
+    session_id: &str,
+    snapshot: &agent_core::DynamicContextSnapshot,
+) -> Result<(), String> {
+    if snapshot.deltas.is_empty() {
+        // Nothing to resume; drop any stale snapshot so restore cannot
+        // resurrect an old context after the user cleared it.
+        let store = current_session_store(state)?;
+        let path = store.prompt_context_path_for_session(session_id);
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|error| format!("prompt_context_remove_failed:{error}"))?;
+        }
+        return Ok(());
+    }
+    let payload = serde_json::to_string(snapshot)
+        .map_err(|error| format!("prompt_context_serialize_failed:{error}"))?;
+    if payload.len() as u64 > MAX_PROMPT_CONTEXT_SNAPSHOT_BYTES {
+        // Oversized contexts are intentionally not restored; the session
+        // restarts with an empty dynamic context rather than failing startup.
+        return Ok(());
+    }
+    let store = current_session_store(state)?;
+    let path = store.prompt_context_path_for_session(session_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("prompt_context_dir_failed:{error}"))?;
+    }
+    agent_core::atomic_write_file(&path, payload.as_bytes())
+        .map_err(|error| format!("prompt_context_write_failed:{error}"))?;
+    Ok(())
+}
+
 fn shutdown_web_runtime(state: &AppState) -> Result<(), String> {
     let mut first_error = None;
 
     match state.manager.lock() {
         Ok(mut manager) => {
             let manager = std::mem::take(&mut *manager);
+            if let Err(error) = persist_prompt_context_snapshots(state, &manager) {
+                first_error.get_or_insert(error);
+            }
             if let Err(error) = manager.shutdown_all_detached() {
                 first_error.get_or_insert(error);
             }
@@ -1837,6 +1940,9 @@ async fn performance_trace(
 }
 
 const MAX_DEBUG_FILE_PREVIEW_BYTES: u64 = 256 * 1024;
+/// Native HTML rendering bypasses the escaped-text pipeline, so large prompt
+/// dumps (often several hundred KB) still render in the browser directly.
+const MAX_DEBUG_HTML_RENDER_BYTES: u64 = 32 * 1024 * 1024;
 
 fn html_escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -1939,9 +2045,11 @@ fn debug_browse_listing(session_id: &str, sub_path: &str, dir: &Path) -> String 
 fn debug_browse_file(session_id: &str, sub_path: &str, file: &Path) -> String {
     let body = match std::fs::metadata(file) {
         Ok(meta) if meta.len() > MAX_DEBUG_FILE_PREVIEW_BYTES => format!(
-            "<p class=\"err\">File is {} bytes; preview is capped at {} bytes. Download it from the host instead.</p>",
+            "<p class=\"err\">File is {} bytes; preview is capped at {} bytes. <a href=\"?session_id={session}&amp;path={path}&amp;download=1\">Download the file</a> instead.</p>",
             meta.len(),
-            MAX_DEBUG_FILE_PREVIEW_BYTES
+            MAX_DEBUG_FILE_PREVIEW_BYTES,
+            session = html_escape(session_id),
+            path = html_escape(sub_path),
         ),
         _ => match std::fs::read(file) {
             Ok(bytes) => format!("<pre>{}</pre>", html_escape(&String::from_utf8_lossy(&bytes))),
@@ -1996,9 +2104,32 @@ async fn debug_browse(
     // HTML files render natively in the browser instead of the escaped
     // text preview, so debug artifacts (e.g. saved pages) stay usable.
     if let Ok(target) = resolve_debug_browse_target(&root, &sub_path) {
+        if query.download {
+            if let Ok(bytes) = std::fs::read(&target) {
+                let filename = target
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "debug_file".to_string());
+                let disposition =
+                    HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+                        .unwrap_or_else(|_| HeaderValue::from_static("attachment"));
+                return (
+                    StatusCode::OK,
+                    [
+                        (
+                            header::CONTENT_TYPE,
+                            HeaderValue::from_static("application/octet-stream"),
+                        ),
+                        (header::CONTENT_DISPOSITION, disposition),
+                    ],
+                    bytes,
+                )
+                    .into_response();
+            }
+        }
         if is_html_debug_file(&target, &sub_path) {
             let too_large = std::fs::metadata(&target)
-                .map(|meta| meta.len() > MAX_DEBUG_FILE_PREVIEW_BYTES)
+                .map(|meta| meta.len() > MAX_DEBUG_HTML_RENDER_BYTES)
                 .unwrap_or(false);
             if !too_large {
                 if let Ok(bytes) = std::fs::read(&target) {
@@ -2074,6 +2205,8 @@ struct AttachSessionSummary {
     working: bool,
     active_turn_id: Option<String>,
     current_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    restart_cwd_decision: Option<RestartCwdDecision>,
     worker_count: usize,
 }
 
@@ -2110,6 +2243,7 @@ fn attach_sessions_snapshot(state: &AppState) -> Vec<AttachSessionSummary> {
                 working,
                 active_turn_id: session.active_turn_id,
                 current_dir: session.current_dir,
+                restart_cwd_decision: session.restart_cwd_decision.clone(),
                 worker_count: session.workers.len(),
             }
         })
@@ -3106,6 +3240,9 @@ fn handle_command_with_id(
             for worker_id in worker_ids {
                 manager.request_shutdown(&worker_id)?;
             }
+        }
+        ClientCommand::SessionClearContext { session_id } => {
+            clear_session_prompt_context(state, &session_id)?;
         }
         ClientCommand::SessionDelete { session_id } => {
             let worker_ids = session_worker_ids(state, &session_id)?;
@@ -5092,6 +5229,7 @@ fn create_session_in_group(
                 pending_unconsumed_supplements: Vec::new(),
                 reported_session_working_worker_count: None,
                 work_instruction_mode: runtime.settings.work_instruction_mode,
+                restored_context_prompt_tokens: None,
                 work_instruction_allowed: None,
                 pending_work_instruction_turn: None,
                 runtime,
@@ -5650,6 +5788,7 @@ fn restore_stored_session(
                 pending_unconsumed_supplements: Vec::new(),
                 reported_session_working_worker_count: None,
                 work_instruction_mode: runtime.settings.work_instruction_mode,
+                restored_context_prompt_tokens: None,
                 work_instruction_allowed: None,
                 pending_work_instruction_turn: None,
                 runtime,
@@ -5670,6 +5809,7 @@ fn restore_stored_session(
         None,
         true,
     )?;
+    restore_prompt_context_snapshot(state, &stored.session_id)?;
     persist_restored_session_runtime_cache(state, &stored)?;
     // A missing preset stays explicitly bound and fails closed at submission.
     // Do not discard restored history just because an endpoint was deleted.
@@ -6944,6 +7084,90 @@ fn create_context_with_worker(
     }
 }
 
+/// Loads the persisted dynamic prompt context snapshot (if any) and imports
+/// it into the session's primary worker so the next turn resumes the previous
+/// model context instead of starting from an empty one. A missing, oversized,
+/// or corrupt snapshot is not an error: the session simply starts fresh.
+fn restore_prompt_context_snapshot(state: &AppState, session_id: &str) -> Result<(), String> {
+    let store = current_session_store(state)?;
+    let path = store.prompt_context_path_for_session(session_id);
+    let Ok(payload) = std::fs::read(&path) else {
+        return Ok(());
+    };
+    if payload.len() as u64 > MAX_PROMPT_CONTEXT_SNAPSHOT_BYTES {
+        return Ok(());
+    }
+    let snapshot: agent_core::DynamicContextSnapshot = match serde_json::from_slice(&payload) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            eprintln!(
+                "[timem_web_warning] prompt_context_restore_failed session_id={session_id:?} reason={error}"
+            );
+            return Ok(());
+        }
+    };
+    let session = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned")?;
+    let worker_id = session
+        .get(session_id)
+        .map(|session| session.primary_worker_id.clone())
+        .ok_or_else(|| "session_not_found".to_string())?;
+    drop(session);
+    let handle = state
+        .manager
+        .lock()
+        .map_err(|_| "worker_manager_poisoned")?
+        .handle(&worker_id)
+        .ok_or_else(|| "session_worker_not_found".to_string())?;
+    let baseline = snapshot.last_observed_prompt_tokens;
+    handle.import_dynamic_context(snapshot)?;
+    let mut sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned")?;
+    if let Some(session) = sessions.get_mut(session_id) {
+        session.restored_context_prompt_tokens = Some(baseline);
+    }
+    Ok(())
+}
+
+/// Authoritative context reset: drops the worker's dynamic prompt context and
+/// the persisted snapshot so the next turn starts from the tool-owned system
+/// prompt only, exactly like a fresh runtime restart.
+fn clear_session_prompt_context(state: &AppState, session_id: &str) -> Result<(), String> {
+    {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned")?;
+        sessions
+            .get(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+    }
+    let handle = session_worker_handle(state, session_id, None)?;
+    handle.clear_dynamic_context()?;
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned")?;
+        if let Some(session) = sessions.get_mut(session_id) {
+            session.restored_context_prompt_tokens = None;
+        }
+    }
+    // Drop the persisted snapshot too, or a restart would restore what the
+    // user just cleared.
+    let store = current_session_store(state)?;
+    let path = store.prompt_context_path_for_session(session_id);
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .map_err(|error| format!("prompt_context_remove_failed:{error}"))?;
+    }
+    Ok(())
+}
+
 fn attach_worker_to_session_context(
     state: &AppState,
     session_id: &str,
@@ -7187,6 +7411,7 @@ fn submit_turn_with_selected_attachments_and_kind(
         publish_semantic(
             state,
             WireEvent::CoreTopic {
+                session_id: session_id.to_string(),
                 turn_id: turn_ref.as_ref().map(|value| value.turn_id.clone()),
                 turn_event_id: turn_ref.map(|value| value.event_id),
                 event: wire_payload,
@@ -9569,6 +9794,7 @@ fn session_context_with_roles(
             SessionResumeNotice {
                 history_path: current_session_store(state)?.history_path_for_session(session_id),
                 current_dir: PathBuf::from(&current_dir),
+                restarted_at: state.runtime_started_at.clone(),
             }
             .render(),
         )
@@ -9896,6 +10122,7 @@ fn work_instruction_notice_event(state: &AppState, session_id: &str) -> Option<W
     let wire_payload = event.wire_payload();
     let turn_ref = append_active_turn_event(state, session_id, "core_topic", wire_payload.clone());
     Some(WireEvent::CoreTopic {
+        session_id: session_id.to_string(),
         turn_id: turn_ref.as_ref().map(|value| value.turn_id.clone()),
         turn_event_id: turn_ref.map(|value| value.event_id),
         event: wire_payload,
@@ -10589,6 +10816,7 @@ fn handle_scoped_worker_event(
                     state,
                     session_id,
                     WireEvent::CoreTopic {
+                        session_id: session_id.to_string(),
                         turn_id: turn_ref.as_ref().map(|value| value.turn_id.clone()),
                         turn_event_id: turn_ref.map(|value| value.event_id),
                         event: wire_payload,
