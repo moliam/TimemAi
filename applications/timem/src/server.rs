@@ -9831,20 +9831,15 @@ fn session_context_with_roles(
 /// Returns the memo text when the session ended with an active memo.
 fn previous_active_memo_from_history(history_path: &std::path::Path) -> Option<String> {
     use std::io::BufRead;
-    const TAIL_LINES: usize = 4000;
     let file = std::fs::File::open(history_path).ok()?;
-    let reader = std::io::BufReader::new(file);
-    let mut ring: std::collections::VecDeque<String> =
-        std::collections::VecDeque::with_capacity(TAIL_LINES);
-    for line in reader.lines() {
+    // A session interleaves many memo create/update/delete events with long
+    // work histories. The memo state is the LAST core.memo event in file
+    // order, so stream once and keep only that state: O(1) memory and immune
+    // to a tail window missing an early still-active memo.
+    let mut last: Option<Option<String>> = None;
+    for line in std::io::BufReader::new(file).lines() {
         let Ok(line) = line else { break };
-        if ring.len() == TAIL_LINES {
-            ring.pop_front();
-        }
-        ring.push_back(line);
-    }
-    for line in ring.iter().rev() {
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         // History event content carries a "core_topic: {json}" style prefix.
@@ -9874,12 +9869,12 @@ fn previous_active_memo_from_history(history_path: &std::path::Path) -> Option<S
             .get("payload")
             .and_then(|p| p.get("active"))
             .and_then(Value::as_bool);
-        return match (active, text) {
+        last = Some(match (active, text) {
             (Some(true), Some(text)) if !text.is_empty() => Some(text),
             _ => None,
-        };
+        });
     }
-    None
+    last.flatten()
 }
 
 fn uploaded_files_context(
