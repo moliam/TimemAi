@@ -6,15 +6,13 @@ summary: Show an answer to one or more current-turn questions while continuing t
 prompt_synopsis: |
   {"sub_answer":{"task":"Concise summary of the addressed question or concern","answer":"user-facing answer"}}
 description: |
-  Plain-text responses without tool calls no longer finish the turn, so ordinary
-  in-progress reasoning needs no special tool. Use this tool only when you want to
-  answer one or more questions or concerns from the current user turn immediately
-  while the overall task is still running. Use this only for a substantive, complete answer that is
-  useful immediately while you continue working. Do not use it for progress updates,
-  plans, acknowledgements, or placeholders. The task must summarize what is answered;
-  do not use input IDs. After using it, continue the work and eventually provide exactly
-  one normal final answer. The final answer remains authoritative and should coherently
-  include relevant sub-answers, explicitly correcting any contradiction.
+  Use this tool to answer one or more questions or concerns from the current user
+  turn immediately, while the overall task is still running. Use it only for a
+  substantive, complete answer that is useful right away; do not use it for progress
+  updates, plans, acknowledgements, or placeholders. The task must summarize what is
+  answered; do not use input IDs. After using it, keep working and eventually deliver
+  exactly one final answer. The final answer remains authoritative and should
+  coherently include relevant sub-answers, explicitly correcting any contradiction.
 prompt_input: |
   Provide a non-empty task summarizing one or more current-turn questions or concerns,
   and a non-empty user-facing answer. Use separate calls when independently
