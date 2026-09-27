@@ -23,6 +23,7 @@ const NATIVE_BUILTIN_TOOL_DESCRIPTIONS_HEADING: &str =
     "## Built-in Tool Descriptions\n\nBuilt-in tool parameter schemas are provided separately through the model API. One response can reasonably contain multiple tool calls for better performance.";
 pub(crate) const MAX_ACTION_RESULT_PROMPT_BYTES: usize =
     tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES;
+pub(crate) const REASONING_REVIEW_TRAILER: &str = "Note: reasoning effort is enabled for this request, while most work rounds run without it. Take advantage of this reasoning pass to review the current work direction, update the plan if needed, and express the review concisely or in detail as appropriate.";
 
 pub(crate) fn truncate_action_result_for_prompt(text: &str) -> String {
     tool_result_gate::gate(text, Retention::Head)
@@ -41,6 +42,7 @@ pub(crate) fn split_formatted_response_trailer(rendered_prompt: &str) -> (&str, 
         RESPONSE_TRAILER,
         NATIVE_RESPONSE_TRAILER,
         CONTEXT_COMPACT_REQUIRED_TRAILER,
+        REASONING_REVIEW_TRAILER,
     ] {
         let marker = format!("\n\n{trailer}");
         if let Some(trailer_start) = trimmed.strip_suffix(&marker).map(str::len) {
@@ -949,6 +951,29 @@ pub(crate) fn render_delta_slices(delta: &PromptDelta) -> Vec<PromptSlice> {
         .filter(|slice| !delta.hidden_slice_ids.contains(&slice.slice_id))
         .cloned()
         .collect()
+}
+
+/// Counts user/assistant message elements in the current dynamic context.
+/// A context compaction summary counts as one message element.
+pub(crate) fn context_message_element_count(deltas: &[PromptDelta]) -> usize {
+    deltas
+        .iter()
+        .map(|delta| {
+            render_delta_slices(delta)
+                .iter()
+                .filter(|slice| {
+                    matches!(
+                        visible_role(&slice.prompt_type),
+                        VisiblePromptRole::User
+                            | VisiblePromptRole::UserSupplement
+                            | VisiblePromptRole::UserResumeDirectly
+                            | VisiblePromptRole::You
+                            | VisiblePromptRole::ContextCompactionSummary
+                    )
+                })
+                .count()
+        })
+        .sum()
 }
 
 #[cfg(test)]

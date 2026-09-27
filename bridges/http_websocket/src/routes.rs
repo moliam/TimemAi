@@ -22,6 +22,7 @@ pub struct BrowserRouteHandlers<S> {
     pub upload: MethodRouter<S>,
     pub performance_trace: MethodRouter<S>,
     pub debug_browse: MethodRouter<S>,
+    pub debug_reset_statistics: MethodRouter<S>,
     pub websocket: MethodRouter<S>,
     pub static_assets: MethodRouter<S>,
 }
@@ -45,6 +46,7 @@ where
         .route("/api/attach/sessions", handlers.attach_sessions)
         .route("/api/upload", handlers.upload)
         .route("/api/debug-browse", handlers.debug_browse)
+        .route("/api/debug/reset", handlers.debug_reset_statistics)
         .route(
             "/api/performance-trace",
             handlers
@@ -83,6 +85,7 @@ mod tests {
             upload: post(|_: Bytes| async { "upload" }),
             performance_trace: post(|| async { StatusCode::NO_CONTENT }),
             debug_browse: get(|| async { "debug_browse" }),
+            debug_reset_statistics: post(|| async { "debug_reset_statistics" }),
             websocket: get(|| async { "websocket" }),
             static_assets: get(|request: Request<Body>| async move {
                 format!("asset:{}", request.uri().path()).into_response()

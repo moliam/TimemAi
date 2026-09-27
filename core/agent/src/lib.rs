@@ -643,6 +643,8 @@ impl PendingApprovedAction {
 const PROMPT_SLICE_TEXT_LIMIT: usize = 12_000;
 const MAX_MCP_SERVER_INSTRUCTIONS_CHARS: usize = 32_000;
 pub const UNLIMITED_ROUND_BUDGET: u32 = u32::MAX;
+const PERIODIC_REASONING_REVIEW_ROUND_INTERVAL: u32 = 35;
+const PERIODIC_REASONING_REVIEW_MIN_MESSAGES: usize = 30;
 const DEFAULT_ROUND_BUDGET: u32 = UNLIMITED_ROUND_BUDGET;
 const MAX_CONFIGURED_ROUND_BUDGET: u32 = 10_000;
 pub const MAX_PROTOCOL_REPAIR_ATTEMPTS: u32 = 20;
@@ -1736,6 +1738,8 @@ pub struct AgentCore {
     max_llm_input_tokens: u32,
     last_observed_prompt_tokens: u32,
     context_compact_required: bool,
+    rounds_since_reasoning: u32,
+    reasoning_review_due: bool,
     configured_round_budget: u32,
     round_budget: u32,
     reminder_tips_config: ReminderTipsConfig,
@@ -1839,6 +1843,8 @@ impl AgentCore {
             max_llm_input_tokens: 100_000,
             last_observed_prompt_tokens: 0,
             context_compact_required: false,
+            rounds_since_reasoning: 0,
+            reasoning_review_due: false,
             configured_round_budget,
             round_budget: configured_round_budget,
             reminder_tips_config: ReminderTipsConfig::default(),
@@ -1897,7 +1903,7 @@ impl AgentCore {
     ) -> ModelInteractionRequest {
         if self.resolved_tool_call_mode != ToolCallMode::Native {
             let mut request = ModelInteractionRequest::inline(rendered_prompt);
-            request.critical_reasoning = self.context_compact_required;
+            request.critical_reasoning = self.reasoning_critical();
             return request;
         }
         let mut tools = self.capabilities.native_builtin_tool_definitions();
@@ -1918,7 +1924,32 @@ impl AgentCore {
             } else {
                 NativeToolChoice::Auto
             },
-            critical_reasoning: self.context_compact_required,
+            critical_reasoning: self.reasoning_critical(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn deltas_for_test(&self) -> &[PromptDelta] {
+        &self.deltas
+    }
+
+    pub fn reasoning_critical(&self) -> bool {
+        self.context_compact_required || self.reasoning_review_due
+    }
+
+    fn evaluate_periodic_reasoning_review(&mut self) {
+        if self.context_compact_required {
+            self.rounds_since_reasoning = 0;
+            self.reasoning_review_due = false;
+            return;
+        }
+        self.rounds_since_reasoning = self.rounds_since_reasoning.saturating_add(1);
+        self.reasoning_review_due = self.rounds_since_reasoning
+            > PERIODIC_REASONING_REVIEW_ROUND_INTERVAL
+            && prompt_render::context_message_element_count(&self.deltas)
+                > PERIODIC_REASONING_REVIEW_MIN_MESSAGES;
+        if self.reasoning_review_due {
+            self.rounds_since_reasoning = 0;
         }
     }
 
@@ -4705,7 +4736,13 @@ impl AgentCore {
         }
         self.guard_pending_action_output_budget();
         self.flush_pending_prompt_components();
-        self.render_prompt()
+        let prompt = self.render_prompt();
+        self.evaluate_periodic_reasoning_review();
+        if self.reasoning_review_due {
+            format!("{}\n\n{}", prompt, prompt_render::REASONING_REVIEW_TRAILER)
+        } else {
+            prompt
+        }
     }
 
     fn guard_pending_action_output_budget(&mut self) -> bool {
