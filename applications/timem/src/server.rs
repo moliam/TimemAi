@@ -9839,6 +9839,10 @@ fn previous_active_memo_from_history(history_path: &std::path::Path) -> Option<S
     let mut last: Option<Option<String>> = None;
     for line in std::io::BufReader::new(file).lines() {
         let Ok(line) = line else { break };
+        // Cheap textual pre-filter: only core.memo lines reach the parser.
+        if !line.contains("core.memo") {
+            continue;
+        }
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
