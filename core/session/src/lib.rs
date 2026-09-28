@@ -399,11 +399,20 @@ struct SupplementMailbox {
     queue: Vec<QueuedSupplement>,
 }
 
+/// A manual compaction request should not wait behind long local work as
+/// long as a normal supplement: 10s is enough for a user-visible hint.
+const MANUAL_CONTEXT_COMPACT_DISPATCH_TIMEOUT: Duration = Duration::from_secs(10);
+
 struct QueuedSupplement {
     text: String,
     additional_context: Option<String>,
     command_id: Option<String>,
     queued_at: Instant,
+    /// Manual context-compaction request normalized onto the supplement
+    /// shuttle: it rides the dispatch timeout to force the next model
+    /// dispatch, then flips the manual compact flag instead of becoming
+    /// prompt text.
+    manual_context_compact: bool,
 }
 
 enum PendingRuntimeUpdate {
@@ -652,6 +661,7 @@ impl CoreSessionWorkerHandle {
                         additional_context: supplement.additional_context,
                         command_id,
                         queued_at: Instant::now(),
+                        manual_context_compact: false,
                     })
                     .collect(),
                 direct_resume,
@@ -724,6 +734,7 @@ impl CoreSessionWorkerHandle {
                     additional_context: None,
                     command_id: None,
                     queued_at: Instant::now(),
+                    manual_context_compact: false,
                 });
                 true
             })
@@ -754,6 +765,7 @@ impl CoreSessionWorkerHandle {
             additional_context: None,
             command_id: None,
             queued_at: Instant::now(),
+            manual_context_compact: false,
         });
         Ok(true)
     }
@@ -814,6 +826,7 @@ impl CoreSessionWorkerHandle {
             additional_context,
             command_id,
             queued_at: Instant::now(),
+            manual_context_compact: false,
         });
         Ok(true)
     }
@@ -827,6 +840,27 @@ impl CoreSessionWorkerHandle {
     pub fn request_manual_context_compact(&self) -> Result<(), String> {
         self.manual_compact_requested.store(true, Ordering::SeqCst);
         Ok(())
+    }
+
+    /// Queues a manual context-compaction request as a mailbox marker so a
+    /// busy turn forces the next model dispatch after the compact dispatch
+    /// timeout instead of waiting for the current local work to finish.
+    pub fn queue_manual_context_compact(&self) -> Result<bool, String> {
+        let mut mailbox = self
+            .supplement_mailbox
+            .lock()
+            .map_err(|_| "supplement_mailbox_poisoned".to_string())?;
+        if !mailbox.accepting {
+            return Ok(false);
+        }
+        mailbox.queue.push(QueuedSupplement {
+            text: String::new(),
+            additional_context: None,
+            command_id: None,
+            queued_at: Instant::now(),
+            manual_context_compact: true,
+        });
+        Ok(true)
     }
 
     pub fn cancel_current_turn(&self) {
@@ -2406,7 +2440,12 @@ impl TurnUi for WorkerTurnUi {
         let timeout = self.supplement_mailbox.lock().ok().and_then(|mailbox| {
             let oldest = mailbox.queue.first()?;
             let waited = oldest.queued_at.elapsed();
-            (waited >= self.user_supplement_model_dispatch_timeout).then_some(waited)
+            let threshold = if oldest.manual_context_compact {
+                MANUAL_CONTEXT_COMPACT_DISPATCH_TIMEOUT
+            } else {
+                self.user_supplement_model_dispatch_timeout
+            };
+            (waited >= threshold).then_some(waited)
         });
         self.supplement_dispatch_timeout = timeout;
         timeout
@@ -2570,15 +2609,21 @@ impl WorkerTurnUi {
         &self,
         queued: Vec<QueuedSupplement>,
     ) -> Vec<agent_core::UserSupplement> {
-        queued
-            .into_iter()
-            .map(|queued| {
-                if let Some(command_id) = queued.command_id {
-                    publish_command_accepted(&self.event_tx, &self.command_ids, command_id);
-                }
-                agent_core::UserSupplement::new(queued.text, queued.additional_context)
-            })
-            .collect()
+        let mut supplements = Vec::new();
+        for queued in queued {
+            if let Some(command_id) = queued.command_id {
+                publish_command_accepted(&self.event_tx, &self.command_ids, command_id);
+            }
+            if queued.manual_context_compact {
+                self.manual_compact_requested.store(true, Ordering::SeqCst);
+                continue;
+            }
+            supplements.push(agent_core::UserSupplement::new(
+                queued.text,
+                queued.additional_context,
+            ));
+        }
+        supplements
     }
 
     fn take_or_close_supplements_for_main_context(&mut self) -> Vec<agent_core::UserSupplement> {

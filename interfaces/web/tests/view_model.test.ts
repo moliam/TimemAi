@@ -54,6 +54,7 @@ import {
   runtimeConnectionLabel,
   sessionCacheHitPercent,
   sessionContextUsage,
+  sessionContextCompactPending,
   sessionCreateDecision,
   sessionInteractionLockReason,
   sessionRenameDecision,
@@ -4394,5 +4395,56 @@ describe("boundSessionHistory message ordering", () => {
     ]);
     const bounded = boundSessionHistory(session);
     expect(bounded.messages.map((m) => m.id)).toEqual(["a", "b", "c"]);
+  });
+});
+
+describe("sessionContextCompactPending", () => {
+  const compactEvent = (phase: string, atMs: number) => ({
+    event_id: `evt_${phase}_${atMs}`,
+    source: "core_topic",
+    payload: {
+      topic: { name: "core.context.compact" },
+      payload: { phase },
+    },
+    created_at_ms: atMs,
+  });
+
+  it("reports pending between requested and completed in the live runtime", () => {
+    const t = { ...turn("turn_c"), events: [compactEvent("requested", 100)] };
+    const target = { ...session("session_1"), turns: [t] };
+    expect(sessionContextCompactPending(target)).toBe(true);
+
+    const done = {
+      ...turn("turn_c"),
+      events: [compactEvent("requested", 100), compactEvent("completed", 200)],
+    };
+    expect(sessionContextCompactPending({ ...session("session_1"), turns: [done] })).toBe(false);
+  });
+
+  it("falls back to not pending when the hosting turn finished without completion notice", () => {
+    const t = {
+      ...turn("turn_c", "finished"),
+      events: [compactEvent("requested", 100)],
+      completion: { stop_reason: "CancelledByUser" },
+    } as unknown as WebTurn;
+    expect(sessionContextCompactPending({ ...session("session_1"), turns: [t] })).toBe(false);
+  });
+
+  it("ignores stale requested notices from before the latest runtime restart", () => {
+    const stale = { ...turn("turn_old"), events: [compactEvent("requested", 100)] };
+    const target = {
+      ...session("session_1"),
+      messages: [
+        {
+          id: "m_restart",
+          role: "system",
+          kind: "runtime_restart",
+          text: "",
+          created_at_ms: 500,
+        },
+      ],
+      turns: [stale],
+    };
+    expect(sessionContextCompactPending(target)).toBe(false);
   });
 });

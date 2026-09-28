@@ -59,7 +59,8 @@ describe("stream tool status continuity", () => {
   it("folds retired tools away entirely with a compact elapsed label", () => {
     const row = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
     expect(row).toContain("stream-tool-elapsed");
-    expect(row).toContain("formatToolElapsed(activity.elapsed_ms)");
+    expect(row).toContain("formatToolElapsed(activity.elapsed_ms!)");
+    expect(row).toContain("formatLiveElapsed(liveElapsedMs)");
     expect(row).not.toContain("summarized");
     expect(styles).toContain(".stream-tool-merged-item.merged { grid-template-rows: 0fr; opacity: 0; }");
     expect(styles).not.toContain(".stream-tool-run { position: relative; }");

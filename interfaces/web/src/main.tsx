@@ -125,6 +125,7 @@ import {
   Snapshot,
   ToolDetail,
   ToolSummary,
+  VersionedTurnProjection,
   WebTurn,
   WebTurnEvent,
   WireEvent,
@@ -190,6 +191,7 @@ import {
   sessionCancellationApplies,
   shouldRenderTurnWorkFrame,
   sessionContextUsage,
+  sessionContextCompactPending,
   sessionCreateDecision,
   sessionInteractionLockReason as sessionInteractionLockReasonForState,
   sessionRenameDecision,
@@ -280,6 +282,7 @@ import {
   toolResultCountsLabel,
   isToolActivityRunning,
   TOOL_STATUS_RUNNING,
+  formatLiveElapsed,
 } from "./tool_status";
 import { MarkdownContent } from "./markdown_render";
 import { BrowserPerformanceTrace } from "./performance_trace";
@@ -7338,6 +7341,7 @@ const WorkingMemoTooltip = memo(function WorkingMemoTooltip({
 const VisibleTurnList = memo(function VisibleTurnList({
   sessionId,
   turns,
+  turnProjection,
   restartMarkers,
   decisionsByTurn,
   sessionInteractionLocked,
@@ -7354,6 +7358,7 @@ const VisibleTurnList = memo(function VisibleTurnList({
 }: {
   sessionId: string;
   turns: WebTurn[];
+  turnProjection: VersionedTurnProjection | null | undefined;
   isCancelling: boolean;
   restartMarkers: ChatMessage[];
   decisionsByTurn: ReadonlyMap<string, Decision[]>;
@@ -7404,6 +7409,7 @@ const VisibleTurnList = memo(function VisibleTurnList({
         key={turn.turn_id}
         sessionId={sessionId}
         turn={turn}
+        turnProjection={turnProjection}
         isCancelling={isCancelling && turn.state === "working"}
         decisions={
           decisionsByTurn.get(sessionTurnKey(sessionId, turn.turn_id)) ??
@@ -7503,6 +7509,7 @@ const SessionTimelinePane = memo(function SessionTimelinePane({
         <VisibleTurnList
           sessionId={renderedSession.session_id}
           turns={visibleTurns}
+          turnProjection={renderedSession.turn_projection}
           restartMarkers={restartMarkers}
           isCancelling={active && isCancelling}
           decisionsByTurn={decisionsByTurn}
@@ -9570,6 +9577,7 @@ function countTurnModelRequests(turn: WebTurn): number {
 type TurnInteractionProps = {
   sessionId: string;
   turn: WebTurn;
+  turnProjection: VersionedTurnProjection | null | undefined;
   isCancelling: boolean;
   decisions: Decision[];
   sessionInteractionLocked: boolean;
@@ -9619,6 +9627,7 @@ const WorkingElapsed = memo(function WorkingElapsed({
 const TurnInteraction = memo(function TurnInteraction({
   sessionId,
   turn,
+  turnProjection,
   isCancelling,
   decisions,
   sessionInteractionLocked,
@@ -9723,8 +9732,11 @@ const TurnInteraction = memo(function TurnInteraction({
   );
   // A completed context compaction supersedes its earlier "compacting..."
   // notice; without this the requested notice keeps its indeterminate
-  // animation forever after the real compaction already finished.
-  const compactCompletedSeen = useMemo(() => {
+  // animation forever after the real compaction already finished. A turn
+  // reaching a terminal state (e.g. cancelled) without a completion notice
+  // supersedes its own requested notice too: that compaction will never
+  // land and the notice must not animate forever.
+  const compactSupersededKeys = useMemo(() => {
     // A requested notice is superseded only by a completion that comes
     // AFTER it; a later cycle gets its own requested+completed pair.
     const seen = new Set<string>();
@@ -9736,12 +9748,21 @@ const TurnInteraction = memo(function TurnInteraction({
       else if (completedAfter && activity.compact_phase === "requested")
         seen.add(visibleItems[i].key);
     }
+    if (turn.completion) {
+      for (const item of visibleItems) {
+        if (
+          item.activity?.kind === "context_compact" &&
+          item.activity.compact_phase === "requested"
+        )
+          seen.add(item.key);
+      }
+    }
     return seen;
-  }, [visibleItems]);
+  }, [visibleItems, turn.completion]);
   const scrollItems = useMemo(
     () =>
-      visibleItems.filter((item) => !persistentToolGenItemKeys.has(item.key) && !compactCompletedSeen.has(item.key)),
-    [persistentToolGenItemKeys, compactCompletedSeen, visibleItems],
+      visibleItems.filter((item) => !persistentToolGenItemKeys.has(item.key) && !compactSupersededKeys.has(item.key)),
+    [persistentToolGenItemKeys, compactSupersededKeys, visibleItems],
   );
   const isWorking = turn.state === "working" && !isCancelling;
   const streamUiMode = useStreamUiMode();
@@ -10151,6 +10172,15 @@ const TurnInteraction = memo(function TurnInteraction({
           turn={turn}
           streamTools={runningStreamTools}
           streamWorking={isWorking}
+          waitingModel={
+            /* Session-scoped single slot: only the active turn publishes an
+             * Active projection, and this trailer renders only while the turn
+             * is working. Do NOT compare token.turn_id (Core `turn_...`) with
+             * turn.turn_id (web `web_turn_...`) — they are different ID
+             * domains and never match. */
+            turnProjection?.projection.state === "active" &&
+            turnProjection.projection.activity.kind === "waiting_model"
+          }
           latestThoughtTime={latestThoughtTime}
           streamRetained={streamRetentionActive}
           onStreamArchived={archiveStream}
@@ -10199,6 +10229,7 @@ function areTurnInteractionPropsEqual(
   if (
     previous.sessionId !== next.sessionId ||
     previous.turn !== next.turn ||
+    previous.turnProjection !== next.turnProjection ||
     previous.isCancelling !== next.isCancelling ||
     previous.sessionInteractionLocked !== next.sessionInteractionLocked ||
     previous.toolGenPending !== next.toolGenPending ||
@@ -10414,6 +10445,17 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
   const command =
     activity.code?.trim() || toolInvocationPreview(activity) || "";
   const detail = activity.detail?.trim();
+  const [liveElapsedMs, setLiveElapsedMs] = useState(() =>
+    Math.max(0, Date.now() - activity.createdAt),
+  );
+  useEffect(() => {
+    if (!running) return;
+    const updateElapsed = () =>
+      setLiveElapsedMs(Math.max(0, Date.now() - activity.createdAt));
+    updateElapsed();
+    const timer = window.setInterval(updateElapsed, 1_000);
+    return () => window.clearInterval(timer);
+  }, [activity.createdAt, running]);
   const [expanded, setExpanded] = useState(false);
   const rowRef = useRef<HTMLDivElement>(null);
   const [interactionHeld, setInteractionHeld] = useState(false);
@@ -10441,7 +10483,15 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
         <b>{toolName}</b>
         {status === "background_running" && <span className="stream-tool-background">(bg)</span>}
         {command && <span className="stream-tool-command-preview" title={command}>{command.replace(/\s+/g, " ")}</span>}
-        {activity.elapsed_ms !== undefined && <span className="stream-tool-elapsed">{formatToolElapsed(activity.elapsed_ms)}</span>}
+        {(running
+          ? liveElapsedMs
+          : activity.elapsed_ms) !== undefined && (
+          <span className="stream-tool-elapsed">
+            {running
+              ? formatLiveElapsed(liveElapsedMs)
+              : formatToolElapsed(activity.elapsed_ms!)}
+          </span>
+        )}
       </div>
       <div className={`stream-tool-fold${open ? " expanded" : ""}`} inert={!open}>
         <div>
@@ -10466,6 +10516,7 @@ function TurnAnswerDelivery({
   turn,
   streamTools,
   streamWorking,
+  waitingModel,
   toolGenPending,
   toolGenBlocked,
   favorite,
@@ -10477,6 +10528,7 @@ function TurnAnswerDelivery({
   turn: WebTurn;
   streamTools: Activity[];
   streamWorking: boolean;
+  waitingModel: boolean;
   latestThoughtTime: number;
   streamRetained: boolean;
   onStreamArchived: () => void;
@@ -10521,7 +10573,11 @@ function TurnAnswerDelivery({
         />
       )}
       {streamUiMode && streamWorking && (
-        <div className="stream-working-trailer" role="status" aria-label="Working">
+        <div
+          className={`stream-working-trailer${waitingModel || preview?.response?.status === "streaming" ? " model-waiting" : " tool-active"}`}
+          role="status"
+          aria-label="Working"
+        >
           <span className="stream-working-dot" aria-hidden="true" />
           <WorkingElapsed createdAtMs={turn.created_at_ms} />
           <span className="stream-working-calls" aria-hidden="true">
@@ -11188,13 +11244,16 @@ function HeaderContextUsage({
                   <button
                     type="button"
                     role="menuitem"
+                    disabled={session ? sessionContextCompactPending(session) : false}
                     onClick={() => {
                       setMenuOpen(false);
                       onCompact();
                     }}
                   >
                     <Eraser size={11} aria-hidden="true" />
-                    {t("context.compactAction")}
+                    {session && sessionContextCompactPending(session)
+                      ? t("context.compactingAction")
+                      : t("context.compactAction")}
                   </button>
                 )}
                 {onClear && (
@@ -11439,7 +11498,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
     Math.max(0, Date.now() - activity.createdAt),
   );
   useEffect(() => {
-    if (!running || (!pollingActivity && waitBudgetMs === undefined)) return;
+    if (!running) return;
     const updateElapsed = () =>
       setLiveElapsedMs(Math.max(0, Date.now() - activity.createdAt));
     updateElapsed();
@@ -11454,8 +11513,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
     activity.tool_name || activity.title,
     activity.tool_mode,
   );
-  const displayedElapsedMs =
-    pollingActivity && running ? liveElapsedMs : activity.elapsed_ms;
+  const displayedElapsedMs = running ? liveElapsedMs : activity.elapsed_ms;
   const remainingWaitMs =
     running && activity.execution_started && waitBudgetMs !== undefined
       ? Math.max(0, waitBudgetMs - liveElapsedMs)
@@ -11494,10 +11552,10 @@ function ToolActivity({ activity }: { activity: Activity }) {
             {t("tools.remaining", { time: formatRemainingDuration(remainingWaitMs) })}
           </span>
         )}
-        {displayedElapsedMs !== undefined && (pollingActivity || !running) && (
+        {displayedElapsedMs !== undefined && (
           <span className="tool-activity-duration">
-            {pollingActivity
-              ? t("tools.elapsed", { time: formatClockDuration(displayedElapsedMs) })
+            {running
+              ? t("tools.elapsed", { time: formatLiveElapsed(displayedElapsedMs) })
               : formatDuration(displayedElapsedMs)}
           </span>
         )}
@@ -14258,16 +14316,6 @@ function formatRemainingDuration(remainingMs: number) {
   return hours > 0
     ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`
     : `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
-}
-
-function formatClockDuration(elapsedMs: number) {
-  const seconds = Math.max(0, Math.floor(elapsedMs / 1000));
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const remainingSeconds = seconds % 60;
-  return hours > 0
-    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`
-    : `${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
 }
 
 function formatDuration(elapsedMs: number | undefined) {

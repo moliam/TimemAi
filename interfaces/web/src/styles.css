@@ -5103,6 +5103,8 @@ body.workspace-modal-open .app-shell { user-select: none; }
 :root[data-theme="light"] .stream-tool-row { background: transparent; }
 :root[data-theme="light"] .stream-tool-head b { color: #24333a; }
 :root[data-theme="light"] .stream-tool-dot { background: #b07f2e; }
+:root[data-theme="light"] .stream-working-trailer.tool-active { color: #b07f2e; }
+:root[data-theme="light"] .stream-working-trailer.model-waiting { color: #286a9b; }
 :root[data-theme="light"] .stream-tool-status { color: #5c6f7a; }
 :root[data-theme="light"] .stream-tool-elapsed { color: #5c6f7a; }
 :root[data-theme="light"] .stream-tool-command { background: #eef2f1; color: #33484f; box-shadow: 0 2px 6px #24333a14; }
@@ -5247,7 +5249,12 @@ body.workspace-modal-open .app-shell { user-select: none; }
   line-height: 1.68;
 }
 .stream-working-trailer { padding: 10px 0; }
-.stream-working-dot { display: block; width: 9px; height: 9px; border-radius: 50%; background: currentColor; animation: stream-working-grow 1.2s ease-in-out infinite; }
+.stream-working-dot { display: block; width: 9px; height: 9px; border-radius: 50%; background: currentColor; animation: stream-working-grow 1.2s ease-in-out infinite; transition: background-color .5s ease; }
+/* Working dot color follows the work phase: tool-running amber matches the
+   stream tool dot, model-waiting blue matches the frame working pulse. The
+   background-color transition above softens phase switches. */
+.stream-working-trailer.tool-active { color: #f1c56f; }
+.stream-working-trailer.model-waiting { color: #3485dc; }
 .stream-working-calls { margin-left: 2px; color: #7794a8; font-size: 11px; font-variant-numeric: tabular-nums; font-weight: 600; }
 :root[data-theme="light"] .stream-working-calls { color: #668397; }
 @keyframes stream-working-grow { 0%, 100% { transform: scale(.4); opacity: .45; } 65% { transform: scale(1); opacity: 1; } }

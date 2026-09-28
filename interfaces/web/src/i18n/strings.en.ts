@@ -516,6 +516,7 @@ export const en: Strings = {
   context: {
     actionsTitle: "Context actions",
     compactAction: "Compact",
+    compactingAction: "Compacting...",
     clearAction: "Clear",
     clearTitle: "Clear working context (restart-fresh state, system prompt only)",
     clearConfirm: "Force-clear this session's working context? The next turn starts from a fresh state; chat history is kept.",

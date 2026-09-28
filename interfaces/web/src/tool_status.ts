@@ -49,6 +49,18 @@ export function formatToolElapsed(elapsedMs: number) {
   return `${hours}h${minutes % 60}m`;
 }
 
+// Live running elapsed: whole-second countdown style (2s, 3m3s, 2h3m12s)
+// refreshed every second while the tool is still running. Settled rows keep
+// the terminal formatToolElapsed fact instead.
+export function formatLiveElapsed(elapsedMs: number) {
+  const seconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m${seconds % 60}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h${minutes % 60}m${seconds % 60}s`;
+}
+
 export function toolResultCountsLabel(succeeded: number, failed: number) {
   return `${succeeded} ✓${failed > 0 ? ` | ${failed} ✗` : ""}`;
 }

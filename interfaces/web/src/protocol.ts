@@ -77,6 +77,9 @@ export type SessionGroup = { id: string; name: string };
 
 export type TurnToken = {
   session_id: string;
+  /** Core lifecycle turn id (`turn_...`), NOT comparable to WebTurn.turn_id
+   * (`web_turn_...`). The host keeps the mapping internally only; never match
+   * this field against WebTurn.turn_id in the client. */
   turn_id: string;
   epoch: number;
 };

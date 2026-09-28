@@ -46,7 +46,12 @@ describe("stream reveal integration", () => {
     expect(mainSource).toContain("useState(() => !streamUiMode && isWorking)");
     expect(mainSource).not.toContain("stream-reading-hold");
     expect(mainSource).not.toContain("stream-thought-card");
-    expect(mainSource).toContain('className="stream-working-trailer"');
+    expect(mainSource).toContain('className={`stream-working-trailer${waitingModel || preview?.response?.status === "streaming" ? " model-waiting" : " tool-active"}`}');
+    expect(mainSource).toContain('turnProjection?.projection.state === "active" &&');
+    expect(mainSource).toContain('turnProjection.projection.activity.kind === "waiting_model"');
+    expect(mainSource).not.toContain('token.turn_id === turn.turn_id');
+    expect(mainSource).toContain('previous.turnProjection !== next.turnProjection');
+    expect(mainSource).not.toContain("isStreamToolRunning");
     expect(mainSource).toContain('const previewText = intermediate ? ""');
     expect(mainSource).toContain("activity.detail && <MarkdownContent text={activity.detail}");
   });
@@ -146,6 +151,11 @@ describe("splitMarkdownBlocks incremental stability", () => {
    expect(css).not.toContain("stream-caret-pulse");
    expect(mainSource).toContain('<StreamProcess closing={turn.state !== "working"}');
    expect(mainSource).toContain('className="stream-working-dot"');
+    expect(css).toContain('.stream-working-trailer.tool-active { color: #f1c56f; }');
+    expect(css).toContain('.stream-working-trailer.model-waiting { color: #3485dc; }');
+    expect(css).toContain(':root[data-theme="light"] .stream-working-trailer.tool-active { color: #b07f2e; }');
+    expect(css).toContain(':root[data-theme="light"] .stream-working-trailer.model-waiting { color: #286a9b; }');
+    expect(css).toMatch(/\.stream-working-dot \{[^}]*transition: background-color \.5s ease/);
  });
 
  it("bounds repeated stream rendering and interaction listeners", () => {

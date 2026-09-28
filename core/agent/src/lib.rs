@@ -5563,10 +5563,10 @@ Runtime tool_call ids:",
     pub fn request_manual_context_compact(&mut self) {
         self.manual_compact_trailer_pending = true;
         self.context_compact_required = true;
-        if self.pending_compact_request_notice.is_none() {
-            self.pending_compact_request_notice =
-                Some((self.last_observed_prompt_tokens, self.max_llm_input_tokens));
-        }
+        // The "compacting..." UI notice for a manual request is published
+        // immediately by the Host when the user clicks, so Core must not
+        // schedule a second requested notice here; only the forced-shrink
+        // threshold path still emits its own notice.
     }
 
     fn estimate_rendered_prompt_tokens(&self, incoming_prompt_tokens: u32) -> u32 {
