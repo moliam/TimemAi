@@ -766,6 +766,9 @@ fn initial_supplement_batch_is_visible_before_an_immediate_final_can_close_the_m
     }
 }
 
+/// Timing-sensitive: relies on a 10ms dispatch timeout racing the local
+/// action loop; Windows CI scheduler granularity makes it flaky there.
+#[cfg(unix)]
 #[test]
 fn worker_forces_dispatch_when_a_live_supplement_times_out_during_local_action() {
     let dir = tmp_dir("live_supplement_dispatch_timeout");
