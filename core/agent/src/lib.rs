@@ -3653,9 +3653,7 @@ impl AgentCore {
                     ));
                     slices.push((
                         "memo_finish_guard".to_string(),
-                        format!(
-                            "Just now you gave a final answer indicating all tasks are done. But there is still memo active: {memo}. All user's requirements really achieved? If yes, delete the memo (memo op=delete) before giving the final answer."
-                        ),
+                        memo_finish_guard_reminder(&memo),
                     ));
                     self.append_delta_with_action_output_budget(slices);
                     return CoreStep::NeedModel {
@@ -3732,9 +3730,7 @@ impl AgentCore {
                         self.memo_finish_guard_used = true;
                         slices.push((
                             "memo_finish_guard".to_string(),
-                            format!(
-                                "Just now you gave a final answer indicating all tasks are done. But there is still memo active: {memo}. All user's requirements really achieved? If yes, delete the memo (memo op=delete) before giving the final answer."
-                            ),
+                            memo_finish_guard_reminder(&memo),
                         ));
                         if !native_calls.is_empty() {
                             self.native_exchanges.push(NativeExchange {
@@ -7601,6 +7597,12 @@ fn normalize_memory_record(mut record: MemoryRecord) -> MemoryRecord {
         record.updated_at_ms = record.created_at_ms;
     }
     record
+}
+
+fn memo_finish_guard_reminder(memo: &str) -> String {
+    format!(
+        "Just now you gave a final answer indicating all tasks are done. But there is still memo active: {memo}. All task/final goal really achieved? If yes, delete the memo (memo op=delete) before giving the final answer."
+    )
 }
 
 fn memory_conflict_result(
