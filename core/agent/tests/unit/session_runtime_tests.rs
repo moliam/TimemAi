@@ -5764,6 +5764,16 @@ fn memo_finish_guard_blocks_inline_final_until_memo_deleted() {
     // The request after the guarded final must carry the memo guard reminder.
     assert!(model.prompts[2].contains("still memo active: 长任务：完成数据迁移并全量绿灯"));
     assert!(model.prompts[2].contains("delete the memo"));
+    // The request AFTER the deletion carries the one-shot re-verify trailer
+    // quoting the deleted memo text.
+    assert!(
+        model.prompts[3].contains("You just deleted the memo: \"长任务：完成数据迁移并全量绿灯\""),
+        "post-deletion request must quote the deleted memo"
+    );
+    assert!(
+        model.prompts[3].contains("don't issue task finish unless user asks you to."),
+        "post-deletion request must carry the finish guidance"
+    );
     // After deletion the turn ends with the last final answer; the
     // append-only timeline keeps the earlier guard text, but no new guard
     // slice was appended (4 requests total, not 5).
