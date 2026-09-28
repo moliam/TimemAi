@@ -7,17 +7,16 @@ prompt_synopsis: |
   {"memo":{"op":"create","text":"refined long-task reminder"}}
 description: |
   Use this tool to record/update your goal with the help of the runtime, especially when the user's task needs long run, step by step, multi turns of work. Distill
-  the user's demand, constraints, methodology, into one concise memo
+  the user's demand/goal, constraints, methodology as your work anchor into one concise memo
   sentence and ask the runtime to remember it for you. An agent holds at most ONE memo.
 
   ops:
-  - create: create a new memo. Any existing memo is replaced.
+  - create: create a new memo. Any existing memo is replaced. Should be overall goal instead of planned steps.
   - update: overwrite/refresh the current memo content.
   - delete: delete the current memo. No error if none exists.
 
-  IMPORTANT: before all work is fully done and you stop (final answer), you MUST
-  delete the memo. If a memo is still active when you try to finish, the runtime
-  will actively keep reminding you and ask you to confirm completion.
+  IMPORTANT: before all work/final goal is fully done and declaring `task finish`, you MUST
+  delete the memo. You cannot finish some planned intermediate steps and declare work is done unless user asks.
 prompt_input: |
   Provide `op` ("create" | "update" | "delete") and `text` (required for
   create/update: the refined reminder; ignored for delete).
