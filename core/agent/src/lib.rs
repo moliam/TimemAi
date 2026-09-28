@@ -1780,6 +1780,10 @@ pub struct AgentCore {
     /// recharges it by 1 (capped); each guarded finish attempt consumes 1.
     /// The turn may only finish with an active memo when the budget is 0.
     memo_finish_guard_tokens: u32,
+    /// Memo forcibly closed by the runtime when a turn finished while the
+    /// memo-finish-guard budget was exhausted. The note is injected once at
+    /// the start of the next turn.
+    pending_forcible_memo_note: Option<String>,
     /// Memo text deleted during the current turn. Task finish in the same
     /// turn is challenged once (models may delete and immediately declare
     /// victory without genuinely re-checking the goal).
@@ -1891,6 +1895,7 @@ impl AgentCore {
             turn_finished_summary: None,
             active_memo: None,
             memo_finish_guard_tokens: MEMO_FINISH_GUARD_TOKEN_CAP,
+            pending_forcible_memo_note: None,
             memo_deleted_this_turn: None,
             memo_deleted_trailer_shown: false,
             pending_native_exchange: None,
@@ -3163,6 +3168,21 @@ impl AgentCore {
         self.active_memo = Some(text);
     }
 
+    /// The turn is finishing while a memo is still active and the guard
+    /// budget is exhausted. Close the memo on the runtime's authority and
+    /// record the notice for the next turn's prompt.
+    pub(crate) fn force_close_memo_on_finish(&mut self, runtime: &mut dyn ActionRuntime) {
+        if let Some(memo) = self.active_memo.take() {
+            self.pending_forcible_memo_note = Some(memo.clone());
+            let session_id = self.current_session_id().to_string();
+            runtime.on_core_topic_events(&[crate::host::memo_topic_event_with_op(
+                session_id,
+                None,
+                "force_deleted",
+            )]);
+        }
+    }
+
     pub(crate) fn clear_active_memo(&mut self) {
         if let Some(memo) = self.active_memo.take() {
             self.memo_deleted_this_turn = Some(memo);
@@ -3234,6 +3254,16 @@ impl AgentCore {
                 PromptComponentRole::system(),
                 "user_interrupted_work",
                 "NOTE: User interrupted the above work. Continue it based on the user's new input's intent. If not sure, ask the user.",
+                "runtime",
+            );
+        }
+        if let Some(memo) = self.pending_forcible_memo_note.take() {
+            self.submit_prompt_component(
+                PromptComponentRole::system(),
+                "memo_forcibly_deleted",
+                format!(
+                    "Last time you forcibly invoked task_finished without deleting the active memo: \"{memo}\" Now this memo has been deleted forcibly by runtime. Recreate it if necessary."
+                ),
                 "runtime",
             );
         }
@@ -3743,6 +3773,11 @@ impl AgentCore {
                     };
                 }
             }
+            // Guard budget exhausted (or rounds ran out) with an active memo:
+            // close the memo on runtime authority before finishing.
+            if self.active_memo.is_some() {
+                self.force_close_memo_on_finish(runtime);
+            }
             slices.extend(self.assistant_replay_slices(
                 &raw_model_output,
                 Some(&parsed),
@@ -3844,6 +3879,12 @@ impl AgentCore {
                             rounds_remaining: self.remaining_rounds(),
                         };
                     }
+                }
+                // The guard budget is exhausted (or rounds ran out) while a
+                // memo is still active: close the memo on runtime authority so
+                // the finished turn leaves no stale long-task state.
+                if self.active_memo.is_some() {
+                    self.force_close_memo_on_finish(runtime);
                 }
                 // task_finished was executed among the actions above. Its native
                 // tool exchange is still recorded below so the provider message
