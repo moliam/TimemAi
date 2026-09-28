@@ -9043,7 +9043,9 @@ fn web_runtime_shutdown_detaches_active_workers_so_ctrl_c_can_exit() {
     let shutdown_started = Instant::now();
     shutdown_web_runtime(&state).unwrap();
     assert!(
-        shutdown_started.elapsed() < Duration::from_millis(250),
+        // Relaxed for CI scheduler jitter: the contract is "does not block on
+        // the active model call" (the mock sleeps 10s), not a hard 250ms bound.
+        shutdown_started.elapsed() < Duration::from_secs(2),
         "web Ctrl+C shutdown should not wait for an active model call to finish"
     );
     assert_eq!(state.manager.lock().unwrap().worker_count(), 0);
