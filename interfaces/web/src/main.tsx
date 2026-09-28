@@ -10280,7 +10280,7 @@ function StreamActivityPresentation({ thoughtText, activities, responseArriving 
       }
       return activity?.kind === "free_talk"
           ? <div key={key} className="stream-thought-text"><MarkdownContent text={activity.detail ?? ""} /></div>
-          : activity?.kind === "user_supplement" ? <ActivityView key={key} activity={activity} /> : null;
+          : activity ? <ActivityView key={key} activity={activity} /> : null;
     })}
     {thoughtText && <div className="stream-thought-text" aria-label="Model thought preview"><StreamText text={thoughtText} /></div>}
   </section>;
@@ -10336,11 +10336,12 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
       run.querySelector<HTMLButtonElement>(".stream-tool-run-toggle")?.focus({ preventScroll: true });
     }
   }, [merged, completed.length]);
-  // 控件契约：收起显示 + tools，展开显示 − tools，与 aria-expanded 一致。
-  // +/- 不表达成功失败；计数另用 ✓ / ✗。保留按钮与行节点，仅新计数可重放反馈。
+  // 控件契约：视觉收起（含双击选中展开等交互保持）显示 + tools xN，
+  // 视觉展开显示 − tools 及 ✓/✗ 结果计数，与 aria-expanded 一致。
+  // 收起态只报数量 xN，不表达对错状态；保留按钮与行节点，仅新计数可重放反馈。
   return <div ref={runRef} className="stream-tool-run">
-    {completed.length > 0 && <button className="stream-tool-run-toggle" type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
-      {expanded ? <Minus size={13} aria-hidden="true" /> : <Plus size={13} aria-hidden="true" />}<span>{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
+    {completed.length > 0 && <button className="stream-tool-run-toggle" type="button" aria-expanded={!merged} onClick={() => setExpanded(value => !value)}>
+      {merged ? <Plus size={13} aria-hidden="true" /> : <Minus size={13} aria-hidden="true" />}<span>{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={merged ? t("tools.doneCount", { count: completed.length }) : showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{merged ? `x${completed.length}` : showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
     </button>}
     {activities.map(activity => <div key={activity.id} className={`stream-tool-merged-item${merged && completedIds.has(activity.id) ? " merged" : ""}`} inert={merged && completedIds.has(activity.id)}>
       <div><StreamToolRow activity={activity} /></div>
@@ -11565,6 +11566,29 @@ function activityFromTurnEvent(
 function ContextCompactNotice({ activity }: { activity: Activity }) {
   const before = activity.before_tokens;
   const after = activity.after_tokens;
+  if (activity.compact_phase === "requested") {
+    const label = t("context.compactingAria", {
+      tokens: formatTokens(activity.estimated_prompt_tokens) ?? t("context.unknown"),
+    });
+    return (
+      <section
+        className="context-compact-notice is-compacting"
+        aria-label={label}
+        role="status"
+      >
+        <div className="compact-icon">
+          <Gauge size={13} />
+        </div>
+        <div className="compact-copy">
+          <span>{t("context.dynamic")}</span>
+          <strong>{t("context.compacting")}</strong>
+        </div>
+        <div className="compact-meter" aria-hidden="true">
+          <span className="compact-before compact-indeterminate" />
+        </div>
+      </section>
+    );
+  }
   const ratio =
     before && after !== undefined
       ? Math.max(6, Math.min(100, (after / before) * 100))
@@ -11598,6 +11622,9 @@ function ContextCompactNotice({ activity }: { activity: Activity }) {
         <span>{t("context.dynamic")}</span>
         <strong>
           {formatTokens(before) ?? "?"} → {formatTokens(after) ?? "?"}
+          {before && after !== undefined && before > 0
+            ? ` (${Math.max(0, Math.round((1 - after / before) * 100))}% off)`
+            : ""}
         </strong>
         {breakdown && <small>{breakdown}</small>}
       </div>

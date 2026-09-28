@@ -515,6 +515,8 @@ export const zh = {
     clearConfirm: "强制清空当前会话的工作上下文？清空后下一轮对话将从初始状态开始，历史消息仍保留。",
     dynamic: "动态上下文",
     unknown: "未知",
+    compacting: "上下文压缩中…",
+    compactingAria: "上下文压缩中：超过 {tokens} tokens",
     compactedAria: "动态上下文已压缩：{before} 到 {after}{suffix}",
     compactedSuffix: "。{breakdown}",
     textToolBreakdown: "文字 {textBefore} → {textAfter}；工具 {toolBefore} → {toolAfter}",

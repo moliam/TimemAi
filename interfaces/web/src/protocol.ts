@@ -343,6 +343,8 @@ export type Activity = {
     | "user_supplement"
     | "memo_notice";
   toolgen_phase?: string;
+  compact_phase?: "requested" | "completed";
+  estimated_prompt_tokens?: number;
   before_tokens?: number;
   after_tokens?: number;
   text_before_tokens?: number;

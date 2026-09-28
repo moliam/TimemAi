@@ -251,6 +251,15 @@ describe("stream retention split", () => {
     expect(computeStreamRetention(items).retained.map(a => a.id)).toEqual(["a1", "a2"]);
   });
 
+  it("keeps memo notices visible in the live stream area", () => {
+    const memoNotice = { ...thought("m1"), kind: "memo_notice" as const };
+    const items = [thought("t1"), memoNotice, tool("a1", "completed")];
+    const ret = computeStreamRetention(items);
+    expect(ret.retained.map((a) => a.id)).toEqual(["t1", "m1", "a1"]);
+    expect(ret.isRetained(memoNotice)).toBe(true);
+    expect(ret.isFramed(memoNotice)).toBe(false);
+  });
+
   it("keeps supplements and thoughts in place across rounds", () => {
     const supplement = { ...thought("supplement"), kind: "user_supplement" as const };
     const items = [thought("t1"), tool("a1", "completed"), supplement];

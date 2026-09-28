@@ -1977,6 +1977,22 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
       };
     }
     case "core.context.compact": {
+      if (payload.phase === "requested") {
+        return {
+          id: clientId(),
+          sessionId: event.session_id,
+          tone: "notice",
+          kind: "context_compact",
+          title: "Context compacting",
+          compact_phase: "requested",
+          estimated_prompt_tokens:
+            typeof payload.estimated_prompt_tokens === "number"
+              ? payload.estimated_prompt_tokens
+              : undefined,
+          detail: "",
+          createdAt: Date.now(),
+        };
+      }
       const before =
         typeof payload.estimated_before_tokens === "number"
           ? payload.estimated_before_tokens
@@ -2006,6 +2022,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         sessionId: event.session_id,
         tone: "notice",
         kind: "context_compact",
+        compact_phase: "completed",
         title: "Dynamic context compacted",
         detail: `Dynamic context ${before ?? "?"} tokens → ${after ?? "?"} tokens`,
         before_tokens: before,

@@ -801,6 +801,30 @@ pub fn model_repair_topic_event(
     )
 }
 
+/// The runtime crossed the forced-shrink threshold and injected the
+/// compaction request into the prompt. UI renders this as "compacting...".
+pub fn context_compact_requested_topic_event(
+    session_id: impl Into<String>,
+    estimated_prompt_tokens: u32,
+    force_threshold_tokens: u32,
+) -> CoreTopicEvent {
+    CoreTopicEvent::new(
+        session_id,
+        CoreTopic::new(
+            CORE_TOPIC_CONTEXT_COMPACT,
+            json!({
+                "name": CORE_TOPIC_CONTEXT_COMPACT,
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "phase": "requested",
+            "estimated_prompt_tokens": estimated_prompt_tokens,
+            "force_shrink_threshold_tokens": force_threshold_tokens,
+        }),
+    )
+}
+
 pub fn context_compact_topic_event(
     session_id: impl Into<String>,
     report: &CoreContextCompactTopic,
@@ -815,6 +839,7 @@ pub fn context_compact_topic_event(
         ),
         CoreSessionState::Running,
         json!({
+            "phase": "completed",
             "estimated_before_tokens": report.estimated_before_tokens,
             "estimated_after_tokens": report.estimated_after_tokens,
             "estimated_text_before_tokens": report.estimated_text_before_tokens,

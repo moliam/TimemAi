@@ -121,9 +121,9 @@ pub use data_layout::{
     workspace_config_file, RuntimeDataLayout,
 };
 pub use host::{
-    context_compact_topic_event, core_initialized_topic_event,
-    core_initialized_topic_event_with_worker, normalize_user_supplements,
-    normalize_user_supplements_with_context, resolve_topic_reply,
+    context_compact_requested_topic_event, context_compact_topic_event,
+    core_initialized_topic_event, core_initialized_topic_event_with_worker,
+    normalize_user_supplements, normalize_user_supplements_with_context, resolve_topic_reply,
     runtime_root_repair_help_topic_event, session_worker_default_display_name, toolgen_topic_event,
     topic_event_status_hint, work_instruction_load_topic_event, CoreActionTopic,
     CoreContextCompactTopic, CoreDynamicContextSummary, CoreGlobalWorkerStatus,
@@ -1738,6 +1738,10 @@ pub struct AgentCore {
     max_llm_input_tokens: u32,
     last_observed_prompt_tokens: u32,
     context_compact_required: bool,
+    /// Set when the runtime first crosses the forced-shrink threshold and
+    /// injects the compaction request. The turn loop drains it into a
+    /// `core.context.compact` phase="requested" topic event for live UI.
+    pending_compact_request_notice: Option<(u32, u32)>,
     rounds_since_reasoning: u32,
     reasoning_review_due: bool,
     /// Incrementally maintained count of user/assistant/summary message
@@ -1860,6 +1864,7 @@ impl AgentCore {
             max_llm_input_tokens: 100_000,
             last_observed_prompt_tokens: 0,
             context_compact_required: false,
+            pending_compact_request_notice: None,
             rounds_since_reasoning: 0,
             reasoning_review_due: false,
             context_message_elements: 0,
@@ -3002,6 +3007,7 @@ impl AgentCore {
         self.context_message_elements = 0;
         self.last_observed_prompt_tokens = 0;
         self.context_compact_required = false;
+        self.pending_compact_request_notice = None;
         self.current_round = 0;
         self.current_stats = UsageStats::zero();
         self.repair_attempted = false;
@@ -5462,6 +5468,9 @@ Runtime tool_call ids:",
         if slices.is_empty() {
             return None;
         }
+        if !self.context_compact_required {
+            self.pending_compact_request_notice = Some((estimated_prompt_tokens, force_threshold));
+        }
         self.context_compact_required = true;
         let dynamic_tokens = slices
             .iter()
@@ -5497,6 +5506,12 @@ Runtime tool_call ids:",
             self.max_llm_input_tokens
         ))
     }
+    /// Drains the pending forced-compaction request notice (estimated prompt
+    /// tokens, force threshold). Called by the turn loop each iteration.
+    pub fn take_pending_compact_request_notice(&mut self) -> Option<(u32, u32)> {
+        self.pending_compact_request_notice.take()
+    }
+
     fn estimate_rendered_prompt_tokens(&self, incoming_prompt_tokens: u32) -> u32 {
         self.last_observed_prompt_tokens
             .saturating_add(incoming_prompt_tokens)

@@ -518,6 +518,8 @@ export const en: Strings = {
     clearConfirm: "Force-clear this session's working context? The next turn starts from a fresh state; chat history is kept.",
     dynamic: "Dynamic context",
     unknown: "unknown",
+    compacting: "Context compacting...",
+    compactingAria: "Context compacting: over {tokens} prompt tokens",
     compactedAria: "Dynamic context compacted: {before} to {after}{suffix}",
     compactedSuffix: ". {breakdown}",
     textToolBreakdown: "Text {textBefore} → {textAfter}; Tool {toolBefore} → {toolAfter}",
