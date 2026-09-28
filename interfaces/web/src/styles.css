@@ -3660,7 +3660,8 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
   display: grid;
   place-items: center;
   justify-self: center;
-  overflow: hidden;
+  /* No overflow clipping: the memo tooltip is positioned outside the button
+     (right: calc(100% + 8px)) and must stay visible on hover. */
   border: 1px solid #59636b5c !important;
   border-radius: 50% !important;
   background: #252a2e !important;
