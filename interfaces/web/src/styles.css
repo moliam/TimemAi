@@ -5248,6 +5248,8 @@ body.workspace-modal-open .app-shell { user-select: none; }
 }
 .stream-working-trailer { padding: 10px 0; }
 .stream-working-dot { display: block; width: 9px; height: 9px; border-radius: 50%; background: currentColor; animation: stream-working-grow 1.2s ease-in-out infinite; }
+.stream-working-calls { margin-left: 2px; color: #7794a8; font-size: 11px; font-variant-numeric: tabular-nums; font-weight: 600; }
+:root[data-theme="light"] .stream-working-calls { color: #668397; }
 @keyframes stream-working-grow { 0%, 100% { transform: scale(.4); opacity: .45; } 65% { transform: scale(1); opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .stream-working-dot { animation: none; } }
 
