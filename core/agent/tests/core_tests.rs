@@ -105,10 +105,24 @@ fn readfile_first_touch_notes_are_injected_once_per_path() {
     core.change_prompt_cwd(cwd.to_string_lossy()).unwrap();
     let _ = core.begin_turn("read files for first touch notes", None);
 
-    let cwd_text = cwd.to_string_lossy();
-    let dir_note = format!("first time to touch dir {cwd_text}/a/b/");
-    let file_c_note = format!("first time to touch file {cwd_text}/a/b/c.txt");
-    let file_d_note = format!("first time to touch file {cwd_text}/a/b/d.txt");
+    // first-touch notes anchor on canonicalized paths (macOS symlink,
+    // Windows verbatim); mirror the runtime by canonicalizing the joined path.
+    let dir_note = format!(
+        "first time to touch dir {}/",
+        fs::canonicalize(cwd.join("a/b")).unwrap().to_string_lossy()
+    );
+    let file_c_note = format!(
+        "first time to touch file {}",
+        fs::canonicalize(cwd.join("a/b/c.txt"))
+            .unwrap()
+            .to_string_lossy()
+    );
+    let file_d_note = format!(
+        "first time to touch file {}",
+        fs::canonicalize(cwd.join("a/b/d.txt"))
+            .unwrap()
+            .to_string_lossy()
+    );
 
     let first = readfile_first_touch_read(&mut core, "a/b/c.txt");
     assert!(first.contains(&dir_note), "{first}");
@@ -149,6 +163,9 @@ fn run_bash_edit_first_touch_read(core: &mut AgentCore, path: &str) -> String {
 fn run_bash_edit_first_touch_notes_are_injected_once_per_path() {
     let cwd = tmp_dir("run_bash_edit_first_touch_once");
     fs::create_dir_all(cwd.join("a/b")).unwrap();
+    // The edit anchors below canonicalize the path; create the file so the
+    // expectation below can canonicalize the same existing path.
+    fs::write(cwd.join("a/b/c.txt"), "one\n").unwrap();
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -157,9 +174,16 @@ fn run_bash_edit_first_touch_notes_are_injected_once_per_path() {
     core.change_prompt_cwd(cwd.to_string_lossy()).unwrap();
     let _ = core.begin_turn("edit files for first touch notes", None);
 
-    let cwd_text = cwd.to_string_lossy();
-    let dir_note = format!("first time to touch dir {cwd_text}/a/b/");
-    let file_c_note = format!("first time to touch file {cwd_text}/a/b/c.txt");
+    let dir_note = format!(
+        "first time to touch dir {}/",
+        fs::canonicalize(cwd.join("a/b")).unwrap().to_string_lossy()
+    );
+    let file_c_note = format!(
+        "first time to touch file {}",
+        fs::canonicalize(cwd.join("a/b/c.txt"))
+            .unwrap()
+            .to_string_lossy()
+    );
 
     let first = run_bash_edit_first_touch_read(&mut core, "a/b/c.txt");
     assert!(first.contains(&dir_note), "{first}");
@@ -191,9 +215,13 @@ fn readfile_first_touch_note_survives_truncated_tool_result() {
     let _ = core.begin_turn("read the large file", None);
 
     let prompt = readfile_first_touch_read(&mut core, "big.txt");
-    let cwd_text = cwd.to_string_lossy();
     assert!(
-        prompt.contains(&format!("first time to touch file {cwd_text}/big.txt")),
+        prompt.contains(&format!(
+            "first time to touch file {}",
+            fs::canonicalize(cwd.join("big.txt"))
+                .unwrap()
+                .to_string_lossy()
+        )),
         "{prompt}"
     );
     assert!(
@@ -216,10 +244,24 @@ fn context_compact_resets_readfile_first_touch_tracking() {
     core.change_prompt_cwd(cwd.to_string_lossy()).unwrap();
     let _ = core.begin_turn("read files then compact", None);
 
-    let cwd_text = cwd.to_string_lossy();
-    let dir_note = format!("first time to touch dir {cwd_text}/a/b/");
-    let file_c_note = format!("first time to touch file {cwd_text}/a/b/c.txt");
-    let file_d_note = format!("first time to touch file {cwd_text}/a/b/d.txt");
+    // first-touch notes anchor on canonicalized paths (macOS symlink,
+    // Windows verbatim); mirror the runtime by canonicalizing the joined path.
+    let dir_note = format!(
+        "first time to touch dir {}/",
+        fs::canonicalize(cwd.join("a/b")).unwrap().to_string_lossy()
+    );
+    let file_c_note = format!(
+        "first time to touch file {}",
+        fs::canonicalize(cwd.join("a/b/c.txt"))
+            .unwrap()
+            .to_string_lossy()
+    );
+    let file_d_note = format!(
+        "first time to touch file {}",
+        fs::canonicalize(cwd.join("a/b/d.txt"))
+            .unwrap()
+            .to_string_lossy()
+    );
 
     let first = readfile_first_touch_read(&mut core, "a/b/c.txt");
     assert!(first.contains(&dir_note), "{first}");
@@ -280,18 +322,33 @@ fn parallel_readfiles_in_same_dir_emit_one_dir_note_and_per_file_notes() {
         other => panic!("expected model continuation, got {other:?}"),
     };
 
-    let cwd_text = cwd.to_string_lossy();
     assert_eq!(
-        count_occurrences(&prompt, &format!("first time to touch dir {cwd_text}/a/b/")),
+        count_occurrences(
+            &prompt,
+            &format!(
+                "first time to touch dir {}/",
+                fs::canonicalize(cwd.join("a/b")).unwrap().to_string_lossy()
+            )
+        ),
         1,
         "{prompt}"
     );
     assert!(
-        prompt.contains(&format!("first time to touch file {cwd_text}/a/b/c.txt")),
+        prompt.contains(&format!(
+            "first time to touch file {}",
+            fs::canonicalize(cwd.join("a/b/c.txt"))
+                .unwrap()
+                .to_string_lossy()
+        )),
         "{prompt}"
     );
     assert!(
-        prompt.contains(&format!("first time to touch file {cwd_text}/a/b/d.txt")),
+        prompt.contains(&format!(
+            "first time to touch file {}",
+            fs::canonicalize(cwd.join("a/b/d.txt"))
+                .unwrap()
+                .to_string_lossy()
+        )),
         "{prompt}"
     );
 }
