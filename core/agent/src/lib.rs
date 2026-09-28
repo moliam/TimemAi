@@ -1740,6 +1740,10 @@ pub struct AgentCore {
     context_compact_required: bool,
     rounds_since_reasoning: u32,
     reasoning_review_due: bool,
+    /// Incrementally maintained count of user/assistant/summary message
+    /// elements in the dynamic context (deltas + native exchanges). Counted at
+    /// write time; never derived by scanning after the fact.
+    context_message_elements: usize,
     configured_round_budget: u32,
     round_budget: u32,
     reminder_tips_config: ReminderTipsConfig,
@@ -1845,6 +1849,7 @@ impl AgentCore {
             context_compact_required: false,
             rounds_since_reasoning: 0,
             reasoning_review_due: false,
+            context_message_elements: 0,
             configured_round_budget,
             round_budget: configured_round_budget,
             reminder_tips_config: ReminderTipsConfig::default(),
@@ -1933,6 +1938,53 @@ impl AgentCore {
         &self.deltas
     }
 
+    #[cfg(test)]
+    pub(crate) fn context_message_elements_for_test(&self) -> usize {
+        self.context_message_elements
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recount_context_message_elements_for_test(&mut self) {
+        self.recount_context_message_elements();
+    }
+
+    fn is_context_message_prompt_type(prompt_type: &str) -> bool {
+        matches!(
+            prompt_type,
+            "user_question"
+                | "user_supplement"
+                | "user_resume_directly"
+                | "llm_response"
+                | "llm_response_raw_xml"
+                | "llm_free_talk"
+                | "context_compaction_summary"
+        )
+    }
+
+    /// Full recomputation from authoritative state; used only at wholesale
+    /// replacement points (snapshot import, compaction shrink) where an
+    /// incremental delta is not expressible.
+    fn recount_context_message_elements(&mut self) {
+        let mut count = 0usize;
+        for delta in &self.deltas {
+            for slice in &delta.slices {
+                if Self::is_context_message_prompt_type(&slice.prompt_type) {
+                    count += 1;
+                }
+            }
+        }
+        for exchange in &self.native_exchanges {
+            count += 1;
+            count += exchange.calls.len().max(exchange.results.len());
+        }
+        self.context_message_elements = count;
+    }
+
+    fn register_native_exchange(&mut self, exchange: NativeExchange) {
+        self.context_message_elements += 1 + exchange.calls.len().max(exchange.results.len());
+        self.native_exchanges.push(exchange);
+    }
+
     pub fn reasoning_critical(&self) -> bool {
         self.context_compact_required || self.reasoning_review_due
     }
@@ -1944,19 +1996,9 @@ impl AgentCore {
             return;
         }
         self.rounds_since_reasoning = self.rounds_since_reasoning.saturating_add(1);
-        // In native mode assistant/tool traffic lives in `native_exchanges`,
-        // not in prompt deltas; count both so the threshold reflects the real
-        // message volume the model sees.
-        let mut message_elements = prompt_render::context_message_element_count(&self.deltas);
-        if self.resolved_tool_call_mode == ToolCallMode::Native {
-            for exchange in &self.native_exchanges {
-                message_elements += 1; // the assistant message itself
-                message_elements += exchange.calls.len().max(exchange.results.len());
-            }
-        }
         self.reasoning_review_due = self.rounds_since_reasoning
             > PERIODIC_REASONING_REVIEW_ROUND_INTERVAL
-            && message_elements > PERIODIC_REASONING_REVIEW_MIN_MESSAGES;
+            && self.context_message_elements > PERIODIC_REASONING_REVIEW_MIN_MESSAGES;
         if self.reasoning_review_due {
             self.rounds_since_reasoning = 0;
         }
@@ -3742,7 +3784,7 @@ impl AgentCore {
                             memo_finish_guard_reminder(&memo),
                         ));
                         if !native_calls.is_empty() {
-                            self.native_exchanges.push(NativeExchange {
+                            self.register_native_exchange(NativeExchange {
                                 delta_id: self.current_native_delta_id(),
                                 assistant_text: response.content.clone(),
                                 results: native_calls
@@ -3769,7 +3811,7 @@ impl AgentCore {
                 // tool exchange is still recorded below so the provider message
                 // sequence stays valid; the turn ends here regardless.
                 if !native_calls.is_empty() {
-                    self.native_exchanges.push(NativeExchange {
+                    self.register_native_exchange(NativeExchange {
                         delta_id: self.current_native_delta_id(),
                         assistant_text: response.content.clone(),
                         results: native_calls
@@ -3802,7 +3844,7 @@ impl AgentCore {
                 });
             }
             if !native_calls.is_empty() {
-                self.native_exchanges.push(NativeExchange {
+                self.register_native_exchange(NativeExchange {
                     delta_id: self.current_native_delta_id(),
                     assistant_text: response.content.clone(),
                     results: native_calls
@@ -4022,7 +4064,7 @@ impl AgentCore {
                 }
             })
             .collect();
-        self.native_exchanges.push(NativeExchange {
+        self.register_native_exchange(NativeExchange {
             delta_id,
             assistant_text,
             calls,
@@ -5278,6 +5320,10 @@ Runtime tool_call ids:",
                 }
             })
             .collect::<Vec<_>>();
+        self.context_message_elements += slices
+            .iter()
+            .filter(|slice| Self::is_context_message_prompt_type(&slice.prompt_type))
+            .count();
         self.deltas.push(PromptDelta {
             delta_id,
             time_ms: timestamp,
