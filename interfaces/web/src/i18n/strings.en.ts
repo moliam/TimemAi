@@ -145,7 +145,7 @@ export const en: Strings = {
     memoCreated: "Memo created",
     memoUpdated: "Memo updated",
     memoDeleted: "Memo deleted",
-    memoForceDeleted: "Memo forcibly closed by runtime",
+    memoForceDeleted: "Memo forcibly deleted by runtime",
     memoStopsFinish: "Memo still active: finish stopped",
   },
   roles: {
