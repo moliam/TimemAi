@@ -243,6 +243,7 @@ struct ImmediateFinalPromptCaptureModel {
     prompts: Arc<Mutex<Vec<String>>>,
 }
 
+#[cfg(unix)]
 struct SupplementDispatchTimeoutModel {
     prompts: Arc<Mutex<Vec<String>>>,
     entered_first_call: Arc<std::sync::atomic::AtomicBool>,
