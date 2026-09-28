@@ -4736,7 +4736,17 @@ impl AgentCore {
         }
         self.guard_pending_action_output_budget();
         self.flush_pending_prompt_components();
-        let prompt = self.render_prompt();
+        let mut prompt = self.render_prompt();
+        // The memo semantics must stay visible in the prompt context every
+        // round, not only at lifecycle events: restate the authoritative
+        // memo text before the response trailer so it keeps guiding work.
+        if let Some(memo) = self.active_memo.as_ref() {
+            prompt.push_str(&format!(
+                "
+
+memo active: {memo}"
+            ));
+        }
         self.evaluate_periodic_reasoning_review();
         if self.reasoning_review_due {
             format!("{}\n\n{}", prompt, prompt_render::REASONING_REVIEW_TRAILER)
