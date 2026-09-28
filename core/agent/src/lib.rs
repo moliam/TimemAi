@@ -2385,19 +2385,25 @@ impl AgentCore {
 
         if still_running.is_none() && updates.is_empty() && !self.context_compact_required {
             if let Some(trailer) = self.take_memo_deleted_trailer() {
-                let mut prompt = current_prompt.to_string();
+                let (body, response_trailer) =
+                    prompt_render::split_formatted_response_trailer(current_prompt);
+                let mut prompt = body.trim_end().to_string();
                 prompt.push_str(&trailer);
+                if let Some(response_trailer) = response_trailer {
+                    prompt.push_str("\n\n");
+                    prompt.push_str(&response_trailer);
+                }
                 return prompt;
             }
             return current_prompt.to_string();
+        }
+        if let Some(trailer) = self.take_memo_deleted_trailer() {
+            prompt.push_str(&trailer);
         }
         prompt.push_str("\n\n");
         if self.context_compact_required {
             prompt.push_str(prompt_render::CONTEXT_COMPACT_REQUIRED_TRAILER);
         } else if let Some(trailer) = trailer {
-            prompt.push_str(&trailer);
-        }
-        if let Some(trailer) = self.take_memo_deleted_trailer() {
             prompt.push_str(&trailer);
         }
         prompt
@@ -4796,7 +4802,7 @@ impl AgentCore {
         }
         self.memo_deleted_trailer_shown = true;
         Some(format!(
-            "\n\nYou just deleted the memo: \"{deleted}\" Re-verify: is the memo's final goal (not an intermediate milestone) genuinely achieved, and is this final answer a complete delivery for the user? If there is still remained work, you should update the memo, and don't issue task finish unless user asks you to."
+            "\n\nYou just deleted the memo: \"{deleted}\" Re-verify: is the memo's final goal (not an intermediate milestone) genuinely achieved, and is this final answer a complete delivery for the user? If there is still remained work, you should update the memo and continue, and don't issue task_finished tool unless user asks you to."
         ))
     }
 
@@ -4812,9 +4818,17 @@ impl AgentCore {
         }
         self.guard_pending_action_output_budget();
         self.flush_pending_prompt_components();
-        let mut prompt = self.render_prompt();
+        let rendered = self.render_prompt();
+        let mut prompt = rendered.clone();
         if let Some(trailer) = self.take_memo_deleted_trailer() {
+            let (body, response_trailer) =
+                prompt_render::split_formatted_response_trailer(&rendered);
+            prompt = body.trim_end().to_string();
             prompt.push_str(&trailer);
+            if let Some(response_trailer) = response_trailer {
+                prompt.push_str("\n\n");
+                prompt.push_str(&response_trailer);
+            }
         }
         self.evaluate_periodic_reasoning_review();
         if self.reasoning_review_due {
