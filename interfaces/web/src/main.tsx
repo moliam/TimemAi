@@ -9557,6 +9557,16 @@ function TimemThread({
   );
 }
 
+function countTurnModelRequests(turn: WebTurn): number {
+  return turn.events.reduce(
+    (count, event) =>
+      event.source === "worker_activity" && event.payload.kind === "model_request"
+        ? count + 1
+        : count,
+    0,
+  );
+}
+
 type TurnInteractionProps = {
   sessionId: string;
   turn: WebTurn;
@@ -10514,6 +10524,9 @@ function TurnAnswerDelivery({
         <div className="stream-working-trailer" role="status" aria-label="Working">
           <span className="stream-working-dot" aria-hidden="true" />
           <WorkingElapsed createdAtMs={turn.created_at_ms} />
+          <span className="stream-working-calls" aria-hidden="true">
+            ✦ {countTurnModelRequests(turn)}
+          </span>
         </div>
       )}
     </section>
