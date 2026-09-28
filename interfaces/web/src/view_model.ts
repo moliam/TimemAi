@@ -2046,6 +2046,29 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
     }
     case "core.work_instruction_load":
       return null;
+    case "core.memo": {
+      const op = label(payload.op) || "updated";
+      if (op === "stops_finish") {
+        return {
+          id: clientId(),
+          sessionId: event.session_id,
+          tone: "notice",
+          kind: "memo_notice",
+          title: "memo stops finish",
+          detail: label(payload.text),
+          createdAt: Date.now(),
+        };
+      }
+      return {
+        id: clientId(),
+        sessionId: event.session_id,
+        tone: "notice",
+        kind: "memo_notice",
+        title: `memo ${op}`,
+        detail: op === "deleted" ? "" : label(payload.text),
+        createdAt: Date.now(),
+      };
+    }
     default:
       return null;
   }

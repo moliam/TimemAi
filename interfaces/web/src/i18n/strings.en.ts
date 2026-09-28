@@ -142,6 +142,10 @@ export const en: Strings = {
     atChatBottom: "This is the bottom of the chat",
     memoIndicator: "Long-task memo",
     memoContent: "Current memo",
+    memoCreated: "Memo created",
+    memoUpdated: "Memo updated",
+    memoDeleted: "Memo deleted",
+    memoStopsFinish: "Memo still active: finish stopped",
   },
   roles: {
     panel: "Role",

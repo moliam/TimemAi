@@ -10799,26 +10799,31 @@ fn handle_scoped_worker_event(
                     }
                 }
                 if event.topic.name == agent_core::CORE_TOPIC_MEMO {
-                    // Authoritative memo state: persist on the session projection
-                    // (survives restart via snapshot) and notify clients.
-                    let memo_text = event
-                        .payload
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                    if let Ok(mut sessions) = state.sessions.lock() {
-                        if let Some(session) = sessions.get_mut(session_id) {
-                            session.active_memo = memo_text.clone();
+                    // The `op` field (created/updated/deleted/stops_finish)
+                    // rides the core_topic turn event below for chat
+                    // rendering. `stops_finish` is an informational
+                    // memo-finish-guard notice: the authoritative memo state
+                    // is unchanged, so skip the session projection update.
+                    if event.payload.get("op").and_then(Value::as_str) != Some("stops_finish") {
+                        let memo_text = event
+                            .payload
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                        if let Ok(mut sessions) = state.sessions.lock() {
+                            if let Some(session) = sessions.get_mut(session_id) {
+                                session.active_memo = memo_text.clone();
+                            }
                         }
+                        let _ = persist_web_session(state, session_id);
+                        publish_semantic(
+                            state,
+                            WireEvent::SessionMemoUpdated {
+                                session_id: session_id.to_string(),
+                                memo_text,
+                            },
+                        );
                     }
-                    let _ = persist_web_session(state, session_id);
-                    publish_semantic(
-                        state,
-                        WireEvent::SessionMemoUpdated {
-                            session_id: session_id.to_string(),
-                            memo_text,
-                        },
-                    );
                 }
                 if event.topic.name == CORE_TOPIC_TOOLGEN {
                     if let Ok(repo) = session_tool_repo(state, session_id) {

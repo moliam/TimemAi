@@ -11155,6 +11155,7 @@ function ActivityView({ activity, enterPulse = false }: { activity: Activity; en
   if (activity.kind === "context_compact")
     return <ContextCompactNotice activity={activity} />;
   if (activity.kind === "toolgen") return <ToolGenNotice activity={activity} />;
+  if (activity.kind === "memo_notice") return <MemoNotice activity={activity} />;
   if (activity.kind === "user_supplement")
     return (
       <div className="turn-work-item thinking user-supplement">
@@ -11449,6 +11450,32 @@ function ToolActivity({ activity }: { activity: Activity }) {
         )}
       </div>
     </details>
+  );
+}
+
+function MemoNotice({ activity }: { activity: Activity }) {
+  const op =
+    activity.title === "memo created"
+      ? "messageNav.memoCreated"
+      : activity.title === "memo updated"
+        ? "messageNav.memoUpdated"
+        : activity.title === "memo deleted"
+          ? "messageNav.memoDeleted"
+          : "messageNav.memoStopsFinish";
+  const icon =
+    activity.title === "memo stops_finish" || activity.title === "memo stops finish"
+      ? "🛑"
+      : "📝";
+  return (
+    <div className="turn-work-item notice memo-notice">
+      <span className="activity-mark" aria-hidden="true">
+        {icon}
+      </span>
+      <div className="memo-notice-line">
+        <strong>{t(op)}</strong>
+        {activity.detail && <span className="memo-notice-text">{activity.detail}</span>}
+      </div>
+    </div>
   );
 }
 
