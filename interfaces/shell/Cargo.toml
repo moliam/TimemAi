@@ -17,7 +17,9 @@ crossterm = "0.29"
 nu-ansi-term = "0.50"
 termimad = "0.34.1"
 syntect = { version = "=5.2.0", default-features = false, features = ["default-syntaxes", "default-themes", "regex-onig"] }
+# Cross-platform sync WebSocket client for `timem attach`; compiled on every
+# target (plain TCP streams only, no TLS features needed).
+tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
