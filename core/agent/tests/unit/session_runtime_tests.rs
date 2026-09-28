@@ -5734,8 +5734,13 @@ fn memo_finish_guard_blocks_inline_final_until_memo_deleted() {
             false,
         )),
         Ok(llm(
-            r#"{"status":"ALL_FINISHED","final_answer":"全部完成（memo 已删除）"}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"全部完成（确认过 memo 目标全部达成）"}"#,
             1_400,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"全部完成（memo 已删除）"}"#,
+            1_500,
             false,
         )),
     ]);
@@ -5758,7 +5763,9 @@ fn memo_finish_guard_blocks_inline_final_until_memo_deleted() {
     );
 
     assert_eq!(outcome.text, "全部完成（memo 已删除）");
-    assert_eq!(model.prompts.len(), 4);
+    // 5 requests: after the same-turn delete+finish, one posthumous challenge
+    // round intervenes before the second finish is accepted.
+    assert_eq!(model.prompts.len(), 5);
     // The request after the guarded final must carry the memo guard reminder.
     assert!(model.prompts[2].contains("still memo active: 长任务：完成数据迁移并全量绿灯"));
     assert!(model.prompts[2].contains("delete the memo"));
@@ -5866,6 +5873,13 @@ fn memo_survives_context_compaction_and_rides_next_prompt() {
                 4 => Ok(llm(
                     r#"{"status":"ALL_FINISHED","final_answer":"压缩链路验证完成"}"#,
                     1_300,
+                    false,
+                )),
+                // The same-turn delete-then-finish guard challenges once; the
+                // repeated finish on call 5 is accepted.
+                5 => Ok(llm(
+                    r#"{"status":"ALL_FINISHED","final_answer":"压缩链路验证完成"}"#,
+                    1_400,
                     false,
                 )),
                 _ => Err("unexpected_extra_model_call".to_string()),
