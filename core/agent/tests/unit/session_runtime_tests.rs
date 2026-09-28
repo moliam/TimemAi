@@ -5771,7 +5771,7 @@ fn memo_finish_guard_blocks_inline_final_until_memo_deleted() {
         "post-deletion request must quote the deleted memo"
     );
     assert!(
-        model.prompts[3].contains("don't issue task finish unless user asks you to."),
+        model.prompts[3].contains("don't issue task_finished tool unless user asks you to."),
         "post-deletion request must carry the finish guidance"
     );
     // After deletion the turn ends with the last final answer; the
