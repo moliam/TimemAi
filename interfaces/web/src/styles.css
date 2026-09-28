@@ -5479,6 +5479,57 @@ body.workspace-modal-open .app-shell { user-select: none; }
   outline-offset: 1px;
 }
 
+/* ctx action menu: hand toggle + compact/clear dropdown. */
+.context-actions-menu {
+  position: relative;
+  display: inline-grid;
+}
+.context-actions-dropdown {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 4px);
+  right: 0;
+  display: grid;
+  gap: 2px;
+  min-width: 108px;
+  padding: 4px;
+  border: 1px solid #33473f99;
+  border-radius: 8px;
+  background: #1c2220f2;
+  box-shadow: 0 4px 16px #0006;
+}
+.context-actions-dropdown button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #cfd6db;
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+.context-actions-dropdown button:hover {
+  background: #2a302edb;
+  color: #eaf1ee;
+}
+.context-actions-dropdown button:focus-visible {
+  outline: 2px solid #66b9ad;
+  outline-offset: 1px;
+}
+:root[data-theme="light"] .context-actions-dropdown {
+  border-color: #9aa8a2;
+  background: #ffffffef;
+}
+:root[data-theme="light"] .context-actions-dropdown button { color: #33413c; }
+:root[data-theme="light"] .context-actions-dropdown button:hover {
+  background: #e7ecef;
+  color: #1e2b26;
+}
+
 /* Stream working trailer: breathing dot with a dim elapsed label beside it. */
 .stream-working-trailer {
   display: flex;

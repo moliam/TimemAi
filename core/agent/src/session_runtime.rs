@@ -356,6 +356,9 @@ fn run_session_turn_with_model_client_and_reminder_override(
                 force_threshold,
             )]);
         }
+        if ui.take_manual_context_compact_request() {
+            core.request_manual_context_compact();
+        }
         match step {
             CoreStep::NeedModel { ref prompt, .. } => {
                 if ui.apply_pending_runtime_updates(core, config) {

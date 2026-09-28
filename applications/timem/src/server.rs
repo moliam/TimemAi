@@ -1144,6 +1144,9 @@ enum ClientCommand {
     SessionClearContext {
         session_id: String,
     },
+    SessionRequestContextCompact {
+        session_id: String,
+    },
     SessionDelete {
         session_id: String,
     },
@@ -1415,6 +1418,7 @@ impl ClientCommand {
             | Self::SessionApiKeyUpdate { session_id, .. }
             | Self::SessionStop { session_id }
             | Self::SessionClearContext { session_id }
+            | Self::SessionRequestContextCompact { session_id }
             | Self::SessionDelete { session_id }
             | Self::ChatMessageDelete { session_id, .. }
             | Self::TurnSubmit { session_id, .. }
@@ -3275,6 +3279,9 @@ fn handle_command_with_id(
         }
         ClientCommand::SessionClearContext { session_id } => {
             clear_session_prompt_context(state, &session_id)?;
+        }
+        ClientCommand::SessionRequestContextCompact { session_id } => {
+            request_session_context_compact(state, &session_id)?;
         }
         ClientCommand::SessionDelete { session_id } => {
             let worker_ids = session_worker_ids(state, &session_id)?;
@@ -7145,6 +7152,26 @@ fn restore_prompt_context_snapshot(state: &AppState, session_id: &str) -> Result
 /// Authoritative context reset: drops the worker's dynamic prompt context and
 /// the persisted snapshot so the next turn starts from the tool-owned system
 /// prompt only, exactly like a fresh runtime restart.
+fn request_session_context_compact(
+    state: &AppState,
+    session_id: &str,
+) -> Result<Option<WireEvent>, String> {
+    {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned")?;
+        sessions
+            .get(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+    }
+    // The worker turn loop polls this flag between model requests, so the
+    // request is accepted and effective even while the model is working.
+    let handle = session_worker_handle(state, session_id, None)?;
+    handle.request_manual_context_compact()?;
+    Ok(None)
+}
+
 fn clear_session_prompt_context(
     state: &AppState,
     session_id: &str,

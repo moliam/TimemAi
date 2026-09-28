@@ -405,6 +405,41 @@ fn test_core(
     core
 }
 
+#[test]
+fn manual_context_compact_request_carries_manual_trailer_and_clears_after_compact() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("manual_compact_mem"),
+    );
+    let _ = core.begin_turn("work", None);
+    core.request_manual_context_compact();
+    let prompt = match core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"status":"working","free_talk":"继续。","working_still_action":[{"run_bash":{"cmd":"true"}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    assert!(
+        prompt.contains("User manually requests context compaction."),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("Please compact context before further work."),
+        "{prompt}"
+    );
+    assert!(
+        !prompt.contains("Context is too long."),
+        "manual request must not use the forced-shrink wording: {prompt}"
+    );
+}
+
 fn xml_prompt_delta_containing<'a>(prompt: &'a str, marker: &str) -> &'a str {
     let marker_pos = prompt
         .find(marker)

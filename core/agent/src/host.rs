@@ -1758,6 +1758,12 @@ pub trait TurnUi {
         self.is_cancel_requested()
     }
 
+    /// User-initiated manual context compaction request (WebUI action).
+    /// Consumed by the turn loop each iteration; safe to set mid-turn.
+    fn take_manual_context_compact_request(&mut self) -> bool {
+        false
+    }
+
     fn drain_user_supplements(&mut self) -> Vec<String> {
         Vec::new()
     }
