@@ -2419,9 +2419,11 @@ impl AgentCore {
             prompt.push_str(&trailer);
         }
         prompt.push_str("\n\n");
+        // The manual wording persists across retries (like the threshold
+        // wording) until the compaction succeeds: the context may not be over
+        // the limit, so retries must not fall back to "Context is too long".
         if self.context_compact_required {
             if self.manual_compact_trailer_pending {
-                self.manual_compact_trailer_pending = false;
                 prompt.push_str(prompt_render::MANUAL_CONTEXT_COMPACT_TRAILER);
             } else {
                 prompt.push_str(prompt_render::CONTEXT_COMPACT_REQUIRED_TRAILER);
@@ -4930,8 +4932,11 @@ impl AgentCore {
         }
         if self.context_compact_required {
             let (body, response_trailer) = prompt_render::split_formatted_response_trailer(&prompt);
+            // The manual wording persists across retries (like the
+            // threshold wording) until the compaction succeeds: the context
+            // may not actually be over the limit, so the retry must not fall
+            // back to "Context is too long".
             let compact_trailer = if self.manual_compact_trailer_pending {
-                self.manual_compact_trailer_pending = false;
                 prompt_render::MANUAL_CONTEXT_COMPACT_TRAILER
             } else {
                 prompt_render::CONTEXT_COMPACT_REQUIRED_TRAILER
