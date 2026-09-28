@@ -9701,10 +9701,27 @@ const TurnInteraction = memo(function TurnInteraction({
     () => new Set(persistentToolGenItems.map(({ key }) => key)),
     [persistentToolGenItems],
   );
+  // A completed context compaction supersedes its earlier "compacting..."
+  // notice; without this the requested notice keeps its indeterminate
+  // animation forever after the real compaction already finished.
+  const compactCompletedSeen = useMemo(() => {
+    // A requested notice is superseded only by a completion that comes
+    // AFTER it; a later cycle gets its own requested+completed pair.
+    const seen = new Set<string>();
+    let completedAfter = false;
+    for (let i = visibleItems.length - 1; i >= 0; i--) {
+      const activity = visibleItems[i].activity;
+      if (activity?.kind !== "context_compact") continue;
+      if (activity.compact_phase === "completed") completedAfter = true;
+      else if (completedAfter && activity.compact_phase === "requested")
+        seen.add(visibleItems[i].key);
+    }
+    return seen;
+  }, [visibleItems]);
   const scrollItems = useMemo(
     () =>
-      visibleItems.filter((item) => !persistentToolGenItemKeys.has(item.key)),
-    [persistentToolGenItemKeys, visibleItems],
+      visibleItems.filter((item) => !persistentToolGenItemKeys.has(item.key) && !compactCompletedSeen.has(item.key)),
+    [persistentToolGenItemKeys, compactCompletedSeen, visibleItems],
   );
   const isWorking = turn.state === "working" && !isCancelling;
   const streamUiMode = useStreamUiMode();
