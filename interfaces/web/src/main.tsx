@@ -68,6 +68,7 @@ import {
   Search,
   Send,
   Eraser,
+  Hand,
   Settings,
   Sparkles,
   Star,
@@ -4399,6 +4400,15 @@ function TimemApp() {
                             session_id: activeSession.session_id,
                           });
                       }
+                    : null
+                }
+                onCompact={
+                  activeSession
+                    ? () =>
+                        sendCommand({
+                          type: "session_request_context_compact",
+                          session_id: activeSession.session_id,
+                        })
                     : null
                 }
               />
@@ -11097,10 +11107,29 @@ function FinalAnswerContent({ text, provisional = false }: { text: string; provi
 function HeaderContextUsage({
   session,
   onClear,
+  onCompact,
 }: {
   session: Session | undefined;
   onClear: (() => void) | null;
+  onCompact: (() => void) | null;
 }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDocDown = (event: MouseEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDocDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
   const usage = session ? sessionContextUsage(session) : undefined;
   const cacheHitPercent = session ? sessionCacheHitPercent(session) : undefined;
   const limit = session?.max_llm_input_tokens || undefined;
@@ -11127,16 +11156,50 @@ function HeaderContextUsage({
           <span style={{ width: `${ratio}%` }} />
         </span>
         <span>{limit ? `${ratio}%/${formatTokens(limit)}` : "—"}</span>
-        {onClear && (
-          <button
-            type="button"
-            className="context-clear-inline"
-            title={t("context.clearTitle")}
-            aria-label={t("context.clearTitle")}
-            onClick={onClear}
-          >
-            <Eraser size={12} aria-hidden="true" />
-          </button>
+        {(onClear || onCompact) && (
+          <span className="context-actions-menu" ref={menuRef}>
+            <button
+              type="button"
+              className="context-clear-inline"
+              title={t("context.actionsTitle")}
+              aria-label={t("context.actionsTitle")}
+              aria-expanded={menuOpen}
+              aria-haspopup="menu"
+              onClick={() => setMenuOpen(value => !value)}
+            >
+              <Hand size={12} aria-hidden="true" />
+            </button>
+            {menuOpen && (
+              <span className="context-actions-dropdown" role="menu">
+                {onCompact && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onCompact();
+                    }}
+                  >
+                    <Eraser size={11} aria-hidden="true" />
+                    {t("context.compactAction")}
+                  </button>
+                )}
+                {onClear && (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      if (window.confirm(t("context.clearConfirm"))) onClear();
+                    }}
+                  >
+                    <Eraser size={11} aria-hidden="true" />
+                    {t("context.clearAction")}
+                  </button>
+                )}
+              </span>
+            )}
+          </span>
         )}
       </span>
       <span className="header-cache-rate">

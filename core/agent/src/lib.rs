@@ -1738,6 +1738,9 @@ pub struct AgentCore {
     max_llm_input_tokens: u32,
     last_observed_prompt_tokens: u32,
     context_compact_required: bool,
+    /// Set for a user-initiated compaction request: the next request carries
+    /// the manual-compaction trailer wording instead of the forced-shrink one.
+    manual_compact_trailer_pending: bool,
     /// Set when the runtime first crosses the forced-shrink threshold and
     /// injects the compaction request. The turn loop drains it into a
     /// `core.context.compact` phase="requested" topic event for live UI.
@@ -1864,6 +1867,7 @@ impl AgentCore {
             max_llm_input_tokens: 100_000,
             last_observed_prompt_tokens: 0,
             context_compact_required: false,
+            manual_compact_trailer_pending: false,
             pending_compact_request_notice: None,
             rounds_since_reasoning: 0,
             reasoning_review_due: false,
@@ -2416,7 +2420,12 @@ impl AgentCore {
         }
         prompt.push_str("\n\n");
         if self.context_compact_required {
-            prompt.push_str(prompt_render::CONTEXT_COMPACT_REQUIRED_TRAILER);
+            if self.manual_compact_trailer_pending {
+                self.manual_compact_trailer_pending = false;
+                prompt.push_str(prompt_render::MANUAL_CONTEXT_COMPACT_TRAILER);
+            } else {
+                prompt.push_str(prompt_render::CONTEXT_COMPACT_REQUIRED_TRAILER);
+            }
         } else if let Some(trailer) = trailer {
             prompt.push_str(&trailer);
         }
@@ -3007,6 +3016,7 @@ impl AgentCore {
         self.context_message_elements = 0;
         self.last_observed_prompt_tokens = 0;
         self.context_compact_required = false;
+        self.manual_compact_trailer_pending = false;
         self.pending_compact_request_notice = None;
         self.current_round = 0;
         self.current_stats = UsageStats::zero();
@@ -3468,8 +3478,21 @@ impl AgentCore {
             && (parsed.context_compacts.len() != 1 || parsed.repair_issue.is_some())
         {
             self.current_round = self.current_round.saturating_sub(1);
+            let mut prompt = self.render_prompt();
+            let (body, response_trailer) = prompt_render::split_formatted_response_trailer(&prompt);
+            prompt = body.trim_end().to_string();
+            prompt.push_str("\n\n");
+            prompt.push_str(if self.manual_compact_trailer_pending {
+                prompt_render::MANUAL_CONTEXT_COMPACT_TRAILER
+            } else {
+                prompt_render::CONTEXT_COMPACT_REQUIRED_TRAILER
+            });
+            if let Some(response_trailer) = response_trailer {
+                prompt.push_str("\n\n");
+                prompt.push_str(&response_trailer);
+            }
             return CoreStep::NeedModel {
-                prompt: self.render_prompt(),
+                prompt,
                 rounds_remaining: self.remaining_rounds(),
             };
         }
@@ -3671,6 +3694,7 @@ impl AgentCore {
         }
         if compacted_successfully {
             self.context_compact_required = false;
+            self.manual_compact_trailer_pending = false;
         }
         if compacted_successfully {
             // A successful compact gets a dedicated assistant checkpoint in both
@@ -4904,6 +4928,21 @@ impl AgentCore {
                 prompt.push_str(&response_trailer);
             }
         }
+        if self.context_compact_required {
+            let (body, response_trailer) = prompt_render::split_formatted_response_trailer(&prompt);
+            let compact_trailer = if self.manual_compact_trailer_pending {
+                self.manual_compact_trailer_pending = false;
+                prompt_render::MANUAL_CONTEXT_COMPACT_TRAILER
+            } else {
+                prompt_render::CONTEXT_COMPACT_REQUIRED_TRAILER
+            };
+            prompt = body.trim_end().to_string();
+            prompt.push_str("\n\n");
+            prompt.push_str(compact_trailer);
+            if let Some(response_trailer) = response_trailer {
+                let _ = response_trailer;
+            }
+        }
         self.evaluate_periodic_reasoning_review();
         if self.reasoning_review_due {
             format!("{}\n\n{}", prompt, prompt_render::REASONING_REVIEW_TRAILER)
@@ -5510,6 +5549,19 @@ Runtime tool_call ids:",
     /// tokens, force threshold). Called by the turn loop each iteration.
     pub fn take_pending_compact_request_notice(&mut self) -> Option<(u32, u32)> {
         self.pending_compact_request_notice.take()
+    }
+
+    /// User-initiated compaction request: the next model request must lead
+    /// with context_compact, announced with the manual-request wording. The
+    /// forced-shrink machinery (response suppression, tool-call gating) is
+    /// reused so the compaction actually happens.
+    pub fn request_manual_context_compact(&mut self) {
+        self.manual_compact_trailer_pending = true;
+        self.context_compact_required = true;
+        if self.pending_compact_request_notice.is_none() {
+            self.pending_compact_request_notice =
+                Some((self.last_observed_prompt_tokens, self.max_llm_input_tokens));
+        }
     }
 
     fn estimate_rendered_prompt_tokens(&self, incoming_prompt_tokens: u32) -> u32 {

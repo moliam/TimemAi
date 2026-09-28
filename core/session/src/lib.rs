@@ -479,6 +479,7 @@ pub struct CoreSessionWorkerHandle {
     supplement_mailbox: Arc<Mutex<SupplementMailbox>>,
     command_ids: Arc<Mutex<CoreCommandIdTracker>>,
     cancel_requested: Arc<AtomicBool>,
+    manual_compact_requested: Arc<AtomicBool>,
     cancel_generation: Arc<AtomicU64>,
     shutdown_requested: Arc<AtomicBool>,
     reply_tx: Sender<TopicReply>,
@@ -819,6 +820,13 @@ impl CoreSessionWorkerHandle {
 
     pub fn add_user_supplement(&self, supplement: impl Into<String>) {
         let _ = self.try_add_user_supplement(supplement);
+    }
+
+    /// User-initiated context compaction; effective even mid-turn because the
+    /// turn loop polls this flag between model requests.
+    pub fn request_manual_context_compact(&self) -> Result<(), String> {
+        self.manual_compact_requested.store(true, Ordering::SeqCst);
+        Ok(())
     }
 
     pub fn cancel_current_turn(&self) {
@@ -1591,6 +1599,7 @@ impl CoreSessionWorker {
         let (reply_tx, reply_rx) = mpsc::channel();
         let supplement_mailbox = Arc::new(Mutex::new(SupplementMailbox::default()));
         let cancel_requested = Arc::new(AtomicBool::new(false));
+        let manual_compact_requested = Arc::new(AtomicBool::new(false));
         let cancel_generation = Arc::new(AtomicU64::new(0));
         let shutdown_requested = Arc::new(AtomicBool::new(false));
         let command_ids = Arc::new(Mutex::new(CoreCommandIdTracker::default()));
@@ -1601,6 +1610,7 @@ impl CoreSessionWorker {
             command_tx,
             supplement_mailbox: Arc::clone(&supplement_mailbox),
             cancel_requested: Arc::clone(&cancel_requested),
+            manual_compact_requested: Arc::clone(&manual_compact_requested),
             cancel_generation: Arc::clone(&cancel_generation),
             shutdown_requested: Arc::clone(&shutdown_requested),
             reply_tx,
@@ -1646,6 +1656,7 @@ impl CoreSessionWorker {
                 supplement_mailbox,
                 command_ids: Arc::clone(&command_ids),
                 cancel_requested: Arc::clone(&cancel_requested),
+                manual_compact_requested: Arc::clone(&manual_compact_requested),
                 reply_rx,
                 runtime: runtime.clone(),
                 current_turn_active: None,
@@ -2074,6 +2085,7 @@ struct WorkerTurnUi {
     supplement_mailbox: Arc<Mutex<SupplementMailbox>>,
     command_ids: Arc<Mutex<CoreCommandIdTracker>>,
     cancel_requested: Arc<AtomicBool>,
+    manual_compact_requested: Arc<AtomicBool>,
     reply_rx: Receiver<TopicReply>,
     runtime: CoreSessionWorkerRuntime,
     current_turn_active: Option<Arc<AtomicBool>>,
@@ -2366,6 +2378,10 @@ impl TurnUi for WorkerTurnUi {
 
     fn take_cancel_request(&mut self) -> bool {
         self.cancel_requested.swap(false, Ordering::SeqCst)
+    }
+
+    fn take_manual_context_compact_request(&mut self) -> bool {
+        self.manual_compact_requested.swap(false, Ordering::SeqCst)
     }
 
     fn drain_user_supplements_with_context(&mut self) -> Vec<agent_core::UserSupplement> {
