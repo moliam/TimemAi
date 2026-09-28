@@ -9384,15 +9384,15 @@ function TimemThread({
             type="button"
             className={`thread-working-away ${activeSession.state === "working" ? "is-working" : "is-idle"}${threadAwayFromBottom ? " away-from-bottom" : " at-live-edge"}`}
             title={
-              activeSession.state === "working"
-                ? activeSession.active_memo
-                  ? `${t("messageNav.memoIndicator")}: ${activeSession.active_memo}`
-                  : threadAwayFromBottom
+              activeSession.state === "working" && activeSession.active_memo
+                ? undefined
+                : activeSession.state === "working"
+                  ? threadAwayFromBottom
                     ? t("messageNav.workingJumpLatest")
                     : t("messageNav.workingAtLatest")
-                : threadAwayFromBottom
-                  ? t("messageNav.jumpToChatBottom")
-                  : t("messageNav.atChatBottom")
+                  : threadAwayFromBottom
+                    ? t("messageNav.jumpToChatBottom")
+                    : t("messageNav.atChatBottom")
             }
             aria-label={
               activeSession.state === "working"
@@ -9405,6 +9405,14 @@ function TimemThread({
             }
             onClick={navigateWorkingToThreadBottom}
           >
+            {activeSession.state === "working" && activeSession.active_memo && (
+              <span className="thread-working-memo-tooltip" role="tooltip">
+                <span className="thread-memo-caption">
+                  {t("messageNav.memoIndicator")}
+                </span>
+                <span className="thread-memo-text">{activeSession.active_memo}</span>
+              </span>
+            )}
             <span className="thread-edge-symbol" aria-hidden="true">
               {activeSession.state === "working" ? (
                 <span className="thread-working-mark">

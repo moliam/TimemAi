@@ -3737,6 +3737,41 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .thread-working-mark:has(.thread-working-pin) .thread-working-pin {
   margin-top: -1px;
 }
+/* Instant memo tooltip for the working indicator: native `title` has a
+   ~1s browser delay; a CSS tooltip appears immediately on hover. */
+.thread-working-memo-tooltip {
+  position: absolute;
+  z-index: 43;
+  right: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%) translateX(4px);
+  display: grid;
+  gap: 3px;
+  width: max-content;
+  max-width: 320px;
+  padding: 8px 10px;
+  border: 1px solid #33473f99;
+  border-radius: 8px;
+  background: #1c2220f2;
+  color: #cfd6db;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: left;
+  box-shadow: 0 2px 10px #00000052;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .08s ease, transform .08s ease;
+}
+.thread-working-away:hover .thread-working-memo-tooltip,
+.thread-working-away:focus-visible .thread-working-memo-tooltip {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+}
+:root[data-theme="light"] .thread-working-memo-tooltip {
+  background: #ffffffef;
+  border-color: #9aa8a2;
+  color: #33413c;
+}
 .thread-working-core {
   position: relative;
   z-index: 1;
