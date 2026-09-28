@@ -3740,12 +3740,14 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 }
 /* Instant memo tooltip for the working indicator: native `title` has a
    ~1s browser delay; a CSS tooltip appears immediately on hover. */
-.thread-working-memo-tooltip {
-  position: absolute;
-  z-index: 43;
-  right: calc(100% + 8px);
-  top: 50%;
-  transform: translateY(-50%) translateX(4px);
+/* Rendered via a portal on <body> with fixed positioning: escapes every
+   ancestor overflow clip and stacking context (chat area, session sidebar).
+   React controls mount/unmount; left/top are computed against the viewport
+   (flips to the right of the button when the left side is too narrow). */
+.thread-working-memo-tooltip.is-portal {
+  position: fixed;
+  z-index: 80;
+  transform: translateY(-50%);
   display: grid;
   gap: 3px;
   width: max-content;
@@ -3759,14 +3761,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
   line-height: 1.5;
   text-align: left;
   box-shadow: 0 2px 10px #00000052;
-  opacity: 0;
   pointer-events: none;
-  transition: opacity .08s ease, transform .08s ease;
-}
-.thread-working-away:hover .thread-working-memo-tooltip,
-.thread-working-away:focus-visible .thread-working-memo-tooltip {
-  opacity: 1;
-  transform: translateY(-50%) translateX(0);
 }
 :root[data-theme="light"] .thread-working-memo-tooltip {
   background: #ffffffef;
