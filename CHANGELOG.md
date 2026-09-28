@@ -1,5 +1,30 @@
 # Changelog
 
+## [2.3.2] - 2026-09-28
+
+### Added
+
+- Emit a `core.context.compact` `phase=requested` topic when the forced
+  shrink threshold is crossed; the WebUI shows a live compacting notice with
+  an indeterminate meter, and the completed notice includes percent-off.
+
+### Changed
+
+- A `task_finished` turn resubmits unconsumed user supplements as a new
+  turn instead of stranding them; stopped/error turns stay fail-closed.
+- The live stream retains every dynamic activity until the authoritative
+  turn end; collapsed tool-run groups show a bare xN count without verdicts.
+- Memo notices drop the icon chip background and distinguish agent-deleted
+  vs runtime-force-deleted wording.
+
+### Fixed
+
+- Compile `tungstenite` on all targets so `timem attach` builds on Windows.
+- Canonicalize first-touch note test expectations for macOS/Windows paths.
+- Gate the timing-sensitive supplement dispatch-timeout test to unix and
+  relax the shutdown-detach timing bound for CI jitter.
+
+
 ## [2.3.1] - 2026-09-28
 
 ### Added
