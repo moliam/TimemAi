@@ -5734,11 +5734,6 @@ fn memo_finish_guard_blocks_inline_final_until_memo_deleted() {
             false,
         )),
         Ok(llm(
-            r#"{"status":"ALL_FINISHED","final_answer":"全部完成（确认过 memo 目标全部达成）"}"#,
-            1_400,
-            false,
-        )),
-        Ok(llm(
             r#"{"status":"ALL_FINISHED","final_answer":"全部完成（memo 已删除）"}"#,
             1_500,
             false,
@@ -5763,9 +5758,9 @@ fn memo_finish_guard_blocks_inline_final_until_memo_deleted() {
     );
 
     assert_eq!(outcome.text, "全部完成（memo 已删除）");
-    // 5 requests: after the same-turn delete+finish, one posthumous challenge
-    // round intervenes before the second finish is accepted.
-    assert_eq!(model.prompts.len(), 5);
+    // 4 requests: after the same-turn delete+finish, the challenge rides the
+    // next request's trailer instead of blocking with an extra round.
+    assert_eq!(model.prompts.len(), 4);
     // The request after the guarded final must carry the memo guard reminder.
     assert!(model.prompts[2].contains("still memo active: 长任务：完成数据迁移并全量绿灯"));
     assert!(model.prompts[2].contains("delete the memo"));
