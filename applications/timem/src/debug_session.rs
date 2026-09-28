@@ -1160,11 +1160,8 @@ fn render_statistics_html(session_id: &str, stats: &SessionDebug) -> String {
     out.push_str("<footer>Request counts cover logical model-turn requests; retry attempts are folded into their final outcome. Capability-probe traffic is reported in endpoint negotiation details.</footer></main><script>");
     out.push_str(STATISTICS_JS);
     out.push_str(&format!(
-        "window.__timemStatsRefresh=setTimeout(()=>location.reload(),{STATISTICS_REFRESH_MS});"
+        "window.__timemStatsRefresh=setTimeout(refresh,{STATISTICS_REFRESH_MS});async function refresh(){{try{{const res=await fetch(location.href,{{cache:'no-store'}});if(!res.ok)return;const doc=new DOMParser().parseFromString(await res.text(),'text/html');document.title=doc.title;const fresh=doc.querySelector('main.shell');const current=document.querySelector('main.shell');if(fresh&&current){{current.replaceWith(fresh);window.wireStatisticsPage();}}}}catch(e){{}}window.__timemStatsRefresh=setTimeout(refresh,{STATISTICS_REFRESH_MS});}}"
     ));
-    out.push_str(
-        "document.getElementById('reset-stats')?.addEventListener('click',async(ev)=>{ev.preventDefault();clearTimeout(window.__timemStatsRefresh);if(!confirm('Reset cumulative statistics for this session?')){window.__timemStatsRefresh=setTimeout(()=>location.reload(),2000);return;}ev.target.disabled=true;const params=new URLSearchParams(location.search);params.delete('path');params.delete('download');try{await fetch('/api/debug/reset?'+params.toString(),{method:'POST'});}catch(e){alert('Reset request failed: '+e);return;}location.reload();});",
-    );
     out.push_str("</script></body></html>");
     out
 }
@@ -1746,7 +1743,8 @@ const STATISTICS_CSS: &str = r#"
 "#;
 
 const STATISTICS_JS: &str = r#"
-(()=>{const key=`timem-statistics-tab:${location.pathname}`;const buttons=[...document.querySelectorAll('[data-endpoint-tab]')];const panels=[...document.querySelectorAll('.endpoint-panel')];const load=()=>{try{return sessionStorage.getItem(key)}catch{return null}};const save=id=>{try{sessionStorage.setItem(key,id)}catch{}};function select(id){if(!panels.some(p=>p.id===id))id=panels[0]?.id;buttons.forEach(b=>b.setAttribute('aria-selected',String(b.dataset.endpointTab===id)));panels.forEach(p=>p.classList.toggle('active',p.id===id));if(id)save(id)}buttons.forEach(b=>b.addEventListener('click',()=>select(b.dataset.endpointTab)));select(load()||panels[0]?.id)})();
+window.wireStatisticsPage=()=>{const key=`timem-statistics-tab:${location.pathname}`;const buttons=[...document.querySelectorAll('[data-endpoint-tab]')];const panels=[...document.querySelectorAll('.endpoint-panel')];const load=()=>{try{return sessionStorage.getItem(key)}catch{return null}};const save=id=>{try{sessionStorage.setItem(key,id)}catch{return}};function select(id){if(!panels.some(p=>p.id===id))id=panels[0]?.id;buttons.forEach(b=>b.setAttribute('aria-selected',String(b.dataset.endpointTab===id)));panels.forEach(p=>p.classList.toggle('active',p.id===id));if(id)save(id)}buttons.forEach(b=>b.addEventListener('click',()=>select(b.dataset.endpointTab)));select(load()||panels[0]?.id);document.getElementById('reset-stats')?.addEventListener('click',async(ev)=>{ev.preventDefault();clearTimeout(window.__timemStatsRefresh);if(!confirm('Reset cumulative statistics for this session?')){window.__timemStatsRefresh=setTimeout(refresh,2000);return;}ev.target.disabled=true;const params=new URLSearchParams(location.search);params.delete('path');params.delete('download');try{await fetch('/api/debug/reset?'+params.toString(),{method:'POST'});}catch(e){alert('Reset request failed: '+e);return;}refresh();});};
+window.wireStatisticsPage();
 "#;
 
 #[cfg(test)]
