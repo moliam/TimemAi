@@ -5491,4 +5491,4 @@ body.workspace-modal-open .app-shell { user-select: none; }
 
 .memo-notice .memo-notice-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .memo-notice .memo-notice-text { color: #9db2c1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
-.memo-notice .activity-mark { font-size: 13px; }
+.memo-notice .activity-mark { font-size: 13px; background: transparent; }
