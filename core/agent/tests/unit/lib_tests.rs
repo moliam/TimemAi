@@ -2456,3 +2456,36 @@ fn context_message_element_count_counts_user_and_assistant_messages() {
         11
     );
 }
+
+#[test]
+fn incremental_message_count_matches_full_recomputation() {
+    let mut core = test_core("incremental_message_count");
+    for i in 0..6 {
+        core.submit_prompt_component(
+            PromptComponentRole::User,
+            "user_question",
+            format!("u{i}"),
+            "user_input",
+        );
+        core.submit_prompt_component(
+            PromptComponentRole::system(),
+            "result_of_llm_action",
+            format!("action {i}"),
+            "previous_model_response",
+        );
+    }
+    core.flush_pending_prompt_components();
+    core.recount_context_message_elements_for_test();
+    let incremental = core.context_message_elements_for_test();
+    assert_eq!(incremental, 6, "non-message slices must not be counted");
+    // A second recount after more message writes stays consistent.
+    core.submit_prompt_component(
+        PromptComponentRole::assistant("Timem"),
+        "llm_response",
+        "assistant reply",
+        "previous_model_response",
+    );
+    core.flush_pending_prompt_components();
+    core.recount_context_message_elements_for_test();
+    assert_eq!(core.context_message_elements_for_test(), incremental + 1);
+}
