@@ -696,7 +696,7 @@ async function main() {
     const longThought = Array.from({length: 60}, (_, i) => `Paragraph ${i} remains stable.\n\n`).join("");
     const longEvents = [thoughtEvent("long", longThought, 1), toolEvent("adjacent-a", 3), toolEvent("adjacent-b", 4), thoughtEvent("after-adjacent", "Following AI reply", 100)];
     await setRound(longEvents, longThought);
-    await waitFor(() => contains(".stream-tool-run-toggle", "2 ✓"), "adjacent completed tools not merged");
+    await waitFor(() => contains(".stream-tool-run-toggle", "x2"), "adjacent completed tools not merged");
     await waitFor(() => browser.evaluate(`document.querySelectorAll('.stream-tool-merged-item.merged').length === 2`), "completed group not folded");
     await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click()`);
     await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-merged-item.merged')`), "merged calls cannot expand");
@@ -747,7 +747,7 @@ async function main() {
     // Visual interaction contracts, beyond node identity.
     await setRound(longEvents, longThought);
     await waitFor(() => browser.evaluate(`document.querySelectorAll('.stream-tool-merged-item.merged').length === 2`), "initial merged run missing");
-    assert(await browser.evaluate(`document.querySelector('.stream-tool-count').textContent === '2 ✓' && !document.querySelector('.stream-tool-count.incremented')`), "initial snapshot must hide zero failures without animating");
+    assert(await browser.evaluate(`document.querySelector('.stream-tool-count').textContent === 'x2' && !document.querySelector('.stream-tool-count.incremented')`), "initial snapshot must hide zero failures without animating");
     await browser.evaluate(`window.countToggle = document.querySelector('.stream-tool-run-toggle'); window.countRows = [...document.querySelectorAll('.stream-tool-row')]; window.countNode = document.querySelector('.stream-tool-count'); window.countAnimations = 0; document.addEventListener('animationstart', e => { if(e.animationName === 'stream-tool-count-increment') window.countAnimations++; });`);
     // CSS zoom exercises layout scaling, not native browser chrome zoom. DPR is
     // varied independently so physical pixel density cannot drive CSS spacing.
@@ -770,7 +770,7 @@ async function main() {
           })()`);
           const expected = Math.min(4, Math.max(2, font * .125));
           assert(Math.abs(result.gap - expected) < .1 && Math.abs(result.margin - expected) < .1, `relative spacing ${width}/${font}/${zoom}: ${JSON.stringify(result)}`);
-          assert(result.width <= result.viewport + 1 && result.toggleWidth > 0 && result.toggleHeight > 0 && result.label === '2 ✓', `responsive overflow/control ${width}/${font}/${zoom}: ${JSON.stringify(result)}`);
+          assert(result.width <= result.viewport + 1 && result.toggleWidth > 0 && result.toggleHeight > 0 && result.label === 'x2', `responsive overflow/control ${width}/${font}/${zoom}: ${JSON.stringify(result)}`);
           responsiveCases++;
         }
       }
@@ -792,11 +792,11 @@ async function main() {
     const visualBase = host.getSession();
     const moreCalls = {...visualBase, turns: visualBase.turns.map(t => ({...t, events:[...longEvents, toolEvent("adjacent-c", 5)]}))};
     host.setSession(moreCalls); host.send({type:"hello", snapshot:makeSnapshot(moreCalls)});
-    await waitFor(() => contains(".stream-tool-run-toggle", "3 ✓"), "new completion missing");
+    await waitFor(() => contains(".stream-tool-run-toggle", "x3"), "new completion missing");
     assert(await browser.evaluate(`document.querySelectorAll('.stream-tool-merged-item.merged').length === 3`), "new completion reopened merged history");
     await waitFor(() => browser.evaluate(`window.countAnimations === 1`), "increment animation did not start");
     assert(await browser.evaluate(`window.countToggle === document.querySelector('.stream-tool-run-toggle') && window.countNode !== document.querySelector('.stream-tool-count') && window.countRows.every((row, i) => row === document.querySelectorAll('.stream-tool-row')[i])`), "count increment remounted toggle or tool rows");
-    assert(await browser.evaluate(`document.querySelector('.stream-tool-count').textContent === '3 ✓' && getComputedStyle(document.querySelector('.stream-tool-count')).animationDuration === '0.36s'`), "count label or animation duration incorrect");
+    assert(await browser.evaluate(`document.querySelector('.stream-tool-count').textContent === 'x3' && getComputedStyle(document.querySelector('.stream-tool-count')).animationDuration === '0.36s'`), "count label or animation duration incorrect");
     await waitForSubtreeIdle(browser, ".stream-tool-count", "count animation did not settle before replay");
     await browser.evaluate(`window.countNode = document.querySelector('.stream-tool-count'); true`);
     host.send({type:"hello", snapshot:makeSnapshot(moreCalls)});
@@ -812,7 +812,7 @@ async function main() {
       growingEvents.push(toolEvent(`increment-${i}`, i + 2));
       const next = {...visualBase, turns: visualBase.turns.map(t => ({...t, events:[...growingEvents]}))};
       host.setSession(next); host.send({type:"hello", snapshot:makeSnapshot(next)});
-      await waitFor(() => browser.evaluate(`document.querySelector('.stream-tool-count')?.textContent === '${i} ✓' && window.countAnimations === ${i - 2}`), `increment ${i} did not animate exactly once`);
+      await waitFor(() => browser.evaluate(`document.querySelector('.stream-tool-count')?.textContent === 'x${i}' && window.countAnimations === ${i - 2}`), `increment ${i} did not animate exactly once`);
     }
     await waitForSubtreeIdle(browser, ".stream-tool-count", "count animation did not settle before metrics");
     const countAfter = await countMetrics();
@@ -825,7 +825,7 @@ async function main() {
     growingEvents.push(toolEvent("reduced-count", 30));
     const reducedCalls = {...visualBase, turns: visualBase.turns.map(t => ({...t, events:[...growingEvents]}))};
     host.setSession(reducedCalls); host.send({type:"hello", snapshot:makeSnapshot(reducedCalls)});
-    await waitFor(() => browser.evaluate(`document.querySelector('.stream-tool-count')?.textContent === '24 ✓'`), "reduced motion lost count update");
+    await waitFor(() => browser.evaluate(`document.querySelector('.stream-tool-count')?.textContent === 'x24'`), "reduced motion lost count update");
     assert(await browser.evaluate(`getComputedStyle(document.querySelector('.stream-tool-count')).animationName === 'none' && window.countAnimations === 21`), "reduced motion animated count");
     await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
     // Restoring motion may start the existing CSS animation; isolate that media
@@ -838,7 +838,7 @@ async function main() {
     growingEvents.push(batchFailure, toolEvent("batch-success", 32));
     const batchCalls = {...visualBase, turns: visualBase.turns.map(t => ({...t, events:[...growingEvents]}))};
     host.setSession(batchCalls); host.send({type:"hello", snapshot:makeSnapshot(batchCalls)});
-    await waitFor(() => browser.evaluate(`document.querySelector('.stream-tool-count')?.textContent === '25 ✓ | 1 ✗' && window.countAnimations === ${beforeBatchAnimations + 1}`), "batched completion must animate once with exact mixed counts");
+    await waitFor(() => browser.evaluate(`document.querySelector('.stream-tool-count')?.textContent === 'x26' && window.countAnimations === ${beforeBatchAnimations + 1}`), "batched completion must animate once with exact mixed counts");
     await waitForSubtreeIdle(browser, ".stream-tool-count", "batch count animation did not settle");
     host.send({type:"hello", snapshot:makeSnapshot(batchCalls)});
     await waitForSubtreeIdle(browser, ".stream-tool-count", "batch replay animation did not settle");
@@ -858,7 +858,7 @@ async function main() {
     await browser.evaluate(`document.querySelector('.stream-tool-toggle').click()`);
     await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-fold.expanded')`), "failed tool collapse control ineffective");
     await setRound([thoughtEvent("mixed-thought", "Mixed results", 1), toolEvent("success-call", 2.75), failed, thoughtEvent("mixed-reply", "Failure explanation", 4)], "Mixed results");
-    await waitFor(() => contains(".stream-tool-run-toggle", "工具 1 ✓ | 1 ✗"), "mixed result counts missing");
+    await waitFor(() => contains(".stream-tool-run-toggle", "x2"), "mixed result counts missing");
     assert(await browser.evaluate(`(() => {
       const item = document.querySelector('.stream-tool-merged-item.merged');
       if (!item) return false;
@@ -877,10 +877,14 @@ async function main() {
     await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click()`);
     assert(await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').getAttribute('aria-expanded') === 'false' && !!document.querySelector('.stream-tool-run-toggle > svg.lucide-plus')`), "collapsed tools must display plus");
     await browser.evaluate(`localStorage.setItem("timem-web-tool-result-status-v1", "false"); window.dispatchEvent(new StorageEvent("storage", {key:"timem-web-tool-result-status-v1"}));`);
-    await waitFor(() => contains(".stream-tool-run-toggle", "2 已完成"), "neutral folded count missing");
+    // Collapsed groups now show a bare xN count (no result verdicts).
+    await waitFor(() => contains(".stream-tool-run-toggle", "x2"), "neutral folded count missing");
     assert(await browser.evaluate(`[...document.querySelectorAll('.stream-tool-status')].every(n => n.textContent === '已完成' && n.getAttribute('aria-label') === '已完成')`), "neutral rows leaked success/failure visually or accessibly");
     await browser.evaluate(`localStorage.setItem("timem-web-tool-result-status-v1", "true"); window.dispatchEvent(new StorageEvent("storage", {key:"timem-web-tool-result-status-v1"}));`);
-    await waitFor(() => contains(".stream-tool-run-toggle", "1 ✓ | 1 ✗"), "result preference did not update mounted rows");
+    // Result preference updates mounted row status; the collapsed toggle
+    // stays a bare xN count under the new collapsed-state contract.
+    await waitFor(() => contains(".stream-tool-run-toggle", "x2"), "result preference did not update mounted rows");
+    assert(await browser.evaluate(`[...document.querySelectorAll(".stream-tool-status")].some(n => n.textContent === "✓" || n.textContent === "✗")`), "result preference did not restore row verdicts");
     console.log("PASS Chrome visual interaction: stable completed groups, selection protection, failure toggle, 390/768px overflow");
     console.log("PASS Chrome continuous stream: multi-round DOM stability, completed adjacency merge/reopen, terminal animation and interruption archive");
     console.log("PASS Chrome interim continuity: deduplicated deliveries, earlier thought/answers retained, reload and typography");
