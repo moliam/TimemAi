@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatToolElapsed, humanizeToolStatus, toolResultCountsLabel, isToolActivityFailed, isToolActivityRunning } from "../src/tool_status";
+import { formatToolElapsed, formatLiveElapsed, humanizeToolStatus, toolResultCountsLabel, isToolActivityFailed, isToolActivityRunning } from "../src/tool_status";
 import { setLocale } from "../src/i18n";
 
 setLocale("zh");
@@ -15,6 +15,15 @@ describe("stream tool elapsed label", () => {
     expect(formatToolElapsed(306000)).toBe("5m6s");
     expect(formatToolElapsed(3720000)).toBe("1h2m");
     expect(formatToolElapsed(-5)).toBe("0s");
+  });
+  it("formats live running elapsed in whole-second compact style", () => {
+    expect(formatLiveElapsed(0)).toBe("0s");
+    expect(formatLiveElapsed(2000)).toBe("2s");
+    expect(formatLiveElapsed(2560)).toBe("2s");
+    expect(formatLiveElapsed(59_999)).toBe("59s");
+    expect(formatLiveElapsed(183_000)).toBe("3m3s");
+    expect(formatLiveElapsed(7_392_000)).toBe("2h3m12s");
+    expect(formatLiveElapsed(-100)).toBe("0s");
   });
 });
 

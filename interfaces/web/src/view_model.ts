@@ -1346,6 +1346,39 @@ function sessionRuntimeRestartAtMs(session: Session): number | undefined {
   );
 }
 
+/**
+ * True while a manual context-compaction request has been announced but no
+ * completion notice has superseded it. Drives the "compacting..." menu item
+ * so the user cannot double-submit.
+ */
+export function sessionContextCompactPending(session: Session): boolean {
+  // Stale notices from before the latest runtime restart or context clear
+  // do not describe the live compaction state; ignore them.
+  const floorMs = sessionContextUsageFloorMs(session);
+  let pending = false;
+  let pendingAtMs = 0;
+  for (const turn of session.turns) {
+    for (const event of turn.events) {
+      if (event.source !== "core_topic") continue;
+      if (floorMs !== undefined && event.created_at_ms < floorMs) continue;
+      const payload = event.payload as { topic?: { name?: string }; payload?: { phase?: string } };
+      if (payload.topic?.name !== "core.context.compact") continue;
+      const phase = payload.payload?.phase;
+      if (event.created_at_ms >= pendingAtMs) {
+        pending = phase === "requested";
+        pendingAtMs = event.created_at_ms;
+      }
+    }
+    // Compaction only happens inside a turn. If the turn hosting the latest
+    // "requested" notice reaches a terminal state without a completion
+    // (e.g. the turn was cancelled), the compaction will never land and the
+    // pending state must fall back so the menu does not stick on
+    // "compacting...".
+    if (pending && turn.completion) pending = false;
+  }
+  return pending;
+}
+
 export function sessionContextUsage(
   session: Session,
 ): import("./protocol").UsageStats | undefined {

@@ -50,9 +50,10 @@ use agent_core::session_store::{
     SessionResumeNotice, SessionStore, StoredSession, StoredSessionProfile, StoredSessionState,
 };
 use agent_core::{
-    apply_runtime_config_value, combine_additional_contexts, create_memory_dir, default_memory_dir,
-    load_workspace_dirs_from_path, model_service_config_from_sources_allow_missing_api_key,
-    resolve_memory_dir, runtime_config_menu_report, validate_api_key, work_instruction_load_report,
+    apply_runtime_config_value, combine_additional_contexts, context_compact_requested_topic_event,
+    create_memory_dir, default_memory_dir, load_workspace_dirs_from_path,
+    model_service_config_from_sources_allow_missing_api_key, resolve_memory_dir,
+    runtime_config_menu_report, validate_api_key, work_instruction_load_report,
     work_instruction_load_request, work_instruction_mode_from_sources, AgentCore, BashApprovalMode,
     CoreSessionWorkerWorkspace, HostDecision, HostDecisionRequest, InterfacePreferences,
     ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind, RuntimeDataLayout,
@@ -6574,6 +6575,10 @@ fn enqueue_next_turn_intent(
         let payload = WebNextTurnPayload {
             send_after_cancel: session.cancelling_turn_id.is_some()
                 && session.message_queue.is_empty(),
+            // Web presentation turn id (`web_turn_...`). It is a separate ID
+            // domain from the Core lifecycle TurnToken (`turn_...`); the mapping
+            // stays host-internal (command_id / pending_turn_id) and is NOT part
+            // of the wire protocol, so clients must never compare the two.
             turn_id: unique_web_id("web_turn"),
             created_at_ms: now_ms(),
             text,
@@ -7156,20 +7161,98 @@ fn request_session_context_compact(
     state: &AppState,
     session_id: &str,
 ) -> Result<Option<WireEvent>, String> {
-    {
+    let handle = session_worker_handle(state, session_id, None)?;
+    // Publish the "compacting..." notice immediately so the user sees the
+    // request accepted; the completion notice later supersedes it.
+    let (estimated_prompt_tokens, force_threshold) = {
         let sessions = state
             .sessions
             .lock()
             .map_err(|_| "session_store_poisoned")?;
-        sessions
+        let session = sessions
             .get(session_id)
             .ok_or_else(|| "session_not_found".to_string())?;
+        let estimated = session_context_usage_tokens(session);
+        (estimated, session.max_llm_input_tokens)
+    };
+    // Normalize the manual compaction onto the supplement shuttle: a busy
+    // worker queues a mailbox marker that forces the next model dispatch
+    // after the compact dispatch timeout; an idle worker starts a direct
+    // resume turn whose first model request leads with the compaction.
+    let busy = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned")?;
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        current_turn_id(session).is_some() || !session.message_queue.is_empty()
+    };
+    let mut idle_turn = None;
+    if busy {
+        if !handle.queue_manual_context_compact()? {
+            return Err("manual_compact_queue_closed".to_string());
+        }
+    } else {
+        handle.request_manual_context_compact()?;
+        idle_turn = Some(submit_turn_with_selected_attachments_and_kind(
+            state,
+            session_id,
+            String::new(),
+            None,
+            None,
+            Vec::new(),
+            "resume_directly",
+        )?);
     }
-    // The worker turn loop polls this flag between model requests, so the
-    // request is accepted and effective even while the model is working.
-    let handle = session_worker_handle(state, session_id, None)?;
-    handle.request_manual_context_compact()?;
+    // Publish the "compacting..." notice only after its host turn exists so
+    // the chat has a turn to attach the activity to; the completion notice
+    // later supersedes it.
+    let notice =
+        context_compact_requested_topic_event(session_id, estimated_prompt_tokens, force_threshold);
+    let wire_payload = notice.wire_payload();
+    let turn_ref = append_active_turn_event(state, session_id, "core_topic", wire_payload.clone());
+    publish_core_semantic(
+        state,
+        session_id,
+        WireEvent::CoreTopic {
+            session_id: session_id.to_string(),
+            turn_id: turn_ref.as_ref().map(|value| value.turn_id.clone()),
+            turn_event_id: turn_ref.map(|value| value.event_id),
+            event: wire_payload,
+        },
+    );
+    if let Some(turn) = idle_turn {
+        publish_semantic(
+            state,
+            WireEvent::TurnUpdated {
+                session_id: session_id.to_string(),
+                turn,
+            },
+        );
+    }
     Ok(None)
+}
+
+/// Best-effort live context size for the immediate manual-compaction notice.
+fn session_context_usage_tokens(session: &WebSession) -> u32 {
+    let restored = session.restored_context_prompt_tokens.unwrap_or(0);
+    let mut live = 0u32;
+    for turn in session.turns.iter().rev() {
+        if turn.state == "restored" {
+            continue;
+        }
+        if let Some(completion) = turn.completion.as_ref() {
+            if let Some(usage) = completion.get("latest_usage") {
+                if let Some(tokens) = usage.get("prompt_tokens").and_then(Value::as_u64) {
+                    live = tokens as u32;
+                    break;
+                }
+            }
+        }
+    }
+    live.max(restored)
 }
 
 fn clear_session_prompt_context(

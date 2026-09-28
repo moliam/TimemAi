@@ -6,11 +6,10 @@ summary: Explicitly declare that all work for the current user turn is complete 
 prompt_synopsis: |
   {"task_finished":{"summary":"final user-facing answer"}}
 description: |
-  Call this tool when all user's valid asked task is finished.
-  .Put the polished, user-facing final answer in `summary`. Do not call it
+  Call this tool when all user's valid asked task is finished. Do not call it
   while any work, verification, or pending question remains; keep using other tools
-  instead. The summary must be the complete final answer, not a placeholder or
-  progress note.
+  instead. The `summary` must be a final answer containing complete, polished, summarized knowledge,
+  not a placeholder or progress note. Neatly organize the answer with lists/table, etc.
 prompt_input: |
   Provide a non-empty `summary` containing the complete final user-facing answer
   in the user's language.
