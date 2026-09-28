@@ -1944,10 +1944,19 @@ impl AgentCore {
             return;
         }
         self.rounds_since_reasoning = self.rounds_since_reasoning.saturating_add(1);
+        // In native mode assistant/tool traffic lives in `native_exchanges`,
+        // not in prompt deltas; count both so the threshold reflects the real
+        // message volume the model sees.
+        let mut message_elements = prompt_render::context_message_element_count(&self.deltas);
+        if self.resolved_tool_call_mode == ToolCallMode::Native {
+            for exchange in &self.native_exchanges {
+                message_elements += 1; // the assistant message itself
+                message_elements += exchange.calls.len().max(exchange.results.len());
+            }
+        }
         self.reasoning_review_due = self.rounds_since_reasoning
             > PERIODIC_REASONING_REVIEW_ROUND_INTERVAL
-            && prompt_render::context_message_element_count(&self.deltas)
-                > PERIODIC_REASONING_REVIEW_MIN_MESSAGES;
+            && message_elements > PERIODIC_REASONING_REVIEW_MIN_MESSAGES;
         if self.reasoning_review_due {
             self.rounds_since_reasoning = 0;
         }
