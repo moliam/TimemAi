@@ -11468,8 +11468,12 @@ function MemoNotice({ activity }: { activity: Activity }) {
     activity.title === "memo stops_finish" || activity.title === "memo stops finish"
       ? "🛑"
       : activity.title === "memo forcibly deleted by runtime"
-        ? "🗑️"
-        : "📝";
+        ? "⚙️"
+        : activity.title === "memo deleted"
+          ? "🗑️"
+          : activity.title === "memo updated"
+            ? "📝"
+            : "📝";
   return (
     <div className="turn-work-item notice memo-notice">
       <span className="activity-mark" aria-hidden="true">
