@@ -5781,7 +5781,7 @@ fn memo_finish_guard_blocks_inline_final_until_memo_deleted() {
 }
 
 #[test]
-fn memo_finish_guard_fires_only_once_per_turn() {
+fn memo_finish_guard_blocks_consecutive_finishes_then_allows_through() {
     let dir = tmp_dir("memo_guard_once");
     let audit = dir.join("audit.json");
     let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
@@ -5803,6 +5803,16 @@ fn memo_finish_guard_fires_only_once_per_turn() {
             1_300,
             false,
         )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"坚持完成的答复"}"#,
+            1_400,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"坚持完成的答复"}"#,
+            1_500,
+            false,
+        )),
     ]);
 
     let outcome = run_session_turn_with_model_client(
@@ -5822,10 +5832,88 @@ fn memo_finish_guard_fires_only_once_per_turn() {
         &mut model,
     );
 
-    // Guard fired once (prompt[2] carries it); the repeated final is allowed
-    // through so the turn cannot loop forever.
-    assert!(model.prompts[2].contains("still memo active"));
+    // Guard intercepts each consecutive finish attempt until the token
+    // budget is exhausted (cap 3); only the attempt after exhaustion is
+    // allowed through so the turn cannot loop forever.
+    for i in 2..=4 {
+        assert!(
+            model.prompts[i].contains("still memo active"),
+            "guard reminder missing in prompt[{i}]"
+        );
+    }
     assert_eq!(outcome.text, "坚持完成的答复");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn memo_finish_guard_recharges_after_working_round() {
+    let dir = tmp_dir("memo_guard_recharge");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    // create memo -> finish (guarded, 3->2) -> working round (recharge to 3)
+    // -> finish (guarded again, 3->2) -> delete memo -> finish passes.
+    let mut model = ReplayModel::new(vec![
+        Ok(llm(
+            r#"{"free_talk":"记下。","working_still_action":[{"memo":{"op":"create","text":"持续任务提醒"}}]}"#,
+            1_000,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"第一段完成"}"#,
+            1_200,
+            false,
+        )),
+        Ok(llm(
+            r#"{"free_talk":"继续干活。","working_still_action":[{"run_bash":{"cmd":"echo progress","timeout_ms":5000}}]}"#,
+            1_300,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"第二段完成"}"#,
+            1_400,
+            false,
+        )),
+        Ok(llm(
+            r#"{"free_talk":"按要求删除 memo。","working_still_action":[{"memo":{"op":"delete"}}]}"#,
+            1_500,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"全部完成"}"#,
+            1_600,
+            false,
+        )),
+    ]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "长任务请求",
+            session: "memo_guard_recharge_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    // The first finish attempt is guarded even though the budget was never
+    // spent before: working rounds keep the guard alive across the turn.
+    assert!(model.prompts[2].contains("still memo active"));
+    // After the working round the second finish attempt is guarded again:
+    // the earlier interception was recharged, not permanently spent.
+    assert!(
+        model.prompts[4].contains("still memo active"),
+        "guard must re-fire after a working round"
+    );
+    assert_eq!(outcome.text, "全部完成");
     let _ = std::fs::remove_dir_all(dir);
 }
 
