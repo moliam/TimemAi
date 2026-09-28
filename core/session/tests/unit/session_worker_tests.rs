@@ -59,7 +59,7 @@ fn manual_compact_ui(
     Arc<std::sync::atomic::AtomicBool>,
 ) {
     let (event_tx, _event_rx) = std::sync::mpsc::channel();
-    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    let (_reply_tx, reply_rx) = std::sync::mpsc::channel();
     let mailbox = Arc::new(Mutex::new(SupplementMailbox {
         accepting: true,
         queue: Vec::new(),
