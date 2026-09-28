@@ -1,5 +1,27 @@
 # Changelog
 
+## [2.3.1] - 2026-09-28
+
+### Added
+
+- Challenge a same-turn memo delete followed by `task_finished` once before
+  accepting the finish, with goal-semantics wording.
+
+### Changed
+
+- Replace the memo finish guard's post-deletion block with a one-shot
+  re-verify trailer on the next request; attach it on every prompt build
+  path before the response protocol trailer, and drop per-round memo
+  restating.
+- Fuse the memo pin into the working indicator arc; the memo tooltip now
+  renders via a portal with fixed positioning and viewport-adaptive
+  placement so it is never clipped or covered.
+- Count native exchanges in the periodic reasoning review threshold;
+  maintain message element counts incrementally at write sites.
+- Refresh the debug statistics page in place to keep the browser find bar
+  open.
+
+
 ## [2.3.0] - 2026-09-27
 
 ### Added
