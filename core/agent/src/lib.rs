@@ -1775,7 +1775,11 @@ pub struct AgentCore {
     native_exchanges: Vec<NativeExchange>,
     turn_finished_summary: Option<String>,
     active_memo: Option<String>,
-    memo_finish_guard_used: bool,
+    /// Rechargeable budget of memo-finish-guard interceptions for the
+    /// current turn. Each model response that does not attempt to finish
+    /// recharges it by 1 (capped); each guarded finish attempt consumes 1.
+    /// The turn may only finish with an active memo when the budget is 0.
+    memo_finish_guard_tokens: u32,
     /// Memo text deleted during the current turn. Task finish in the same
     /// turn is challenged once (models may delete and immediately declare
     /// victory without genuinely re-checking the goal).
@@ -1886,7 +1890,7 @@ impl AgentCore {
             native_exchanges: Vec::new(),
             turn_finished_summary: None,
             active_memo: None,
-            memo_finish_guard_used: false,
+            memo_finish_guard_tokens: MEMO_FINISH_GUARD_TOKEN_CAP,
             memo_deleted_this_turn: None,
             memo_deleted_trailer_shown: false,
             pending_native_exchange: None,
@@ -3198,7 +3202,7 @@ impl AgentCore {
         self.pending_approval = None;
         self.last_notifications.clear();
         self.turn_finished_summary = None;
-        self.memo_finish_guard_used = false;
+        self.memo_finish_guard_tokens = MEMO_FINISH_GUARD_TOKEN_CAP;
         self.memo_deleted_this_turn = None;
         self.memo_deleted_trailer_shown = false;
         // A final assistant replay may already be pending from the previous turn.
@@ -3717,8 +3721,8 @@ impl AgentCore {
             // The inline-protocol final answer (status:ALL_FINISHED) must pass
             // the same memo guard as the explicit task_finished tool.
             if let Some(memo) = self.active_memo.clone() {
-                if !self.memo_finish_guard_used && self.remaining_rounds() > 0 {
-                    self.memo_finish_guard_used = true;
+                if self.memo_finish_guard_tokens > 0 && self.remaining_rounds() > 0 {
+                    self.memo_finish_guard_tokens -= 1;
                     slices.extend(self.assistant_replay_slices(
                         &raw_model_output,
                         Some(&parsed),
@@ -3797,10 +3801,12 @@ impl AgentCore {
             }
             if let Some(stop_summary) = self.take_turn_finished_summary() {
                 if let Some(memo) = self.active_memo.clone() {
-                    if !self.memo_finish_guard_used && self.remaining_rounds() > 0 {
+                    if self.memo_finish_guard_tokens > 0 && self.remaining_rounds() > 0 {
                         // A still-active memo contradicts "all work done".
-                        // Send the reminder back once per turn instead of ending.
-                        self.memo_finish_guard_used = true;
+                        // Interception consumes one guard token; genuine work
+                        // rounds recharge it, so only consecutive finish
+                        // attempts can exhaust the budget and end the turn.
+                        self.memo_finish_guard_tokens -= 1;
                         slices.push((
                             "memo_finish_guard".to_string(),
                             memo_finish_guard_reminder(&memo),
@@ -3882,6 +3888,7 @@ impl AgentCore {
                     calls: native_calls,
                 });
             }
+            self.recharge_memo_guard_tokens();
             self.submit_running_job_updates_for_session(&self.current_session_id(), runtime);
             self.append_delta_with_action_output_budget(slices);
             self.append_in_turn_shrink_review_if_needed();
@@ -4791,6 +4798,16 @@ impl AgentCore {
     ) -> Option<String> {
         let logical_time_ms = now_ms();
         self.submit_prompt_component_at(role, kind, content, source, logical_time_ms)
+    }
+
+    /// A model response that keeps working (no finish attempt) proves the
+    /// turn made real progress; recharge one memo-finish-guard token so an
+    /// earlier interception cannot be "spent" by stale history.
+    fn recharge_memo_guard_tokens(&mut self) {
+        self.memo_finish_guard_tokens = self
+            .memo_finish_guard_tokens
+            .saturating_add(1)
+            .min(MEMO_FINISH_GUARD_TOKEN_CAP);
     }
 
     /// After a memo is deleted mid-turn, the next request carries a one-shot
@@ -7692,9 +7709,13 @@ fn normalize_memory_record(mut record: MemoryRecord) -> MemoryRecord {
     record
 }
 
+/// Max consecutive finish attempts the memo-finish-guard can intercept per
+/// turn. Non-finishing work responses recharge the budget up to this cap.
+const MEMO_FINISH_GUARD_TOKEN_CAP: u32 = 3;
+
 fn memo_finish_guard_reminder(memo: &str) -> String {
     format!(
-        "Just now you gave a final answer indicating all tasks are done. But there is still memo active: {memo}. All task/final goal really achieved? If yes, delete the memo (memo op=delete) before giving the final answer."
+        "Just now you gave a final answer indicating all tasks are done. But there is still memo active: {memo}. All task/final goal really achieved? If yes, delete the memo (memo op=delete) before giving the final answer; if no, update memo and continue."
     )
 }
 
