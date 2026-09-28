@@ -1780,7 +1780,7 @@ pub struct AgentCore {
     /// turn is challenged once (models may delete and immediately declare
     /// victory without genuinely re-checking the goal).
     memo_deleted_this_turn: Option<String>,
-    memo_deleted_finish_guard_used: bool,
+    memo_deleted_trailer_shown: bool,
     pending_native_exchange: Option<(String, String, Vec<NativeToolCall>, Vec<String>)>,
 }
 impl AgentCore {
@@ -1888,7 +1888,7 @@ impl AgentCore {
             active_memo: None,
             memo_finish_guard_used: false,
             memo_deleted_this_turn: None,
-            memo_deleted_finish_guard_used: false,
+            memo_deleted_trailer_shown: false,
             pending_native_exchange: None,
         }
     }
@@ -3186,7 +3186,7 @@ impl AgentCore {
         self.turn_finished_summary = None;
         self.memo_finish_guard_used = false;
         self.memo_deleted_this_turn = None;
-        self.memo_deleted_finish_guard_used = false;
+        self.memo_deleted_trailer_shown = false;
         // A final assistant replay may already be pending from the previous turn.
         // Keep it before the marker below; both may share a transport delta because
         // BEGIN TURN, rather than delta batching, defines logical ownership.
@@ -3700,32 +3700,6 @@ impl AgentCore {
                 }
             }
             let final_text = parsed.final_text();
-            // A memo deleted earlier this same turn must still gate the
-            // finish once: models often delete and immediately declare
-            // victory without genuinely re-checking the goal.
-            if self.active_memo.is_none() {
-                if let Some(deleted) = self.memo_deleted_this_turn.clone() {
-                    if !self.memo_deleted_finish_guard_used && self.remaining_rounds() > 0 {
-                        self.memo_deleted_finish_guard_used = true;
-                        slices.extend(self.assistant_replay_slices(
-                            &raw_model_output,
-                            Some(&parsed),
-                            Some(&final_text),
-                        ));
-                        slices.push((
-                            "memo_deleted_finish_guard".to_string(),
-                            format!(
-                                "You just deleted the memo: \"{deleted}\" and immediately declared all work finished in the same turn. Re-verify: is the memo's final goal (not an intermediate milestone) genuinely achieved, and is this final answer a complete delivery for the user? If yes, call task_finished again. If not, continue the work."
-                            ),
-                        ));
-                        self.append_delta_with_action_output_budget(slices);
-                        return CoreStep::NeedModel {
-                            prompt: self.build_next_prompt(),
-                            rounds_remaining: self.remaining_rounds(),
-                        };
-                    }
-                }
-            }
             // The inline-protocol final answer (status:ALL_FINISHED) must pass
             // the same memo guard as the explicit task_finished tool.
             if let Some(memo) = self.active_memo.clone() {
@@ -3808,42 +3782,6 @@ impl AgentCore {
                 ));
             }
             if let Some(stop_summary) = self.take_turn_finished_summary() {
-                // Same-turn memo deletion still gates the finish once.
-                if self.active_memo.is_none() {
-                    if let Some(deleted) = self.memo_deleted_this_turn.clone() {
-                        if !self.memo_deleted_finish_guard_used && self.remaining_rounds() > 0 {
-                            self.memo_deleted_finish_guard_used = true;
-                            slices.push((
-                                "memo_deleted_finish_guard".to_string(),
-                                format!(
-                                    "You just deleted the memo: \"{deleted}\" and immediately declared all work finished in the same turn. Re-verify: is the memo's final goal (not an intermediate milestone) genuinely achieved, and is this final answer a complete delivery for the user? If yes, call task_finished again. If not, continue the work."
-                                ),
-                            ));
-                            if !native_calls.is_empty() {
-                                self.register_native_exchange(NativeExchange {
-                                    delta_id: self.current_native_delta_id(),
-                                    assistant_text: response.content.clone(),
-                                    results: native_calls
-                                        .iter()
-                                        .zip(result_lines.iter())
-                                        .map(|(call, result)| NativeToolResult {
-                                            call_id: call.id.clone(),
-                                            name: call.name.clone(),
-                                            content: result.clone(),
-                                            is_error: result.contains("\nerror:"),
-                                        })
-                                        .collect(),
-                                    calls: native_calls,
-                                });
-                            }
-                            self.append_delta_with_action_output_budget(slices);
-                            return CoreStep::NeedModel {
-                                prompt: self.build_next_prompt(),
-                                rounds_remaining: self.remaining_rounds(),
-                            };
-                        }
-                    }
-                }
                 if let Some(memo) = self.active_memo.clone() {
                     if !self.memo_finish_guard_used && self.remaining_rounds() > 0 {
                         // A still-active memo contradicts "all work done".
@@ -4854,15 +4792,15 @@ impl AgentCore {
         self.guard_pending_action_output_budget();
         self.flush_pending_prompt_components();
         let mut prompt = self.render_prompt();
-        // The memo semantics must stay visible in the prompt context every
-        // round, not only at lifecycle events: restate the authoritative
-        // memo text before the response trailer so it keeps guiding work.
-        if let Some(memo) = self.active_memo.as_ref() {
-            prompt.push_str(&format!(
-                "
-
-memo active: {memo}"
-            ));
+        // After a memo is deleted mid-turn, the next request carries a one-shot
+        // re-verify trailer; no per-round memo restate is attached otherwise.
+        if let Some(deleted) = self.memo_deleted_this_turn.clone() {
+            if !self.memo_deleted_trailer_shown {
+                self.memo_deleted_trailer_shown = true;
+                prompt.push_str(&format!(
+                    "\n\nYou just deleted the memo: \"{deleted}\" Re-verify: is the memo's final goal (not an intermediate milestone) genuinely achieved, and is this final answer a complete delivery for the user? If there is still remained work, you should update the memo, and don't issue task finish unless user asks you to."
+                ));
+            }
         }
         self.evaluate_periodic_reasoning_review();
         if self.reasoning_review_due {
