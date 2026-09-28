@@ -2054,7 +2054,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
           sessionId: event.session_id,
           tone: "notice",
           kind: "memo_notice",
-          title: "memo force_deleted",
+          title: "memo forcibly deleted by runtime",
           detail: "",
           createdAt: Date.now(),
         };

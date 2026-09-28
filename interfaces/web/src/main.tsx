@@ -11461,13 +11461,13 @@ function MemoNotice({ activity }: { activity: Activity }) {
         ? "messageNav.memoUpdated"
         : activity.title === "memo deleted"
           ? "messageNav.memoDeleted"
-          : activity.title === "memo force_deleted"
+          : activity.title === "memo forcibly deleted by runtime"
             ? "messageNav.memoForceDeleted"
             : "messageNav.memoStopsFinish";
   const icon =
     activity.title === "memo stops_finish" || activity.title === "memo stops finish"
       ? "🛑"
-      : activity.title === "memo force_deleted"
+      : activity.title === "memo forcibly deleted by runtime"
         ? "🗑️"
         : "📝";
   return (

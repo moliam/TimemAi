@@ -469,7 +469,7 @@ describe("web topic view model", () => {
     expect(forceDeleted).toMatchObject({
       tone: "notice",
       kind: "memo_notice",
-      title: "memo force_deleted",
+      title: "memo forcibly deleted by runtime",
       detail: "",
     });
   });
