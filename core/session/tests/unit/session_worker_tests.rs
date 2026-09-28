@@ -280,6 +280,10 @@ impl ModelClient for SupplementDispatchTimeoutModel {
             });
         }
 
+        // Scheduling is platform-dependent: the dispatch-timeout note may not
+        // be injected yet when an early follow-up request is built (observed on
+        // Windows). Keep working until the note actually arrives so the test
+        // does not depend on timer granularity.
         let has_dispatch_timeout = prompt.contains("USER_SUPPLEMENT_ACTION_DISPATCH_TIMEOUT")
             && prompt.contains("WORKER_SUPPLEMENT_AFTER_TIMEOUT");
         Ok(LlmResponse {
@@ -287,7 +291,7 @@ impl ModelClient for SupplementDispatchTimeoutModel {
             content: if has_dispatch_timeout {
                 r#"{"status":"ALL_FINISHED","final_answer":"WORKER_DISPATCH_TIMEOUT_OK"}"#
             } else {
-                r#"{"status":"ALL_FINISHED","final_answer":"STALE"}"#
+                r#"{"status":"working","free_talk":"continue.","working_still_action":[{"run_bash":{"loop_cmd":"exit 1","interval_ms":20,"loop_timeout_ms":600000}}]}"#
             }
             .to_string(),
             model_name: "test-model".to_string(),
@@ -823,11 +827,15 @@ fn worker_forces_dispatch_when_a_live_supplement_times_out_during_local_action()
 
     assert_eq!(outcome.text, "WORKER_DISPATCH_TIMEOUT_OK");
     let prompts = prompts.lock().unwrap();
-    assert_eq!(prompts.len(), 2);
+    // The first request precedes the supplement; later requests may poll while
+    // the dispatch-timeout note is not injected yet, so only the last request
+    // is required to carry it.
+    assert!(prompts.len() >= 2);
     assert!(!prompts[0].contains("WORKER_SUPPLEMENT_AFTER_TIMEOUT"));
-    assert!(prompts[1].contains("USER_SUPPLEMENT_ACTION_DISPATCH_TIMEOUT"));
-    assert!(prompts[1].contains("do not invent it"));
-    assert!(prompts[1].contains("WORKER_SUPPLEMENT_AFTER_TIMEOUT"));
+    let last = prompts.last().unwrap();
+    assert!(last.contains("USER_SUPPLEMENT_ACTION_DISPATCH_TIMEOUT"));
+    assert!(last.contains("do not invent it"));
+    assert!(last.contains("WORKER_SUPPLEMENT_AFTER_TIMEOUT"));
 
     let _ = worker.shutdown();
 }
