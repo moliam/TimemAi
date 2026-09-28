@@ -414,7 +414,9 @@ fn manual_context_compact_request_carries_manual_trailer_and_clears_after_compac
     );
     let _ = core.begin_turn("work", None);
     core.request_manual_context_compact();
-    let prompt = match core.apply_model_response(LlmResponse {
+
+    // First follow-up request carries the manual wording.
+    let first = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(
             r#"{"status":"working","free_talk":"继续。","working_still_action":[{"run_bash":{"cmd":"true"}}]}"#,
@@ -427,16 +429,67 @@ fn manual_context_compact_request_carries_manual_trailer_and_clears_after_compac
         other => panic!("expected model continuation, got {other:?}"),
     };
     assert!(
-        prompt.contains("User manually requests context compaction."),
-        "{prompt}"
+        first.contains("User manually requests context compaction."),
+        "{first}"
     );
     assert!(
-        prompt.contains("Please compact context before further work."),
-        "{prompt}"
+        first.contains("Please compact context before further work."),
+        "{first}"
     );
     assert!(
-        !prompt.contains("Context is too long."),
-        "manual request must not use the forced-shrink wording: {prompt}"
+        !first.contains("Context is too long."),
+        "manual request must not use the forced-shrink wording: {first}"
+    );
+
+    // A model reply that still ignores the compaction is intercepted; the
+    // retry keeps the manual wording instead of falling back to the
+    // threshold wording (the context may not be over the limit).
+    let retry = match core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"status":"working","free_talk":"还想继续。","working_still_action":[{"run_bash":{"cmd":"true"}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected retry request, got {other:?}"),
+    };
+    assert!(
+        retry.contains("User manually requests context compaction."),
+        "retry must keep the manual wording: {retry}"
+    );
+    assert!(
+        !retry.contains("Context is too long."),
+        "retry must not claim the threshold was crossed: {retry}"
+    );
+
+    // Compacting clears the requirement; the next request is a normal one.
+    let delta_id = first
+        .split(
+            "
+",
+        )
+        .find_map(|line| line.strip_prefix("[BEGIN DELTA delta_id: "))
+        .and_then(|rest| rest.split(",").next())
+        .expect("delta id");
+    let after = match core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(&format!(
+            r#"{{"status":"working","free_talk":"压缩完成。","context_compact":{{"discard":[{delta_id:?}],"summary":"保留目标"}}}}"#
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation after compaction, got {other:?}"),
+    };
+    assert!(
+        !after.contains("User manually requests context compaction.")
+            && !after.contains("Context is too long."),
+        "compaction success must clear the compact trailer: {after}"
     );
 }
 
