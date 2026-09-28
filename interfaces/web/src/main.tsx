@@ -11461,11 +11461,15 @@ function MemoNotice({ activity }: { activity: Activity }) {
         ? "messageNav.memoUpdated"
         : activity.title === "memo deleted"
           ? "messageNav.memoDeleted"
-          : "messageNav.memoStopsFinish";
+          : activity.title === "memo force_deleted"
+            ? "messageNav.memoForceDeleted"
+            : "messageNav.memoStopsFinish";
   const icon =
     activity.title === "memo stops_finish" || activity.title === "memo stops finish"
       ? "🛑"
-      : "📝";
+      : activity.title === "memo force_deleted"
+        ? "🗑️"
+        : "📝";
   return (
     <div className="turn-work-item notice memo-notice">
       <span className="activity-mark" aria-hidden="true">

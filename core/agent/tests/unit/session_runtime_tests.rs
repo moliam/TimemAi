@@ -5846,6 +5846,94 @@ fn memo_finish_guard_blocks_consecutive_finishes_then_allows_through() {
 }
 
 #[test]
+fn memo_forcibly_closed_when_finish_exhausts_guard_budget() {
+    let dir = tmp_dir("memo_force_close");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    let mut model = ReplayModel::new(vec![
+        Ok(llm(
+            r#"{"free_talk":"记下。","working_still_action":[{"memo":{"op":"create","text":"持续任务提醒"}}]}"#,
+            1_000,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"强制完成"}"#,
+            1_200,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"强制完成"}"#,
+            1_300,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"强制完成"}"#,
+            1_400,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"强制完成"}"#,
+            1_500,
+            false,
+        )),
+    ]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "长任务请求",
+            session: "memo_force_close_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+    assert_eq!(outcome.text, "强制完成");
+    assert_eq!(core.active_memo(), None);
+
+    let mut model2 = ReplayModel::new(vec![Ok(llm(
+        r#"{"status":"ALL_FINISHED","final_answer":"下一回合"}"#,
+        2_000,
+        false,
+    ))]);
+    let outcome2 = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "下一回合请求",
+            session: "memo_force_close_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model2,
+    );
+    assert_eq!(outcome2.text, "下一回合");
+    assert!(
+        model2.prompts[0]
+            .contains("forcibly invoked task_finished without deleting the active memo"),
+        "next turn context must carry the forcible memo notice"
+    );
+    assert!(
+        model2.prompts[0].contains("deleted forcibly by runtime. Recreate it if necessary."),
+        "notice must instruct recreation if necessary"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn memo_finish_guard_recharges_after_working_round() {
     let dir = tmp_dir("memo_guard_recharge");
     let audit = dir.join("audit.json");

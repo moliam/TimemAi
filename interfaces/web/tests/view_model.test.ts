@@ -463,6 +463,15 @@ describe("web topic view model", () => {
       title: "memo stops finish",
       detail: "目标 B",
     });
+    const forceDeleted = activityFromTopic(
+      topic("core.memo", { op: "force_deleted", active: false, text: null }),
+    );
+    expect(forceDeleted).toMatchObject({
+      tone: "notice",
+      kind: "memo_notice",
+      title: "memo force_deleted",
+      detail: "",
+    });
   });
 
   it("renders ToolGen lifecycle as one compact system activity", () => {

@@ -2048,6 +2048,17 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
       return null;
     case "core.memo": {
       const op = label(payload.op) || "updated";
+      if (op === "force_deleted") {
+        return {
+          id: clientId(),
+          sessionId: event.session_id,
+          tone: "notice",
+          kind: "memo_notice",
+          title: "memo force_deleted",
+          detail: "",
+          createdAt: Date.now(),
+        };
+      }
       if (op === "stops_finish") {
         return {
           id: clientId(),

@@ -142,6 +142,7 @@ export const zh = {
     memoCreated: "备忘已创建",
     memoUpdated: "备忘已更新",
     memoDeleted: "备忘已删除",
+    memoForceDeleted: "备忘已被运行时强制关闭",
     memoStopsFinish: "备忘仍在：已阻止结束回合",
   },
   roles: {
