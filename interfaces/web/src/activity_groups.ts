@@ -134,12 +134,17 @@ export type StreamRetention = {
   isRetained: (activity: Activity | null | undefined) => boolean;
 };
 
-/** All rounds remain in place until the caller archives the confirmed final answer. */
+/**
+ * All rounds remain in place until the caller archives the confirmed final answer.
+ * The live stream area keeps every dynamic activity (thoughts, tools, memo
+ * notices, context compaction, supplements, ...) so users always see runtime
+ * status live; collapse into the Thought/Action frame happens only when the
+ * caller archives the stream after the authoritative turn state ends.
+ */
 export function computeStreamRetention(
   activities: readonly (Activity | null)[],
 ): StreamRetention {
-  const retained = activities.filter((activity): activity is Activity => !!activity &&
-    (activity.kind === "free_talk" || activity.tone === "action" || activity.kind === "user_supplement"));
+  const retained = activities.filter((activity): activity is Activity => !!activity);
   const retainedSet = new Set(retained);
   return {
     retained,

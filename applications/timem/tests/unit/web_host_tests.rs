@@ -8354,6 +8354,72 @@ fn final_answer_is_preserved_before_unconsumed_supplement_starts_a_new_turn() {
 }
 
 #[test]
+fn task_finished_turn_resubmits_unconsumed_supplements_as_new_turn() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    start_web_turn(&state, session_id, "Q1").unwrap();
+    let (context_id, worker_id) = primary_worker_scope(&state, session_id).unwrap();
+
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::Topics(vec![CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new(CORE_TOPIC_MODEL_RESPONSE, json!({})),
+            CoreSessionState::Finished,
+            json!({
+                "status": "ALL_FINISHED",
+                "final_answer": "final_answer1",
+                "continue_work": false,
+                "global": {
+                    "working_worker_count": 0,
+                    "session_working_worker_count": 0
+                }
+            }),
+        )
+        .with_worker_scope(context_id.clone(), worker_id.clone())]),
+    );
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::UnconsumedSupplements {
+            supplements: vec!["late follow-up".to_string()],
+        },
+    );
+
+    let mut outcome = TurnOutcome::final_response(
+        "final_answer1",
+        UsageStats::zero(),
+        None,
+        None,
+        Duration::from_millis(1),
+    );
+    outcome.stop_reason = Some(agent_core::TurnStopReason::TurnFinished);
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::TurnFinished { outcome },
+    );
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = sessions.get(session_id).unwrap();
+    // In the routing-test harness the Core worker handle is absent, so the
+    // resubmit enqueues the queued turn but cannot hand it to Core; the turn
+    // identity and entry below still prove the supplement was not silently
+    // dropped on a TurnFinished completion.
+    assert_eq!(session.turns.len(), 2);
+    assert_eq!(session.turns[1].user_entries.len(), 1);
+    assert_eq!(session.turns[1].user_entries[0].kind, "task");
+    assert_eq!(session.turns[1].user_entries[0].text, "late follow-up");
+}
+
+#[test]
 fn stopped_primary_turn_preserves_unconsumed_supplements_without_resubmitting() {
     let state = routing_test_state();
     let session_id = "session_a";

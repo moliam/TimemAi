@@ -11080,7 +11080,15 @@ fn handle_scoped_worker_event(
                 );
                 return;
             }
-            let should_resubmit_unconsumed_supplements = outcome.stop_reason.is_none();
+            // A supplement recorded while the turn was finishing was never
+            // consumed. Natural exhaustion AND a `task_finished` stop are both
+            // clean completions, so the pending user input must start a new
+            // turn instead of being silently stranded in `recorded` state.
+            // Stopped/error turns stay fail-closed: the user drives recovery.
+            let should_resubmit_unconsumed_supplements = matches!(
+                outcome.stop_reason,
+                None | Some(agent_core::TurnStopReason::TurnFinished)
+            );
             // A stopped turn does not emit a final model-response topic after the
             // worker guard is released. The last reported count therefore still
             // includes this primary worker. Remove that stale primary contribution

@@ -3124,6 +3124,39 @@ describe("web topic view model", () => {
     });
   });
 
+  it("maps the forced-compaction request into a compacting activity", () => {
+    const activity = activityFromTopic(
+      topic("core.context.compact", {
+        phase: "requested",
+        estimated_prompt_tokens: 95_000,
+        force_shrink_threshold_tokens: 90_000,
+      }),
+    );
+    expect(activity).toMatchObject({
+      kind: "context_compact",
+      tone: "notice",
+      compact_phase: "requested",
+      estimated_prompt_tokens: 95_000,
+      title: "Context compacting",
+    });
+  });
+
+  it("marks completed compaction with an explicit phase", () => {
+    const activity = activityFromTopic(
+      topic("core.context.compact", {
+        phase: "completed",
+        estimated_before_tokens: 82_000,
+        estimated_after_tokens: 14_000,
+      }),
+    );
+    expect(activity).toMatchObject({
+      kind: "context_compact",
+      compact_phase: "completed",
+      before_tokens: 82_000,
+      after_tokens: 14_000,
+    });
+  });
+
   it("renders run_bash commands as Bash code and keeps the structured status", () => {
     const activity = activityFromTopic(
       topic("core.action", {

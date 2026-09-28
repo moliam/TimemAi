@@ -345,6 +345,17 @@ fn run_session_turn_with_model_client_and_reminder_override(
         if take_cancel_request(ui, &mut turn_projection) {
             break cancelled_turn_parts();
         }
+        // Forced-compaction request notices ride the earliest loop iteration
+        // after the threshold crossing so live UI can show "compacting...".
+        if let Some((estimated_prompt_tokens, force_threshold)) =
+            core.take_pending_compact_request_notice()
+        {
+            ui.on_core_topic_events(&[crate::host::context_compact_requested_topic_event(
+                request.session,
+                estimated_prompt_tokens,
+                force_threshold,
+            )]);
+        }
         match step {
             CoreStep::NeedModel { ref prompt, .. } => {
                 if ui.apply_pending_runtime_updates(core, config) {
