@@ -48,6 +48,113 @@ fn core_command_id_tracker_rejects_pending_capacity_without_evicting_inflight_id
         .contains(&format!("pending-{}", CORE_COMMAND_ID_CAPACITY - 1)));
 }
 
+/// Real WorkerTurnUi behaviors for the manual-compaction mailbox marker:
+/// queueing, marker consumption into the compact flag (never prompt text),
+/// and the dedicated short dispatch timeout.
+fn manual_compact_ui(
+    session_id: &str,
+) -> (
+    WorkerTurnUi,
+    Arc<Mutex<SupplementMailbox>>,
+    Arc<std::sync::atomic::AtomicBool>,
+) {
+    let (event_tx, _event_rx) = std::sync::mpsc::channel();
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    let mailbox = Arc::new(Mutex::new(SupplementMailbox {
+        accepting: true,
+        queue: Vec::new(),
+    }));
+    let manual_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ui = WorkerTurnUi {
+        event_tx,
+        session_id: session_id.to_string(),
+        context_id: "context_0".to_string(),
+        worker_id: "worker_0".to_string(),
+        supplement_mailbox: Arc::clone(&mailbox),
+        command_ids: Arc::new(Mutex::new(CoreCommandIdTracker::default())),
+        cancel_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        manual_compact_requested: Arc::clone(&manual_flag),
+        reply_rx,
+        runtime: CoreSessionWorkerRuntime::new(),
+        current_turn_active: None,
+        phase: None,
+        accept_supplements: true,
+        user_supplement_model_dispatch_timeout: Duration::from_secs(120),
+        supplement_dispatch_timeout: None,
+        continue_supplements_after_final_answer: true,
+        pending_bash_always_allow: false,
+        pending_runtime_updates: Arc::new(Mutex::new(Vec::new())),
+        interaction_profile: None,
+    };
+    (ui, mailbox, manual_flag)
+}
+
+#[test]
+fn manual_compact_marker_drains_into_flag_not_prompt_text() {
+    use agent_core::TurnUi as _;
+    let (mut ui, mailbox, manual_flag) = manual_compact_ui("session_manual_compact_drain");
+    // Queue a real user supplement plus the manual compact marker.
+    mailbox.lock().unwrap().queue.push(QueuedSupplement {
+        text: "user follow-up".to_string(),
+        additional_context: None,
+        command_id: None,
+        queued_at: Instant::now(),
+        manual_context_compact: false,
+    });
+    mailbox.lock().unwrap().queue.push(QueuedSupplement {
+        text: String::new(),
+        additional_context: None,
+        command_id: None,
+        queued_at: Instant::now(),
+        manual_context_compact: true,
+    });
+    let supplements = ui.drain_user_supplements_with_context();
+    // The user text survives as a supplement; the marker becomes the compact
+    // flag instead of an empty/blank prompt supplement.
+    assert_eq!(supplements.len(), 1);
+    assert_eq!(supplements[0].text, "user follow-up");
+    assert!(manual_flag.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(ui.take_manual_context_compact_request());
+    assert!(!ui.take_manual_context_compact_request());
+}
+
+#[test]
+fn manual_compact_marker_uses_short_dispatch_timeout() {
+    use agent_core::TurnUi as _;
+    let (mut ui, mailbox, _flag) = manual_compact_ui("session_manual_compact_timeout");
+    mailbox.lock().unwrap().queue.push(QueuedSupplement {
+        text: String::new(),
+        additional_context: None,
+        command_id: None,
+        queued_at: Instant::now() - Duration::from_secs(11),
+        manual_context_compact: true,
+    });
+    // The normal supplement timeout is 120s; the marker must fire at 10s.
+    let waited = ui.take_user_supplement_model_dispatch_timeout();
+    assert!(waited.is_some(), "11s-old marker must be due immediately");
+}
+
+#[test]
+fn manual_compact_queue_rejects_closed_mailbox() {
+    let (command_tx, _command_rx) = std::sync::mpsc::channel();
+    let handle = CoreSessionWorkerHandle {
+        command_tx,
+        supplement_mailbox: Arc::new(Mutex::new(SupplementMailbox {
+            accepting: false,
+            queue: Vec::new(),
+        })),
+        cancel_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        manual_compact_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        cancel_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        shutdown_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        reply_tx: std::sync::mpsc::channel().0,
+        command_ids: Arc::new(Mutex::new(CoreCommandIdTracker::default())),
+        pending_runtime_updates: Arc::new(Mutex::new(Vec::new())),
+        background_cancel: Arc::new(|| {}),
+    };
+    assert_eq!(handle.queue_manual_context_compact(), Ok(false));
+}
+
 #[test]
 fn failed_durable_supplement_append_releases_command_id_for_retry() {
     let (command_tx, _command_rx) = std::sync::mpsc::channel();
