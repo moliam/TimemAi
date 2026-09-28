@@ -831,6 +831,16 @@ pub fn context_compact_topic_event(
 /// Authoritative memo state for a session: `text` is Some while a memo is
 /// active and None after it was deleted.
 pub fn memo_topic_event(session_id: impl Into<String>, text: Option<&str>) -> CoreTopicEvent {
+    memo_topic_event_with_op(session_id, text, "updated")
+}
+
+/// `op` describes the memo lifecycle transition that produced this event:
+/// "created" | "updated" | "deleted". `text` is None only for "deleted".
+pub fn memo_topic_event_with_op(
+    session_id: impl Into<String>,
+    text: Option<&str>,
+    op: &str,
+) -> CoreTopicEvent {
     CoreTopicEvent::new(
         session_id,
         CoreTopic::new(
@@ -843,6 +853,27 @@ pub fn memo_topic_event(session_id: impl Into<String>, text: Option<&str>) -> Co
         json!({
             "active": text.is_some(),
             "text": text,
+            "op": op,
+        }),
+    )
+}
+
+/// Emitted when the memo-finish-guard intercepts a finish attempt because a
+/// memo is still active. Purely informational: the memo state is unchanged.
+pub fn memo_stops_finish_topic_event(session_id: impl Into<String>, memo: &str) -> CoreTopicEvent {
+    CoreTopicEvent::new(
+        session_id,
+        CoreTopic::new(
+            CORE_TOPIC_MEMO,
+            json!({
+                "name": CORE_TOPIC_MEMO,
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "active": true,
+            "text": memo,
+            "op": "stops_finish",
         }),
     )
 }

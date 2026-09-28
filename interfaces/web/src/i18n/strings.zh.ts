@@ -139,6 +139,10 @@ export const zh = {
     atChatBottom: "当前已是聊天最下方",
     memoIndicator: "长任务备忘",
     memoContent: "当前备忘内容",
+    memoCreated: "备忘已创建",
+    memoUpdated: "备忘已更新",
+    memoDeleted: "备忘已删除",
+    memoStopsFinish: "备忘仍在：已阻止结束回合",
   },
   roles: {
     panel: "Role",

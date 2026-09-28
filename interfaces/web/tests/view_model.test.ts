@@ -425,6 +425,46 @@ describe("web topic view model", () => {
     expect(hasOnlyFreeTalkActivity(freeTalk ? [freeTalk] : [], 1)).toBe(false);
   });
 
+  it("maps core.memo lifecycle ops to memo notice activities", () => {
+    const created = activityFromTopic(
+      topic("core.memo", { op: "created", active: true, text: "目标 A" }),
+    );
+    const updated = activityFromTopic(
+      topic("core.memo", { op: "updated", active: true, text: "目标 B" }),
+    );
+    const deleted = activityFromTopic(
+      topic("core.memo", { op: "deleted", active: false, text: null }),
+    );
+    const stopsFinish = activityFromTopic(
+      topic("core.memo", { op: "stops_finish", active: true, text: "目标 B" }),
+    );
+
+    expect(created).toMatchObject({
+      tone: "notice",
+      kind: "memo_notice",
+      title: "memo created",
+      detail: "目标 A",
+    });
+    expect(updated).toMatchObject({
+      tone: "notice",
+      kind: "memo_notice",
+      title: "memo updated",
+      detail: "目标 B",
+    });
+    expect(deleted).toMatchObject({
+      tone: "notice",
+      kind: "memo_notice",
+      title: "memo deleted",
+      detail: "",
+    });
+    expect(stopsFinish).toMatchObject({
+      tone: "notice",
+      kind: "memo_notice",
+      title: "memo stops finish",
+      detail: "目标 B",
+    });
+  });
+
   it("renders ToolGen lifecycle as one compact system activity", () => {
     const started = activityFromTopic(
       topic("core.toolgen", { phase: "started", tool_count: 2 }),

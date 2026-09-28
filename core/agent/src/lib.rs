@@ -3723,6 +3723,10 @@ impl AgentCore {
             if let Some(memo) = self.active_memo.clone() {
                 if self.memo_finish_guard_tokens > 0 && self.remaining_rounds() > 0 {
                     self.memo_finish_guard_tokens -= 1;
+                    runtime.on_core_topic_events(&[crate::host::memo_stops_finish_topic_event(
+                        self.current_session_id().to_string(),
+                        &memo,
+                    )]);
                     slices.extend(self.assistant_replay_slices(
                         &raw_model_output,
                         Some(&parsed),
@@ -3807,6 +3811,12 @@ impl AgentCore {
                         // rounds recharge it, so only consecutive finish
                         // attempts can exhaust the budget and end the turn.
                         self.memo_finish_guard_tokens -= 1;
+                        runtime.on_core_topic_events(&[
+                            crate::host::memo_stops_finish_topic_event(
+                                self.current_session_id().to_string(),
+                                &memo,
+                            ),
+                        ]);
                         slices.push((
                             "memo_finish_guard".to_string(),
                             memo_finish_guard_reminder(&memo),

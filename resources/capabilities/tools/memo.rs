@@ -28,13 +28,19 @@ pub(crate) fn execute_action(
             // Publish the authoritative memo state so interfaces can surface
             // the active long-task reminder (WebUI memo indicator).
             let session_id = core.current_session_id().to_string();
-            runtime.on_core_topic_events(&[crate::host::memo_topic_event(session_id, Some(&text))]);
+            runtime.on_core_topic_events(&[crate::host::memo_topic_event_with_op(
+                session_id,
+                Some(&text),
+                "created",
+            )]);
             "Memo created.  You should work continuously without disturbing user to achieve the memo goal if steps are clear. Don't `finish` in the middle unless user asks.".to_string()
         }
         "delete" => {
             core.clear_active_memo();
             let session_id = core.current_session_id().to_string();
-            runtime.on_core_topic_events(&[crate::host::memo_topic_event(session_id, None)]);
+            runtime.on_core_topic_events(&[crate::host::memo_topic_event_with_op(
+                session_id, None, "deleted",
+            )]);
             "Memo deleted. No active memo. Reminder: make sure that all user's demands/goal are met. If next step is clear, you should automatically continue without disturbing user. Don't `finish` in the middle unless user asks.".to_string()
         }
         _ => return failed("op_invalid"),
