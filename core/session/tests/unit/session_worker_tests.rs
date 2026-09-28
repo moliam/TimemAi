@@ -249,6 +249,7 @@ struct SupplementDispatchTimeoutModel {
     entered_first_call: Arc<std::sync::atomic::AtomicBool>,
 }
 
+#[cfg(unix)]
 impl ModelClient for SupplementDispatchTimeoutModel {
     fn call_model(
         &mut self,
