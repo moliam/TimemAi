@@ -29,13 +29,13 @@ pub(crate) fn execute_action(
             // the active long-task reminder (WebUI memo indicator).
             let session_id = core.current_session_id().to_string();
             runtime.on_core_topic_events(&[crate::host::memo_topic_event(session_id, Some(&text))]);
-            "Memo active. The runtime will remind you of it after interruptions or compaction, and before you finish.".to_string()
+            "Memo active. The runtime will remind you of it after interruptions or compaction, and before you finish. You should work continuously without disturbing user to achieve the goal if steps are clear. Don't `finish` in the middle unless user asks.".to_string()
         }
         "delete" => {
             core.clear_active_memo();
             let session_id = core.current_session_id().to_string();
             runtime.on_core_topic_events(&[crate::host::memo_topic_event(session_id, None)]);
-            "Memo deleted. No active memo.".to_string()
+            "Memo deleted. No active memo. Reminder: make sure that all user's demands/goal are met. If next step is clear, you should automatically continue without disturbing user. Don't `finish` in the middle unless user asks.".to_string()
         }
         _ => return failed("op_invalid"),
     };
