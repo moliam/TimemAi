@@ -7257,6 +7257,74 @@ function ToolRepoPanel({
 const EMPTY_DECISIONS: Decision[] = [];
 const SessionTimelineActiveContext = createContext(false);
 
+/**
+ * Working-indicator memo tooltip rendered through a portal with
+ * `position: fixed`. Portalling escapes every ancestor overflow clip and
+ * stacking context, so the tooltip always floats above the chat area and the
+ * session sidebar. Placement adapts to the viewport: it prefers opening to
+ * the left of the button, flips to the right when the left side is too
+ * narrow (sidebar), and clamps vertically inside the viewport.
+ */
+const WorkingMemoTooltip = memo(function WorkingMemoTooltip({
+  anchor,
+  caption,
+  text,
+}: {
+  anchor: HTMLElement;
+  caption: string;
+  text: string;
+}) {
+  const [placement, setPlacement] = useState<{ left: number; top: number } | null>(
+    null,
+  );
+  useEffect(() => {
+    const GAP = 8;
+    const MAX_WIDTH = 320;
+    const update = () => {
+      const rect = anchor.getBoundingClientRect();
+      const viewportWidth = window.innerWidth;
+      const leftSpace = rect.left - GAP;
+      let left: number;
+      if (leftSpace >= MAX_WIDTH) {
+        // Open to the left: right edge of the tooltip at GAP from the button.
+        left = Math.max(GAP, rect.left - GAP - MAX_WIDTH);
+      } else if (viewportWidth - rect.right - GAP >= 120) {
+        // Not enough room on the left (sidebar): open to the right.
+        left = Math.min(rect.right + GAP, viewportWidth - MAX_WIDTH - GAP);
+      } else {
+        // Narrow viewport: clamp inside the viewport, still preferring left.
+        const width = Math.max(160, Math.min(MAX_WIDTH, viewportWidth - 2 * GAP));
+        left = Math.max(GAP, Math.min(rect.left - GAP - width, viewportWidth - GAP - width));
+      }
+      // Vertical: center on the button, clamped into the viewport.
+      const top = Math.max(GAP, Math.min(rect.top + rect.height / 2, window.innerHeight - GAP));
+      setPlacement({ left, top });
+    };
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [anchor]);
+  return createPortal(
+    <span
+      className="thread-working-memo-tooltip is-portal"
+      role="tooltip"
+      style={
+        placement
+          ? { left: `${placement.left}px`, top: `${placement.top}px`, visibility: "visible" }
+          : { visibility: "hidden" }
+      }
+    >
+      <span className="thread-memo-caption">{caption}</span>
+      <span className="thread-memo-text">{text}</span>
+    </span>,
+    document.body,
+  );
+});
+
 const VisibleTurnList = memo(function VisibleTurnList({
   sessionId,
   turns,
@@ -7636,6 +7704,10 @@ function TimemThread({
   const restoredSessionIdRef = useRef<string | undefined>(undefined);
   const followThreadLatest = useRef(true);
   const [threadAwayFromBottom, setThreadAwayFromBottom] = useState(false);
+  const workingAwayButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [workingMemoVisible, setWorkingMemoVisible] = useState(false);
+  const showWorkingMemoTooltip = () => setWorkingMemoVisible(true);
+  const hideWorkingMemoTooltip = () => setWorkingMemoVisible(false);
   const [draftsBySession, setDraftsBySession] = useState<
     Record<string, string>
   >({});
@@ -9404,15 +9476,12 @@ function TimemThread({
                   : t("messageNav.atChatBottom")
             }
             onClick={navigateWorkingToThreadBottom}
+            ref={workingAwayButtonRef}
+            onPointerEnter={showWorkingMemoTooltip}
+            onPointerLeave={hideWorkingMemoTooltip}
+            onFocus={showWorkingMemoTooltip}
+            onBlur={hideWorkingMemoTooltip}
           >
-            {activeSession.state === "working" && activeSession.active_memo && (
-              <span className="thread-working-memo-tooltip" role="tooltip">
-                <span className="thread-memo-caption">
-                  {t("messageNav.memoIndicator")}
-                </span>
-                <span className="thread-memo-text">{activeSession.active_memo}</span>
-              </span>
-            )}
             <span className="thread-edge-symbol" aria-hidden="true">
               {activeSession.state === "working" ? (
                 <span className="thread-working-mark">
@@ -9463,6 +9532,16 @@ function TimemThread({
             </span>
           </span>
         )}
+        {activeSession?.state === "working" &&
+          activeSession.active_memo &&
+          workingMemoVisible &&
+          workingAwayButtonRef.current && (
+            <WorkingMemoTooltip
+              anchor={workingAwayButtonRef.current}
+              caption={t("messageNav.memoIndicator")}
+              text={activeSession.active_memo}
+            />
+          )}
       </nav>
     </ThreadPrimitive.Root>
   );
