@@ -476,7 +476,7 @@ fn manual_context_compact_request_carries_manual_trailer_and_clears_after_compac
         .expect("delta id");
     let after = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(&format!(
+        content: scored(format!(
             r#"{{"status":"working","free_talk":"压缩完成。","context_compact":{{"discard":[{delta_id:?}],"summary":"保留目标"}}}}"#
         )),
         model_name: "qwen-plus".to_string(),
