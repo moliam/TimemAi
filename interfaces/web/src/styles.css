@@ -3720,6 +3720,19 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
   stroke-dasharray: 18 82;
   opacity: .82;
 }
+/* When a memo is active, the working dot core is replaced by a small pin
+   glyph. Keep it inside the arc radius (arc r=9 in a 24px viewBox) and nudge
+   the arc outward so the pin never collides with the spinning ring. */
+.thread-working-pin {
+  position: relative;
+  z-index: 1;
+  font-size: 9px;
+  line-height: 1;
+  letter-spacing: 0;
+}
+.thread-working-mark:has(.thread-working-pin) .thread-working-arc {
+  transform: scale(1.12);
+}
 .thread-working-core {
   position: relative;
   z-index: 1;

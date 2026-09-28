@@ -9385,9 +9385,11 @@ function TimemThread({
             className={`thread-working-away ${activeSession.state === "working" ? "is-working" : "is-idle"}${threadAwayFromBottom ? " away-from-bottom" : " at-live-edge"}`}
             title={
               activeSession.state === "working"
-                ? threadAwayFromBottom
-                  ? t("messageNav.workingJumpLatest")
-                  : t("messageNav.workingAtLatest")
+                ? activeSession.active_memo
+                  ? `${t("messageNav.memoIndicator")}: ${activeSession.active_memo}`
+                  : threadAwayFromBottom
+                    ? t("messageNav.workingJumpLatest")
+                    : t("messageNav.workingAtLatest")
                 : threadAwayFromBottom
                   ? t("messageNav.jumpToChatBottom")
                   : t("messageNav.atChatBottom")
@@ -9413,7 +9415,13 @@ function TimemThread({
                   >
                     <circle cx="12" cy="12" r="9" pathLength="100" />
                   </svg>
-                  <span className="thread-working-core" />
+                  {activeSession.active_memo ? (
+                    <span className="thread-working-pin" aria-hidden="true">
+                      📌
+                    </span>
+                  ) : (
+                    <span className="thread-working-core" />
+                  )}
                 </span>
               ) : (
                 <ArrowDownToLine
@@ -9428,7 +9436,7 @@ function TimemThread({
             </span>
           </button>
         )}
-        {activeSession?.active_memo && (
+        {activeSession?.active_memo && activeSession.state !== "working" && (
           <span
             className="thread-memo-indicator"
             role="status"
