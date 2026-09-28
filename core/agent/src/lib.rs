@@ -1934,11 +1934,6 @@ impl AgentCore {
     }
 
     #[cfg(test)]
-    pub(crate) fn deltas_for_test(&self) -> &[PromptDelta] {
-        &self.deltas
-    }
-
-    #[cfg(test)]
     pub(crate) fn context_message_elements_for_test(&self) -> usize {
         self.context_message_elements
     }
@@ -2959,6 +2954,7 @@ impl AgentCore {
         }
         self.deltas = snapshot.deltas;
         self.native_exchanges = snapshot.native_exchanges;
+        self.recount_context_message_elements();
         self.last_observed_prompt_tokens = snapshot.last_observed_prompt_tokens;
         if let Some(max_seq) = self
             .deltas
@@ -2973,6 +2969,7 @@ impl AgentCore {
 
     pub fn clear_dynamic_context(&mut self) {
         self.deltas.clear();
+        self.context_message_elements = 0;
         self.last_observed_prompt_tokens = 0;
         self.context_compact_required = false;
         self.current_round = 0;
@@ -6421,6 +6418,8 @@ Runtime tool_call ids:",
         delta_ids: &[String],
         slice_ids: &[String],
     ) -> String {
+        // Wholesale removal invalidates the incremental counter; recount.
+        self.recount_context_message_elements();
         let delta_id_set = delta_ids
             .iter()
             .map(|id| id.trim().to_string())

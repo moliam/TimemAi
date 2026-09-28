@@ -953,29 +953,6 @@ pub(crate) fn render_delta_slices(delta: &PromptDelta) -> Vec<PromptSlice> {
         .collect()
 }
 
-/// Counts user/assistant message elements in the current dynamic context.
-/// A context compaction summary counts as one message element.
-pub(crate) fn context_message_element_count(deltas: &[PromptDelta]) -> usize {
-    deltas
-        .iter()
-        .map(|delta| {
-            render_delta_slices(delta)
-                .iter()
-                .filter(|slice| {
-                    matches!(
-                        visible_role(&slice.prompt_type),
-                        VisiblePromptRole::User
-                            | VisiblePromptRole::UserSupplement
-                            | VisiblePromptRole::UserResumeDirectly
-                            | VisiblePromptRole::You
-                            | VisiblePromptRole::ContextCompactionSummary
-                    )
-                })
-                .count()
-        })
-        .sum()
-}
-
 #[cfg(test)]
 #[path = "../tests/unit/prompt_render_tests.rs"]
 mod tests;

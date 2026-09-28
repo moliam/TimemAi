@@ -2422,42 +2422,6 @@ fn periodic_reasoning_review_requires_enough_messages() {
 }
 
 #[test]
-fn context_message_element_count_counts_user_and_assistant_messages() {
-    let mut core = test_core("message_element_count");
-    for i in 0..5 {
-        core.submit_prompt_component(
-            PromptComponentRole::User,
-            "user_question",
-            format!("u{i}"),
-            "user_input",
-        );
-        core.submit_prompt_component(
-            PromptComponentRole::system(),
-            "result_of_llm_action",
-            format!("action {i}"),
-            "previous_model_response",
-        );
-        core.submit_prompt_component(
-            PromptComponentRole::assistant("Timem"),
-            "llm_response",
-            format!("a{i}"),
-            "previous_model_response",
-        );
-    }
-    core.submit_prompt_component(
-        PromptComponentRole::assistant("Timem"),
-        "context_compaction_summary",
-        "compacted",
-        "runtime",
-    );
-    core.flush_pending_prompt_components();
-    assert_eq!(
-        prompt_render::context_message_element_count(core.deltas_for_test()),
-        11
-    );
-}
-
-#[test]
 fn incremental_message_count_matches_full_recomputation() {
     let mut core = test_core("incremental_message_count");
     for i in 0..6 {
