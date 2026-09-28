@@ -2384,12 +2384,20 @@ impl AgentCore {
         self.flush_pending_prompt_components();
 
         if still_running.is_none() && updates.is_empty() && !self.context_compact_required {
+            if let Some(trailer) = self.take_memo_deleted_trailer() {
+                let mut prompt = current_prompt.to_string();
+                prompt.push_str(&trailer);
+                return prompt;
+            }
             return current_prompt.to_string();
         }
         prompt.push_str("\n\n");
         if self.context_compact_required {
             prompt.push_str(prompt_render::CONTEXT_COMPACT_REQUIRED_TRAILER);
         } else if let Some(trailer) = trailer {
+            prompt.push_str(&trailer);
+        }
+        if let Some(trailer) = self.take_memo_deleted_trailer() {
             prompt.push_str(&trailer);
         }
         prompt
@@ -4779,6 +4787,19 @@ impl AgentCore {
         self.submit_prompt_component_at(role, kind, content, source, logical_time_ms)
     }
 
+    /// After a memo is deleted mid-turn, the next request carries a one-shot
+    /// re-verify trailer; no per-round memo restate is attached otherwise.
+    fn take_memo_deleted_trailer(&mut self) -> Option<String> {
+        let deleted = self.memo_deleted_this_turn.clone()?;
+        if self.memo_deleted_trailer_shown {
+            return None;
+        }
+        self.memo_deleted_trailer_shown = true;
+        Some(format!(
+            "\n\nYou just deleted the memo: \"{deleted}\" Re-verify: is the memo's final goal (not an intermediate milestone) genuinely achieved, and is this final answer a complete delivery for the user? If there is still remained work, you should update the memo, and don't issue task finish unless user asks you to."
+        ))
+    }
+
     pub fn build_next_prompt(&mut self) -> String {
         if self.runtime_config_changed_notice_pending {
             self.runtime_config_changed_notice_pending = false;
@@ -4792,15 +4813,8 @@ impl AgentCore {
         self.guard_pending_action_output_budget();
         self.flush_pending_prompt_components();
         let mut prompt = self.render_prompt();
-        // After a memo is deleted mid-turn, the next request carries a one-shot
-        // re-verify trailer; no per-round memo restate is attached otherwise.
-        if let Some(deleted) = self.memo_deleted_this_turn.clone() {
-            if !self.memo_deleted_trailer_shown {
-                self.memo_deleted_trailer_shown = true;
-                prompt.push_str(&format!(
-                    "\n\nYou just deleted the memo: \"{deleted}\" Re-verify: is the memo's final goal (not an intermediate milestone) genuinely achieved, and is this final answer a complete delivery for the user? If there is still remained work, you should update the memo, and don't issue task finish unless user asks you to."
-                ));
-            }
+        if let Some(trailer) = self.take_memo_deleted_trailer() {
+            prompt.push_str(&trailer);
         }
         self.evaluate_periodic_reasoning_review();
         if self.reasoning_review_due {
