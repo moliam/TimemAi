@@ -3730,8 +3730,12 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
   line-height: 1;
   letter-spacing: 0;
 }
-.thread-working-mark:has(.thread-working-pin) .thread-working-arc {
-  transform: scale(1.12);
+/* Do NOT set a static transform here: the arc's spin keyframes animate
+   `transform: rotate()` on the same element, and a mismatched base transform
+   (e.g. scale) breaks the rotation interpolation. The 9px pin already sits
+   inside the arc's inner radius; only adjust spacing, never transform. */
+.thread-working-mark:has(.thread-working-pin) .thread-working-pin {
+  margin-top: -1px;
 }
 .thread-working-core {
   position: relative;
