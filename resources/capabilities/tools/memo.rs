@@ -24,14 +24,17 @@ pub(crate) fn execute_action(
             if text.is_empty() {
                 return failed("text_required");
             }
+            let creating = core.active_memo().is_none();
             core.set_active_memo(text.clone());
             // Publish the authoritative memo state so interfaces can surface
-            // the active long-task reminder (WebUI memo indicator).
+            // the active long-task reminder (WebUI memo indicator). The op
+            // distinguishes creating from updating so notices render the
+            // right lifecycle label.
             let session_id = core.current_session_id().to_string();
             runtime.on_core_topic_events(&[crate::host::memo_topic_event_with_op(
                 session_id,
                 Some(&text),
-                "created",
+                if creating { "created" } else { "updated" },
             )]);
             "Memo created.  You should work continuously without disturbing user to achieve the memo goal if steps are clear. Don't `finish` in the middle unless user asks.".to_string()
         }

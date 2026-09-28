@@ -61,6 +61,46 @@ fn memo_create_overwrites_and_delete_clears() {
     assert_eq!(core.active_memo(), None);
 }
 
+#[derive(Default)]
+struct RecordingRuntime {
+    ops: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl ActionRuntime for RecordingRuntime {
+    fn should_cancel(&mut self) -> bool {
+        false
+    }
+    fn on_core_topic_events(&mut self, events: &[crate::host::CoreTopicEvent]) {
+        for event in events {
+            if event.topic.name == crate::host::CORE_TOPIC_MEMO {
+                if let Ok(mut ops) = self.ops.lock() {
+                    ops.push(
+                        event
+                            .payload
+                            .get("op")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn memo_publishes_created_then_updated_lifecycle_ops() {
+    let (mut core, _dir) = setup("lifecycle_ops");
+    let ops = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut runtime = RecordingRuntime {
+        ops: std::sync::Arc::clone(&ops),
+    };
+    let _ = super::execute_action(&mut core, &memo_action("create", "first"), &mut runtime);
+    let _ = super::execute_action(&mut core, &memo_action("update", "second"), &mut runtime);
+    let _ = super::execute_action(&mut core, &memo_action("create", "third"), &mut runtime);
+    assert_eq!(*ops.lock().unwrap(), vec!["created", "updated", "updated"]);
+}
+
 #[test]
 fn memo_validates_op_and_text() {
     let (mut core, _dir) = setup("validation");
