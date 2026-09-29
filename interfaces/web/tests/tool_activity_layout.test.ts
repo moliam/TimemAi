@@ -76,6 +76,12 @@ describe("collapsed tool summary", () => {
     // available to screen readers via the sr-only span.
     expect(source).toContain('<span className="sr-only">{t("tools.toolsLabel")}</span>');
     expect(source).toContain('className="stream-tool-run-glyph"');
+    // The disclosure +/- sign leads, the wrench glyph follows.
+    const summary = source.match(/<span className="stream-tool-run-sign".*?stream-tool-run-glyph"/s)?.[0];
+    expect(summary).toBeDefined();
+    expect(summary?.indexOf("stream-tool-run-sign")).toBeLessThan(
+      summary?.indexOf("stream-tool-run-glyph") ?? -1,
+    );
     expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*font-weight: 400;/);
     expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*padding: 2px 4px;/);
   });
