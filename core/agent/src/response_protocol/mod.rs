@@ -546,10 +546,18 @@ pub fn json_string_list(value: &Value) -> Vec<String> {
     value
         .as_str()
         .map(|text| {
+            // Models sometimes stringify the whole array (edit: "[\"/a/b.py\"]");
+            // parse it as JSON first so brackets never leak into item text.
+            if let Ok(items) = serde_json::from_str::<Vec<String>>(text) {
+                if !items.is_empty() {
+                    return items;
+                }
+            }
             text.split(',')
                 .map(str::trim)
                 .filter(|item| !item.is_empty())
-                .map(|item| item.trim_matches(['"', '\'']).to_string())
+                .map(|item| item.trim_matches(['[', ']', '"', '\'']).to_string())
+                .filter(|item| !item.is_empty())
                 .collect()
         })
         .unwrap_or_default()
