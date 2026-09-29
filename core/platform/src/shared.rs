@@ -194,6 +194,18 @@ pub(super) fn runtime_child_pid_kind() -> &'static str {
     "runtime_child_process_group"
 }
 
+/// One non-blocking reap attempt of any dead child (biological or
+/// subreaper-adopted). Returns true when the child was reaped or is not our
+/// child at all; false when it is still terminating. A subreaper runtime must
+/// reap adopted orphans or they stay zombies forever.
+pub(super) fn try_reap_child_process(pid: u32) -> bool {
+    if pid <= 1 {
+        return true;
+    }
+    let rc = unsafe { libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG) };
+    rc != 0
+}
+
 pub(super) fn reap_child_process(pid: u32) {
     let pid = pid as libc::pid_t;
     if pid <= 1 {
