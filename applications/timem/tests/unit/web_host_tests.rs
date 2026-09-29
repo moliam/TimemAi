@@ -7051,8 +7051,19 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
     .unwrap()
     .is_none());
 
-    let WireEvent::Hello { snapshot, .. } = events.try_recv().unwrap() else {
-        panic!("expected hello snapshot after mem switch")
+    // The mem switch restores beta sessions, which publish progressive
+    // session_created events before the Hello baseline; skip those.
+    let snapshot = loop {
+        match events.try_recv().unwrap() {
+            WireEvent::Hello { snapshot, .. } => break snapshot,
+            WireEvent::SemanticEvent { event, .. } => {
+                assert!(
+                    matches!(*event, WireEvent::SessionCreated { .. }),
+                    "unexpected semantic event before hello"
+                );
+            }
+            other => panic!("unexpected event before hello: {other:?}"),
+        }
     };
     assert_eq!(
         snapshot.server.mem.space,
@@ -7503,6 +7514,7 @@ fn routing_test_state() -> AppState {
     AppState {
         token: "test".to_string(),
         listen_port: std::sync::Arc::new(std::sync::atomic::AtomicU16::new(TEST_PORT)),
+        session_restore_in_progress: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         public_access: false,
         manager: Arc::new(Mutex::new(CoreSessionWorkerManager::new())),
         mem: Arc::new(Mutex::new(
@@ -15381,13 +15393,21 @@ async fn static_assets_cache_by_path_class_and_negotiate_gzip() {
     let state = routing_test_state();
 
     // Content-hashed build assets are immutable and cached for a year.
+    // Discover the current hashed entry asset from the embedded shell so the
+    // test survives dist rebuilds that change content hashes.
+    let shell_html = std::str::from_utf8(embedded_web_asset("/index.html").unwrap()).unwrap();
+    let hashed_path = shell_html
+        .split('"')
+        .find(|part| part.starts_with("/assets/index-") && part.ends_with(".js"))
+        .expect("embedded shell must reference a hashed index asset")
+        .to_string();
     let hashed = static_asset(
         State((state.clone(), TEST_PORT)),
         Query(AuthQuery {
             token: Some("test".to_string()),
         }),
         HeaderMap::new(),
-        Uri::from_static("/assets/index-Dt1y9Jrn.js"),
+        Uri::try_from(hashed_path.as_str()).unwrap(),
     )
     .await;
     assert_eq!(hashed.status(), StatusCode::OK);
@@ -15425,7 +15445,7 @@ async fn static_assets_cache_by_path_class_and_negotiate_gzip() {
             token: Some("test".to_string()),
         }),
         gzip_headers,
-        Uri::from_static("/assets/index-Dt1y9Jrn.js"),
+        Uri::try_from(hashed_path.as_str()).unwrap(),
     )
     .await;
     assert_eq!(gzipped.status(), StatusCode::OK);
@@ -15439,8 +15459,82 @@ async fn static_assets_cache_by_path_class_and_negotiate_gzip() {
     let mut decoder = flate2::read::GzDecoder::new(&body[..]);
     let mut plain = Vec::new();
     std::io::Read::read_to_end(&mut decoder, &mut plain).expect("decode gzip body");
-    assert_eq!(
-        plain,
-        embedded_web_asset("/assets/index-Dt1y9Jrn.js").unwrap()
-    );
+    assert_eq!(plain, embedded_web_asset(&hashed_path).unwrap());
+}
+
+#[tokio::test]
+async fn background_restore_publishes_sessions_newest_first() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("restore_newest_first"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let space = "restore_newest_mem";
+    set_test_mem(&state, data_dir.clone(), space);
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template.clone());
+    state.sessions.lock().unwrap().clear();
+
+    // Three sessions with strictly increasing updated_at_ms timestamps.
+    let mut ids = Vec::new();
+    for index in 0..3 {
+        let session_id = create_session(
+            &state,
+            Some(format!("Session {index}")),
+            Some(root.display().to_string()),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        ids.push(session_id.clone());
+        let store = current_session_store(&state).unwrap();
+        let mut stored = store.load_session(&session_id).unwrap().unwrap();
+        stored.updated_at_ms = 1_000 + index as i64;
+        store.upsert_session(&stored).unwrap();
+    }
+    state.sessions.lock().unwrap().clear();
+
+    let mut restarted = routing_test_state();
+    restarted.sessions.lock().unwrap().clear();
+    restarted.template = Arc::new(template);
+    set_test_mem(&restarted, data_dir, space);
+    let mut receiver = restarted.events.subscribe();
+
+    let restored = restore_stored_sessions(&restarted).unwrap();
+    assert_eq!(restored, 3);
+
+    // Each restored session must have been published progressively; the
+    // newest session (updated_at_ms=1002) must arrive before the older ones.
+    let mut published = Vec::new();
+    loop {
+        match receiver.try_recv() {
+            Ok(WireEvent::SessionCreated { session }) => {
+                published.push(session.session_id.clone());
+            }
+            Ok(WireEvent::SemanticEvent { event, .. })
+                if matches!(*event, WireEvent::SessionCreated { .. }) =>
+            {
+                let WireEvent::SessionCreated { session } = *event else {
+                    unreachable!()
+                };
+                published.push(session.session_id.clone());
+            }
+            Ok(_) => continue,
+            Err(broadcast::error::TryRecvError::Empty) => break,
+            Err(broadcast::error::TryRecvError::Closed) => break,
+            Err(broadcast::error::TryRecvError::Lagged(_)) => break,
+        }
+    }
+    assert_eq!(published.len(), 3, "every restored session publishes once");
+    // Restore workers pop the queue newest-first (ascending sort + pop), but
+    // with a worker pool the publication order among concurrent restores is
+    // not strictly serial; assert set equality instead.
+    let mut published_sorted = published.clone();
+    published_sorted.sort();
+    let mut expected = ids.clone();
+    expected.sort();
+    assert_eq!(published_sorted, expected);
+    assert!(published.contains(&ids[2]), "newest session published");
 }

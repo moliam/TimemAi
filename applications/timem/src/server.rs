@@ -124,7 +124,12 @@ const EVENT_CHANNEL_CAPACITY: usize = 256;
 const TEMPORARY_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const TEMPORARY_MAINTENANCE_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const TEMPORARY_MAINTENANCE_BUSY_RETRY_INTERVAL: Duration = Duration::from_secs(60);
-const SESSION_HISTORY_PAGE_LIMIT: usize = 200;
+// Cap on concurrent session-restore worker threads.
+const SESSION_RESTORE_WORKERS: usize = 3;
+
+// Restore only the most recent slice of history for the initial snapshot;
+// earlier turns load lazily via the history_page command while scrolling.
+const SESSION_HISTORY_PAGE_LIMIT: usize = 30;
 const DEFAULT_MEM_TEMPORARY_RETENTION_DAYS: u16 = 5;
 const MEM_CAPACITY_128_MB: u64 = 128 * 1024 * 1024;
 const MEM_CAPACITY_256_MB: u64 = 256 * 1024 * 1024;
@@ -162,6 +167,7 @@ type SemanticEventDelivery = OrderedEventDelivery<WireEvent>;
 struct AppState {
     token: String,
     listen_port: std::sync::Arc<std::sync::atomic::AtomicU16>,
+    session_restore_in_progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
     public_access: bool,
     manager: Arc<Mutex<CoreSessionWorkerManager>>,
     template: Arc<WorkerTemplate>,
@@ -961,6 +967,7 @@ struct ServerInfo {
     public_access: bool,
     debug_mode: bool,
     performance_trace: bool,
+    restoring: bool,
     mem: WebMemInfo,
     runtime_options: Vec<WebRuntimeOption>,
     session_env_defaults: BTreeMap<String, String>,
@@ -1614,6 +1621,7 @@ pub async fn run(
     let state = AppState {
         token: token.clone().unwrap_or_default(),
         listen_port: std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0)),
+        session_restore_in_progress: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         public_access: launch.public_access,
         manager,
         template: Arc::new(template),
@@ -1634,18 +1642,10 @@ pub async fn run(
     };
     let cleanup_guard = WebRuntimeCleanupGuard::new(&state);
 
-    let restored_sessions =
-        restore_stored_sessions_after_runtime_restart(&state).map_err(|error| {
-            friendly_memory_space_error(
-                error,
-                &state.template.data_dir,
-                &state.template.initial_space,
-            )
-        })?;
-    if restored_sessions == 0 {
-        let default_session = create_session(&state, None, None, BTreeMap::new())?;
-        let _ = default_session;
-    }
+    // Session restore no longer blocks the listener: the web UI gets its first
+    // (possibly empty) snapshot immediately while sessions are restored in the
+    // background. A fresh Hello with the full snapshot is broadcast once the
+    // restore finishes.
     spawn_event_bridge(state.clone());
 
     let listener = bind_web_listener(launch.port, launch.public_access, prefer_default_mem_port)
@@ -1693,6 +1693,7 @@ pub async fn run(
         );
         println!("Local access: {local_url}");
     }
+    spawn_background_session_restore(state.clone());
     let _ = schedule_selected_session_mcp_refreshes(&state);
     if launch.open_browser && !launch.public_access {
         if should_auto_open_browser() {
@@ -5352,6 +5353,45 @@ fn create_session_in_group(
     Ok(session_id)
 }
 
+fn spawn_background_session_restore(state: AppState) {
+    std::thread::spawn(move || {
+        let restored_sessions = match restore_stored_sessions_after_runtime_restart(&state) {
+            Ok(restored) => restored,
+            Err(error) => {
+                eprintln!(
+                    "[timem_web_session_restore_error] reason={}",
+                    friendly_memory_space_error(
+                        error,
+                        &state.template.data_dir,
+                        &state.template.initial_space,
+                    )
+                );
+                0
+            }
+        };
+        if restored_sessions == 0 {
+            if let Err(error) = create_session(&state, None, None, BTreeMap::new()) {
+                eprintln!(
+                    "[timem_web_session_restore_error] default_session_create_failed reason={error}"
+                );
+                return;
+            }
+        }
+        state
+            .session_restore_in_progress
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let port = state.listen_port.load(std::sync::atomic::Ordering::SeqCst);
+        state
+            .semantic_delivery
+            .broadcast_baseline_with(|event_cursor| WireEvent::Hello {
+                snapshot: snapshot_for(&state, port),
+                event_cursor,
+                event_replay_floor: event_cursor,
+            });
+        let _ = schedule_selected_session_mcp_refreshes(&state);
+    });
+}
+
 fn restore_stored_sessions(state: &AppState) -> Result<usize, String> {
     restore_stored_sessions_with_runtime_restart_marker(state, false)
 }
@@ -5365,18 +5405,65 @@ fn restore_stored_sessions_with_runtime_restart_marker(
     record_runtime_restart: bool,
 ) -> Result<usize, String> {
     let store = current_session_store(state)?;
-    let stored_sessions = list_stored_sessions_resilient(&store)?;
-    let mut restored = 0usize;
-    for stored in stored_sessions {
-        let session_id = stored.session_id.clone();
-        match restore_stored_session(state, stored, record_runtime_restart) {
-            Ok(()) => restored += 1,
-            Err(error) => eprintln!(
-                "[timem_web_session_restore_error] session_id={session_id:?} reason={error}"
-            ),
-        }
+    let mut stored_sessions = list_stored_sessions_resilient(&store)?;
+    // Restore newest sessions first: the user's most relevant page comes back
+    // fastest while older sessions continue restoring in the background.
+    // The worker queue pops from the end, so sort ascending to pop newest.
+    stored_sessions.sort_by(|left, right| {
+        left.updated_at_ms
+            .cmp(&right.updated_at_ms)
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
+    // Restore sessions through a small worker pool (bounded instead of one
+    // thread per session, so huge workspaces do not spawn unbounded threads).
+    // Each session's history is an independent disk read and shared state
+    // (sessions map, MEM role library) is already guarded by mutexes.
+    let worker_count = stored_sessions.len().min(SESSION_RESTORE_WORKERS);
+    let queue = std::sync::Arc::new((
+        std::sync::Mutex::new(stored_sessions),
+        std::sync::Condvar::new(),
+    ));
+    let restored = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut handles = Vec::new();
+    for _ in 0..worker_count {
+        let state = state.clone();
+        let queue = queue.clone();
+        let restored = restored.clone();
+        handles.push(std::thread::spawn(move || loop {
+            let stored = { queue.0.lock().map(|mut q| q.pop()).ok().flatten() };
+            let Some(stored) = stored else { return };
+            let session_id = stored.session_id.clone();
+            match restore_stored_session(&state, stored, record_runtime_restart) {
+                Ok(()) => {
+                    restored.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    // Progressive visibility: publish each restored session
+                    // immediately so connected clients see the list fill up
+                    // (newest first) instead of waiting for the whole
+                    // background restore to finish.
+                    if let Some(session) = state
+                        .sessions
+                        .lock()
+                        .ok()
+                        .and_then(|sessions| sessions.get(&session_id).cloned())
+                    {
+                        publish_semantic(
+                            &state,
+                            WireEvent::SessionCreated {
+                                session: Box::new(session),
+                            },
+                        );
+                    }
+                }
+                Err(error) => eprintln!(
+                    "[timem_web_session_restore_error] session_id={session_id:?} reason={error}"
+                ),
+            }
+        }));
     }
-    Ok(restored)
+    for handle in handles {
+        let _ = handle.join();
+    }
+    Ok(restored.load(std::sync::atomic::Ordering::SeqCst))
 }
 
 fn list_stored_sessions_resilient(store: &SessionStore) -> Result<Vec<StoredSession>, String> {
@@ -11591,6 +11678,9 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
             public_access: state.public_access,
             debug_mode: state.debug.is_some(),
             performance_trace: state.runtime_log.enabled(),
+            restoring: state
+                .session_restore_in_progress
+                .load(std::sync::atomic::Ordering::SeqCst),
             mem,
             runtime_options,
             session_env_defaults,
