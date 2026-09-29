@@ -115,8 +115,11 @@ fn forced_compaction_preserves_native_history_and_restricts_model_request() {
     assert_eq!(core.native_exchanges[0].delta_id, "pd_1");
     let prompt = core.render_prompt();
     assert!(!prompt.contains("old tool work"));
-    assert!(prompt.contains("mode=force_shrink_required"));
+    // The shrink instruction is one-shot trailer content: never persisted in
+    // the rendered context, re-attached fresh on every model request.
+    assert!(!prompt.contains("mode=force_shrink_required"));
     let request_prompt = core.build_model_request_prompt(&prompt);
+    assert!(request_prompt.contains("mode=force_shrink_required"));
     assert!(request_prompt
         .ends_with("Context is too long. Your tool calls must start with context_compact:"));
     let request = core.model_interaction_request(request_prompt);
@@ -615,15 +618,62 @@ fn native_context_compact_after_another_call_is_rejected() {
 }
 
 #[test]
-fn failed_context_compact_blocks_later_native_calls() {
-    let mut core = test_core("native_compact_failure_barrier");
+fn stale_delta_refs_compact_idempotently_succeeds_and_runs_later_calls() {
+    let mut core = test_core("native_compact_stale_refs_idempotent");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "ACTIVE STATE".to_string(),
+    )]);
+    // pd_missing was already discarded by an earlier compaction but its id
+    // lingers in stale prompt text; discarding it again is the target state.
+    let compact_arguments = serde_json::json!({
+        "discard": ["pd_missing"],
+        "summary": "STALE REFS ARE IDEMPOTENT",
+    });
+    let cwd_arguments = serde_json::json!({"type": "cwd"});
+
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![
+            NativeToolCall {
+                id: "call_stale_compact".to_string(),
+                name: "context_compact".to_string(),
+                raw_arguments: compact_arguments.to_string(),
+                arguments: compact_arguments,
+            },
+            NativeToolCall {
+                id: "call_may_run".to_string(),
+                name: "self_tool".to_string(),
+                raw_arguments: cwd_arguments.to_string(),
+                arguments: cwd_arguments,
+            },
+        ],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("idempotent compact should succeed and continue")
+    };
+
+    assert!(!prompt.contains("error: invalid_prompt_refs"));
+    assert!(prompt.contains("context compacted successfully."));
+    assert!(prompt.contains("already_absent_delta_ids (idempotently ignored): pd_missing"));
+    assert!(prompt.contains("current_live_delta_refs:"));
+    assert!(prompt.contains("ACTIVE STATE"));
+}
+
+#[test]
+fn prompt_zero_compact_still_fails_closed_and_blocks_later_native_calls() {
+    let mut core = test_core("native_compact_prompt_zero_barrier");
     core.set_interaction_profile(&native_test_profile());
     core.append_delta(vec![(
         "user_question".to_string(),
         "ACTIVE STATE".to_string(),
     )]);
     let compact_arguments = serde_json::json!({
-        "discard": ["pd_missing"],
+        "discard": ["prompt_0"],
         "summary": "INVALID COMPACT",
     });
     let cwd_arguments = serde_json::json!({"type": "cwd"});
@@ -653,6 +703,8 @@ fn failed_context_compact_blocks_later_native_calls() {
     };
 
     assert!(prompt.contains("error: invalid_prompt_refs"));
+    assert!(prompt.contains("missing_ids: prompt_0"));
+    assert!(prompt.contains("current_live_delta_refs:"));
     assert!(!prompt.contains("Action result: self_tool"));
     assert!(prompt.contains("ACTIVE STATE"));
     assert!(core.native_exchanges.is_empty());
