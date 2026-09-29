@@ -193,14 +193,11 @@ fn run_bash_edit_stringified_array_emits_clean_first_touch_paths() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected model continuation, got {other:?}"),
     };
-    let expected_file = fs::canonicalize(cwd.join("a/b/c.txt"))
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
-    let expected_dir = format!(
-        "{}/",
-        fs::canonicalize(cwd.join("a/b")).unwrap().to_string_lossy()
-    );
+    // edit anchors join the cwd without canonicalizing; mirror that exactly
+    // (canonicalize would differ on macOS /var symlinks and Windows verbatim
+    // paths).
+    let expected_file = cwd.join("a/b/c.txt").to_string_lossy().to_string();
+    let expected_dir = format!("{}/", cwd.join("a/b").to_string_lossy());
     assert!(
         prompt.contains(&format!("first time to touch file {expected_file}")),
         "{prompt}"
