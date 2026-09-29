@@ -5845,6 +5845,98 @@ fn memo_finish_guard_blocks_consecutive_finishes_then_allows_through() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
+#[test]
+fn memo_forcibly_closed_when_user_stops_turn() {
+    let dir = tmp_dir("memo_stop_close");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    struct CancelWhenReadyUi {
+        ready: std::path::PathBuf,
+        hard_timeout: Duration,
+    }
+    impl TurnUi for CancelWhenReadyUi {
+        fn is_cancel_requested(&mut self) -> bool {
+            self.ready.is_file() || self.hard_timeout < Duration::from_millis(0)
+        }
+    }
+    // First round creates the memo and starts a long command that records
+    // readiness; the UI cancels once the command is running, so the turn
+    // stops with CancelledByUser AFTER the memo exists.
+    let ready = dir.join("memo_stop_ready");
+    let cmd = format!("echo 3660445 > {}; sleep 5", shell_quote(&ready));
+    let mut model = ReplayModel::new(vec![Ok(llm(
+        format!(
+            r#"{{"free_talk":"记下。","working_still_action":[{{"memo":{{"op":"create","text":"会被中断的目标"}}}},{{"run_bash":{{"cmd":{},"timeout_ms":30000}}}}]}}"#,
+            serde_json::to_string(&cmd).unwrap()
+        ),
+        1_000,
+        false,
+    ))]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "长任务请求",
+            session: "memo_stop_close_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut CancelWhenReadyUi {
+            ready: ready.clone(),
+            hard_timeout: Duration::from_secs(30),
+        },
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.stop_reason, Some(TurnStopReason::CancelledByUser));
+    // User stop must forcibly close the memo on runtime authority.
+    assert_eq!(core.active_memo(), None);
+
+    // The next turn's context carries the one-shot interrupted-memo notice
+    // telling the model to recreate the memo if the new input needs it.
+    let mut model2 = ReplayModel::new(vec![Ok(llm(
+        r#"{"status":"ALL_FINISHED","final_answer":"好的"}"#,
+        2_000,
+        false,
+    ))]);
+    let outcome2 = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "新指令",
+            session: "memo_stop_close_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model2,
+    );
+    assert_eq!(outcome2.text, "好的");
+    assert!(
+        model2.prompts[0].contains(
+            "User interrupted the previous work and the runtime forcibly deleted its active memo"
+        ),
+        "next turn must carry the interrupted-memo notice"
+    );
+    assert!(
+        model2.prompts[0].contains("Recreate the memo if necessary based on the user's new input."),
+        "notice must instruct memo recreation from the new input"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn memo_forcibly_closed_when_finish_exhausts_guard_budget() {
     let dir = tmp_dir("memo_force_close");

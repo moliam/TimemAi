@@ -1791,6 +1791,9 @@ pub struct AgentCore {
     /// memo-finish-guard budget was exhausted. The note is injected once at
     /// the start of the next turn.
     pending_forcible_memo_note: Option<String>,
+    /// Memo forcibly closed by the runtime when the user stopped/interrupted
+    /// the turn. The note is injected once at the start of the next turn.
+    pending_interrupted_memo_note: Option<String>,
     /// Memo text deleted during the current turn. Task finish in the same
     /// turn is challenged once (models may delete and immediately declare
     /// victory without genuinely re-checking the goal).
@@ -1905,6 +1908,7 @@ impl AgentCore {
             active_memo: None,
             memo_finish_guard_tokens: MEMO_FINISH_GUARD_TOKEN_CAP,
             pending_forcible_memo_note: None,
+            pending_interrupted_memo_note: None,
             memo_deleted_this_turn: None,
             memo_deleted_trailer_shown: false,
             pending_native_exchange: None,
@@ -3201,6 +3205,14 @@ impl AgentCore {
         }
     }
 
+    /// A user stop/interrupt abandons the turn: close the memo on runtime
+    /// authority and record the notice for the next turn.
+    pub(crate) fn force_close_memo_on_interrupt(&mut self) -> Option<String> {
+        let memo = self.active_memo.take()?;
+        self.pending_interrupted_memo_note = Some(memo.clone());
+        Some(memo)
+    }
+
     pub(crate) fn clear_active_memo(&mut self) {
         if let Some(memo) = self.active_memo.take() {
             self.memo_deleted_this_turn = Some(memo);
@@ -3272,6 +3284,16 @@ impl AgentCore {
                 PromptComponentRole::system(),
                 "user_interrupted_work",
                 "NOTE: User interrupted the above work. Continue it based on the user's new input's intent. If not sure, ask the user.",
+                "runtime",
+            );
+        }
+        if let Some(memo) = self.pending_interrupted_memo_note.take() {
+            self.submit_prompt_component(
+                PromptComponentRole::system(),
+                "memo_interrupted_deleted",
+                format!(
+                    "User interrupted the previous work and the runtime forcibly deleted its active memo: {memo:?} Recreate the memo if necessary based on the user's new input."
+                ),
                 "runtime",
             );
         }
