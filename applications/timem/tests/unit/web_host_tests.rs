@@ -2741,7 +2741,7 @@ async fn local_static_web_entry_needs_no_token_and_public_entry_sets_auth_cookie
         State((state, TEST_PORT)),
         Query(AuthQuery { token: None }),
         headers,
-        Uri::from_static("/assets/index.js"),
+        Uri::from_static("/assets/index-Dt1y9Jrn.js"),
     )
     .await;
     assert_ne!(cookie_allowed.status(), StatusCode::UNAUTHORIZED);
@@ -15373,5 +15373,74 @@ fn queued_message_turn_uses_consume_time_not_enqueue_time_for_chat_order() {
     assert!(
         session.message_queue.item("queued_early_command").is_none(),
         "confirmed turn must consume the queue item"
+    );
+}
+
+#[tokio::test]
+async fn static_assets_cache_by_path_class_and_negotiate_gzip() {
+    let state = routing_test_state();
+
+    // Content-hashed build assets are immutable and cached for a year.
+    let hashed = static_asset(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery {
+            token: Some("test".to_string()),
+        }),
+        HeaderMap::new(),
+        Uri::from_static("/assets/index-Dt1y9Jrn.js"),
+    )
+    .await;
+    assert_eq!(hashed.status(), StatusCode::OK);
+    assert_eq!(
+        hashed.headers().get(header::CACHE_CONTROL).unwrap(),
+        "public, max-age=31536000, immutable"
+    );
+    assert!(hashed.headers().get(header::CONTENT_ENCODING).is_none());
+
+    // The HTML shell revalidates so a new release is always picked up.
+    let shell = static_asset(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery {
+            token: Some("test".to_string()),
+        }),
+        HeaderMap::new(),
+        Uri::from_static("/"),
+    )
+    .await;
+    assert_eq!(shell.status(), StatusCode::OK);
+    assert_eq!(
+        shell.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-cache"
+    );
+
+    // A request advertising gzip receives the precompressed representation.
+    let mut gzip_headers = HeaderMap::new();
+    gzip_headers.insert(
+        header::ACCEPT_ENCODING,
+        HeaderValue::from_static("gzip, br"),
+    );
+    let gzipped = static_asset(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery {
+            token: Some("test".to_string()),
+        }),
+        gzip_headers,
+        Uri::from_static("/assets/index-Dt1y9Jrn.js"),
+    )
+    .await;
+    assert_eq!(gzipped.status(), StatusCode::OK);
+    assert_eq!(
+        gzipped.headers().get(header::CONTENT_ENCODING).unwrap(),
+        "gzip"
+    );
+    let body = axum::body::to_bytes(gzipped.into_body(), 1 << 20)
+        .await
+        .expect("gzip body");
+    let mut decoder = flate2::read::GzDecoder::new(&body[..]);
+    let mut plain = Vec::new();
+    std::io::Read::read_to_end(&mut decoder, &mut plain).expect("decode gzip body");
+    assert_eq!(
+        plain,
+        embedded_web_asset("/assets/index-Dt1y9Jrn.js").unwrap()
     );
 }

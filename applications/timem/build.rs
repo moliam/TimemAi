@@ -17,6 +17,12 @@ fn main() {
     let mut generated = String::from(
         "pub fn embedded_web_asset(path: &str) -> Option<&'static [u8]> {\n    match path {\n",
     );
+    // Precompressed (gzip) twins for compressible text assets, served when
+    // the request advertises gzip support. Binary assets (fonts, images)
+    // stay identity-only.
+    let mut compressed = String::from(
+        "pub fn embedded_web_asset_gzip(path: &str) -> Option<&'static [u8]> {\n    match path {\n",
+    );
     for asset in assets {
         let relative = asset.strip_prefix(dist_dir).expect("asset under dist");
         let url_path = format!("/{}", relative.to_string_lossy().replace('\\', "/"));
@@ -24,8 +30,18 @@ fn main() {
         generated.push_str(&format!(
             "        {url_path:?} => Some(include_bytes!({absolute:?})),\n"
         ));
+        if compressible_asset(&url_path) {
+            let gz_path = write_gzip_asset(dist_dir, &asset);
+            let gz_absolute = gz_path.canonicalize().expect("gzip asset canonical path");
+            compressed.push_str(&format!(
+                "        {url_path:?} => Some(include_bytes!({gz_absolute:?})),\n"
+            ));
+        }
     }
     generated.push_str("        _ => None,\n    }\n}\n");
+    compressed.push_str("        _ => None,\n    }\n}\n");
+    generated.push('\n');
+    generated.push_str(&compressed);
     fs::write(output, generated).expect("write generated embedded asset table");
 }
 
@@ -41,4 +57,41 @@ fn collect_assets(root: &Path, directory: &Path, assets: &mut Vec<std::path::Pat
         }
     }
     let _ = root;
+}
+
+fn compressible_asset(url_path: &str) -> bool {
+    url_path.ends_with(".js")
+        || url_path.ends_with(".css")
+        || url_path.ends_with(".html")
+        || url_path.ends_with(".svg")
+        || url_path.ends_with(".json")
+}
+
+fn write_gzip_asset(dist_dir: &Path, asset: &Path) -> std::path::PathBuf {
+    use flate2::{write::GzEncoder, Compression};
+    use std::io::Write;
+    let relative_gz = asset
+        .strip_prefix(dist_dir)
+        .expect("asset under dist")
+        .with_extension(format!(
+            "{}.gz",
+            asset
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or_default()
+        ));
+    let gz_path = std::env::temp_dir().join(format!(
+        "timem-web-gzip-{}-{}",
+        std::process::id(),
+        relative_gz.to_string_lossy().replace('/', "_")
+    ));
+    let data = fs::read(asset).expect("read asset for gzip");
+    let encoder = GzEncoder::new(
+        fs::File::create(&gz_path).expect("create gzip asset file"),
+        Compression::default(),
+    );
+    let mut encoder = encoder;
+    encoder.write_all(&data).expect("write gzip asset");
+    encoder.finish().expect("finish gzip asset");
+    gz_path
 }
