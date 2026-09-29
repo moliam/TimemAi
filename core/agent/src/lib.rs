@@ -1738,6 +1738,11 @@ pub struct AgentCore {
     max_llm_input_tokens: u32,
     last_observed_prompt_tokens: u32,
     context_compact_required: bool,
+    /// One-time-per-request forced-shrink instruction (with live delta
+    /// refs). Kept out of persistent deltas: it is rebuilt fresh for every
+    /// model request while compaction is required, so no stale ref lists
+    /// linger in context.
+    forced_shrink_review: Option<String>,
     /// Set for a user-initiated compaction request: the next request carries
     /// the manual-compaction trailer wording instead of the forced-shrink one.
     manual_compact_trailer_pending: bool,
@@ -1870,6 +1875,7 @@ impl AgentCore {
             max_llm_input_tokens: 100_000,
             last_observed_prompt_tokens: 0,
             context_compact_required: false,
+            forced_shrink_review: None,
             manual_compact_trailer_pending: false,
             pending_compact_request_notice: None,
             rounds_since_reasoning: 0,
@@ -2427,6 +2433,10 @@ impl AgentCore {
         // wording) until the compaction succeeds: the context may not be over
         // the limit, so retries must not fall back to "Context is too long".
         if self.context_compact_required {
+            if let Some(review) = self.forced_shrink_review.as_deref() {
+                prompt.push_str(review);
+                prompt.push_str("\n\n");
+            }
             if self.manual_compact_trailer_pending {
                 prompt.push_str(prompt_render::MANUAL_CONTEXT_COMPACT_TRAILER);
             } else {
@@ -3022,6 +3032,7 @@ impl AgentCore {
         self.context_message_elements = 0;
         self.last_observed_prompt_tokens = 0;
         self.context_compact_required = false;
+        self.forced_shrink_review = None;
         self.manual_compact_trailer_pending = false;
         self.pending_compact_request_notice = None;
         self.current_round = 0;
@@ -3329,7 +3340,8 @@ impl AgentCore {
         if let Some(shrink_review) =
             self.consume_shrink_review_if_needed(incoming_prompt_tokens, pending_dynamic_tokens)
         {
-            system_texts.push(format!("Long-context maintenance:\n{shrink_review}"));
+            // One-shot trailer content: never persisted into deltas.
+            self.forced_shrink_review = Some(format!("Long-context maintenance:\n{shrink_review}"));
         }
         for system_text in system_texts {
             self.submit_prompt_component(
@@ -3506,6 +3518,10 @@ impl AgentCore {
             let (body, response_trailer) = prompt_render::split_formatted_response_trailer(&prompt);
             prompt = body.trim_end().to_string();
             prompt.push_str("\n\n");
+            if let Some(review) = self.forced_shrink_review.as_deref() {
+                prompt.push_str(review);
+                prompt.push_str("\n\n");
+            }
             prompt.push_str(if self.manual_compact_trailer_pending {
                 prompt_render::MANUAL_CONTEXT_COMPACT_TRAILER
             } else {
@@ -3640,13 +3656,47 @@ impl AgentCore {
         let mut compacted_successfully = false;
         let mut successful_compact_summaries = Vec::new();
         for compact in &parsed.context_compacts {
-            let missing = self.missing_prompt_refs(&compact.delta_ids, &compact.slice_ids);
+            // Idempotent refs: a delta id that no longer exists has already
+            // reached the compaction target state (an earlier compact
+            // discarded it) but stale refs linger in old prompt text, so a
+            // missing delta id must not fail the whole request — that
+            // dead-looped the force-shrink retry path. Genuinely malformed
+            // refs (prompt_0, unknown slice ids) still fail closed.
+            let mut missing = self.missing_prompt_refs(&[], &compact.slice_ids);
+            if compact.delta_ids.iter().any(|id| id.trim() == "prompt_0") {
+                missing.push("prompt_0".to_string());
+            }
+            let existing_delta_ids = self
+                .deltas
+                .iter()
+                .map(|delta| delta.delta_id.clone())
+                .collect::<HashSet<_>>();
+            let mut stale_delta_ids = Vec::new();
+            let mut live_delta_ids = Vec::new();
+            for id in &compact.delta_ids {
+                let id = id.trim();
+                if id.is_empty() {
+                    continue;
+                }
+                if existing_delta_ids.contains(id) {
+                    live_delta_ids.push(id.to_string());
+                } else {
+                    stale_delta_ids.push(id.to_string());
+                }
+            }
+            let live_offload_ids = compact
+                .offload_delta_ids
+                .iter()
+                .filter(|id| live_delta_ids.contains(&id.trim().to_string()))
+                .cloned()
+                .collect::<Vec<_>>();
+            let live_delta_refs = self.live_delta_refs_hint();
             if missing.is_empty() {
                 let estimated_before = self.dynamic_context_token_estimate();
-                let offload_record = if compact.offload_delta_ids.is_empty() {
+                let offload_record = if live_offload_ids.is_empty() {
                     None
                 } else {
-                    match self.collect_prompt_context_for_scratch(&compact.offload_delta_ids, &[]) {
+                    match self.collect_prompt_context_for_scratch(&live_offload_ids, &[]) {
                         Ok(offload) => match self.scratch.write_record(
                             "context_offload",
                             "context compact offload",
@@ -3678,11 +3728,23 @@ impl AgentCore {
                         }
                     }
                 };
-                let _ = self.apply_prompt_shrink(
+                let mut shrink_report = self.apply_prompt_shrink(
                     "Action result: context_compact",
                     &compact.delta_ids,
                     &compact.slice_ids,
                 );
+                if !stale_delta_ids.is_empty() {
+                    shrink_report.push_str(&format!(
+                        "\nalready_absent_delta_ids (idempotently ignored): {}",
+                        stale_delta_ids.join(", ")
+                    ));
+                }
+                shrink_report.push_str(&format!("\ncurrent_live_delta_refs:\n{}", live_delta_refs));
+                // Only idempotent (partly stale) compacts need an explicit
+                // result note; a clean success stays silent as before.
+                if !stale_delta_ids.is_empty() {
+                    slices.push(("result_of_llm_action".to_string(), shrink_report));
+                }
                 let estimated_after = self.dynamic_context_token_estimate();
                 let summary_tokens = estimate_prompt_tokens(&compact.summary);
                 let compact_report = host::CoreContextCompactTopic {
@@ -3710,11 +3772,22 @@ impl AgentCore {
                 slices.push((
                     "result_of_llm_action".to_string(),
                     format!(
-                        "Action result: context_compact\nerror: invalid_prompt_refs\nmissing_ids: {}",
-                        missing.join(", ")
+                        "Action result: context_compact\nerror: invalid_prompt_refs\nmissing_ids: {}\ncurrent_live_delta_refs:\n{}",
+                        missing.join(", "),
+                        live_delta_refs
                     ),
                 ));
             }
+        }
+        if compacted_successfully {
+            // The request succeeded; superseded maintenance instructions and
+            // past failure echoes would only pollute future compactions.
+            self.hide_prompt_slices_matching("force_shrink_required");
+            self.hide_prompt_slices_matching("error: invalid_prompt_refs");
+            self.hide_prompt_slices_matching("error: scratch_offload_failed");
+        }
+        if compacted_successfully {
+            self.forced_shrink_review = None;
         }
         if compacted_successfully {
             // A successful compaction is accepted as-is: shrink depth cannot
@@ -4969,6 +5042,10 @@ impl AgentCore {
             };
             prompt = body.trim_end().to_string();
             prompt.push_str("\n\n");
+            if let Some(review) = self.forced_shrink_review.as_deref() {
+                prompt.push_str(review);
+                prompt.push_str("\n\n");
+            }
             prompt.push_str(compact_trailer);
             if let Some(response_trailer) = response_trailer {
                 let _ = response_trailer;
@@ -5140,10 +5217,8 @@ impl AgentCore {
 
     fn append_in_turn_shrink_review_if_needed(&mut self) {
         if let Some(shrink_review) = self.consume_shrink_review_if_needed(0, 0) {
-            self.append_delta(vec![(
-                "result_of_llm_action".to_string(),
-                format!("Long-context maintenance:\n{shrink_review}"),
-            )]);
+            // One-shot trailer content: never persisted into deltas.
+            self.forced_shrink_review = Some(format!("Long-context maintenance:\n{shrink_review}"));
         }
     }
 
@@ -5542,6 +5617,9 @@ Runtime tool_call ids:",
             self.pending_compact_request_notice = Some((estimated_prompt_tokens, force_threshold));
         }
         self.context_compact_required = true;
+        // Older maintenance notes carry stale delta refs that already led the
+        // model astray; hide them so only the fresh authoritative list stays.
+        self.hide_prompt_slices_matching("force_shrink_required");
         let dynamic_tokens = slices
             .iter()
             .map(|slice| estimate_prompt_tokens(&slice.text))
@@ -5555,11 +5633,11 @@ Runtime tool_call ids:",
             // text slices: a pure tool round is exactly the fat bulk a
             // compaction should be able to discard.
             .filter(|delta| {
-                !prompt_render::render_delta_slices(delta).is_empty()
-                    || self
-                        .native_exchanges
-                        .iter()
-                        .any(|exchange| exchange.delta_id == delta.delta_id)
+                // Text slices carry their [BEGIN DELTA] markers inline; only
+                // native-exchange deltas lack inline refs and need listing.
+                self.native_exchanges
+                    .iter()
+                    .any(|exchange| exchange.delta_id == delta.delta_id)
             })
             .rev()
             .take(12)
@@ -6645,6 +6723,20 @@ Runtime tool_call ids:",
         })
     }
 
+    /// Hide every visible slice whose text contains `needle`. Used to retire
+    /// superseded long-context maintenance instructions and stale compaction
+    /// failure echoes without touching unrelated history.
+    fn hide_prompt_slices_matching(&mut self, needle: &str) {
+        for delta in &mut self.deltas {
+            for slice in prompt_render::render_delta_slices(delta) {
+                if slice.text.contains(needle) && !delta.hidden_slice_ids.contains(&slice.slice_id)
+                {
+                    delta.hidden_slice_ids.push(slice.slice_id.clone());
+                }
+            }
+        }
+    }
+
     pub(crate) fn apply_prompt_shrink(
         &mut self,
         action_result_header: &str,
@@ -6732,6 +6824,41 @@ Runtime tool_call ids:",
             shrunk_tokens_estimate,
             missing_text
         )
+    }
+
+    /// Current authoritative delta ids with their text+native token hints,
+    /// so compaction retries always see fresh refs instead of the stale
+    /// lists that linger in historical prompt text.
+    fn live_delta_refs_hint(&self) -> String {
+        self.deltas
+            .iter()
+            // Text slices already carry their [BEGIN DELTA] markers inline;
+            // only native-exchange deltas lack inline refs and need a hint.
+            .filter(|delta| {
+                self.native_exchanges
+                    .iter()
+                    .any(|exchange| exchange.delta_id == delta.delta_id)
+            })
+            .rev()
+            .take(12)
+            .map(|delta| {
+                let text_tokens = prompt_render::render_delta_slices(delta)
+                    .iter()
+                    .map(|slice| estimate_prompt_tokens(&slice.text))
+                    .sum::<u32>();
+                let native_tokens = self
+                    .native_exchanges
+                    .iter()
+                    .filter(|exchange| exchange.delta_id == delta.delta_id)
+                    .map(estimate_native_exchange_tokens)
+                    .fold(0_u32, u32::saturating_add);
+                format!(
+                    "- delta_id={} (text {} + tool_exchanges {})",
+                    delta.delta_id, text_tokens, native_tokens
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn missing_prompt_refs(&self, delta_ids: &[String], slice_ids: &[String]) -> Vec<String> {

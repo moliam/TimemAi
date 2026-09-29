@@ -5060,7 +5060,7 @@ fn json_failed_context_compact_blocks_later_action() {
         tool_calls: Vec::new(),
         content: serde_json::json!({
             "context_compact": {
-                "discard": ["pd_missing"],
+                "discard": ["prompt_0"],
                 "summary": "INVALID JSON COMPACT"
             },
             "working_still_action": {
@@ -5160,7 +5160,7 @@ fn context_compact_offload_rejects_invalid_prompt_refs_without_writing() {
     let _ = core.begin_turn("seed context", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"free_talk":"checking compact refs","context_compact":{"offload":["pd_missing"],"summary":"bad refs should not write scratch"}}"#),
+        content: scored(r#"{"free_talk":"checking compact refs","context_compact":{"offload":["prompt_0"],"summary":"bad refs should not write scratch"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5171,7 +5171,8 @@ fn context_compact_offload_rejects_invalid_prompt_refs_without_writing() {
     };
     assert!(prompt.contains("Action result: context_compact"));
     assert!(prompt.contains("error: invalid_prompt_refs"));
-    assert!(prompt.contains("missing_ids: pd_missing"));
+    assert!(prompt.contains("missing_ids: prompt_0"));
+    assert!(prompt.contains("current_live_delta_refs:"));
     assert!(prompt.contains("checking compact refs"));
     assert!(prompt.contains("bad refs should not write scratch"));
     let assistant = prompt.find("## TIMEM_ASSISTANT").unwrap();
