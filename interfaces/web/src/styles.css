@@ -511,7 +511,7 @@ button:disabled { cursor: not-allowed; }
 .compact-meter { position: relative; width: 72px; height: 3px; overflow: hidden; border-radius: 999px; background: #26343d; }
 .compact-meter span { position: absolute; inset: 0 auto 0 0; border-radius: inherit; transform-origin: left; }
 .compact-before { width: 100%; background: #677986; animation: compact-before-fade .8s ease-out both; }
-.compact-indeterminate { animation: compact-indeterminate 2.4s ease-in-out infinite; }
+.compact-indeterminate { animation: compact-indeterminate 10s ease-in-out infinite; }
 @keyframes compact-indeterminate { 0% { width: 18%; } 50% { width: 82%; } 100% { width: 18%; } }
 .compact-after { background: #58bca7; animation: compact-after-settle .75s cubic-bezier(.2,.8,.2,1) both; }
 @keyframes spin { to { transform: rotate(360deg); } }
