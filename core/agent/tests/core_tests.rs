@@ -160,6 +160,64 @@ fn run_bash_edit_first_touch_read(core: &mut AgentCore, path: &str) -> String {
 }
 
 #[test]
+fn run_bash_edit_stringified_array_emits_clean_first_touch_paths() {
+    // Models sometimes stringify the edit list; the first-touch anchors must
+    // resolve to the clean path, never dir/[".../file"] garbage.
+    let cwd = tmp_dir("run_bash_edit_stringified");
+    fs::create_dir_all(cwd.join("a/b")).unwrap();
+    fs::write(cwd.join("a/b/c.txt"), "one\n").unwrap();
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("run_bash_edit_stringified_mem"),
+    );
+    core.change_prompt_cwd(cwd.to_string_lossy()).unwrap();
+    let _ = core.begin_turn("edit via stringified array", None);
+
+    // `edit` is a STRING whose content is a JSON array with one path.
+    let array_text =
+        serde_json::to_string(&vec![cwd.join("a/b/c.txt").to_string_lossy().to_string()]).unwrap();
+    let edit_string = serde_json::to_string(&array_text).unwrap();
+    let action = serde_json::json!({
+        "working_still_action": [{
+            "run_bash": {"cmd": "true", "edit": array_text}
+        }]
+    })
+    .to_string();
+    let prompt = match core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(action),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    let expected_file = fs::canonicalize(cwd.join("a/b/c.txt"))
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let expected_dir = format!(
+        "{}/",
+        fs::canonicalize(cwd.join("a/b")).unwrap().to_string_lossy()
+    );
+    assert!(
+        prompt.contains(&format!("first time to touch file {expected_file}")),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(&format!("first time to touch dir {expected_dir}")),
+        "{prompt}"
+    );
+    // No bracketed/quoted garbage from the stringified wrapper remains.
+    assert!(
+        !prompt.contains("[\""),
+        "bracketed garbage leaked into first-touch notes: {prompt}"
+    );
+}
+
+#[test]
 fn run_bash_edit_first_touch_notes_are_injected_once_per_path() {
     let cwd = tmp_dir("run_bash_edit_first_touch_once");
     fs::create_dir_all(cwd.join("a/b")).unwrap();
