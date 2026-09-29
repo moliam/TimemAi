@@ -184,7 +184,7 @@ impl SessionResumeNotice {
             self.previous_active_memo
                 .as_deref()
                 .map(|memo| format!(
-                    "\nPrevious active memo turns inactive: {{ {memo} }}.\nYou need to recreate memo if necessary."
+                    "\nPrevious active memo is deleted by runtime: {{ {memo} }}.\nYou need to recreate memo if necessary."
                 ))
                 .unwrap_or_default(),
             chat_history_prompt_format_hint(&self.history_path),

@@ -507,6 +507,14 @@ pub struct DynamicContextSnapshot {
     /// would desynchronize the long-task reminder from its context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_memo: Option<String>,
+    /// Runtime-authority memo closure notices that were still pending at
+    /// snapshot time. They describe runtime state the model must hear about
+    /// in the next turn, so they travel with the snapshot to survive a
+    /// restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_forcible_memo_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_interrupted_memo_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3001,6 +3009,8 @@ impl AgentCore {
             native_exchanges: self.native_exchanges.clone(),
             last_observed_prompt_tokens: self.last_observed_prompt_tokens,
             active_memo: self.active_memo.clone(),
+            pending_forcible_memo_note: self.pending_forcible_memo_note.clone(),
+            pending_interrupted_memo_note: self.pending_interrupted_memo_note.clone(),
         }
     }
 
@@ -3016,6 +3026,11 @@ impl AgentCore {
         self.native_exchanges = snapshot.native_exchanges;
         self.recount_context_message_elements();
         self.last_observed_prompt_tokens = snapshot.last_observed_prompt_tokens;
+        // Pending runtime-authority memo notices are runtime state for the
+        // next turn; they must survive a restart with the context they
+        // belong to.
+        self.pending_forcible_memo_note = snapshot.pending_forcible_memo_note;
+        self.pending_interrupted_memo_note = snapshot.pending_interrupted_memo_note;
         if let Some(max_seq) = self
             .deltas
             .iter()
