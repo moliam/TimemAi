@@ -5626,49 +5626,6 @@ Runtime tool_call ids:",
             .sum::<u32>()
             .saturating_add(pending_dynamic_tokens);
         let current_count = self.deltas.len();
-        let delta_refs = self
-            .deltas
-            .iter()
-            // Include deltas that own native tool exchanges even without
-            // text slices: a pure tool round is exactly the fat bulk a
-            // compaction should be able to discard.
-            .filter(|delta| {
-                // Text slices carry their [BEGIN DELTA] markers inline; only
-                // native-exchange deltas lack inline refs and need listing.
-                self.native_exchanges
-                    .iter()
-                    .any(|exchange| exchange.delta_id == delta.delta_id)
-            })
-            .rev()
-            .take(12)
-            .map(|delta| {
-                // Size hint must include the delta's native exchanges (tool
-                // calls/results): they are the bulk of a native-mode context.
-                // Text-only hints made fat native deltas look small, so the
-                // model discarded small stale deltas and compaction barely
-                // shrank anything.
-                let text_tokens = prompt_render::render_delta_slices(delta)
-                    .iter()
-                    .map(|slice| estimate_prompt_tokens(&slice.text))
-                    .sum::<u32>();
-                let native_tokens = self
-                    .native_exchanges
-                    .iter()
-                    .filter(|exchange| exchange.delta_id == delta.delta_id)
-                    .map(estimate_native_exchange_tokens)
-                    .fold(0_u32, u32::saturating_add);
-                format!(
-                    "- delta_id={} time_ms={} visible_slices={} estimated_tokens={} (text {} + tool_exchanges {})",
-                    delta.delta_id,
-                    delta.time_ms,
-                    prompt_render::render_delta_slices(delta).len(),
-                    text_tokens.saturating_add(native_tokens),
-                    text_tokens,
-                    native_tokens
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
         let tip = "TIPS: You can update your job list plan, steer and optimize your work based on the above work.";
         // A manual compaction request must not claim the threshold was
         // crossed; it demands a deep shrink of the same 10%-20% footprint.
@@ -5678,7 +5635,7 @@ Runtime tool_call ids:",
             "Context is above 90% of the configured input window. Your tool calls must start with context_compact. Summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use the response protocol's context_compact block: discard stale delta ids, offload important but lengthy delta ids, and provide the summary. Do not target prompt_0. You may include later tool calls in the same response; they run only after context_compact succeeds. Until compaction succeeds, responses that do not start with context_compact are ignored without being shown or executed."
         };
         Some(format!(
-            "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\ndynamic_context_tokens={dynamic_tokens}\nprompt_delta_count={current_count}\nrecent_prompt_delta_refs:\n{delta_refs}\n{tip}\n{instruction}",
+            "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\ndynamic_context_tokens={dynamic_tokens}\nprompt_delta_count={current_count}\nPick delta ids yourself from the [BEGIN DELTA delta_id: ...]/[END DELTA delta_id: ...] markers inline in the context; discard the fattest stale deltas first.\n{tip}\n{instruction}",
             self.max_llm_input_tokens
         ))
     }
