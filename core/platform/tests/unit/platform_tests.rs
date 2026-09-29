@@ -402,3 +402,54 @@ fn subreaper_safety_net_adopts_and_sweeps_detached_orphans() {
     }
     assert!(gone, "swept orphan must disappear from the sweep list");
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn subreaper_reaps_self_exited_adopted_orphans() {
+    use crate::install_process_subreaper;
+    use crate::reparented_detached_child_pids;
+    use crate::try_reap_child_process;
+    assert!(install_process_subreaper());
+    // Spawn a setsid orphan that exits on its own. The subreaper adopts it,
+    // but without an explicit reap it stays a zombie forever and
+    // kill(pid, 0) keeps reporting it alive — the exact regression behind
+    // the lifecycle smoke "Host survived" failure.
+    let marker = std::env::temp_dir().join(format!(
+        "timem-orphan-reap-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    ));
+    let status = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "setsid bash -c 'echo $$ > {:?}; exit 0' & wait",
+            marker
+        ))
+        .status()
+        .expect("spawn orphan shell");
+    assert!(status.success());
+    let orphan_pid: u32 = std::fs::read_to_string(&marker)
+        .expect("orphan marker file")
+        .trim()
+        .parse()
+        .expect("orphan pid");
+    let _ = std::fs::remove_file(&marker);
+    // Wait until it is adopted (appears in the sweep list); once it has
+    // exited, try_reap must remove the zombie.
+    let mut reaped = false;
+    for _ in 0..100 {
+        if (reparented_detached_child_pids().contains(&orphan_pid)
+            || !crate::process_running(orphan_pid))
+            && try_reap_child_process(orphan_pid)
+            && !crate::process_running(orphan_pid)
+        {
+            reaped = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(reaped, "self-exited adopted orphan must be reaped");
+}

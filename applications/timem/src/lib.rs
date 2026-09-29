@@ -57,7 +57,20 @@ fn acquire_workspace_instance_lock(
 pub fn run_web(args: Vec<String>) {
     // Orphan safety net: reparent escaped descendants to this runtime so the
     // shell job manager can find and terminate them on job/shutdown sweeps.
-    let _ = agent_core::os::install_process_subreaper();
+    // A subreaper must also reap adopted orphans, or any descendant that
+    // exits on its own stays a zombie forever (kill(pid,0) keeps reporting
+    // it alive), so a lightweight periodic reaper thread runs beside it.
+    if agent_core::os::install_process_subreaper() {
+        std::thread::Builder::new()
+            .name("orphan-reaper".to_string())
+            .spawn(|| loop {
+                for pid in agent_core::os::reparented_detached_child_pids() {
+                    agent_core::os::try_reap_child_process(pid);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            })
+            .ok();
+    }
     let memory_root = match lifecycle_diagnostics::memory_root_from_args(&args) {
         Ok(path) => path,
         Err(error) => {

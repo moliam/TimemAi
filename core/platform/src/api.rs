@@ -324,6 +324,18 @@ pub fn reparented_detached_child_pids() -> Vec<u32> {
 
 /// Reap a reparented orphan child that has been terminated. Without this the
 /// child remains a zombie, and kill(pid, 0) keeps reporting it as alive.
+/// Non-blocking reap attempt of a dead child (biological or subreaper-adopted).
+/// Returns true when reaped or not our child; false while it is terminating.
+pub fn try_reap_child_process(pid: u32) -> bool {
+    #[cfg(unix)]
+    return crate::shared::try_reap_child_process(pid);
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
 pub fn reap_child_process(pid: u32) {
     #[cfg(unix)]
     crate::shared::reap_child_process(pid);
