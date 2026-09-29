@@ -68,6 +68,7 @@ pub mod response_protocol;
 pub mod retry_policy;
 pub mod rolling_file_store;
 pub mod runtime_context;
+mod runtime_info;
 mod schema_optimizer;
 #[path = "../../../resources/capabilities/tools/self_tool.rs"]
 pub mod self_tool;
@@ -1778,6 +1779,11 @@ pub struct AgentCore {
     pub(crate) scratch: FileScratchStore,
     pub(crate) chat_history: FileChatHistoryStore,
     pub(crate) shell_jobs: ShellJobManager,
+    pub(crate) disk_pressure: runtime_info::DiskPressureTracker,
+    /// Test-only override for the disk sample (total free, total capacity)
+    /// so disk pressure windows can be simulated without mutating a real
+    /// filesystem. None in production, where the real sample is taken.
+    pub(crate) disk_free_override: Option<(u64, u64)>,
     pub(crate) tool_jobs: FileToolJobStore,
     action_audit: FileActionAuditStore,
     pub(crate) self_tool: SelfToolState,
@@ -1912,6 +1918,8 @@ impl AgentCore {
             scratch: FileScratchStore::new(memory_dir),
             chat_history: FileChatHistoryStore::new(memory_dir),
             shell_jobs: ShellJobManager::new(memory_dir),
+            disk_pressure: runtime_info::DiskPressureTracker::new(),
+            disk_free_override: None,
             tool_jobs: FileToolJobStore::new(memory_dir),
             action_audit: FileActionAuditStore::new(memory_dir),
             self_tool,
@@ -2346,14 +2354,31 @@ impl AgentCore {
             updates
                 .iter()
                 .map(|update| {
+                    let orphan_hint = {
+                        let members = os::list_live_process_group_members(update.pid);
+                        if members.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                "\nORPHAN_PROCESS: the exited job pid={} left these programs still running: [{}]. They will keep running until stopped. Check what they are (e.g. `ps -fp <pid>`) and stop them with `kill <pid>` if they are leftovers.",
+                                update.pid,
+                                members
+                                    .iter()
+                                    .map(|pid| pid.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        }
+                    };
                     format!(
-                        "RUNNING_JOB_UPDATE: pid={}, {}, cmd={}, now exits. elapsed time={}ms\nExit status: {}\nFinal output:\n{}",
+                        "RUNNING_JOB_UPDATE: pid={}, {}, cmd={}, now exits. elapsed time={}ms\nExit status: {}\nFinal output:\n{}{}",
                         update.pid,
                         update.description(),
                         compact_text(&update.command, 500),
                         update.elapsed_ms,
                         update.status,
                         compact_text(&update.output, 4000),
+                        orphan_hint,
                     )
                 })
                 .collect::<Vec<_>>()
@@ -2400,6 +2425,78 @@ impl AgentCore {
         Some(text)
     }
 
+    /// One observation point for the disk pressure tracker. Samples the
+    /// total free space of the disks the work may write to.
+    fn observe_disk_pressure(
+        &mut self,
+        running: &[runtime_info::RunningJobSnapshot],
+    ) -> Option<String> {
+        let sample = match self.disk_free_override {
+            Some(sample) => Some(sample),
+            None => {
+                let filesystems = Self::filesystems_for_info(running);
+                if filesystems.is_empty() {
+                    None
+                } else {
+                    Some((
+                        filesystems.iter().map(|fs| fs.free_bytes).sum(),
+                        filesystems.iter().map(|fs| fs.total_bytes).sum(),
+                    ))
+                }
+            }
+        };
+        let notice = self.disk_pressure.observe(sample);
+        // Persist immediately: even when the current request path takes an
+        // early return, the notice rides the next request instead of being
+        // dropped. Exit-event-like notices must be consumed, not lost.
+        if let Some(notice) = &notice {
+            self.submit_prompt_component(
+                PromptComponentRole::system(),
+                "disk_pressure",
+                notice.clone(),
+                "runtime",
+            );
+        }
+        notice
+    }
+
+    /// Sample filesystem usage for every disk the current work may write
+    /// to: the session working directory plus each running job's cwd,
+    /// deduplicated by device id so one disk reports once.
+    fn filesystems_for_info(
+        running: &[runtime_info::RunningJobSnapshot],
+    ) -> Vec<runtime_info::FilesystemUsage> {
+        let mut paths: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(dir) = std::env::current_dir().ok() {
+            paths.push(dir);
+        }
+        for job in running {
+            if job.cwd.trim().is_empty() {
+                continue;
+            }
+            paths.push(std::path::PathBuf::from(&job.cwd));
+        }
+        let mut seen_devices = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for path in paths {
+            let Some(device) = os::filesystem_device_id(&path) else {
+                continue;
+            };
+            if !seen_devices.insert(device) {
+                continue;
+            }
+            let Some((total, free)) = os::filesystem_usage_bytes(&path) else {
+                continue;
+            };
+            out.push(runtime_info::FilesystemUsage {
+                path: path.display().to_string(),
+                total_bytes: total,
+                free_bytes: free,
+            });
+        }
+        out
+    }
+
     pub fn build_model_request_prompt(&mut self, current_prompt: &str) -> String {
         self.build_model_request_prompt_inner(current_prompt, None)
     }
@@ -2439,7 +2536,27 @@ impl AgentCore {
         F: FnOnce() -> (Vec<RunningShellJob>, Vec<ShellJobExitUpdate>),
     {
         let oldest_running_created_ms = running.iter().map(|job| job.created_at_ms).min();
-        let still_running = self.still_running_cmds_context_from(running);
+        let still_running = self.still_running_cmds_context_from(running.clone());
+        let running_snapshot_for_info: Vec<runtime_info::RunningJobSnapshot> = running
+            .iter()
+            .map(|job| runtime_info::RunningJobSnapshot {
+                pid: job.pid,
+                tool_call_id: job.tool_call_id.clone(),
+                command: job.command.clone(),
+                cwd: job.cwd.clone(),
+                created_at_ms: job.created_at_ms,
+            })
+            .collect();
+        let mut updates_snapshot_for_info: Vec<runtime_info::JobExitSnapshot> = updates
+            .iter()
+            .map(|update| runtime_info::JobExitSnapshot {
+                pid: update.pid,
+                tool_call_id: update.tool_call_id.clone(),
+                command: update.command.clone(),
+                elapsed_ms: update.elapsed_ms,
+                status: update.status.clone(),
+            })
+            .collect();
         // Request-local progress check driven by the runtime shell-job state:
         // when any tracked job has already run for over 3 minutes without
         // finishing, the trailer asks the model to verify real progress. It is
@@ -2454,15 +2571,52 @@ impl AgentCore {
         });
         let (body, trailer) = prompt_render::split_formatted_response_trailer(current_prompt);
         let mut prompt = body.trim_end().to_string();
-        if let Some(still_running) = still_running.as_ref() {
-            prompt.push_str("\n\n");
-            prompt.push_str(still_running);
-        }
 
+        // RUNTIME_INFO: aggregated observation from registered module
+        // reporters (jobmanager, sysstat). Built only when some reporter
+        // has important state; rides along with this request and is never
+        // persisted into prompt history.
         // Capture jobs that finish while the base prompt and running table are rendered.
         // The request-local order is historical tool results, running snapshot, then exits.
+        // The final scan runs BEFORE RUNTIME_INFO so exit events found here
+        // (e.g. SIGKILL/OOM) are never lost from the sysstat report: exit
+        // updates are events that must be consumed, not dropped.
         let (_, final_updates) = final_scan();
+        updates_snapshot_for_info.extend(final_updates.iter().map(|update| {
+            runtime_info::JobExitSnapshot {
+                pid: update.pid,
+                tool_call_id: update.tool_call_id.clone(),
+                command: update.command.clone(),
+                elapsed_ms: update.elapsed_ms,
+                status: update.status.clone(),
+            }
+        }));
         updates.extend(final_updates);
+
+        // RUNTIME_INFO: aggregated observation from registered module
+        // reporters (jobmanager, sysstat). Built only when some reporter
+        // has important state; rides along with this request and is never
+        // persisted into prompt history.
+        // Model API request observation point for disk pressure sampling.
+        let api_disk_notice = self.observe_disk_pressure(&running_snapshot_for_info);
+        let filesystems_for_info = Self::filesystems_for_info(&running_snapshot_for_info);
+        let runtime_info = {
+            let inputs = runtime_info::RuntimeInfoInputs {
+                running: running_snapshot_for_info,
+                updates: updates_snapshot_for_info,
+                escaped_pids: os::reparented_detached_child_pids()
+                    .into_iter()
+                    .filter(|pid| process_is_alive(u64::from(*pid)) != Some(false))
+                    .collect(),
+                filesystems: filesystems_for_info,
+                disk_pressure_notice: api_disk_notice,
+            };
+            runtime_info::default_registry().render(&inputs)
+        };
+        if let Some(runtime_info) = runtime_info.as_ref() {
+            prompt.push_str("\n\n");
+            prompt.push_str(runtime_info);
+        }
         if let Some(update_text) = Self::format_running_job_updates(&updates) {
             prompt.push_str("\n\n");
             prompt.push_str(&update_text);
@@ -2490,7 +2644,11 @@ impl AgentCore {
         self.submit_running_job_updates(updates.clone());
         self.flush_pending_prompt_components();
 
-        if still_running.is_none() && updates.is_empty() && !self.context_compact_required {
+        if still_running.is_none()
+            && updates.is_empty()
+            && runtime_info.is_none()
+            && !self.context_compact_required
+        {
             if let Some(trailer) = self.take_memo_deleted_trailer() {
                 let (body, response_trailer) =
                     prompt_render::split_formatted_response_trailer(current_prompt);
@@ -6401,6 +6559,10 @@ Runtime tool_call ids:",
     ) -> ActionExecution {
         let wall_start = Instant::now();
         let mut execution = self.execute_action_inner(action, runtime);
+        // Completed tool run observation point for disk pressure sampling.
+        if matches!(execution, ActionExecution::Completed(_)) {
+            self.observe_disk_pressure(&[]);
+        }
         let elapsed_ms = wall_start.elapsed().as_millis() as u64;
         match &mut execution {
             ActionExecution::Completed(outcome) => {

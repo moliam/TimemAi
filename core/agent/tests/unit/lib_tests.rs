@@ -2247,7 +2247,12 @@ fn model_prompt_job_finished_before_first_scan_has_only_exit_update() {
         prompt.contains("BASE_TOOL_RESULT: finished normally"),
         "{prompt}"
     );
-    assert!(!prompt.contains("### STILL RUNNING"), "{prompt}");
+    // Other tests' adopted orphans may legitimately add ORPHAN_PROCESS, so
+    // assert no running-table rows instead of the whole section's absence.
+    assert!(
+        !prompt.contains("| pid | created by tool_call id"),
+        "{prompt}"
+    );
     assert_eq!(prompt.matches("RUNNING_JOB_UPDATE").count(), 1, "{prompt}");
     assert!(prompt.contains("Exit status: 0"), "{prompt}");
     assert!(prompt.contains("output-101"), "{prompt}");
@@ -2264,10 +2269,10 @@ fn model_prompt_job_finished_between_scans_orders_running_before_exit() {
     );
 
     let tool = prompt.find("BASE_TOOL_RESULT: finished normally").unwrap();
-    let running = prompt.find("### STILL RUNNING").unwrap();
+    let running = prompt.find("#### jobmanager").unwrap();
     let exit = prompt.find("RUNNING_JOB_UPDATE").unwrap();
     assert!(tool < running && running < exit, "{prompt}");
-    assert_eq!(prompt.matches("### STILL RUNNING").count(), 1, "{prompt}");
+    assert_eq!(prompt.matches("#### jobmanager").count(), 1, "{prompt}");
     assert!(
         prompt.contains("| pid | created by tool_call id | command |"),
         "{prompt}"
@@ -2291,7 +2296,7 @@ fn model_prompt_job_finished_after_final_scan_moves_exit_to_next_request() {
         (vec![controlled_job_snapshot(303)], Vec::new()),
         || (Vec::new(), Vec::new()),
     );
-    assert!(first.contains("### STILL RUNNING"), "{first}");
+    assert!(first.contains("#### jobmanager"), "{first}");
     assert!(!first.contains("RUNNING_JOB_UPDATE"), "{first}");
 
     let second = core.build_model_request_prompt_from_job_snapshots(
@@ -2300,7 +2305,9 @@ fn model_prompt_job_finished_after_final_scan_moves_exit_to_next_request() {
         (Vec::new(), vec![controlled_job_exit(303)]),
         || (Vec::new(), Vec::new()),
     );
-    assert!(!second.contains("### STILL RUNNING"), "{second}");
+    // Other tests' adopted orphans may legitimately add ORPHAN_PROCESS, so
+    // assert this job's running-table row is gone, not the whole section.
+    assert!(!second.contains("| 303 |"), "{second}");
     assert_eq!(second.matches("RUNNING_JOB_UPDATE").count(), 1, "{second}");
     assert!(second.contains("Exit status: 0"), "{second}");
     assert!(second.contains("output-303"), "{second}");
@@ -2554,14 +2561,14 @@ fn long_running_progress_check_trailer_requires_still_running_table() {
         (vec![old_job], Vec::new()),
         || (Vec::new(), Vec::new()),
     );
-    assert!(prompt.contains("### STILL RUNNING"), "{prompt}");
+    assert!(prompt.contains("#### jobmanager"), "{prompt}");
     assert!(
         prompt.contains("Need to check whether the long running job is really making progress ? "),
         "{prompt}"
     );
     // The user's invariant: whenever the reminder exists, the same prompt
     // delta must carry the still-running table.
-    assert!(prompt.contains("Need to check") && prompt.contains("### STILL RUNNING"));
+    assert!(prompt.contains("Need to check") && prompt.contains("#### jobmanager"));
 
     // A fresh job under 3 minutes: the table is shown without the reminder.
     let mut fresh_job = controlled_job_snapshot(405);
@@ -2572,7 +2579,7 @@ fn long_running_progress_check_trailer_requires_still_running_table() {
         (vec![fresh_job], Vec::new()),
         || (Vec::new(), Vec::new()),
     );
-    assert!(prompt.contains("### STILL RUNNING"), "{prompt}");
+    assert!(prompt.contains("#### jobmanager"), "{prompt}");
     assert!(
         !prompt.contains("Need to check whether the long running job"),
         "{prompt}"
@@ -2587,4 +2594,203 @@ fn long_running_progress_check_trailer_requires_still_running_table() {
         || (Vec::new(), Vec::new()),
     );
     assert_eq!(prompt, base);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn model_prompt_reports_setsid_escaped_process_as_runtime_info() {
+    use std::process::{Command, Stdio};
+    // Without the subreaper the orphan would go to init and stay invisible.
+    assert!(crate::os::install_process_subreaper());
+    // A tool job that exits while its setsid --fork descendant survives it.
+    let mut wrapper = Command::new("setsid")
+        .arg("--fork")
+        .arg("bash")
+        .arg("-c")
+        .arg("i=0; while [ $i -lt 400 ]; do i=$((i+1)); sleep 0.1; done")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn setsid");
+    let _ = wrapper.wait();
+
+    let self_pid = std::process::id();
+    let stat_ppid = |pid: u32| -> Option<u32> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let rest = stat.rsplit(')').next()?;
+        rest.split_whitespace().nth(1)?.parse().ok()
+    };
+    let mut escapee = None;
+    for _ in 0..100 {
+        if let Some(pid) = crate::os::reparented_detached_child_pids()
+            .iter()
+            .find(|pid| stat_ppid(**pid) == Some(self_pid))
+        {
+            escapee = Some(*pid);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let escapee = escapee.expect("expected an adopted escapee pid");
+
+    let inputs = crate::runtime_info::RuntimeInfoInputs {
+        escaped_pids: vec![escapee],
+        ..Default::default()
+    };
+    let mut registry = crate::runtime_info::RuntimeInfoRegistry::new();
+    registry.register(crate::runtime_info::RuntimeInfoReporter {
+        name: "jobmanager",
+        report: crate::runtime_info::jobmanager_report,
+    });
+    let out = registry.render(&inputs).expect("expected RUNTIME_INFO");
+    assert!(out.starts_with("### RUNTIME_INFO"), "{out}");
+    assert!(out.contains("ORPHAN_PROCESS"), "{out}");
+    assert!(out.contains(&escapee.to_string()), "{out}");
+
+    // Cleanup: terminate the escapee, then close.
+    unsafe {
+        libc::kill(escapee as i32, libc::SIGKILL);
+    }
+    let _ = crate::os::try_reap_child_process(escapee);
+    assert!(crate::os::reparented_detached_child_pids()
+        .iter()
+        .all(|pid| *pid != escapee));
+}
+
+#[test]
+fn model_prompt_reports_sigkilled_job_in_runtime_info_sysstat() {
+    // Real process killed by SIGKILL: the exit update must reach the
+    // model as a sysstat JOB_KILLED field inside RUNTIME_INFO, because the
+    // job's own output cannot explain the kill.
+    use std::process::{Command, Stdio};
+    let mut core = test_core("runtime_info_sigkill");
+    let mut child = Command::new("bash")
+        .arg("-c")
+        .arg("echo start; kill -9 $$")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn");
+    let output = child.wait_with_output().expect("wait");
+    let status = if output.status.success() {
+        format!("exit code: {}", output.status.code().unwrap_or(0))
+    } else {
+        use std::os::unix::process::ExitStatusExt;
+        format!("signal: {}", output.status.signal().unwrap_or(0))
+    };
+    let mut update = controlled_job_exit(777);
+    update.status = status;
+    let prompt = core.build_model_request_prompt_from_job_snapshots(
+        &controlled_request_base(),
+        None,
+        (Vec::new(), vec![update]),
+        || (Vec::new(), Vec::new()),
+    );
+    assert!(prompt.contains("### RUNTIME_INFO"), "{prompt}");
+    assert!(prompt.contains("#### sysstat"), "{prompt}");
+    assert!(prompt.contains("JOB_KILLED"), "{prompt}");
+    assert!(prompt.contains("pid=777"), "{prompt}");
+}
+
+#[test]
+fn disk_pressure_notice_rides_runtime_info_after_window_with_stub_sample() {
+    // Disk sampling cannot be controlled on a real filesystem, so the
+    // stub override drives the tracker: two sampling windows with a >150MB
+    // drop must surface DISK_PRESSURE through RUNTIME_INFO on the API
+    // observation point.
+    let mut core = test_core("runtime_info_disk_stub");
+    // 10GB disk with 5GB free; threshold = max(8% * 10GB, 150MB) ≈ 819MB.
+    let cap: u64 = 10 * 1024 * 1024 * 1024;
+    let base: u64 = 5 * 1024 * 1024 * 1024;
+    let dropped = base - 1024 * 1024 * 1024;
+    // Window 1: establish the baseline (first sample only sets it).
+    core.disk_free_override = Some((base, cap));
+    for _ in 0..10 {
+        let prompt = core.build_model_request_prompt_from_job_snapshots(
+            &controlled_request_base(),
+            None,
+            (Vec::new(), Vec::new()),
+            || (Vec::new(), Vec::new()),
+        );
+        assert!(!prompt.contains("DISK_PRESSURE"), "{prompt}");
+    }
+    // Window 2: same baseline level must not trigger.
+    for _ in 0..10 {
+        let prompt = core.build_model_request_prompt_from_job_snapshots(
+            &controlled_request_base(),
+            None,
+            (Vec::new(), Vec::new()),
+            || (Vec::new(), Vec::new()),
+        );
+        assert!(!prompt.contains("DISK_PRESSURE"), "{prompt}");
+    }
+    // Window 3: 200MB drop triggers exactly once, then rebases.
+    core.disk_free_override = Some((dropped, cap));
+    let mut triggered = 0;
+    for _ in 0..10 {
+        let prompt = core.build_model_request_prompt_from_job_snapshots(
+            &controlled_request_base(),
+            None,
+            (Vec::new(), Vec::new()),
+            || (Vec::new(), Vec::new()),
+        );
+        if prompt.contains("DISK_PRESSURE") {
+            triggered += 1;
+        }
+    }
+    // The notice may appear both inline in RUNTIME_INFO and as the
+    // persisted disk_pressure component in this request; at least once
+    // proves it was delivered, never dropped.
+    assert!(
+        triggered >= 1,
+        "expected the DISK_PRESSURE notice to be delivered"
+    );
+    // Window 4: same dropped level: baseline was refreshed, no retrigger.
+    let prompt = core.build_model_request_prompt_from_job_snapshots(
+        &controlled_request_base(),
+        None,
+        (Vec::new(), Vec::new()),
+        || (Vec::new(), Vec::new()),
+    );
+    assert!(!prompt.contains("DISK_PRESSURE"), "{prompt}");
+}
+
+#[test]
+fn filesystems_for_info_deduplicates_same_device() {
+    // Two paths on the same filesystem must sample once; the device id is
+    // the dedup key, so a second path on the same disk is skipped.
+    let same_dir = std::path::Path::new("/tmp");
+    let a = same_dir.join(format!("a-{}", std::process::id()));
+    let b = same_dir.join(format!("b-{}", std::process::id()));
+    std::fs::create_dir_all(&a).ok();
+    std::fs::create_dir_all(&b).ok();
+    let dev_a = crate::os::filesystem_device_id(&a);
+    let dev_b = crate::os::filesystem_device_id(&b);
+    assert_eq!(dev_a, dev_b, "same parent dir must share a device id");
+
+    let running = vec![crate::runtime_info::RunningJobSnapshot {
+        pid: 1,
+        tool_call_id: "c".into(),
+        command: "true".into(),
+        cwd: a.display().to_string(),
+        created_at_ms: 0,
+    }];
+    // filesystems_for_info samples cwd of running jobs; a and b are on the
+    // same device, so even if both were sampled only one entry remains.
+    let sampled = crate::AgentCore::filesystems_for_info(&running);
+    // Whichever path won the dedup, the /tmp device must appear exactly
+    // once across all sampled entries (not once per sampled path on it).
+    let same_disk_count = sampled
+        .iter()
+        .filter(|fs| {
+            std::path::Path::new(&fs.path)
+                .canonicalize()
+                .ok()
+                .and_then(|p| crate::os::filesystem_device_id(&p))
+                == dev_a
+        })
+        .count();
+    assert_eq!(same_disk_count, 1, "sampled: {:?}", sampled);
+    std::fs::remove_dir_all(&a).ok();
+    std::fs::remove_dir_all(&b).ok();
 }

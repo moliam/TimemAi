@@ -259,6 +259,77 @@ pub(super) fn kill_process_group(pid: u32) {
     }
 }
 
+/// Lists live (non-zombie) members of the process group led by
+/// `group_leader_pid`. Used after a tracked job exits to surface leftover
+/// descendants (orphans) to the model instead of leaving them invisible.
+/// Filesystem usage snapshot for the filesystem containing `path`.
+/// Returns (total_bytes, free_bytes). Unix uses statvfs; used = total - free.
+#[cfg(unix)]
+/// Stable device identifier of the filesystem containing `path`, used to
+/// deduplicate multiple paths on the same disk. Unix uses stat's st_dev.
+#[cfg(unix)]
+pub(super) fn filesystem_device_id(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|meta| meta.dev())
+}
+
+/// Stable device identifier of the filesystem containing `path`.
+#[cfg(windows)]
+pub(super) fn filesystem_device_id(path: &std::path::Path) -> Option<u64> {
+    crate::windows::filesystem_device_id(path)
+}
+
+pub(super) fn filesystem_usage_bytes(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::ffi::CString;
+    let c_path = CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+    if rc != 0 {
+        return None;
+    }
+    let total = (stat.f_blocks as u64).saturating_mul(stat.f_frsize as u64);
+    let free = (stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64);
+    Some((total, free))
+}
+
+/// Filesystem usage snapshot for the filesystem containing `path`.
+/// Returns (total_bytes, free_bytes).
+#[cfg(windows)]
+pub(super) fn filesystem_usage_bytes(path: &std::path::Path) -> Option<(u64, u64)> {
+    crate::windows::filesystem_usage_bytes(path)
+}
+
+pub(super) fn list_live_process_group_members(group_leader_pid: u32) -> Vec<u32> {
+    let mut members = Vec::new();
+    if group_leader_pid <= 1 || group_leader_pid as libc::pid_t == unsafe { libc::getpgrp() } {
+        return members;
+    }
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return members;
+    };
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{name}/stat")) else {
+            continue;
+        };
+        let Some(rest) = stat.rsplit(')').next() else {
+            continue;
+        };
+        let mut fields = rest.split_whitespace();
+        let state = fields.next().unwrap_or("");
+        let Some(pgrp) = fields.nth(1) else { continue };
+        if pgrp.parse::<u32>() == Ok(group_leader_pid) && state != "Z" {
+            members.push(pid);
+        }
+    }
+    members.sort_unstable();
+    members
+}
+
 pub(super) fn process_group_running(group_leader_pid: u32) -> bool {
     if group_leader_pid <= 1 || group_leader_pid as libc::pid_t == unsafe { libc::getpgrp() } {
         return false;

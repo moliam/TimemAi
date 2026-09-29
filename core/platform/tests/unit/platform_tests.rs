@@ -453,3 +453,66 @@ fn subreaper_reaps_self_exited_adopted_orphans() {
     }
     assert!(reaped, "self-exited adopted orphan must be reaped");
 }
+
+#[cfg(unix)]
+#[test]
+fn list_live_process_group_members_reports_spawned_child() {
+    use crate::configure_child_process_group;
+    use std::process::Command;
+    let marker = std::env::temp_dir().join("timem_pgid_member_test");
+    let _ = std::fs::remove_file(&marker);
+    let mut child = Command::new("bash");
+    configure_child_process_group(&mut child);
+    let mut child = child
+        .arg("-c")
+        .arg(format!("echo $$ > {:?}; sleep 5", marker))
+        .spawn()
+        .expect("spawn group leader");
+    let pgid = child.id();
+    let mut member_text = String::new();
+    for _ in 0..100 {
+        if let Ok(text) = std::fs::read_to_string(&marker) {
+            member_text = text;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let member: u32 = member_text
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("member pid from marker: {member_text:?}"));
+    // the leader itself is a live member of its own group
+    let members = crate::list_live_process_group_members(pgid);
+    assert!(
+        members.contains(&pgid),
+        "leader must be listed: {members:?}"
+    );
+    // the spawned sleep shares the group on Linux
+    if crate::process_running(member) {
+        assert!(
+            members.contains(&member),
+            "spawned child must be listed: {members:?}"
+        );
+    }
+    crate::kill_process_group(pgid);
+    let _ = child.wait();
+    let _ = std::fs::remove_file(&marker);
+}
+
+#[cfg(unix)]
+#[test]
+fn list_live_process_group_members_empty_after_group_exit() {
+    use crate::configure_child_process_group;
+    use std::process::Command;
+    let mut child = Command::new("bash");
+    configure_child_process_group(&mut child);
+    let mut _child = child
+        .arg("-c")
+        .arg("exit 0")
+        .spawn()
+        .expect("spawn short-lived leader");
+    let pgid = _child.id();
+    let _ = _child.wait();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(crate::list_live_process_group_members(pgid).is_empty());
+}
