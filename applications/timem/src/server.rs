@@ -7144,11 +7144,9 @@ fn restore_prompt_context_snapshot(state: &AppState, session_id: &str) -> Result
         .map_err(|_| "session_store_poisoned")?;
     if let Some(session) = sessions.get_mut(session_id) {
         session.restored_context_prompt_tokens = Some(baseline);
-        // A restart makes the memo inactive by design. The snapshot value is
-        // kept as the authoritative "previous active memo" for the resume
-        // notice; the WebUI indicator stays hidden until the model recreates
-        // the memo.
-        session.active_memo = None;
+        // The snapshot memo survives the restart as the authoritative memo:
+        // the next turn hydrates it back into Core, so the finish guard, the
+        // periodic restate, and the WebUI indicator stay coherent.
         session.previous_memo_for_notice = previous_memo;
     }
     Ok(())
@@ -7345,6 +7343,16 @@ fn attach_worker_to_session_context(
         state
             .template
             .new_core_at(&mem, &current_dir, &runtime.settings, runtime.env.clone())?;
+    // Hydrate the snapshot memo back into Core so the finish guard, the
+    // periodic context restate, and the UI indicator stay coherent after a
+    // runtime restart (a restart otherwise leaves Core memo-less while the
+    // session projection still shows one).
+    let snapshot_memo = state.sessions.lock().ok().and_then(|sessions| {
+        sessions
+            .get(session_id)
+            .and_then(|session| session.active_memo.clone())
+    });
+    core.restore_active_memo(snapshot_memo);
     let mcp_configs = mem
         .mcp_configs
         .iter()

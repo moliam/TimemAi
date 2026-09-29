@@ -3197,6 +3197,15 @@ impl AgentCore {
         self.active_memo.as_deref()
     }
 
+    /// Restores an active memo from a host snapshot (e.g. after a runtime
+    /// restart). Unlike the memo tool this performs a pure state hydration:
+    /// no topic event is published, so the chat history does not gain a
+    /// duplicate "memo created" row; the finish guard and the periodic
+    /// context restate become authoritative again.
+    pub fn restore_active_memo(&mut self, text: Option<String>) {
+        self.active_memo = text;
+    }
+
     pub(crate) fn set_active_memo(&mut self, text: String) {
         self.active_memo = Some(text);
     }
