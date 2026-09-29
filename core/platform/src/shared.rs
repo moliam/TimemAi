@@ -265,6 +265,78 @@ pub(super) fn kill_process_group(pid: u32) {
 /// Filesystem usage snapshot for the filesystem containing `path`.
 /// Returns (total_bytes, free_bytes). Unix uses statvfs; used = total - free.
 #[cfg(unix)]
+/// Local real filesystem mount points from /proc/mounts (ext4, xfs, btrfs,
+/// vfat, ntfs, f2fs, zfs). Pseudo filesystems (proc, sysfs, tmpfs, devpts,
+/// overlays, snap loops) are excluded. Used so disk sampling covers writes
+/// to any data disk, not only the working directory.
+#[cfg(target_os = "linux")]
+pub(super) fn local_filesystem_mount_points() -> Vec<std::path::PathBuf> {
+    let supported = [
+        "ext4", "ext3", "ext2", "xfs", "btrfs", "vfat", "exfat", "ntfs", "ntfs3", "f2fs", "zfs",
+        "apfs", "hfsplus",
+    ];
+    let mut out = Vec::new();
+    let Ok(content) = std::fs::read_to_string("/proc/mounts") else {
+        return out;
+    };
+    for line in content.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(_dev), Some(mount), Some(fstype)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if supported.contains(&fstype) {
+            out.push(std::path::PathBuf::from(mount));
+        }
+    }
+    out
+}
+
+/// Local real filesystem mount points on macOS: APFS/HFS+ volumes from
+/// TODO(platform/macos): 待实现验证——此实现基于 getmntinfo 的静态核对，
+/// 尚未在真实 macOS 上编译与运行测试；到 macOS 平台开发时需补单元测试
+/// （/ 与 /Volumes/* 出现，devfs/autofs 排除）并按实际行为修正。
+/// getmntinfo (covers /, /System/Volumes/* and mounted /Volumes/* disks);
+/// pseudo mount types (devfs, autofs, nullfs, ...) are excluded.
+#[cfg(target_os = "macos")]
+pub(super) fn local_filesystem_mount_points() -> Vec<std::path::PathBuf> {
+    let supported = [
+        "apfs", "hfs", "hfsplus", "msdos", "exfat", "ntfs", "udf", "nfs",
+    ];
+    let mut out = Vec::new();
+    let mut mounts: *mut libc::statfs = std::ptr::null_mut();
+    let count = unsafe { libc::getmntinfo(&mut mounts, libc::MNT_NOWAIT) };
+    if count <= 0 {
+        return out;
+    }
+    for index in 0..count as usize {
+        let entry = unsafe { &*mounts.add(index) };
+        let fstype = unsafe { std::ffi::CStr::from_ptr(entry.fstype.as_ptr().cast()) }
+            .to_string_lossy()
+            .to_string();
+        if supported.contains(&fstype.as_str()) {
+            let mount = unsafe { std::ffi::CStr::from_ptr(entry.f_mntonname.as_ptr().cast()) };
+            if let Ok(mount) = mount.to_str() {
+                out.push(std::path::PathBuf::from(mount));
+            }
+        }
+    }
+    out
+}
+
+/// Local real filesystem mount points on other Unix systems: the root
+/// filesystem is always reported (best-effort baseline).
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+pub(super) fn local_filesystem_mount_points() -> Vec<std::path::PathBuf> {
+    vec![std::path::PathBuf::from("/")]
+}
+
+/// Local real filesystem mount points (Windows reports fixed drives).
+#[cfg(windows)]
+pub(super) fn local_filesystem_mount_points() -> Vec<std::path::PathBuf> {
+    crate::windows::local_filesystem_mount_points()
+}
+
 /// Stable device identifier of the filesystem containing `path`, used to
 /// deduplicate multiple paths on the same disk. Unix uses stat's st_dev.
 #[cfg(unix)]

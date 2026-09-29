@@ -163,3 +163,34 @@ pub(super) fn filesystem_device_id(path: &std::path::Path) -> Option<u64> {
     };
     (ok != 0).then(|| u64::from(serial))
 }
+
+/// Local real filesystem mount points on Windows: fixed drives reported by
+/// TODO(platform/windows): 待实现验证——此实现基于 GetLogicalDrives +
+/// GetDriveTypeW(DRIVE_FIXED) 的静态核对，尚未在真实 Windows 上编译与
+/// 运行测试；到 Windows 平台开发时需补单元测试（C:\ 出现、网络盘排除）
+/// 并按实际行为修正。
+/// GetLogicalDrives + GetDriveTypeW (DRIVE_FIXED only).
+#[cfg(windows)]
+pub(super) fn local_filesystem_mount_points() -> Vec<std::path::PathBuf> {
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, DRIVE_FIXED};
+    let mut out = Vec::new();
+    let mask = unsafe { GetLogicalDrives() };
+    if mask == 0 {
+        return out;
+    }
+    for index in 0..26u32 {
+        if mask & (1 << index) == 0 {
+            continue;
+        }
+        let letter = char::from(b'A' + index as u8);
+        let root: Vec<u16> = format!("{letter}:\\").encode_utf16().collect();
+        // encode_utf16 has no terminator; build a terminated buffer.
+        let mut root_buf = root;
+        root_buf.push(0);
+        let drive_type = unsafe { GetDriveTypeW(root_buf.as_ptr()) };
+        if drive_type == DRIVE_FIXED {
+            out.push(std::path::PathBuf::from(format!("{letter}:\\")));
+        }
+    }
+    out
+}

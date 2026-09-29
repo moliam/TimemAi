@@ -5,7 +5,10 @@
 //! next request. Unimportant facts (e.g. a job that finished normally this
 //! round and already has an action result) produce nothing.
 
-use std::fmt::Write as _;
+use std::{
+    fmt::Write as _,
+    time::{Duration, Instant},
+};
 
 /// Snapshot of agent state handed to every reporter on collection.
 #[derive(Default, Clone)]
@@ -189,15 +192,8 @@ pub fn sysstat_report(inputs: &RuntimeInfoInputs) -> Option<String> {
         parts.push(notice.clone());
     }
 
-    for update in &inputs.updates {
-        if looks_killed(&update.status) {
-            parts.push(format!(
-                "JOB_KILLED: pid={} cmd=`{}` exited with `{}` — not a normal exit. If the command itself does not print an error, suspect OOM kill (check dmesg/`journalctl -k`) or an external terminator.",
-                update.pid,
-                update.command.chars().take(200).collect::<String>(),
-                update.status
-            ));
-        }
+    if let Some(killed) = killed_jobs_notice(&inputs.updates) {
+        parts.push(killed);
     }
 
     if parts.is_empty() {
@@ -205,6 +201,26 @@ pub fn sysstat_report(inputs: &RuntimeInfoInputs) -> Option<String> {
     } else {
         Some(parts.join("\n\n"))
     }
+}
+
+/// Facts about kill-looking job exits across the provided snapshots, or
+/// None when every exit was normal. Shared by the sysstat reporter and the
+/// persistent exit-update path so kills are never missed regardless of
+/// which channel the exit lands on.
+pub fn killed_jobs_notice(updates: &[JobExitSnapshot]) -> Option<String> {
+    let parts: Vec<String> = updates
+        .iter()
+        .filter(|update| looks_killed(&update.status))
+        .map(|update| {
+            format!(
+                "JOB_KILLED: pid={} cmd=`{}` exited with `{}` — not a normal exit. If the command itself does not print an error, suspect OOM kill (check dmesg/`journalctl -k`) or an external terminator.",
+                update.pid,
+                update.command.chars().take(200).collect::<String>(),
+                update.status
+            )
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
 fn looks_killed(status: &str) -> bool {
@@ -322,22 +338,59 @@ mod tests {
     }
 }
 
+/// Triggered disk pressure drop with before/after totals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskPressureEvent {
+    pub dropped: u64,
+    pub base: u64,
+    pub new: u64,
+}
+
+impl DiskPressureEvent {
+    /// Render the model-facing notice, including the per-disk breakdown of
+    /// the current sample so the model can see which mount dropped.
+    pub fn render(&self, filesystems: &[FilesystemUsage]) -> String {
+        let mut out = format!(
+            "DISK_PRESSURE: total free space across the working disks dropped by {} ({} -> {}). Free space is being consumed fast; clean up or move data if writes are expected to continue.",
+            human_bytes(self.dropped),
+            human_bytes(self.base),
+            human_bytes(self.new)
+        );
+        if !filesystems.is_empty() {
+            out.push_str("\ncurrent disk info:\n\n| mount | total | free |\n|---|---:|---:|");
+            for fs in filesystems {
+                let _ = writeln!(
+                    out,
+                    "\n| `{}` | {} | {} |",
+                    fs.path,
+                    human_bytes(fs.total_bytes),
+                    human_bytes(fs.free_bytes)
+                );
+            }
+        }
+        out
+    }
+}
+
 /// Observation-point-throttled disk pressure tracker.
 ///
 /// An observation point is one completed tool run or one model API request.
-/// Every 10 points the total free space of all sampled disks is compared
-/// with a baseline:
+/// A sample is taken when either 10 observation points accumulated or
+/// 3 minutes elapsed since the previous sample. A successful sample resets
+/// both gates and compares total free space with the baseline:
 /// - `new > base`: space was reclaimed; refresh `base = new` (no notice).
 /// - `new <= base` and free space dropped by more than the threshold: emit
 ///   a notice and refresh `base = new`; otherwise keep the baseline so slow
 ///   consumption still accumulates toward the threshold.
 #[derive(Debug)]
 pub struct DiskPressureTracker {
-    observations: u32,
+    observations_since_sample: u32,
+    last_sample_at: Instant,
     baseline: Option<u64>,
 }
 
 const DISK_SAMPLE_INTERVAL: u32 = 10;
+const DISK_SAMPLE_MAX_AGE: Duration = Duration::from_secs(3 * 60);
 /// Drop threshold: the smaller of 200MB and 8% of the disk capacity, so
 /// large disks stay sensitive (200MB cap) and tiny disks scale down.
 const DISK_PRESSURE_DELTA_CAP_BYTES: u64 = 200 * 1024 * 1024;
@@ -351,8 +404,26 @@ impl Default for DiskPressureTracker {
 impl DiskPressureTracker {
     pub fn new() -> Self {
         Self {
-            observations: 0,
+            observations_since_sample: 0,
+            last_sample_at: Instant::now(),
             baseline: None,
+        }
+    }
+
+    /// Seed the baseline at runtime startup from the real disk sample so
+    /// the first sampling window after a restart is not a blind window.
+    /// Does not consume an observation point and never emits a notice.
+    pub fn seed_baseline(&mut self, sample: Option<(u64, u64)>) {
+        self.seed_baseline_at(sample, Instant::now());
+    }
+
+    fn seed_baseline_at(&mut self, sample: Option<(u64, u64)>, now: Instant) {
+        if let Some((free, _capacity)) = sample {
+            if self.baseline.is_none() {
+                self.baseline = Some(free);
+                self.observations_since_sample = 0;
+                self.last_sample_at = now;
+            }
         }
     }
 
@@ -362,21 +433,34 @@ impl DiskPressureTracker {
         self.baseline
     }
 
-    /// True when the latest observe call closed a sampling window (for tests).
+    /// Observation count since the most recent successful sample (tests).
     #[cfg(test)]
-    pub fn window_complete(&self) -> bool {
-        self.observations.is_multiple_of(DISK_SAMPLE_INTERVAL)
+    fn pending_observations(&self) -> u32 {
+        self.observations_since_sample
     }
 
-    /// Record one observation point (tool run or API request) with the
-    /// sampled (total_free, total_capacity) of the working disks. Returns a
-    /// notice string when the sampled interval triggered disk pressure.
-    pub fn observe(&mut self, sample: Option<(u64, u64)>) -> Option<String> {
-        self.observations = self.observations.saturating_add(1);
-        if !self.observations.is_multiple_of(DISK_SAMPLE_INTERVAL) {
+    /// Record one observation point (tool run or API request). A new sample
+    /// is evaluated when either 10 observations accumulated or 3 minutes
+    /// elapsed since the previous successful sample. A successful sample
+    /// resets both gates and starts the next window.
+    pub fn observe(&mut self, sample: Option<(u64, u64)>) -> Option<DiskPressureEvent> {
+        self.observe_at(sample, Instant::now())
+    }
+
+    fn observe_at(
+        &mut self,
+        sample: Option<(u64, u64)>,
+        now: Instant,
+    ) -> Option<DiskPressureEvent> {
+        self.observations_since_sample = self.observations_since_sample.saturating_add(1);
+        let count_due = self.observations_since_sample >= DISK_SAMPLE_INTERVAL;
+        let time_due = now.saturating_duration_since(self.last_sample_at) >= DISK_SAMPLE_MAX_AGE;
+        if !count_due && !time_due {
             return None;
         }
         let (new, capacity) = sample?;
+        self.observations_since_sample = 0;
+        self.last_sample_at = now;
         let Some(base) = self.baseline else {
             // First sample only establishes the initial baseline.
             self.baseline = Some(new);
@@ -392,12 +476,7 @@ impl DiskPressureTracker {
         let threshold = (DISK_PRESSURE_DELTA_CAP_BYTES).min(capacity / 100 * 8);
         if dropped > threshold {
             self.baseline = Some(new);
-            return Some(format!(
-                "DISK_PRESSURE: total free space across the working disks dropped by {} within the last {} observation points (now {}). Free space is being consumed fast; clean up or move data if writes are expected to continue.",
-                human_bytes(dropped),
-                DISK_SAMPLE_INTERVAL,
-                human_bytes(new)
-            ));
+            return Some(DiskPressureEvent { dropped, base, new });
         }
         // Below the threshold: keep the baseline so continued consumption
         // still accumulates toward the next window's comparison.
@@ -419,13 +498,167 @@ mod disk_pressure_tests {
         DiskPressureTracker::new()
     }
 
-    fn advance_to_sample(t: &mut DiskPressureTracker, free: u64) -> Option<String> {
-        loop {
-            let notice = t.observe(Some((free, CAP)));
-            if t.window_complete() {
-                return notice;
-            }
+    fn advance_to_sample(t: &mut DiskPressureTracker, free: u64) -> Option<DiskPressureEvent> {
+        let mut event = None;
+        for _ in 0..DISK_SAMPLE_INTERVAL {
+            event = t.observe(Some((free, CAP)));
         }
+        assert_eq!(t.pending_observations(), 0, "sample must reset count gate");
+        event
+    }
+
+    #[test]
+    fn count_gate_samples_on_tenth_observation_not_before() {
+        let start = Instant::now();
+        let mut t = tracker();
+        t.seed_baseline_at(Some((5 * GB, CAP)), start);
+        for step in 1..DISK_SAMPLE_INTERVAL {
+            assert!(
+                t.observe_at(
+                    Some((5 * GB - THRESHOLD - 1, CAP)),
+                    start + Duration::from_secs(step as u64)
+                )
+                .is_none(),
+                "observation {step} must not sample early"
+            );
+            assert_eq!(t.pending_observations(), step);
+        }
+        assert!(
+            t.observe_at(
+                Some((5 * GB - THRESHOLD - 1, CAP)),
+                start + Duration::from_secs(DISK_SAMPLE_INTERVAL as u64),
+            )
+            .is_some(),
+            "tenth observation must sample"
+        );
+        assert_eq!(t.pending_observations(), 0);
+    }
+
+    #[test]
+    fn time_gate_samples_after_three_minutes_with_one_observation() {
+        let start = Instant::now();
+        let mut t = tracker();
+        t.seed_baseline_at(Some((5 * GB, CAP)), start);
+        assert!(
+            t.observe_at(
+                Some((5 * GB - THRESHOLD - 1, CAP)),
+                start + DISK_SAMPLE_MAX_AGE - Duration::from_millis(1),
+            )
+            .is_none(),
+            "time gate must not fire early"
+        );
+        assert_eq!(t.pending_observations(), 1);
+        assert!(
+            t.observe_at(
+                Some((5 * GB - THRESHOLD - 1, CAP)),
+                start + DISK_SAMPLE_MAX_AGE,
+            )
+            .is_some(),
+            "first observation at three minutes must sample"
+        );
+        assert_eq!(t.pending_observations(), 0);
+    }
+
+    #[test]
+    fn successful_sample_resets_both_count_and_time_gates() {
+        let start = Instant::now();
+        let mut t = tracker();
+        t.seed_baseline_at(Some((5 * GB, CAP)), start);
+        // Time gate closes the first window with only one observation.
+        assert!(t
+            .observe_at(Some((5 * GB, CAP)), start + DISK_SAMPLE_MAX_AGE)
+            .is_none());
+        assert_eq!(t.pending_observations(), 0);
+        // Nine observations and just under three minutes from the new sample
+        // must not close the next window.
+        for step in 1..DISK_SAMPLE_INTERVAL {
+            assert!(t
+                .observe_at(
+                    Some((5 * GB - THRESHOLD - 1, CAP)),
+                    start + DISK_SAMPLE_MAX_AGE + Duration::from_secs(step as u64),
+                )
+                .is_none());
+        }
+        assert_eq!(t.pending_observations(), DISK_SAMPLE_INTERVAL - 1);
+        // The tenth observation closes it via the count gate.
+        assert!(t
+            .observe_at(
+                Some((5 * GB - THRESHOLD - 1, CAP)),
+                start + DISK_SAMPLE_MAX_AGE + Duration::from_secs(10),
+            )
+            .is_some());
+        assert_eq!(t.pending_observations(), 0);
+    }
+
+    #[test]
+    fn unavailable_sample_does_not_reset_due_window() {
+        let start = Instant::now();
+        let mut t = tracker();
+        t.seed_baseline_at(Some((5 * GB, CAP)), start);
+        for step in 1..DISK_SAMPLE_INTERVAL {
+            assert!(t
+                .observe_at(None, start + Duration::from_secs(step as u64))
+                .is_none());
+        }
+        assert!(
+            t.observe_at(None, start + Duration::from_secs(10))
+                .is_none(),
+            "missing sample cannot close the due window"
+        );
+        assert_eq!(t.pending_observations(), DISK_SAMPLE_INTERVAL);
+        assert!(
+            t.observe_at(
+                Some((5 * GB - THRESHOLD - 1, CAP)),
+                start + Duration::from_secs(11),
+            )
+            .is_some(),
+            "next available sample must service the overdue window"
+        );
+        assert_eq!(t.pending_observations(), 0);
+    }
+
+    #[test]
+    fn event_render_includes_before_after_and_disk_table() {
+        let event = DiskPressureEvent {
+            dropped: 255_400_000,
+            base: 91_000_000_000,
+            new: 90_700_000_000,
+        };
+        let filesystems = vec![FilesystemUsage {
+            path: "/".into(),
+            total_bytes: 982_862_268 * 1024,
+            free_bytes: 84_600_000_000,
+        }];
+        let text = event.render(&filesystems);
+        assert!(text.contains("dropped by 243.6 MB"), "{text}");
+        assert!(text.contains("(84.8 GB -> 84.5 GB)"), "{text}");
+        assert!(text.contains("current disk info:"), "{text}");
+        assert!(text.contains("| `/` | 937.3 GB | 78.8 GB |"), "{text}");
+    }
+
+    #[test]
+    fn seeded_baseline_makes_first_window_compare_immediately() {
+        let mut t = tracker();
+        t.seed_baseline(Some((5 * GB, CAP)));
+        assert_eq!(t.baseline(), Some(5 * GB));
+        // First window right after startup can now trigger: no blind window.
+        let notice = advance_to_sample(&mut t, 5 * GB - THRESHOLD - 1);
+        assert!(
+            notice.is_some(),
+            "startup-seeded baseline must compare in the first window"
+        );
+    }
+
+    #[test]
+    fn seed_is_ignored_when_baseline_already_exists() {
+        let mut t = tracker();
+        assert!(advance_to_sample(&mut t, 5 * GB).is_none());
+        t.seed_baseline(Some((GB, CAP)));
+        assert_eq!(
+            t.baseline(),
+            Some(5 * GB),
+            "seed must not overwrite an existing baseline"
+        );
     }
 
     #[test]
@@ -476,38 +709,32 @@ mod disk_pressure_tests {
         let scaled = small_cap / 100 * 8;
         assert!(scaled < 200 * 1024 * 1024);
         let mut t = tracker();
-        loop {
-            t.observe(Some((small_cap, small_cap)));
-            if t.window_complete() {
-                break;
-            }
+        for _ in 0..DISK_SAMPLE_INTERVAL {
+            assert!(t.observe(Some((small_cap, small_cap))).is_none());
         }
+        assert_eq!(t.pending_observations(), 0);
         // Just above the scaled threshold must trigger.
         let drop = scaled + 1;
-        let notice = loop {
-            let notice = t.observe(Some((small_cap - drop, small_cap)));
-            if t.window_complete() {
-                break notice;
-            }
-        };
+        let mut notice = None;
+        for _ in 0..DISK_SAMPLE_INTERVAL {
+            notice = t.observe(Some((small_cap - drop, small_cap)));
+        }
+        assert_eq!(t.pending_observations(), 0);
         assert!(
             notice.is_some(),
             "drop just above the 8% scaled threshold must trigger"
         );
         // Just below the scaled threshold must not.
         let mut t2 = tracker();
-        loop {
-            t2.observe(Some((small_cap, small_cap)));
-            if t2.window_complete() {
-                break;
-            }
+        for _ in 0..DISK_SAMPLE_INTERVAL {
+            assert!(t2.observe(Some((small_cap, small_cap))).is_none());
         }
-        let notice = loop {
-            let notice = t2.observe(Some((small_cap - scaled + 1, small_cap)));
-            if t2.window_complete() {
-                break notice;
-            }
-        };
+        assert_eq!(t2.pending_observations(), 0);
+        let mut notice = None;
+        for _ in 0..DISK_SAMPLE_INTERVAL {
+            notice = t2.observe(Some((small_cap - scaled + 1, small_cap)));
+        }
+        assert_eq!(t2.pending_observations(), 0);
         assert!(
             notice.is_none(),
             "drop below the 8% scaled threshold must not trigger"
