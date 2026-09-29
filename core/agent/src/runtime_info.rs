@@ -19,6 +19,9 @@ pub struct RuntimeInfoInputs {
     pub escaped_pids: Vec<u32>,
     /// Filesystems the current work may write to (session working dir plus
     /// the cwd of every running job), already deduplicated per device.
+    /// Kept for tests and future per-filesystem reporters; the sysstat
+    /// report reads the tracker notice instead of re-walking this list.
+    #[allow(dead_code)]
     pub filesystems: Vec<FilesystemUsage>,
     /// Delta-based disk pressure notice produced by DiskPressureTracker at
     /// its latest sampled observation point, if it triggered.
@@ -26,6 +29,7 @@ pub struct RuntimeInfoInputs {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)] // `path` is diagnostic context for future reporters; usage math reads the byte fields.
 pub struct FilesystemUsage {
     pub path: String,
     pub total_bytes: u64,
@@ -353,16 +357,19 @@ impl DiskPressureTracker {
     }
 
     /// Observation counter (for tests).
+    #[cfg(test)]
     pub fn debug_observations(&self) -> u32 {
         self.observations
     }
 
     /// Current baseline value (for tests).
+    #[cfg(test)]
     pub fn baseline(&self) -> Option<u64> {
         self.baseline
     }
 
     /// True when the latest observe call closed a sampling window (for tests).
+    #[cfg(test)]
     pub fn window_complete(&self) -> bool {
         self.observations % DISK_SAMPLE_INTERVAL == 0
     }
