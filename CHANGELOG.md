@@ -1,5 +1,26 @@
 # Changelog
 
+## [2.3.3] - 2026-09-29
+
+### Added
+
+- Manual context compaction from the WebUI ctx menu: works mid-turn via a
+  mailbox marker with a 10s dispatch timeout, or a direct-resume turn when
+  idle; manual trailer wording persists across retries until success, with
+  live compacting/pending UI states.
+
+### Changed
+
+- Stream working trailer shows the model request count and a waiting-model
+  indicator; running tool rows show live per-second elapsed.
+- Memo notices report "updated" when an existing memo is replaced.
+
+### Fixed
+
+- Parse stringified string-list arguments as JSON so brackets never leak
+  into first-touch reminder paths.
+
+
 ## [2.3.2] - 2026-09-28
 
 ### Added
