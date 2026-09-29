@@ -5529,20 +5529,42 @@ Runtime tool_call ids:",
         let delta_refs = self
             .deltas
             .iter()
-            .filter(|delta| !prompt_render::render_delta_slices(delta).is_empty())
+            // Include deltas that own native tool exchanges even without
+            // text slices: a pure tool round is exactly the fat bulk a
+            // compaction should be able to discard.
+            .filter(|delta| {
+                !prompt_render::render_delta_slices(delta).is_empty()
+                    || self
+                        .native_exchanges
+                        .iter()
+                        .any(|exchange| exchange.delta_id == delta.delta_id)
+            })
             .rev()
             .take(12)
             .map(|delta| {
-                let token_estimate = prompt_render::render_delta_slices(delta)
+                // Size hint must include the delta's native exchanges (tool
+                // calls/results): they are the bulk of a native-mode context.
+                // Text-only hints made fat native deltas look small, so the
+                // model discarded small stale deltas and compaction barely
+                // shrank anything.
+                let text_tokens = prompt_render::render_delta_slices(delta)
                     .iter()
                     .map(|slice| estimate_prompt_tokens(&slice.text))
                     .sum::<u32>();
+                let native_tokens = self
+                    .native_exchanges
+                    .iter()
+                    .filter(|exchange| exchange.delta_id == delta.delta_id)
+                    .map(estimate_native_exchange_tokens)
+                    .fold(0_u32, u32::saturating_add);
                 format!(
-                    "- delta_id={} time_ms={} visible_slices={} estimated_tokens={}",
+                    "- delta_id={} time_ms={} visible_slices={} estimated_tokens={} (text {} + tool_exchanges {})",
                     delta.delta_id,
                     delta.time_ms,
                     prompt_render::render_delta_slices(delta).len(),
-                    token_estimate
+                    text_tokens.saturating_add(native_tokens),
+                    text_tokens,
+                    native_tokens
                 )
             })
             .collect::<Vec<_>>()

@@ -930,6 +930,68 @@ fn completed_background_bash_emits_terminal_topic_for_original_action() {
     assert_eq!(terminal.payload["turn_id"], core.current_action_turn_id());
 }
 
+fn native_profile() -> InteractionProfile {
+    InteractionProfile {
+        api_protocol: "openai_compatible".to_string(),
+        model: "test".to_string(),
+        gateway: "test".to_string(),
+        requested_mode: ToolCallMode::Native,
+        resolved_mode: ToolCallMode::Native,
+        active_prompt_protocol: "json".to_string(),
+        parallel_supported: true,
+        parallel_enabled: true,
+        source: CapabilityProbeSource::Explicit,
+        reason: "test".to_string(),
+        probe_latency_ms: None,
+        observed_tool_calls: 1,
+    }
+}
+
+#[test]
+fn shrink_review_delta_refs_count_native_tool_exchanges() {
+    let mut core = test_core("shrink_refs_tool_exchanges");
+    core.set_interaction_profile(&native_profile());
+    core.set_max_llm_input_tokens(3_000);
+    let _ = core.begin_turn("seed", None);
+    // A native tool-call round with a large result registers a native
+    // exchange owned by its delta; the delta itself has little/no text.
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![crate::NativeToolCall {
+            id: "call_read".to_string(),
+            name: "readfile".to_string(),
+            arguments: serde_json::json!({"path": "big.txt"}),
+            raw_arguments: r#"{"path":"big.txt"}"#.to_string(),
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats {
+            prompt_tokens: 2_700,
+            ..UsageStats::zero()
+        },
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+    // Feed the (large) tool result to complete the exchange.
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: Vec::new(),
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Long-context maintenance:"), "{prompt}");
+    assert!(prompt.contains("mode=force_shrink_required"), "{prompt}");
+    // The delta owning the tool exchange must appear in the refs list with
+    // its tool_exchanges contribution spelled out, not as a tiny text-only
+    // estimate the model would never pick for compaction.
+    assert!(prompt.contains("(text "), "{prompt}");
+    assert!(prompt.contains("+ tool_exchanges "), "{prompt}");
+}
+
 fn test_core(name: &str) -> AgentCore {
     let dir = std::env::temp_dir().join(format!(
         "timem_prompt_component_test_{}_{}",
