@@ -15,7 +15,7 @@ pub(crate) const NATIVE_RESPONSE_TRAILER: &str = "Continue the work and express 
 pub(crate) const CONTEXT_COMPACT_REQUIRED_TRAILER: &str =
     "Context is too long. Your tool calls must start with context_compact:";
 pub(crate) const MANUAL_CONTEXT_COMPACT_TRAILER: &str =
-    "User manually requests context compaction.  Please compact context before further work. Your tool calls must start with context_compact:";
+    "User manually requests context compaction.  Please compact context before further work: try to discard stale deltas and bulky tool results, and extract what is valuable into a short summary that preserves active work-relevant state. Your tool calls must start with context_compact:";
 const NATIVE_PROTOCOL_SECTION: &str = "## Tool Calling\n\nCapabilities are provided through the model API. Call them through the API tool-call channel. You may request independent calls together. Text accompanying calls is a user-visible progress note. A response without tool calls does not finish the turn; explicitly call the task_finished tool with the final answer to end it. `context_compact` may be followed by other capability calls in the same response, but it must be the first call. Later calls run only after compaction succeeds.";
 const NATIVE_RESPONSE_MODE_INSTRUCTION: &str = "Use the API tool-call channel for runtime capabilities. Ordinary response text is user-visible, you should report to user your progress often, or answer questions while working; text without tool calls keeps the loop running; call task_finished to end it.";
 const INLINE_RESPONSE_MODE_INSTRUCTION: &str =

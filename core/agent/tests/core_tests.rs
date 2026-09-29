@@ -487,7 +487,12 @@ fn manual_context_compact_request_carries_manual_trailer_and_clears_after_compac
         "{first}"
     );
     assert!(
-        first.contains("Please compact context before further work."),
+        first.contains("Please compact context before further work"),
+        "{first}"
+    );
+    // The manual trailer carries qualitative depth guidance (no numeric floor).
+    assert!(
+        first.contains("discard stale deltas and bulky tool results"),
         "{first}"
     );
     assert!(
@@ -544,6 +549,81 @@ fn manual_context_compact_request_carries_manual_trailer_and_clears_after_compac
         !after.contains("User manually requests context compaction.")
             && !after.contains("Context is too long."),
         "compaction success must clear the compact trailer: {after}"
+    );
+}
+
+#[test]
+fn manual_compact_succeeds_on_any_successful_compaction() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("manual_compact_gate_mem"),
+    );
+    let _ = core.begin_turn("work", None);
+    // Build a small dynamic context; the manual request must work on any
+    // size, with depth guidance living in the trailer wording only.
+    for i in 0..3 {
+        let step = core.apply_model_response(LlmResponse {
+            tool_calls: Vec::new(),
+            content: scored(format!(
+                r#"{{"status":"working","free_talk":"第 {i} 步。","working_still_action":[{{"run_bash":{{"cmd":"true"}}}}]}}"#
+            )),
+            model_name: "qwen-plus".to_string(),
+            usage: usage(),
+            truncated: false,
+        });
+        let CoreStep::NeedModel { .. } = step else {
+            panic!("expected continuation at step {i}")
+        };
+    }
+    core.request_manual_context_compact();
+    let prompt = match core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"status":"working","free_talk":"继续。","working_still_action":[{"run_bash":{"cmd":"true"}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    // The manual trailer carries qualitative guidance (discard stale deltas,
+    // short valuable summary), not a quantified shrink floor.
+    assert!(
+        prompt.contains("User manually requests context compaction."),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("discard stale deltas and bulky tool results"),
+        "manual trailer must guide the compaction depth qualitatively: {prompt}"
+    );
+    let delta_ids: Vec<String> = prompt
+        .lines()
+        .filter_map(|line| line.strip_prefix("[BEGIN DELTA delta_id: "))
+        .map(|rest| rest.split(',').next().unwrap_or("").to_string())
+        .collect();
+    assert!(delta_ids.len() >= 2, "{prompt}");
+    // Even a compact that discards only part of the deltas is accepted: no
+    // numeric shrink gate, so the requirement clears on success.
+    let partial = serde_json::to_string(&delta_ids[..1]).unwrap();
+    let after = match core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(format!(
+            r#"{{"status":"working","free_talk":"压缩完成。","context_compact":{{"discard":{partial},"summary":"保留任务状态"}}}}"#
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected continuation after compact, got {other:?}"),
+    };
+    assert!(
+        !after.contains("User manually requests context compaction.")
+            && !after.contains("Context is too long."),
+        "any successful compaction must clear the requirement: {after}"
     );
 }
 

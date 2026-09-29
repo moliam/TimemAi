@@ -3695,6 +3695,10 @@ impl AgentCore {
             }
         }
         if compacted_successfully {
+            // A successful compaction is accepted as-is: shrink depth cannot
+            // be quantified reliably by the model, so depth guidance lives in
+            // the compact trailers (discard stale deltas/tool noise, extract
+            // a valuable short summary) rather than a numeric gate.
             self.context_compact_required = false;
             self.manual_compact_trailer_pending = false;
         }
@@ -5544,7 +5548,13 @@ Runtime tool_call ids:",
             .collect::<Vec<_>>()
             .join("\n");
         let tip = "TIPS: You can update your job list plan, steer and optimize your work based on the above work.";
-        let instruction = "Context is above 90% of the configured input window. Your tool calls must start with context_compact. Summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use the response protocol's context_compact block: discard stale delta ids, offload important but lengthy delta ids, and provide the summary. Do not target prompt_0. You may include later tool calls in the same response; they run only after context_compact succeeds. Until compaction succeeds, responses that do not start with context_compact are ignored without being shown or executed.";
+        // A manual compaction request must not claim the threshold was
+        // crossed; it demands a deep shrink of the same 10%-20% footprint.
+        let instruction = if self.manual_compact_trailer_pending {
+            "User manually requests context compaction. Your tool calls must start with context_compact. Try to discard stale deltas and bulky tool results, extract what is valuable into a short summary, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use the response protocol's context_compact block: discard stale delta ids, offload important but lengthy delta ids, and provide the summary. Do not target prompt_0. You may include later tool calls in the same response; they run only after context_compact succeeds. Until compaction succeeds, responses that do not start with context_compact are ignored without being shown or executed."
+        } else {
+            "Context is above 90% of the configured input window. Your tool calls must start with context_compact. Summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use the response protocol's context_compact block: discard stale delta ids, offload important but lengthy delta ids, and provide the summary. Do not target prompt_0. You may include later tool calls in the same response; they run only after context_compact succeeds. Until compaction succeeds, responses that do not start with context_compact are ignored without being shown or executed."
+        };
         Some(format!(
             "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\ndynamic_context_tokens={dynamic_tokens}\nprompt_delta_count={current_count}\nrecent_prompt_delta_refs:\n{delta_refs}\n{tip}\n{instruction}",
             self.max_llm_input_tokens
