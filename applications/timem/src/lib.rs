@@ -55,6 +55,9 @@ fn acquire_workspace_instance_lock(
 }
 
 pub fn run_web(args: Vec<String>) {
+    // Orphan safety net: reparent escaped descendants to this runtime so the
+    // shell job manager can find and terminate them on job/shutdown sweeps.
+    let _ = agent_core::os::install_process_subreaper();
     let memory_root = match lifecycle_diagnostics::memory_root_from_args(&args) {
         Ok(path) => path,
         Err(error) => {

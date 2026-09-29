@@ -68,7 +68,3 @@ Follow the `memmgr` capability contract for exact operations.
 {{TOOL_CATALOG}}
 
 {{RESPONSE_PROTOCOL_SECTION}}
-
-## STARTUP_TIMESTAMP
-Timem restarted at:
-{{STARTUP_STAMP}}

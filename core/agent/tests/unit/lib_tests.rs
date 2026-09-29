@@ -121,7 +121,7 @@ fn forced_compaction_preserves_native_history_and_restricts_model_request() {
     let request_prompt = core.build_model_request_prompt(&prompt);
     assert!(request_prompt.contains("mode=force_shrink_required"));
     assert!(request_prompt
-        .ends_with("Context is too long. Your tool calls must start with context_compact:"));
+        .ends_with("Context is too long. Compact context as the tool context_compact desc suggests. Your tool calls must start with context_compact:"));
     let request = core.model_interaction_request(request_prompt);
     assert_eq!(request.tool_choice, NativeToolChoice::Required);
     assert!(request
@@ -2186,6 +2186,7 @@ fn controlled_job_snapshot(pid: u32) -> RunningShellJob {
 fn controlled_job_exit(pid: u32) -> ShellJobExitUpdate {
     ShellJobExitUpdate {
         pid,
+        topic_published: false,
         tool_call_id: format!("call_{pid}"),
         kind: "test".to_string(),
         command: format!("job-{pid}"),
@@ -2504,4 +2505,86 @@ fn incremental_message_count_matches_full_recomputation() {
     core.flush_pending_prompt_components();
     core.recount_context_message_elements_for_test();
     assert_eq!(core.context_message_elements_for_test(), incremental + 1);
+}
+
+#[test]
+fn format_time_elapsed_hms_renders_human_readable_durations() {
+    assert_eq!(crate::format_time_elapsed_hms(0), "0.0s");
+    assert_eq!(crate::format_time_elapsed_hms(250), "0.3s");
+    assert_eq!(crate::format_time_elapsed_hms(1_299), "1.3s");
+    assert_eq!(crate::format_time_elapsed_hms(1_000), "1.0s");
+    assert_eq!(crate::format_time_elapsed_hms(9_750), "9.8s");
+    assert_eq!(crate::format_time_elapsed_hms(9_999), "10.0s");
+    assert_eq!(crate::format_time_elapsed_hms(10_000), "10s");
+    assert_eq!(crate::format_time_elapsed_hms(123_000), "2m3s");
+    assert_eq!(crate::format_time_elapsed_hms(3 * 60 * 1000), "3m0s");
+    assert_eq!(crate::format_time_elapsed_hms(3_678_000), "1h1m18s");
+}
+
+#[test]
+fn time_elapsed_trailer_marks_unfinished_long_running_jobs() {
+    let mut outcome = crate::ActionOutcome::completed("Action result: run_bash\nok");
+    assert!(!outcome.still_running());
+    outcome.elapsed_ms = Some(2_000);
+    // Completed actions never carry the long-running reminder.
+    let trailer = match outcome.still_running() {
+        true => "long",
+        false => "short",
+    };
+    assert_eq!(trailer, "short");
+
+    let mut running = crate::ActionOutcome::timeout("Action result: run_bash\nstill running");
+    assert!(running.still_running());
+    running.elapsed_ms = Some(4 * 60 * 1000);
+    assert!(running.elapsed_ms >= Some(3 * 60 * 1000));
+}
+
+#[test]
+fn long_running_progress_check_trailer_requires_still_running_table() {
+    let mut core = test_core("long_running_progress_check");
+    let base = controlled_request_base();
+
+    // A job older than 3 minutes: the reminder appears together with the
+    // still-running table in the same request-local prompt.
+    let mut old_job = controlled_job_snapshot(404);
+    old_job.created_at_ms = 1;
+    let prompt = core.build_model_request_prompt_from_job_snapshots(
+        &base,
+        None,
+        (vec![old_job], Vec::new()),
+        || (Vec::new(), Vec::new()),
+    );
+    assert!(prompt.contains("### STILL RUNNING"), "{prompt}");
+    assert!(
+        prompt.contains("Need to check whether the long running job is really making progress ? "),
+        "{prompt}"
+    );
+    // The user's invariant: whenever the reminder exists, the same prompt
+    // delta must carry the still-running table.
+    assert!(prompt.contains("Need to check") && prompt.contains("### STILL RUNNING"));
+
+    // A fresh job under 3 minutes: the table is shown without the reminder.
+    let mut fresh_job = controlled_job_snapshot(405);
+    fresh_job.created_at_ms = crate::now_ms();
+    let prompt = core.build_model_request_prompt_from_job_snapshots(
+        &base,
+        None,
+        (vec![fresh_job], Vec::new()),
+        || (Vec::new(), Vec::new()),
+    );
+    assert!(prompt.contains("### STILL RUNNING"), "{prompt}");
+    assert!(
+        !prompt.contains("Need to check whether the long running job"),
+        "{prompt}"
+    );
+
+    // No running jobs: neither the table nor the reminder appears, and the
+    // base prompt is untouched so history stays unaffected.
+    let prompt = core.build_model_request_prompt_from_job_snapshots(
+        &base,
+        None,
+        (Vec::new(), Vec::new()),
+        || (Vec::new(), Vec::new()),
+    );
+    assert_eq!(prompt, base);
 }

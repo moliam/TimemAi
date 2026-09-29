@@ -1705,6 +1705,19 @@ impl CoreSessionWorker {
                 interaction_profile: None,
             };
 
+            let context_id = identity.context_id.clone();
+            let worker_id = identity.worker_id.clone();
+            // Event-driven shell-job exit push: the supervisor thread of a
+            // background job publishes the finish topic immediately, so the
+            // stream UI stops timing without waiting for worker harvest
+            // (model-request prompt build or the idle 100ms poll).
+            let exit_event_tx = event_tx.clone();
+            core.set_shell_job_exit_listener(move |update| {
+                let event = agent_core::running_shell_job_exit_topic_event(update)
+                    .with_worker_scope(&context_id, &worker_id);
+                let _ = exit_event_tx.send(CoreSessionWorkerEvent::Topics(vec![event]));
+            });
+
             let mut has_running_shell_jobs = false;
             loop {
                 let command = if has_running_shell_jobs {

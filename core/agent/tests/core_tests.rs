@@ -487,12 +487,9 @@ fn manual_context_compact_request_carries_manual_trailer_and_clears_after_compac
         "{first}"
     );
     assert!(
-        first.contains("Please compact context before further work"),
-        "{first}"
-    );
-    // The manual trailer carries qualitative depth guidance (no numeric floor).
-    assert!(
-        first.contains("discard stale deltas and bulky tool results"),
+        first.contains(
+            "Compact context as the tool context_compact desc suggests, before further work"
+        ),
         "{first}"
     );
     assert!(
@@ -596,8 +593,10 @@ fn manual_compact_succeeds_on_any_successful_compaction() {
         "{prompt}"
     );
     assert!(
-        prompt.contains("discard stale deltas and bulky tool results"),
-        "manual trailer must guide the compaction depth qualitatively: {prompt}"
+        prompt.contains(
+            "Compact context as the tool context_compact desc suggests, before further work"
+        ),
+        "manual trailer must point at the context_compact tool desc: {prompt}"
     );
     let delta_ids: Vec<String> = prompt
         .lines()
@@ -1092,7 +1091,7 @@ fn prompt_is_append_only_and_segmented() {
 }
 
 #[test]
-fn startup_stamp_is_fixed_for_one_core_instance_across_static_prompt_refreshes() {
+fn startup_timestamp_section_is_removed_from_static_prompt() {
     let mut core = AgentCore::new(
         include_str!("../../../resources/system_prompt/system_prompt.md"),
         profile("qwen-plus"),
@@ -1102,26 +1101,15 @@ fn startup_stamp_is_fixed_for_one_core_instance_across_static_prompt_refreshes()
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    // The checked-out Markdown template may use CRLF on Windows. Parse a
-    // normalized view so this test verifies the rendered semantic section rather
-    // than Git's platform-specific working-tree line endings.
-    let first_normalized = first.replace("\r\n", "\n");
-    let timestamp_section = "## STARTUP_TIMESTAMP\nTimem restarted at:\n";
-    let stamp = first_normalized
-        .rsplit_once(timestamp_section)
-        .and_then(|(_, rest)| rest.lines().next())
-        .expect("startup stamp should be rendered")
-        .to_string();
-    assert!(
-        stamp.contains("local_time") || stamp == "local_time_unavailable",
-        "unexpected rendered startup stamp: {stamp:?}"
-    );
+    // The restart timestamp is now carried only by the runtime resume notice
+    // in the user-message side, not by the static system prompt.
+    assert!(!first.contains("## STARTUP_TIMESTAMP"));
+    assert!(!first.contains("Timem restarted at"));
     assert!(!first.contains("{{STARTUP_STAMP}}"));
 
     core.set_assistant_speaker_name("Ai2");
     let refreshed = core.build_next_prompt();
-    let refreshed_normalized = refreshed.replace("\r\n", "\n");
-    assert!(refreshed_normalized.contains(&format!("{timestamp_section}{stamp}")));
+    assert!(!refreshed.contains("## STARTUP_TIMESTAMP"));
     assert!(!refreshed.contains("{{STARTUP_STAMP}}"));
 }
 

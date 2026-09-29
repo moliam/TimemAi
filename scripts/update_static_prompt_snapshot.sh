@@ -16,7 +16,9 @@ trap cleanup EXIT
 render_one() {
   local protocol="$1"
   local out="$2"
-  TIMEM_RESPONSE_PROTOCOL="$protocol" cargo run -q -p agent_core --example expand_static_prompt > "$out"
+  # `| cat` keeps the write on this side of the pipe: some sandboxed cargo
+  # wrappers (e.g. snap) drop redirected child output entirely.
+  TIMEM_RESPONSE_PROTOCOL="$protocol" cargo run -q -p agent_core --example expand_static_prompt | cat > "$out"
 }
 
 validate_one() {

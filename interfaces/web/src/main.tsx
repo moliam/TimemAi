@@ -59,6 +59,7 @@ import {
   Minimize2,
   Palette,
   FolderInput,
+  Pin,
   Paperclip,
   Pencil,
   Plug,
@@ -67,11 +68,11 @@ import {
   RefreshCw,
   Search,
   Send,
-  Eraser,
   Hand,
   Settings,
   Sparkles,
   Star,
+  StickyNote,
   Terminal,
   TriangleAlert,
   Trash2,
@@ -188,6 +189,7 @@ import {
   resolveActiveSessionId,
   runtimeConnectionLabel,
   sessionCacheHitPercent,
+  sessionCacheTokenTotals,
   sessionCancellationApplies,
   shouldRenderTurnWorkFrame,
   sessionContextUsage,
@@ -255,7 +257,7 @@ import {
   ModelEndpointDraft,
 } from "./model_endpoints";
 import { createFrameEventQueue } from "./frame_event_queue";
-import { formatTokens } from "./token_format";
+import { formatTokens, formatTokensCoarse } from "./token_format";
 import {
   computeStreamRetention,
   streamToolHandoffIds,
@@ -454,7 +456,9 @@ function loadSidebarLayout(): SidebarLayout {
     leftWidth: 200,
     rightWidth: 200,
     leftCollapsed: false,
-    rightCollapsed: false,
+    // The worker-role panel always starts collapsed after reload/restart;
+    // persisted expand state is intentionally not restored.
+    rightCollapsed: true,
   };
   try {
     const stored = JSON.parse(
@@ -473,7 +477,7 @@ function loadSidebarLayout(): SidebarLayout {
         RIGHT_SIDEBAR_MAX_WIDTH,
       ),
       leftCollapsed: stored.leftCollapsed === true,
-      rightCollapsed: stored.rightCollapsed === true,
+      rightCollapsed: true,
     };
   } catch {
     return fallback;
@@ -5584,6 +5588,9 @@ function WorkerRolePanel({
   const [collapsedRoleGroupIds, setCollapsedRoleGroupIds] = useState<
     Set<string>
   >(() => new Set());
+  // Role groups are collapsed by default: track which group ids have been
+  // seen so far so newly appearing groups also start collapsed.
+  const knownRoleGroupIdsRef = useRef<Set<string>>(new Set());
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -5608,10 +5615,18 @@ function WorkerRolePanel({
       "ungrouped",
       ...library.groups.map((group) => group.id),
     ]);
-    setCollapsedRoleGroupIds(
-      (current) =>
-        new Set(Array.from(current).filter((id) => validGroupIds.has(id))),
+    const known = knownRoleGroupIdsRef.current;
+    const freshGroupIds = Array.from(validGroupIds).filter(
+      (id) => !known.has(id),
     );
+    knownRoleGroupIdsRef.current = new Set(validGroupIds);
+    setCollapsedRoleGroupIds((current) => {
+      const next = new Set(
+        Array.from(current).filter((id) => validGroupIds.has(id)),
+      );
+      for (const id of freshGroupIds) next.add(id);
+      return next;
+    });
   }, [library.groups]);
   useEffect(() => {
     if (
@@ -9515,11 +9530,11 @@ function TimemThread({
                     viewBox="0 0 24 24"
                     aria-hidden="true"
                   >
-                    <circle cx="12" cy="12" r="9" pathLength="100" />
+                    <circle cx="12" cy="12" r="11" pathLength="100" />
                   </svg>
                   {activeSession.active_memo ? (
                     <span className="thread-working-pin" aria-hidden="true">
-                      📌
+                      <StickyNote size={12} />
                     </span>
                   ) : (
                     <span className="thread-working-core" />
@@ -9547,7 +9562,7 @@ function TimemThread({
             aria-label={t("messageNav.memoIndicator")}
           >
             <span className="thread-memo-icon" aria-hidden="true">
-              📌
+              <Pin size={13} />
             </span>
             <span className="thread-memo-tooltip" role="tooltip">
               <span className="thread-memo-caption">
@@ -10417,7 +10432,7 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
   // 收起态只报数量 xN，不表达对错状态；保留按钮与行节点，仅新计数可重放反馈。
   return <div ref={runRef} className="stream-tool-run">
     {completed.length > 0 && <button className="stream-tool-run-toggle" type="button" aria-expanded={!merged} onClick={() => setExpanded(value => !value)}>
-      {merged ? <Plus size={13} aria-hidden="true" /> : <Minus size={13} aria-hidden="true" />}<span>{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={merged ? t("tools.doneCount", { count: completed.length }) : showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{merged ? `x${completed.length}` : showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
+      <Wrench size={13} strokeWidth={2.1} className="stream-tool-run-glyph" aria-hidden="true" /><span className="stream-tool-run-sign" aria-hidden="true">{merged ? <Plus size={11} strokeWidth={2.2} /> : <Minus size={11} strokeWidth={2.2} />}</span><span className="sr-only">{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={merged ? t("tools.doneCount", { count: completed.length }) : showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{merged ? `x${completed.length}` : showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
     </button>}
     {activities.map(activity => <div key={activity.id} className={`stream-tool-merged-item${merged && completedIds.has(activity.id) ? " merged" : ""}`} inert={merged && completedIds.has(activity.id)}>
       <div><StreamToolRow activity={activity} /></div>
@@ -10584,9 +10599,22 @@ function TurnAnswerDelivery({
         <div
           className={`stream-working-trailer${waitingModel || preview?.response?.status === "streaming" ? " model-waiting" : " tool-active"}`}
           role="status"
-          aria-label="Working"
+          title={
+            waitingModel || preview?.response?.status === "streaming"
+              ? t("tools.waitingModel")
+              : t("tools.localWorking")
+          }
+          aria-label={
+            waitingModel || preview?.response?.status === "streaming"
+              ? t("tools.waitingModel")
+              : t("tools.localWorking")
+          }
         >
-          <span className="stream-working-dot" aria-hidden="true" />
+          {waitingModel || preview?.response?.status === "streaming" ? (
+            <span className="stream-working-star" aria-hidden="true">✦</span>
+          ) : (
+            <span className="stream-working-dot" aria-hidden="true" />
+          )}
           <WorkingElapsed createdAtMs={turn.created_at_ms} />
           <span className="stream-working-calls" aria-hidden="true">
             ✦ {countTurnModelRequests(turn)}
@@ -11209,6 +11237,7 @@ function HeaderContextUsage({
   }, [menuOpen]);
   const usage = session ? sessionContextUsage(session) : undefined;
   const cacheHitPercent = session ? sessionCacheHitPercent(session) : undefined;
+  const cacheTotals = session ? sessionCacheTokenTotals(session) : undefined;
   const limit = session?.max_llm_input_tokens || undefined;
   const ratio = limit
     ? Math.min(100, Math.ceil(((usage?.prompt_tokens ?? 0) * 100) / limit))
@@ -11217,7 +11246,7 @@ function HeaderContextUsage({
   const cacheLabel =
     cacheHitPercent === undefined
       ? "cache: —"
-      : `cache: ${cacheHitPercent.toFixed(1)}%`;
+      : `cache: ${cacheHitPercent.toFixed(1)}%, in: ${formatTokensCoarse(cacheTotals?.prompt_tokens ?? 0)}, out: ${formatTokensCoarse(cacheTotals?.completion_tokens ?? 0)}`;
   const contextUsageLabel = limit
     ? `Context usage ${ratio}% · ${formatTokens(usage?.prompt_tokens ?? 0)} / ${formatTokens(limit)} input tokens · ${cacheLabel}`
     : `Context usage waiting for runtime usage · ${cacheLabel}`;
@@ -11258,7 +11287,6 @@ function HeaderContextUsage({
                       onCompact();
                     }}
                   >
-                    <Eraser size={11} aria-hidden="true" />
                     {session && sessionContextCompactPending(session)
                       ? t("context.compactingAction")
                       : t("context.compactAction")}
@@ -11273,7 +11301,6 @@ function HeaderContextUsage({
                       if (window.confirm(t("context.clearConfirm"))) onClear();
                     }}
                   >
-                    <Eraser size={11} aria-hidden="true" />
                     {t("context.clearAction")}
                   </button>
                 )}
@@ -11624,16 +11651,15 @@ function MemoNotice({ activity }: { activity: Activity }) {
           : activity.title === "memo forcibly deleted by runtime"
             ? "messageNav.memoForceDeleted"
             : "messageNav.memoStopsFinish";
+  // One memo icon for create/update/delete notices; only the runtime
+  // finish-guard keeps its distinct stop signal. Matches the minimal lucide
+  // line-icon style used by the dynamic-context notices.
   const icon =
-    activity.title === "memo stops_finish" || activity.title === "memo stops finish"
-      ? "🛑"
-      : activity.title === "memo forcibly deleted by runtime"
-        ? "⚙️"
-        : activity.title === "memo deleted"
-          ? "🗑️"
-          : activity.title === "memo updated"
-            ? "📝"
-            : "📝";
+    activity.title === "memo stops_finish" || activity.title === "memo stops finish" ? (
+      <CircleStop size={13} />
+    ) : (
+      <StickyNote size={13} />
+    );
   return (
     <div className="turn-work-item notice memo-notice">
       <span className="activity-mark" aria-hidden="true">
@@ -11725,36 +11751,29 @@ function activityFromTurnEvent(
 function ContextCompactNotice({ activity }: { activity: Activity }) {
   const before = activity.before_tokens;
   const after = activity.after_tokens;
+  const hasBreakdown =
+    activity.text_before_tokens !== undefined ||
+    activity.native_before_tokens !== undefined;
   if (activity.compact_phase === "requested") {
     const label = t("context.compactingAria", {
       tokens: formatTokens(activity.estimated_prompt_tokens) ?? t("context.unknown"),
     });
     return (
-      <section
-        className="context-compact-notice is-compacting"
-        aria-label={label}
+      <div
+        className="turn-work-item notice compact-notice"
         role="status"
+        aria-label={label}
       >
-        <div className="compact-icon">
+        <span className="activity-mark" aria-hidden="true">
           <Gauge size={13} />
+        </span>
+        <div className="compact-notice-line">
+          <strong>{t("context.dynamic")}</strong>
+          <span>{t("context.compacting")}</span>
         </div>
-        <div className="compact-copy">
-          <span>{t("context.dynamic")}</span>
-          <strong>{t("context.compacting")}</strong>
-        </div>
-        <div className="compact-meter" aria-hidden="true">
-          <span className="compact-before compact-indeterminate" />
-        </div>
-      </section>
+      </div>
     );
   }
-  const ratio =
-    before && after !== undefined
-      ? Math.max(6, Math.min(100, (after / before) * 100))
-      : 36;
-  const hasBreakdown =
-    activity.text_before_tokens !== undefined ||
-    activity.native_before_tokens !== undefined;
   const breakdown = hasBreakdown
     ? t("context.textToolBreakdown", {
         textBefore: formatTokens(activity.text_before_tokens) ?? "?",
@@ -11769,29 +11788,21 @@ function ContextCompactNotice({ activity }: { activity: Activity }) {
     suffix: breakdown ? t("context.compactedSuffix", { breakdown }) : "",
   });
   return (
-    <section
-      className="context-compact-notice"
-      aria-label={label}
-      title={breakdown}
-    >
-      <div className="compact-icon">
+    <div className="turn-work-item notice compact-notice" aria-label={label} title={breakdown}>
+      <span className="activity-mark" aria-hidden="true">
         <Gauge size={13} />
-      </div>
-      <div className="compact-copy">
-        <span>{t("context.dynamic")}</span>
-        <strong>
+      </span>
+      <div className="compact-notice-line">
+        <strong>{t("context.dynamic")}</strong>
+        <span className="compact-notice-metric">
           {formatTokens(before) ?? "?"} → {formatTokens(after) ?? "?"}
           {before && after !== undefined && before > 0
             ? ` (${Math.max(0, Math.round((1 - after / before) * 100))}% off)`
             : ""}
-        </strong>
-        {breakdown && <small>{breakdown}</small>}
+        </span>
+        {breakdown && <span className="compact-notice-text">{breakdown}</span>}
       </div>
-      <div className="compact-meter" aria-hidden="true">
-        <span className="compact-before" />
-        <span className="compact-after" style={{ width: `${ratio}%` }} />
-      </div>
-    </section>
+    </div>
   );
 }
 

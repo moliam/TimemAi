@@ -497,6 +497,32 @@ impl TurnUi for SupplementAndExpansionUi {
 }
 
 #[cfg(unix)]
+/// Simulates a restart followed by the user immediately clicking manual
+/// context compaction: the direct-resume turn starts while the Host has
+/// already set the manual-compact flag.
+struct ManualCompactOnceUi {
+    requested: bool,
+    topics: Vec<CoreTopicEvent>,
+}
+
+impl ManualCompactOnceUi {
+    fn new() -> Self {
+        Self {
+            requested: true,
+            topics: Vec::new(),
+        }
+    }
+}
+
+impl TurnUi for ManualCompactOnceUi {
+    fn take_manual_context_compact_request(&mut self) -> bool {
+        std::mem::replace(&mut self.requested, false)
+    }
+    fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
+        self.topics.extend_from_slice(events);
+    }
+}
+
 #[test]
 fn every_model_request_lists_still_running_commands_with_the_creating_tool_call_id() {
     let dir = tmp_dir("still_running_model_prompt");
@@ -1349,7 +1375,7 @@ fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
     assert_eq!(model.prompts.len(), 3);
     assert!(model.prompts[1].contains("Your action's output is too large:"));
     assert!(model.prompts[1]
-        .ends_with("Context is too long. Your tool calls must start with context_compact:"));
+        .ends_with("Context is too long. Compact context as the tool context_compact desc suggests. Your tool calls must start with context_compact:"));
     assert!(model.prompts[2].contains("context compacted successfully."));
     assert!(model.prompts[1].contains("optimize your action or compact context"));
     assert!(!model.prompts[1].contains(&"0".repeat(1_000)));
@@ -6224,4 +6250,119 @@ fn memo_survives_context_compaction_and_rides_next_prompt() {
         "memo must ride the post-compaction prompt"
     );
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn direct_resume_turn_injects_restart_notice_into_first_model_request() {
+    let dir = tmp_dir("resume_notice_injection");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    let mut model = ReplayModel::new([Ok(llm(
+        r#"{"status":"ALL_FINISHED","final_answer":"resumed"}"#,
+        1_000,
+        false,
+    ))]);
+    // A resume notice as the Host would render it after a restart.
+    let notice = "Runtime restarted at 2026-09-29 14:25:05 (local time). Previous runtime/job state may be stale.\nCurrent cwd: /work/project";
+
+    let outcome = run_direct_resume_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(notice),
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "resumed");
+    assert_eq!(
+        model.prompts.len(),
+        1,
+        "the turn must finish in one request"
+    );
+    let prompt = &model.prompts[0];
+    assert!(
+        prompt.contains("Runtime restarted at 2026-09-29 14:25:05"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("Current cwd: /work/project"), "{prompt}");
+    assert!(prompt.contains(crate::DIRECT_RESUME_USER_INPUT), "{prompt}");
+    assert!(!prompt.contains("context compaction"), "{prompt}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn restart_then_manual_compact_leads_with_notice_and_compact_trailer() {
+    let dir = tmp_dir("restart_then_manual_compact");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    // First request must lead with context_compact; the reply performs it,
+    // then a final answer closes the turn.
+    let mut model = ReplayModel::new([
+        Ok(llm(
+            r#"{"working_still_action":{"context_compact":{"summary":"restart compact summary","discard":["pd_1"]}}}"#,
+            1_000,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"compacted after restart"}"#,
+            800,
+            false,
+        )),
+    ]);
+    let notice = "Runtime restarted at 2026-09-29 14:25:05 (local time). Previous runtime/job state may be stale.\nPrevious active memo is deleted by runtime: { finish the feature }.\nCurrent cwd: /work/project";
+    let mut ui = ManualCompactOnceUi::new();
+
+    let outcome = run_direct_resume_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(notice),
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "compacted after restart");
+    assert_eq!(model.prompts.len(), 2);
+    // The very first model request carries BOTH the restart context (with
+    // memo state) and the manual-compaction trailer.
+    let first = &model.prompts[0];
+    assert!(
+        first.contains("Runtime restarted at 2026-09-29 14:25:05"),
+        "{first}"
+    );
+    assert!(
+        first.contains("Previous active memo is deleted by runtime: { finish the feature }"),
+        "{first}"
+    );
+    assert!(
+        first.contains("User manually requests context compaction."),
+        "{first}"
+    );
+    // After a successful compaction the manual wording must clear.
+    let second = &model.prompts[1];
+    assert!(
+        !second.contains("User manually requests context compaction."),
+        "{second}"
+    );
+    assert!(second.contains("restart compact summary"), "{second}");
+    let _ = fs::remove_dir_all(dir);
 }

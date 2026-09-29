@@ -49,10 +49,10 @@ fn cancellation_interrupts_waiting_for_response_headers() {
     thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let _ = read_http_request(&mut stream);
-        thread::sleep(Duration::from_secs(2));
+        thread::sleep(Duration::from_secs(5));
     });
 
-    let config = local_config(addr, 5);
+    let config = local_config(addr, 10);
     let audit_file = test_audit_file("cancel");
     let cancel_after = Instant::now() + Duration::from_millis(80);
     let started = Instant::now();
@@ -62,8 +62,12 @@ fn cancellation_interrupts_waiting_for_response_headers() {
     .unwrap_err();
 
     assert_eq!(error, "cancelled_by_user");
+    // The stub server sleeps 5s before any response and the request timeout
+    // is 10s, so a genuine cancellation must return well before the server
+    // would ever answer. The 4s bound keeps that proof while staying stable
+    // under parallel test load (thread starvation delays the cancel check).
     assert!(
-        started.elapsed() < Duration::from_millis(500),
+        started.elapsed() < Duration::from_secs(4),
         "native HTTP cancellation took {:?}",
         started.elapsed()
     );

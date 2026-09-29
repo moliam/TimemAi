@@ -16,6 +16,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(all(test, unix))]
 static SHELL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const LONG_RUNNING_COMMAND_PROMPT_AFTER: Duration = Duration::from_secs(60);
+/// Default total polling wait budget (loop_timeout_ms) when loop_cmd is present.
+const DEFAULT_LOOP_TIMEOUT_MS: i64 = 60_000;
 
 pub(crate) fn is_local_shell_action(action: &str) -> bool {
     matches!(action, "run_bash" | "run_powershell")
@@ -46,6 +48,9 @@ pub struct RunningShellJob {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellJobExitUpdate {
     pub pid: u32,
+    /// Whether a finish topic for this job was already published through the
+    /// manager's exit listener, so later consumption must not duplicate it.
+    pub topic_published: bool,
     pub tool_call_id: String,
     pub kind: String,
     pub command: String,
@@ -150,6 +155,9 @@ enum ShellJobDelivery {
 #[derive(Debug, Clone)]
 struct FinishedShellJob {
     completion_sequence: u64,
+    /// Wall-clock timestamp (ms) captured by the supervisor thread the moment
+    /// the child actually exited, so later delivery does not inflate elapsed.
+    finished_at_ms: i64,
     status: String,
     stdout: String,
     stderr: String,
@@ -166,6 +174,9 @@ enum ShellJobLifecycle {
 struct ShellJobState {
     delivery: ShellJobDelivery,
     lifecycle: ShellJobLifecycle,
+    /// Whether a terminal update for this job has already been published
+    /// through the manager's exit listener.
+    exit_published: bool,
 }
 
 #[derive(Debug)]
@@ -184,6 +195,7 @@ struct ManagedShellJob {
     changed: Condvar,
     supervisor: Mutex<Option<thread::JoinHandle<()>>>,
     completion_publication: Arc<Mutex<u64>>,
+    exit_hooks: Arc<Mutex<ShellJobManagerExitHooks>>,
 }
 
 impl ManagedShellJob {
@@ -210,6 +222,7 @@ impl ManagedShellJob {
     fn exit_update(&self, finished: &FinishedShellJob) -> ShellJobExitUpdate {
         ShellJobExitUpdate {
             pid: self.pid,
+            topic_published: false,
             tool_call_id: self.tool_call_id.clone(),
             kind: self.kind.clone(),
             command: self.command.clone(),
@@ -217,7 +230,10 @@ impl ManagedShellJob {
             session_id: self.session_id.clone(),
             turn_id: self.turn_id.clone(),
             created_at_ms: self.created_at_ms,
-            elapsed_ms: now_ms().saturating_sub(self.created_at_ms),
+            elapsed_ms: finished
+                .finished_at_ms
+                .saturating_sub(self.created_at_ms)
+                .max(0),
             status: finished.status.clone(),
             stdout: finished.stdout.clone(),
             stderr: finished.stderr.clone(),
@@ -241,10 +257,37 @@ impl ManagedShellJob {
     }
 }
 
-#[derive(Debug)]
+type ShellJobExitListener = Arc<dyn Fn(&ShellJobExitUpdate) + Send + Sync>;
+
+#[derive(Default)]
+pub(crate) struct ShellJobManagerExitHooks {
+    /// Optional event-driven callback invoked once per job, immediately when
+    /// the job's supervisor observes the exit.
+    exit_listener: Option<ShellJobExitListener>,
+}
+
 struct ShellJobManagerState {
     jobs: Mutex<HashMap<u32, Arc<ManagedShellJob>>>,
     completion_publication: Arc<Mutex<u64>>,
+    exit_hooks: Arc<Mutex<ShellJobManagerExitHooks>>,
+}
+
+impl std::fmt::Debug for ShellJobManagerExitHooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShellJobManagerExitHooks")
+            .field("exit_listener", &self.exit_listener.is_some())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ShellJobManagerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShellJobManagerState")
+            .field("jobs", &self.jobs)
+            .field("completion_publication", &self.completion_publication)
+            .field("exit_hooks", &self.exit_hooks)
+            .finish()
+    }
 }
 
 impl Drop for ShellJobManagerState {
@@ -262,6 +305,7 @@ impl Drop for ShellJobManagerState {
         for job in jobs {
             job.join_supervisor();
         }
+        sweep_detached_reparented_children();
     }
 }
 
@@ -278,6 +322,7 @@ impl ShellJobManager {
             state: Arc::new(ShellJobManagerState {
                 jobs: Mutex::new(HashMap::new()),
                 completion_publication: Arc::new(Mutex::new(0)),
+                exit_hooks: Arc::new(Mutex::new(ShellJobManagerExitHooks::default())),
             }),
             long_running_prompt_after: LONG_RUNNING_COMMAND_PROMPT_AFTER,
         }
@@ -385,6 +430,16 @@ impl ShellJobManager {
         crate::os::configure_child_process_group(&mut command);
         let mut child = command.spawn()?;
         let pid = child.id();
+        // OS-level containment: on Windows the child joins the runtime's
+        // kill-on-close job object; on Unix this is a no-op and the subreaper
+        // safety net covers escapees instead.
+        if !crate::os::contain_child_process(pid) {
+            terminate_process(pid);
+            let _ = child.wait();
+            return Err(std::io::Error::other(
+                "spawned process could not be contained by the runtime job",
+            ));
+        }
         if !is_runtime_child_pid(pid) {
             terminate_process(pid);
             let _ = child.wait();
@@ -416,10 +471,12 @@ impl ShellJobManager {
             state: Mutex::new(ShellJobState {
                 delivery,
                 lifecycle: ShellJobLifecycle::Running,
+                exit_published: false,
             }),
             changed: Condvar::new(),
             supervisor: Mutex::new(None),
             completion_publication: Arc::clone(&self.state.completion_publication),
+            exit_hooks: Arc::clone(&self.state.exit_hooks),
         });
         let supervised = Arc::clone(&job);
         let supervisor = thread::spawn(move || {
@@ -689,7 +746,9 @@ impl ShellJobManager {
                 }
                 (ShellJobDelivery::Background, ShellJobLifecycle::Finished(finished)) => {
                     let completion_sequence = finished.completion_sequence;
-                    let update = job.exit_update(finished);
+                    let topic_published = state.exit_published;
+                    let mut update = job.exit_update(finished);
+                    update.topic_published = topic_published;
                     state.delivery = ShellJobDelivery::Delivered;
                     exited.push((completion_sequence, update));
                     remove.push(Arc::clone(&job));
@@ -728,6 +787,18 @@ impl ShellJobManager {
         out.push('\n');
         out.push_str(LONG_RUNNING_ACTION_GUIDANCE);
         Some(out)
+    }
+
+    /// Registers a callback invoked exactly once per managed job, immediately
+    /// when its supervisor observes the exit, from the supervisor thread.
+    /// The callback must be cheap and must not touch job state back.
+    pub fn set_exit_listener(
+        &self,
+        listener: impl Fn(&ShellJobExitUpdate) + Send + Sync + 'static,
+    ) {
+        if let Ok(mut hooks) = self.state.exit_hooks.lock() {
+            hooks.exit_listener = Some(Arc::new(listener));
+        }
     }
 
     #[cfg(all(test, unix))]
@@ -903,6 +974,15 @@ fn shell_output_text(output: &SharedShellOutput) -> String {
         .unwrap_or_default()
 }
 
+fn sweep_detached_reparented_children() {
+    for pid in crate::os::reparented_detached_child_pids() {
+        crate::os::terminate_process(pid);
+        // The reparented orphan is our child; after termination it stays a
+        // zombie until reaped, and kill(pid, 0) keeps succeeding for zombies.
+        crate::os::reap_child_process(pid);
+    }
+}
+
 fn supervise_shell_job(
     job: Arc<ManagedShellJob>,
     mut child: Child,
@@ -925,22 +1005,52 @@ fn supervise_shell_job(
     while crate::os::process_group_running(job.pid) {
         thread::sleep(Duration::from_millis(20));
     }
+    // Safety net for processes that escaped the managed process group via
+    // `setsid`-style detach: with the subreaper flag installed they are
+    // reparented to this runtime in their own session; terminate them so no
+    // orphan outlives the job.
+    sweep_detached_reparented_children();
     let stdout = shell_output_text(&job.stdout);
     let stderr = shell_output_text(&job.stderr);
     let Ok(mut publication_sequence) = job.completion_publication.lock() else {
         return;
     };
     *publication_sequence = publication_sequence.saturating_add(1);
+    let finished_at_ms = now_ms();
     let finished = FinishedShellJob {
         completion_sequence: *publication_sequence,
+        finished_at_ms,
         status,
         output: normalized_shell_output(&combined_shell_output(&stdout, &stderr)),
         stdout,
         stderr,
     };
+    let listener = job
+        .exit_hooks
+        .lock()
+        .ok()
+        .and_then(|hooks| hooks.exit_listener.clone());
+    let mut exit_update = None;
     if let Ok(mut state) = job.state.lock() {
         state.lifecycle = ShellJobLifecycle::Finished(finished);
+        let publish_topic = matches!(state.delivery, ShellJobDelivery::Background)
+            && listener.is_some()
+            && !state.exit_published;
+        if publish_topic {
+            state.exit_published = true;
+            match &state.lifecycle {
+                ShellJobLifecycle::Finished(finished) => {
+                    let mut update = job.exit_update(finished);
+                    update.topic_published = true;
+                    exit_update = Some(update);
+                }
+                ShellJobLifecycle::Running => unreachable!(),
+            }
+        }
         job.changed.notify_all();
+    }
+    if let (Some(listener), Some(update)) = (listener, exit_update) {
+        listener(&update);
     }
 }
 
@@ -1001,17 +1111,9 @@ fn validate_powershell_request(command: &str) -> Result<(), String> {
 #[cfg(windows)]
 fn validate_powershell_lifecycle(command: &str, background: bool) -> Result<(), String> {
     let normalized = command.to_ascii_lowercase().replace('`', "");
-    if normalized.contains("start-process") && !normalized.contains("-wait") {
-        return Err(if background {
-            "explicit_process_detach"
-        } else {
-            "unmanaged_background_process"
-        }
-        .to_string());
-    }
-    if normalized.contains("cmd.exe /c start") || normalized.contains("cmd /c start") {
-        return Err("explicit_process_detach".to_string());
-    }
+    // No detach keyword checks: escaped processes are contained by the
+    // kill-on-close job object, not by semantic scanning.
+    let _ = (normalized, background);
     Ok(())
 }
 
@@ -1020,7 +1122,7 @@ pub fn validate_bash_request(command: &str) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err("command_required".to_string());
     }
-    validate_bash_safety(trimmed)?;
+    validate_bash_safety(strip_heredoc_bodies(trimmed).as_str())?;
     Ok(())
 }
 
@@ -1080,17 +1182,129 @@ fn validate_bash_safety(command: &str) -> Result<(), String> {
 
 #[cfg(not(windows))]
 fn validate_bash_lifecycle(command: &str, background: bool) -> Result<(), String> {
-    if !background && contains_unmanaged_shell_background(command) && !contains_shell_wait(command)
+    let scanned = strip_heredoc_bodies(command);
+    if !background
+        && contains_unmanaged_shell_background(scanned.as_str())
+        && !contains_shell_wait(scanned.as_str())
     {
         return Err("unmanaged_background_process".to_string());
     }
-    if contains_explicit_process_detach(command) {
-        return Err("explicit_process_detach".to_string());
-    }
-    for script in nested_shell_scripts(command) {
-        validate_bash_lifecycle(&script, background)?;
+    // Deliberately no keyword blacklist here: `setsid`-style escapes are
+    // contained by OS-level mechanisms (child subreaper adoption on Linux,
+    // kill-on-close job objects on Windows), not by semantic scanning.
+    for script in nested_shell_scripts(scanned.as_str()) {
+        validate_bash_lifecycle(script.as_str(), background)?;
     }
     Ok(())
+}
+
+/// Replaces heredoc bodies with spaces so safety/lifecycle scans treat them
+/// as data, not shell syntax. A heredoc body may legitimately contain
+/// ampersands, quotes, or words like `setsid` that must not trip the
+/// background/detach detectors. Bodies are bounded by the terminator word,
+/// so removal is finite even for unterminated bodies.
+fn strip_heredoc_bodies(command: &str) -> String {
+    let chars: Vec<char> = command.chars().collect();
+    let mut out = String::with_capacity(command.len());
+    let mut index = 0_usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !in_single {
+            escaped = true;
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        if ch == '\'' && !in_double {
+            in_single = !in_single;
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        if ch == '"' && !in_single {
+            in_double = !in_double;
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        if ch == '<' && !in_single && !in_double && chars.get(index + 1).copied() == Some('<') {
+            // A here-string (`<<<`) feeds a single word, not a heredoc body;
+            // it must not be treated as one, or the delimiter scan would
+            // swallow the rest of the command and bypass lifecycle checks.
+            if chars.get(index + 2).copied() == Some('<') {
+                out.push_str("<<<");
+                index += 3;
+                continue;
+            }
+            let mut cursor = index + 2;
+            let strip_tabs = chars.get(cursor).copied() == Some('-');
+            if strip_tabs {
+                cursor += 1;
+            }
+            let delimiter_start = cursor;
+            while cursor < chars.len() && !chars[cursor].is_whitespace() && chars[cursor] != ';' {
+                cursor += 1;
+            }
+            if cursor > delimiter_start {
+                // The delimiter word may be quoted (<<'EOF', <<"EOF"); the
+                // terminating line always uses the bare word, so strip quotes.
+                let raw: String = chars[delimiter_start..cursor].iter().collect();
+                let delimiter = raw
+                    .strip_prefix('\'')
+                    .and_then(|r| r.strip_suffix('\''))
+                    .or_else(|| raw.strip_prefix('"').and_then(|r| r.strip_suffix('"')))
+                    .map(str::to_string)
+                    .unwrap_or(raw);
+                out.push('<');
+                out.push('<');
+                if strip_tabs {
+                    out.push('-');
+                }
+                out.push_str(delimiter.as_str());
+                index = cursor;
+                let mut line_start = index;
+                let mut body_end = chars.len();
+                while line_start < chars.len() {
+                    let mut probe = line_start;
+                    if strip_tabs {
+                        while probe < chars.len() && chars[probe] == '\t' {
+                            probe += 1;
+                        }
+                    }
+                    let delimiter_len = delimiter.chars().count();
+                    let candidate: String = chars[probe..(probe + delimiter_len).min(chars.len())]
+                        .iter()
+                        .collect();
+                    let after = chars.get(probe + delimiter_len);
+                    if candidate == delimiter && after.is_none_or(|c| c.is_whitespace()) {
+                        body_end = line_start;
+                        break;
+                    }
+                    match chars[line_start..].iter().position(|c| *c == '\n') {
+                        Some(offset) => line_start += offset + 1,
+                        None => break,
+                    }
+                }
+                for ch in chars[index..body_end].iter() {
+                    out.push(if ch.is_whitespace() { *ch } else { ' ' });
+                }
+                index = body_end;
+                continue;
+            }
+        }
+        out.push(ch);
+        index += 1;
+    }
+    out
 }
 
 #[cfg(not(windows))]
@@ -1163,37 +1377,6 @@ fn contains_shell_wait(command: &str) -> bool {
 }
 
 #[cfg(not(windows))]
-fn contains_explicit_process_detach(command: &str) -> bool {
-    let words = shell_words_for_safety_scan(command);
-    let mut index = 0;
-    while index < words.len() {
-        if !is_command_separator(&words[index]) {
-            index += 1;
-            continue;
-        }
-        index += 1;
-        let Some(executable) = shell_executable_index(&words, index) else {
-            continue;
-        };
-        let executable_name = shell_command_basename(&words[executable]);
-        if matches!(
-            executable_name,
-            "setsid" | "disown" | "daemon" | "daemonize" | "start-stop-daemon"
-        ) {
-            return true;
-        }
-        if is_shell_interpreter(executable_name)
-            && nested_shell_script(&words, executable + 1)
-                .is_some_and(contains_explicit_process_detach)
-        {
-            return true;
-        }
-        index = executable + 1;
-    }
-    false
-}
-
-#[cfg(not(windows))]
 fn nested_shell_scripts(command: &str) -> Vec<String> {
     let words = shell_words_for_safety_scan(command);
     let mut scripts = Vec::new();
@@ -1210,6 +1393,11 @@ fn nested_shell_scripts(command: &str) -> Vec<String> {
         if is_shell_interpreter(shell_command_basename(&words[executable])) {
             if let Some(script) = nested_shell_script(&words, executable + 1) {
                 scripts.push(script.to_string());
+            }
+        }
+        if shell_command_basename(&words[executable]) == "eval" {
+            if let Some(script) = eval_script(&words, executable + 1) {
+                scripts.push(script);
             }
         }
         index = executable + 1;
@@ -1241,6 +1429,21 @@ fn nested_shell_script(words: &[String], mut index: usize) -> Option<&str> {
         index += 1;
     }
     None
+}
+
+#[cfg(not(windows))]
+fn eval_script(words: &[String], mut index: usize) -> Option<String> {
+    // `eval` re-parses its concatenated arguments as a shell script; surface
+    // them as one string so the same lifecycle scans apply.
+    let mut script = String::new();
+    while index < words.len() && !is_command_separator(&words[index]) {
+        if !script.is_empty() {
+            script.push(' ');
+        }
+        script.push_str(words[index].as_str());
+        index += 1;
+    }
+    (!script.is_empty()).then_some(script)
 }
 
 #[cfg(not(windows))]
@@ -1346,8 +1549,22 @@ fn shell_words_for_safety_scan(command: &str) -> Vec<String> {
                     }
                 }
             }
-            ' ' | '\t' | '\n' if !in_single && !in_double => {
+            '`' if !in_single && !in_double => {
+                // Command-substitution boundaries delimit a nested command;
+                // treating them as separators keeps `setsid true` inside a
+                // substitution visible to the lifecycle/detach scans.
                 push_shell_word(&mut words, &mut current);
+                push_separator(&mut words);
+            }
+            ' ' | '\t' if !in_single && !in_double => {
+                push_shell_word(&mut words, &mut current);
+            }
+            '\n' if !in_single && !in_double => {
+                // A newline starts a new command like ';' does; treating it as
+                // a command separator prevents newline-separated detach or
+                // background launches from bypassing the lifecycle scan.
+                push_shell_word(&mut words, &mut current);
+                push_separator(&mut words);
             }
             ';' if !in_single && !in_double => {
                 push_shell_word(&mut words, &mut current);
@@ -1384,7 +1601,9 @@ fn push_separator(words: &mut Vec<String>) {
 }
 
 fn is_command_separator(word: &str) -> bool {
-    matches!(word, ";" | "then" | "do" | "else")
+    // `{` and `}` delimit brace command groups, so a standalone brace starts
+    // or ends a command just like `;` does for the lifecycle scans.
+    matches!(word, ";" | "{" | "}" | "then" | "do" | "else")
 }
 
 fn is_assignment_word(word: &str) -> bool {
@@ -1542,7 +1761,9 @@ pub(crate) fn execute_run_bash_action(
     let timeout_ms = if is_regular_command {
         action.timeout_ms_i64(5000)
     } else {
-        action.input_i64("loop_timeout_ms").unwrap_or(600_000)
+        action
+            .input_i64("loop_timeout_ms")
+            .unwrap_or(DEFAULT_LOOP_TIMEOUT_MS)
     };
     let session_id = core.current_session_id();
     let turn_id = core.current_action_turn_id();
@@ -1665,7 +1886,7 @@ pub(crate) fn execute_run_bash_with_tail(
         ));
     }
     if !background && is_regular_command && contains_long_local_shell_sleep(command_to_run) {
-        let reason = "The command contains a long sleep in normal mode. Use loop_cmd with interval_ms to poll external status, or background=true for long local work that should continue across turns.";
+        let reason = "The command contains a long sleep in normal mode. Use loop_cmd with interval_ms to poll external status, or background=true for long local work that should continue across turns. If the `sleep N` text is only data inside a script or fixture, put it inside a quoted string or a heredoc (<<'EOF') body and retry.";
         return ActionExecution::Completed(bash_finished_error_outcome(
             bash_action_not_executed(Some(command_to_run), reason),
             "InvalidInput",
@@ -2173,37 +2394,32 @@ fn contains_long_powershell_sleep(command: &str) -> bool {
 
 #[cfg(not(windows))]
 fn contains_long_normal_sleep(command: &str) -> bool {
-    let tokens = shell_words_for_sleep_scan(command);
-    tokens.windows(2).any(|pair| {
-        pair[0] == "sleep" && sleep_arg_seconds(&pair[1]).is_some_and(|seconds| seconds >= 30.0)
-    })
-}
-
-#[cfg(not(windows))]
-fn shell_words_for_sleep_scan(command: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut in_single = false;
-    let mut in_double = false;
-    for ch in command.chars() {
-        match ch {
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            ' ' | '\t' | '\n' | ';' | '&' | '|' | '(' | ')' if !in_single && !in_double => {
-                if !current.is_empty() {
-                    words.push(std::mem::take(&mut current));
-                }
-            }
-            _ => current.push(ch),
+    // Heredoc bodies and quoted strings are data, not commands: sample
+    // command text inside a script or heredoc must not trip the sleep scan.
+    // Scan word segments and only accept `sleep` in executable position.
+    let words = shell_words_for_safety_scan(strip_heredoc_bodies(command).as_str());
+    let mut index = 0;
+    while index < words.len() {
+        if !is_command_separator(&words[index]) {
+            index += 1;
+            continue;
         }
+        index += 1;
+        let Some(executable) = shell_executable_index(&words, index) else {
+            continue;
+        };
+        if words[executable] == "sleep"
+            && words
+                .get(executable + 1)
+                .and_then(|arg| sleep_arg_seconds(arg))
+                .is_some_and(|seconds| seconds >= 30.0)
+        {
+            return true;
+        }
+        index = executable + 1;
     }
-    if !current.is_empty() {
-        words.push(current);
-    }
-    words
+    false
 }
-
-#[cfg(not(windows))]
 fn sleep_arg_seconds(arg: &str) -> Option<f64> {
     let clean = arg.trim();
     let (number, multiplier) = if let Some(number) = clean.strip_suffix('s') {
@@ -2284,6 +2500,7 @@ impl BashCommandOutput {
                     "Action result: {}\nLONG_RUNNING_COMMAND_STATUS:\nPID: {}\nElapsed: {} ms\nStatus: still running\n{}",
                     action_name, pid, elapsed_ms, LONG_RUNNING_ACTION_GUIDANCE
                 );
+
                 if !self.output.trim().is_empty() {
                     out.push_str("\nPartial return:\n");
                     out.push_str(&self.output);
@@ -2295,6 +2512,7 @@ impl BashCommandOutput {
                     "Action result: {}\npid={}, timeout, but is still running\nTimeout means Timem stopped waiting; the process was not killed and there is no final exit code yet.",
                     action_name, pid
                 );
+
                 if !self.output.trim().is_empty() {
                     out.push_str("\nPartial return:\n");
                     out.push_str(&self.output);
@@ -2528,10 +2746,7 @@ fn bash_validation_message(reason: &str) -> &'static str {
             "The local command was blocked by Timem safety policy because it may recursively delete the filesystem root."
         }
         "unmanaged_background_process" => {
-            "检测到命令可能创建脱离 Runtime 管理的后台进程。请改用当前平台命令工具的 background=true。"
-        }
-        "explicit_process_detach" => {
-            "检测到命令可能创建脱离 Runtime 管理的后台进程。请改用当前平台命令工具的 background=true，并移除 setsid、disown 或 daemon 等主动脱离方式。"
+            "检测到命令可能创建脱离 Runtime 管理的后台进程（未加 wait 的 `&` 后台启动）。请改用当前平台命令工具的 background=true；若 `&` 只是数据/样例文本，请放入引号字符串或 heredoc（<<'EOF'）正文中后重试。"
         }
         _ => "The local command request did not pass runtime validation.",
     }

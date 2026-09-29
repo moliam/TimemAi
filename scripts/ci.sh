@@ -66,7 +66,8 @@ if [[ "$(uname -s)" == "Linux" ]]; then
   agent_test_list="$(cargo test -p agent_core --lib --locked -- --list)"
   for test_name in \
     shell_lifecycle_validation_rejects_unmanaged_background_without_wait \
-    shell_lifecycle_validation_rejects_explicit_detach \
+    shell_lifecycle_validation_allows_detach_keywords_under_os_containment \
+    run_bash_sweeps_setsid_orphan_via_subreaper_safety_net \
     timeout_job_reports_pid_and_later_exit_update \
     timed_out_job_remains_cancellable_after_launcher_exits \
     supervisor_waits_for_managed_process_group_after_launcher_exits \

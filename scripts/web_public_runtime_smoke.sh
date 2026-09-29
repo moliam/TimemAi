@@ -141,7 +141,7 @@ fi
 curl "${curl_common[@]}" --dump-header "$test_root/headers" \
   --output "$test_root/page.html" "$first_url"
 grep -q '<div id="root">' "$test_root/page.html"
-grep -Eiq '^set-cookie: timem_web_token=.*Path=/; SameSite=Strict; HttpOnly' \
+grep -Eiq '^set-cookie: timem_web_token_[0-9]+=.*Path=/; SameSite=Strict; HttpOnly' \
   "$test_root/headers"
 cookie="$(sed -nE 's/^[Ss]et-[Cc]ookie:[[:space:]]*([^;]+).*/\1/p' \
   "$test_root/headers" | head -n 1 | tr -d '\r')"

@@ -4,6 +4,7 @@ use agent_core::{
     ResponseProtocolKind, SessionToolRepo, UsageStats,
 };
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Instant;
 
@@ -5262,5 +5263,143 @@ fn queued_mcp_update_is_applied_before_the_next_user_turn_prompt() {
     assert!(prompt.contains("## USER\n\nUse the new capability."));
 
     worker.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Background exit topic must arrive while the model call is still blocked
+/// (event-driven push from the job supervisor thread), without waiting for
+/// the next model-request prompt build or the idle poll.
+#[cfg(unix)]
+#[test]
+fn background_exit_topic_arrives_while_model_call_is_blocked() {
+    use std::sync::mpsc as test_mpsc;
+
+    struct BlockingModel {
+        release: Arc<std::sync::atomic::AtomicBool>,
+        calls: usize,
+    }
+    impl ModelClient for BlockingModel {
+        fn call_model(
+            &mut self,
+            _config: &ModelServiceConfig,
+            _prompt: &str,
+            _audit_file: &std::path::Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.calls += 1;
+            let content = if self.calls == 1 {
+                r#"{"status":"working","working_still_action":[{"run_bash":{"cmd":"printf bg_done","background":true}}]}"#
+                    .to_string()
+            } else {
+                // Block the second model call so the worker cannot build a
+                // new prompt (no harvest path can run) until released or
+                // cancelled; never block forever so tests cannot hang.
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while !self.release.load(Ordering::Relaxed)
+                    && !_should_cancel()
+                    && Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                r#"{"status":"ALL_FINISHED","final_answer":"DONE"}"#.to_string()
+            };
+            Ok(LlmResponse {
+                tool_calls: Vec::new(),
+                content,
+                model_name: "test-model".to_string(),
+                usage: UsageStats::zero(),
+                truncated: false,
+            })
+        }
+    }
+
+    let dir = tmp_dir("blocked_model_exit_topic");
+    let mut core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    core.set_bash_approval_mode(agent_core::BashApprovalMode::Approve);
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (finish_tx, finish_rx) = test_mpsc::channel::<()>();
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "blocked_model_exit_topic", 1),
+        BlockingModel {
+            release: Arc::clone(&release),
+            calls: 0,
+        },
+    );
+    let handle = worker.handle();
+    let _lifecycle = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker lifecycle");
+    handle
+        .run_turn("start background work", None)
+        .expect("turn should enqueue");
+
+    let mut action_id = None;
+    let mut finish_seen = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match worker.events().recv_timeout(Duration::from_millis(100)) {
+            Ok(CoreSessionWorkerEvent::Topics(events)) => {
+                for event in events {
+                    match event.payload["event"].as_str() {
+                        Some("start") => {
+                            action_id = event.payload["action_id"].as_str().map(str::to_string);
+                        }
+                        Some("finish")
+                            if !finish_seen && event.payload["status"] != "background_running" =>
+                        {
+                            // Skip the immediate tool-delivery finish
+                            // (status=background_running, process still
+                            // running); the real exit topic carries a
+                            // terminal status.
+                            assert_eq!(
+                                event.payload["action_id"].as_str(),
+                                action_id.as_deref(),
+                                "finish topic must match the started background action"
+                            );
+                            assert_eq!(event.payload["status"], "completed");
+                            assert_eq!(event.payload["event"], "finish");
+                            finish_seen = true;
+                            // Finish arrived while the model call is still
+                            // blocked: prove it, then let the turn complete.
+                            let _ = finish_tx.send(());
+                            release.store(true, Ordering::Relaxed);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+        if finish_seen {
+            break;
+        }
+    }
+    assert!(
+        finish_seen,
+        "finish topic must be pushed while the model call is blocked"
+    );
+    // Drain remaining events until the turn completes, then shut down.
+    let _ = finish_rx.recv();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match worker.events().recv_timeout(Duration::from_millis(200)) {
+            Ok(CoreSessionWorkerEvent::TurnFinished { .. }) => break,
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(_) => {}
+        }
+    }
+    let _ = worker.shutdown();
     let _ = std::fs::remove_dir_all(dir);
 }

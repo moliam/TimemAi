@@ -223,6 +223,13 @@ fn terminate_command_process(child: &mut std::process::Child) {
     crate::os::kill_process_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
+    // Same safety net as shell jobs: with the subreaper flag installed, a
+    // `setsid`-style escapee is reparented to this runtime in its own
+    // session; terminate and reap it so no orphan outlives the command.
+    for pid in crate::os::reparented_detached_child_pids() {
+        crate::os::terminate_process(pid);
+        crate::os::reap_child_process(pid);
+    }
 }
 
 fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {

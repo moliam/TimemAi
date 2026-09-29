@@ -264,6 +264,8 @@ export const zh = {
     openInTerminal: "在命令行中打开目录",
     done: "已完成",
     running: "运行中",
+    waitingModel: "等待模型回复",
+    localWorking: "本地工作中",
     runningWith: "运行中（{parts}）",
     fgCount: "前台 {count}",
     bgCount: "后台 {count}",

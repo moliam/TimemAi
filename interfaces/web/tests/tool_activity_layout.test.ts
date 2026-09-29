@@ -72,7 +72,10 @@ describe("stream tool status continuity", () => {
 
 describe("collapsed tool summary", () => {
   it("labels prior tools explicitly and aligns the disclosure with live rows", () => {
-    expect(source).toContain('<span>{t("tools.toolsLabel")}</span>');
+    // The visible "tools" word became a wrench glyph; the label stays
+    // available to screen readers via the sr-only span.
+    expect(source).toContain('<span className="sr-only">{t("tools.toolsLabel")}</span>');
+    expect(source).toContain('className="stream-tool-run-glyph"');
     expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*font-weight: 400;/);
     expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*padding: 2px 4px;/);
   });

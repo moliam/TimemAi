@@ -23,7 +23,8 @@ description: |
   when the condition is satisfied and nonzero otherwise, for example:
   `if (Test-Path path) { exit 0 } else { exit 1 }`.
   For long local work that should keep running across interaction rounds, use
-  `background=true`. Runtime rejects unmanaged process detachment. Background
+  `background=true`. Processes are contained in a kill-on-close job object.
+  Background
   and timeout jobs return a pid; inspect or stop only jobs owned by this runtime.
 prompt_input: |
   Choose exactly one mode. For a normal/background command, provide cmd and do
@@ -47,7 +48,7 @@ input_schema: |
       "cmd": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Non-empty PowerShell command for normal or background mode. Mutually exclusive with loop_cmd."},
       "loop_cmd": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Non-empty PowerShell polling check command. Runtime re-runs it until it exits with code 0. Mutually exclusive with cmd and requires interval_ms."},
       "timeout_ms": {"type": "integer", "minimum": 1, "description": "Normal command wait budget in milliseconds. Default: 5000."},
-      "loop_timeout_ms": {"type": "integer", "minimum": 1, "description": "Total polling wait budget in milliseconds. Default: 600000 when loop_cmd is present."},
+      "loop_timeout_ms": {"type": "integer", "minimum": 1, "description": "Total polling wait budget in milliseconds. Default: 60000 when loop_cmd is present."},
       "once_timeout_ms": {"type": "integer", "minimum": 1, "description": "Per-check timeout in polling mode. Default: 5000."},
       "interval_ms": {"type": "integer", "minimum": 1, "description": "Polling interval in milliseconds. Required with loop_cmd and invalid with cmd."},
       "background": {"type": "boolean", "description": "When true, runtime continues interaction without blocking on the action, returning a pid for future reference. Use it for persistent long-running commands that should keep running across interaction rounds."},

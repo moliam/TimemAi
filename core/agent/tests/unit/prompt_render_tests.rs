@@ -49,7 +49,6 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
         ),
         &JsonSuiteV1,
         "TIMEM_ASSISTANT",
-        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
     );
     let rendered = render_prompt_with_rendered_static(
         &rendered_static,
@@ -144,7 +143,6 @@ fn xml_protocol_wraps_static_prompt_with_timem_system_prompt_boundary() {
         ),
         &XmlSuiteV1,
         "TIMEM_ASSISTANT",
-        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
     );
 
     assert!(rendered.starts_with("<Timem System Prompt>\n"));
@@ -159,7 +157,6 @@ fn xml_protocol_wraps_static_prompt_with_timem_system_prompt_boundary() {
         ),
         &JsonSuiteV1,
         "TIMEM_ASSISTANT",
-        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
     );
     assert!(json.starts_with("[BEGIN SYSTEM PROMPT]\n"));
     assert!(json.ends_with("\n[END SYSTEM PROMPT]"));
@@ -1153,7 +1150,6 @@ fn prompt_renderer_replaces_current_protocol_language() {
         ),
         &JsonSuiteV1,
         "Ai7",
-        "startup",
     );
     let xml = render_static_prompt(
         template,
@@ -1162,7 +1158,6 @@ fn prompt_renderer_replaces_current_protocol_language() {
         ),
         &XmlSuiteV1,
         "Ai7",
-        "startup",
     );
 
     assert!(json.contains("Return JSON"));
@@ -1181,7 +1176,6 @@ fn prompt_renderer_injects_only_the_active_protocol_context_structure() {
         ),
         &JsonSuiteV1,
         "Ai7",
-        "startup",
     );
     let xml = render_static_prompt(
         template,
@@ -1190,7 +1184,6 @@ fn prompt_renderer_injects_only_the_active_protocol_context_structure() {
         ),
         &XmlSuiteV1,
         "Ai7",
-        "startup",
     );
 
     assert!(json.contains("[BEGIN DELTA "));
@@ -1211,7 +1204,6 @@ fn prompt_renderer_injects_only_the_active_protocol_delta_example() {
         ),
         &JsonSuiteV1,
         "Ai7",
-        "startup",
     );
     let xml = render_static_prompt(
         template,
@@ -1220,7 +1212,6 @@ fn prompt_renderer_injects_only_the_active_protocol_delta_example() {
         ),
         &XmlSuiteV1,
         "Ai7",
-        "startup",
     );
 
     assert!(json.contains("[BEGIN DELTA delta_id: pd_1, time_ms: 123]"));
@@ -1273,7 +1264,6 @@ fn prompt_renderer_uses_protocol_native_tool_synopses() {
         ),
         &XmlSuiteV1,
         "Ai7",
-        "startup",
     );
     let json = render_static_prompt(
         template,
@@ -1282,7 +1272,6 @@ fn prompt_renderer_uses_protocol_native_tool_synopses() {
         ),
         &JsonSuiteV1,
         "Ai7",
-        "startup",
     );
 
     assert!(xml.contains("`<readfile><path>src/main.rs</path>"), "{xml}");
@@ -1302,7 +1291,6 @@ fn native_prompt_encourages_progress_updates_without_changing_finalization_seman
         ),
         &JsonSuiteV1,
         "Ai7",
-        "startup",
         ToolCallMode::Native,
     );
 
@@ -1327,7 +1315,6 @@ fn native_prompt_contains_builtin_descriptions_without_schemas_or_dynamic_tools(
         ),
         &JsonSuiteV1,
         "Ai7",
-        "startup",
         ToolCallMode::Native,
     );
 
@@ -1367,7 +1354,6 @@ fn prompt_renderer_replaces_assistant_id() {
         ),
         &JsonSuiteV1,
         "Ai7",
-        "startup",
     );
     assert!(rendered.contains("YOUR ID is: Ai7"));
     assert!(rendered.contains("## Ai7"));
@@ -1376,7 +1362,7 @@ fn prompt_renderer_replaces_assistant_id() {
 }
 
 #[test]
-fn prompt_renderer_replaces_startup_stamp() {
+fn prompt_renderer_keeps_startup_stamp_placeholder_as_plain_text() {
     let rendered = render_static_prompt(
         "## TIMESTAMP\n{{STARTUP_STAMP}}",
         &CapabilityRegistry::builtin_for_host(
@@ -1384,11 +1370,9 @@ fn prompt_renderer_replaces_startup_stamp() {
         ),
         &JsonSuiteV1,
         "Ai7",
-        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
     );
 
-    assert!(rendered.contains("## TIMESTAMP\n2026-08-17 12:34:56 local_time, weekday=周一/Monday"));
-    assert!(!rendered.contains("{{STARTUP_STAMP}}"));
+    assert!(rendered.contains("{{STARTUP_STAMP}}"));
 }
 
 #[test]
@@ -1415,7 +1399,6 @@ fn context_compaction_summary_has_an_explicit_assistant_heading() {
         ),
         &JsonSuiteV1,
         "TIMEM_ASSISTANT",
-        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
     );
     let rendered = render_prompt_with_rendered_static(
         &rendered_static,
@@ -1452,7 +1435,6 @@ fn xml_context_compaction_summary_uses_an_assistant_kind_attribute() {
         ),
         &XmlSuiteV1,
         "TIMEM_ASSISTANT",
-        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
     );
     let rendered = render_prompt_with_rendered_static(
         &rendered_static,
@@ -1493,7 +1475,6 @@ fn prompt_serialization_is_byte_stable_and_append_only_before_trailer() {
         ),
         &XmlSuiteV1,
         "TIMEM_ASSISTANT",
-        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
     );
     let first_deltas = vec![
         delta("pd_1", 100, "user_question", "first question"),

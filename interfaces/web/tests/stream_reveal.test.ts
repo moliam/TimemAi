@@ -151,11 +151,21 @@ describe("splitMarkdownBlocks incremental stability", () => {
    expect(css).not.toContain("stream-caret-pulse");
    expect(mainSource).toContain('<StreamProcess closing={turn.state !== "working"}');
    expect(mainSource).toContain('className="stream-working-dot"');
+    // Model waiting/streaming swaps the dot for a breathing star glyph so the
+    // phase differs by shape AND color; tool-running keeps the amber dot.
+    expect(mainSource).toContain('className="stream-working-star"');
+    expect(mainSource).toContain('>✦</span>');
+    expect(css).toContain('.stream-working-star {');
+    expect(css).toMatch(/\.stream-working-star \{[^}]*animation: stream-working-grow/);
     expect(css).toContain('.stream-working-trailer.tool-active { color: #f1c56f; }');
     expect(css).toContain('.stream-working-trailer.model-waiting { color: #3485dc; }');
     expect(css).toContain(':root[data-theme="light"] .stream-working-trailer.tool-active { color: #b07f2e; }');
     expect(css).toContain(':root[data-theme="light"] .stream-working-trailer.model-waiting { color: #286a9b; }');
-    expect(css).toMatch(/\.stream-working-dot \{[^}]*transition: background-color \.5s ease/);
+    // The dot keeps a fixed 9x9 hover target; the grow animation lives on
+    // ::after so transform scaling never shrinks the tooltip hit area.
+    expect(css).toMatch(/\.stream-working-dot \{[^}]*width: 9px; height: 9px/);
+    expect(css).toMatch(/\.stream-working-dot::after \{[^}]*animation: stream-working-grow/);
+    expect(css).toMatch(/\.stream-working-dot \{[^}]*transition: color \.5s ease/);
  });
 
  it("bounds repeated stream rendering and interaction listeners", () => {

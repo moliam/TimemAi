@@ -13,9 +13,9 @@ pub(crate) const RESPONSE_TRAILER: &str =
     "Please continue the work and respond as protocol requires in user's language:";
 pub(crate) const NATIVE_RESPONSE_TRAILER: &str = "Continue the work and express thought in the user's language.  Use tools smartly. When all work is genuinely done, call the task_finished tool with the complete final answer as its summary:";
 pub(crate) const CONTEXT_COMPACT_REQUIRED_TRAILER: &str =
-    "Context is too long. Your tool calls must start with context_compact:";
+    "Context is too long. Compact context as the tool context_compact desc suggests. Your tool calls must start with context_compact:";
 pub(crate) const MANUAL_CONTEXT_COMPACT_TRAILER: &str =
-    "User manually requests context compaction.  Please compact context before further work: try to discard stale deltas and bulky tool results, and extract what is valuable into a short summary that preserves active work-relevant state. Your tool calls must start with context_compact:";
+    "User manually requests context compaction. Compact context as the tool context_compact desc suggests, before further work. Your tool calls must start with context_compact:";
 const NATIVE_PROTOCOL_SECTION: &str = "## Tool Calling\n\nCapabilities are provided through the model API. Call them through the API tool-call channel. You may request independent calls together. Text accompanying calls is a user-visible progress note. A response without tool calls does not finish the turn; explicitly call the task_finished tool with the final answer to end it. `context_compact` may be followed by other capability calls in the same response, but it must be the first call. Later calls run only after compaction succeeds.";
 const NATIVE_RESPONSE_MODE_INSTRUCTION: &str = "Use the API tool-call channel for runtime capabilities. Ordinary response text is user-visible, you should report to user your progress often, or answer questions while working; text without tool calls keeps the loop running; call task_finished to end it.";
 const INLINE_RESPONSE_MODE_INSTRUCTION: &str =
@@ -25,7 +25,7 @@ const NATIVE_BUILTIN_TOOL_DESCRIPTIONS_HEADING: &str =
     "## Built-in Tool Descriptions\n\nBuilt-in tool parameter schemas are provided separately through the model API. One response can reasonably contain multiple tool calls for better performance.";
 pub(crate) const MAX_ACTION_RESULT_PROMPT_BYTES: usize =
     tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES;
-pub(crate) const REASONING_REVIEW_TRAILER: &str = "Note: reasoning effort is enabled for this request, while most work rounds run without it. Take advantage of this reasoning pass to review the current work direction, update the plan if needed, and express the review concisely or in detail as appropriate.";
+pub(crate) const REASONING_REVIEW_TRAILER: &str = "Note: reasoning effort is enabled for this request, while most work rounds run without it. Take advantage of this reasoning pass to review current work, update or adjust the work direction/plan if needed, and express in remarks as appropriate.";
 
 pub(crate) fn truncate_action_result_for_prompt(text: &str) -> String {
     tool_result_gate::gate(text, Retention::Head)
@@ -667,14 +667,12 @@ pub(crate) fn render_static_prompt(
     capabilities: &CapabilityRegistry,
     protocol_suite: &dyn ResponseProtocolSuite,
     assistant_heading: &str,
-    startup_stamp: &str,
 ) -> String {
     render_static_prompt_for_mode(
         static_prompt,
         capabilities,
         protocol_suite,
         assistant_heading,
-        startup_stamp,
         ToolCallMode::Inline,
     )
 }
@@ -684,7 +682,6 @@ pub(crate) fn render_static_prompt_for_mode(
     capabilities: &CapabilityRegistry,
     protocol_suite: &dyn ResponseProtocolSuite,
     assistant_heading: &str,
-    startup_stamp: &str,
     tool_call_mode: ToolCallMode,
 ) -> String {
     render_static_prompt_for_mode_with_preferences(
@@ -692,7 +689,6 @@ pub(crate) fn render_static_prompt_for_mode(
         capabilities,
         protocol_suite,
         assistant_heading,
-        startup_stamp,
         tool_call_mode,
         InterfacePreferences::default(),
     )
@@ -703,7 +699,6 @@ pub(crate) fn render_static_prompt_for_mode_with_preferences(
     capabilities: &CapabilityRegistry,
     protocol_suite: &dyn ResponseProtocolSuite,
     assistant_heading: &str,
-    startup_stamp: &str,
     tool_call_mode: ToolCallMode,
     interface_preferences: InterfacePreferences,
 ) -> String {
@@ -760,7 +755,6 @@ pub(crate) fn render_static_prompt_for_mode_with_preferences(
     let assistant_heading = assistant_heading.trim();
     let with_protocol = with_protocol.replace("{{ASSSISTANT_ID}}", assistant_heading);
     let with_protocol = with_protocol.replace("ASSSISTANT_ID", assistant_heading);
-    let with_protocol = with_protocol.replace("{{STARTUP_STAMP}}", startup_stamp);
     let tool_catalog_heading = if tool_call_mode == ToolCallMode::Native {
         NATIVE_BUILTIN_TOOL_DESCRIPTIONS_HEADING
     } else {

@@ -35,9 +35,9 @@ describe("thread working indicator", () => {
     const arc = rule(".thread-working-arc");
     const stroke = rule(".thread-working-arc circle");
 
-    expect(source).toContain('<circle cx="12" cy="12" r="9" pathLength="100" />');
+    expect(source).toContain('<circle cx="12" cy="12" r="11" pathLength="100" />');
     expect(arc).toContain("animation: thread-working-spin 1.8s linear infinite");
-    expect(stroke).toContain("stroke-width: 3");
+    expect(stroke).toContain("stroke-width: 2");
     expect(stroke).toContain("stroke-linecap: round");
     expect(stroke).toContain("stroke-dasharray: 18 82");
     expect(stroke).toContain("fill: none");
@@ -45,7 +45,7 @@ describe("thread working indicator", () => {
 
   it("keeps reduced-motion users free from the arc animation", () => {
     expect(styles).toMatch(
-      /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.thread-working-away\.is-working \.thread-working-arc \{ animation: none; \}/,
+      /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.thread-working-away\.is-working \.thread-working-arc \{ animation: none; transition: none; \}/,
     );
   });
 });

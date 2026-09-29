@@ -502,29 +502,20 @@ button:disabled { cursor: not-allowed; }
 .session-runtime-reset:hover { border-color: #55717e; color: #d0dce1; }
 
 /* Runtime context maintenance is rendered separately from conversational messages. */
-.context-compact-notice { width: fit-content; max-width: min(100%, 430px); margin: -2px 0 12px 10px; display: inline-grid; grid-template-columns: 22px minmax(0, auto) 72px; align-items: center; gap: 7px; padding: 5px 8px 5px 6px; border: 1px solid #2d4852; border-radius: 999px; background: #101c23; color: #9fb5c1; box-shadow: 0 2px 8px #0003; animation: compact-enter .32s ease-out both; }
-.compact-icon { width: 22px; height: 22px; display: grid; place-items: center; border-radius: 50%; background: #17323a; color: #78d2be; }
-.compact-copy { min-width: 0; display: flex; align-items: baseline; gap: 6px; white-space: nowrap; }
-.compact-copy span { color: #b8ccd4; font-size: 10px; font-weight: 650; }
-.compact-copy strong { color: #78d2be; font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; }
-.compact-copy small { min-width: 0; overflow: hidden; color: #708892; font-size: 9px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; }
-.compact-meter { position: relative; width: 72px; height: 3px; overflow: hidden; border-radius: 999px; background: #26343d; }
-.compact-meter span { position: absolute; inset: 0 auto 0 0; border-radius: inherit; transform-origin: left; }
-.compact-before { width: 100%; background: #677986; animation: compact-before-fade .8s ease-out both; }
-.compact-indeterminate { animation: compact-indeterminate 10s ease-in-out infinite; }
-@keyframes compact-indeterminate { 0% { width: 18%; } 50% { width: 82%; } 100% { width: 18%; } }
-.compact-after { background: #58bca7; animation: compact-after-settle .75s cubic-bezier(.2,.8,.2,1) both; }
+.compact-notice .compact-notice-line { display: flex; align-items: center; gap: 8px; min-width: 0; white-space: nowrap; }
+.compact-notice .compact-notice-line strong { color: #78d2be; font-size: 10px; font-weight: 700; }
+.compact-notice .compact-notice-line span { color: #9db2c1; font-size: 10px; font-variant-numeric: tabular-nums; }
+.compact-notice .compact-notice-metric { color: #78d2be; font-weight: 700; }
+.compact-notice .compact-notice-text { color: #708892; overflow: hidden; text-overflow: ellipsis; max-width: 60%; }
+.compact-notice .activity-mark { font-size: 13px; background: transparent; display: inline-flex; align-items: center; justify-content: center; align-self: center; line-height: 1; color: #78d2be; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes session-working-glow { 50% { background: #28332f; box-shadow: inset 2px 0 #d3a75f, 0 0 0 1px #d3a75f22; } }
-@keyframes compact-enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-@keyframes compact-before-fade { to { opacity: .16; } }
-@keyframes compact-after-settle { from { width: 100%; } }
 @keyframes work-row-enter { from { opacity: 0; transform: translateY(3px); } }
 
 @media (max-width: 720px) { .user-message-navigation { left: 6px; }.user-message-navigation button { width: 30px; height: 30px; border-radius: 8px; } }
-@media (prefers-reduced-motion: reduce) { .chat-scroll { scroll-behavior: auto; }.live-turn-usage, .pulse, .connection.offline, .session-row.working, .session-working-icon, .load-history.loading svg, .send-button.sending svg, .stop-button.sending svg, .decision-actions .primary.sending svg, .completion-toolgen.sending svg, .context-compact-notice, .compact-before, .compact-after, .compact-indeterminate, .turn-assistant-frame.working, .working-chip.toolgen-working svg, .turn-work-item, .toolrepo-header-button.count-pulse .toolrepo-header-count, .attach-button.uploading:disabled, .attach-button.uploading svg, .toolrepo-search-pending, .toolrepo-empty.searching svg, .upload-dot { animation: none; }.mcp-session-toggle-thumb { transition: none; }.user-message-navigation, .user-message-navigation button, .session-row .session, .session-expand { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .chat-scroll { scroll-behavior: auto; }.live-turn-usage, .pulse, .connection.offline, .session-row.working, .session-working-icon, .load-history.loading svg, .send-button.sending svg, .stop-button.sending svg, .decision-actions .primary.sending svg, .completion-toolgen.sending svg, .turn-assistant-frame.working, .working-chip.toolgen-working svg, .turn-work-item, .toolrepo-header-button.count-pulse .toolrepo-header-count, .attach-button.uploading:disabled, .attach-button.uploading svg, .toolrepo-search-pending, .toolrepo-empty.searching svg, .upload-dot { animation: none; }.mcp-session-toggle-thumb { transition: none; }.user-message-navigation, .user-message-navigation button, .session-row .session, .session-expand { transition: none; } }
 @media (max-width: 1050px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 214px minmax(0, 1fr); }.side-panel-backdrop { display: block; position: fixed; z-index: 3; inset: 0; width: 100%; border: 0; background: #02060973; }.toolrepo-side-panel { position: fixed; z-index: 4; right: 0; top: 0; bottom: 0; width: min(360px, 88vw); } }
-@media (max-width: 720px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 1fr; }.context-compact-notice { max-width: calc(100% - 10px); margin-left: 0; grid-template-columns: 22px minmax(0, auto) minmax(42px, 64px); }.compact-copy span { overflow: hidden; text-overflow: ellipsis; }.compact-copy small { display: none; }.compact-meter { width: 100%; } }
+@media (max-width: 720px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 1fr; }.compact-notice .compact-notice-line { flex-wrap: wrap; white-space: normal; }.compact-notice .compact-notice-text { max-width: 100%; } }
 @media (max-width: 720px) { .session-runtime-grid { grid-template-columns: 1fr; } }
 @media (max-width: 720px) { .live-turn-usage { padding-left: 10px; } }
 
@@ -738,11 +729,11 @@ button:disabled { cursor: not-allowed; }
   .code-block figcaption button span { display: none; }
 }
 :root[data-theme="light"] .live-turn-usage { border-color: #d9e3e6; color: #286a9b; }
-:root[data-theme="light"] .context-compact-notice { border-color: #bdd2d6; background: #edf5f4; color: #536a75; }
-:root[data-theme="light"] .compact-icon { background: #d7ebe7; color: #237c70; }
-:root[data-theme="light"] .compact-copy span { color: #506873; }
-:root[data-theme="light"] .compact-copy strong { color: #237c70; }
-:root[data-theme="light"] .compact-meter { background: #cad5da; }
+:root[data-theme="light"] .compact-notice .compact-notice-line span { color: #506873; }
+:root[data-theme="light"] .compact-notice .compact-notice-line strong,
+:root[data-theme="light"] .compact-notice .compact-notice-metric,
+:root[data-theme="light"] .compact-notice .activity-mark { color: #237c70; }
+:root[data-theme="light"] .compact-notice .compact-notice-text { color: #6a8391; }
 @media (prefers-reduced-motion: no-preference) {
 }
 @keyframes session-working-glow-light { 50% { background: #e8eee9; box-shadow: inset 2px 0 #b58535, 0 0 0 1px #b5853522; } }
@@ -3713,25 +3704,43 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
   overflow: visible;
   color: #7aa5bf;
   animation: thread-working-spin 1.8s linear infinite;
+  /* `scale` is a standalone property, so the spin keyframes on `transform`
+     stay untouched while the orbit radius eases between memo states. */
+  scale: .7;
+  transform-origin: 50% 50%;
+  transition: scale .35s cubic-bezier(.2,.8,.2,1);
   will-change: transform;
+}
+/* With a memo pinned, the orbit grows to full size so the sticky-note glyph
+   fits inside; without one it settles into a tighter inner circle. */
+.thread-working-mark:has(.thread-working-pin) .thread-working-arc { scale: 1; }
+@keyframes thread-working-memo-pop {
+  from { opacity: 0; scale: .4; }
+  to { opacity: 1; scale: 1; }
 }
 .thread-working-arc circle {
   fill: none;
   stroke: currentColor;
-  stroke-width: 3;
+  stroke-width: 2;
   stroke-linecap: round;
   stroke-dasharray: 18 82;
   opacity: .82;
+  /* `non-scaling-stroke` keeps the ring thickness constant on screen while
+     the standalone `scale` above eases only the orbit radius between memo
+     states (0.7 inner circle vs full-size ring). */
+  vector-effect: non-scaling-stroke;
 }
 /* When a memo is active, the working dot core is replaced by a small pin
-   glyph. Keep it inside the arc radius (arc r=9 in a 24px viewBox) and nudge
+   glyph. Keep it inside the arc radius (arc r=11 in a 24px viewBox) and nudge
    the arc outward so the pin never collides with the spinning ring. */
 .thread-working-pin {
   position: relative;
   z-index: 1;
-  font-size: 9px;
-  line-height: 1;
-  letter-spacing: 0;
+  display: inline-flex;
+  align-items: center;
+  color: #a9c9dd;
+  opacity: .95;
+  animation: thread-working-memo-pop .3s cubic-bezier(.2,.8,.2,1) both;
 }
 /* Do NOT set a static transform here: the arc's spin keyframes animate
    `transform: rotate()` on the same element, and a mismatched base transform
@@ -3818,6 +3827,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
   box-shadow: 0 1px 3px #26364024, 0 0 12px #4f88aa2b !important;
 }
 :root[data-theme="light"] .thread-working-away.is-working .thread-working-arc { color: #527f99; }
+:root[data-theme="light"] .thread-working-pin { color: #527f99; }
 :root[data-theme="light"] .thread-working-away:hover { border-color: #82939d !important; background: #f7f8f8 !important; box-shadow: 0 2px 4px #26364024, inset 0 1px #fff !important; }
 :root[data-theme="light"] .thread-working-away.is-working:hover { border: 0 !important; box-shadow: 0 2px 4px #26364024, 0 0 14px #4f88aa38 !important; }
 
@@ -3828,7 +3838,8 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 @media (prefers-reduced-motion: reduce) {
   .worker-working-icon,
   .thread-working-away.is-working,
-  .thread-working-away.is-working .thread-working-arc { animation: none; }
+  .thread-working-away.is-working .thread-working-arc { animation: none; transition: none; }
+  .thread-working-pin { animation: none; }
   .thread-working-away,
   .thread-working-away::before,
   .thread-working-core { transition: none; }
@@ -5249,7 +5260,12 @@ body.workspace-modal-open .app-shell { user-select: none; }
   line-height: 1.68;
 }
 .stream-working-trailer { padding: 10px 0; }
-.stream-working-dot { display: block; width: 9px; height: 9px; border-radius: 50%; background: currentColor; animation: stream-working-grow 1.2s ease-in-out infinite; transition: background-color .5s ease; }
+/* Keep the dot's 9x9 box a stable hover/pointer target: the grow animation
+   runs on the ::after pseudo-element so transform scaling never shrinks the
+   hit area (it would drop to ~3.6px at scale(.4), making the tooltip nearly
+   impossible to hover). */
+.stream-working-dot { position: relative; display: block; width: 9px; height: 9px; transition: color .5s ease; }
+.stream-working-dot::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: currentColor; animation: stream-working-grow 1.2s ease-in-out infinite; }
 /* Working dot color follows the work phase: tool-running amber matches the
    stream tool dot, model-waiting blue matches the frame working pulse. The
    background-color transition above softens phase switches. */
@@ -5258,7 +5274,11 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .stream-working-calls { margin-left: 2px; color: #7794a8; font-size: 11px; font-variant-numeric: tabular-nums; font-weight: 600; }
 :root[data-theme="light"] .stream-working-calls { color: #668397; }
 @keyframes stream-working-grow { 0%, 100% { transform: scale(.4); opacity: .45; } 65% { transform: scale(1); opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { .stream-working-dot { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .stream-working-dot::after { animation: none; } }
+.stream-working-star { display: block; width: 9px; text-align: center; font-size: 12px; line-height: 1; color: currentColor; animation: stream-working-grow 1.2s ease-in-out infinite; }
+/* Reduced-motion users get the static star glyph; shape alone still distinguishes model waiting from the amber tool dot. */
+@media (prefers-reduced-motion: reduce) { .stream-working-star { animation: none; } }
+
 
 /* Migration cue: when a thought run leaves the stream and settles into the
    Thought/Action frame, its frame row enters with one soft settle-in pulse. */
@@ -5311,6 +5331,11 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .stream-tool-merged-item.merged { grid-template-rows: 0fr; opacity: 0; }
 .stream-tool-merged-item > div { min-height: 0; overflow: hidden; }
 .stream-tool-run-toggle { display: flex; align-items: center; gap: 6px; border: 0; background: transparent; color: inherit; padding: 2px 4px; cursor: pointer; font-size: 12px; font-weight: 400; }
+/* Compact glyph row: wrench stands for "tools", the sign chip flips between
+   a fine-lined plus (merged) and minus (expanded) with a soft tinted pill. */
+.stream-tool-run-glyph { flex: none; opacity: .85; }
+.stream-tool-run-sign { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; flex: none; border-radius: 4px; background: #ffffff14; color: inherit; }
+:root[data-theme="light"] .stream-tool-run-sign { background: #26364012; }
 .stream-tool-run-toggle[aria-expanded="true"] svg { transform: none; }
 @media (prefers-reduced-motion: reduce) { .stream-tool-merged-item { transition: none; } }
 
@@ -5414,6 +5439,8 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .thread-memo-icon {
   font-size: 13px;
   line-height: 1;
+  display: inline-flex;
+  align-items: center;
 }
 .user-message-navigation:has(.thread-memo-indicator:hover),
 .user-message-navigation:has(.thread-memo-indicator:focus-visible) {

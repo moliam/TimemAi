@@ -345,3 +345,60 @@ fn windows_process_identity_and_parent_are_available() {
     assert_eq!(process_identity(pid), Some(identity));
     assert!(current_parent_pid().is_some());
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn subreaper_safety_net_adopts_and_sweeps_detached_orphans() {
+    use crate::install_process_subreaper;
+    use crate::reparented_detached_child_pids;
+    assert!(
+        install_process_subreaper(),
+        "Linux runtime must support PR_SET_CHILD_SUBREAPER"
+    );
+    // Spawn a `setsid` child that outlives its shell and escapes the managed
+    // process group; the subreaper flag must reparent it to this test process
+    // in its own session, and the sweep list must find it.
+    let marker =
+        std::env::temp_dir().join(format!("timem_subreaper_test_{}.pid", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+    let script = format!(
+        "setsid sh -c 'echo $$ > {}; while [ -e {0} ]; do sleep 0.2; done' &\nsleep 0.1\n",
+        marker.display()
+    );
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&script)
+        .status()
+        .expect("spawn escapee script");
+    assert!(status.success(), "escapee script must run");
+    let orphan_pid: u32 = std::fs::read_to_string(&marker)
+        .expect("escapee marker file")
+        .trim()
+        .parse()
+        .expect("escapee pid");
+    let _ = std::fs::remove_file(&marker);
+    assert_ne!(orphan_pid, std::process::id());
+    // Give the kernel a moment; then the orphan must appear in the sweep list
+    // (ppid == this process, own session after setsid escape).
+    let mut found = false;
+    for _ in 0..50 {
+        if reparented_detached_child_pids().contains(&orphan_pid) {
+            found = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(found, "setsid escapee must be reparented and detected");
+    // Terminate the orphan via the same primitive the sweep uses and confirm
+    // it leaves the sweep list.
+    crate::terminate_process(orphan_pid);
+    let mut gone = false;
+    for _ in 0..50 {
+        if !reparented_detached_child_pids().contains(&orphan_pid) {
+            gone = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(gone, "swept orphan must disappear from the sweep list");
+}
