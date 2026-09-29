@@ -2729,7 +2729,7 @@ async fn local_static_web_entry_needs_no_token_and_public_entry_sets_auth_cookie
             .get(header::SET_COOKIE)
             .and_then(|value| value.to_str().ok())
             .unwrap_or(""),
-        "timem_web_token=test; Path=/; SameSite=Strict; HttpOnly"
+        "timem_web_token_12345=test; Path=/; SameSite=Strict; HttpOnly; Max-Age=604800"
     );
 
     let mut headers = HeaderMap::new();
@@ -7492,6 +7492,7 @@ fn routing_test_state() -> AppState {
     let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
     AppState {
         token: "test".to_string(),
+        listen_port: std::sync::Arc::new(std::sync::atomic::AtomicU16::new(TEST_PORT)),
         public_access: false,
         manager: Arc::new(Mutex::new(CoreSessionWorkerManager::new())),
         mem: Arc::new(Mutex::new(
