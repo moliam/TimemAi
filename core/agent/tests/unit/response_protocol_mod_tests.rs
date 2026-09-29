@@ -1,5 +1,36 @@
 use super::*;
 
+#[test]
+fn json_string_list_parses_stringified_arrays_and_trims_brackets() {
+    use serde_json::json;
+    // A real array passes through.
+    assert_eq!(
+        super::json_string_list(&json!(["/a/b.py", "/c/d.rs"])),
+        vec!["/a/b.py", "/c/d.rs"]
+    );
+    // A stringified array (models do this) must parse back into items,
+    // never leak brackets into the text.
+    assert_eq!(
+        super::json_string_list(&json!("[\"/a/b.py\"]")),
+        vec!["/a/b.py"]
+    );
+    assert_eq!(
+        super::json_string_list(&json!("[\"/a/b.py\", \"/c/d.rs\"]")),
+        vec!["/a/b.py", "/c/d.rs"]
+    );
+    // Plain comma lists keep working, with stray brackets/quotes trimmed.
+    assert_eq!(
+        super::json_string_list(&json!("/a/b.py, /c/d.rs")),
+        vec!["/a/b.py", "/c/d.rs"]
+    );
+    assert_eq!(
+        super::json_string_list(&json!("[\"/a/b.py\", \"/c/d.rs\"]")),
+        vec!["/a/b.py", "/c/d.rs"]
+    );
+    // An empty stringified array does not fabricate items.
+    assert!(super::json_string_list(&json!("[]")).is_empty());
+}
+
 fn caps() -> CapabilityRegistry {
     CapabilityRegistry::builtin_for_host(
         crate::capability::CapabilityHostProfile::with_local_command_execution(),
