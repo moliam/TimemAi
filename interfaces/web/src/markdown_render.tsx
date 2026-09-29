@@ -1,16 +1,45 @@
-import { Children, isValidElement, memo, ReactNode } from "react";
+import { Children, isValidElement, memo, useEffect, useState, ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
-import rehypeHighlight from "rehype-highlight";
-import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import { CheckCheck, Copy } from "lucide-react";
+import { useTimedClipboardCopy } from "./clipboard_copy";
 import { normalizeMarkdownMath } from "./markdown_math";
 import { extractMarkdownOutline, markdownHeadingId } from "./markdown_outline";
 import { safeMarkdownImageUrl, safeMarkdownLinkUrl } from "./markdown_security";
-import { useTimedClipboardCopy } from "./clipboard_copy";
+
+// Heavy rehype plugins (highlight.js, KaTeX) load progressively: markdown
+// text renders synchronously first, math highlighting/code colors enhance
+// the same nodes once the plugin chunk arrives. Shared so every instance
+// mounts the enhancement exactly once.
+let heavyPluginsPromise: Promise<readonly unknown[]> | null = null;
+let heavyPluginsLoaded: readonly unknown[] | null = null;
+const heavyPluginWaiters: ((plugins: readonly unknown[]) => void)[] = [];
+
+function loadHeavyPlugins() {
+  if (heavyPluginsLoaded) return Promise.resolve(heavyPluginsLoaded);
+  if (!heavyPluginsPromise) {
+    heavyPluginsPromise = import("./markdown_plugins").then((module) => {
+      heavyPluginsLoaded = module.heavyRehypePlugins;
+      for (const waiter of heavyPluginWaiters.splice(0)) waiter(heavyPluginsLoaded);
+      return heavyPluginsLoaded;
+    });
+  }
+  return heavyPluginsPromise;
+}
 
 export const MarkdownContent = memo(function MarkdownContent({ text, headingIdPrefix }: { text: string; headingIdPrefix?: string }) {
+  const [heavyPlugins, setHeavyPlugins] = useState<readonly unknown[] | null>(heavyPluginsLoaded);
+  useEffect(() => {
+    if (heavyPluginsLoaded) {
+      setHeavyPlugins(heavyPluginsLoaded);
+      return;
+    }
+    let alive = true;
+    heavyPluginWaiters.push((plugins) => { if (alive) setHeavyPlugins(plugins); });
+    void loadHeavyPlugins();
+    return () => { alive = false; };
+  }, []);
   const headingOccurrences = new Map<string, number>();
   const outlineIds = headingIdPrefix ? extractMarkdownOutline(text).map((item) => item.id) : [];
   let outlineIndex = 0;
@@ -27,7 +56,7 @@ export const MarkdownContent = memo(function MarkdownContent({ text, headingIdPr
   };
   return <div className="markdown-body"><ReactMarkdown
     remarkPlugins={[remarkGfm, remarkMath]}
-    rehypePlugins={[rehypeHighlight, rehypeKatex]}
+    rehypePlugins={(heavyPlugins ?? []) as never[]}
     components={{
       h1: heading(1),
       h2: heading(2),
