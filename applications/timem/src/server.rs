@@ -6144,6 +6144,127 @@ fn restored_messages_from_history_records(records: &[ChatHistoryRecord]) -> Vec<
         .collect()
 }
 
+/// Restored history events only feed the compact turn preview UI; the full
+/// action result text stays in the raw chat history on disk and reloads via
+/// the history_page command when the user expands details. Keep oversized
+/// strings out of the initial snapshot so a large session does not turn the
+/// hello frame into megabytes on slow remote links.
+const RESTORED_EVENT_TEXT_LIMIT_BYTES: usize = 256;
+const RESTORED_EVENT_DEPTH_LIMIT: usize = 12;
+
+fn truncate_restored_event_value(value: Value, depth: usize) -> Value {
+    match value {
+        Value::String(text) => {
+            if text.len() <= RESTORED_EVENT_TEXT_LIMIT_BYTES {
+                Value::String(text)
+            } else {
+                // Cut on a char boundary at or before the byte limit.
+                let cut = text
+                    .char_indices()
+                    .map(|(idx, _)| idx)
+                    .take_while(|idx| *idx <= RESTORED_EVENT_TEXT_LIMIT_BYTES)
+                    .last()
+                    .unwrap_or(0);
+                let mut prefix = String::from(&text[..cut]);
+                prefix.push_str("…[truncated]");
+                Value::String(prefix)
+            }
+        }
+        Value::Array(items) => {
+            if depth >= RESTORED_EVENT_DEPTH_LIMIT {
+                return Value::Array(Vec::new());
+            }
+            Value::Array(
+                items
+                    .into_iter()
+                    .map(|item| truncate_restored_event_value(item, depth + 1))
+                    .collect(),
+            )
+        }
+        Value::Object(map) => {
+            if depth >= RESTORED_EVENT_DEPTH_LIMIT {
+                return Value::Object(serde_json::Map::new());
+            }
+            let mut out = serde_json::Map::new();
+            for (key, item) in map {
+                out.insert(key, truncate_restored_event_value(item, depth + 1));
+            }
+            Value::Object(out)
+        }
+        other => other,
+    }
+}
+
+/// Collapsed Thought/Action history items only need the skeleton of an
+/// action (name, status, ids, and a short command preview). Full command
+/// and result text stays on disk and loads via history_page when the user
+/// expands details, so drop everything else from restored core.action
+/// events before they enter the initial snapshot.
+fn slim_restored_action_event(payload: Value) -> Value {
+    let topic = match payload.get("topic") {
+        Some(topic) => topic.clone(),
+        None => return payload,
+    };
+    if topic.get("name").and_then(Value::as_str) != Some("core.action") {
+        return payload;
+    }
+    let attributes = topic.get("attributes").cloned().unwrap_or(Value::Null);
+    let pick = |map: &Value, keys: &[&str]| -> serde_json::Map<String, Value> {
+        let mut out = serde_json::Map::new();
+        if let Some(map) = map.as_object() {
+            for key in keys {
+                if let Some(value) = map.get(*key) {
+                    out.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+        out
+    };
+    let mut slim_attributes = pick(
+        &attributes,
+        &["name", "action", "action_id", "event", "active"],
+    );
+    // keep a short command preview for the collapsed chip
+    for src in [
+        attributes.as_object(),
+        payload.get("payload").and_then(|v| v.as_object()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(cmd) = src
+            .get("command")
+            .or_else(|| src.get("cmd"))
+            .and_then(Value::as_str)
+        {
+            slim_attributes.insert(
+                "command".to_string(),
+                Value::String(cmd.chars().take(120).collect()),
+            );
+            break;
+        }
+    }
+    let mut inner = pick(
+        payload.get("payload").unwrap_or(&Value::Null),
+        &[
+            "action",
+            "action_id",
+            "event",
+            "status",
+            "elapsed_ms",
+            "pid",
+        ],
+    );
+    if let Some(command) = slim_attributes.get("command") {
+        inner.insert("command".to_string(), command.clone());
+    }
+    json!({
+        "context_id": payload.get("context_id").cloned().unwrap_or(Value::Null),
+        "payload": Value::Object(inner),
+        "topic": json!({ "name": "core.action", "attributes": Value::Object(slim_attributes) }),
+    })
+}
+
 fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<WebTurn> {
     let mut turns = BTreeMap::<String, WebTurn>::new();
     for record in records.iter().cloned() {
@@ -6257,6 +6378,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                 let payload = extra
                     .remove("payload")
                     .unwrap_or_else(|| json!({"kind": format!("{kind:?}")}));
+                let payload = slim_restored_action_event(truncate_restored_event_value(payload, 0));
                 let source = extra
                     .remove("source")
                     .and_then(|value| value.as_str().map(str::to_string))
@@ -6287,6 +6409,13 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     created_at_ms: created_at_ms as u128,
                 });
             }
+        }
+    }
+    const RESTORED_TURN_EVENT_LIMIT: usize = 40;
+    for turn in turns.values_mut() {
+        if turn.events.len() > RESTORED_TURN_EVENT_LIMIT {
+            let excess = turn.events.len() - RESTORED_TURN_EVENT_LIMIT;
+            turn.events.drain(0..excess);
         }
     }
     let mut restored = turns.into_values().collect::<Vec<_>>();
@@ -11607,6 +11736,34 @@ fn set_worker_state(state: &AppState, session_id: &str, worker_id: &str, worker_
     }
 }
 
+/// Snapshot-only projection: terminal (non-working) turns are rendered
+/// collapsed first, so their events only need the preview skeleton. The
+/// in-memory WebSession keeps full events for live delivery; this clone is
+/// slimmed right before serialization so a mid-work reconnect also gets a
+/// small hello frame. The active/working turn keeps full fidelity.
+fn slim_restored_turn_for_snapshot(turn: &WebTurn) -> WebTurn {
+    let mut slim = turn.clone();
+    slim.events = slim
+        .events
+        .iter()
+        .map(|event| WebTurnEvent {
+            event_id: event.event_id.clone(),
+            source: event.source.clone(),
+            payload: slim_restored_action_event(truncate_restored_event_value(
+                event.payload.clone(),
+                0,
+            )),
+            created_at_ms: event.created_at_ms,
+        })
+        .collect();
+    const SNAPSHOT_TURN_EVENT_LIMIT: usize = 40;
+    if slim.events.len() > SNAPSHOT_TURN_EVENT_LIMIT {
+        let excess = slim.events.len() - SNAPSHOT_TURN_EVENT_LIMIT;
+        slim.events.drain(0..excess);
+    }
+    slim
+}
+
 fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
     let mut sessions: Vec<_> = state
         .sessions
@@ -11618,6 +11775,18 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
             .cmp(&right.ordinal)
             .then_with(|| left.session_id.cmp(&right.session_id))
     });
+    for session in sessions.iter_mut() {
+        let active_turn_id = session.active_turn_id.clone();
+        let cancelling = session.cancelling_turn_id.clone();
+        for turn in session.turns.iter_mut() {
+            let is_live = Some(turn.turn_id.clone()) == active_turn_id
+                || Some(turn.turn_id.clone()) == cancelling
+                || turn.state == "working";
+            if !is_live {
+                *turn = slim_restored_turn_for_snapshot(turn);
+            }
+        }
+    }
     let runtime_options = state
         .template
         .settings

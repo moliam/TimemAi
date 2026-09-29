@@ -1822,6 +1822,10 @@ function TimemApp() {
         if (userInitiated) {
           setActiveSessionId(event.session.session_id);
         }
+        // Progressive background restore publishes sessions before the final
+        // Hello; the first restored (newest) session is enough to replace the
+        // loading placeholder instead of masking the list until restore ends.
+        setSnapshotReady(true);
         return;
       }
       if (event.type === "session_restart_cwd_resolved") {

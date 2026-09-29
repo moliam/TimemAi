@@ -507,6 +507,35 @@ pub fn process_group_running(group_leader_pid: u32) -> bool {
     }
 }
 
+/// Filesystem usage for the filesystem containing `path`:
+/// (total_bytes, free_bytes). None when the stat call fails.
+/// Stable device identifier of the filesystem containing `path`, used to
+/// deduplicate paths on the same disk.
+pub fn filesystem_device_id(path: &std::path::Path) -> Option<u64> {
+    crate::shared::filesystem_device_id(path)
+}
+
+pub fn filesystem_usage_bytes(path: &std::path::Path) -> Option<(u64, u64)> {
+    crate::shared::filesystem_usage_bytes(path)
+}
+
+pub fn list_live_process_group_members(group_leader_pid: u32) -> Vec<u32> {
+    #[cfg(unix)]
+    return crate::shared::list_live_process_group_members(group_leader_pid);
+    #[cfg(windows)]
+    {
+        // Windows job containment reports the whole tree at shutdown; live
+        // member listing is a Unix /proc facility, so report none here.
+        let _ = group_leader_pid;
+        Vec::new()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = group_leader_pid;
+        Vec::new()
+    }
+}
+
 pub fn current_parent_pid() -> Option<u32> {
     #[cfg(unix)]
     {

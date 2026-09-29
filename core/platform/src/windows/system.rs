@@ -116,3 +116,50 @@ pub(crate) fn terminal_command(path: &Path) -> (OsString, Vec<OsString>) {
 pub(crate) fn graphical_session_available() -> bool {
     std::env::var_os("SESSIONNAME").is_some_and(|value| !value.is_empty() && value != "Services")
 }
+
+/// Filesystem usage for the filesystem containing `path`:
+/// (total_bytes, free_bytes) via GetDiskFreeSpaceExW.
+#[cfg(windows)]
+pub(super) fn filesystem_usage_bytes(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let mut prefix: Vec<u16> = path.as_os_str().encode_wide().collect();
+    prefix.push(0);
+    let mut free: u64 = 0;
+    let mut total: u64 = 0;
+    let mut _total_free: u64 = 0;
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            prefix.as_ptr(),
+            &mut free as *mut u64 as *mut _,
+            &mut total as *mut u64 as *mut _,
+            &mut _total_free as *mut u64 as *mut _,
+        )
+    };
+    (ok != 0).then_some((total, free))
+}
+
+/// Stable device identifier of the filesystem containing `path`. Uses the
+/// volume serial number via GetVolumeInformationW on the path's root.
+#[cfg(windows)]
+pub(super) fn filesystem_device_id(path: &std::path::Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationW;
+    let root = path.ancestors().last()?.to_path_buf();
+    let mut prefix: Vec<u16> = root.as_os_str().encode_wide().collect();
+    prefix.push(0);
+    let mut serial: u32 = 0;
+    let ok = unsafe {
+        GetVolumeInformationW(
+            prefix.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            &mut serial,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (ok != 0).then(|| u64::from(serial))
+}

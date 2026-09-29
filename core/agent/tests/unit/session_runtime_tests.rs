@@ -562,10 +562,10 @@ fn every_model_request_lists_still_running_commands_with_the_creating_tool_call_
 
     assert_eq!(outcome.text, "background task started");
     assert_eq!(model.prompts.len(), 2);
-    assert!(!model.prompts[0].contains("### STILL RUNNING"));
+    assert!(!model.prompts[0].contains("#### jobmanager"));
     let second = &model.prompts[1];
-    assert!(second.contains("still running cmds:"), "{second}");
-    assert!(second.contains("### STILL RUNNING"), "{second}");
+    assert!(second.contains("### RUNTIME_INFO"), "{second}");
+    assert!(second.contains("#### jobmanager"), "{second}");
     assert!(
         second.contains("| pid | created by tool_call id | command |"),
         "{second}"
@@ -586,9 +586,9 @@ fn every_model_request_lists_still_running_commands_with_the_creating_tool_call_
         second.contains(&format!("- {call_id}: run_bash")),
         "{second}"
     );
-    assert_eq!(second.matches("### STILL RUNNING").count(), 1, "{second}");
+    assert_eq!(second.matches("#### jobmanager").count(), 1, "{second}");
     assert_eq!(
-        core.render_prompt().matches("### STILL RUNNING").count(),
+        core.render_prompt().matches("#### jobmanager").count(),
         0,
         "the reminder is request-scoped and must not accumulate in prompt history"
     );
@@ -3083,7 +3083,7 @@ fn user_supplement_dispatch_timeout_prompt_includes_still_running_work() {
         dispatched.contains("USER_SUPPLEMENT_ACTION_DISPATCH_TIMEOUT"),
         "{dispatched}"
     );
-    assert!(dispatched.contains("### STILL RUNNING"), "{dispatched}");
+    assert!(dispatched.contains("#### jobmanager"), "{dispatched}");
     assert!(dispatched.contains("`sleep 30`"), "{dispatched}");
     assert!(
         dispatched.contains("补充：根据后台任务状态继续"),
