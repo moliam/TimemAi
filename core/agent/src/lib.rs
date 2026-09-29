@@ -1900,7 +1900,7 @@ impl AgentCore {
             ToolCallMode::Inline,
             interface_preferences,
         );
-        Self {
+        let mut core = Self {
             memory_dir: memory_dir.to_path_buf(),
             static_prompt,
             runtime_system_context: String::new(),
@@ -1970,7 +1970,23 @@ impl AgentCore {
             memo_deleted_this_turn: None,
             memo_deleted_trailer_shown: false,
             pending_native_exchange: None,
-        }
+        };
+        // Runtime startup: seed the disk pressure baseline from the real
+        // sample immediately, so the first sampling window after a restart
+        // compares against startup free space instead of being blind.
+        let sample = {
+            let filesystems = Self::filesystems_for_info(&[]);
+            if filesystems.is_empty() {
+                None
+            } else {
+                Some((
+                    filesystems.iter().map(|fs| fs.free_bytes).sum(),
+                    filesystems.iter().map(|fs| fs.total_bytes).sum(),
+                ))
+            }
+        };
+        core.disk_pressure.seed_baseline(sample);
+        core
     }
 
     pub fn set_interaction_profile(&mut self, profile: &InteractionProfile) {
@@ -2346,7 +2362,7 @@ impl AgentCore {
                 runtime.on_core_topic_events(&events);
             }
         }
-        self.submit_running_job_updates(updates);
+        self.submit_running_job_updates(updates, true);
     }
 
     fn format_running_job_updates(updates: &[ShellJobExitUpdate]) -> Option<String> {
@@ -2386,7 +2402,38 @@ impl AgentCore {
         })
     }
 
-    fn submit_running_job_updates(&mut self, updates: Vec<ShellJobExitUpdate>) {
+    fn submit_running_job_updates(
+        &mut self,
+        updates: Vec<ShellJobExitUpdate>,
+        persist_killed_notice: bool,
+    ) {
+        // Kill-looking exits (e.g. SIGKILL/OOM) are facts the model cannot
+        // diagnose from the job output alone. Emit them wherever the exit
+        // lands — including the async exit-listener path that never passes
+        // through the request-building snapshots — as a persistent sysstat
+        // notice so it is consumed, never dropped.
+        if persist_killed_notice {
+            let killed_notice = runtime_info::killed_jobs_notice(
+                &updates
+                    .iter()
+                    .map(|update| runtime_info::JobExitSnapshot {
+                        pid: update.pid,
+                        tool_call_id: update.tool_call_id.clone(),
+                        command: update.command.clone(),
+                        elapsed_ms: update.elapsed_ms,
+                        status: update.status.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            if let Some(notice) = killed_notice {
+                self.submit_prompt_component(
+                    PromptComponentRole::system(),
+                    "job_killed",
+                    notice,
+                    "runtime",
+                );
+            }
+        }
         let Some(text) = Self::format_running_job_updates(&updates) else {
             return;
         };
@@ -2429,26 +2476,21 @@ impl AgentCore {
     /// total free space of the disks the work may write to.
     fn observe_disk_pressure(
         &mut self,
-        running: &[runtime_info::RunningJobSnapshot],
+        filesystems: &[runtime_info::FilesystemUsage],
     ) -> Option<String> {
         let sample = match self.disk_free_override {
             Some(sample) => Some(sample),
-            None => {
-                let filesystems = Self::filesystems_for_info(running);
-                if filesystems.is_empty() {
-                    None
-                } else {
-                    Some((
-                        filesystems.iter().map(|fs| fs.free_bytes).sum(),
-                        filesystems.iter().map(|fs| fs.total_bytes).sum(),
-                    ))
-                }
-            }
+            None if filesystems.is_empty() => None,
+            None => Some((
+                filesystems.iter().map(|fs| fs.free_bytes).sum(),
+                filesystems.iter().map(|fs| fs.total_bytes).sum(),
+            )),
         };
-        let notice = self.disk_pressure.observe(sample);
+        let event = self.disk_pressure.observe(sample);
         // Persist immediately: even when the current request path takes an
         // early return, the notice rides the next request instead of being
         // dropped. Exit-event-like notices must be consumed, not lost.
+        let notice = event.map(|event| event.render(filesystems));
         if let Some(notice) = &notice {
             self.submit_prompt_component(
                 PromptComponentRole::system(),
@@ -2476,6 +2518,10 @@ impl AgentCore {
             }
             paths.push(std::path::PathBuf::from(&job.cwd));
         }
+        // Foreground tools can write to any mounted data disk, so the
+        // sample set also covers every local real filesystem mount point;
+        // per-device dedup below keeps each disk counted once.
+        paths.extend(os::local_filesystem_mount_points());
         let mut seen_devices = std::collections::HashSet::new();
         let mut out = Vec::new();
         for path in paths {
@@ -2598,8 +2644,8 @@ impl AgentCore {
         // has important state; rides along with this request and is never
         // persisted into prompt history.
         // Model API request observation point for disk pressure sampling.
-        let api_disk_notice = self.observe_disk_pressure(&running_snapshot_for_info);
         let filesystems_for_info = Self::filesystems_for_info(&running_snapshot_for_info);
+        let api_disk_notice = self.observe_disk_pressure(&filesystems_for_info);
         let runtime_info = {
             let inputs = runtime_info::RuntimeInfoInputs {
                 running: running_snapshot_for_info,
@@ -2641,7 +2687,7 @@ impl AgentCore {
         }
         // Persist terminal updates for later prompts, but do not re-render that delta into this
         // request: the request-local copy above has the authoritative ordering.
-        self.submit_running_job_updates(updates.clone());
+        self.submit_running_job_updates(updates.clone(), false);
         self.flush_pending_prompt_components();
 
         if still_running.is_none()
@@ -6561,7 +6607,8 @@ Runtime tool_call ids:",
         let mut execution = self.execute_action_inner(action, runtime);
         // Completed tool run observation point for disk pressure sampling.
         if matches!(execution, ActionExecution::Completed(_)) {
-            self.observe_disk_pressure(&[]);
+            let filesystems = Self::filesystems_for_info(&[]);
+            self.observe_disk_pressure(&filesystems);
         }
         let elapsed_ms = wall_start.elapsed().as_millis() as u64;
         match &mut execution {

@@ -2694,64 +2694,52 @@ fn model_prompt_reports_sigkilled_job_in_runtime_info_sysstat() {
 
 #[test]
 fn disk_pressure_notice_rides_runtime_info_after_window_with_stub_sample() {
-    // Disk sampling cannot be controlled on a real filesystem, so the
-    // stub override drives the tracker: two sampling windows with a >150MB
-    // drop must surface DISK_PRESSURE through RUNTIME_INFO on the API
-    // observation point.
+    // Disk sampling cannot be controlled on a real filesystem, so the stub
+    // override drives the tracker. The constructor already seeded the
+    // baseline from the real disk, so testing uses window-stable stub
+    // levels: a stable level may rebase once at most, then stay quiet.
     let mut core = test_core("runtime_info_disk_stub");
-    // 10GB disk with 5GB free; threshold = max(8% * 10GB, 150MB) ≈ 819MB.
+    // 10GB disk with 5GB free; threshold = min(200MB, 8% * 10GB) = 200MB.
     let cap: u64 = 10 * 1024 * 1024 * 1024;
     let base: u64 = 5 * 1024 * 1024 * 1024;
-    let dropped = base - 1024 * 1024 * 1024;
-    // Window 1: establish the baseline (first sample only sets it).
+    let dropped = base - 300 * 1024 * 1024;
+    let request = |core: &mut crate::AgentCore| {
+        core.build_model_request_prompt_from_job_snapshots(
+            &controlled_request_base(),
+            None,
+            (Vec::new(), Vec::new()),
+            || (Vec::new(), Vec::new()),
+        )
+    };
+    // Windows 1-2 at the stable stub level: whatever rebase happened due
+    // to the startup-seeded baseline, at most one notice may appear and
+    // afterwards it must stay quiet at that level.
     core.disk_free_override = Some((base, cap));
-    for _ in 0..10 {
-        let prompt = core.build_model_request_prompt_from_job_snapshots(
-            &controlled_request_base(),
-            None,
-            (Vec::new(), Vec::new()),
-            || (Vec::new(), Vec::new()),
-        );
-        assert!(!prompt.contains("DISK_PRESSURE"), "{prompt}");
-    }
-    // Window 2: same baseline level must not trigger.
-    for _ in 0..10 {
-        let prompt = core.build_model_request_prompt_from_job_snapshots(
-            &controlled_request_base(),
-            None,
-            (Vec::new(), Vec::new()),
-            || (Vec::new(), Vec::new()),
-        );
-        assert!(!prompt.contains("DISK_PRESSURE"), "{prompt}");
-    }
-    // Window 3: 200MB drop triggers exactly once, then rebases.
-    core.disk_free_override = Some((dropped, cap));
-    let mut triggered = 0;
-    for _ in 0..10 {
-        let prompt = core.build_model_request_prompt_from_job_snapshots(
-            &controlled_request_base(),
-            None,
-            (Vec::new(), Vec::new()),
-            || (Vec::new(), Vec::new()),
-        );
-        if prompt.contains("DISK_PRESSURE") {
-            triggered += 1;
+    let mut notices = 0;
+    for _ in 0..20 {
+        if request(&mut core).contains("DISK_PRESSURE") {
+            notices += 1;
         }
     }
-    // The notice may appear both inline in RUNTIME_INFO and as the
-    // persisted disk_pressure component in this request; at least once
-    // proves it was delivered, never dropped.
     assert!(
-        triggered >= 1,
+        notices <= 1,
+        "stable level must not repeatedly alert: {notices}"
+    );
+    // Window 3: 300MB drop (above the 200MB threshold) triggers and is
+    // delivered through RUNTIME_INFO or the persisted component.
+    core.disk_free_override = Some((dropped, cap));
+    let mut delivered = false;
+    for _ in 0..10 {
+        if request(&mut core).contains("DISK_PRESSURE") {
+            delivered = true;
+        }
+    }
+    assert!(
+        delivered,
         "expected the DISK_PRESSURE notice to be delivered"
     );
     // Window 4: same dropped level: baseline was refreshed, no retrigger.
-    let prompt = core.build_model_request_prompt_from_job_snapshots(
-        &controlled_request_base(),
-        None,
-        (Vec::new(), Vec::new()),
-        || (Vec::new(), Vec::new()),
-    );
+    let prompt = request(&mut core);
     assert!(!prompt.contains("DISK_PRESSURE"), "{prompt}");
 }
 
@@ -2793,4 +2781,73 @@ fn filesystems_for_info_deduplicates_same_device() {
     assert_eq!(same_disk_count, 1, "sampled: {:?}", sampled);
     std::fs::remove_dir_all(&a).ok();
     std::fs::remove_dir_all(&b).ok();
+}
+
+#[test]
+fn disk_pressure_startup_baseline_removes_blind_window_e2e() {
+    // The constructor seeds the baseline from the real disk sample, so the
+    // very first sampling window after startup can trigger. The stub
+    // override only controls the sample values from now on.
+    let mut core = test_core("disk_startup_baseline");
+    // Read the real startup baseline instead of assuming the test host has
+    // more than an arbitrary amount of free space. Then simulate a 201MB
+    // first-window drop, just above the capped 200MB threshold. Without
+    // startup seeding this window would only establish a baseline and stay
+    // silent.
+    let startup_free = core
+        .disk_pressure
+        .baseline()
+        .expect("constructor must seed a baseline on the test host");
+    let drop = 201 * 1024 * 1024;
+    assert!(
+        startup_free > drop,
+        "test host must have enough free space for the pressure delta"
+    );
+    let capacity = startup_free.saturating_mul(2).max(10 * 1024 * 1024 * 1024);
+    core.disk_free_override = Some((startup_free - drop, capacity));
+    let mut delivered = false;
+    for _ in 0..10 {
+        let prompt = core.build_model_request_prompt_from_job_snapshots(
+            &controlled_request_base(),
+            None,
+            (Vec::new(), Vec::new()),
+            || (Vec::new(), Vec::new()),
+        );
+        if prompt.contains("DISK_PRESSURE") {
+            delivered = true;
+        }
+    }
+    assert!(
+        delivered,
+        "first window after startup must be able to trigger"
+    );
+}
+
+#[test]
+fn killed_background_job_emits_persistent_job_killed_notice() {
+    // The async exit-listener path (submit_running_job_updates) never passes
+    // through the request-building snapshots, so a SIGKILL exit must be
+    // captured there too, as a persistent component the next request sees.
+    let mut core = test_core("job_killed_async_path");
+    let mut update = controlled_job_exit(606);
+    update.status = "signal: 9 (SIGKILL)".to_string();
+    core.submit_running_job_updates(vec![update], true);
+    core.flush_pending_prompt_components();
+    let prompt = core.render_prompt();
+    assert!(prompt.contains("JOB_KILLED"), "{prompt}");
+    assert!(prompt.contains("pid=606"), "{prompt}");
+    assert!(prompt.contains("SIGKILL"), "{prompt}");
+}
+
+#[test]
+fn normal_background_exit_does_not_emit_job_killed() {
+    let mut core = test_core("job_normal_async_path");
+    core.submit_running_job_updates(vec![controlled_job_exit(707)], true);
+    let prompt = core.build_model_request_prompt_from_job_snapshots(
+        &controlled_request_base(),
+        None,
+        (Vec::new(), Vec::new()),
+        || (Vec::new(), Vec::new()),
+    );
+    assert!(!prompt.contains("JOB_KILLED"), "{prompt}");
 }

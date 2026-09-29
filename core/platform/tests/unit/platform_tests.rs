@@ -516,3 +516,21 @@ fn list_live_process_group_members_empty_after_group_exit() {
     std::thread::sleep(std::time::Duration::from_millis(100));
     assert!(crate::list_live_process_group_members(pgid).is_empty());
 }
+
+#[test]
+#[cfg(target_os = "linux")]
+fn local_filesystem_mount_points_reports_root_and_skips_pseudo() {
+    let mounts = crate::local_filesystem_mount_points();
+    assert!(
+        mounts.contains(&std::path::PathBuf::from("/")),
+        "{mounts:?}"
+    );
+    // Pseudo filesystems must never appear in the sample set.
+    for mount in &mounts {
+        let text = mount.display().to_string();
+        assert!(!text.starts_with("/proc"), "{text}");
+        assert!(!text.starts_with("/sys"), "{text}");
+        assert!(!text.starts_with("/dev"), "{text}");
+        assert!(!text.starts_with("/run"), "{text}");
+    }
+}

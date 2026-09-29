@@ -507,14 +507,21 @@ pub fn process_group_running(group_leader_pid: u32) -> bool {
     }
 }
 
-/// Filesystem usage for the filesystem containing `path`:
-/// (total_bytes, free_bytes). None when the stat call fails.
+/// Local real filesystem mount points (data disks), excluding pseudo
+/// filesystems. Disk sampling uses this so writes to any data disk are
+/// covered, not only the working directory.
+pub fn local_filesystem_mount_points() -> Vec<std::path::PathBuf> {
+    crate::shared::local_filesystem_mount_points()
+}
+
 /// Stable device identifier of the filesystem containing `path`, used to
 /// deduplicate paths on the same disk.
 pub fn filesystem_device_id(path: &std::path::Path) -> Option<u64> {
     crate::shared::filesystem_device_id(path)
 }
 
+/// Filesystem usage for the filesystem containing `path`:
+/// (total_bytes, free_bytes). None when the stat call fails.
 pub fn filesystem_usage_bytes(path: &std::path::Path) -> Option<(u64, u64)> {
     crate::shared::filesystem_usage_bytes(path)
 }

@@ -6510,7 +6510,7 @@ fn run_bash_background_job_enters_running_list_and_later_emits_exit_update() {
     };
     assert!(prompt.contains("now keeps running in background"));
     assert!(prompt.contains("pid="));
-    assert!(!prompt.contains("### STILL RUNNING"));
+    assert!(!prompt.contains("#### jobmanager"));
 
     std::thread::sleep(std::time::Duration::from_millis(250));
     let step = core.apply_model_response(LlmResponse {
@@ -6585,7 +6585,7 @@ fn model_request_refresh_includes_a_just_finished_background_jobs_exit_status() 
     assert!(prompt.contains("RUNNING_JOB_UPDATE"), "{prompt}");
     assert!(prompt.contains("Exit status: 0"), "{prompt}");
     assert!(prompt.contains("boundary-ok"), "{prompt}");
-    assert!(!prompt.contains("### STILL RUNNING"), "{prompt}");
+    assert!(!prompt.contains("#### jobmanager"), "{prompt}");
 }
 
 #[cfg(unix)]
@@ -6618,7 +6618,7 @@ fn still_running_table_survives_discard_of_the_original_action_delta() {
         prompt.contains("now keeps running in background"),
         "{prompt}"
     );
-    assert!(!prompt.contains("### STILL RUNNING"), "{prompt}");
+    assert!(!prompt.contains("#### jobmanager"), "{prompt}");
     let running_delta_id = field_values(&prompt, "delta_id")
         .into_iter()
         .last()
@@ -6655,7 +6655,7 @@ fn still_running_table_survives_discard_of_the_original_action_delta() {
         !prompt.contains("Action result: context_compact"),
         "{prompt}"
     );
-    assert!(prompt.contains("### STILL RUNNING"), "{prompt}");
+    assert!(prompt.contains("#### jobmanager"), "{prompt}");
     assert!(prompt.contains("created by tool_call id"), "{prompt}");
     assert!(
         prompt.contains("| pid | created by tool_call id | command |"),
@@ -6741,7 +6741,7 @@ fn still_running_table_is_universal_even_when_compaction_targets_an_unrelated_de
         !prompt.contains("Action result: context_compact"),
         "{prompt}"
     );
-    assert!(prompt.contains("### STILL RUNNING"), "{prompt}");
+    assert!(prompt.contains("#### jobmanager"), "{prompt}");
 
     #[cfg(unix)]
     {
@@ -6811,7 +6811,7 @@ fn still_running_table_survives_offload_of_the_original_action_delta() {
         prompt.contains("context compacted successfully."),
         "{prompt}"
     );
-    assert!(prompt.contains("### STILL RUNNING"), "{prompt}");
+    assert!(prompt.contains("#### jobmanager"), "{prompt}");
     assert!(prompt.contains("created by tool_call id"), "{prompt}");
     assert!(
         prompt
@@ -6894,7 +6894,7 @@ fn still_running_table_survives_xml_style_compaction_of_the_original_action_delt
         !prompt.contains("Action result: context_compact"),
         "{prompt}"
     );
-    assert!(prompt.contains("### STILL RUNNING"), "{prompt}");
+    assert!(prompt.contains("#### jobmanager"), "{prompt}");
     assert!(prompt.contains("created by tool_call id"), "{prompt}");
     assert!(
         prompt
