@@ -2664,7 +2664,7 @@ fn model_prompt_reports_sigkilled_job_in_runtime_info_sysstat() {
     // job's own output cannot explain the kill.
     use std::process::{Command, Stdio};
     let mut core = test_core("runtime_info_sigkill");
-    let mut child = Command::new("bash")
+    let child = Command::new("bash")
         .arg("-c")
         .arg("echo start; kill -9 $$")
         .stdout(Stdio::piped())

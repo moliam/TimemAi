@@ -356,12 +356,6 @@ impl DiskPressureTracker {
         }
     }
 
-    /// Observation counter (for tests).
-    #[cfg(test)]
-    pub fn debug_observations(&self) -> u32 {
-        self.observations
-    }
-
     /// Current baseline value (for tests).
     #[cfg(test)]
     pub fn baseline(&self) -> Option<u64> {
@@ -371,7 +365,7 @@ impl DiskPressureTracker {
     /// True when the latest observe call closed a sampling window (for tests).
     #[cfg(test)]
     pub fn window_complete(&self) -> bool {
-        self.observations % DISK_SAMPLE_INTERVAL == 0
+        self.observations.is_multiple_of(DISK_SAMPLE_INTERVAL)
     }
 
     /// Record one observation point (tool run or API request) with the
@@ -379,12 +373,10 @@ impl DiskPressureTracker {
     /// notice string when the sampled interval triggered disk pressure.
     pub fn observe(&mut self, sample: Option<(u64, u64)>) -> Option<String> {
         self.observations = self.observations.saturating_add(1);
-        if self.observations % DISK_SAMPLE_INTERVAL != 0 {
+        if !self.observations.is_multiple_of(DISK_SAMPLE_INTERVAL) {
             return None;
         }
-        let Some((new, capacity)) = sample else {
-            return None;
-        };
+        let (new, capacity) = sample?;
         let Some(base) = self.baseline else {
             // First sample only establishes the initial baseline.
             self.baseline = Some(new);
@@ -480,7 +472,7 @@ mod disk_pressure_tests {
     #[test]
     fn small_disks_scale_below_the_150mb_cap() {
         // A 1GB disk scales to only 80MB (8%), which is now below the cap.
-        let small_cap = 1 * GB;
+        let small_cap = GB;
         let scaled = small_cap / 100 * 8;
         assert!(scaled < 200 * 1024 * 1024);
         let mut t = tracker();

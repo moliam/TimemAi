@@ -2467,7 +2467,7 @@ impl AgentCore {
         running: &[runtime_info::RunningJobSnapshot],
     ) -> Vec<runtime_info::FilesystemUsage> {
         let mut paths: Vec<std::path::PathBuf> = Vec::new();
-        if let Some(dir) = std::env::current_dir().ok() {
+        if let Ok(dir) = std::env::current_dir() {
             paths.push(dir);
         }
         for job in running {
