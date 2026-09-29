@@ -738,6 +738,18 @@ fn run_session_turn_with_model_client_and_reminder_override(
         core.mark_user_interrupted_work();
     }
     let mut action_runtime = TurnActionRuntime::new(ui);
+    if outcome.stop_reason == Some(TurnStopReason::CancelledByUser) {
+        // A user stop abandons the turn's authority: the memo must not
+        // outlive it as stale state. Close it on runtime authority so the
+        // next turn starts clean and can recreate it from the new input.
+        if let Some(_memo) = core.force_close_memo_on_interrupt() {
+            action_runtime.on_core_topic_events(&[crate::host::memo_topic_event_with_op(
+                request.session.to_string(),
+                None,
+                "force_deleted",
+            )]);
+        }
+    }
     outcome =
         outcome.with_running_jobs(core.consume_completed_shell_jobs_for_session_with_runtime(
             request.session,
