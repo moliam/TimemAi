@@ -102,10 +102,10 @@ impl PromptBoundarySpec {
         }
     }
 
-    pub fn delta_close(self, delta_id: &str) -> String {
+    pub fn delta_close(self) -> &'static str {
         match self.delta_boundary {
-            PromptDeltaBoundary::Bracketed => format!("[END DELTA delta_id: {delta_id}]"),
-            PromptDeltaBoundary::XmlElement => "</prompt_delta>".to_string(),
+            PromptDeltaBoundary::Bracketed => "",
+            PromptDeltaBoundary::XmlElement => "</prompt_delta>",
         }
     }
 

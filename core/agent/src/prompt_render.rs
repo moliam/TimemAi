@@ -595,7 +595,7 @@ across prompt deltas, belong to that turn until the next BEGIN TURN marker. Init
 user input uses `<USER>` and later input in the same turn uses \
 `<USER kind=\"supplement\">`. Explicit direct resume uses `<USER kind=\"user resume directly\">` with an empty body. User-kind attributes describe structured behavior, not user-authored text. Restart/supporting context precedes the user entry; later runtime observations remain after it. Static system content is separate in `<Timem System Prompt>`."
     } else {
-        "A dynamic delta starts with `[BEGIN DELTA delta_id: <id>, time_ms: <time>]` and is closed by its matching END DELTA marker; every provider-native message between the two markers belongs to that delta. Deltas are transport batches, not user turns. A RUNTIME entry `[BEGIN TURN turn_id: <id>]` opens a logical user turn; all following USER, ASSISTANT, RUNTIME, and native tool-call/result messages, even across deltas, belong to that turn until the next BEGIN TURN marker. Initial user input uses `## USER`; later input in the same turn uses `## USER (supplement)`. Explicit direct resume uses the header `## USER (user resume directly)` with an empty body (XML: `<USER kind=\"user resume directly\">`). These annotations describe structured user behavior, not user-authored text. Restart/supporting context precedes the user entry; later runtime observations remain after it. There is no END TURN marker. Static system content is enclosed separately by the system-prompt boundaries."
+        "A dynamic delta starts with `[BEGIN DELTA delta_id: <id>, time_ms: <time>]` and extends through every following provider-native message until the next BEGIN DELTA marker or the end of the current model input. Deltas are transport batches, not user turns. A RUNTIME entry `[BEGIN TURN turn_id: <id>]` opens a logical user turn; all following USER, ASSISTANT, RUNTIME, and native tool-call/result messages, even across deltas, belong to that turn until the next BEGIN TURN marker. Initial user input uses `## USER`; later input in the same turn uses `## USER (supplement)`. Explicit direct resume uses the header `## USER (user resume directly)` with an empty body (XML: `<USER kind=\"user resume directly\">`). These annotations describe structured user behavior, not user-authored text. Restart/supporting context precedes the user entry; later runtime observations remain after it. There is no END DELTA or END TURN marker. Static system content is enclosed separately by the system-prompt boundaries."
     }
 }
 
@@ -657,7 +657,7 @@ fn render_prompt_delta_example(
         example.push('\n');
     }
     example.push('\n');
-    example.push_str(&boundaries.delta_close("pd_1"));
+    example.push_str(boundaries.delta_close());
     example
 }
 
@@ -920,12 +920,7 @@ pub(crate) fn append_rendered_deltas_for_mode(
             }
         }
         out.push('\n');
-        // In native mode the END marker is appended by model_api after the
-        // delta's provider-native tool exchanges, so every exchange is
-        // bracketed inside its owning delta; text rendering stays open-ended.
-        if tool_call_mode != ToolCallMode::Native {
-            out.push_str(&boundaries.delta_close(&delta.delta_id));
-        }
+        out.push_str(boundaries.delta_close());
     }
 }
 

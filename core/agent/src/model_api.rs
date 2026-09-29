@@ -613,18 +613,6 @@ fn mark_anthropic_static_tool_prefix(tools: &mut [Value], static_tool_count: usi
     }
 }
 
-fn delta_close_text(delta_id: &str) -> String {
-    format!("[END DELTA delta_id: {delta_id}]")
-}
-
-fn delta_close_message(delta_id: &str) -> Value {
-    json!({"role":"user","content":delta_close_text(delta_id)})
-}
-
-fn openai_responses_exchange_items_delta_close(delta_id: &str) -> Vec<Value> {
-    vec![json!({"role":"user","content":[{"type":"input_text","text":delta_close_text(delta_id)}]})]
-}
-
 fn prompt_delta_id(text: &str) -> Option<String> {
     KNOWN_PROMPT_BOUNDARIES
         .iter()
@@ -670,7 +658,6 @@ fn append_openai_chat_exchanges(messages: &mut Vec<Value>, interaction: &ModelIn
             for exchange in exchanges_for_delta(interaction, &delta_id) {
                 ordered.extend(openai_chat_exchange_messages(exchange));
             }
-            ordered.push(delta_close_message(&delta_id));
         }
     }
     ordered.extend(tail);
@@ -710,7 +697,6 @@ fn append_openai_responses_exchanges(
             for exchange in exchanges_for_delta(interaction, &delta_id) {
                 ordered.extend(openai_responses_exchange_items(exchange));
             }
-            ordered.extend(openai_responses_exchange_items_delta_close(&delta_id));
         }
     }
     ordered.extend(tail);
@@ -759,7 +745,6 @@ fn append_anthropic_exchanges(messages: &mut Vec<Value>, interaction: &ModelInte
             for exchange in exchanges_for_delta(interaction, &delta_id) {
                 ordered.extend(anthropic_exchange_messages(exchange));
             }
-            ordered.push(json!({"role":"user","content":[json!({"type":"text","text":delta_close_text(&delta_id)})]}));
         }
     }
     pending.extend(tail);
