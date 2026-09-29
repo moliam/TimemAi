@@ -171,9 +171,8 @@ pub struct SessionResumeNotice {
     /// Local time label captured when the runtime restarted, so the notice
     /// reports the restart moment even if the next turn starts much later.
     pub restarted_at: String,
-    /// Set when the pre-restart history ended with an active memo. The memo
-    /// survives the restart (hydrated back into Core on the next turn); the
-    /// notice reminds the model that the memo goal still holds.
+    /// Set when the pre-restart history ended with an active memo; the
+    /// runtime-held memo did not survive the restart.
     pub previous_active_memo: Option<String>,
 }
 
@@ -185,7 +184,7 @@ impl SessionResumeNotice {
             self.previous_active_memo
                 .as_deref()
                 .map(|memo| format!(
-                    "\nAn active memo survived the restart: {{ {memo} }}.\nIt has been restored; keep working toward its goal."
+                    "\nPrevious active memo turns inactive: {{ {memo} }}.\nYou need to recreate memo if necessary."
                 ))
                 .unwrap_or_default(),
             chat_history_prompt_format_hint(&self.history_path),
