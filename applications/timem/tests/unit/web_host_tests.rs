@@ -5556,7 +5556,7 @@ fn restored_web_turns_preserve_user_entry_kinds() {
 }
 
 #[test]
-fn runtime_restart_materializes_never_dispatched_queue_items_as_queued_interrupted() {
+fn runtime_restart_preserves_never_dispatched_queue_items_in_message_queue() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("restart_queued_interrupted"));
     std::fs::create_dir_all(&root).unwrap();
@@ -5613,26 +5613,36 @@ fn runtime_restart_materializes_never_dispatched_queue_items_as_queued_interrupt
     {
         let sessions = restarted.sessions.lock().unwrap();
         let restored = &sessions[&session_id];
-        assert!(restored.message_queue.is_empty());
-        let queued_turn = restored
-            .turns
-            .iter()
-            .find(|candidate| {
-                candidate
-                    .user_entries
-                    .iter()
-                    .any(|entry| entry.command_id.as_deref() == Some("queued_never_dispatched"))
-            })
-            .expect("queued input remains visible after the restart");
-        assert_eq!(queued_turn.state, "interrupted");
-        assert_eq!(queued_turn.final_answer, None);
-        assert_eq!(queued_turn.completion, None);
         assert_eq!(
-            queued_turn.user_entries[0].kind.as_str(),
-            "queued_interrupted",
-            "history shown to the model must not label never-dispatched input as a task"
+            restored.message_queue.len(),
+            1,
+            "never-dispatched queued input must survive the restart in the message queue"
+        );
+        assert_eq!(
+            restored.message_queue.projection().items[0].payload.text,
+            "never sent before the restart"
         );
         assert!(restored
+            .message_queue
+            .projection()
+            .dispatching_command_id
+            .is_none());
+        assert_eq!(
+            restored.message_queue.projection().continuation,
+            timem_session::message_queue::MessageQueueContinuation::AwaitingNormalCompletion,
+            "restart must not carry an automatic-dispatch grant"
+        );
+        // The queued input is preserved as pending input, not flushed into
+        // chat history as a phantom turn.
+        assert!(restored
+            .turns
+            .iter()
+            .filter(|turn| turn.final_answer.is_none() && turn.completion.is_none())
+            .all(|turn| turn
+                .user_entries
+                .iter()
+                .all(|entry| entry.kind.as_str() != "queued_interrupted")));
+        assert!(!restored
             .messages
             .iter()
             .any(|message| message.kind.as_deref() == Some("queued_interrupted")));
@@ -5644,7 +5654,7 @@ fn runtime_restart_materializes_never_dispatched_queue_items_as_queued_interrupt
             .history_path_for_session(&session_id),
     )
     .unwrap();
-    assert!(records
+    assert!(!records
         .iter()
         .any(|record| matches!(record, ChatHistoryRecord::Message { role: ChatHistoryRole::User, kind: Some(kind), .. } if kind == "queued_interrupted")));
 }
@@ -11094,7 +11104,7 @@ fn repeated_user_sends_during_an_active_turn_are_ordered_supplements() {
 }
 
 #[test]
-fn runtime_restart_interrupts_and_clears_persisted_message_queue() {
+fn runtime_restart_preserves_persisted_message_queue_without_dispatch_grant() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("restart_restores_queue"));
     std::fs::create_dir_all(&root).unwrap();
@@ -11163,25 +11173,33 @@ fn runtime_restart_interrupts_and_clears_persisted_message_queue() {
         1
     );
     let sessions = restarted.sessions.lock().unwrap();
-    assert!(
-        sessions[&session_id].message_queue.is_empty(),
-        "runtime restart is a hard boundary and must not retain executable work"
+    assert_eq!(
+        sessions[&session_id].message_queue.len(),
+        1,
+        "queued input must survive a runtime restart in the message queue"
     );
-    let interrupted = sessions[&session_id]
-        .turns
-        .iter()
-        .find(|turn| {
-            turn.user_entries
-                .iter()
-                .any(|entry| entry.command_id.as_deref() == Some("queued-command"))
-        })
-        .expect("accepted queued input remains visible as interrupted history");
-    assert_eq!(interrupted.state, "interrupted");
-    assert_eq!(interrupted.user_entries[0].text, "queued survives");
+    let queued = &sessions[&session_id].message_queue.projection().items[0];
+    assert_eq!(queued.command_id, "queued-command");
+    assert_eq!(queued.payload.text, "queued survives");
+    assert!(sessions[&session_id]
+        .message_queue
+        .projection()
+        .dispatching_command_id
+        .is_none());
+    assert_eq!(
+        sessions[&session_id]
+            .message_queue
+            .projection()
+            .continuation,
+        timem_session::message_queue::MessageQueueContinuation::AwaitingNormalCompletion
+    );
     drop(sessions);
-    assert!(load_message_queue(&restarted, &session_id)
-        .unwrap()
-        .is_empty());
+    let persisted_after_restart = load_message_queue(&restarted, &session_id).unwrap();
+    assert_eq!(
+        persisted_after_restart.len(),
+        1,
+        "persisted queue file must retain the queued item after the restart"
+    );
     let manager = {
         let mut guard = restarted.manager.lock().unwrap();
         std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
@@ -15300,5 +15318,60 @@ fn task_finished_outcome_persists_assistant_history_and_turn_final_answer() {
     assert_eq!(
         restored_turn.final_answer.as_deref(),
         Some("task_finished summary as final answer")
+    );
+}
+
+#[test]
+fn queued_message_turn_uses_consume_time_not_enqueue_time_for_chat_order() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let worker_id = state.sessions.lock().unwrap()[session_id]
+        .primary_worker_id
+        .clone();
+
+    // Enqueue at an old timestamp, then simulate a reorder-to-later consumption.
+    let enqueue_at_ms = 1u128;
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id).unwrap();
+        session
+            .message_queue
+            .enqueue(
+                "queued_early_command",
+                WebNextTurnPayload {
+                    send_after_cancel: false,
+                    turn_id: "queued_early_turn".to_string(),
+                    created_at_ms: enqueue_at_ms,
+                    text: "typed early, consumed later".to_string(),
+                    attachments: Vec::new(),
+                    worker_roles: Vec::new(),
+                },
+            )
+            .unwrap();
+        session
+            .message_queue
+            .begin_immediate_dispatch("queued_early_command")
+            .unwrap();
+    }
+
+    let started =
+        activate_core_started_turn(&state, session_id, &worker_id, Some("queued_early_command"))
+            .expect("dispatching queued command should materialize a turn");
+
+    // The chat timeline must reflect real consumption order, not enqueue order:
+    // a reordered-to-later message consumed now sorts at now, not at its
+    // original enqueue timestamp.
+    assert!(started.0.created_at_ms > enqueue_at_ms);
+    assert!(started.0.user_entries[0].created_at_ms > enqueue_at_ms);
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[session_id];
+    assert!(session.turns.last().unwrap().created_at_ms > enqueue_at_ms);
+    let chat = session.messages.last().unwrap();
+    assert_eq!(chat.text, "typed early, consumed later");
+    assert!(chat.created_at_ms > enqueue_at_ms);
+    assert!(
+        session.message_queue.item("queued_early_command").is_none(),
+        "confirmed turn must consume the queue item"
     );
 }

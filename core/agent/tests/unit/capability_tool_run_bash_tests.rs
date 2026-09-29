@@ -156,10 +156,14 @@ fn synthetic_managed_job(delivery: ShellJobDelivery) -> ManagedShellJob {
         state: Mutex::new(ShellJobState {
             delivery,
             lifecycle: ShellJobLifecycle::Running,
+            exit_published: false,
         }),
         changed: Condvar::new(),
         supervisor: Mutex::new(None),
         completion_publication: Arc::new(Mutex::new(0)),
+        exit_hooks: Arc::new(Mutex::new(
+            crate::shell_exec::ShellJobManagerExitHooks::default(),
+        )),
     }
 }
 
@@ -178,6 +182,7 @@ fn completion_and_timeout_handoff_have_one_state_lock_winner() {
     let finished = synthetic_managed_job(ShellJobDelivery::Direct);
     finished.state.lock().unwrap().lifecycle = ShellJobLifecycle::Finished(FinishedShellJob {
         completion_sequence: 1,
+        finished_at_ms: now_ms(),
         status: "0".to_string(),
         stdout: "done".to_string(),
         stderr: String::new(),
@@ -251,6 +256,43 @@ fn consumed_background_completion_is_removed_from_the_manager_index() {
         .consume_completed_for_session("bg-session")
         .1
         .is_empty());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn background_exit_elapsed_reflects_finish_time_not_delivery_time() {
+    let dir = tmp_memory_dir("elapsed_finish_time");
+    let store = ShellJobManager::new(&dir);
+    let _ = store.spawn_background("sleep 0.2", &dir, "elapsed-session", "elapsed-turn");
+
+    // Let the command finish, then deliberately delay the delivery/consume
+    // step far beyond the command's real runtime. The reported elapsed_ms
+    // must be measured against the supervisor's observed finish timestamp,
+    // not the moment this consume call happens.
+    thread::sleep(Duration::from_millis(900));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let update = loop {
+        let (_, updates) = store.consume_completed_for_session("elapsed-session");
+        if let Some(update) = updates.into_iter().next() {
+            break update;
+        }
+        assert!(Instant::now() < deadline, "background job did not finish");
+        thread::sleep(Duration::from_millis(10));
+    };
+
+    assert_eq!(update.status, "0");
+    // Real runtime is ~200ms; delivery happens >=900ms after spawn. The old
+    // bug computed elapsed at delivery time, so anything >=900ms proves it.
+    assert!(
+        update.elapsed_ms < 900,
+        "elapsed_ms={} includes delivery delay; it must reflect actual finish time",
+        update.elapsed_ms
+    );
+    assert!(
+        update.elapsed_ms >= 150,
+        "elapsed_ms={} below real runtime",
+        update.elapsed_ms
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -944,6 +986,60 @@ fn normal_run_bash_rejects_long_sleep_commands() {
 }
 
 #[test]
+fn sleep_scan_treats_heredoc_and_quoted_text_as_data() {
+    // Sample command text embedded in a quoted heredoc body must not trip
+    // the long-sleep scan; a real executable long sleep still must.
+    let store = ShellJobManager::new(&tmp_memory_dir("sleep_scan_data"));
+    let cwd = tmp_cwd("sleep_scan_data");
+    let fixture = "cat > /tmp/t.rs <<'EOF'\nassert!(validate(\"sleep 30 &\").is_err());\nEOF";
+    let result = execute_run_bash(
+        fixture,
+        &cwd,
+        false,
+        5000,
+        None,
+        5000,
+        BashApprovalMode::Approve,
+        &store,
+        "session_a",
+        "turn_a",
+        true,
+        &mut NeverCancelRuntime,
+    );
+    match result {
+        ActionExecution::Completed(outcome) => {
+            assert_ne!(outcome.status, ActionStatus::Failed, "{}", outcome.text);
+        }
+        ActionExecution::NeedsApproval(_) => panic!("fixture write should pass the sleep scan"),
+    }
+    // A real long sleep in executable position is still rejected.
+    let rejected = execute_run_bash(
+        "echo start; sleep 45",
+        &cwd,
+        false,
+        5000,
+        None,
+        5000,
+        BashApprovalMode::Approve,
+        &store,
+        "session_a",
+        "turn_a",
+        true,
+        &mut NeverCancelRuntime,
+    );
+    match rejected {
+        ActionExecution::Completed(outcome) => {
+            assert!(
+                outcome.text.contains("long sleep in normal mode"),
+                "{}",
+                outcome.text
+            );
+        }
+        ActionExecution::NeedsApproval(_) => panic!("long sleep should be rejected"),
+    }
+}
+
+#[test]
 fn normal_run_bash_allows_short_sleep_commands() {
     let store = ShellJobManager::new(&tmp_memory_dir("short_sleep_guard"));
     let cwd = tmp_cwd("short_sleep_guard");
@@ -1612,6 +1708,155 @@ fn bash_validation_rejects_empty_and_allows_long_commands() {
 }
 
 #[test]
+fn shell_lifecycle_validation_ignores_heredoc_body_content() {
+    // Heredoc bodies are data, not shell syntax: ampersands, quotes, and
+    // detach keywords inside the body must not trip the scanners.
+    assert!(validate_bash_lifecycle(
+        "cat > /tmp/t.py <<'EOF'\ns = &format!(\"{stamp}\")\nsetsid & sleep 30\nEOF\necho done",
+        false
+    )
+    .is_ok());
+    assert!(
+        validate_bash_request("cat > /tmp/t.py <<'EOF'\ns = &format!(\"{stamp}\")\nEOF").is_ok()
+    );
+    // <<- variant with tab-indented terminator.
+    assert!(validate_bash_lifecycle(
+        "cat <<-EOF\n\tdata with & and setsid text\n\tEOF\necho ok",
+        false
+    )
+    .is_ok());
+    // A real background launch after a heredoc is still rejected.
+    assert_eq!(
+        validate_bash_lifecycle("cat <<'EOF'\nbody\nEOF\nsleep 30 &", false),
+        Err("unmanaged_background_process".to_string())
+    );
+    // Detach keywords are no longer rejected: OS-level containment
+    // (subreaper/job object) covers escapees; semantic scanning is guidance.
+    assert!(validate_bash_lifecycle(
+        "cat <<'EOF'\nmentions setsid in body\nEOF\nsetsid sleep 30",
+        true
+    )
+    .is_ok());
+
+    // Here-strings (`<<<`) feed one word; they must not be mistaken for
+    // heredocs, which previously swallowed the rest of the command.
+    assert!(validate_bash_lifecycle("cat <<< \"x\"; echo ok", false).is_ok());
+    assert!(validate_bash_lifecycle("cat <<< x; setsid true", false).is_ok());
+    assert!(validate_bash_lifecycle("grep a <<< \"b\" && disown", false).is_ok());
+
+    // Backtick substitution, brace groups, and `eval` parse correctly:
+    // unmanaged background inside them is still rejected, while detach
+    // keywords themselves are guidance, not rejections.
+    assert!(validate_bash_lifecycle("echo `setsid true`; echo after", false).is_ok());
+    assert!(validate_bash_lifecycle("echo `date`", false).is_ok());
+    assert!(validate_bash_lifecycle("{ setsid true; }; echo after", false).is_ok());
+    assert_eq!(
+        validate_bash_lifecycle("{ sleep 30 & }; echo after", false),
+        Err("unmanaged_background_process".to_string())
+    );
+    assert!(validate_bash_lifecycle("{ echo grouped; }", false).is_ok());
+    assert!(validate_bash_lifecycle("eval 'setsid true'; echo after", false).is_ok());
+    assert_eq!(
+        validate_bash_lifecycle("eval \"sleep 30 &\"; echo after", false),
+        Err("unmanaged_background_process".to_string())
+    );
+    assert!(validate_bash_lifecycle("eval 'echo safe'", false).is_ok());
+}
+
+#[test]
+fn shell_lifecycle_validation_allows_detach_keywords_under_os_containment() {
+    // Detach keywords are no longer semantically blocked: escaped processes
+    // are contained by OS mechanisms (child subreaper on Linux, kill-on-close
+    // job object on Windows) and swept by the job manager.
+    for command in [
+        "setsid sleep 30",
+        "command setsid sleep 30",
+        "nohup setsid sleep 30",
+        "env FOO=bar setsid sleep 30",
+        "sudo -n -- setsid sleep 30",
+        "disown",
+        "daemon server",
+        "/usr/bin/setsid sleep 30",
+        "bash -c 'setsid sleep 30'",
+        "/bin/sh -c '/usr/bin/setsid sleep 30'",
+        "env FOO=bar bash -lc 'nohup setsid sleep 30'",
+    ] {
+        assert!(validate_bash_lifecycle(command, true).is_ok(), "{command}");
+    }
+    // But an unmanaged `&` background launch still fails lifecycle checks.
+    assert_eq!(
+        validate_bash_lifecycle("setsid sleep 30 &", false),
+        Err("unmanaged_background_process".to_string())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn run_bash_sweeps_setsid_orphan_via_subreaper_safety_net() {
+    // End-to-end: with the subreaper installed, a real `setsid` command is
+    // allowed through (no semantic blacklist) and the escaped orphan it
+    // leaves behind must be reparented, detected, and terminated by the
+    // supervisor sweep after the shell job finishes.
+    //
+    // Nested-runtime note (Timem developing Timem): when this test runs
+    // under an outer Timem instance, the subreaper that adopts the escaped
+    // orphan may be the OUTER runtime process, not this test binary. The
+    // orphan is then outside our process tree and only /proc-based
+    // liveness/state checks stay correct at any nesting level; never probe
+    // with kill(pid,0) alone, which also succeeds for unreaped zombies.
+    assert!(
+        crate::os::install_process_subreaper(),
+        "Linux runtime must support PR_SET_CHILD_SUBREAPER"
+    );
+    let store = ShellJobManager::new(&tmp_memory_dir("subreaper_e2e"));
+    let cwd = tmp_cwd("subreaper_e2e");
+    let marker = cwd.join("orphan.pid");
+    let _ = std::fs::remove_file(&marker);
+    let command = format!(
+        "setsid --fork sh -c 'echo $$ > {m}; sleep 60' >/dev/null 2>&1\n",
+        m = marker.display()
+    );
+    let result = execute_run_bash(
+        &command,
+        &cwd,
+        false,
+        5000,
+        None,
+        5000,
+        BashApprovalMode::Approve,
+        &store,
+        "session_a",
+        "turn_a",
+        true,
+        &mut NeverCancelRuntime,
+    );
+    let ActionExecution::Completed(outcome) = result else {
+        panic!("setsid command must execute under OS containment");
+    };
+    assert_ne!(outcome.status, ActionStatus::Failed, "{}", outcome.text);
+    let orphan_pid: u32 = std::fs::read_to_string(&marker)
+        .expect("escapee marker file")
+        .trim()
+        .parse()
+        .expect("escapee pid");
+    let _ = std::fs::remove_file(&marker);
+    // The supervisor sweep must have terminated the orphan shortly after the
+    // job finished.
+    let mut gone = false;
+    for _ in 0..100 {
+        if !crate::os::process_may_be_alive(orphan_pid) {
+            gone = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        gone,
+        "setsid orphan {orphan_pid} must be swept by the safety net"
+    );
+}
+
+#[test]
 fn shell_lifecycle_validation_rejects_unmanaged_background_without_wait() {
     for command in [
         "sleep 30 &",
@@ -1635,29 +1880,6 @@ fn shell_lifecycle_validation_rejects_unmanaged_background_without_wait() {
     assert!(
         validate_bash_lifecycle(r#"bash -c 'sleep 0.1 & child=$!; wait "$child"'"#, false).is_ok()
     );
-}
-
-#[test]
-fn shell_lifecycle_validation_rejects_explicit_detach() {
-    for command in [
-        "setsid sleep 30",
-        "command setsid sleep 30",
-        "nohup setsid sleep 30",
-        "env FOO=bar setsid sleep 30",
-        "sudo -n -- setsid sleep 30",
-        "disown",
-        "daemon server",
-        "/usr/bin/setsid sleep 30",
-        "bash -c 'setsid sleep 30'",
-        "/bin/sh -c '/usr/bin/setsid sleep 30'",
-        "env FOO=bar bash -lc 'nohup setsid sleep 30'",
-    ] {
-        assert_eq!(
-            validate_bash_lifecycle(command, true),
-            Err("explicit_process_detach".to_string()),
-            "{command}"
-        );
-    }
 }
 
 #[test]
@@ -2119,4 +2341,71 @@ fn edited_files_declaration_reaches_outcome_and_pending_approval() {
         .audit_input("approval_x", "risk", "reason")["edit"]
         .is_array());
     let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[test]
+fn exit_listener_fires_once_with_terminal_update_for_background_jobs() {
+    let dir = tmp_memory_dir("exit_listener_once");
+    let store = ShellJobManager::new(&dir);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<ShellJobExitUpdate>::new()));
+    let hook_seen = std::sync::Arc::clone(&seen);
+    store.set_exit_listener(move |update| hook_seen.lock().unwrap().push(update.clone()));
+    store.spawn_background("printf hi", &dir, "listener_sess", "turn_l");
+    let (running, updates) = store.consume_completed_for_session("listener_sess");
+    // Race: consume may run before or after exit; retry until finished.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut updates = updates;
+    let mut running = running;
+    while updates.is_empty() && deadline > std::time::Instant::now() {
+        let (r, u) = store.consume_completed_for_session("listener_sess");
+        running = r;
+        updates = u;
+        if updates.is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    assert!(!running.is_empty() || !updates.is_empty());
+    let fired = seen.lock().unwrap();
+    assert_eq!(
+        fired.len(),
+        1,
+        "listener must fire exactly once per background job"
+    );
+    assert_eq!(fired[0].status, "0");
+    assert!(fired[0].elapsed_ms >= 0);
+    assert!(
+        fired[0].topic_published,
+        "listener update must be marked published"
+    );
+    // Consumed update must be flagged so topic emission can skip duplicates.
+    if let Some(update) = updates.first() {
+        assert!(update.topic_published);
+    }
+    let _ = store.terminate_owned_running();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn exit_listener_not_fired_for_direct_jobs() {
+    let dir = tmp_memory_dir("exit_listener_direct");
+    let store = ShellJobManager::new(&dir);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let hook_seen = std::sync::Arc::clone(&seen);
+    store.set_exit_listener(move |_update| {
+        *hook_seen.lock().unwrap() += 1;
+    });
+    let _ = store.run_with_timeout(
+        "printf direct",
+        &dir,
+        5_000,
+        "listener_sess",
+        "turn_d",
+        &mut NeverCancelRuntime,
+    );
+    let fired = *seen.lock().unwrap();
+    assert_eq!(
+        fired, 0,
+        "direct (non-background) jobs must not publish through the exit listener"
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }

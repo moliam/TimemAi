@@ -3420,6 +3420,47 @@ describe("web topic view model", () => {
     });
   });
 
+  it("keeps host elapsed for a background job settled by a later finish topic", () => {
+    // start -> finish(background_running) at +1s -> real exit at +3s, but the
+    // exit topic is only delivered at +7s with authoritative elapsed_ms=3025.
+    const start = actionEvent("1000", "start", "running", { cmd: "sleep 3 && echo done", background: true }, "bg-settle");
+    const bg = actionEvent("2000", "finish", "background_running", { cmd: "sleep 3 && echo done", background: true }, "bg-settle");
+    const finish = actionEvent("8000", "finish", "completed", { cmd: "sleep 3 && echo done", background: true }, "bg-settle");
+    (finish.payload as unknown as CoreTopicEvent).payload.elapsed_ms = 3025;
+    const [completed] = coalesceActionLifecycle([start, bg, finish]);
+    const completedTopic = completed.payload as unknown as CoreTopicEvent;
+    expect(completedTopic.payload.elapsed_ms).toBe(3025);
+    expect(activityFromTopic(completedTopic)).toMatchObject({ elapsed_ms: 3025 });
+  });
+
+  it("prefers host-reported elapsed_ms over locally derived delivery delay", () => {
+    const start = actionEvent(
+      "1000",
+      "start",
+      "running",
+      { cmd: "sleep 3 && echo done", background: true },
+      "bg-elapsed",
+    );
+    // The finish topic arrives 8s after start (delivery delay), but the host
+    // recorded the real finish timestamp: 3s of actual execution time.
+    const finish = actionEvent(
+      "8000",
+      "finish",
+      "completed",
+      { cmd: "sleep 3 && echo done", background: true },
+      "bg-elapsed",
+    );
+    const finishTopic = finish.payload as unknown as CoreTopicEvent;
+    (finishTopic.payload as Record<string, unknown>).elapsed_ms = 3025;
+    const [completed] = coalesceActionLifecycle([start, finish]);
+    const completedTopic = completed.payload as unknown as CoreTopicEvent;
+
+    expect(completedTopic.payload.elapsed_ms).toBe(3025);
+    expect(activityFromTopic(completedTopic)).toMatchObject({
+      elapsed_ms: 3025,
+    });
+  });
+
   it("keeps Poll mode and final duration after action lifecycle coalescing", () => {
     const start = actionEvent(
       "1000",

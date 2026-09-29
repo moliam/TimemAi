@@ -795,8 +795,15 @@ export function coalesceActionLifecycle(events: WebTurnEvent[]) {
       if (startIndex !== undefined) {
         const started = visible[startIndex];
         const elapsedMs = event.created_at_ms - started.created_at_ms;
+        // Prefer the authoritative elapsed_ms the host computed at the real
+        // finish timestamp; the local diff includes topic delivery delay.
+        const hostElapsed =
+          typeof (topicEvent.payload as { elapsed_ms?: unknown }).elapsed_ms ===
+          "number"
+            ? ((topicEvent.payload as { elapsed_ms: number }).elapsed_ms)
+            : elapsedMs;
         visible[startIndex] =
-          preservePresentation(started, elapsedMs >= 0 ? withActionElapsed(event, elapsedMs) : event);
+          preservePresentation(started, elapsedMs >= 0 ? withActionElapsed(event, hostElapsed) : event);
         if (status !== TOOL_STATUS_BACKGROUND_RUNNING) startIndexes?.shift();
       } else {
         // A trimmed history may no longer contain the action start. Only a
@@ -1448,6 +1455,17 @@ export function sessionRuntimeUsage(
     add(turn.completion?.stats);
   }
   return found ? total : undefined;
+}
+
+export function sessionCacheTokenTotals(session: Session): {
+  prompt_tokens: number;
+  completion_tokens: number;
+} {
+  const usage = sessionRuntimeUsage(session);
+  return {
+    prompt_tokens: usage?.prompt_tokens ?? 0,
+    completion_tokens: usage?.completion_tokens ?? 0,
+  };
 }
 
 export function sessionCacheHitPercent(session: Session): number | undefined {

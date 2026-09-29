@@ -184,13 +184,35 @@ fn command_action_timeout_terminates_descendant_process_group() {
         .trim()
         .parse()
         .unwrap();
+    // `kill(pid, 0)` also succeeds for zombies: the test process is the
+    // installed subreaper, so the SIGKILLed descendant may linger as an
+    // unreaped zombie child. A zombie state means the kill worked.
+    //
+    // Nested-runtime note (Timem developing Timem): when this test runs
+    // under an outer Timem instance, the subreaper that adopts the orphaned
+    // descendant can be the OUTER runtime process, not this test binary. The
+    // zombie is then reparented outside our process tree and never reaped by
+    // us, so `kill(pid, 0)` stays "alive" forever at every inner level.
+    // Judging by /proc/<pid>/stat state (Z) instead of signal probing keeps
+    // this assertion correct for any level of nesting.
+    let zombie_or_gone = |pid: i32| match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat
+            .rsplit(')')
+            .next()
+            .unwrap_or("")
+            .trim_start()
+            .starts_with('Z'),
+        Err(_) => true,
+    };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while unsafe { libc::kill(child_pid, 0) } == 0 && std::time::Instant::now() < deadline {
+    while unsafe { libc::kill(child_pid, 0) } == 0
+        && !zombie_or_gone(child_pid)
+        && std::time::Instant::now() < deadline
+    {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    assert_ne!(
-        unsafe { libc::kill(child_pid, 0) },
-        0,
+    assert!(
+        unsafe { libc::kill(child_pid, 0) } != 0 || zombie_or_gone(child_pid),
         "descendant process {child_pid} survived command timeout"
     );
     let _ = fs::remove_dir_all(&dir);
@@ -308,4 +330,61 @@ fn windows_command_action_rejects_unknown_script_extension() {
         "{result}"
     );
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn command_action_timeout_sweeps_setsid_escapee_and_leaves_no_zombie() {
+    // A capability command may spawn a `setsid` child that escapes the
+    // managed process group. With the subreaper flag installed the escapee is
+    // reparented to this test process, so the timeout path must terminate AND
+    // reap it: a lingering zombie would keep kill(pid,0) succeeding forever
+    // (nested-runtime trap: under an outer Timem instance the adopting
+    // subreaper may be the outer process, and the zombie is never reaped by
+    // us). Assert via /proc state, not signal probing.
+    assert!(
+        crate::os::install_process_subreaper(),
+        "Linux runtime must support PR_SET_CHILD_SUBREAPER"
+    );
+    let dir = temp_case_dir("command_timeout_setsid_sweep");
+    let pid_file = dir.join("escapee.pid");
+    fs::write(
+        dir.join("escape.sh"),
+        format!(
+            "#!/bin/sh\nsetsid --fork sh -c 'echo $$ > \"{}\"; sleep 60' >/dev/null 2>&1\nsleep 30\n",
+            pid_file.display()
+        ),
+    )
+    .unwrap();
+
+    let result = execute_command_action("escape_tool", &dir.join("escape.sh"), &json!({}), 1000);
+    assert!(result.contains("error: timeout"), "{result}");
+
+    let escapee_pid: i32 = fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // Zombie-aware liveness: gone or zombie both prove the sweep worked.
+    let zombie_or_gone = |pid: i32| match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat
+            .rsplit(')')
+            .next()
+            .unwrap_or("")
+            .trim_start()
+            .starts_with('Z'),
+        Err(_) => true,
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while unsafe { libc::kill(escapee_pid, 0) } == 0
+        && !zombie_or_gone(escapee_pid)
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        unsafe { libc::kill(escapee_pid, 0) } != 0 || zombie_or_gone(escapee_pid),
+        "setsid escapee {escapee_pid} must be swept after command timeout"
+    );
+    let _ = fs::remove_dir_all(dir);
 }

@@ -1,4 +1,5 @@
 mod command;
+mod job;
 mod process;
 mod system;
 
@@ -6,6 +7,7 @@ pub(crate) use command::{
     command_for_script, configure_child_process_group, configure_sanitized_child_environment,
     powershell_script_command,
 };
+pub(crate) use job::contain_process_in_runtime_job;
 pub(crate) use process::{
     child_process_running, current_parent_pid, is_runtime_child_process_group, process_identity,
     process_is_alive, process_tree_running, terminate_process,

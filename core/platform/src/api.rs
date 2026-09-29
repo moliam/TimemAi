@@ -298,6 +298,52 @@ pub fn graphical_session_available() -> bool {
     platform_graphical_session_available()
 }
 
+/// Install this process as a child subreaper (Linux). Returns whether the
+/// platform supports and applied the flag. Called once at runtime startup so
+/// orphaned descendants are reparented to the runtime instead of init.
+pub fn install_process_subreaper() -> bool {
+    #[cfg(unix)]
+    return crate::shared::install_process_subreaper();
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// Orphaned descendants reparented to this runtime that escaped managed
+/// process groups (own session, e.g. via `setsid`). Used by the shell job
+/// manager as a safety net to terminate escapees.
+pub fn reparented_detached_child_pids() -> Vec<u32> {
+    #[cfg(unix)]
+    return crate::shared::reparented_detached_child_pids();
+    #[cfg(not(unix))]
+    {
+        Vec::new()
+    }
+}
+
+/// Reap a reparented orphan child that has been terminated. Without this the
+/// child remains a zombie, and kill(pid, 0) keeps reporting it as alive.
+pub fn reap_child_process(pid: u32) {
+    #[cfg(unix)]
+    crate::shared::reap_child_process(pid);
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+/// Contain a freshly spawned child in the runtime's OS-level containment
+/// (Windows job object; no-op returning true on Unix, where the subreaper
+/// safety net applies instead).
+pub fn contain_child_process(pid: u32) -> bool {
+    #[cfg(windows)]
+    return crate::windows::contain_process_in_runtime_job(pid);
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
 pub fn configure_child_process_group(command: &mut Command) {
     #[cfg(unix)]
     crate::shared::configure_child_process_group(command);

@@ -5757,7 +5757,7 @@ fn restore_stored_session(
         SESSION_HISTORY_PAGE_LIMIT,
     )?;
     let history_records = history_page.records;
-    let mut messages = restored_messages_from_history_records(&history_records);
+    let messages = restored_messages_from_history_records(&history_records);
     let mut turns = restored_turns_from_history_records(&history_records);
     mark_restored_interrupted_turn(
         &mut turns,
@@ -5775,33 +5775,15 @@ fn restore_stored_session(
     let (mcp_config_revision, applied_mcp_config_revision) =
         initial_mcp_revisions(&stored.mcp_server_ids);
     let restored_message_queue = load_message_queue_resilient(state, &stored.session_id);
-    let message_queue = if record_runtime_restart {
-        let interrupted_at_ms = now_ms();
-        for item in &restored_message_queue.projection().items {
-            if let Some(turn) = turns
-                .iter_mut()
-                .find(|turn| turn.turn_id == item.payload.turn_id)
-            {
-                if turn.final_answer.is_none() && turn.completion.is_none() {
-                    turn.state = "interrupted".to_string();
-                    turn.interrupted_at_ms.get_or_insert(interrupted_at_ms);
-                }
-                continue;
-            }
-            append_interrupted_queued_message_history(state, &stored.session_id, item)?;
-            let (message, turn) = interrupted_turn_from_queued_message(item, interrupted_at_ms);
-            messages.push(message);
-            turns.push(turn);
-        }
-        messages.sort_by_key(|message| message.created_at_ms);
-        turns.sort_by_key(|turn| turn.created_at_ms);
-        // A real process restart invalidates all execution ownership. Persisting
-        // an empty queue below prevents a later ordinary completion from ever
-        // granting or dispatching work accepted by the previous Runtime.
-        SessionMessageQueue::new(MAX_NEXT_TURN_INTENTS)
-    } else {
-        restored_message_queue
-    };
+    // A real process restart keeps the queued, never-dispatched user input in
+    // the message queue instead of flushing it into chat history: the user
+    // decides after the restart whether to send it. `load_message_queue`
+    // already clears the live dispatch reservation and the continuation
+    // grant, so nothing dispatches automatically across the restart; only an
+    // explicit user send (send-now) or a fresh natural completion grant can.
+    // Turns already dispatched when the restart hit remain marked
+    // interrupted by the restored history itself.
+    let message_queue = restored_message_queue;
     {
         let mut sessions = state
             .sessions
@@ -10547,17 +10529,21 @@ fn activate_core_started_turn(
                 return None;
             }
             let payload = item.payload;
+            // Consume time, not enqueue time: the chat timeline must reflect
+            // the real dispatch order after queue reordering, not the order in
+            // which messages were originally typed into the queue.
+            let consumed_at_ms = now_ms();
             let turn = WebTurn {
                 preview: None,
                 turn_id: payload.turn_id.clone(),
                 state: "pending".to_string(),
-                created_at_ms: payload.created_at_ms,
+                created_at_ms: consumed_at_ms,
                 interrupted_at_ms: None,
                 user_entries: vec![WebTurnUserEntry {
                     kind: "task".to_string(),
                     text: payload.text.clone(),
                     attachments: payload.attachments.clone(),
-                    created_at_ms: payload.created_at_ms,
+                    created_at_ms: consumed_at_ms,
                     command_id: Some(command_id.to_string()),
                     delivery_state: Some(ChatCommandDeliveryState::CoreAccepted),
                     worker_roles: payload.worker_roles.clone(),
@@ -10575,7 +10561,7 @@ fn activate_core_started_turn(
                 id: unique_web_id("msg_user"),
                 role: "user".to_string(),
                 text: payload.text.clone(),
-                created_at_ms: payload.created_at_ms,
+                created_at_ms: consumed_at_ms,
                 kind: None,
                 completion: None,
             });
@@ -10666,6 +10652,10 @@ fn handle_scoped_worker_event(
                 if let (Some(command_id), Some(payload)) =
                     (command_id.as_deref(), materialized_payload.as_ref())
                 {
+                    // Chat history is also ordered by timestamp on restore, so it
+                    // must record the consume time that activate_core_started_turn
+                    // used, not the original enqueue time.
+                    let consumed_at_ms = turn.created_at_ms as i64;
                     let _ = persist_message_queue(state, session_id)
                         .and_then(|()| {
                             append_chat_history_message(
@@ -10675,7 +10665,7 @@ fn handle_scoped_worker_event(
                                 "user",
                                 Some("task"),
                                 Some(command_id),
-                                payload.created_at_ms as i64,
+                                consumed_at_ms,
                                 payload.text.clone(),
                             )
                         })
@@ -10684,7 +10674,7 @@ fn handle_scoped_worker_event(
                                 state,
                                 session_id,
                                 &payload.turn_id,
-                                payload.created_at_ms as i64,
+                                consumed_at_ms,
                                 &payload.worker_roles,
                             )
                         })

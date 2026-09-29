@@ -267,6 +267,8 @@ export const en: Strings = {
     openInTerminal: "Open directory in terminal",
     done: "Done",
     running: "running",
+    waitingModel: "Waiting for model response",
+    localWorking: "Working locally",
     runningWith: "running ({parts})",
     fgCount: "fg {count}",
     bgCount: "bg {count}",

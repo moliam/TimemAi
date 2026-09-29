@@ -124,23 +124,23 @@ pub use host::{
     context_compact_requested_topic_event, context_compact_topic_event,
     core_initialized_topic_event, core_initialized_topic_event_with_worker,
     normalize_user_supplements, normalize_user_supplements_with_context, resolve_topic_reply,
-    runtime_root_repair_help_topic_event, session_worker_default_display_name, toolgen_topic_event,
-    topic_event_status_hint, work_instruction_load_topic_event, CoreActionTopic,
-    CoreContextCompactTopic, CoreDynamicContextSummary, CoreGlobalWorkerStatus,
-    CoreHostDecisionRequestTopic, CoreLifecycleEvent, CoreLifecycleTopic, CoreModelRepairTopic,
-    CoreModelResponseTopic, CoreSessionState, CoreSessionWorkerIdentity,
-    CoreSessionWorkerWorkspace, CoreTopic, CoreTopicEvent, CoreTopicEventSink, CoreTopicStatusHint,
-    CoreWorkInstructionLoadTopic, HostDecision, HostDecisionDefault, HostDecisionRequest,
-    LongRunningCommandContinueRequest, NoopTurnUi, OutputExpansionRequest,
-    OutputExpansionResolution, RoundLimitDecisionRequest, RoundLimitResolution, StoppedTurn,
-    TopicReply, TopicReplyError, TurnInput, TurnOutcome, TurnStopDetail, TurnStopReason,
-    TurnStopSummary, TurnUi, UserSupplement, CORE_TOPIC_ACTION, CORE_TOPIC_CONTEXT_COMPACT,
-    CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST, CORE_TOPIC_MEMO,
-    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST,
-    CORE_TOPIC_ROUND_LIMIT_REQUEST, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP,
-    CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST,
-    CORE_TOPIC_WORK_INSTRUCTION_LOAD, DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
-    USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT,
+    running_shell_job_exit_topic_event, runtime_root_repair_help_topic_event,
+    session_worker_default_display_name, toolgen_topic_event, topic_event_status_hint,
+    work_instruction_load_topic_event, CoreActionTopic, CoreContextCompactTopic,
+    CoreDynamicContextSummary, CoreGlobalWorkerStatus, CoreHostDecisionRequestTopic,
+    CoreLifecycleEvent, CoreLifecycleTopic, CoreModelRepairTopic, CoreModelResponseTopic,
+    CoreSessionState, CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopic,
+    CoreTopicEvent, CoreTopicEventSink, CoreTopicStatusHint, CoreWorkInstructionLoadTopic,
+    HostDecision, HostDecisionDefault, HostDecisionRequest, LongRunningCommandContinueRequest,
+    NoopTurnUi, OutputExpansionRequest, OutputExpansionResolution, RoundLimitDecisionRequest,
+    RoundLimitResolution, StoppedTurn, TopicReply, TopicReplyError, TurnInput, TurnOutcome,
+    TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi, UserSupplement, CORE_TOPIC_ACTION,
+    CORE_TOPIC_CONTEXT_COMPACT, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST,
+    CORE_TOPIC_MEMO, CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE,
+    CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
+    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TOOLGEN,
+    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT, USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT,
 };
 pub use interaction::{
     parse_parallel_tool_calls, parse_tool_call_mode, CapabilityProbeSource, InteractionConfig,
@@ -1042,6 +1042,7 @@ pub(crate) struct SelfToolResultEvidence {
 pub(crate) struct ActionOutcome {
     pub status: ActionStatus,
     pub text: String,
+    pub elapsed_ms: Option<u64>,
     pub bash_result: Option<BashResultEvidence>,
     pub readfile_result: Option<ReadfileResultEvidence>,
     pub memmgr_result: Option<MemmgrResultEvidence>,
@@ -1053,11 +1054,17 @@ impl ActionOutcome {
         Self {
             status,
             text: text.into(),
+            elapsed_ms: None,
             bash_result: None,
             readfile_result: None,
             memmgr_result: None,
             self_tool_result: None,
         }
+    }
+
+    pub(crate) fn with_elapsed_ms(mut self, elapsed_ms: u64) -> Self {
+        self.elapsed_ms = Some(elapsed_ms);
+        self
     }
 
     pub(crate) fn with_bash_result(mut self, bash_result: BashResultEvidence) -> Self {
@@ -1105,6 +1112,39 @@ impl ActionOutcome {
 
     pub(crate) fn background_finished(text: impl Into<String>) -> Self {
         Self::new(ActionStatus::BackgroundFinished, text)
+    }
+
+    /// True when the action has not fully finished yet, so `elapsed_ms` only
+    /// reflects time already spent, not the total tool time.
+    #[cfg(test)]
+    pub(crate) fn still_running(&self) -> bool {
+        matches!(
+            self.status,
+            ActionStatus::Timeout | ActionStatus::BackgroundRunning
+        )
+    }
+}
+
+/// Human readable wall-clock duration: 0.3s, 9.8s, 10s, 2m3s, 1h3m3s.
+///
+/// Sub-10-second durations keep one decimal place, rounded up, so short tool
+/// calls never report a misleading "0s". Longer durations stay integral.
+pub(crate) fn format_time_elapsed_hms(ms: u64) -> String {
+    const SUB_TEN_SECONDS_CEILING_MS: u64 = 10_000;
+    if ms < SUB_TEN_SECONDS_CEILING_MS {
+        let tenths = ms.div_ceil(100);
+        return format!("{}.{}s", tenths / 10, tenths % 10);
+    }
+    let total_seconds = ms / 1000;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours}h{minutes}m{seconds}s")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds}s")
+    } else {
+        format!("{seconds}s")
     }
 }
 
@@ -1725,7 +1765,6 @@ pub struct AgentCore {
     static_prompt: String,
     runtime_system_context: String,
     rendered_static_prompt: String,
-    startup_stamp: String,
     interface_preferences: InterfacePreferences,
     profile: CoreProfile,
     pub(crate) capabilities: CapabilityRegistry,
@@ -1846,14 +1885,12 @@ impl AgentCore {
         let response_protocol = ResponseProtocolKind::default();
         let configured_round_budget = configured_round_budget_from_env();
         let assistant_speaker_name = "TIMEM_ASSISTANT".to_string();
-        let startup_stamp = runtime_time_context();
         let current_prompt_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let rendered_static_prompt = prompt_render::render_static_prompt_for_mode_with_preferences(
             &static_prompt,
             &capabilities,
             response_protocol.suite(),
             &assistant_speaker_name,
-            &startup_stamp,
             ToolCallMode::Inline,
             interface_preferences,
         );
@@ -1862,7 +1899,6 @@ impl AgentCore {
             static_prompt,
             runtime_system_context: String::new(),
             rendered_static_prompt,
-            startup_stamp,
             interface_preferences,
             profile,
             capabilities,
@@ -2247,6 +2283,16 @@ impl AgentCore {
         self.shell_jobs.query_running_for_session(session_id)
     }
 
+    /// Registers an event-driven callback fired immediately when a
+    /// background shell job's supervisor observes its exit. Used by session
+    /// workers to push finish topics to the UI without waiting for harvest.
+    pub fn set_shell_job_exit_listener(
+        &self,
+        listener: impl Fn(&ShellJobExitUpdate) + Send + Sync + 'static,
+    ) {
+        self.shell_jobs.set_exit_listener(listener);
+    }
+
     pub fn consume_completed_shell_jobs_for_session(
         &mut self,
         session_id: &str,
@@ -2282,6 +2328,10 @@ impl AgentCore {
         if let Some(runtime) = runtime {
             let events = updates
                 .iter()
+                // Jobs whose finish topic was already published through the
+                // manager's exit listener must not emit a duplicate topic;
+                // the textual RUNNING_JOB_UPDATE below still goes to the model.
+                .filter(|update| !update.topic_published)
                 .map(host::running_shell_job_exit_topic_event)
                 .collect::<Vec<_>>();
             if !events.is_empty() {
@@ -2388,7 +2438,20 @@ impl AgentCore {
     where
         F: FnOnce() -> (Vec<RunningShellJob>, Vec<ShellJobExitUpdate>),
     {
+        let oldest_running_created_ms = running.iter().map(|job| job.created_at_ms).min();
         let still_running = self.still_running_cmds_context_from(running);
+        // Request-local progress check driven by the runtime shell-job state:
+        // when any tracked job has already run for over 3 minutes without
+        // finishing, the trailer asks the model to verify real progress. It is
+        // recomputed for every request and never persisted into prompt
+        // history, so once the job finishes later requests carry no reminder.
+        let long_running_progress_check = (still_running.is_some()
+            && oldest_running_created_ms.is_some_and(|earliest_ms| {
+                (now_ms() - earliest_ms).max(0) as u64 >= 3 * 60 * 1000
+            }))
+        .then(|| {
+            "Need to check whether the long running job is really making progress ? ".to_string()
+        });
         let (body, trailer) = prompt_render::split_formatted_response_trailer(current_prompt);
         let mut prompt = body.trim_end().to_string();
         if let Some(still_running) = still_running.as_ref() {
@@ -2404,10 +2467,18 @@ impl AgentCore {
             prompt.push_str("\n\n");
             prompt.push_str(&update_text);
         }
+        if let Some(reminder) = long_running_progress_check.as_ref() {
+            prompt.push_str("\n\n");
+            prompt.push_str(reminder);
+        }
 
         if let Some(runtime) = runtime {
             let events = updates
                 .iter()
+                // Jobs whose finish topic was already published through the
+                // manager's exit listener must not emit a duplicate topic;
+                // the textual RUNNING_JOB_UPDATE below still goes to the model.
+                .filter(|update| !update.topic_published)
                 .map(host::running_shell_job_exit_topic_event)
                 .collect::<Vec<_>>();
             if !events.is_empty() {
@@ -2562,7 +2633,6 @@ impl AgentCore {
             &self.capabilities,
             self.response_protocol.suite(),
             &self.assistant_speaker_name,
-            &self.startup_stamp,
             self.resolved_tool_call_mode,
             self.interface_preferences,
         );
@@ -5896,6 +5966,15 @@ Runtime tool_call ids:",
 
     fn format_action_outcome(&mut self, action: &ParsedAction, outcome: &ActionOutcome) -> String {
         let body = self.format_action_outcome_body(action, outcome);
+        let body = match outcome.elapsed_ms {
+            Some(elapsed_ms) => {
+                format!(
+                    "{body}\nTime_elapsed: {}",
+                    format_time_elapsed_hms(elapsed_ms)
+                )
+            }
+            None => body,
+        };
         if self.response_protocol == ResponseProtocolKind::Xml {
             format!("<tool_call_id>{}</tool_call_id>{body}", action.call_id)
         } else {
@@ -5983,6 +6062,7 @@ Runtime tool_call ids:",
         let cwd = self.current_prompt_cwd().to_path_buf();
         self.current_stats.tool_calls += 1;
         thread::spawn(move || {
+            let wall_start = Instant::now();
             let cpu_start = thread_cpu_time();
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 readfile::execute_with_timeout_outcome(
@@ -6018,6 +6098,7 @@ Runtime tool_call ids:",
                     error_type: Some("InternalError".to_string()),
                 })
             });
+            let outcome = outcome.with_elapsed_ms(wall_start.elapsed().as_millis() as u64);
             (idx, action, outcome, elapsed_thread_cpu(cpu_start))
         })
     }
@@ -6042,6 +6123,7 @@ Runtime tool_call ids:",
         let shell_jobs = self.shell_jobs.clone();
         self.current_stats.tool_calls += 1;
         thread::spawn(move || {
+            let wall_start = Instant::now();
             let result = match &pending_for_thread.approved_action {
                 PendingApprovedAction::RunBash {
                     command,
@@ -6084,6 +6166,10 @@ Runtime tool_call ids:",
                     )
                 }
             };
+            let mut result = result;
+            if result.elapsed_ms.is_none() {
+                result.elapsed_ms = Some(wall_start.elapsed().as_millis() as u64);
+            }
             (idx, action, pending_for_thread, result, None)
         })
     }
@@ -6101,6 +6187,7 @@ Runtime tool_call ids:",
         let cwd = self.current_prompt_cwd().to_path_buf();
         self.current_stats.tool_calls += 1;
         thread::spawn(move || {
+            let wall_start = Instant::now();
             let loop_command = action.input_str("loop_cmd");
             let is_regular_command = loop_command.is_empty();
             let cmd_command = action.input_str("cmd");
@@ -6142,7 +6229,12 @@ Runtime tool_call ids:",
                 )
             };
             let outcome = match result {
-                ActionExecution::Completed(outcome) => outcome,
+                ActionExecution::Completed(mut outcome) => {
+                    if outcome.elapsed_ms.is_none() {
+                        outcome.elapsed_ms = Some(wall_start.elapsed().as_millis() as u64);
+                    }
+                    outcome
+                }
                 ActionExecution::NeedsApproval(_) => ActionOutcome::failed(format!(
                     "Action result: {}\ncommand: {}\nerror: unexpected_parallel_approval_request",
                     action.action, command,
@@ -6303,6 +6395,25 @@ Runtime tool_call ids:",
     }
 
     fn execute_action(
+        &mut self,
+        action: ParsedAction,
+        runtime: &mut dyn ActionRuntime,
+    ) -> ActionExecution {
+        let wall_start = Instant::now();
+        let mut execution = self.execute_action_inner(action, runtime);
+        let elapsed_ms = wall_start.elapsed().as_millis() as u64;
+        match &mut execution {
+            ActionExecution::Completed(outcome) => {
+                if outcome.elapsed_ms.is_none() {
+                    outcome.elapsed_ms = Some(elapsed_ms);
+                }
+            }
+            ActionExecution::NeedsApproval(_) => {}
+        }
+        execution
+    }
+
+    fn execute_action_inner(
         &mut self,
         action: ParsedAction,
         runtime: &mut dyn ActionRuntime,
