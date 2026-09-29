@@ -1793,7 +1793,14 @@ function TimemApp() {
         setFavoriteCapacityNotice(null);
         setFavoriteCapacityUpdating(false);
         setFavoritesLoading(true);
-        setSnapshotReady(true);
+        // Show the list as soon as it has content: sessions restore newest
+        // first in the background, so the user sees their page immediately
+        // while older sessions keep filling in progressively. The loading
+        // placeholder only stays when nothing is restored yet.
+        setSnapshotReady(
+          event.snapshot.server.restoring !== true ||
+            event.snapshot.sessions.length > 0,
+        );
         queueMicrotask(() => {
           if (!sendCommand({ type: "favorites_list" }))
             setFavoritesLoading(false);
@@ -1801,6 +1808,10 @@ function TimemApp() {
         return;
       }
       if (event.type === "session_created") {
+        // A user-initiated creation takes over the view; background restore
+        // publications only fill the list progressively without stealing
+        // the user's current selection.
+        const userInitiated = creatingSessionRef.current;
         creatingSessionRef.current = false;
         setCreatingSession(false);
         setSessions((current) => upsertSession(current, event.session));
@@ -1808,7 +1819,9 @@ function TimemApp() {
           event.session.session_id,
           event.session.tools.length,
         );
-        setActiveSessionId(event.session.session_id);
+        if (userInitiated) {
+          setActiveSessionId(event.session.session_id);
+        }
         return;
       }
       if (event.type === "session_restart_cwd_resolved") {

@@ -448,6 +448,7 @@ export type Snapshot = {
     public_access: boolean;
     debug_mode: boolean;
     performance_trace: boolean;
+    restoring?: boolean;
     mem: {
       space: string;
       data_dir: string;
