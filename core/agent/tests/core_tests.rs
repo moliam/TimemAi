@@ -8197,8 +8197,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(json_prompt.contains("\"working_still_action\""));
     assert!(json_prompt.contains("\"ALL_FINISHED\""));
     assert!(json_prompt.contains("[BEGIN DELTA delta_id: pd_1, time_ms: 123]"));
-    // Bracketed deltas are now explicitly closed.
-    assert!(json_prompt.contains("[END DELTA delta_id:"));
+    assert!(!json_prompt.contains("[END DELTA]"));
     assert!(!json_prompt.contains("<prompt_delta "));
     assert!(!json_prompt.contains("</prompt_delta>"));
     assert!(json_prompt
