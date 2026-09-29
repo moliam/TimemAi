@@ -508,7 +508,7 @@ async function main() {
     for (const width of [1440, 390]) {
       await browser.call("Emulation.setDeviceMetricsOverride", {width, height:1000, deviceScaleFactor:1, mobile:false});
       assert(await browser.evaluate(`(() => {
-        const summary = document.querySelector('.stream-tool-run-toggle > svg');
+        const summary = document.querySelector('.stream-tool-run-toggle .stream-tool-run-sign');
         const live = document.querySelector('.stream-tool-row.running .stream-tool-toggle > svg');
         return !!summary && !!live && Math.abs(summary.getBoundingClientRect().left - live.getBoundingClientRect().left) < 1;
       })()`), `collapsed summary and live tool must be peers at ${width}px`);
@@ -558,7 +558,8 @@ async function main() {
       const sessionDot = sessionIcon ? sessionIcon.getBoundingClientRect() : null;
       const workerStatic = [...document.querySelectorAll('.worker-working-icon')].every(node => getComputedStyle(node).animationName === 'none');
       const pulse = document.querySelector('.turn-assistant-frame.working .working-chip .pulse, .stream-working-dot');
-      const pulseAnim = pulse ? getComputedStyle(pulse) : null;
+      // The stream working dot carries its animation on ::after, not the host span.
+      const pulseAnim = pulse ? getComputedStyle(pulse, pulse.matches('.stream-working-dot') ? '::after' : null) : null;
       return !!sessionAnim && sessionAnim.animationName === 'stream-working-grow' &&
         parseFloat(sessionAnim.animationDuration) === 1.2 &&
         !!sessionDot &&
@@ -865,7 +866,12 @@ async function main() {
       return item.getBoundingClientRect().height < 1 && getComputedStyle(item).opacity === '0';
     })()`), "retired tools must fold away completely with no visible summary bar");
     await waitFor(() => browser.evaluate(`document.querySelectorAll('.stream-tool-merged-item.merged').length === 2`), "failed call not merged with adjacent success");
-    assert(await browser.evaluate(`document.querySelector('.stream-tool-run-toggle > span')?.textContent === '工具' && [...document.querySelector('.stream-tool-run-toggle').querySelectorAll('span')].every(n => getComputedStyle(n).fontWeight === '400')`), "tools label and counts must use normal weight");
+    assert(await browser.evaluate(`(() => {
+      const toggle = document.querySelector('.stream-tool-run-toggle');
+      const spans = [...toggle.querySelectorAll('span')];
+      const hasLabel = spans.some(span => span.textContent === '工具');
+      return hasLabel && spans.every(span => getComputedStyle(span).fontWeight === '400');
+    })()`), "tools label and counts must use normal weight");
     await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click()`);
     await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-merged-item.merged')`), "merged failure rows cannot reopen");
     for (const width of [390, 768]) {
@@ -873,9 +879,9 @@ async function main() {
       assert(await browser.evaluate(`document.documentElement.scrollWidth <= window.innerWidth + 1`), `horizontal overflow at ${width}px`);
     }
     await browser.call("Emulation.clearDeviceMetricsOverride");
-    assert(await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').getAttribute('aria-expanded') === 'true' && !!document.querySelector('.stream-tool-run-toggle > svg.lucide-minus')`), "expanded tools must display minus");
+    assert(await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').getAttribute('aria-expanded') === 'true' && !!document.querySelector('.stream-tool-run-toggle .stream-tool-run-sign svg.lucide-minus')`), "expanded tools must display minus");
     await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click()`);
-    assert(await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').getAttribute('aria-expanded') === 'false' && !!document.querySelector('.stream-tool-run-toggle > svg.lucide-plus')`), "collapsed tools must display plus");
+    assert(await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').getAttribute('aria-expanded') === 'false' && !!document.querySelector('.stream-tool-run-toggle .stream-tool-run-sign svg.lucide-plus')`), "collapsed tools must display plus");
     await browser.evaluate(`localStorage.setItem("timem-web-tool-result-status-v1", "false"); window.dispatchEvent(new StorageEvent("storage", {key:"timem-web-tool-result-status-v1"}));`);
     // Collapsed groups now show a bare xN count (no result verdicts).
     await waitFor(() => contains(".stream-tool-run-toggle", "x2"), "neutral folded count missing");
