@@ -6026,6 +6026,54 @@ fn memo_forcibly_closed_when_finish_exhausts_guard_budget() {
 }
 
 #[test]
+fn restored_memo_rearms_finish_guard_after_restart() {
+    let dir = tmp_dir("memo_restore_guard");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    // Simulate a runtime restart: a fresh Core whose memo is hydrated from
+    // the host snapshot before the first turn runs.
+    core.restore_active_memo(Some("重启后仍有效的长任务目标".to_string()));
+    let mut model = ReplayModel::new(vec![
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"直接结束"}"#,
+            1_000,
+            false,
+        )),
+        Ok(llm(
+            r#"{"free_talk":"继续。","working_still_action":[{"run_bash":{"cmd":"echo go","timeout_ms":5000}}]}"#,
+            1_200,
+            false,
+        )),
+    ]);
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "重启后的新请求",
+            session: "memo_restore_guard_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+    // The hydrated memo must arm the finish guard: the first finish attempt
+    // is intercepted instead of ending the turn.
+    assert!(model.prompts[1].contains("still memo active: 重启后仍有效的长任务目标"));
+    assert_eq!(core.active_memo(), Some("重启后仍有效的长任务目标"));
+    // The model continues working; the turn has not finished yet through
+    // the guarded path.
+    assert_ne!(outcome.text, "直接结束");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn memo_finish_guard_recharges_after_working_round() {
     let dir = tmp_dir("memo_guard_recharge");
     let audit = dir.join("audit.json");
