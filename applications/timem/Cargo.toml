@@ -9,6 +9,9 @@ license.workspace = true
 name = "timem"
 path = "src/main.rs"
 
+[build-dependencies]
+flate2 = "1"
+
 [dependencies]
 agent_core = { path = "../../core/agent" }
 timem_session = { path = "../../core/session" }
@@ -27,4 +30,5 @@ tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread
 libc = "0.2"
 
 [dev-dependencies]
+flate2 = "1"
 rcgen = "0.12"

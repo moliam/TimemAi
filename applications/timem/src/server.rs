@@ -2387,12 +2387,45 @@ async fn static_asset(
         Some(_) => (path, mime_for_path(path)),
         None => ("/index.html", "text/html; charset=utf-8"),
     };
-    let body = embedded_web_asset(asset_path).expect("embedded index asset must exist");
+    // Content-hashed build assets are immutable: cache them for a year so
+    // reloads reuse the browser cache instead of re-downloading ~1.7MB.
+    // The HTML shell must revalidate so a new release is always picked up.
+    let cache_control = if asset_path.starts_with("/assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+    let accepts_gzip = headers
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|part| part.trim() == "gzip"));
+    let body = if accepts_gzip {
+        embedded_web_asset_gzip(asset_path).unwrap_or_else(|| {
+            embedded_web_asset(asset_path).expect("embedded index asset must exist")
+        })
+    } else {
+        embedded_web_asset(asset_path).expect("embedded index asset must exist")
+    };
+    let gzip_encoded = accepts_gzip && embedded_web_asset_gzip(asset_path).is_some();
     let mut response = (
-        [(header::CONTENT_TYPE, HeaderValue::from_static(content_type))],
+        [
+            (header::CONTENT_TYPE, HeaderValue::from_static(content_type)),
+            (
+                header::CACHE_CONTROL,
+                HeaderValue::from_static(cache_control),
+            ),
+        ],
         body,
     )
         .into_response();
+    if gzip_encoded {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        // RFC 9110: content-encoding applies to the selected representation;
+        // drop any identity length that no longer matches.
+        response.headers_mut().remove(header::CONTENT_LENGTH);
+    }
     if token_from_query {
         let port = state.listen_port.load(std::sync::atomic::Ordering::SeqCst);
         if let Ok(cookie) = HeaderValue::from_str(&format!(
