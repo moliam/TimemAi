@@ -177,7 +177,6 @@ fn run_bash_edit_stringified_array_emits_clean_first_touch_paths() {
     // `edit` is a STRING whose content is a JSON array with one path.
     let array_text =
         serde_json::to_string(&vec![cwd.join("a/b/c.txt").to_string_lossy().to_string()]).unwrap();
-    let edit_string = serde_json::to_string(&array_text).unwrap();
     let action = serde_json::json!({
         "working_still_action": [{
             "run_bash": {"cmd": "true", "edit": array_text}
