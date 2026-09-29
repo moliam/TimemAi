@@ -161,6 +161,7 @@ type SemanticEventDelivery = OrderedEventDelivery<WireEvent>;
 #[derive(Clone)]
 struct AppState {
     token: String,
+    listen_port: std::sync::Arc<std::sync::atomic::AtomicU16>,
     public_access: bool,
     manager: Arc<Mutex<CoreSessionWorkerManager>>,
     template: Arc<WorkerTemplate>,
@@ -1612,6 +1613,7 @@ pub async fn run(
     }
     let state = AppState {
         token: token.clone().unwrap_or_default(),
+        listen_port: std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0)),
         public_access: launch.public_access,
         manager,
         template: Arc::new(template),
@@ -1653,6 +1655,9 @@ pub async fn run(
         .local_addr()
         .map_err(|error| error.to_string())?
         .port();
+    state
+        .listen_port
+        .store(port, std::sync::atomic::Ordering::SeqCst);
     // Register signal streams before publishing any readiness milestone so an
     // immediate terminal/service stop cannot fall through to the OS default.
     let shutdown_monitor = crate::os::ShutdownSignalMonitor::capture(launch_parent);
@@ -2077,7 +2082,21 @@ async fn debug_browse(
     headers: HeaderMap,
 ) -> Response {
     if !authorized_api_request(&state, query.token.as_deref(), &headers) {
-        return StatusCode::UNAUTHORIZED.into_response();
+        // A bare 401 reads as "broken page" in the browser. Explain what
+        // happened and how to recover (reopen the authenticated WebUI URL).
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=utf-8"),
+            )],
+            debug_browse_page(
+                &query.session_id,
+                query.path.as_deref().unwrap_or(""),
+                "<p class=\"err\">Authentication failed: the debug view needs the WebUI access token. Reopen the WebUI with the full authenticated URL (including ?token=...) printed at timem startup, then open the DEBUG link again.</p>",
+            ),
+        )
+            .into_response();
     }
     let Some(debug) = state.debug.as_ref() else {
         return (
@@ -2375,8 +2394,10 @@ async fn static_asset(
     )
         .into_response();
     if token_from_query {
+        let port = state.listen_port.load(std::sync::atomic::Ordering::SeqCst);
         if let Ok(cookie) = HeaderValue::from_str(&format!(
-            "timem_web_token={}; Path=/; SameSite=Strict; HttpOnly",
+            "{}={}; Path=/; SameSite=Strict; HttpOnly; Max-Age=604800",
+            web_cookie_name(port),
             state.token
         )) {
             response.headers_mut().insert(header::SET_COOKIE, cookie);
@@ -2385,17 +2406,24 @@ async fn static_asset(
     response
 }
 
+fn web_cookie_name(port: u16) -> String {
+    format!("timem_web_token_{port}")
+}
+
 fn authorized_by_cookie(state: &AppState, headers: &HeaderMap) -> bool {
-    headers
+    let Some(cookie) = headers
         .get(header::COOKIE)
         .and_then(|value| value.to_str().ok())
-        .map(|cookie| {
-            cookie
-                .split(';')
-                .map(str::trim)
-                .any(|part| part == format!("timem_web_token={}", state.token))
-        })
-        .unwrap_or(false)
+    else {
+        return false;
+    };
+    let port = state.listen_port.load(std::sync::atomic::Ordering::SeqCst);
+    let namespaced = format!("{}={}", web_cookie_name(port), state.token);
+    let legacy = format!("timem_web_token={}", state.token);
+    cookie
+        .split(';')
+        .map(str::trim)
+        .any(|part| part == namespaced || part == legacy)
 }
 
 fn mime_for_path(path: &str) -> &'static str {

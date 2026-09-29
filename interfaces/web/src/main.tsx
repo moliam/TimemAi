@@ -374,6 +374,10 @@ function initialAccessToken() {
   const query = new URLSearchParams(window.location.search).get("token") ?? "";
   if (query) {
     try {
+      // Persist across tabs and browser restarts so auxiliary views (debug
+      // browse links) keep working long after the initial authenticated
+      // visit. sessionStorage is kept as a mirror for older sessions.
+      window.localStorage.setItem(TOKEN_STORAGE_KEY, query);
       window.sessionStorage.setItem(TOKEN_STORAGE_KEY, query);
     } catch {
       /* Keep the in-memory token. */
@@ -381,7 +385,11 @@ function initialAccessToken() {
     return query;
   }
   try {
-    return window.sessionStorage.getItem(TOKEN_STORAGE_KEY) ?? "";
+    return (
+      window.localStorage.getItem(TOKEN_STORAGE_KEY) ??
+      window.sessionStorage.getItem(TOKEN_STORAGE_KEY) ??
+      ""
+    );
   } catch {
     return "";
   }
