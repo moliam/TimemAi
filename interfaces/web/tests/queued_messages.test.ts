@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches, clearQueuedMessagesPause, loadQueuedMessagesPause, queuedMessagesPauseSessionId, queuedMessagesPauseStorageKey, saveQueuedMessagesPause, shouldDirectManualMessage, stopQueuedAutoSend, unclaimedQueuedMessages } from "../src/queued_messages";
 
@@ -8,6 +9,15 @@ const messages: QueuedMessage[] = ["a", "b", "c", "d", "e"].map((id, index) => (
 attachmentIds: index === 0 ? ["upload-a"] : [], }));
 
 describe("queued messages", () => {
+  it("keeps internal queue transfer and pause status out of the queue header", () => {
+    const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
+    expect(source).not.toContain("composer.autoSendDisabledByUser");
+    expect(source).not.toContain("composer.autoSendStoppedReason");
+    expect(source).not.toContain("composer.autoSendStopped");
+    expect(source).not.toContain("composer.migratingToQueue");
+    expect(source).not.toContain("queuedMessagesPause?.reason");
+  });
+
   it("direct-sends from ready, stopped, or error without backlog or pause", () => {
     expect(shouldDirectManualMessage("ready", 0, false)).toBe(true);
     expect(shouldDirectManualMessage("working", 0, false)).toBe(true);

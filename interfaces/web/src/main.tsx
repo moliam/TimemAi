@@ -7800,17 +7800,8 @@ function TimemThread({
   >(new Map());
   const turns = activeSession?.turns ?? [];
   const activeSessionId = activeSession?.session_id;
-  const queuedMessagesPause =
-    activeSession && !activeSession.message_queue.auto_send_enabled
-      ? {
-          paused: true as const,
-          reason:
-            activeSession.message_queue.continuation.state === "blocked"
-              ? activeSession.message_queue.continuation.reason
-              : t("composer.autoSendDisabledByUser"),
-          stoppedAtMs: 0,
-        }
-      : null;
+  const queuedMessagesPaused =
+    !!activeSession && !activeSession.message_queue.auto_send_enabled;
   const draft = draftForSession(draftsBySession, activeSessionId);
   const queuedMessages: QueuedMessage[] =
     activeSession?.message_queue.items.map((item) => ({
@@ -8755,13 +8746,13 @@ function TimemThread({
       <div className="composer-wrap aui-thread-footer">
           {!!activeSession && displayQueuedMessages.length > 0 && (
             <section
-              className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPause ? "paused" : ""}`}
+              className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPaused ? "paused" : ""}`}
               aria-label={`${displayQueuedMessages.length} queued message${displayQueuedMessages.length === 1 ? "" : "s"}`}
               aria-live="polite"
             >
               <header>
                 <span>{t("composer.queueTitle")}</span>
-                {queuePanelCollapsed ? (
+                {queuePanelCollapsed && (
                   <div
                     className={`queued-message-summary ${firstQueuedMessage?.deliveryError ? "delivery-error" : ""}`}
                     title={
@@ -8781,14 +8772,6 @@ function TimemThread({
                       {t("composer.countLabel", { count: displayQueuedMessages.length })}
                     </small>
                   </div>
-                ) : (
-                  <small title={queuedMessagesPause?.reason}>
-                    {queuedMessagesPause
-                      ? queuedMessagesPause.reason
-                        ? t("composer.autoSendStoppedReason", { reason: queuedMessagesPause.reason })
-                        : t("composer.autoSendStopped")
-                      : t("composer.migratingToQueue")}
-                  </small>
                 )}
                 <div className="queued-message-header-actions">
                   <label className="queued-auto-send-control">
@@ -8797,14 +8780,14 @@ function TimemThread({
                       type="button"
                       role="switch"
                       className="queued-auto-send-switch"
-                      aria-checked={!queuedMessagesPause}
+                      aria-checked={!queuedMessagesPaused}
                       aria-label={
-                        queuedMessagesPause
+                        queuedMessagesPaused
                           ? t("composer.enableAutoSend")
                           : t("composer.pauseAutoSend")
                       }
                       title={
-                        queuedMessagesPause
+                        queuedMessagesPaused
                           ? t("composer.enableAutoSend")
                           : t("composer.pauseAutoSend")
                       }
@@ -8813,7 +8796,7 @@ function TimemThread({
                         onMessageQueueCommand({
                           type: "message_queue_auto_send_set",
                           session_id: activeSessionId,
-                          enabled: !!queuedMessagesPause,
+                          enabled: queuedMessagesPaused,
                         });
                       }}
                     >
