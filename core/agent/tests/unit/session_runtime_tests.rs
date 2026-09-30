@@ -3723,10 +3723,8 @@ impl ModelClient for ShrinkReplayModel {
     ) -> Result<LlmResponse, String> {
         self.prompts.push(prompt.to_string());
         if self.prompts.len() == 1 {
-            assert!(prompt.contains("mode=force_shrink_required"));
-            assert!(prompt.contains(
-                "TIPS: You can update your job list plan, steer and optimize your work based on the above work."
-            ));
+            assert!(prompt.contains("Compact context as the tool context_compact desc suggests"));
+            assert!(!prompt.contains("Long-context maintenance:"));
             let mut delta_ids = prompt_field_values(prompt, "delta_id");
             delta_ids.sort();
             delta_ids.dedup();
@@ -3747,10 +3745,8 @@ impl ModelClient for ShrinkReplayModel {
                 .count(),
             1
         );
-        assert!(!prompt.contains("mode=force_shrink_required"));
-        assert!(!prompt.contains(
-            "TIPS: You can update your job list plan, steer and optimize your work based on the above work."
-        ));
+        assert!(!prompt.contains("Compact context as the tool context_compact desc suggests"));
+        assert!(!prompt.contains("Long-context maintenance:"));
         Ok(llm(
             r#"{"status":"ALL_FINISHED","final_answer":"压缩已完成，可以继续对话。"}"#,
             1_200,
@@ -4416,7 +4412,8 @@ fn session_turn_forced_shrink_runs_to_final_without_repeated_shrink() {
         model
             .prompts
             .iter()
-            .filter(|prompt| prompt.contains("mode=force_shrink_required"))
+            .filter(|prompt| prompt
+                .contains("Compact context as the tool context_compact desc suggests"))
             .count(),
         1
     );
@@ -5208,7 +5205,10 @@ impl ModelClient for StoryReplayModel {
                 ))
             }
             6 => {
-                assert!(prompt.contains("mode=force_shrink_required"));
+                assert!(
+                    prompt.contains("Compact context as the tool context_compact desc suggests")
+                );
+                assert!(!prompt.contains("Long-context maintenance:"));
                 let mut delta_ids = prompt_field_values(prompt, "delta_id");
                 delta_ids.sort();
                 delta_ids.dedup();
@@ -5237,7 +5237,10 @@ impl ModelClient for StoryReplayModel {
                 ))
             }
             9 => {
-                assert!(prompt.contains("mode=force_shrink_required"));
+                assert!(
+                    prompt.contains("Compact context as the tool context_compact desc suggests")
+                );
+                assert!(!prompt.contains("Long-context maintenance:"));
                 let mut delta_ids = prompt_field_values(prompt, "delta_id");
                 delta_ids.sort();
                 delta_ids.dedup();
@@ -5249,7 +5252,9 @@ impl ModelClient for StoryReplayModel {
             }
             10 => {
                 assert!(prompt.contains("context compacted successfully."));
-                assert!(!prompt.contains("mode=force_shrink_required"));
+                assert!(
+                    !prompt.contains("Compact context as the tool context_compact desc suggests")
+                );
                 Ok(llm(
                     r#"{"status":"ALL_FINISHED","final_answer":"上下文已转存并压缩，可以继续。"}"#,
                     2_000,
@@ -5323,7 +5328,8 @@ fn session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rend
         model
             .prompts
             .iter()
-            .filter(|prompt| prompt.contains("mode=force_shrink_required"))
+            .filter(|prompt| prompt
+                .contains("Compact context as the tool context_compact desc suggests"))
             .count()
             >= 1,
         "story should force shrink through context compact"

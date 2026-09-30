@@ -115,11 +115,12 @@ fn forced_compaction_preserves_native_history_and_restricts_model_request() {
     assert_eq!(core.native_exchanges[0].delta_id, "pd_1");
     let prompt = core.render_prompt();
     assert!(!prompt.contains("old tool work"));
-    // The shrink instruction is one-shot trailer content: never persisted in
-    // the rendered context, re-attached fresh on every model request.
-    assert!(!prompt.contains("mode=force_shrink_required"));
+    // Compaction policy lives in the context_compact capability description;
+    // Core adds only the short mandatory-call trailer to the request.
+    assert!(!prompt.contains("Long-context maintenance:"));
     let request_prompt = core.build_model_request_prompt(&prompt);
-    assert!(request_prompt.contains("mode=force_shrink_required"));
+    assert!(!request_prompt.contains("Long-context maintenance:"));
+    assert!(!request_prompt.contains("target_dynamic_context_ratio"));
     assert!(request_prompt
         .ends_with("Context is too long. Compact context as the tool context_compact desc suggests. Your tool calls must start with context_compact:"));
     let request = core.model_interaction_request(request_prompt);
