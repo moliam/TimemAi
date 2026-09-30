@@ -354,12 +354,14 @@ pub struct OrphanProcessEvent {
     pub state: &'static str,
 }
 
-/// Drains bounded, not-yet-reported adoption and terminal events from the
-/// runtime fallback process supervisor.
+/// One bounded internal adoption or terminal transition from the Runtime
+/// fallback process supervisor. These transitions support diagnostics and
+/// tests; model-facing RuntimeInfo uses only current fallback snapshots.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FallbackProcessSnapshot {
     pub pid: u32,
     pub process_name: String,
+    pub zombie: bool,
 }
 
 /// Current descendants being watched by the Runtime fallback chain because
@@ -371,10 +373,37 @@ pub fn fallback_process_snapshots() -> Vec<FallbackProcessSnapshot> {
         .map(|snapshot| FallbackProcessSnapshot {
             pid: snapshot.pid,
             process_name: snapshot.process_name,
+            zombie: snapshot.zombie,
         })
         .collect();
     #[cfg(not(unix))]
     Vec::new()
+}
+
+/// Platform-native aggregate observation point for the current Runtime's
+/// exact Session scope. Returns None until that scope exists.
+pub fn session_process_scope_snapshot(
+    session_id: &str,
+) -> Option<crate::SessionProcessScopeSnapshot> {
+    #[cfg(target_os = "linux")]
+    return crate::linux::session_process_scope_snapshot(session_id);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = session_id;
+        None
+    }
+}
+
+/// Previous Runtime scopes for this exact Session that still contain live
+/// members. Empty stale directories are cleaned internally and not returned.
+pub fn stale_process_scope_snapshots(session_id: &str) -> Vec<crate::StaleProcessScopeSnapshot> {
+    #[cfg(target_os = "linux")]
+    return crate::linux::stale_process_scope_snapshots(session_id);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = session_id;
+        Vec::new()
+    }
 }
 
 pub fn take_orphan_process_events() -> Vec<OrphanProcessEvent> {

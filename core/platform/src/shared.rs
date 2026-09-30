@@ -126,11 +126,19 @@ struct DirectChildIdentity {
 pub(super) struct FallbackProcessSnapshot {
     pub pid: u32,
     pub process_name: String,
+    pub zombie: bool,
 }
 
-static ACTIVE_FALLBACK_PROCESSES: OnceLock<Mutex<HashMap<(u32, String), String>>> = OnceLock::new();
+#[derive(Clone, Debug)]
+struct ActiveFallbackProcess {
+    process_name: String,
+    zombie: bool,
+}
 
-fn active_fallback_processes() -> &'static Mutex<HashMap<(u32, String), String>> {
+static ACTIVE_FALLBACK_PROCESSES: OnceLock<Mutex<HashMap<(u32, String), ActiveFallbackProcess>>> =
+    OnceLock::new();
+
+fn active_fallback_processes() -> &'static Mutex<HashMap<(u32, String), ActiveFallbackProcess>> {
     ACTIVE_FALLBACK_PROCESSES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -140,9 +148,10 @@ pub(super) fn fallback_process_snapshots() -> Vec<FallbackProcessSnapshot> {
         .map(|active| {
             let mut snapshots = active
                 .iter()
-                .map(|((pid, _), process_name)| FallbackProcessSnapshot {
+                .map(|((pid, _), process)| FallbackProcessSnapshot {
                     pid: *pid,
-                    process_name: process_name.clone(),
+                    process_name: process.process_name.clone(),
+                    zombie: process.zombie,
                 })
                 .collect::<Vec<_>>();
             snapshots.sort_by_key(|snapshot| snapshot.pid);
@@ -206,7 +215,13 @@ impl FallbackProcessReaper {
                         return false;
                     }
                     active
-                        .insert(identity.clone(), child.process_name.clone())
+                        .insert(
+                            identity.clone(),
+                            ActiveFallbackProcess {
+                                process_name: child.process_name.clone(),
+                                zombie: child.zombie,
+                            },
+                        )
                         .is_none()
                 })
                 .unwrap_or(false);

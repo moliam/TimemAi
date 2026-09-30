@@ -17,11 +17,15 @@ pub struct RuntimeInfoInputs {
     pub running: Vec<RunningJobSnapshot>,
     /// Jobs that exited since the last request, with their exit status.
     pub updates: Vec<JobExitSnapshot>,
+    /// Platform-native aggregate observation point for the current Agent's
+    /// Session-owned process Jobs. AgentCore supplies this only for a one-shot
+    /// startup/restart or post-compaction reminder.
+    pub process_scope: Option<String>,
+    /// Previous Runtime scopes for this Session that still contain live work.
+    pub stale_process_scopes: Vec<StaleProcessScopeSnapshot>,
     /// Live descendants watched by the Runtime fallback chain after their
     /// original supervision chain ended.
     pub fallback_processes: Vec<FallbackProcessSnapshot>,
-    /// Lifecycle events produced by the runtime fallback process supervisor.
-    pub orphan_events: Vec<OrphanProcessEventSnapshot>,
     /// Delta-based disk pressure notice produced by DiskPressureTracker at
     /// its latest sampled observation point, if it triggered.
     pub disk_pressure_notice: Option<String>,
@@ -53,14 +57,13 @@ pub struct RunningJobSnapshot {
 pub struct FallbackProcessSnapshot {
     pub pid: u32,
     pub process_name: String,
+    pub zombie: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
-pub struct OrphanProcessEventSnapshot {
-    pub pid: u32,
-    pub process_name: String,
-    pub state: String,
+pub struct StaleProcessScopeSnapshot {
+    pub observation_note: String,
+    pub owner_pid: u32,
 }
 
 #[derive(Clone)]
@@ -159,6 +162,12 @@ fn human_bytes(bytes: u64) -> String {
 pub fn jobmanager_report(inputs: &RuntimeInfoInputs) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
 
+    if let Some(scope) = inputs.process_scope.as_deref() {
+        parts.push(format!(
+            "current agent/session aggregate observation path: {scope}"
+        ));
+    }
+
     if !inputs.running.is_empty() {
         let mut table = String::from(
             "still running jobs:\n\n| pid | elapsed | created by tool_call id | command | notes |\n|---:|---:|---|---|---|",
@@ -195,10 +204,16 @@ pub fn jobmanager_report(inputs: &RuntimeInfoInputs) -> Option<String> {
         );
         for process in &inputs.fallback_processes {
             let name = process.process_name.replace('|', "\\|").replace('\n', " ");
+            let state = if process.zombie { "zombie" } else { "active" };
+            let decision = if process.zombie {
+                "inspect parent/reaper health; do not signal an already-dead process"
+            } else {
+                "inspect purpose/progress, then keep observing or terminate"
+            };
             let _ = writeln!(
                 table,
-                "\n| {} | `{}` | `active` | inspect purpose/progress, then keep observing or terminate |",
-                process.pid, name
+                "\n| {} | `{}` | `{}` | {} |",
+                process.pid, name, state, decision
             );
         }
         table.push_str(
@@ -207,21 +222,28 @@ pub fn jobmanager_report(inputs: &RuntimeInfoInputs) -> Option<String> {
         parts.push(table);
     }
 
-    if !inputs.orphan_events.is_empty() {
-        let rows = inputs
-            .orphan_events
-            .iter()
-            .map(|event| {
-                format!(
-                    "pid={} process={} state={}",
-                    event.pid, event.process_name, event.state
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        parts.push(format!(
-            "UNOWNED_CHILD_UPDATE: previously unowned child processes changed state: {rows}. `reaped` means the process had already exited and its final wait completed; no kill decision is pending for that PID."
-        ));
+    if !inputs.stale_process_scopes.is_empty() {
+        let mut table = String::from(
+            "stale process scopes from previous Runtime owners still contain live work:
+
+| previous owner pid | observation point | model decision |
+|---:|---|---|",
+        );
+        for scope in &inputs.stale_process_scopes {
+            let note = scope
+                .observation_note
+                .replace('|', "\\|")
+                .replace('\n', " ");
+            let _ = writeln!(
+                table,
+                "\n| {} | `{}` | inspect members, then preserve or terminate explicitly |",
+                scope.owner_pid, note
+            );
+        }
+        table.push_str(
+            "\n\nThe previous Runtime owner identity no longer matches. These processes were not silently adopted or killed.",
+        );
+        parts.push(table);
     }
 
     if parts.is_empty() {
@@ -327,15 +349,23 @@ mod tests {
                 elapsed_ms: 70_000,
                 notes: "cgroup: /sys/fs/cgroup/example/job-42".into(),
             }],
-            fallback_processes: vec![FallbackProcessSnapshot {
-                pid: 77,
-                process_name: "worker-helper".into(),
+            process_scope: Some("cgroup: /sys/fs/cgroup/timem.jobs/runtime-1-2/session-abcd".into()),
+            stale_process_scopes: vec![StaleProcessScopeSnapshot {
+                observation_note: "cgroup: /sys/fs/cgroup/timem.jobs/runtime-7-8/session-abcd".into(),
+                owner_pid: 7,
             }],
-            orphan_events: vec![OrphanProcessEventSnapshot {
-                pid: 78,
-                process_name: "helper".into(),
-                state: "reaped".into(),
-            }],
+            fallback_processes: vec![
+                FallbackProcessSnapshot {
+                    pid: 77,
+                    process_name: "worker-helper".into(),
+                    zombie: false,
+                },
+                FallbackProcessSnapshot {
+                    pid: 78,
+                    process_name: "dead-helper".into(),
+                    zombie: true,
+                },
+            ],
             disk_pressure_notice: Some(
                 "DISK_PRESSURE: total free space across the working disks dropped within the last 15 observation points".into(),
             ),
@@ -358,11 +388,40 @@ mod tests {
         assert!(out.contains("unowned child processes"), "{out}");
         assert!(out.contains("`active`"), "{out}");
         assert!(out.contains("worker-helper"), "{out}");
-        assert!(out.contains("UNOWNED_CHILD_UPDATE"), "{out}");
+        assert!(out.contains("`zombie`"), "{out}");
+        assert!(out.contains("dead-helper"), "{out}");
+        assert!(
+            out.contains("current agent/session aggregate observation path"),
+            "{out}"
+        );
+        assert!(
+            out.contains("stale process scopes from previous Runtime owners"),
+            "{out}"
+        );
+        assert!(!out.contains("UNOWNED_CHILD_UPDATE"), "{out}");
+        assert!(!out.contains("reaped"), "{out}");
         assert!(out.contains("DISK_PRESSURE"), "{out}");
         assert!(out.contains("observation points"), "{out}");
         assert!(out.contains("JOB_KILLED"), "{out}");
         assert!(out.contains("SIGKILL"), "{out}");
+    }
+
+    #[test]
+    fn aggregate_observation_path_is_sufficient_without_running_jobs() {
+        let out = jobmanager_report(&RuntimeInfoInputs {
+            process_scope: Some(
+                "cgroup: /sys/fs/cgroup/timem.jobs/runtime-1-2/session-abcd".into(),
+            ),
+            ..Default::default()
+        })
+        .expect("one-shot aggregate path report");
+        assert_eq!(
+            out,
+            "current agent/session aggregate observation path: cgroup: /sys/fs/cgroup/timem.jobs/runtime-1-2/session-abcd"
+        );
+        assert!(!out.contains("memory.current"));
+        assert!(!out.contains("pids.current"));
+        assert!(!out.contains("cpu.stat"));
     }
 
     #[test]

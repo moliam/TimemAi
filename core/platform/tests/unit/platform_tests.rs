@@ -715,7 +715,8 @@ fn linux_fallback_lifecycle_is_adopted_active_then_exactly_reaped() {
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_managed_process_job_contains_and_kills_setsid_descendants() {
-    let job = match ManagedProcessJob::create() {
+    let raw_session_id = "private-session-id-must-not-appear";
+    let job = match ManagedProcessJob::create_for_session(raw_session_id) {
         Ok(job) => job,
         Err(error)
             if matches!(
@@ -731,7 +732,30 @@ fn linux_managed_process_job_contains_and_kills_setsid_descendants() {
     assert_eq!(job.backend_name(), "linux_cgroup_v2");
     let observation_note = job.observation_note().expect("Linux cgroup note");
     assert!(observation_note.starts_with("cgroup: /sys/fs/cgroup/"));
-    assert!(observation_note.contains("/timem.jobs/job-"));
+    assert!(
+        observation_note.contains("/timem.jobs/runtime-"),
+        "{observation_note}"
+    );
+    assert!(observation_note.contains("/session-"), "{observation_note}");
+    assert!(observation_note.contains("/job-"), "{observation_note}");
+    assert!(
+        !observation_note.contains(raw_session_id),
+        "{observation_note}"
+    );
+    let aggregate = crate::session_process_scope_snapshot(raw_session_id)
+        .expect("current Session aggregate cgroup scope");
+    let aggregate_path = aggregate
+        .observation_note
+        .strip_prefix("cgroup: ")
+        .expect("aggregate cgroup note");
+    let job_path = observation_note
+        .strip_prefix("cgroup: ")
+        .expect("Job cgroup note");
+    assert_eq!(
+        std::path::Path::new(job_path).parent(),
+        Some(std::path::Path::new(aggregate_path))
+    );
+    assert!(!aggregate.observation_note.contains(raw_session_id));
     let root = std::env::temp_dir().join(format!(
         "timem-linux-cgroup-job-{}-{}",
         std::process::id(),

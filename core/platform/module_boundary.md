@@ -19,6 +19,8 @@ low-level process primitives shared across Timem hosts.
   selection or operating-system process lifecycle primitives.
 - Agent/Core consumers depend only on platform-neutral facades; cgroup, Job Object, and other backend types must not leak outside this crate.
 - A process-Job backend must establish ownership before user code can fork, target destructive operations only at that Job, and expose kernel-derived membership/completion facts.
+- Aggregate observation scopes are platform-owned, read-only facades to Agent/Core. Linux uses empty `runtime-<pid>-<start_ticks>/session-<opaque-key>` parents above per-Job leaves; raw Session ids must not enter platform paths.
+- Restart cleanup may remove only kernel-confirmed empty managed scopes. A previous Runtime scope with live members is never silently adopted, signalled, or deleted.
 - Target-specific modules compile only on their matching target.
 - Unsupported targets fail closed for ownership/destructive decisions.
 - Platform behavior changes require tests under `core/platform/tests`.

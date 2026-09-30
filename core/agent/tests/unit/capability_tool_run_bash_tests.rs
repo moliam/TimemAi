@@ -1368,7 +1368,10 @@ fn background_job_reports_pid_and_running_list_until_exit() {
             .strip_prefix("cgroup: ")
             .expect("minimal Linux cgroup observation note");
         assert!(cgroup.starts_with("/sys/fs/cgroup/"), "{cgroup}");
-        assert!(cgroup.contains("/timem.jobs/job-"), "{cgroup}");
+        assert!(cgroup.contains("/timem.jobs/runtime-"), "{cgroup}");
+        assert!(cgroup.contains("/session-"), "{cgroup}");
+        assert!(cgroup.contains("/job-"), "{cgroup}");
+        assert!(!cgroup.contains("session_a"), "{cgroup}");
         assert!(std::path::Path::new(cgroup).is_dir(), "{cgroup}");
         assert_eq!(running[0].notes, format!("cgroup: {cgroup}"));
     }
