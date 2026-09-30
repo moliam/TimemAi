@@ -84,6 +84,44 @@ example_json: |
 
 #[cfg(unix)]
 #[test]
+fn unavailable_exact_process_backend_never_blocks_command_action() {
+    let dir = temp_case_dir("command_backend_fallback");
+    let script = dir.join("fallback.sh");
+    fs::write(&script, "#!/bin/sh\nprintf fallback_ok\n").unwrap();
+
+    for kind in [
+        std::io::ErrorKind::Unsupported,
+        std::io::ErrorKind::PermissionDenied,
+        std::io::ErrorKind::NotFound,
+        std::io::ErrorKind::Other,
+    ] {
+        let outcome = execute_command_action_outcome_with_process_job(
+            "fallback_tool",
+            &script,
+            &json!({}),
+            1000,
+            Err(std::io::Error::new(kind, "optional backend unavailable")),
+        );
+        assert_eq!(outcome.status, crate::ActionStatus::Completed, "{kind:?}");
+        assert!(
+            outcome.text.contains("fallback_ok"),
+            "{kind:?}: {}",
+            outcome.text
+        );
+        assert!(!outcome.text.contains("containment"), "{}", outcome.text);
+        assert!(!outcome.text.contains("cgroup"), "{}", outcome.text);
+        assert!(
+            !outcome.text.contains("optional backend"),
+            "{}",
+            outcome.text
+        );
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
 fn command_action_receives_json_payload_on_stdin() {
     let dir = temp_case_dir("command_payload");
     fs::write(

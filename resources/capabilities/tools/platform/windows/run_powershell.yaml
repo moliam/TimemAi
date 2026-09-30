@@ -24,9 +24,9 @@ description: |
   when the condition is satisfied and nonzero otherwise, for example:
   `if (Test-Path path) { exit 0 } else { exit 1 }`.
   For long local work that should keep running across interaction rounds, use
-  `background=true`. Processes are contained in a kill-on-close job object.
-  Background
-  and timeout jobs return a pid; inspect or stop only jobs owned by this runtime.
+  `background=true`. Runtime-managed jobs are cleaned up on cancellation or
+  shutdown where the host platform permits. Background and timeout jobs return
+  a pid; inspect or stop only jobs owned by this runtime.
 prompt_input: |
   Choose exactly one mode. For a normal/background command, provide cmd and do
   not provide loop_cmd or interval_ms; timeout_ms, background, and tail_out are

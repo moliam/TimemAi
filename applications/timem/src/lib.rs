@@ -54,29 +54,20 @@ fn acquire_workspace_instance_lock(
     }
 }
 
+fn exit_with_process_cleanup(code: i32) -> ! {
+    agent_core::os::cleanup_process_safety_net();
+    std::process::exit(code);
+}
+
 pub fn run_web(args: Vec<String>) {
-    // Orphan safety net: reparent escaped descendants to this runtime so the
-    // shell job manager can find and terminate them on job/shutdown sweeps.
-    // A subreaper must also reap adopted orphans, or any descendant that
-    // exits on its own stays a zombie forever (kill(pid,0) keeps reporting
-    // it alive), so a lightweight periodic reaper thread runs beside it.
-    if agent_core::os::install_process_subreaper() {
-        std::thread::Builder::new()
-            .name("orphan-reaper".to_string())
-            .spawn(|| {
-                let mut reaper = agent_core::os::FallbackProcessReaper::for_runtime();
-                loop {
-                    reaper.reap_adopted_zombies();
-                    std::thread::sleep(std::time::Duration::from_millis(250));
-                }
-            })
-            .ok();
-    }
+    // Best-effort orphan safety net. Exact ownership still requires a writable,
+    // delegated cgroup-v2 subtree; unsupported environments use process groups.
+    let _process_safety_net = agent_core::os::ensure_process_safety_net();
     let memory_root = match lifecycle_diagnostics::memory_root_from_args(&args) {
         Ok(path) => path,
         Err(error) => {
             eprintln!("\nTimem Web could not start.\n\n{error}\n");
-            std::process::exit(2);
+            exit_with_process_cleanup(2);
         }
     };
     let help_requested = args.iter().any(|arg| arg == "--help" || arg == "-h");
@@ -86,7 +77,7 @@ pub fn run_web(args: Vec<String>) {
         if let Err(error) = agent_core::create_memory_dir(&memory_root) {
             eprintln!("[timem_web_diagnostics_unavailable] {error}");
             eprintln!("\nTimem Web could not start.\n\n{error}\n");
-            std::process::exit(2);
+            exit_with_process_cleanup(2);
         }
         match acquire_workspace_instance_lock(&memory_root) {
             Ok(lock) => Some(lock),
@@ -96,7 +87,7 @@ pub fn run_web(args: Vec<String>) {
                     memory_root.to_string_lossy().as_ref(),
                 );
                 eprintln!("\nTimem Web could not start.\n\n{message}\n");
-                std::process::exit(2);
+                exit_with_process_cleanup(2);
             }
         }
     };
@@ -127,7 +118,7 @@ pub fn run_web(args: Vec<String>) {
             let message = format!("tokio_runtime_create_failed:{error}");
             diagnostics.finish("runtime_initialization_error", false, Some(&message));
             eprintln!("\nTimem Web could not start.\n\n{message}\n");
-            std::process::exit(2);
+            exit_with_process_cleanup(2);
         }
     };
 
@@ -136,7 +127,7 @@ pub fn run_web(args: Vec<String>) {
         Err(error) => {
             diagnostics.finish("startup_or_runtime_error", false, Some(&error));
             eprintln!("\nTimem Web could not start.\n\n{error}\n");
-            std::process::exit(2);
+            exit_with_process_cleanup(2);
         }
     }
 }

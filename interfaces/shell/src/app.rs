@@ -74,22 +74,30 @@ enum ConfigTableItem {
     Row(ConfigRow),
 }
 
+fn exit_with_process_cleanup(code: i32) -> ! {
+    timem_in_process::agent_api::os::cleanup_process_safety_net();
+    std::process::exit(code);
+}
+
 pub fn run(args: Vec<String>) {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_help();
         return;
     }
+    // Exact ownership is optional; the guard keeps the process-wide fallback
+    // active and removes empty Runtime cgroup scopes on normal shutdown.
+    let _process_safety_net = timem_in_process::agent_api::os::ensure_process_safety_net();
     let options = parse_cli_args(&args);
     if std::env::var_os("TIMEM_DATA_DIR").is_some() {
         eprintln!("[config_error] unsupported_env:TIMEM_DATA_DIR; MEM is the complete workspace");
-        std::process::exit(2);
+        exit_with_process_cleanup(2);
     }
     if args
         .iter()
         .any(|arg| arg == "--data-dir" || arg.starts_with("--data-dir="))
     {
         eprintln!("[config_error] unsupported_option:--data-dir; MEM is the complete workspace");
-        std::process::exit(2);
+        exit_with_process_cleanup(2);
     }
     let env: HashMap<String, String> = std::env::vars().collect();
     let configured_space = options
@@ -100,12 +108,12 @@ pub fn run(args: Vec<String>) {
         Ok(path) => path,
         Err(error) => {
             eprintln!("[config_error] {error}");
-            std::process::exit(2);
+            exit_with_process_cleanup(2);
         }
     };
     if let Err(error) = create_memory_dir(&memory_dir) {
         eprintln!("[config_error] {error}");
-        std::process::exit(2);
+        exit_with_process_cleanup(2);
     }
     let workspace_lock = match timem_in_process::agent_api::WorkspaceInstanceLock::acquire(
         &memory_dir,
@@ -114,7 +122,7 @@ pub fn run(args: Vec<String>) {
         Ok(lock) => lock,
         Err(error) => {
             eprintln!("[workspace_error] {error}: {}", memory_dir.display());
-            std::process::exit(2);
+            exit_with_process_cleanup(2);
         }
     };
     let _workspace_lock = workspace_lock;
@@ -134,7 +142,7 @@ pub fn run(args: Vec<String>) {
         Ok(config) => config,
         Err(err) => {
             eprintln!("[config_error] {err}");
-            std::process::exit(2);
+            exit_with_process_cleanup(2);
         }
     };
     let workspace_config = workspace_config_file(&data_root);
@@ -208,7 +216,7 @@ pub fn run(args: Vec<String>) {
             Ok(registry) => core.set_capability_registry(registry),
             Err(err) => {
                 eprintln!("[config_error] capability_overlay_failed: {err}");
-                std::process::exit(2);
+                exit_with_process_cleanup(2);
             }
         }
     }

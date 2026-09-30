@@ -1837,10 +1837,6 @@ pub struct AgentCore {
     round_budget: u32,
     reminder_tips_config: ReminderTipsConfig,
     runtime_config_changed_notice_pending: bool,
-    /// Re-remind the model of the current Session aggregate process observation
-    /// path after Agent startup and successful context compaction. Consumed only
-    /// when the platform scope actually exists.
-    process_scope_reminder_pending: bool,
     current_round: u32,
     pub(crate) current_stats: UsageStats,
     repair_attempted: bool,
@@ -1967,7 +1963,6 @@ impl AgentCore {
             round_budget: configured_round_budget,
             reminder_tips_config: ReminderTipsConfig::default(),
             runtime_config_changed_notice_pending: false,
-            process_scope_reminder_pending: true,
             current_round: 0,
             current_stats: UsageStats::zero(),
             repair_attempted: false,
@@ -2656,22 +2651,12 @@ impl AgentCore {
             // children and stale process scopes).
             let _ = os::take_orphan_process_events();
             let session_id = self.current_session_id();
-            let process_scope = if self.process_scope_reminder_pending {
-                os::session_process_scope_snapshot(&session_id).map(|scope| scope.observation_note)
-            } else {
-                None
-            };
-            if process_scope.is_some() {
-                self.process_scope_reminder_pending = false;
-            }
             let inputs = runtime_info::RuntimeInfoInputs {
                 running: running_snapshot_for_info,
                 updates: updates_snapshot_for_info,
-                process_scope,
                 stale_process_scopes: os::stale_process_scope_snapshots(&session_id)
                     .into_iter()
                     .map(|scope| runtime_info::StaleProcessScopeSnapshot {
-                        observation_note: scope.observation_note,
                         owner_pid: scope.owner_pid,
                     })
                     .collect(),
@@ -7384,10 +7369,6 @@ Runtime tool_call ids:",
         // the live prompt context. A shrink rewrites that context, so the
         // tracking resets with it and later reads trigger reminders again.
         self.touched_paths.clear();
-        // RuntimeInfo is request-local and the previous aggregate observation
-        // path may have been removed with compacted context. Re-arm its one-shot
-        // reminder; it is consumed only after the platform scope exists.
-        self.process_scope_reminder_pending = true;
 
         let mut hidden_slice_count = 0usize;
         let mut matched_slice_ids = HashSet::new();

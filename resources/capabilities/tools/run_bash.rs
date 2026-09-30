@@ -157,21 +157,6 @@ struct ShellOutputSnapshot {
 type SharedShellOutput = Arc<Mutex<BoundedShellOutput>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProcessJobMode {
-    Exact,
-    DegradedProcessGroup,
-}
-
-impl ProcessJobMode {
-    fn evidence_line(self) -> &'static str {
-        match self {
-            Self::Exact => "Process containment: cgroup v2",
-            Self::DegradedProcessGroup => "Process containment: process group only",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShellJobDelivery {
     Direct,
     Background,
@@ -225,7 +210,6 @@ struct ManagedShellJob {
     completion_publication: Arc<Mutex<u64>>,
     exit_hooks: Arc<Mutex<ShellJobManagerExitHooks>>,
     process_job: Option<crate::os::ManagedProcessJob>,
-    process_job_mode: ProcessJobMode,
 }
 
 impl ManagedShellJob {
@@ -239,11 +223,7 @@ impl ManagedShellJob {
             session_id: self.session_id.clone(),
             turn_id: self.turn_id.clone(),
             created_at_ms: self.created_at_ms,
-            notes: self
-                .process_job
-                .as_ref()
-                .and_then(|process_job| process_job.observation_note())
-                .unwrap_or_default(),
+            notes: String::new(),
         }
     }
 
@@ -357,6 +337,7 @@ impl Drop for ShellJobManagerState {
 pub struct ShellJobManager {
     state: Arc<ShellJobManagerState>,
     long_running_prompt_after: Duration,
+    force_process_group_fallback: bool,
 }
 
 impl ShellJobManager {
@@ -369,12 +350,18 @@ impl ShellJobManager {
                 exit_hooks: Arc::new(Mutex::new(ShellJobManagerExitHooks::default())),
             }),
             long_running_prompt_after: LONG_RUNNING_COMMAND_PROMPT_AFTER,
+            force_process_group_fallback: false,
         }
     }
 
     #[cfg(all(test, unix))]
     pub(crate) fn set_long_running_prompt_after_for_tests(&mut self, duration: Duration) {
         self.long_running_prompt_after = duration.max(Duration::from_millis(1));
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn force_process_group_fallback_for_tests(&mut self) {
+        self.force_process_group_fallback = true;
     }
 
     pub fn spawn_background(
@@ -435,18 +422,10 @@ impl ShellJobManager {
             }
         };
         ActionOutcome::background_running(format!(
-            "Action result: {}\npid={}, now keeps running in background\n{}",
+            "Action result: {}\npid={}, now keeps running in background",
             crate::os::local_shell_tool_name(),
-            job.pid,
-            job.process_job_mode.evidence_line()
+            job.pid
         ))
-        .with_runtime_metadata(
-            "process_containment",
-            match job.process_job_mode {
-                ProcessJobMode::Exact => "cgroup v2",
-                ProcessJobMode::DegradedProcessGroup => "process group only",
-            },
-        )
         .with_bash_result(BashResultEvidence {
             stdout: String::new(),
             stderr: String::new(),
@@ -461,6 +440,25 @@ impl ShellJobManager {
         })
     }
 
+    fn select_process_job(
+        result: std::io::Result<crate::os::ManagedProcessJob>,
+    ) -> Option<crate::os::ManagedProcessJob> {
+        result.ok()
+    }
+
+    fn configured_shell_command(clean: &str, cwd: &Path) -> std::io::Result<Command> {
+        let mut command =
+            crate::os::command_for_local_shell(clean).map_err(std::io::Error::other)?;
+        configure_run_bash_environment(&mut command);
+        command
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        crate::os::configure_child_process_group(&mut command);
+        Ok(command)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn spawn_managed(
         &self,
@@ -473,25 +471,31 @@ impl ShellJobManager {
         tail_out: bool,
         delivery: ShellJobDelivery,
     ) -> std::io::Result<Arc<ManagedShellJob>> {
-        let mut command =
-            crate::os::command_for_local_shell(clean).map_err(std::io::Error::other)?;
-        configure_run_bash_environment(&mut command);
-        command
-            .current_dir(cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        crate::os::configure_child_process_group(&mut command);
-        let process_job = crate::os::ManagedProcessJob::create_for_session(session_id).ok();
-        let process_job_mode = if process_job.is_some() {
-            ProcessJobMode::Exact
+        let mut command = Self::configured_shell_command(clean, cwd)?;
+        let mut process_job = if self.force_process_group_fallback {
+            None
         } else {
-            ProcessJobMode::DegradedProcessGroup
+            Self::select_process_job(crate::os::ManagedProcessJob::create_for_session(session_id))
         };
-        if let Some(process_job) = &process_job {
-            process_job.configure_command(&mut command)?;
+        if process_job
+            .as_ref()
+            .is_some_and(|job| job.configure_command(&mut command).is_err())
+        {
+            process_job = None;
+            command = Self::configured_shell_command(clean, cwd)?;
         }
-        let mut child = command.spawn()?;
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(_) if process_job.is_some() => {
+                // The cgroup may become unavailable between setup and pre_exec.
+                // No user code ran when pre_exec failed, so retry once without
+                // exact containment instead of making the optional mechanism
+                // block command execution.
+                process_job = None;
+                Self::configured_shell_command(clean, cwd)?.spawn()?
+            }
+            Err(error) => return Err(error),
+        };
         let pid = child.id();
         let child_registration = crate::os::register_managed_child(pid);
         // OS-level containment: on Windows the child joins the runtime's
@@ -542,7 +546,6 @@ impl ShellJobManager {
             completion_publication: Arc::clone(&self.state.completion_publication),
             exit_hooks: Arc::clone(&self.state.exit_hooks),
             process_job,
-            process_job_mode,
         });
         let supervised = Arc::clone(&job);
         let supervisor = thread::spawn(move || {
@@ -965,10 +968,7 @@ fn running_output_for_job(
         stdout_truncation: stdout.truncation,
         stderr_truncation: stderr.truncation,
         error: Some(error),
-        job_management: Some(match job.process_job_mode {
-            ProcessJobMode::Exact => "cgroup v2".to_string(),
-            ProcessJobMode::DegradedProcessGroup => "process group only".to_string(),
-        }),
+        job_management: None,
         tail_out,
     }
 }
@@ -2576,7 +2576,7 @@ impl BashCommandOutput {
         let timed_out =
             running_error.is_some_and(|error| error.starts_with("timeout_still_running:"));
         let pid_kind = pid.map(|_| runtime_child_pid_kind().to_string());
-        let mut outcome = ActionOutcome::new(status, text).with_bash_result(BashResultEvidence {
+        ActionOutcome::new(status, text).with_bash_result(BashResultEvidence {
             stdout: self.stdout.clone(),
             stderr: self.stderr.clone(),
             stdout_truncation: self.stdout_truncation.clone(),
@@ -2591,11 +2591,7 @@ impl BashCommandOutput {
                 .as_deref()
                 .and_then(bash_error_type)
                 .map(str::to_string),
-        });
-        if let Some(containment) = self.job_management.as_deref() {
-            outcome = outcome.with_runtime_metadata("process_containment", containment);
-        }
-        outcome
+        })
     }
 
     fn render_action_result(&self, action_name: &str) -> String {
@@ -2606,11 +2602,6 @@ impl BashCommandOutput {
                     "Action result: {}\nLONG_RUNNING_COMMAND_STATUS:\nPID: {}\nElapsed: {} ms\nStatus: still running\n{}",
                     action_name, pid, elapsed_ms, LONG_RUNNING_ACTION_GUIDANCE
                 );
-                if let Some(mode) = &self.job_management {
-                    out.push_str("\nProcess containment: ");
-                    out.push_str(mode);
-                }
-
                 if !self.output.trim().is_empty() {
                     out.push_str("\nPartial return:\n");
                     out.push_str(&self.output);
@@ -2622,11 +2613,6 @@ impl BashCommandOutput {
                     "Action result: {}\npid={}, timeout, but is still running\nTimeout means Timem stopped waiting; the process was not killed and there is no final exit code yet.",
                     action_name, pid
                 );
-                if let Some(mode) = &self.job_management {
-                    out.push_str("\nProcess containment: ");
-                    out.push_str(mode);
-                }
-
                 if !self.output.trim().is_empty() {
                     out.push_str("\nPartial return:\n");
                     out.push_str(&self.output);

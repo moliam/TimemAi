@@ -17,10 +17,6 @@ pub struct RuntimeInfoInputs {
     pub running: Vec<RunningJobSnapshot>,
     /// Jobs that exited since the last request, with their exit status.
     pub updates: Vec<JobExitSnapshot>,
-    /// Platform-native aggregate observation point for the current Agent's
-    /// Session-owned process Jobs. AgentCore supplies this only for a one-shot
-    /// startup/restart or post-compaction reminder.
-    pub process_scope: Option<String>,
     /// Previous Runtime scopes for this Session that still contain live work.
     pub stale_process_scopes: Vec<StaleProcessScopeSnapshot>,
     /// Live descendants watched by the Runtime fallback chain after their
@@ -62,7 +58,6 @@ pub struct FallbackProcessSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StaleProcessScopeSnapshot {
-    pub observation_note: String,
     pub owner_pid: u32,
 }
 
@@ -162,12 +157,6 @@ fn human_bytes(bytes: u64) -> String {
 pub fn jobmanager_report(inputs: &RuntimeInfoInputs) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
 
-    if let Some(scope) = inputs.process_scope.as_deref() {
-        parts.push(format!(
-            "current agent/session aggregate observation path: {scope}"
-        ));
-    }
-
     if !inputs.running.is_empty() {
         let mut table = String::from(
             "still running jobs:\n\n| pid | elapsed | created by tool_call id | command | notes |\n|---:|---:|---|---|---|",
@@ -226,18 +215,14 @@ pub fn jobmanager_report(inputs: &RuntimeInfoInputs) -> Option<String> {
         let mut table = String::from(
             "stale process scopes from previous Runtime owners still contain live work:
 
-| previous owner pid | observation point | model decision |
-|---:|---|---|",
+| previous owner pid | model decision |
+|---:|---|",
         );
         for scope in &inputs.stale_process_scopes {
-            let note = scope
-                .observation_note
-                .replace('|', "\\|")
-                .replace('\n', " ");
             let _ = writeln!(
                 table,
-                "\n| {} | `{}` | inspect members, then preserve or terminate explicitly |",
-                scope.owner_pid, note
+                "\n| {} | inspect residual processes, then preserve or terminate explicitly |",
+                scope.owner_pid
             );
         }
         table.push_str(
@@ -347,13 +332,9 @@ mod tests {
                 cwd: "/tmp".into(),
                 created_at_ms: 0,
                 elapsed_ms: 70_000,
-                notes: "cgroup: /sys/fs/cgroup/example/job-42".into(),
+                notes: String::new(),
             }],
-            process_scope: Some("cgroup: /sys/fs/cgroup/timem.jobs/runtime-1-2/session-abcd".into()),
-            stale_process_scopes: vec![StaleProcessScopeSnapshot {
-                observation_note: "cgroup: /sys/fs/cgroup/timem.jobs/runtime-7-8/session-abcd".into(),
-                owner_pid: 7,
-            }],
+            stale_process_scopes: vec![StaleProcessScopeSnapshot { owner_pid: 7 }],
             fallback_processes: vec![
                 FallbackProcessSnapshot {
                     pid: 77,
@@ -391,10 +372,6 @@ mod tests {
         assert!(out.contains("`zombie`"), "{out}");
         assert!(out.contains("dead-helper"), "{out}");
         assert!(
-            out.contains("current agent/session aggregate observation path"),
-            "{out}"
-        );
-        assert!(
             out.contains("stale process scopes from previous Runtime owners"),
             "{out}"
         );
@@ -404,24 +381,6 @@ mod tests {
         assert!(out.contains("observation points"), "{out}");
         assert!(out.contains("JOB_KILLED"), "{out}");
         assert!(out.contains("SIGKILL"), "{out}");
-    }
-
-    #[test]
-    fn aggregate_observation_path_is_sufficient_without_running_jobs() {
-        let out = jobmanager_report(&RuntimeInfoInputs {
-            process_scope: Some(
-                "cgroup: /sys/fs/cgroup/timem.jobs/runtime-1-2/session-abcd".into(),
-            ),
-            ..Default::default()
-        })
-        .expect("one-shot aggregate path report");
-        assert_eq!(
-            out,
-            "current agent/session aggregate observation path: cgroup: /sys/fs/cgroup/timem.jobs/runtime-1-2/session-abcd"
-        );
-        assert!(!out.contains("memory.current"));
-        assert!(!out.contains("pids.current"));
-        assert!(!out.contains("cpu.stat"));
     }
 
     #[test]

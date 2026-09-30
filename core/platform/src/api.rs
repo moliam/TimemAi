@@ -298,9 +298,73 @@ pub fn graphical_session_available() -> bool {
     platform_graphical_session_available()
 }
 
-/// Install this process as a child subreaper (Linux). Returns whether the
-/// platform supports and applied the flag. Called once at runtime startup so
-/// orphaned descendants are reparented to the runtime instead of init.
+/// Process-wide orphan safety-net initialization state.
+///
+/// The safety net is optional: unsupported platforms and initialization
+/// failures must never block local command execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessSafetyNetStatus {
+    Active,
+    Unsupported,
+    InitializationFailed,
+}
+
+/// Starts the Runtime-wide orphan safety net at most once per process.
+///
+/// Linux installs the process as a child subreaper and runs the bounded
+/// fallback reaper. Other platforms report Unsupported. Failure never blocks
+/// local command execution; callers retain process-group/platform fallbacks.
+#[derive(Debug)]
+pub struct ProcessSafetyNetGuard {
+    status: ProcessSafetyNetStatus,
+}
+
+impl ProcessSafetyNetGuard {
+    pub fn status(&self) -> ProcessSafetyNetStatus {
+        self.status
+    }
+}
+
+impl Drop for ProcessSafetyNetGuard {
+    fn drop(&mut self) {
+        cleanup_process_safety_net();
+    }
+}
+
+pub fn ensure_process_safety_net() -> ProcessSafetyNetGuard {
+    static STATUS: OnceLock<ProcessSafetyNetStatus> = OnceLock::new();
+    let status = *STATUS.get_or_init(|| {
+        if !install_process_subreaper() {
+            return if cfg!(target_os = "linux") {
+                ProcessSafetyNetStatus::InitializationFailed
+            } else {
+                ProcessSafetyNetStatus::Unsupported
+            };
+        }
+        match std::thread::Builder::new()
+            .name("orphan-reaper".to_string())
+            .spawn(|| {
+                let mut reaper = FallbackProcessReaper::for_runtime();
+                loop {
+                    reaper.reap_adopted_zombies();
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+            }) {
+            Ok(_) => ProcessSafetyNetStatus::Active,
+            Err(_) => ProcessSafetyNetStatus::InitializationFailed,
+        }
+    });
+    ProcessSafetyNetGuard { status }
+}
+
+/// Best-effort removal of empty process-management facilities owned by this
+/// Runtime. Live or unrecognised scopes are preserved, and cleanup failure
+/// never changes command or shutdown behavior.
+pub fn cleanup_process_safety_net() {
+    #[cfg(target_os = "linux")]
+    crate::linux::cleanup_current_runtime_process_scope();
+}
+
 pub fn install_process_subreaper() -> bool {
     #[cfg(unix)]
     return crate::shared::install_process_subreaper();
@@ -378,20 +442,6 @@ pub fn fallback_process_snapshots() -> Vec<FallbackProcessSnapshot> {
         .collect();
     #[cfg(not(unix))]
     Vec::new()
-}
-
-/// Platform-native aggregate observation point for the current Runtime's
-/// exact Session scope. Returns None until that scope exists.
-pub fn session_process_scope_snapshot(
-    session_id: &str,
-) -> Option<crate::SessionProcessScopeSnapshot> {
-    #[cfg(target_os = "linux")]
-    return crate::linux::session_process_scope_snapshot(session_id);
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = session_id;
-        None
-    }
 }
 
 /// Previous Runtime scopes for this exact Session that still contain live

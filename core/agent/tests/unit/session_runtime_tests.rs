@@ -2296,10 +2296,8 @@ fn session_turn_long_running_command_hands_status_to_next_model_round() {
         "{follow_up}"
     );
     assert!(!follow_up.contains("model_decision"), "{follow_up}");
-    assert!(
-        follow_up.contains(r#""process_containment":"cgroup v2""#),
-        "{follow_up}"
-    );
+    assert!(!follow_up.contains("process_containment"), "{follow_up}");
+    assert!(!follow_up.contains("process group only"), "{follow_up}");
     assert!(follow_up.contains(r#""pid":"#), "{follow_up}");
     assert!(follow_up.contains(command), "{follow_up}");
     assert!(
@@ -2371,10 +2369,8 @@ fn sequential_group_with_long_timeout_command_hands_status_to_model() {
         "{follow_up}"
     );
     assert!(!follow_up.contains("model_decision"), "{follow_up}");
-    assert!(
-        follow_up.contains(r#""process_containment":"cgroup v2""#),
-        "{follow_up}"
-    );
+    assert!(!follow_up.contains("process_containment"), "{follow_up}");
+    assert!(!follow_up.contains("process group only"), "{follow_up}");
     assert!(follow_up.contains("sleep 2; printf late"), "{follow_up}");
     assert!(
         !follow_up.contains("user cancels the command"),
