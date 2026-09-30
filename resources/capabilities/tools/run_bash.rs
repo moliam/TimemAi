@@ -2,7 +2,7 @@ use crate::response_protocol::ParsedAction;
 use crate::{
     ActionExecution, ActionOutcome, ActionRuntime, ActionStatus, AgentCore, ApprovalRequest,
     BashApprovalMode, BashResultEvidence, LongRunningCommandStatus, PendingApproval,
-    PendingApprovedAction,
+    PendingApprovedAction, StreamCaptureTruncation,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -63,6 +63,8 @@ pub struct ShellJobExitUpdate {
     pub status: String,
     pub stdout: String,
     pub stderr: String,
+    pub stdout_truncation: Option<StreamCaptureTruncation>,
+    pub stderr_truncation: Option<StreamCaptureTruncation>,
     pub output: String,
 }
 
@@ -92,6 +94,7 @@ struct BoundedShellOutput {
     bytes: std::collections::VecDeque<u8>,
     retain_tail: bool,
     truncated: bool,
+    original_bytes: usize,
 }
 
 impl BoundedShellOutput {
@@ -100,9 +103,11 @@ impl BoundedShellOutput {
             bytes: std::collections::VecDeque::with_capacity(SHELL_OUTPUT_LIMIT_BYTES),
             retain_tail,
             truncated: false,
+            original_bytes: 0,
         }
     }
     fn push(&mut self, chunk: &[u8]) {
+        self.original_bytes = self.original_bytes.saturating_add(chunk.len());
         if self.retain_tail {
             if chunk.len() >= SHELL_OUTPUT_LIMIT_BYTES {
                 self.bytes.clear();
@@ -130,18 +135,23 @@ impl BoundedShellOutput {
             self.truncated = self.truncated || chunk.len() > remaining;
         }
     }
-    fn text(&self) -> String {
+    fn snapshot(&self) -> ShellOutputSnapshot {
         let bytes = self.bytes.iter().copied().collect::<Vec<_>>();
-        let text = String::from_utf8_lossy(&bytes);
-        if !self.truncated {
-            return text.into_owned();
-        }
-        if self.retain_tail {
-            format!("[output truncated; retained last {SHELL_OUTPUT_LIMIT_BYTES} bytes]\n{text}")
-        } else {
-            format!("{text}\n[output truncated; retained first {SHELL_OUTPUT_LIMIT_BYTES} bytes]")
+        ShellOutputSnapshot {
+            text: String::from_utf8_lossy(&bytes).into_owned(),
+            truncation: self.truncated.then_some(StreamCaptureTruncation {
+                original_bytes: self.original_bytes,
+                retained_bytes: bytes.len(),
+                retained: if self.retain_tail { "tail" } else { "head" },
+            }),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct ShellOutputSnapshot {
+    text: String,
+    truncation: Option<StreamCaptureTruncation>,
 }
 
 type SharedShellOutput = Arc<Mutex<BoundedShellOutput>>;
@@ -177,6 +187,8 @@ struct FinishedShellJob {
     status: String,
     stdout: String,
     stderr: String,
+    stdout_truncation: Option<StreamCaptureTruncation>,
+    stderr_truncation: Option<StreamCaptureTruncation>,
     output: String,
 }
 
@@ -235,10 +247,10 @@ impl ManagedShellJob {
         }
     }
 
-    fn partial_streams(&self) -> (String, String) {
+    fn partial_streams(&self) -> (ShellOutputSnapshot, ShellOutputSnapshot) {
         (
-            shell_output_text(&self.stdout),
-            shell_output_text(&self.stderr),
+            shell_output_snapshot(&self.stdout),
+            shell_output_snapshot(&self.stderr),
         )
     }
 
@@ -260,6 +272,8 @@ impl ManagedShellJob {
             status: finished.status.clone(),
             stdout: finished.stdout.clone(),
             stderr: finished.stderr.clone(),
+            stdout_truncation: finished.stdout_truncation.clone(),
+            stderr_truncation: finished.stderr_truncation.clone(),
             output: finished.output.clone(),
         }
     }
@@ -426,9 +440,18 @@ impl ShellJobManager {
             job.pid,
             job.process_job_mode.evidence_line()
         ))
+        .with_runtime_metadata(
+            "process_containment",
+            match job.process_job_mode {
+                ProcessJobMode::Exact => "cgroup v2",
+                ProcessJobMode::DegradedProcessGroup => "process group only",
+            },
+        )
         .with_bash_result(BashResultEvidence {
             stdout: String::new(),
             stderr: String::new(),
+            stdout_truncation: None,
+            stderr_truncation: None,
             exit_code: None,
             signal: None,
             pid: Some(job.pid),
@@ -936,9 +959,11 @@ fn running_output_for_job(
         command: command.to_string(),
         status: None,
         signal: None,
-        output: combined_shell_output(&stdout, &stderr),
-        stdout,
-        stderr,
+        output: combined_shell_output(&stdout.text, &stderr.text),
+        stdout: stdout.text,
+        stderr: stderr.text,
+        stdout_truncation: stdout.truncation,
+        stderr_truncation: stderr.truncation,
         error: Some(error),
         job_management: Some(match job.process_job_mode {
             ProcessJobMode::Exact => "cgroup v2".to_string(),
@@ -961,6 +986,8 @@ fn finished_output(
         output: finished.output.clone(),
         stdout: finished.stdout.clone(),
         stderr: finished.stderr.clone(),
+        stdout_truncation: finished.stdout_truncation.clone(),
+        stderr_truncation: finished.stderr_truncation.clone(),
         error: None,
         job_management: None,
         tail_out,
@@ -1016,11 +1043,14 @@ fn join_output_drains(
     }
 }
 
-fn shell_output_text(output: &SharedShellOutput) -> String {
+fn shell_output_snapshot(output: &SharedShellOutput) -> ShellOutputSnapshot {
     output
         .lock()
-        .map(|output| output.text())
-        .unwrap_or_default()
+        .map(|output| output.snapshot())
+        .unwrap_or(ShellOutputSnapshot {
+            text: String::new(),
+            truncation: None,
+        })
 }
 
 fn supervise_shell_job(
@@ -1062,8 +1092,8 @@ fn supervise_shell_job(
     join_output_drains(stdout_drain, stderr_drain);
     // A terminal update is published only after the kernel reports this job's
     // native Job empty. In degraded mode, only process-group membership is known.
-    let stdout = shell_output_text(&job.stdout);
-    let stderr = shell_output_text(&job.stderr);
+    let stdout = shell_output_snapshot(&job.stdout);
+    let stderr = shell_output_snapshot(&job.stderr);
     let Ok(mut publication_sequence) = job.completion_publication.lock() else {
         return;
     };
@@ -1073,9 +1103,11 @@ fn supervise_shell_job(
         completion_sequence: *publication_sequence,
         finished_at_ms,
         status,
-        output: normalized_shell_output(&combined_shell_output(&stdout, &stderr)),
-        stdout,
-        stderr,
+        output: normalized_shell_output(&combined_shell_output(&stdout.text, &stderr.text)),
+        stdout: stdout.text,
+        stderr: stderr.text,
+        stdout_truncation: stdout.truncation,
+        stderr_truncation: stderr.truncation,
     };
     let listener = job
         .exit_hooks
@@ -1820,7 +1852,11 @@ pub(crate) fn execute_run_bash_action(
     let session_id = core.current_session_id();
     let turn_id = core.current_action_turn_id();
     let cwd = core.current_prompt_cwd().to_path_buf();
-    let tail_out = action.input_bool("tail_out");
+    let tail_out = action
+        .raw_input
+        .get("tail_out")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
     let edited_files = action.input_list("edit");
     let tool_call_id = action.call_id.as_str();
     execute_run_bash_with_tail(
@@ -2102,29 +2138,25 @@ pub(crate) fn execute_approved_bash_with_tail(
     let clean = command.trim();
     if let Err(reason) = validate_local_shell_request(clean) {
         let message = bash_validation_message(&reason);
-        let mut outcome = bash_finished_error_outcome(
+        let outcome = bash_finished_error_outcome(
             bash_action_not_executed(Some(clean), message),
             "InvalidInput",
             message,
         );
-        outcome.text.push_str(&format!(
-            "\napproval_id: {}\napproval_status: approved_by_user",
-            request.approval_id
-        ));
-        return outcome;
+        return outcome
+            .with_runtime_metadata("approval_id", request.approval_id.clone())
+            .with_runtime_metadata("approval_status", "approved_by_user");
     }
     if let Err(reason) = validate_local_shell_lifecycle(clean, background) {
         let message = bash_validation_message(&reason);
-        let mut outcome = bash_finished_error_outcome(
+        let outcome = bash_finished_error_outcome(
             bash_action_not_executed(Some(clean), message),
             "InvalidInput",
             message,
         );
-        outcome.text.push_str(&format!(
-            "\napproval_id: {}\napproval_status: approved_by_user",
-            request.approval_id
-        ));
-        return outcome;
+        return outcome
+            .with_runtime_metadata("approval_id", request.approval_id.clone())
+            .with_runtime_metadata("approval_status", "approved_by_user");
     }
     let mut outcome = if background {
         shell_jobs.spawn_background_outcome(clean, cwd, session_id, turn_id, tool_call_id, tail_out)
@@ -2150,12 +2182,10 @@ pub(crate) fn execute_approved_bash_with_tail(
             runtime,
         )
     };
-    outcome.text.push_str(&format!(
-        "\napproval_id: {}\napproval_status: approved_by_user",
-        request.approval_id
-    ));
     append_edited_files_note(&mut outcome.text, edited_files);
     outcome
+        .with_runtime_metadata("approval_id", request.approval_id.clone())
+        .with_runtime_metadata("approval_status", "approved_by_user")
 }
 
 pub fn execute_one_bash(command: &str, timeout_ms: i64, runtime: &mut dyn ActionRuntime) -> String {
@@ -2374,20 +2404,35 @@ fn polling_result(
         "cancelled" | "dispatch_timeout_interrupted" => ActionStatus::Cancelled,
         _ => ActionStatus::Failed,
     };
-    ActionOutcome::new(status, out).with_bash_result(BashResultEvidence {
-        stdout: stdout.to_string(),
-        stderr: stderr.to_string(),
-        exit_code: last_status,
-        signal: last_signal,
-        pid: None,
-        timed_out: false,
-        pid_kind: None,
-        error_type: match state {
-            "cancelled" | "dispatch_timeout_interrupted" => Some("Cancelled".to_string()),
-            "not_executed" => Some("InvalidInput".to_string()),
-            _ => None,
-        },
-    })
+    let mut outcome = ActionOutcome::new(status, out)
+        .with_runtime_metadata("polling_state", state)
+        .with_runtime_metadata("polling_attempts", attempts)
+        .with_runtime_metadata("polling_elapsed_ms", elapsed.as_millis() as u64)
+        .with_runtime_metadata("success_condition", "loop_cmd exit code 0")
+        .with_runtime_metadata(
+            "exit_code_semantics",
+            "exit_code belongs to the last loop_cmd execution, not automatically to the waited task",
+        )
+        .with_bash_result(BashResultEvidence {
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+            stdout_truncation: None,
+            stderr_truncation: None,
+            exit_code: last_status,
+            signal: last_signal,
+            pid: None,
+            timed_out: false,
+            pid_kind: None,
+            error_type: match state {
+                "cancelled" | "dispatch_timeout_interrupted" => Some("Cancelled".to_string()),
+                "not_executed" => Some("InvalidInput".to_string()),
+                _ => None,
+            },
+        });
+    if let Some(error) = error {
+        outcome = outcome.with_runtime_metadata("last_execution_problem", error);
+    }
+    outcome
 }
 
 fn sleep_cancelable(duration: Duration, cancelled: &mut impl FnMut() -> bool) {
@@ -2493,6 +2538,8 @@ pub struct BashCommandOutput {
     pub signal: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+    pub stdout_truncation: Option<StreamCaptureTruncation>,
+    pub stderr_truncation: Option<StreamCaptureTruncation>,
     pub output: String,
     pub error: Option<String>,
     pub job_management: Option<String>,
@@ -2529,9 +2576,11 @@ impl BashCommandOutput {
         let timed_out =
             running_error.is_some_and(|error| error.starts_with("timeout_still_running:"));
         let pid_kind = pid.map(|_| runtime_child_pid_kind().to_string());
-        ActionOutcome::new(status, text).with_bash_result(BashResultEvidence {
+        let mut outcome = ActionOutcome::new(status, text).with_bash_result(BashResultEvidence {
             stdout: self.stdout.clone(),
             stderr: self.stderr.clone(),
+            stdout_truncation: self.stdout_truncation.clone(),
+            stderr_truncation: self.stderr_truncation.clone(),
             exit_code: self.status,
             signal: self.signal,
             pid,
@@ -2542,7 +2591,11 @@ impl BashCommandOutput {
                 .as_deref()
                 .and_then(bash_error_type)
                 .map(str::to_string),
-        })
+        });
+        if let Some(containment) = self.job_management.as_deref() {
+            outcome = outcome.with_runtime_metadata("process_containment", containment);
+        }
+        outcome
     }
 
     fn render_action_result(&self, action_name: &str) -> String {
@@ -2693,15 +2746,17 @@ fn execute_one_bash_structured_with_prompt_after(
         }
     };
     join_output_drains(stdout_drain, stderr_drain);
-    let stdout = shell_output_text(&stdout);
-    let stderr = shell_output_text(&stderr);
+    let stdout = shell_output_snapshot(&stdout);
+    let stderr = shell_output_snapshot(&stderr);
     BashCommandOutput {
         command: command.to_string(),
         status: exit_status.code(),
         signal: exit_signal(&exit_status),
-        output: combined_shell_output(&stdout, &stderr),
-        stdout,
-        stderr,
+        output: combined_shell_output(&stdout.text, &stderr.text),
+        stdout: stdout.text,
+        stderr: stderr.text,
+        stdout_truncation: stdout.truncation,
+        stderr_truncation: stderr.truncation,
         error: None,
         job_management: None,
         tail_out: false,
@@ -2750,6 +2805,8 @@ fn bash_finished_error_outcome(
     ActionOutcome::failed(text).with_bash_result(BashResultEvidence {
         stdout: String::new(),
         stderr: error_message.into(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         exit_code: None,
         signal: None,
         pid: None,
@@ -2785,6 +2842,8 @@ fn bash_error(command: &str, error: &str) -> BashCommandOutput {
         signal: None,
         stdout: String::new(),
         stderr: diagnostic.clone(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output: diagnostic,
         error: Some(error.to_string()),
         job_management: None,

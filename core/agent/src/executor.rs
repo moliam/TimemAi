@@ -1,5 +1,5 @@
 use crate::capability::CapabilityRegistry;
-use crate::ActionOutcome;
+use crate::{ActionOutcome, BashResultEvidence};
 use serde_json::Value;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -233,18 +233,42 @@ fn render_command_output(
         return ActionOutcome::failed(format!(
             "Action result: {action}\nerror: terminated_by_signal\nsignal: {signal}\noutput:\n{}",
             compact_text(&combined, 4000)
-        ));
+        ))
+        .with_bash_result(BashResultEvidence {
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+            stdout_truncation: None,
+            stderr_truncation: None,
+            exit_code: None,
+            signal: Some(signal),
+            pid: None,
+            timed_out: false,
+            pid_kind: None,
+            error_type: Some("TerminatedBySignal".to_string()),
+        });
     }
     let code = status.code().unwrap_or(-1);
     let text = format!(
         "Action result: {action}\nstatus: {code}\noutput:\n{}",
         compact_text(&combined, 4000)
     );
-    if code == 0 {
+    let outcome = if code == 0 {
         ActionOutcome::completed(text)
     } else {
         ActionOutcome::failed(text)
-    }
+    };
+    outcome.with_bash_result(BashResultEvidence {
+        stdout: stdout.to_string(),
+        stderr: stderr.to_string(),
+        stdout_truncation: None,
+        stderr_truncation: None,
+        exit_code: Some(code),
+        signal: None,
+        pid: None,
+        timed_out: false,
+        pid_kind: None,
+        error_type: None,
+    })
 }
 
 fn terminate_command_process(

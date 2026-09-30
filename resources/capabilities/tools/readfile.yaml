@@ -68,7 +68,7 @@ input_schema: |
         ]
       },
       "max_bytes": {"type": "integer", "minimum": 1, "maximum": 32768, "description": "Maximum returned UTF-8 content bytes. Default and maximum 32768."},
-      "tail_out": {"type": "boolean", "description": "When true, an oversized selected range retains its ending and places a truncation notice before the content. Default: false."}
+      "tail_out": {"type": "boolean", "description": "Controls which side of an oversized selected range is retained. True retains the ending; false retains the beginning. Default: false. Truncation facts are reported in runtime metadata, not inserted into content."}
     }
   }
 example_json: |

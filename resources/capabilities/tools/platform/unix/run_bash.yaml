@@ -17,9 +17,9 @@ description: |
   files.
   `timeout_ms` is only how long Timem waits for a normal command. It is not a
   kill deadline. If the wait budget is reached, Timem returns the pid and stops
-  waiting while the process may still be running. Set `tail_out=true` to
-  retain the end of oversized command output, which is useful for compiler and
-  test summaries.
+  waiting while the process may still be running. Oversized command output
+  retains its end by default, which is useful for compiler and test summaries.
+  Set `tail_out=false` to retain its beginning.
   Accomplish your goals by intelligently choosing and organizing your commands.
   Revert tmp changes in the user's environment in a timely manner. Prefer to
   transform long sleeps into loop_cmd or `while` loops with short sleeps that
@@ -80,7 +80,7 @@ input_schema: |
       "once_timeout_ms": {"type": "integer", "minimum": 1, "description": "Per-check timeout in polling mode. Default: 5000."},
       "interval_ms": {"type": "integer", "minimum": 1, "description": "Polling interval in milliseconds. Required with loop_cmd and invalid with cmd."},
       "background": {"type": "boolean", "description": "When true, runtime continues interaction without blocking on the action, returning a pid for future reference. Use it for persistent long-running commands that should keep running across interaction rounds."},
-      "tail_out": {"type": "boolean", "description": "When true, oversized output retains its ending and places the truncation notice before the retained content. Default: false."},
+      "tail_out": {"type": "boolean", "description": "Controls which side of oversized output is retained. True retains the ending; false retains the beginning. Default: true. Truncation facts are reported in runtime metadata, not inserted into stdout or stderr."},
       "edit": {"description": "Absolute paths of every file this command creates, modifies, or writes. Accept a single path string or an array of path strings. Required whenever the command writes files (sed -i, >>, >, tee, cp/mv onto a file, patch, formatters --write, heredocs like cat > file <<'EOF', etc.); list each file once, even inside compound commands. Omit entirely for read-only commands.", "oneOf": [{"type": "string", "minLength": 1, "pattern": "\\S"}, {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1, "pattern": "\\S"}}]}
     },
     "x-required-any": [["cmd", "loop_cmd"]],

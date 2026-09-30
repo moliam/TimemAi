@@ -12043,7 +12043,8 @@ impl ModelClient for ToolGenPublishModel {
         self.calls += 1;
         let content = if self.calls == 1 {
             "<ASSISTANT><free_talk>Checking the reusable workflow.</free_talk><actions><run_bash name=\"check reusable workflow\" timeout_ms=\"5000\"><cmd>printf toolgen-host-check</cmd></run_bash></actions></ASSISTANT>".to_string()
-        } else if prompt.contains(r#"<action_result><toolgen name="publish verified draft">"#) {
+        } else if prompt.contains(r#""status":"completed""#) && prompt.contains(r#"status: ready"#)
+        {
             confirmed_xml_response("<toolgen_retrospect>Published host-tool after runtime validation.</toolgen_retrospect><final_answer>ToolGen host workflow completed.</final_answer>")
         } else {
             let marker = "Write the new tool files only in this temporary staging directory:\n";

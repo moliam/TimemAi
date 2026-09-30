@@ -191,7 +191,9 @@ pub use reminder_config::{
     TIMEM_RESOURCES_DIR_ENV,
 };
 pub use response_protocol::ResponseProtocolKind;
-use response_protocol::{ActionGroupOrder, ParsedAction, ParsedActionGroup, ParsedEnvelope};
+use response_protocol::{
+    ActionGroupOrder, ParsedAction, ParsedActionGroup, ParsedContextCompact, ParsedEnvelope,
+};
 pub use retry_policy::{
     is_model_input_too_large_error, is_retryable_model_system_error, model_retry_decision,
     ModelCallOutcome, ModelRetryDecision, ModelSystemRetryPolicy,
@@ -996,9 +998,18 @@ impl ActionStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamCaptureTruncation {
+    pub original_bytes: usize,
+    pub retained_bytes: usize,
+    pub retained: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BashResultEvidence {
     pub stdout: String,
     pub stderr: String,
+    pub stdout_truncation: Option<StreamCaptureTruncation>,
+    pub stderr_truncation: Option<StreamCaptureTruncation>,
     pub exit_code: Option<i32>,
     pub signal: Option<i32>,
     pub pid: Option<u32>,
@@ -1044,6 +1055,7 @@ pub(crate) struct ActionOutcome {
     pub status: ActionStatus,
     pub text: String,
     pub elapsed_ms: Option<u64>,
+    pub runtime_metadata: serde_json::Map<String, Value>,
     pub bash_result: Option<BashResultEvidence>,
     pub readfile_result: Option<ReadfileResultEvidence>,
     pub memmgr_result: Option<MemmgrResultEvidence>,
@@ -1056,6 +1068,7 @@ impl ActionOutcome {
             status,
             text: text.into(),
             elapsed_ms: None,
+            runtime_metadata: serde_json::Map::new(),
             bash_result: None,
             readfile_result: None,
             memmgr_result: None,
@@ -1065,6 +1078,15 @@ impl ActionOutcome {
 
     pub(crate) fn with_elapsed_ms(mut self, elapsed_ms: u64) -> Self {
         self.elapsed_ms = Some(elapsed_ms);
+        self
+    }
+
+    pub(crate) fn with_runtime_metadata(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<Value>,
+    ) -> Self {
+        self.runtime_metadata.insert(key.into(), value.into());
         self
     }
 
@@ -3976,33 +3998,29 @@ impl AgentCore {
                         ) {
                             Ok(record) => Some(record),
                             Err(err) => {
-                                slices.push((
-                                    "result_of_llm_action".to_string(),
-                                    format!(
-                                        "Action result: context_compact\nerror: scratch_offload_failed\nreason: {}",
-                                        err
-                                    ),
-                                ));
+                                let outcome =
+                                    ActionOutcome::failed(format!("scratch_offload_failed: {err}"))
+                                        .with_runtime_metadata(
+                                            "error_type",
+                                            "ScratchOffloadFailed",
+                                        );
+                                let result = self.format_context_compact_outcome(compact, &outcome);
+                                slices.push(("result_of_llm_action".to_string(), result));
                                 continue;
                             }
                         },
                         Err(err) => {
-                            slices.push((
-                                "result_of_llm_action".to_string(),
-                                format!(
-                                    "Action result: context_compact\nerror: scratch_offload_failed\nreason: {}",
-                                    err
-                                ),
-                            ));
+                            let outcome =
+                                ActionOutcome::failed(format!("scratch_offload_failed: {err}"))
+                                    .with_runtime_metadata("error_type", "ScratchOffloadFailed");
+                            let result = self.format_context_compact_outcome(compact, &outcome);
+                            slices.push(("result_of_llm_action".to_string(), result));
                             continue;
                         }
                     }
                 };
-                let mut shrink_report = self.apply_prompt_shrink(
-                    "Action result: context_compact",
-                    &compact.delta_ids,
-                    &compact.slice_ids,
-                );
+                let mut shrink_report =
+                    self.apply_prompt_shrink(&compact.delta_ids, &compact.slice_ids);
                 if !stale_delta_ids.is_empty() {
                     shrink_report.push_str(&format!(
                         "\nalready_absent_delta_ids (idempotently ignored): {}",
@@ -4010,11 +4028,18 @@ impl AgentCore {
                     ));
                 }
                 shrink_report.push_str(&format!("\ncurrent_live_delta_refs:\n{}", live_delta_refs));
-                // Only idempotent (partly stale) compacts need an explicit
-                // result note; a clean success stays silent as before.
-                if !stale_delta_ids.is_empty() {
-                    slices.push(("result_of_llm_action".to_string(), shrink_report));
+                let mut outcome = ActionOutcome::completed(shrink_report)
+                    .with_runtime_metadata("discarded_delta_ids", json!(compact.discard_delta_ids))
+                    .with_runtime_metadata("offloaded_delta_ids", json!(compact.offload_delta_ids));
+                if let Some(record) = offload_record.as_ref() {
+                    outcome = outcome.with_runtime_metadata("scratch_id", record.id.clone());
                 }
+                if !stale_delta_ids.is_empty() {
+                    outcome = outcome
+                        .with_runtime_metadata("already_absent_delta_ids", json!(stale_delta_ids));
+                }
+                let result = self.format_context_compact_outcome(compact, &outcome);
+                slices.push(("result_of_llm_action".to_string(), result));
                 let estimated_after = self.dynamic_context_token_estimate();
                 let summary_tokens = estimate_prompt_tokens(&compact.summary);
                 let compact_report = host::CoreContextCompactTopic {
@@ -4039,14 +4064,15 @@ impl AgentCore {
                 successful_compact_summaries.push(compact.summary.trim().to_string());
                 compacted_successfully = true;
             } else {
-                slices.push((
-                    "result_of_llm_action".to_string(),
-                    format!(
-                        "Action result: context_compact\nerror: invalid_prompt_refs\nmissing_ids: {}\ncurrent_live_delta_refs:\n{}",
-                        missing.join(", "),
-                        live_delta_refs
-                    ),
-                ));
+                let outcome = ActionOutcome::failed(format!(
+                    "invalid_prompt_refs\nmissing_ids: {}\ncurrent_live_delta_refs:\n{}",
+                    missing.join(", "),
+                    live_delta_refs
+                ))
+                .with_runtime_metadata("error_type", "InvalidPromptRefs")
+                .with_runtime_metadata("missing_ids", json!(missing));
+                let result = self.format_context_compact_outcome(compact, &outcome);
+                slices.push(("result_of_llm_action".to_string(), result));
             }
         }
         if compacted_successfully {
@@ -4221,11 +4247,12 @@ impl AgentCore {
                             native_calls,
                             result_lines,
                         ));
-                    } else if !result_lines.is_empty() {
-                        slices.push((
-                            "result_of_llm_action".to_string(),
-                            result_lines.join("\n\n"),
-                        ));
+                    } else {
+                        slices.extend(
+                            result_lines
+                                .into_iter()
+                                .map(|result| ("result_of_llm_action".to_string(), result)),
+                        );
                     }
                     self.append_delta_with_action_output_budget(slices);
                     let request = pending.request.clone();
@@ -4233,11 +4260,13 @@ impl AgentCore {
                     return CoreStep::NeedsUserApproval { request };
                 }
             };
-            if !result_lines.is_empty() && native_calls.is_empty() {
-                slices.push((
-                    "result_of_llm_action".to_string(),
-                    result_lines.join("\n\n"),
-                ));
+            if native_calls.is_empty() {
+                slices.extend(
+                    result_lines
+                        .iter()
+                        .cloned()
+                        .map(|result| ("result_of_llm_action".to_string(), result)),
+                );
             }
             if let Some(stop_summary) = self.take_turn_finished_summary() {
                 if let Some(memo) = self.active_memo.clone() {
@@ -4268,7 +4297,7 @@ impl AgentCore {
                                         call_id: call.id.clone(),
                                         name: call.name.clone(),
                                         content: result.clone(),
-                                        is_error: result.contains("\nerror:"),
+                                        is_error: Self::action_result_is_error(result),
                                     })
                                     .collect(),
                                 calls: native_calls,
@@ -4301,7 +4330,7 @@ impl AgentCore {
                                 call_id: call.id.clone(),
                                 name: call.name.clone(),
                                 content: result.clone(),
-                                is_error: result.contains("\nerror:"),
+                                is_error: Self::action_result_is_error(result),
                             })
                             .collect(),
                         calls: native_calls,
@@ -4334,7 +4363,7 @@ impl AgentCore {
                             call_id: call.id.clone(),
                             name: call.name.clone(),
                             content: result.clone(),
-                            is_error: result.contains("\nerror:"),
+                            is_error: Self::action_result_is_error(result),
                         })
                         .collect(),
                     calls: native_calls,
@@ -4540,7 +4569,7 @@ impl AgentCore {
                 NativeToolResult {
                     call_id: call.id.clone(),
                     name: call.name.clone(),
-                    is_error: content.contains("\nerror:"),
+                    is_error: Self::action_result_is_error(&content),
                     content,
                 }
             })
@@ -4877,13 +4906,7 @@ impl AgentCore {
                 }
             }
         } else {
-            ActionOutcome::failed(format!(
-                "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: denied_by_user\nreason: {}",
-                pending.request.action,
-                pending.approved_action.command(),
-                pending.request.approval_id,
-                pending.request.reason
-            ))
+            self.denied_approval_outcome(&pending)
         };
         self.record_pending_approval_audit(&pending, approved, &outcome.text);
         self.emit_action_finish_topic(
@@ -4897,7 +4920,7 @@ impl AgentCore {
             },
             runtime,
         );
-        let prompt_result = self.format_pending_action_result(&pending, &outcome.text);
+        let prompt_result = self.format_pending_action_result(&pending, &outcome);
         if !self.complete_pending_native_exchange(vec![prompt_result.clone()]) {
             self.append_delta_with_action_output_budget(vec![(
                 "result_of_llm_action".to_string(),
@@ -4916,14 +4939,11 @@ impl AgentCore {
         }
     }
 
-    fn denied_approval_result(&self, pending: &PendingApproval) -> String {
-        format!(
-            "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: denied_by_user\nreason: {}",
-            pending.request.action,
-            pending.approved_action.command(),
-            pending.request.approval_id,
-            pending.request.reason
-        )
+    fn denied_approval_outcome(&self, pending: &PendingApproval) -> ActionOutcome {
+        ActionOutcome::failed("approval denied by user")
+            .with_runtime_metadata("approval_status", "denied_by_user")
+            .with_runtime_metadata("approval_id", pending.request.approval_id.clone())
+            .with_runtime_metadata("approval_reason", pending.request.reason.clone())
     }
 
     #[allow(clippy::result_large_err)]
@@ -5038,9 +5058,9 @@ impl AgentCore {
                 self.bash_approval_mode = BashApprovalMode::Approve;
             }
         } else {
-            let result = self.denied_approval_result(&pending);
-            self.record_pending_approval_audit(&pending, false, &result);
-            let prompt_result = self.format_pending_action_result(&pending, &result);
+            let outcome = self.denied_approval_outcome(&pending);
+            self.record_pending_approval_audit(&pending, false, &outcome.text);
+            let prompt_result = self.format_pending_action_result(&pending, &outcome);
             denied_results.push((current_index, prompt_result));
         }
 
@@ -5083,10 +5103,12 @@ impl AgentCore {
                 if let Some((_, _, _, results)) = self.pending_native_exchange.as_mut() {
                     results.extend(partial);
                 } else {
-                    self.append_delta_with_action_output_budget(vec![(
-                        "result_of_llm_action".to_string(),
-                        partial.join("\n\n"),
-                    )]);
+                    self.append_delta_with_action_output_budget(
+                        partial
+                            .into_iter()
+                            .map(|result| ("result_of_llm_action".to_string(), result))
+                            .collect(),
+                    );
                 }
                 return CoreStep::NeedsUserApproval {
                     request: pending.request,
@@ -5095,10 +5117,12 @@ impl AgentCore {
         };
 
         if !self.complete_pending_native_exchange(result_lines.clone()) {
-            self.append_delta_with_action_output_budget(vec![(
-                "result_of_llm_action".to_string(),
-                result_lines.join("\n\n"),
-            )]);
+            self.append_delta_with_action_output_budget(
+                result_lines
+                    .into_iter()
+                    .map(|result| ("result_of_llm_action".to_string(), result))
+                    .collect(),
+            );
         }
         self.append_in_turn_shrink_review_if_needed();
         if self.remaining_rounds() == 0 {
@@ -5441,7 +5465,7 @@ impl AgentCore {
         let chunks = slice_texts
             .into_iter()
             .flat_map(|(prompt_type, text)| {
-                split_text_for_prompt_slices(&text, PROMPT_SLICE_TEXT_LIMIT)
+                split_prompt_component_text(&prompt_type, &text, PROMPT_SLICE_TEXT_LIMIT)
                     .into_iter()
                     .map(move |chunk| (prompt_type.clone(), chunk))
                     .collect::<Vec<_>>()
@@ -5603,10 +5627,12 @@ Runtime tool_call ids:",
     ) -> Option<String> {
         let kind = kind.into();
         let mut content = content.into();
-        if role.prompt_type_hint(&kind) == "result_of_llm_action" {
+        if role.prompt_type_hint(&kind) == "result_of_llm_action"
+            && !prompt_render::is_structured_action_result_envelope(&content)
+        {
             // Defensive ingress for legacy/internal producers that do not originate
-            // from a typed action. Normal tool execution has already selected its
-            // per-call retention policy before reaching this point.
+            // from a typed action. Structured action envelopes have already applied
+            // their per-call model budget and must remain valid JSON end to end.
             content = tool_result_gate::gate(&content, tool_result_gate::Retention::Head);
         }
         // Explicit resume is a header-only user behavior, not synthetic text.
@@ -5810,17 +5836,21 @@ Runtime tool_call ids:",
                 let prompt_type = component.prompt_type();
                 let component_id = component.id;
                 let slice_time_ms = component.created_at_ms;
-                split_text_for_prompt_slices(&component.content, PROMPT_SLICE_TEXT_LIMIT)
-                    .into_iter()
-                    .map(move |chunk| {
-                        (
-                            component_id.clone(),
-                            prompt_type.clone(),
-                            slice_time_ms,
-                            chunk,
-                        )
-                    })
-                    .collect::<Vec<_>>()
+                split_prompt_component_text(
+                    &prompt_type,
+                    &component.content,
+                    PROMPT_SLICE_TEXT_LIMIT,
+                )
+                .into_iter()
+                .map(move |chunk| {
+                    (
+                        component_id.clone(),
+                        prompt_type.clone(),
+                        slice_time_ms,
+                        chunk,
+                    )
+                })
+                .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
         let slice_count = chunks.len();
@@ -6062,127 +6092,413 @@ Runtime tool_call ids:",
         notes.join("\n")
     }
 
-    fn format_action_outcome_body(
+    fn action_runtime_notes(
         &mut self,
         action: &ParsedAction,
         outcome: &ActionOutcome,
-    ) -> String {
-        // First-touch reminders are runtime notes about the model's live prompt
-        // context rather than tool output, so they are attached outside the
-        // tool-result truncation gate and always reach the model in full.
-        let first_touch_note = if action.action == "readfile" {
+    ) -> Vec<String> {
+        let notes = if action.action == "readfile" {
             self.readfile_first_touch_notes(outcome)
         } else if shell_exec::is_local_shell_action(&action.action) {
             self.local_shell_first_touch_notes(action)
         } else {
             String::new()
         };
-        let body = self.format_action_outcome_body_inner(action, outcome);
-        if first_touch_note.is_empty() {
-            body
-        } else {
-            format!("{first_touch_note}\n{body}")
+        notes
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn truncation_report(fragment: &tool_result_gate::RetainedFragment) -> Option<Value> {
+        fragment.truncated.then(|| {
+            json!({
+                "truncated": true,
+                "retained": fragment.retained,
+                "original_bytes": fragment.original_bytes,
+                "retained_bytes": fragment.retained_bytes,
+            })
+        })
+    }
+
+    fn capture_truncation_report(truncation: &StreamCaptureTruncation) -> Value {
+        json!({
+            "truncated": true,
+            "retained": truncation.retained,
+            "original_bytes": truncation.original_bytes,
+            "retained_bytes": truncation.retained_bytes,
+        })
+    }
+
+    fn insert_truncation_stage(
+        truncation: &mut serde_json::Map<String, Value>,
+        field: &str,
+        stage: &str,
+        report: Value,
+    ) {
+        let stages = truncation
+            .entry(field.to_string())
+            .or_insert_with(|| json!({}));
+        if let Some(stages) = stages.as_object_mut() {
+            stages.insert(stage.to_string(), report);
         }
     }
 
-    fn format_action_outcome_body_inner(
+    fn insert_sparse_metadata(
+        metadata: &mut serde_json::Map<String, Value>,
+        key: impl Into<String>,
+        value: Value,
+    ) {
+        let meaningful = match &value {
+            Value::Null => false,
+            Value::Bool(value) => *value,
+            Value::String(value) => !value.is_empty(),
+            Value::Array(value) => !value.is_empty(),
+            Value::Object(value) => !value.is_empty(),
+            Value::Number(_) => true,
+        };
+        if meaningful {
+            metadata.insert(key.into(), value);
+        }
+    }
+
+    fn structured_tool_output(
         &self,
         action: &ParsedAction,
         outcome: &ActionOutcome,
-    ) -> String {
-        let retention = tool_result_gate::Retention::from_tail_out(action.input_bool("tail_out"));
-        if self.response_protocol == ResponseProtocolKind::Xml {
-            let output_time_ms = now_ms();
-            if shell_exec::is_local_shell_action(&action.action) {
-                if let Some(bash_result) = outcome.bash_result.as_ref() {
-                    return prompt_render::render_xml_bash_result_with_retention(
-                        action.name.as_deref(),
-                        outcome.status,
-                        bash_result,
-                        output_time_ms,
-                        retention,
+        output_budget: usize,
+    ) -> (Value, serde_json::Map<String, Value>) {
+        let tail_out = action
+            .raw_input
+            .get("tail_out")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| shell_exec::is_local_shell_action(&action.action));
+        let retention = tool_result_gate::Retention::from_tail_out(tail_out);
+        let output_budget = output_budget.min(prompt_render::MAX_ACTION_RESULT_PROMPT_BYTES);
+        if shell_exec::is_local_shell_action(&action.action) {
+            if let Some(result) = outcome.bash_result.as_ref() {
+                let stdout_budget = if result.stderr.is_empty() {
+                    output_budget
+                } else {
+                    output_budget / 2
+                };
+                let stderr_budget = if result.stdout.is_empty() {
+                    output_budget
+                } else {
+                    output_budget.saturating_sub(stdout_budget)
+                };
+                let stdout = tool_result_gate::retain_fragment(
+                    result.stdout.trim_end(),
+                    stdout_budget,
+                    retention,
+                );
+                let stderr = tool_result_gate::retain_fragment(
+                    result.stderr.trim_end(),
+                    stderr_budget,
+                    retention,
+                );
+                let mut truncation = serde_json::Map::new();
+                if let Some(report) = Self::truncation_report(&stdout) {
+                    Self::insert_truncation_stage(
+                        &mut truncation,
+                        "stdout",
+                        "model_result_budget",
+                        report,
                     );
                 }
-            }
-            if action.action == "readfile" {
-                if let Some(readfile_result) = outcome.readfile_result.as_ref() {
-                    return prompt_render::render_xml_readfile_result_with_retention(
-                        action.name.as_deref(),
-                        outcome.status,
-                        readfile_result,
-                        output_time_ms,
-                        retention,
+                if let Some(report) = Self::truncation_report(&stderr) {
+                    Self::insert_truncation_stage(
+                        &mut truncation,
+                        "stderr",
+                        "model_result_budget",
+                        report,
                     );
                 }
-            }
-            if action.action == "memmgr" {
-                if let Some(memmgr_result) = outcome.memmgr_result.as_ref() {
-                    return prompt_render::render_xml_memmgr_result_with_retention(
-                        action.name.as_deref(),
-                        outcome.status,
-                        memmgr_result,
-                        output_time_ms,
-                        retention,
-                    );
+                let mut tool_output = serde_json::Map::new();
+                if !stdout.text.is_empty() {
+                    tool_output.insert("stdout".to_string(), json!(stdout.text));
                 }
-            }
-            if action.action == "self_tool" {
-                if let Some(self_tool_result) = outcome.self_tool_result.as_ref() {
-                    return prompt_render::render_xml_self_tool_result_with_retention(
-                        action.name.as_deref(),
-                        outcome.status,
-                        self_tool_result,
-                        output_time_ms,
-                        retention,
-                    );
+                if !stderr.text.is_empty() {
+                    tool_output.insert("stderr".to_string(), json!(stderr.text));
                 }
+                return (Value::Object(tool_output), truncation);
             }
-            prompt_render::render_xml_action_result_with_retention(
-                &action.action,
-                action.name.as_deref(),
-                &outcome.text,
-                now_ms(),
-                retention,
-            )
-        } else {
-            tool_result_gate::gate(&outcome.text, retention)
         }
+        let content = if action.action == "readfile" {
+            outcome
+                .readfile_result
+                .as_ref()
+                .map(|result| result.content.as_str())
+        } else if action.action == "memmgr" {
+            outcome
+                .memmgr_result
+                .as_ref()
+                .map(|result| result.content.as_str())
+        } else if action.action == "self_tool" {
+            outcome
+                .self_tool_result
+                .as_ref()
+                .map(|result| result.content.as_str())
+        } else {
+            None
+        }
+        .unwrap_or(outcome.text.as_str());
+        let content =
+            tool_result_gate::retain_fragment(content.trim_end(), output_budget, retention);
+        let mut truncation = serde_json::Map::new();
+        if let Some(report) = Self::truncation_report(&content) {
+            Self::insert_truncation_stage(
+                &mut truncation,
+                "content",
+                "model_result_budget",
+                report,
+            );
+        }
+        let mut tool_output = serde_json::Map::new();
+        if !content.text.is_empty() {
+            tool_output.insert("content".to_string(), json!(content.text));
+        }
+        (Value::Object(tool_output), truncation)
+    }
+
+    fn action_runtime_metadata(
+        &self,
+        outcome: &ActionOutcome,
+        runtime_notes: Vec<String>,
+    ) -> Value {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("status".to_string(), json!(outcome.status.as_str()));
+        if let Some(elapsed_ms) = outcome.elapsed_ms {
+            metadata.insert("elapsed_ms".to_string(), json!(elapsed_ms));
+        }
+        if !runtime_notes.is_empty() {
+            let notes = runtime_notes
+                .into_iter()
+                .map(|note| {
+                    tool_result_gate::retain_fragment(
+                        &note,
+                        2 * 1024,
+                        tool_result_gate::Retention::Head,
+                    )
+                    .text
+                })
+                .collect::<Vec<_>>();
+            metadata.insert("notes".to_string(), json!(notes));
+        }
+        for (key, value) in &outcome.runtime_metadata {
+            if !metadata.contains_key(key) {
+                Self::insert_sparse_metadata(&mut metadata, key.clone(), value.clone());
+            }
+        }
+        let mut truncation = serde_json::Map::new();
+        if let Some(result) = outcome.bash_result.as_ref() {
+            if let Some(value) = result.exit_code {
+                metadata.insert("exit_code".to_string(), json!(value));
+            }
+            if let Some(value) = result.signal {
+                metadata.insert("signal".to_string(), json!(value));
+            }
+            if let Some(value) = result.pid {
+                metadata.insert("pid".to_string(), json!(value));
+            }
+            if result.timed_out {
+                metadata.insert("timed_out".to_string(), json!(true));
+            }
+            if let Some(value) = &result.pid_kind {
+                Self::insert_sparse_metadata(&mut metadata, "pid_kind", json!(value));
+            }
+            if let Some(value) = &result.error_type {
+                Self::insert_sparse_metadata(&mut metadata, "error_type", json!(value));
+            }
+            if let Some(value) = &result.stdout_truncation {
+                Self::insert_truncation_stage(
+                    &mut truncation,
+                    "stdout",
+                    "execution_capture",
+                    Self::capture_truncation_report(value),
+                );
+            }
+            if let Some(value) = &result.stderr_truncation {
+                Self::insert_truncation_stage(
+                    &mut truncation,
+                    "stderr",
+                    "execution_capture",
+                    Self::capture_truncation_report(value),
+                );
+            }
+        } else if let Some(result) = outcome.readfile_result.as_ref() {
+            Self::insert_sparse_metadata(&mut metadata, "path", json!(result.path));
+            if let Some(value) = &result.matcher {
+                Self::insert_sparse_metadata(&mut metadata, "matcher", json!(value));
+            }
+            if let Some(value) = result.start_line {
+                metadata.insert("start_line".to_string(), json!(value));
+            }
+            if let Some(value) = result.end_line {
+                metadata.insert("end_line".to_string(), json!(value));
+            }
+            if let Some(value) = result.total_lines {
+                metadata.insert("total_lines".to_string(), json!(value));
+            }
+            if let Some(value) = &result.encoding {
+                Self::insert_sparse_metadata(&mut metadata, "encoding", json!(value));
+            }
+            if let Some(value) = result.file_bytes {
+                metadata.insert("file_bytes".to_string(), json!(value));
+            }
+            if let Some(value) = result.content_bytes {
+                metadata.insert("content_bytes".to_string(), json!(value));
+            }
+            if result.limited == Some(true) {
+                Self::insert_truncation_stage(
+                    &mut truncation,
+                    "content",
+                    "tool_selection",
+                    json!({
+                        "truncated": true,
+                        "retained": if result.tail_out == Some(true) { "tail" } else { "head" },
+                        "retained_bytes": result.content_bytes,
+                    }),
+                );
+            }
+            if result.tail_out == Some(true) {
+                metadata.insert("tail_out".to_string(), json!(true));
+            }
+            if let Some(value) = &result.error_type {
+                Self::insert_sparse_metadata(&mut metadata, "error_type", json!(value));
+            }
+        } else if let Some(result) = outcome.memmgr_result.as_ref() {
+            Self::insert_sparse_metadata(&mut metadata, "memory_type", json!(result.memory_type));
+            Self::insert_sparse_metadata(&mut metadata, "operation", json!(result.op));
+            if let Some(value) = &result.error_type {
+                Self::insert_sparse_metadata(&mut metadata, "error_type", json!(value));
+            }
+        } else if let Some(result) = outcome.self_tool_result.as_ref() {
+            Self::insert_sparse_metadata(&mut metadata, "self_type", json!(result.self_type));
+            if let Some(value) = &result.cwd {
+                Self::insert_sparse_metadata(&mut metadata, "cwd", json!(value));
+            }
+            if let Some(value) = &result.error_type {
+                Self::insert_sparse_metadata(&mut metadata, "error_type", json!(value));
+            }
+        }
+        if !truncation.is_empty() {
+            metadata.insert("truncation".to_string(), Value::Object(truncation));
+        }
+        Value::Object(metadata)
+    }
+
+    fn merge_truncation(
+        runtime_metadata: &mut serde_json::Map<String, Value>,
+        additional: serde_json::Map<String, Value>,
+    ) {
+        if additional.is_empty() {
+            return;
+        }
+        let truncation = runtime_metadata
+            .entry("truncation".to_string())
+            .or_insert_with(|| json!({}));
+        let Some(fields) = truncation.as_object_mut() else {
+            return;
+        };
+        for (field, stages) in additional {
+            let current = fields.entry(field).or_insert_with(|| json!({}));
+            if let (Some(current), Some(stages)) = (current.as_object_mut(), stages.as_object()) {
+                for (stage, report) in stages {
+                    current.insert(stage.clone(), report.clone());
+                }
+            }
+        }
+    }
+
+    fn render_action_result_envelope(
+        &self,
+        action: &ParsedAction,
+        outcome: &ActionOutcome,
+        runtime_metadata: &Value,
+        output_budget: usize,
+    ) -> String {
+        let (tool_output, truncation) = self.structured_tool_output(action, outcome, output_budget);
+        let mut runtime_metadata = runtime_metadata.as_object().cloned().unwrap_or_default();
+        Self::merge_truncation(&mut runtime_metadata, truncation);
+        serde_json::to_string(&json!({
+            "action_result": {
+                "tool_call_id": action.call_id,
+                "runtime_metadata": runtime_metadata,
+                "tool_output": tool_output,
+            }
+        }))
+        .unwrap_or_else(|_| {
+            "{\"action_result\":{\"runtime_metadata\":{\"status\":\"serialization_failed\"}}}"
+                .to_string()
+        })
     }
 
     fn format_action_outcome(&mut self, action: &ParsedAction, outcome: &ActionOutcome) -> String {
-        let body = self.format_action_outcome_body(action, outcome);
-        let body = match outcome.elapsed_ms {
-            Some(elapsed_ms) => {
-                format!(
-                    "{body}\nTime_elapsed: {}",
-                    format_time_elapsed_hms(elapsed_ms)
-                )
+        let runtime_notes = self.action_runtime_notes(action, outcome);
+        let runtime_metadata = self.action_runtime_metadata(outcome, runtime_notes);
+        let max_bytes = tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES;
+        let mut low = 0usize;
+        let mut high = max_bytes;
+        let mut best = self.render_action_result_envelope(action, outcome, &runtime_metadata, 0);
+        while low <= high {
+            let candidate_budget = low + (high - low) / 2;
+            let candidate = self.render_action_result_envelope(
+                action,
+                outcome,
+                &runtime_metadata,
+                candidate_budget,
+            );
+            if candidate.len() <= max_bytes {
+                best = candidate;
+                low = candidate_budget.saturating_add(1);
+            } else if candidate_budget == 0 {
+                break;
+            } else {
+                high = candidate_budget - 1;
             }
-            None => body,
-        };
-        if self.response_protocol == ResponseProtocolKind::Xml {
-            format!("<tool_call_id>{}</tool_call_id>{body}", action.call_id)
-        } else {
-            format!(
-                "tool_call_id: {}
-{body}",
-                action.call_id
-            )
         }
+        best
     }
 
-    fn format_action_result(&mut self, action: &ParsedAction, result: &str) -> String {
-        self.format_action_outcome(action, &ActionOutcome::completed(result))
+    fn format_context_compact_outcome(
+        &mut self,
+        compact: &ParsedContextCompact,
+        outcome: &ActionOutcome,
+    ) -> String {
+        let action = ParsedAction {
+            action: "context_compact".to_string(),
+            name: None,
+            call_id: compact.call_id.clone(),
+            raw_input: json!({}),
+        };
+        self.format_action_outcome(&action, outcome)
     }
 
-    fn format_pending_action_result(&mut self, pending: &PendingApproval, result: &str) -> String {
+    fn action_result_is_error(content: &str) -> bool {
+        let Ok(envelope) = serde_json::from_str::<Value>(content) else {
+            return true;
+        };
+        !matches!(
+            envelope["action_result"]["runtime_metadata"]["status"].as_str(),
+            Some("completed" | "background_finished")
+        )
+    }
+
+    fn format_pending_action_result(
+        &mut self,
+        pending: &PendingApproval,
+        outcome: &ActionOutcome,
+    ) -> String {
         let action = ParsedAction {
             action: pending.request.action.clone(),
             name: pending.action_name.clone(),
             call_id: pending.action_call_id.clone(),
             raw_input: json!({ "tail_out": pending.approved_action.tail_out() }),
         };
-        self.format_action_result(&action, result)
+        self.format_action_outcome(&action, outcome)
     }
 
     #[allow(clippy::result_large_err)]
@@ -6409,7 +6725,11 @@ Runtime tool_call ids:",
                     &turn_id,
                     action.call_id.as_str(),
                     is_regular_command,
-                    action.input_bool("tail_out"),
+                    action
+                        .raw_input
+                        .get("tail_out")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
                     &mut runtime,
                 )
             };
@@ -7011,7 +7331,6 @@ Runtime tool_call ids:",
 
     pub(crate) fn apply_prompt_shrink(
         &mut self,
-        action_result_header: &str,
         delta_ids: &[String],
         slice_ids: &[String],
     ) -> String {
@@ -7089,12 +7408,8 @@ Runtime tool_call ids:",
             missing.join(", ")
         };
         format!(
-            "{}\nremoved_delta_count: {}\nhidden_slice_count: {}\nshrunk_tokens_estimate: {}\nmissing_ids: {}",
-            action_result_header,
-            removed_delta_count,
-            hidden_slice_count,
-            shrunk_tokens_estimate,
-            missing_text
+            "removed_delta_count: {}\nhidden_slice_count: {}\nshrunk_tokens_estimate: {}\nmissing_ids: {}",
+            removed_delta_count, hidden_slice_count, shrunk_tokens_estimate, missing_text
         )
     }
 
@@ -8113,6 +8428,16 @@ fn validate_memory_sql(sql: &str) -> Result<(), String> {
         return Err("only_declared_tables_are_allowed".to_string());
     }
     Ok(())
+}
+
+fn split_prompt_component_text(prompt_type: &str, text: &str, limit: usize) -> Vec<String> {
+    if prompt_type == "result_of_llm_action"
+        && prompt_render::is_structured_action_result_envelope(text)
+    {
+        vec![text.to_string()]
+    } else {
+        split_text_for_prompt_slices(text, limit)
+    }
 }
 
 fn split_text_for_prompt_slices(text: &str, limit: usize) -> Vec<String> {

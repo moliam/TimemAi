@@ -1693,9 +1693,7 @@ impl ModelClient for ToolGenWorkflowModel {
     ) -> Result<LlmResponse, String> {
         let (phase, content) = if prompt.contains("Follow the ToolGen repository standard") {
             assert!(prompt.contains("[TOOL_GEN_TASK]"));
-            assert!(
-                prompt.contains(r#"<self_tool_result task="inspect runtime parameters" type="params" status="finished">"#)
-            );
+            assert!(prompt.contains(r#""self_type":"params""#));
             assert!(prompt.contains(
                 "<ASSISTANT><actions><self_tool name=\"inspect runtime parameters\" type=\"params\"/></actions></ASSISTANT>"
             ));
@@ -1704,7 +1702,7 @@ impl ModelClient for ToolGenWorkflowModel {
             assert!(!prompt.contains("ID0_TOOLGEN"));
             assert!(!prompt.contains("Referenced completed turn id:"));
             assert!(!prompt.contains("Completed task result:"));
-            if prompt.contains(r#"<action_result><toolgen name="publish validated tool draft">"#) {
+            if prompt.contains(r#"status: ready"#) {
                 (
                     "toolgen_finish",
                     confirmed_xml_response("<ASSISTANT><toolgen_retrospect>Created reusable-line-counter; runtime validation returned status: ready.</toolgen_retrospect><final_answer>ToolGen review complete.</final_answer></ASSISTANT>"),
@@ -1743,8 +1741,7 @@ impl ModelClient for ToolGenWorkflowModel {
                     format!("<ASSISTANT><free_talk>Writing and validating the reusable line counter.</free_talk><actions><toolgen name=\"publish validated tool draft\" op=\"publish\"><draft_path>{draft}</draft_path></toolgen></actions></ASSISTANT>"),
                 )
             }
-        } else if prompt.contains(r#"<self_tool_result task="inspect runtime parameters" type="params" status="finished">"#)
-        {
+        } else if prompt.contains(r#""self_type":"params""#) {
             (
                 "main_finish",
                 confirmed_xml_response(
@@ -2029,8 +2026,7 @@ impl ModelClient for LongToolGenWorkflowModel {
         };
         let content = if call <= 11 {
             format!("<ASSISTANT><free_talk>ToolGen round {call}.</free_talk><actions><self_tool name=\"inspect runtime parameters\" type=\"params\"/></actions></ASSISTANT>")
-        } else if prompt.contains(r#"<action_result><toolgen name="publish validated tool draft">"#)
-        {
+        } else if prompt.contains(r#"status: ready"#) {
             confirmed_xml_response("<ASSISTANT><toolgen_retrospect>Created long-running-tool after normal runtime validation.</toolgen_retrospect><final_answer>Extended ToolGen workflow completed.</final_answer></ASSISTANT>")
         } else {
             let marker = "Write the new tool files only in this temporary staging directory:\n";
@@ -2172,8 +2168,7 @@ impl ModelClient for FailingToolGenModel {
         let content = if prompt.contains("Follow the ToolGen repository standard") {
             *self.child_calls.lock().unwrap() += 1;
             "not xml".to_string()
-        } else if prompt.contains(r#"<self_tool_result task="inspect runtime parameters" type="params" status="finished">"#)
-        {
+        } else if prompt.contains(r#""self_type":"params""#) {
             confirmed_xml_response("<ASSISTANT><final_answer>Main task survives ToolGen failure.</final_answer></ASSISTANT>")
         } else {
             "<ASSISTANT><actions><self_tool name=\"inspect runtime parameters\" type=\"params\"/></actions></ASSISTANT>".to_string()
@@ -5083,9 +5078,9 @@ fn update_runtime_config_changes_worker_model_service_config() {
             .count(),
         1
     );
-    assert!(prompt.contains("model: \"updated-model\""));
-    assert!(prompt.contains("base_url: \"http://new-url/v1\""));
-    assert!(prompt.contains("max_llm_output_tokens: \"16000\""));
+    assert!(prompt.contains(r#"model: \"updated-model\""#));
+    assert!(prompt.contains(r#"base_url: \"http://new-url/v1\""#));
+    assert!(prompt.contains(r#"max_llm_output_tokens: \"16000\""#));
     assert!(!prompt.contains("updated-secret"));
 
     let _ = worker.shutdown();

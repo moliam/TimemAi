@@ -65,15 +65,87 @@ fn oversized_readfile_action_result_has_common_prompt_truncation_notice() {
         other => panic!("expected readfile action result, got {other:?}"),
     };
 
-    assert!(prompt.contains("Action result: readfile"), "{prompt}");
+    assert!(!action_results(&prompt).is_empty(), "{prompt}");
+    let results = action_results(&prompt);
     assert!(
-        prompt.contains("words truncated. Generate more actions if necessary !!!"),
+        results.iter().any(|result| {
+            result["action_result"]["runtime_metadata"]["truncation"]["content"]
+                .get("tool_selection")
+                .is_some()
+        }),
         "{prompt}"
     );
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "words truncated. Generate more actions if necessary !!!"
+    ));
 }
 
 fn count_occurrences(haystack: &str, needle: &str) -> usize {
     haystack.match_indices(needle).count()
+}
+
+fn action_results(prompt: &str) -> Vec<Value> {
+    prompt
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.starts_with(r#"{"action_result":"#) {
+                serde_json::from_str(line).ok()
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn has_runtime_metadata(prompt: &str, key: &str, expected: Value) -> bool {
+    action_results(prompt).iter().any(|envelope| {
+        envelope["action_result"]["runtime_metadata"]
+            .get(key)
+            .is_some_and(|value| value == &expected)
+    })
+}
+
+fn action_result_pid(prompt: &str) -> Option<u64> {
+    action_results(prompt)
+        .iter()
+        .find_map(|envelope| envelope["action_result"]["runtime_metadata"]["pid"].as_u64())
+}
+
+fn tool_outputs(prompt: &str, key: &str) -> Vec<String> {
+    action_results(prompt)
+        .iter()
+        .filter_map(|envelope| {
+            envelope["action_result"]["tool_output"][key]
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn has_tool_output_containing(prompt: &str, key: &str, expected: &str) -> bool {
+    tool_outputs(prompt, key)
+        .iter()
+        .any(|value| value.contains(expected))
+}
+
+fn tool_contents(prompt: &str) -> Vec<String> {
+    tool_outputs(prompt, "content")
+}
+
+fn tool_content_field(prompt: &str, field: &str) -> Option<String> {
+    let prefix = format!("{field}: ");
+    tool_contents(prompt).iter().rev().find_map(|content| {
+        content
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix).map(str::to_string))
+    })
+}
+
+fn has_action_status(prompt: &str, expected: &str) -> bool {
+    has_runtime_metadata(prompt, "status", json!(expected))
 }
 
 fn readfile_first_touch_read(core: &mut AgentCore, path: &str) -> String {
@@ -206,11 +278,19 @@ fn run_bash_edit_stringified_array_emits_clean_first_touch_paths() {
         prompt.contains(&format!("first time to touch dir {expected_dir}")),
         "{prompt}"
     );
-    // No bracketed/quoted garbage from the stringified wrapper remains.
-    assert!(
-        !prompt.contains("[\""),
-        "bracketed garbage leaked into first-touch notes: {prompt}"
-    );
+    // JSON history legitimately contains the original stringified array; only
+    // runtime first-touch notes must use clean paths.
+    let notes = action_results(&prompt)
+        .into_iter()
+        .flat_map(|result| {
+            result["action_result"]["runtime_metadata"]["notes"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|note| note.as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    assert!(notes.iter().all(|note| !note.contains("[\"")), "{notes:?}");
 }
 
 #[test]
@@ -279,9 +359,18 @@ fn readfile_first_touch_note_survives_truncated_tool_result() {
         "{prompt}"
     );
     assert!(
-        prompt.contains("words truncated. Generate more actions if necessary !!!"),
+        action_results(&prompt).iter().any(|result| {
+            result["action_result"]["runtime_metadata"]["truncation"]["content"]
+                .get("tool_selection")
+                .is_some()
+        }),
         "{prompt}"
     );
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "words truncated. Generate more actions if necessary !!!"
+    ));
 }
 
 #[test]
@@ -1182,10 +1271,12 @@ fn extracted_fields_replay_keeps_the_complete_accepted_xml_response() {
     assert!(!replay_delta.contains(r#"<ASSISTANT name="Session Assistant">"#));
     assert_eq!(replay_delta.matches("<ASSISTANT>").count(), 1);
     assert_eq!(replay_delta.matches("&lt;ASSISTANT&gt;").count(), 0);
-    assert!(prompt.contains(
-        r#"<self_tool_result task="inspect runtime parameters" type="params" status="finished">"#
-    ));
-    assert!(!prompt.contains("The following are results of the actions generated in response:"));
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("params")),
+        "{prompt}"
+    );
+    assert_eq!(action_results(&prompt).len(), 1, "{prompt}");
+    assert!(!prompt.contains("<self_tool_result"));
     assert!(!prompt.contains("newly initiated actions"));
 }
 
@@ -1219,42 +1310,23 @@ fn xml_action_results_preserve_names_for_sequential_and_parallel_actions() {
         other => panic!("expected named XML action results, got {other:?}"),
     };
 
-    assert!(
-        prompt.contains(
-            r#"<self_tool_result task="inspect runtime paths" type="path" status="finished">"#
-        ),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains(r#"<self_tool_result task="inspect runtime parameters" type="params" status="finished">"#),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains(r#"<self_tool_result task="inspect current directory" type="cwd" cwd=""#),
-        "{prompt}"
-    );
+    let results = action_results(&prompt);
+    assert_eq!(results.len(), 3, "{prompt}");
     assert_eq!(
-        prompt.matches("<self_tool_result ").count(),
-        3,
-        "every sequential/parallel self_tool action must have one specialized result: {prompt}"
+        results
+            .iter()
+            .filter(|result| result["action_result"]["runtime_metadata"]
+                .get("self_type")
+                .is_some())
+            .count(),
+        3
     );
-    assert_eq!(
-        prompt.matches("<<<CONTENT_").count(),
-        3,
-        "every successful self_tool result must have one content boundary: {prompt}"
-    );
-    assert_eq!(
-        prompt.matches("</self_tool_result>").count(),
-        3,
-        "every specialized result must have a closing root tag: {prompt}"
-    );
-    assert!(!prompt.contains("<output_id_"));
-    assert_eq!(
-        core.build_next_prompt(),
-        prompt,
-        "re-rendering unchanged context must preserve output IDs"
-    );
-    assert!(!prompt.contains("The following are results of the actions generated in response:"));
+    assert!(results.iter().all(|result| {
+        result["action_result"].get("tool_call_id").is_some()
+            && result["action_result"]["tool_output"]["content"].is_string()
+    }));
+    assert!(!prompt.contains("<self_tool_result"));
+    assert_eq!(core.build_next_prompt(), prompt);
 }
 
 #[test]
@@ -1292,16 +1364,15 @@ fn xml_readfile_result_reports_file_name_matcher_and_line_range_before_content()
         other => panic!("expected readfile action result, got {other:?}"),
     };
 
-    assert!(
-        prompt.contains(r#"<readfile_result task="read matched notes" path=""#),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains(r#"matcher="START ... END" lines="2-4" total_lines="5""#)
-            && prompt.contains("<<<CONTENT_")
-            && prompt.contains("START\nmiddle\nEND"),
-        "{prompt}"
-    );
+    let results = action_results(&prompt);
+    assert_eq!(results.len(), 1, "{prompt}");
+    let result = &results[0]["action_result"];
+    assert_eq!(result["runtime_metadata"]["matcher"], "START ... END");
+    assert_eq!(result["runtime_metadata"]["start_line"], 2);
+    assert_eq!(result["runtime_metadata"]["end_line"], 4);
+    assert_eq!(result["runtime_metadata"]["total_lines"], 5);
+    assert_eq!(result["tool_output"]["content"], "START\nmiddle\nEND");
+    assert!(!prompt.contains("<readfile_result"));
 }
 
 #[cfg(unix)]
@@ -1332,35 +1403,13 @@ fn xml_timeout_still_running_uses_orthogonal_lifecycle_evidence() {
         other => panic!("expected XML timed-out running Bash result, got {other:?}"),
     };
 
-    let result_start = prompt
-        .find(r#"<bash_result task="wait briefly for managed task" status="running" pid=""#)
-        .expect("running Bash result with managed pid");
-    let result = &prompt[result_start..];
-    assert!(result.contains(r#"timed_out="true""#), "{prompt}");
-    #[cfg(unix)]
-    assert!(
-        result.contains(r#"pid_kind="runtime_child_process_group""#),
-        "{prompt}"
-    );
-    #[cfg(not(unix))]
-    assert!(
-        result.contains(r#"pid_kind="runtime_child_process""#),
-        "{prompt}"
-    );
-    assert!(
-        !result
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .contains(r#"status="timeout""#),
-        "{prompt}"
-    );
-
-    let pid = result
-        .split_once(r#" pid=""#)
-        .and_then(|(_, rest)| rest.split('"').next())
-        .expect("managed pid")
-        .to_string();
+    let results = action_results(&prompt);
+    let result = results.last().expect("running Bash result");
+    let metadata = &result["action_result"]["runtime_metadata"];
+    assert_eq!(metadata["status"], "background_running");
+    assert_eq!(metadata["timed_out"], true);
+    assert_eq!(metadata["pid_kind"], "runtime_child_process_group");
+    let pid = metadata["pid"].as_u64().expect("managed pid").to_string();
 
     let cleanup = format!(
         r#"<ASSISTANT><actions><run_bash name="stop managed task" timeout_ms="1000"><cmd>kill {pid}</cmd></run_bash></actions></ASSISTANT>"#
@@ -1376,10 +1425,10 @@ fn xml_timeout_still_running_uses_orthogonal_lifecycle_evidence() {
         other => panic!("expected cleanup action result, got {other:?}"),
     };
     assert!(
-        cleanup_prompt
-            .contains(r#"<bash_result task="stop managed task" status="finished" exit_code="0">"#),
+        has_runtime_metadata(&cleanup_prompt, "exit_code", json!(0)),
         "{cleanup_prompt}"
     );
+    assert!(!cleanup_prompt.contains("<bash_result"));
 }
 
 #[cfg(unix)]
@@ -1413,53 +1462,23 @@ fn xml_parallel_run_bash_results_use_action_names_without_repeating_commands() {
         other => panic!("expected XML parallel bash results, got {other:?}"),
     };
 
-    let first_tag =
-        r#"<bash_result task="output first concurrent marker" status="finished" exit_code="0">"#;
-    let second_tag =
-        r#"<bash_result task="output second concurrent marker" status="finished" exit_code="0">"#;
-    let first = prompt.find(first_tag).expect("first named result");
-    let second = prompt.find(second_tag).expect("second named result");
-
-    assert!(
-        first < second,
-        "parallel results must retain declared order"
-    );
-    let action_results = &prompt[first..];
-    assert!(action_results.contains("FIRST_XML_MARKER"), "{prompt}");
-    assert!(action_results.contains("SECOND_XML_MARKER"), "{prompt}");
-    assert!(!action_results.contains("Command:"), "{prompt}");
-    assert!(
-        !action_results.contains("printf FIRST_XML_MARKER"),
-        "{prompt}"
-    );
-    assert!(
-        !action_results.contains("printf SECOND_XML_MARKER"),
-        "{prompt}"
-    );
-
-    let ids = action_results
-        .match_indices("<<<OUTPUT_")
-        .filter_map(|(start, _)| {
-            let suffix = &action_results[start + "<<<OUTPUT_".len()..];
-            Some(suffix.get(..4)?.to_string())
-        })
-        .collect::<Vec<_>>();
+    let results = action_results(&prompt);
+    assert_eq!(results.len(), 2, "{prompt}");
     assert_eq!(
-        ids.len(),
-        2,
-        "each Bash result must have one output boundary: {prompt}"
+        results[0]["action_result"]["tool_output"]["stdout"],
+        "FIRST_XML_MARKER"
     );
-    assert_ne!(
-        ids[0], ids[1],
-        "parallel Bash results must have independent IDs"
+    assert_eq!(
+        results[1]["action_result"]["tool_output"]["stdout"],
+        "SECOND_XML_MARKER"
     );
-    for id in ids {
-        assert_eq!(
-            action_results.matches(&format!("OUTPUT_{id}")).count(),
-            2,
-            "each ID must appear in one opening and one closing marker: {prompt}"
-        );
-    }
+    assert!(results.iter().all(|result| {
+        result["action_result"]["runtime_metadata"]["exit_code"] == json!(0)
+            && result["action_result"].get("action").is_none()
+            && result["action_result"].get("name").is_none()
+            && result["action_result"].get("input").is_none()
+    }));
+    assert!(!prompt.contains("<bash_result"));
 }
 
 #[cfg(unix)]
@@ -1491,10 +1510,15 @@ fn xml_denied_approval_result_preserves_action_name() {
         other => panic!("expected denied approval result, got {other:?}"),
     };
     assert!(
-        prompt.contains(r#"<action_result><run_bash name="remove missing file">"#),
+        has_runtime_metadata(&prompt, "approval_status", json!("denied_by_user")),
         "{prompt}"
     );
-    assert!(prompt.contains("status: denied_by_user"), "{prompt}");
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "approval denied by user"
+    ));
+    assert!(!prompt.contains("<action_result><run_bash"));
 }
 
 #[test]
@@ -1527,7 +1551,7 @@ fn raw_assistant_replay_is_included_before_action_results_for_working_turns() {
         .unwrap();
     assert!(assistant < raw);
     assert!(raw < system_result);
-    assert!(prompt.contains("Action result: self_tool"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(!prompt.contains("## TIMEM_ASSISTANT\n\n需要读取自身信息。"));
 }
 
@@ -1760,7 +1784,7 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
     };
     assert_eq!(max_rounds, 1);
     let limited_prompt = core.render_prompt();
-    assert!(limited_prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&limited_prompt).is_empty());
 
     let audit_file = tmp_dir("round_limit_continue_audit").join("audit.json");
     let resolution = core.resolve_round_limit_with_audit(
@@ -1809,7 +1833,7 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
         panic!("unexpected step: {step:?}");
     };
     assert_eq!(rounds_remaining, UNLIMITED_ROUND_BUDGET);
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
 }
 
 #[test]
@@ -2095,10 +2119,10 @@ fn runtime_host_configuration_sync_is_core_owned() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains(&format!(
-        "Action result: {}",
-        agent_core::os::local_shell_tool_name()
-    )));
+    assert!(
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
+        "{prompt}"
+    );
     assert!(prompt.contains("configured"));
 }
 
@@ -2559,7 +2583,7 @@ fn missing_durable_score_does_not_block_valid_actions() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("测试代号是 ALPHA-42"));
     assert!(!prompt.contains("response is not protocol compliant"));
 }
@@ -2603,8 +2627,17 @@ fn prompt_discard_can_remove_whole_delta_by_delta_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(!prompt.contains("Action result: context_compact"));
-    assert!(!prompt.contains("removed_delta_count:"));
+    assert!(has_action_status(&prompt, "completed"), "{prompt}");
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "removed_delta_count:"
+    ));
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "Action result: context_compact"
+    ));
     assert!(!prompt.contains("REMOVE_THIS_DELTA"));
     assert!(prompt.contains("context compacted successfully."));
     assert!(!prompt.contains("Context compact summary replacing"));
@@ -2780,8 +2813,17 @@ fn response_context_compact_hides_refs_and_appends_summary_slice() {
     assert!(prompt.contains("旧任务已经完成，只保留 compact 后的测试摘要"));
     assert!(prompt.contains("context compacted successfully."));
     assert!(prompt.contains("CWD: "));
-    assert!(!prompt.contains("Action result: context_compact"));
-    assert!(!prompt.contains("removed_delta_count:"));
+    assert!(has_action_status(&prompt, "completed"), "{prompt}");
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "removed_delta_count:"
+    ));
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "Action result: context_compact"
+    ));
     assert!(!prompt.contains("OLD_DYNAMIC_CONTEXT_TO_COMPACT"));
     assert!(!prompt.contains("Active MCP capabilities after context compaction"));
 }
@@ -2867,8 +2909,17 @@ fn prompt_discard_can_remove_visible_delta_by_delta_id() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("context compacted successfully."));
-    assert!(!prompt.contains("Action result: context_compact"));
-    assert!(!prompt.contains("removed_delta_count:"));
+    assert!(has_action_status(&prompt, "completed"), "{prompt}");
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "removed_delta_count:"
+    ));
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "Action result: context_compact"
+    ));
     assert!(!prompt.contains(&format!("[BEGIN DELTA]\ndelta_id: {}", delta_id)));
     assert!(!prompt.contains("SLICE_ONE_ONLY"));
 
@@ -3113,8 +3164,20 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
     };
 
     assert!(next_prompt.contains("context compacted successfully."));
-    assert!(!next_prompt.contains("Action result: context_compact"));
-    assert!(!next_prompt.contains("removed_delta_count"));
+    assert!(
+        has_action_status(&next_prompt, "completed"),
+        "{next_prompt}"
+    );
+    assert!(has_tool_output_containing(
+        &next_prompt,
+        "content",
+        "removed_delta_count"
+    ));
+    assert!(!has_tool_output_containing(
+        &next_prompt,
+        "content",
+        "Action result: context_compact"
+    ));
     assert!(!next_prompt.contains("mode=force_shrink_required"));
 
     let final_step = core.apply_model_response(LlmResponse {
@@ -3190,7 +3253,7 @@ fn query_memory_action_returns_action_result_delta() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("2099-06-12"));
 }
 
@@ -3216,9 +3279,15 @@ fn memmgr_durable_sql_returns_action_result_delta() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("type: durable"));
-    assert!(prompt.contains("op: sql"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "memory_type", json!("durable")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "operation", json!("sql")),
+        "{prompt}"
+    );
     assert!(prompt.contains("2099-06-12"));
 }
 
@@ -3247,14 +3316,14 @@ fn canonical_tools_accept_json_object_args() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("测试代号是 ALPHA-42"));
-    assert!(prompt.contains(&format!(
-        "Action result: {}",
-        agent_core::os::local_shell_tool_name()
-    )));
+    assert!(
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
+        "{prompt}"
+    );
     assert!(prompt.contains("kv-ok"));
-    assert!(prompt.contains("Action result: self_tool"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("TimemAi"));
 }
 
@@ -3358,28 +3427,61 @@ fn builtin_tools_end_to_end_parse_validate_and_execute_manifest_args() {
         other => panic!("expected action results, got {other:?}"),
     };
 
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("type: durable"));
-    assert!(prompt.contains("op: insert"));
-    assert!(prompt.contains("stored: builtin e2e fact value"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "memory_type", json!("durable")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "operation", json!("upsert")),
+        "{prompt}"
+    );
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "stored: builtin e2e fact value"
+    ));
     assert!(prompt.contains("builtin e2e fact value"));
-    assert!(prompt.contains("type: raw_chat"));
-    assert!(prompt.contains("BUILTIN-RAW-42"));
-    assert!(prompt.contains("label: builtin e2e note"));
-    assert!(prompt.contains("Action result: capmgr"));
+    assert!(
+        has_runtime_metadata(&prompt, "memory_type", json!("raw_chat")),
+        "{prompt}"
+    );
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "BUILTIN-RAW-42"
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "label: builtin e2e note"
+    ));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("op: list"));
     assert!(prompt.contains("id=run_bash"));
     assert!(prompt.contains("op: load"));
     assert!(prompt.contains("#### `run_bash`"));
-    assert!(prompt.contains("Action result: self_tool"));
-    assert!(prompt.contains("type: path"));
-    assert!(prompt.contains("type: params"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("path")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("params")),
+        "{prompt}"
+    );
     assert!(prompt.contains("TimemAi"));
-    assert!(prompt.contains("Action result: run_bash"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("builtin-normal"));
-    assert!(prompt.contains("Polling state: finished"));
-    assert!(prompt.contains("now keeps running in background"));
-    assert!(prompt.contains("pid="));
+    assert!(
+        has_runtime_metadata(&prompt, "polling_state", json!("finished")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "status", json!("background_running")),
+        "{prompt}"
+    );
+    assert!(action_result_pid(&prompt).is_some(), "{prompt}");
     std::thread::sleep(std::time::Duration::from_millis(250));
 
     let second_response = json!({
@@ -3400,7 +3502,7 @@ fn builtin_tools_end_to_end_parse_validate_and_execute_manifest_args() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected run_bash result, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: run_bash"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("checked"));
     assert!(prompt.contains("RUNNING_JOB_UPDATE"));
     assert!(prompt.contains("background job"));
@@ -3472,11 +3574,11 @@ fn protocol_examples_cover_normal_and_corner_flows() {
         other => panic!("expected action results, got {other:?}"),
     };
     assert!(prompt.contains("并行查询记忆和本地文件数量。"));
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains(&format!(
-        "Action result: {}",
-        agent_core::os::local_shell_tool_name()
-    )));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
+        "{prompt}"
+    );
 
     let _ = core.begin_turn("最终确认发布包", None);
     let final_turn = match core.apply_model_response(LlmResponse {
@@ -3508,7 +3610,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected memory update action result, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("Project-Alpha"));
 
     let _ = core.begin_turn("读取受保护路径", None);
@@ -3524,8 +3626,11 @@ fn protocol_examples_cover_normal_and_corner_flows() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected self_tool action result, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: self_tool"));
-    assert!(prompt.contains("type: path"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("path")),
+        "{prompt}"
+    );
 
     let compact_request_prompt = match core.begin_turn("上下文收缩", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -3550,7 +3655,12 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     };
     assert!(prompt.contains("context compacted successfully."));
     assert!(prompt.contains("CWD: "));
-    assert!(!prompt.contains("Action result: context_compact"));
+    assert!(has_action_status(&prompt, "completed"), "{prompt}");
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "Action result: context_compact"
+    ));
 
     let _ = core.begin_turn("读取错误日志", None);
     let prompt = match core.apply_model_response(LlmResponse {
@@ -3565,10 +3675,10 @@ fn protocol_examples_cover_normal_and_corner_flows() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected bash action result, got {other:?}"),
     };
-    assert!(prompt.contains(&format!(
-        "Action result: {}",
-        agent_core::os::local_shell_tool_name()
-    )));
+    assert!(
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
+        "{prompt}"
+    );
     assert!(prompt.contains("ERROR"));
 
     let _ = core.begin_turn("最小动作", None);
@@ -3717,11 +3827,25 @@ fn memmgr_raw_chat_search_reads_persisted_chat_records() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("type: raw_chat"));
-    assert!(prompt.contains("op: search"));
-    assert!(prompt.contains("chat_records"));
-    assert!(prompt.contains("测试物品 BLUE-17"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "memory_type", json!("raw_chat")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "operation", json!("search")),
+        "{prompt}"
+    );
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "chat_records"
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "测试物品 BLUE-17"
+    ));
 }
 
 #[test]
@@ -4050,7 +4174,7 @@ fn status_working_requires_working_still_action_and_keeps_progress_separate() {
     };
     assert!(!prompt.contains("prompt_type: llm_progress"));
     assert!(!prompt.contains("progress:\n正在查询。"));
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(!prompt.contains("intent: Find evidence."));
 }
 
@@ -4428,10 +4552,17 @@ fn action_input_decodes_common_json_escape_sequences() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("stored: tab:\tend\nline2\r\nunicode:你好"));
-    assert!(prompt.contains("path:C:\\Users\\me\\file"));
-    assert!(prompt.contains("quote:\"ok\" slash:/ regex:\\d+"));
+    assert!(!action_results(&prompt).is_empty());
+    let content = tool_contents(&prompt).join("\n");
+    assert!(
+        content.contains("stored: tab:\tend\nline2\r\nunicode:你好"),
+        "{content:?}"
+    );
+    assert!(content.contains("path:C:\\Users\\me\\file"), "{content:?}");
+    assert!(
+        content.contains("quote:\"ok\" slash:/ regex:\\d+"),
+        "{content:?}"
+    );
 }
 
 #[test]
@@ -4564,9 +4695,15 @@ fn memmgr_durable_sql_lists_recent_records() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(!prompt.contains("response is not protocol compliant"));
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("type: durable"));
-    assert!(prompt.contains("op: sql"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "memory_type", json!("durable")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "operation", json!("sql")),
+        "{prompt}"
+    );
     assert!(prompt.contains("新测试记忆"));
     assert!(!prompt.contains("旧测试记忆"));
 }
@@ -4604,7 +4741,15 @@ fn xml_memmgr_durable_sql_lists_recent_records_without_repair() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(!prompt.contains("response is not protocol compliant"));
-    assert!(prompt.contains(r#"<memmgr_result task="list recent durable memories" type="durable" op="sql" status="finished">"#));
+    assert!(
+        has_runtime_metadata(&prompt, "memory_type", json!("durable")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "operation", json!("sql")),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("<memmgr_result"));
     assert!(prompt.contains("第二条 durable 记录"));
     assert!(prompt.contains("第一条 durable 记录"));
 }
@@ -4633,7 +4778,7 @@ fn progress_and_working_still_action_continue_with_implicit_continue_note() {
     };
     assert!(!prompt.contains("prompt_type: llm_progress"));
     assert!(!prompt.contains("上轮回复没有写 status"));
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
 }
 
 #[test]
@@ -4653,7 +4798,7 @@ fn next_action_without_intent_uses_action_name_fallback() {
     };
     assert!(!prompt.contains("response is not protocol compliant"));
     assert!(!prompt.contains("intent_required"));
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
 }
 
 #[test]
@@ -4693,7 +4838,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("label: release checkpoint"));
     assert!(prompt.contains("type: notes"));
     assert!(prompt.contains("content_preview: continue this task later"));
@@ -4720,7 +4865,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("found: true"));
     assert!(prompt.contains("continue this task later"));
 
@@ -4735,7 +4880,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("deleted: true"));
     assert!(!fs::read_to_string(core.scratch_file())
         .unwrap()
@@ -4761,11 +4906,25 @@ fn memmgr_scratch_write_and_read_notes() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("type: scratch"));
-    assert!(prompt.contains("op: write"));
-    assert!(prompt.contains("label: release checkpoint"));
-    assert!(prompt.contains("content_preview: continue this task later"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "memory_type", json!("scratch")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "operation", json!("write")),
+        "{prompt}"
+    );
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "label: release checkpoint"
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "content_preview: continue this task later"
+    ));
     let stored = fs::read_to_string(core.scratch_file()).unwrap();
     let scratch_id = stored
         .lines()
@@ -4789,10 +4948,21 @@ fn memmgr_scratch_write_and_read_notes() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("op: read"));
-    assert!(prompt.contains("found: true"));
-    assert!(prompt.contains("continue this task later"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "operation", json!("read")),
+        "{prompt}"
+    );
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "found: true"
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "continue this task later"
+    ));
 }
 
 #[test]
@@ -4876,7 +5046,7 @@ fn scratch_search_empty_text_lists_recent_notes_with_limit() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("scratch_new"));
     assert!(prompt.contains("label=new label"));
     assert!(prompt.contains("new checkpoint"));
@@ -4985,7 +5155,7 @@ fn scratch_delete_missing_id_is_non_destructive() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("deleted: false"));
     assert!(fs::read_to_string(core.scratch_file())
         .unwrap()
@@ -5030,7 +5200,7 @@ fn json_context_compact_runs_before_later_action_in_same_response() {
 
     assert!(!prompt.contains("OLD JSON CONTEXT"));
     assert!(prompt.contains("KEEP JSON ACTIVE STATE"));
-    assert!(prompt.contains("Action result: self_tool"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("CWD:"));
 }
 
@@ -5064,8 +5234,17 @@ fn json_failed_context_compact_blocks_later_action() {
         other => panic!("expected failed compact barrier to continue, got {other:?}"),
     };
 
-    assert!(prompt.contains("error: invalid_prompt_refs"));
-    assert!(!prompt.contains("Action result: self_tool"));
+    assert!(has_runtime_metadata(
+        &prompt,
+        "error_type",
+        json!("InvalidPromptRefs")
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "invalid_prompt_refs"
+    ));
+    assert!(!has_runtime_metadata(&prompt, "self_type", json!("cwd")));
     assert!(prompt.contains("KEEP JSON OLD STATE"));
 }
 
@@ -5102,7 +5281,12 @@ fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
     };
     assert!(prompt.contains("context compacted successfully."));
     assert!(prompt.contains("CWD: "));
-    assert!(!prompt.contains("Action result: context_compact"));
+    assert!(has_action_status(&prompt, "completed"), "{prompt}");
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "Action result: context_compact"
+    ));
     assert!(!prompt.contains("scratch_id:"));
 
     let stored = fs::read_to_string(core.scratch_file()).unwrap();
@@ -5133,7 +5317,7 @@ fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("found: true"));
     assert!(prompt.contains("large investigation context that should move to scratch"));
 }
@@ -5157,14 +5341,25 @@ fn context_compact_offload_rejects_invalid_prompt_refs_without_writing() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: context_compact"));
-    assert!(prompt.contains("error: invalid_prompt_refs"));
-    assert!(prompt.contains("missing_ids: prompt_0"));
-    assert!(prompt.contains("current_live_delta_refs:"));
+    let results = action_results(&prompt);
+    assert_eq!(results.len(), 1, "{prompt}");
+    let result = &results[0]["action_result"];
+    assert_eq!(result["runtime_metadata"]["status"], "failed");
+    assert_eq!(
+        result["runtime_metadata"]["error_type"],
+        "InvalidPromptRefs"
+    );
+    assert_eq!(
+        result["runtime_metadata"]["missing_ids"],
+        json!(["prompt_0"])
+    );
+    assert!(result["tool_output"]["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("current_live_delta_refs:")));
     assert!(prompt.contains("checking compact refs"));
     assert!(prompt.contains("bad refs should not write scratch"));
     let assistant = prompt.find("## TIMEM_ASSISTANT").unwrap();
-    let action_result = prompt.find("Action result: context_compact").unwrap();
+    let action_result = prompt.find(r#"{"action_result":"#).unwrap();
     assert!(assistant < action_result);
     assert!(!prompt.contains("## TIMEM_ASSISTANT (context compaction summary)"));
     assert!(!core.scratch_file().exists());
@@ -5237,7 +5432,7 @@ fn query_memory_does_not_expand_semantic_aliases() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("results: none"));
     assert!(!prompt.contains("测试代号是 ALPHA-42"));
 }
@@ -5289,7 +5484,8 @@ fn memory_lookup_context_triggers_runtime_precheck_before_model_reply() {
     };
     assert!(prompt.contains("## USER"));
     assert!(prompt.contains("## RUNTIME"));
-    assert!(prompt.contains("Action result: runtime_memory_precheck"));
+    assert!(action_results(&prompt).is_empty());
+    assert!(prompt.contains("runtime_memory_precheck"));
     assert!(prompt.contains("lexical_results: none"));
     assert!(prompt.contains("recent_memory_evidence"));
     assert!(prompt.contains("测试代号是 ALPHA-42"));
@@ -5335,7 +5531,7 @@ fn sql_read_action_returns_rows() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("content=测试代号是 ALPHA-42"));
     assert!(prompt.contains("created_at_ms=11"));
 }
@@ -5363,7 +5559,7 @@ fn durable_sql_empty_filter_reports_total_rows() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("results: none"));
     assert!(prompt.contains("durable_memory_total_rows: 2"));
 }
@@ -5418,7 +5614,7 @@ fn sql_read_allows_with_cte_reads() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("content=测试代号是 ALPHA-42"));
     assert!(prompt.contains("created_at_ms=11"));
 }
@@ -5445,7 +5641,7 @@ fn sql_read_rejects_write_statement() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("error: read_only_sql_required"));
 }
 
@@ -5472,7 +5668,7 @@ fn memory_sql_query_uses_action_limit_without_sql_limit() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("content=第一条记忆"));
     assert!(!prompt.contains("content=第二条记忆"));
 }
@@ -5512,7 +5708,7 @@ fn memory_schema_action_returns_native_schema_contract() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains(
         "memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)"
     ));
@@ -5536,7 +5732,7 @@ fn memory_sql_query_allows_pragma_table_info() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("name=content"));
     assert!(prompt.contains("name=created_at_ms"));
 }
@@ -5560,7 +5756,7 @@ fn memory_sql_query_rejects_chat_messages_table_info() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("error: only_declared_tables_are_allowed"));
 }
 
@@ -5679,7 +5875,7 @@ fn memory_sql_prepare_error_exposes_sqlite_reason_to_model() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(!prompt.contains("response is not protocol compliant"));
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("sql_prepare_failed"));
     assert!(prompt.contains("no such column: key"));
     assert!(!prompt.contains("用户的秘密：ABC=123456"));
@@ -5711,7 +5907,7 @@ fn chat_history_query_reads_persisted_chat_records() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("chat_records"));
     assert!(prompt.contains("source=chat_history"));
     assert!(prompt.contains("shell_old"));
@@ -5745,7 +5941,7 @@ fn chat_history_query_reads_legacy_jsonl_audit_records() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("source=chat_history"));
     assert!(prompt.contains("legacy_shell"));
     assert!(prompt.contains("测试物品 GREEN-29"));
@@ -5774,7 +5970,7 @@ fn chat_history_query_keeps_current_prompt_delta_fallback() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("测试物品 BLUE-17"));
     assert!(prompt.contains("current_prompt_deltas"));
     assert!(prompt.contains("source=prompt_delta"));
@@ -5832,7 +6028,7 @@ fn memory_sql_query_rejects_chat_messages_reads() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("error: only_declared_tables_are_allowed"));
 }
 
@@ -5885,7 +6081,7 @@ fn memory_sql_query_accepts_common_llm_param_shapes() {
             CoreStep::NeedModel { prompt, .. } => prompt,
             other => panic!("{case_name} unexpected step: {other:?}"),
         };
-        assert!(prompt.contains("Action result: memmgr"), "{case_name}");
+        assert!(!action_results(&prompt).is_empty(), "{case_name}");
         assert!(prompt.contains("results: none"), "{case_name}: {prompt}");
         assert!(!prompt.contains("error:"), "{case_name}: {prompt}");
     }
@@ -5906,7 +6102,7 @@ fn memory_sql_query_rejects_raw_update_sql() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("error: read_only_sql_required"));
 }
 
@@ -5937,7 +6133,7 @@ fn memory_sql_query_rejects_chat_history_delete_sql() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("error: read_only_sql_required"));
     assert_eq!(fs::read_to_string(&audit_file).unwrap(), before);
 }
@@ -5970,7 +6166,7 @@ fn chat_history_delete_removes_matching_turn_from_audit_log() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("deleted_count: 1"));
     let stored = fs::read_to_string(&audit_file).unwrap();
     assert!(!stored.contains("删除目标"));
@@ -5994,7 +6190,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("id: user_name"));
     let git_available = Command::new("git")
         .arg("--version")
@@ -6034,8 +6230,11 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("op: update"));
-    assert!(prompt.contains("version: 2"));
+    assert!(
+        has_runtime_metadata(&prompt, "operation", json!("update")),
+        "{prompt}"
+    );
+    assert!(has_tool_output_containing(&prompt, "content", "version: 2"));
     let stored = fs::read_to_string(core.memory_file()).unwrap();
     assert!(stored.contains("测试代号是 BETA-43"));
     assert!(!stored.contains("测试代号是 ALPHA-42\""));
@@ -6054,7 +6253,10 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("op: delete"));
+    assert!(
+        has_runtime_metadata(&prompt, "operation", json!("delete")),
+        "{prompt}"
+    );
     assert!(!fs::read_to_string(core.memory_file())
         .unwrap()
         .contains("user_name"));
@@ -6160,7 +6362,10 @@ fn memory_update_concurrent_same_version_conflicts_allow_only_one_winner() {
         .collect::<Vec<_>>();
     let success_count = prompts
         .iter()
-        .filter(|prompt| prompt.contains("op: update") && prompt.contains("version: 2"))
+        .filter(|prompt| {
+            has_runtime_metadata(prompt, "operation", json!("update"))
+                && has_tool_output_containing(prompt, "content", "version: 2")
+        })
         .count();
     let conflict_count = prompts
         .iter()
@@ -6378,10 +6583,16 @@ fn run_bash_allows_readonly_count_command() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: run_bash"));
-    assert!(prompt.contains("Exit code: 0"));
-    assert!(prompt.contains("Return:"));
-    assert!(!prompt.contains("Output:"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
+        "{prompt}"
+    );
+    assert!(
+        has_tool_output_containing(&prompt, "stdout", "1"),
+        "{prompt}"
+    );
+    assert!(!has_tool_output_containing(&prompt, "stdout", "Return:"));
 }
 
 #[test]
@@ -6508,8 +6719,11 @@ fn run_bash_background_job_enters_running_list_and_later_emits_exit_update() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("now keeps running in background"));
-    assert!(prompt.contains("pid="));
+    assert!(
+        has_runtime_metadata(&prompt, "status", json!("background_running")),
+        "{prompt}"
+    );
+    assert!(action_result_pid(&prompt).is_some(), "{prompt}");
     assert!(!prompt.contains("#### jobmanager"));
 
     std::thread::sleep(std::time::Duration::from_millis(250));
@@ -6614,10 +6828,7 @@ fn still_running_table_survives_discard_of_the_original_action_delta() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(
-        prompt.contains("now keeps running in background"),
-        "{prompt}"
-    );
+    assert!(has_action_status(&prompt, "background_running"), "{prompt}");
     assert!(!prompt.contains("#### jobmanager"), "{prompt}");
     let running_delta_id = field_values(&prompt, "delta_id")
         .into_iter()
@@ -6625,12 +6836,7 @@ fn still_running_table_survives_discard_of_the_original_action_delta() {
         .expect("running delta id");
     assert_ne!(running_delta_id, user_delta_id);
     #[cfg(unix)]
-    let pid = prompt
-        .lines()
-        .find_map(|line| line.strip_prefix("pid="))
-        .and_then(|rest| rest.split(',').next())
-        .expect("pid")
-        .to_string();
+    let pid = action_result_pid(&prompt).expect("pid").to_string();
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -6651,10 +6857,12 @@ fn still_running_table_survives_discard_of_the_original_action_delta() {
         prompt.contains("context compacted successfully."),
         "{prompt}"
     );
-    assert!(
-        !prompt.contains("Action result: context_compact"),
-        "{prompt}"
-    );
+    assert!(has_action_status(&prompt, "completed"), "{prompt}");
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "Action result: context_compact"
+    ));
     assert!(prompt.contains("#### jobmanager"), "{prompt}");
     assert!(prompt.contains("created by tool_call id"), "{prompt}");
     assert!(
@@ -6706,17 +6914,9 @@ fn still_running_table_is_universal_even_when_compaction_targets_an_unrelated_de
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(
-        prompt.contains("now keeps running in background"),
-        "{prompt}"
-    );
+    assert!(has_action_status(&prompt, "background_running"), "{prompt}");
     #[cfg(unix)]
-    let pid = prompt
-        .lines()
-        .find_map(|line| line.strip_prefix("pid="))
-        .and_then(|rest| rest.split(',').next())
-        .expect("pid")
-        .to_string();
+    let pid = action_result_pid(&prompt).expect("pid").to_string();
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -6737,10 +6937,12 @@ fn still_running_table_is_universal_even_when_compaction_targets_an_unrelated_de
         prompt.contains("context compacted successfully."),
         "{prompt}"
     );
-    assert!(
-        !prompt.contains("Action result: context_compact"),
-        "{prompt}"
-    );
+    assert!(has_action_status(&prompt, "completed"), "{prompt}");
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "Action result: context_compact"
+    ));
     assert!(prompt.contains("#### jobmanager"), "{prompt}");
 
     #[cfg(unix)]
@@ -6784,12 +6986,7 @@ fn still_running_table_survives_offload_of_the_original_action_delta() {
         .last()
         .expect("running delta id");
     #[cfg(unix)]
-    let pid = prompt
-        .lines()
-        .find_map(|line| line.strip_prefix("pid="))
-        .and_then(|rest| rest.split(',').next())
-        .expect("pid")
-        .to_string();
+    let pid = action_result_pid(&prompt).expect("pid").to_string();
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -6864,12 +7061,7 @@ fn still_running_table_survives_xml_style_compaction_of_the_original_action_delt
         .last()
         .expect("running delta id");
     #[cfg(unix)]
-    let pid = prompt
-        .lines()
-        .find_map(|line| line.strip_prefix("pid="))
-        .and_then(|rest| rest.split(',').next())
-        .expect("pid")
-        .to_string();
+    let pid = action_result_pid(&prompt).expect("pid").to_string();
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -6890,10 +7082,12 @@ fn still_running_table_survives_xml_style_compaction_of_the_original_action_delt
         prompt.contains("context compacted successfully."),
         "{prompt}"
     );
-    assert!(
-        !prompt.contains("Action result: context_compact"),
-        "{prompt}"
-    );
+    assert!(has_action_status(&prompt, "completed"), "{prompt}");
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "Action result: context_compact"
+    ));
     assert!(prompt.contains("#### jobmanager"), "{prompt}");
     assert!(prompt.contains("created by tool_call id"), "{prompt}");
     assert!(
@@ -6954,13 +7148,12 @@ fn timeout_job_is_reported_running_and_model_can_kill_by_pid() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("timeout, but is still running"), "{prompt}");
-    let pid = prompt
-        .lines()
-        .find_map(|line| line.strip_prefix("pid="))
-        .and_then(|rest| rest.split(',').next())
-        .expect("pid")
-        .to_string();
+    assert!(has_action_status(&prompt, "background_running"), "{prompt}");
+    assert!(
+        has_runtime_metadata(&prompt, "timed_out", json!(true)),
+        "{prompt}"
+    );
+    let pid = action_result_pid(&prompt).expect("pid").to_string();
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -6976,7 +7169,7 @@ fn timeout_job_is_reported_running_and_model_can_kill_by_pid() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: run_bash"));
+    assert!(!action_results(&prompt).is_empty());
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while core
@@ -7100,7 +7293,10 @@ fn run_bash_requires_approval_for_mutating_commands() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("status: denied_by_user"));
+    assert!(
+        has_runtime_metadata(&prompt, "approval_status", json!("denied_by_user")),
+        "{prompt}"
+    );
     assert!(prompt.contains(&request.approval_id));
     let turn_audit_doc = read_api_audit_doc(&api_audit_stream_path(&turn_audit)).unwrap();
     let events = turn_audit_doc["events"].as_array().unwrap();
@@ -7187,7 +7383,10 @@ fn run_bash_always_allow_promotes_remaining_parallel_approvals() {
     };
     assert!(prompt.contains("rm missing_one"));
     assert!(prompt.contains("rm missing_two"));
-    assert!(prompt.contains("approved_by_user"));
+    assert!(
+        has_runtime_metadata(&prompt, "approval_status", json!("approved_by_user")),
+        "{prompt}"
+    );
 }
 
 #[cfg(unix)]
@@ -7211,8 +7410,11 @@ fn run_bash_allows_compound_local_write_commands() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: run_bash"));
-    assert!(prompt.contains("Exit code: 0"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
+        "{prompt}"
+    );
     assert!(prompt.contains("ok"));
     let _ = fs::remove_dir_all("target/timem_test");
     let _ = fs::remove_dir("target");
@@ -7278,9 +7480,15 @@ fn run_bash_executes_shell_syntax_after_user_approval() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Exit code: 0"));
+    assert!(
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
+        "{prompt}"
+    );
     assert!(prompt.contains("Ok"));
-    assert!(prompt.contains("approval_status: approved_by_user"));
+    assert!(
+        has_runtime_metadata(&prompt, "approval_status", json!("approved_by_user")),
+        "{prompt}"
+    );
     assert!(!prompt.contains("shell_expansion_not_allowed"));
 }
 
@@ -7307,8 +7515,14 @@ fn run_bash_child_sigsegv_isolated_and_turn_can_still_finish() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step after child signal: {other:?}"),
     };
-    assert!(prompt.contains("process signal"), "{prompt}");
-    assert!(prompt.contains("Signal: 11"), "{prompt}");
+    assert!(
+        has_runtime_metadata(&prompt, "status", json!("failed")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "signal", json!(11)),
+        "{prompt}"
+    );
 
     let final_turn = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -7393,12 +7607,18 @@ fn run_bash_allows_low_risk_system_identity_commands() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: run_bash"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(!prompt.contains("intent: Read system identity."));
     assert!(!prompt.contains("Command: uname -s"));
     assert!(!prompt.contains("Command:"));
-    assert!(prompt.contains("Exit code: 0"));
-    assert!(!prompt.contains("approval_status: approved_by_user"));
+    assert!(
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
+        "{prompt}"
+    );
+    assert!(
+        !has_runtime_metadata(&prompt, "approval_status", json!("approved_by_user")),
+        "{prompt}"
+    );
 }
 
 #[cfg(unix)]
@@ -7442,7 +7662,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(recall_prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&recall_prompt).is_empty());
     assert!(recall_prompt.contains("测试项目纪念日是 2099-06-12"));
     let recall_final = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -7470,7 +7690,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(delete_prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&delete_prompt).is_empty());
     assert!(delete_prompt.contains("error: id_not_found"));
 
     let delete_prompt = match core.apply_model_response(LlmResponse {
@@ -7483,7 +7703,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(delete_prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&delete_prompt).is_empty());
     assert!(delete_prompt.contains("content=测试项目纪念日是 2099-06-12"));
     assert!(delete_prompt.contains("version=1"));
 
@@ -7508,7 +7728,10 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(delete_final_prompt.contains("op: delete"));
+    assert!(
+        has_runtime_metadata(&delete_final_prompt, "operation", json!("delete")),
+        "{delete_final_prompt}"
+    );
     assert!(!fs::read_to_string(core.memory_file())
         .unwrap()
         .contains("测试项目纪念日"));
@@ -7537,8 +7760,11 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(shell_prompt.contains("Action result: run_bash"));
-    assert!(shell_prompt.contains("Exit code: 0"));
+    assert!(!action_results(&shell_prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&shell_prompt, "exit_code", json!(0)),
+        "{shell_prompt}"
+    );
 
     core.set_bash_approval_mode(BashApprovalMode::Ask);
     let _ = core.begin_turn("把 /etc/passwd 读出来", None);
@@ -7554,7 +7780,6 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     };
     assert_eq!(security_request.reason, "run_bash_requires_user_approval");
 
-    core.set_max_llm_input_tokens(3_000);
     for index in 0..3 {
         let _ = core.begin_turn(
             &format!("无关闲聊 {} {}", index, "长上下文 ".repeat(600)),
@@ -7572,6 +7797,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         });
         assert!(matches!(step, CoreStep::Final(_)));
     }
+    core.set_max_llm_input_tokens(3_000);
     let long_prompt = match core.begin_turn("继续一个新任务", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
@@ -7607,10 +7833,13 @@ fn scenario_coding_inspects_project_and_reports_from_shell_evidence() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected shell evidence prompt, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: run_bash"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("target/timem_scenario_files.txt"));
     assert!(prompt.contains("target/timem_scenario_tests.rs"));
-    assert!(prompt.contains("Exit code: 0"));
+    assert!(
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
+        "{prompt}"
+    );
 
     let final_turn = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -7665,7 +7894,7 @@ fn scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected memory evidence prompt, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("测试代号是 ALPHA-42"));
     assert!(prompt.contains("测试发布检查"));
     assert!(prompt.contains("完整 CI 和真实 TTY smoke"));
@@ -7701,9 +7930,15 @@ fn scenario_self_qa_returns_runtime_params_and_paths() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected self_tool evidence prompt, got {other:?}"),
     };
-    assert!(prompt.contains("type: params"));
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("params")),
+        "{prompt}"
+    );
     assert!(prompt.contains("name: TimemAi"));
-    assert!(prompt.contains("type: path"));
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("path")),
+        "{prompt}"
+    );
     assert!(prompt.contains("api_audit_logical_stream:"));
     assert!(prompt.contains("api_audit_segments_dir:"));
     assert!(prompt.contains("action_audit_logical_stream:"));
@@ -7750,11 +7985,14 @@ fn scenario_file_writing_outputs_artifact_and_verifies_content() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected file evidence prompt, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: run_bash"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("Release_Check"));
     assert!(prompt.contains("CI_passed"));
     assert!(prompt.contains("Sensitive_scan_passed"));
-    assert!(prompt.contains("Exit code: 0"));
+    assert!(
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
+        "{prompt}"
+    );
     assert!(
         fs::read_to_string("target/timem_scenario_output/release_check.md")
             .unwrap()
@@ -8299,7 +8537,7 @@ fn no_local_command_host_omits_bash_from_prompt_and_rejects_bash_actions() {
     };
     assert!(repair_prompt.contains("response is not protocol compliant"));
     assert!(repair_prompt.contains("unsupported_action:run_bash"));
-    assert!(!repair_prompt.contains("Exit code: 0"));
+    assert!(!has_runtime_metadata(&repair_prompt, "exit_code", json!(0)));
     assert!(!repair_prompt.contains("output:\n"));
 }
 
@@ -8627,9 +8865,15 @@ fn canonical_tool_action_is_validated_through_capability_registry() {
         other => panic!("expected NeedModel after action, got {other:?}"),
     };
 
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("type: durable"));
-    assert!(prompt.contains("op: sql"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "memory_type", json!("durable")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "operation", json!("sql")),
+        "{prompt}"
+    );
     assert!(!prompt.contains("response is not protocol compliant"));
 }
 
@@ -8688,7 +8932,7 @@ fn capmgr_load_skill_adds_skill_body_as_action_result() {
         other => panic!("expected NeedModel after capmgr load, got {other:?}"),
     };
 
-    assert!(prompt.contains("Action result: capmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("kind: skill"));
     assert!(prompt.contains("id: release_quality_gate"));
     assert!(prompt.contains("# Release Quality Gate"));
@@ -8756,8 +9000,11 @@ fn self_tool_reads_runtime_paths_and_params() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected model continuation, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: self_tool"));
-    assert!(prompt.contains("type: path"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("path")),
+        "{prompt}"
+    );
     assert!(prompt.contains("memory_file:"));
     assert!(prompt.contains("reminder_tips_file:"));
     assert!(prompt.contains("session_index_file:"));
@@ -8768,7 +9015,10 @@ fn self_tool_reads_runtime_paths_and_params() {
     assert!(prompt.contains("action_audit_segments_dir:"));
     assert!(prompt.contains("audit_storage_note:"));
     assert!(!prompt.contains("api_audit_file:"));
-    assert!(prompt.contains("type: params"));
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("params")),
+        "{prompt}"
+    );
     assert!(prompt.contains("name: TimemAi"));
     assert!(prompt.contains("pid:"));
     assert!(prompt.contains("process_cwd:"));
@@ -8836,15 +9086,25 @@ fn self_tool_public_surface_groups_self_information_into_path_and_params() {
     let CoreStep::NeedModel { prompt, .. } = step else {
         panic!("expected model continuation, got {step:?}");
     };
-    assert!(prompt.contains("type: path"));
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("path")),
+        "{prompt}"
+    );
     assert!(prompt.contains("reminder_tips_file:"));
     assert!(prompt.contains("memory_file:"));
-    assert!(prompt.contains("type: params"));
-    assert!(prompt.contains("model: \"self-model\""));
-    assert!(prompt.contains("base_url: \"https://example.invalid/v1\""));
-    assert!(prompt.contains("api_key_configured: true"));
-    assert!(prompt.contains("max_llm_output_tokens: \"20000\""));
-    assert!(prompt.contains("max_steps: 200"));
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("params")),
+        "{prompt}"
+    );
+    let self_content = tool_contents(&prompt).join("\n");
+    assert!(
+        self_content.contains("model: \"self-model\""),
+        "{self_content}"
+    );
+    assert!(self_content.contains("base_url: \"https://example.invalid/v1\""));
+    assert!(self_content.contains("api_key_configured: true"));
+    assert!(self_content.contains("max_llm_output_tokens: \"20000\""));
+    assert!(self_content.contains("max_steps: 200"));
     assert!(!prompt.contains("non_sensitive_session_env_json"));
     assert!(!prompt.contains("never-expose-this-key"));
     assert!(!prompt.contains("TIMEM_API_KEY"));
@@ -8997,8 +9257,11 @@ fn self_tool_params_excludes_credentials_and_arbitrary_environment() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected model continuation, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: self_tool"));
-    assert!(prompt.contains("type: params"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("params")),
+        "{prompt}"
+    );
     assert!(!prompt.contains("TIMEM_API_KEY"));
 }
 
@@ -9023,8 +9286,11 @@ fn self_tool_path_is_read_only_and_reports_data_root() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected model continuation, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: self_tool"));
-    assert!(prompt.contains("type: path"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("path")),
+        "{prompt}"
+    );
     assert!(prompt.contains("data_root:"));
 }
 
@@ -9139,10 +9405,7 @@ fn self_tool_cwd_changes_relative_context_and_emits_structured_state() {
         "{prompt}"
     );
     assert!(
-        prompt.contains(&format!(
-            "Action result: {}",
-            agent_core::os::local_shell_tool_name()
-        )),
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
         "{prompt}"
     );
     assert!(
@@ -9206,14 +9469,21 @@ fn self_tool_cwd_failure_keeps_context_and_emits_no_structured_state() {
     };
 
     assert_eq!(core.current_prompt_cwd(), base_dir.as_path());
-    let action_result = prompt
-        .split("The following are results of the actions generated in response:")
-        .nth(1)
-        .expect("action result section");
-    assert!(action_result.contains("error: path_not_found"), "{prompt}");
-    assert!(!action_result.contains("new_path:"), "{prompt}");
-    assert!(!action_result.contains("/forged"), "{prompt}");
-    assert!(!action_result.contains("CWD changed to: "), "{prompt}");
+    assert!(
+        has_runtime_metadata(&prompt, "status", json!("failed")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "error_type", json!("InvalidPath")),
+        "{prompt}"
+    );
+    assert_eq!(tool_contents(&prompt), vec!["path_not_found".to_string()]);
+    assert!(!has_tool_output_containing(&prompt, "content", "/forged"));
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "CWD changed to: "
+    ));
 
     let cwd_finish = runtime
         .0
@@ -9268,7 +9538,10 @@ fn self_tool_path_read_remains_read_only() {
     };
 
     assert_eq!(core.current_prompt_cwd(), base_dir.as_path());
-    assert!(prompt.contains("type: path"), "{prompt}");
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("path")),
+        "{prompt}"
+    );
     assert!(runtime
         .0
         .iter()
@@ -9296,8 +9569,11 @@ fn self_tool_supports_identity_and_process_qa_replay() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected model continuation, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: self_tool"));
-    assert!(prompt.contains("type: params"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("params")),
+        "{prompt}"
+    );
     assert!(prompt.contains("name: TimemAi"));
     assert!(prompt.contains("version:"));
     assert!(prompt.contains("pid:"));
@@ -9468,7 +9744,7 @@ example_json: |
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected overlay command result, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: cap_echo"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("cap_echo_ok"));
     assert!(prompt.contains(r#""text":"hello""#));
     assert!(!prompt.contains("response is not protocol compliant"));
@@ -9558,7 +9834,7 @@ example_json: |
         other => panic!("expected command action result, got {other:?}"),
     };
 
-    assert!(prompt.contains("Action result: echo_payload"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("overlay_command_ok"));
     assert!(prompt.contains("\"text\":\"hello\""));
 }
@@ -9674,15 +9950,18 @@ example_json: |
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected background job result, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: echo_payload"));
-    assert!(prompt.contains("status: background_started"));
-    assert!(prompt.contains("next_action: capmgr op=job_status"));
-    let job_id = prompt
-        .lines()
-        .find_map(|line| line.strip_prefix("job_id: "))
-        .expect("job id in action result")
-        .trim()
-        .to_string();
+    assert!(!action_results(&prompt).is_empty());
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "status: background_started"
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "next_action: capmgr op=job_status"
+    ));
+    let job_id = tool_content_field(&prompt, "job_id").expect("job id in action result");
 
     let prompt = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -9697,11 +9976,27 @@ example_json: |
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected tool job status result, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: capmgr"));
-    assert!(prompt.contains("op: job_status"));
-    assert!(prompt.contains("action: echo_payload"));
-    assert!(prompt.contains("state: finished"));
-    assert!(prompt.contains("registered_background_ok"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "op: job_status"
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "action: echo_payload"
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "state: finished"
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "registered_background_ok"
+    ));
 }
 
 #[cfg(unix)]
@@ -9759,12 +10054,7 @@ example_json: |
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected background job result, got {other:?}"),
     };
-    let job_id = prompt
-        .lines()
-        .find_map(|line| line.strip_prefix("job_id: "))
-        .expect("job id in action result")
-        .trim()
-        .to_string();
+    let job_id = tool_content_field(&prompt, "job_id").expect("job id in action result");
 
     let prompt = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -9779,10 +10069,22 @@ example_json: |
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected tool job cancel result, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: capmgr"));
-    assert!(prompt.contains("op: job_cancel"));
-    assert!(prompt.contains("action: slow_payload"));
-    assert!(prompt.contains("state: cancelled"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "op: job_cancel"
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "action: slow_payload"
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "state: cancelled"
+    ));
 }
 
 #[test]

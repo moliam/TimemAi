@@ -429,7 +429,7 @@ fn execute_inner(cwd: &Path, input: &Value) -> Result<ReadfileSuccess, ReadfileE
             content_bytes: Some(content.len()),
             limited: Some(limited),
             tail_out: Some(tail_out),
-            content: rendered_content,
+            content: content.to_string(),
             error_type: None,
         },
     })

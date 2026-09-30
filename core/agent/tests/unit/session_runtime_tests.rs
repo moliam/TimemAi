@@ -579,7 +579,7 @@ fn every_model_request_lists_still_running_commands_with_the_creating_tool_call_
     assert_eq!(call_id.len(), 6, "{second}");
     assert!(call_id.chars().all(|ch| ch.is_ascii_hexdigit()), "{second}");
     assert!(
-        second.contains(&format!("tool_call_id: {call_id}")),
+        second.contains(&format!(r#""tool_call_id":"{call_id}""#)),
         "{second}"
     );
     assert!(
@@ -1730,7 +1730,8 @@ discard-after"#,
     assert!(!model.prompts[1].contains("&lt;ASSISTANT&gt;"));
     assert!(!model.prompts[1].contains("<free_talk>search memory</free_talk>"));
     assert!(!model.prompts[1].contains("discard-after"));
-    assert!(model.prompts[1].contains(r#"<memmgr_result task=""#));
+    assert!(model.prompts[1].contains(r#""memory_type":"raw_chat""#));
+    assert!(model.prompts[1].contains(r#""operation":"search""#));
     assert!(!model.prompts[1].contains("ERROR: The previous XML response had content outside"));
     assert!(!model.prompts[1].contains("begin exactly with <ASSISTANT>"));
 
@@ -2232,8 +2233,13 @@ fn session_turn_run_bash_poll_mode_waits_until_check_succeeds() {
         "poll action should emit a finish/completed topic"
     );
     assert_eq!(model.prompts.len(), 2);
-    assert!(model.prompts[1].contains("Action result: run_bash"));
-    assert!(model.prompts[1].contains("Polling state: finished"));
+    assert!(model.prompts[1].contains(r#""status":"completed""#));
+    assert!(model.prompts[1].contains(r#""exit_code":0"#));
+    assert!(model.prompts[1].contains(r#""polling_state":"finished""#));
+    assert!(model.prompts[1].contains(r#""success_condition":"loop_cmd exit code 0""#));
+    assert!(model.prompts[1].contains(
+        r#""exit_code_semantics":"exit_code belongs to the last loop_cmd execution, not automatically to the waited task""#
+    ));
 }
 
 #[cfg(unix)]
@@ -2282,23 +2288,20 @@ fn session_turn_long_running_command_hands_status_to_next_model_round() {
     assert_eq!(model.prompts.len(), 2);
     let follow_up = &model.prompts[1];
     assert!(
-        follow_up.contains("LONG_RUNNING_COMMAND_STATUS"),
+        follow_up.contains(r#""status":"background_running""#),
         "{follow_up}"
     );
+    assert!(
+        !follow_up.contains("model_decision_required"),
+        "{follow_up}"
+    );
+    assert!(!follow_up.contains("model_decision"), "{follow_up}");
+    assert!(
+        follow_up.contains(r#""process_containment":"cgroup v2""#),
+        "{follow_up}"
+    );
+    assert!(follow_up.contains(r#""pid":"#), "{follow_up}");
     assert!(follow_up.contains(command), "{follow_up}");
-    assert!(follow_up.contains("PID:"), "{follow_up}");
-    assert!(follow_up.contains("Elapsed:"), "{follow_up}");
-    assert!(follow_up.contains("Status: still running"), "{follow_up}");
-    assert!(
-        follow_up.contains(
-            "Decide whether to wait, inspect, terminate, or take another appropriate action"
-        ),
-        "{follow_up}"
-    );
-    assert!(
-        follow_up.contains("Reflect and avoid long running ineffective actions if possible"),
-        "{follow_up}"
-    );
     assert!(
         !follow_up.contains("user cancels the command"),
         "{follow_up}"
@@ -2360,13 +2363,19 @@ fn sequential_group_with_long_timeout_command_hands_status_to_model() {
     let follow_up = &model.prompts[1];
     assert!(follow_up.contains("quick"), "{follow_up}");
     assert!(
-        follow_up.contains("LONG_RUNNING_COMMAND_STATUS"),
+        follow_up.contains(r#""status":"background_running""#),
+        "{follow_up}"
+    );
+    assert!(
+        !follow_up.contains("model_decision_required"),
+        "{follow_up}"
+    );
+    assert!(!follow_up.contains("model_decision"), "{follow_up}");
+    assert!(
+        follow_up.contains(r#""process_containment":"cgroup v2""#),
         "{follow_up}"
     );
     assert!(follow_up.contains("sleep 2; printf late"), "{follow_up}");
-    assert!(follow_up.contains("PID:"), "{follow_up}");
-    assert!(follow_up.contains("Elapsed:"), "{follow_up}");
-    assert!(follow_up.contains("Status: still running"), "{follow_up}");
     assert!(
         !follow_up.contains("user cancels the command"),
         "{follow_up}"
@@ -2702,7 +2711,7 @@ fn session_turn_parallel_group_spawns_bash_while_running_builtin_actions_in_orde
         .unwrap();
     let results = &second_parts.new_delta[results_start..];
     let first_bash = results.find("group_a").unwrap();
-    let builtin = results.find("Action result: memmgr").unwrap();
+    let builtin = results.find(r#""operation":"sql""#).unwrap();
     let second_bash = results.find("group_b").unwrap();
     assert!(first_bash < builtin);
     assert!(builtin < second_bash);
@@ -2839,27 +2848,28 @@ fn session_turn_parallel_group_collects_approvals_then_spawns_bash_concurrently(
     let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
     let results_start = second_parts
         .new_delta
-        .find("Action result: run_bash")
+        .find("The following are results")
         .unwrap();
     let results = &second_parts.new_delta[results_start..];
-    let mut bash_results = results.match_indices("Action result: run_bash");
-    let first_bash = bash_results.next().expect("first run_bash result").0;
-    let second_bash = bash_results.next().expect("second run_bash result").0;
-    assert!(
-        bash_results.next().is_none(),
-        "expected exactly two run_bash results: {results}"
-    );
+    let first_bash = results
+        .find(r#""stdout":"approved_a""#)
+        .expect("first Bash output");
     let builtin = results
-        .find("Action result: memmgr")
+        .find(r#""memory_type":"durable""#)
         .expect("memmgr result");
+    let second_bash = results
+        .find(r#""stdout":"approved_b""#)
+        .expect("second Bash output");
     assert!(first_bash < builtin, "{results}");
     assert!(builtin < second_bash, "{results}");
-    assert!(
-        results[first_bash..builtin].contains("approved_a"),
+    assert!(!results.contains("Command:"), "{results}");
+    assert_eq!(
+        results
+            .matches(r#""approval_status":"approved_by_user""#)
+            .count(),
+        2,
         "{results}"
     );
-    assert!(results[second_bash..].contains("approved_b"), "{results}");
-    assert!(!results.contains("Command:"), "{results}");
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "user_approval"), 2);
     let _ = std::fs::remove_dir_all(dir);
@@ -3313,7 +3323,8 @@ fn session_turn_preserves_incremental_prompt_cache_plan_across_rounds() {
     assert!(second_parts.old_deltas.contains("帮我看看最近 scratch"));
     assert!(second_parts
         .new_delta
-        .contains(r#"<memmgr_result task="search recent scratch notes" type="scratch" op="search" status="finished">"#));
+        .contains(r#""memory_type":"scratch""#));
+    assert!(second_parts.new_delta.contains(r#""operation":"search""#));
     assert!(second_parts.new_delta.contains("查询 scratch 后继续。"));
     let second_blocks = crate::plan_incremental_cache(second_parts);
     assert_eq!(second_blocks.len(), 3);
@@ -3376,7 +3387,10 @@ fn session_turn_preserves_cache_plan_with_json_response_protocol() {
         .static_prompt
         .contains("Always use exactly one top-level JSON object."));
     assert!(second_parts.old_deltas.contains("帮我看看最近 scratch"));
-    assert!(second_parts.new_delta.contains("Action result: memmgr"));
+    assert!(second_parts
+        .new_delta
+        .contains(r#""memory_type":"scratch""#));
+    assert!(second_parts.new_delta.contains(r#""operation":"search""#));
     let second_blocks = crate::plan_incremental_cache(second_parts);
     assert_eq!(second_blocks.len(), 3);
     assert_eq!(second_blocks[0].cache, crate::CacheControl::Ephemeral);
@@ -3445,7 +3459,8 @@ fn session_turn_preserves_cache_plan_with_xml_response_protocol() {
     assert!(second_parts.old_deltas.contains("帮我看看最近 scratch"));
     assert!(second_parts
         .new_delta
-        .contains(r#"<memmgr_result task="search recent scratch notes" type="scratch" op="search" status="finished">"#));
+        .contains(r#""memory_type":"scratch""#));
+    assert!(second_parts.new_delta.contains(r#""operation":"search""#));
     let second_blocks = crate::plan_incremental_cache(second_parts);
     assert_eq!(second_blocks.len(), 3);
     assert_eq!(second_blocks[0].cache, crate::CacheControl::Ephemeral);
@@ -4758,8 +4773,9 @@ fn session_turn_bash_approval_executes_action_then_finishes_with_audit() {
     assert_eq!(ui.approval_requests, 1);
     assert_eq!(std::fs::read_to_string(&output_file).unwrap(), "approved");
     assert_eq!(model.prompts.len(), 2);
-    assert!(model.prompts[1].contains("Action result: run_bash"));
-    assert!(model.prompts[1].contains("Exit code: 0"));
+    assert!(model.prompts[1].contains(r#""status":"completed""#));
+    assert!(model.prompts[1].contains(r#""exit_code":0"#));
+    assert!(model.prompts[1].contains(r#""approval_status":"approved_by_user""#));
     let events = read_audit_events(&audit);
     let approval = audit_event(&events, "user_approval").unwrap();
     assert_eq!(approval["approved"], true);
@@ -4853,7 +4869,8 @@ fn session_turn_cancelled_user_approval_resumes_ui_before_continuing() {
     assert_eq!(ui.resume_count, 1);
     assert!(!output_file.exists());
     assert_eq!(model.prompts.len(), 2);
-    assert!(model.prompts[1].contains("status: denied_by_user"));
+    assert!(model.prompts[1].contains(r#""approval_status":"denied_by_user""#));
+    assert!(model.prompts[1].contains(r#""status":"failed""#));
     let events = read_audit_events(&audit);
     let approval = audit_event(&events, "user_approval").unwrap();
     assert_eq!(approval["approved"], false);
@@ -5185,9 +5202,8 @@ impl ModelClient for StoryReplayModel {
                 false,
             )),
             5 => {
-                assert!(prompt.contains("Action result: memmgr"));
-                assert!(prompt.contains("type: durable"));
-                assert!(prompt.contains("op: insert"));
+                assert!(prompt.contains(r#""memory_type":"durable""#));
+                assert!(prompt.contains(r#""operation":"upsert""#));
                 assert!(prompt.contains("project_code"));
                 Ok(llm(
                     r#"{"status":"ALL_FINISHED","final_answer":"已记录测试项目代号。"}"#,
@@ -5215,9 +5231,8 @@ impl ModelClient for StoryReplayModel {
                 ))
             }
             8 => {
-                assert!(prompt.contains("Action result: memmgr"));
-                assert!(prompt.contains("type: durable"));
-                assert!(prompt.contains("op: sql"));
+                assert!(prompt.contains(r#""memory_type":"durable""#));
+                assert!(prompt.contains(r#""operation":"sql""#));
                 assert!(prompt.contains("测试项目代号是 OMEGA-7"));
                 Ok(llm(
                     r#"{"status":"ALL_FINISHED","final_answer":"测试项目代号是 OMEGA-7。"}"#,
