@@ -221,3 +221,13 @@ configuration match. Endpoint edits update the complete route for idle bound
 Sessions; active Turns retain their route until the next new-Turn boundary.
 Restore and submission resolve the saved ID; deleted endpoints fail closed.
 Legacy migration requires a unique full configuration match, including secrets.
+
+### Embedded Web build artifacts
+
+`build.rs` embeds the tracked `interfaces/web/dist` assets. Generated source must
+resolve original assets with compile-time `CARGO_MANIFEST_DIR`, not absolute paths
+from the worktree that ran the build script. Precompressed gzip files belong under
+Cargo `OUT_DIR/web-gzip` and are referenced through compile-time `OUT_DIR`; they
+must not depend on system temporary files surviving until a later compilation.
+`tests/embedded_assets_tests.rs` guards these paths and verifies the embedded HTML
+and its gzip representation against the current dist.
