@@ -815,6 +815,78 @@ fn native_context_compact_first_then_executes_later_call_with_correct_id() {
 }
 
 #[test]
+fn context_compact_live_refs_report_only_surviving_exchanges() {
+    for native in [false, true] {
+        for remove_all in [false, true] {
+            let mut core = test_core(&format!("compact_live_refs_{native}_{remove_all}"));
+            core.set_response_protocol(ResponseProtocolKind::Json);
+            if native {
+                core.set_interaction_profile(&native_test_profile());
+            }
+            for id in ["pd_1", "pd_2"] {
+                core.append_delta(vec![("user_question".to_string(), id.to_string())]);
+                core.native_exchanges.push(NativeExchange {
+                    delta_id: id.to_string(),
+                    assistant_text: "previous work".to_string(),
+                    calls: Vec::new(),
+                    results: Vec::new(),
+                });
+            }
+            let discard = if remove_all {
+                vec!["pd_1", "pd_2", "pd_already_absent"]
+            } else {
+                vec!["pd_1", "pd_already_absent"]
+            };
+            let arguments = serde_json::json!({
+                "discard": discard,
+                "summary": "Retain active task state",
+            });
+            let step = core.apply_model_response(LlmResponse {
+                content: if native {
+                    String::new()
+                } else {
+                    serde_json::json!({"context_compact": arguments}).to_string()
+                },
+                tool_calls: if native {
+                    vec![NativeToolCall {
+                        id: "call_compact".to_string(),
+                        name: "context_compact".to_string(),
+                        raw_arguments: arguments.to_string(),
+                        arguments,
+                    }]
+                } else {
+                    Vec::new()
+                },
+                model_name: "test".to_string(),
+                usage: UsageStats::zero(),
+                truncated: false,
+            });
+            let CoreStep::NeedModel { prompt, .. } = step else {
+                panic!("compaction should continue");
+            };
+            assert!(
+                prompt.contains("context compacted successfully."),
+                "{prompt}"
+            );
+            assert!(prompt.contains("current_live_delta_refs:"));
+            assert!(
+                !prompt.contains("- delta_id=pd_1 ("),
+                "deleted delta leaked into live refs"
+            );
+            assert_eq!(
+                prompt.contains("- delta_id=pd_2 ("),
+                !remove_all,
+                "{prompt}"
+            );
+            assert!(prompt.contains("missing_ids: none"), "{prompt}");
+            assert!(prompt
+                .contains("already_absent_delta_ids (idempotently ignored): pd_already_absent"));
+            assert_eq!(core.native_exchanges.len(), usize::from(!remove_all));
+        }
+    }
+}
+
+#[test]
 fn native_context_compact_after_another_call_is_rejected() {
     let mut core = test_core("native_compact_not_first");
     core.set_interaction_profile(&native_test_profile());

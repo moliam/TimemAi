@@ -66,6 +66,8 @@ pub(super) fn publish(state: &AppState, session_id: &str, worker_id: &str, event
             session_id: session_id.to_string(),
             turn_id: Some(web_turn_id),
             turn_event_id: None,
+            timeline_seq: Some(timeline_seq),
+            created_at_ms: None,
             event: wire_event,
         },
     );

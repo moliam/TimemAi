@@ -52,6 +52,7 @@ import {
   FolderOpen,
   FolderPlus,
   Gauge,
+  Brain,
   GripVertical,
   KeyRound,
   LoaderCircle,
@@ -107,6 +108,7 @@ import {
 import { loadToolGenEnabled, saveToolGenEnabled } from "./beta_features";
 import {
   Activity,
+  ChatHistoryRecord,
   ChatFavorite,
   ChatLibraryCapacity,
   ChatMessage,
@@ -180,6 +182,7 @@ import {
   groupDecisionsBySessionTurn,
   manualToolGenCommand,
   prependHistoryRecords,
+  turnsFromHistoryRecords,
   pruneSessionDrafts,
   pruneSessionSubmissionLocks,
   releaseSessionDraftSubmission,
@@ -736,6 +739,7 @@ function TimemApp() {
   const pendingMcpKeysRef = useRef<Set<string>>(new Set());
   const pendingEndpointDeleteIdsRef = useRef<Set<string>>(new Set());
   const pendingEndpointDeleteCommandRef = useRef("");
+  const turnHistoryPagesRef = useRef(new Map<string, { records: ChatHistoryRecord[]; offset: number }>());
   const pendingHistorySessionIdsRef = useRef<Set<string>>(new Set());
   const pendingUploadSessionIdsRef = useRef<Set<string>>(new Set());
   const pendingToolgenRequestsRef = useRef<Set<string>>(new Set());
@@ -1029,6 +1033,9 @@ function TimemApp() {
     },
     [snapshotReady],
   );
+
+  const sendCommandRef = useRef(sendCommand);
+  sendCommandRef.current = sendCommand;
 
   const closeSettingsCenter = useCallback(() => {
     if (
@@ -1549,6 +1556,7 @@ function TimemApp() {
     function receiveWireEvent(event: WireEvent, fromSemantic = false) {
       if (!fromSemantic) {
         if (event.type === "hello") {
+          turnHistoryPagesRef.current.clear();
           // A reconnect may intentionally target an older Host, so Hello resets
           // rather than only ever enabling this connection-level capability.
           semanticDeliveryRef.current = enablesSemanticDelivery(event);
@@ -1779,6 +1787,7 @@ function TimemApp() {
         return;
       }
       if (event.type === "hello") {
+        turnHistoryPagesRef.current.clear();
         // Hello carries the complete authoritative baseline. Adopt its exact
         // sequence before any later semantic event is reduced; reconnecting to
         // a Host that has already emitted events must not look like a gap from
@@ -2197,6 +2206,7 @@ function TimemApp() {
         return;
       }
       if (event.type === "host_error") {
+        turnHistoryPagesRef.current.clear();
         clearAllPendingCommands();
         pushActivity({
           id: clientId(),
@@ -2387,6 +2397,25 @@ function TimemApp() {
         );
         return;
       }
+      if (event.type === "turn_history_page") {
+        const key = sessionTurnKey(event.session_id, event.turn_id);
+        const pending = turnHistoryPagesRef.current.get(key);
+        if (!pending || pending.offset !== event.offset) return;
+        pending.records.push(...event.records);
+        if (event.next_offset !== null) {
+          pending.offset = event.next_offset;
+          if (!sendCommandRef.current({ type: "turn_history_page", session_id: event.session_id,
+            turn_id: event.turn_id, offset: event.next_offset })) turnHistoryPagesRef.current.delete(key);
+        } else {
+          const restored = turnsFromHistoryRecords(pending.records).find((turn) => turn.turn_id === event.turn_id);
+          turnHistoryPagesRef.current.delete(key);
+          if (restored) setSessions((current) => current.map((session) => session.session_id !== event.session_id ? session : {
+            ...session, turns: session.turns.map((turn) => turn.turn_id === event.turn_id && turn.state !== "working"
+              ? { ...turn, events: restored.events, user_entries: turn.user_entries.map((entry) => ({ ...entry, timeline_seq: undefined })) } : turn),
+          }));
+        }
+        return;
+      }
       if (event.type === "history_page") {
         removePendingKey(
           pendingHistorySessionIdsRef,
@@ -2484,7 +2513,8 @@ function TimemApp() {
           event_id: event.turn_event_id ?? clientId(),
           source: "worker_activity",
           payload: event.event,
-          created_at_ms: Date.now(),
+          created_at_ms: event.created_at_ms ?? Date.now(),
+          timeline_seq: event.timeline_seq ?? undefined,
         };
         const workerState =
           kind === "model_request"
@@ -2573,7 +2603,8 @@ function TimemApp() {
             event_id: event.turn_event_id ?? clientId(),
             source: "core_topic",
             payload: topic as unknown as Record<string, unknown>,
-            created_at_ms: Date.now(),
+            created_at_ms: event.created_at_ms ?? Date.now(),
+            timeline_seq: event.timeline_seq ?? undefined,
           }),
           topic,
           (text) => makeMessage("assistant", text),
@@ -3516,6 +3547,13 @@ function TimemApp() {
     return () => document.body.classList.remove("workspace-modal-open");
   }, [workspaceModalOpen]);
   return (
+    <TurnHistoryRequestContext.Provider value={(sessionId, turnId) => {
+      const key = sessionTurnKey(sessionId, turnId);
+      if (turnHistoryPagesRef.current.has(key)) return;
+      turnHistoryPagesRef.current.set(key, { records: [], offset: 0 });
+      if (!sendCommand({ type: "turn_history_page", session_id: sessionId, turn_id: turnId, offset: 0 }))
+        turnHistoryPagesRef.current.delete(key);
+    }}>
     <AssistantRuntimeProvider runtime={runtime}>
       <div
         inert={workspaceModalOpen}
@@ -5333,6 +5371,7 @@ function TimemApp() {
           )}
       </div>
     </AssistantRuntimeProvider>
+    </TurnHistoryRequestContext.Provider>
   );
 }
 
@@ -7308,6 +7347,7 @@ function ToolRepoPanel({
 }
 
 const EMPTY_DECISIONS: Decision[] = [];
+const TurnHistoryRequestContext = createContext<(sessionId: string, turnId: string) => void>(() => {});
 const SessionTimelineActiveContext = createContext(false);
 
 /**
@@ -9664,6 +9704,7 @@ const TurnInteraction = memo(function TurnInteraction({
   onRequestToolGen,
   onRequestMessageDelete,
 }: TurnInteractionProps) {
+  const requestTurnHistory = useContext(TurnHistoryRequestContext);
   const workScrollRef = useRef<HTMLDivElement | null>(null);
   const workContentRef = useRef<HTMLDivElement | null>(null);
   const followLatest = useRef(true);
@@ -10044,7 +10085,10 @@ const TurnInteraction = memo(function TurnInteraction({
                   showWorkStream ? "Hide work details" : "Show work details"
                 }
                 aria-expanded={showWorkStream}
-                onClick={() => setShowWorkStream((visible) => !visible)}
+                onClick={() => {
+                  if (!showWorkStream && !isWorking) requestTurnHistory(sessionId, turn.turn_id);
+                  setShowWorkStream((visible) => !visible);
+                }}
               >
                 <ChevronRight
                   className="work-collapse-arrow"
@@ -11366,6 +11410,11 @@ function LiveTurnUsage({ turn }: { turn: WebTurn }) {
 }
 
 function ActivityView({ activity, enterPulse = false }: { activity: Activity; enterPulse?: boolean }) {
+  if (activity.kind === "reasoning_notice")
+    return <div className="turn-work-item notice compact-notice reasoning-notice" role="status">
+      <span className="activity-mark" aria-hidden="true"><Brain size={13} /></span>
+      <div className="compact-notice-line"><span>{t("context.usingReasoning")}</span></div>
+    </div>;
   if (activity.kind === "context_compact")
     return <ContextCompactNotice activity={activity} />;
   if (activity.kind === "toolgen") return <ToolGenNotice activity={activity} />;
@@ -11731,6 +11780,10 @@ function activityFromTurnEvent(
   }
   if (event.source !== "worker_activity") return null;
   const kind = String(event.payload.kind ?? "worker_event");
+  if (kind === "model_request" && event.payload.reasoning_enabled === true)
+    return { id: event.event_id, sessionId, tone: "notice", kind: "reasoning_notice",
+      title: "", createdAt: event.created_at_ms };
+
   if (
     kind === "model_request" ||
     kind === "model_response" ||

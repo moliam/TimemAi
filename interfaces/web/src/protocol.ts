@@ -347,7 +347,8 @@ export type Activity = {
     | "toolgen"
     | "free_talk"
     | "user_supplement"
-    | "memo_notice";
+    | "memo_notice"
+    | "reasoning_notice";
   toolgen_phase?: string;
   compact_phase?: "requested" | "completed";
   estimated_prompt_tokens?: number;
@@ -562,6 +563,8 @@ export type WireEvent =
       type: "core_topic";
       turn_id?: string | null;
       turn_event_id?: string | null;
+      timeline_seq?: number | null;
+      created_at_ms?: number | null;
       event: CoreTopicEvent;
     }
   | {
@@ -571,6 +574,8 @@ export type WireEvent =
       worker_id: string;
       turn_id?: string | null;
       turn_event_id?: string | null;
+      timeline_seq?: number | null;
+      created_at_ms?: number | null;
       event: Record<string, unknown>;
     }
   | {
@@ -630,6 +635,14 @@ export type WireEvent =
   | { type: "mem_temporary_items"; items: MemTemporaryItem[]; error?: string }
   | { type: "file_uploaded"; session_id: string; file: Attachment }
   | { type: "attachment_removed"; session_id: string; attachment_id: string }
+  | {
+      type: "turn_history_page";
+      session_id: string;
+      turn_id: string;
+      offset: number;
+      records: ChatHistoryRecord[];
+      next_offset: number | null;
+    }
   | {
       type: "history_page";
       session_id: string;
@@ -786,6 +799,12 @@ export type ClientCommand =
       queued_command_id: string;
     }
   | { type: "attachment_remove"; session_id: string; attachment_id: string }
+  | {
+      type: "turn_history_page";
+      session_id: string;
+      turn_id: string;
+      offset: number;
+    }
   | {
       type: "history_page";
       session_id: string;

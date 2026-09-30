@@ -395,6 +395,8 @@ enum CoreSessionWorkerCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UnconsumedSupplement {
+    #[serde(default)]
+    pub manual_context_compact: bool,
     pub text: String,
     pub additional_context: Option<String>,
     pub command_id: Option<String>,
@@ -406,6 +408,7 @@ impl From<QueuedSupplement> for UnconsumedSupplement {
             text: supplement.text,
             additional_context: supplement.additional_context,
             command_id: supplement.command_id,
+            manual_context_compact: supplement.manual_context_compact,
         }
     }
 }
@@ -2673,15 +2676,24 @@ impl WorkerTurnUi {
             })
             .unwrap_or_default();
         let mut supplements = Vec::new();
+        let mut compact = self.manual_compact_requested.swap(false, Ordering::SeqCst);
         for queued in queued {
             if let Some(command_id) = queued.command_id.as_ref() {
                 publish_command_accepted(&self.event_tx, &self.command_ids, command_id.clone());
             }
             if queued.manual_context_compact {
-                self.manual_compact_requested.store(true, Ordering::SeqCst);
+                compact = true;
                 continue;
             }
             supplements.push(UnconsumedSupplement::from(queued));
+        }
+        if compact {
+            supplements.push(UnconsumedSupplement {
+                text: String::new(),
+                additional_context: None,
+                command_id: None,
+                manual_context_compact: true,
+            });
         }
         supplements
     }

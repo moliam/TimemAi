@@ -515,6 +515,7 @@ export const zh = {
     clearAction: "清除",
     clearTitle: "清空工作上下文（回到重启初始状态，仅保留系统提示）",
     clearConfirm: "强制清空当前会话的工作上下文？清空后下一轮对话将从初始状态开始，历史消息仍保留。",
+    usingReasoning: "使用推理",
     dynamic: "动态上下文",
     unknown: "未知",
     compacting: "上下文压缩中…",

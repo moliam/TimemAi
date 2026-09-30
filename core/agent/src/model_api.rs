@@ -170,6 +170,29 @@ pub struct ModelPromptBlock {
     pub cache: ModelCacheControl,
 }
 
+/// Whether the outgoing payload explicitly enables reasoning. Provider defaults
+/// without an explicit request are unknown and must not be advertised as enabled.
+pub fn request_uses_reasoning(body: &Value) -> bool {
+    if body.get("enable_thinking").and_then(Value::as_bool) == Some(false)
+        || body.pointer("/thinking/type").and_then(Value::as_str) == Some("disabled")
+    {
+        return false;
+    }
+    body.get("enable_thinking").and_then(Value::as_bool) == Some(true)
+        || matches!(
+            body.pointer("/thinking/type").and_then(Value::as_str),
+            Some("enabled" | "adaptive")
+        )
+        || [
+            body.get("reasoning_effort"),
+            body.pointer("/reasoning/effort"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|effort| matches!(effort, "minimal" | "low" | "medium" | "high" | "xhigh"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedModelRequest {
     pub body: Value,
