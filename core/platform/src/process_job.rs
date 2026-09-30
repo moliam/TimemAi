@@ -10,6 +10,21 @@ pub struct ManagedProcessJob {
     backend: Box<dyn ProcessJobBackend>,
 }
 
+/// Platform-native observation location for one Session process scope.
+/// Models can inspect backend-specific files only when a decision requires it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionProcessScopeSnapshot {
+    pub observation_note: String,
+}
+
+/// A scope left by a previous Runtime owner that still has live members.
+/// Runtime never silently adopts or kills these processes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaleProcessScopeSnapshot {
+    pub observation_note: String,
+    pub owner_pid: u32,
+}
+
 impl std::fmt::Debug for ManagedProcessJob {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ManagedProcessJob")
@@ -35,7 +50,14 @@ impl ManagedProcessJob {
     /// Unsupported or undelegated environments return an explicit error;
     /// individual callers decide whether their contract permits degradation.
     pub fn create() -> std::io::Result<Self> {
-        create_platform_backend().map(|backend| Self { backend })
+        create_platform_backend(None).map(|backend| Self { backend })
+    }
+
+    /// Creates one exact process Job below the current Runtime and Session
+    /// aggregate scope. The Session identifier is converted to a bounded,
+    /// filesystem-safe opaque key by the platform backend.
+    pub fn create_for_session(session_id: &str) -> std::io::Result<Self> {
+        create_platform_backend(Some(session_id)).map(|backend| Self { backend })
     }
 
     pub fn backend_name(&self) -> &'static str {
@@ -80,13 +102,17 @@ pub fn managed_process_job_permission_hint() -> Option<&'static str> {
 }
 
 #[cfg(target_os = "linux")]
-fn create_platform_backend() -> std::io::Result<Box<dyn ProcessJobBackend>> {
-    crate::linux::LinuxCgroupProcessJob::create()
+fn create_platform_backend(
+    session_id: Option<&str>,
+) -> std::io::Result<Box<dyn ProcessJobBackend>> {
+    crate::linux::LinuxCgroupProcessJob::create(session_id)
         .map(|backend| Box::new(backend) as Box<dyn ProcessJobBackend>)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn create_platform_backend() -> std::io::Result<Box<dyn ProcessJobBackend>> {
+fn create_platform_backend(
+    _session_id: Option<&str>,
+) -> std::io::Result<Box<dyn ProcessJobBackend>> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "exact per-job process management is unavailable on this platform",

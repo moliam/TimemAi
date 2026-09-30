@@ -2387,6 +2387,47 @@ fn controlled_request_base() -> String {
     )
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn aggregate_process_scope_is_one_shot_and_rearmed_after_compaction() {
+    let mut core = test_core("aggregate_process_scope_reminder");
+    let session_id = core.current_session_id();
+    let cwd = core.current_prompt_cwd().to_path_buf();
+    let started =
+        core.shell_jobs
+            .spawn_background("sleep 30", &cwd, &session_id, "scope_reminder_turn");
+    assert!(started.contains("pid="), "{started}");
+
+    let Some(scope) = crate::os::session_process_scope_snapshot(&session_id) else {
+        // A valid non-delegated cgroup environment degrades to process-group
+        // containment and intentionally has no aggregate cgroup path.
+        return;
+    };
+    let marker = format!(
+        "current agent/session aggregate observation path: {}",
+        scope.observation_note
+    );
+
+    let first = core.build_model_request_prompt(&controlled_request_base());
+    assert!(first.contains(&marker), "{first}");
+    assert!(!first.contains("memory.current"), "{first}");
+    assert!(!first.contains("pids.current"), "{first}");
+    assert!(!first.contains("cpu.stat"), "{first}");
+
+    let second = core.build_model_request_prompt(&controlled_request_base());
+    assert!(!second.contains(&marker), "{second}");
+
+    let _ = core.apply_prompt_shrink(&[], &[]);
+    let after_compaction = core.build_model_request_prompt(&controlled_request_base());
+    assert!(after_compaction.contains(&marker), "{after_compaction}");
+
+    let ordinary_follow_up = core.build_model_request_prompt(&controlled_request_base());
+    assert!(
+        !ordinary_follow_up.contains(&marker),
+        "{ordinary_follow_up}"
+    );
+}
+
 #[test]
 fn model_prompt_job_finished_before_first_scan_has_only_exit_update() {
     let mut core = test_core("job_status_before_first_scan");
@@ -2956,6 +2997,7 @@ fn model_prompt_reports_setsid_escaped_process_as_runtime_info() {
         fallback_processes: vec![crate::runtime_info::FallbackProcessSnapshot {
             pid: escapee,
             process_name: "bash".to_string(),
+            zombie: false,
         }],
         ..Default::default()
     };

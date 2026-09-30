@@ -482,7 +482,7 @@ impl ShellJobManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         crate::os::configure_child_process_group(&mut command);
-        let process_job = crate::os::ManagedProcessJob::create().ok();
+        let process_job = crate::os::ManagedProcessJob::create_for_session(session_id).ok();
         let process_job_mode = if process_job.is_some() {
             ProcessJobMode::Exact
         } else {
