@@ -1784,6 +1784,8 @@ pub struct AgentCore {
     /// so disk pressure windows can be simulated without mutating a real
     /// filesystem. None in production, where the real sample is taken.
     pub(crate) disk_free_override: Option<(u64, u64)>,
+    #[cfg(test)]
+    pub(crate) disk_sample_count: usize,
     pub(crate) tool_jobs: FileToolJobStore,
     action_audit: FileActionAuditStore,
     pub(crate) self_tool: SelfToolState,
@@ -1920,6 +1922,8 @@ impl AgentCore {
             shell_jobs: ShellJobManager::new(memory_dir),
             disk_pressure: runtime_info::DiskPressureTracker::new(),
             disk_free_override: None,
+            #[cfg(test)]
+            disk_sample_count: 0,
             tool_jobs: FileToolJobStore::new(memory_dir),
             action_audit: FileActionAuditStore::new(memory_dir),
             self_tool,
@@ -2472,25 +2476,42 @@ impl AgentCore {
         Some(text)
     }
 
-    /// One observation point for the disk pressure tracker. Samples the
-    /// total free space of the disks the work may write to.
+    /// One observation point for the disk pressure tracker. The tracker
+    /// invokes the filesystem sampler only when its count or time gate is
+    /// due, keeping ordinary tool completions and model requests free of
+    /// mount enumeration and stat calls.
     fn observe_disk_pressure(
         &mut self,
-        filesystems: &[runtime_info::FilesystemUsage],
+        running: &[runtime_info::RunningJobSnapshot],
     ) -> Option<String> {
-        let sample = match self.disk_free_override {
-            Some(sample) => Some(sample),
-            None if filesystems.is_empty() => None,
-            None => Some((
-                filesystems.iter().map(|fs| fs.free_bytes).sum(),
-                filesystems.iter().map(|fs| fs.total_bytes).sum(),
-            )),
-        };
-        let event = self.disk_pressure.observe(sample);
+        let override_sample = self.disk_free_override;
+        let mut filesystems = Vec::new();
+        #[cfg(test)]
+        let mut sampled = false;
+        let event = self.disk_pressure.observe_with(|| {
+            #[cfg(test)]
+            {
+                sampled = true;
+            }
+            if let Some(sample) = override_sample {
+                return Some(sample);
+            }
+            filesystems = Self::filesystems_for_info(running);
+            (!filesystems.is_empty()).then(|| {
+                (
+                    filesystems.iter().map(|fs| fs.free_bytes).sum(),
+                    filesystems.iter().map(|fs| fs.total_bytes).sum(),
+                )
+            })
+        });
+        #[cfg(test)]
+        if sampled {
+            self.disk_sample_count = self.disk_sample_count.saturating_add(1);
+        }
         // Persist immediately: even when the current request path takes an
         // early return, the notice rides the next request instead of being
         // dropped. Exit-event-like notices must be consumed, not lost.
-        let notice = event.map(|event| event.render(filesystems));
+        let notice = event.map(|event| event.render(&filesystems));
         if let Some(notice) = &notice {
             self.submit_prompt_component(
                 PromptComponentRole::system(),
@@ -2644,8 +2665,7 @@ impl AgentCore {
         // has important state; rides along with this request and is never
         // persisted into prompt history.
         // Model API request observation point for disk pressure sampling.
-        let filesystems_for_info = Self::filesystems_for_info(&running_snapshot_for_info);
-        let api_disk_notice = self.observe_disk_pressure(&filesystems_for_info);
+        let api_disk_notice = self.observe_disk_pressure(&running_snapshot_for_info);
         let runtime_info = {
             let inputs = runtime_info::RuntimeInfoInputs {
                 running: running_snapshot_for_info,
@@ -2654,7 +2674,6 @@ impl AgentCore {
                     .into_iter()
                     .filter(|pid| process_is_alive(u64::from(*pid)) != Some(false))
                     .collect(),
-                filesystems: filesystems_for_info,
                 disk_pressure_notice: api_disk_notice,
             };
             runtime_info::default_registry().render(&inputs)
@@ -6607,8 +6626,7 @@ Runtime tool_call ids:",
         let mut execution = self.execute_action_inner(action, runtime);
         // Completed tool run observation point for disk pressure sampling.
         if matches!(execution, ActionExecution::Completed(_)) {
-            let filesystems = Self::filesystems_for_info(&[]);
-            self.observe_disk_pressure(&filesystems);
+            self.observe_disk_pressure(&[]);
         }
         let elapsed_ms = wall_start.elapsed().as_millis() as u64;
         match &mut execution {

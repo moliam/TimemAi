@@ -15416,6 +15416,10 @@ async fn static_assets_cache_by_path_class_and_negotiate_gzip() {
         "public, max-age=31536000, immutable"
     );
     assert!(hashed.headers().get(header::CONTENT_ENCODING).is_none());
+    assert_eq!(
+        hashed.headers().get(header::VARY).unwrap(),
+        "Accept-Encoding"
+    );
 
     // The HTML shell revalidates so a new release is always picked up.
     let shell = static_asset(
@@ -15452,6 +15456,10 @@ async fn static_assets_cache_by_path_class_and_negotiate_gzip() {
     assert_eq!(
         gzipped.headers().get(header::CONTENT_ENCODING).unwrap(),
         "gzip"
+    );
+    assert_eq!(
+        gzipped.headers().get(header::VARY).unwrap(),
+        "Accept-Encoding"
     );
     let body = axum::body::to_bytes(gzipped.into_body(), 1 << 20)
         .await
@@ -15528,13 +15536,14 @@ async fn background_restore_publishes_sessions_newest_first() {
         }
     }
     assert_eq!(published.len(), 3, "every restored session publishes once");
-    // Restore workers pop the queue newest-first (ascending sort + pop), but
-    // with a worker pool the publication order among concurrent restores is
-    // not strictly serial; assert set equality instead.
+    assert_eq!(
+        published.first(),
+        Some(&ids[2]),
+        "newest session must be the first progressively visible session"
+    );
     let mut published_sorted = published.clone();
     published_sorted.sort();
     let mut expected = ids.clone();
     expected.sort();
     assert_eq!(published_sorted, expected);
-    assert!(published.contains(&ids[2]), "newest session published");
 }
