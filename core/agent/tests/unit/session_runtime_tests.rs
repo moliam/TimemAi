@@ -5658,7 +5658,9 @@ impl ModelClient for NativeRoundTripModel {
                     .contains("Rust 42");
         } else {
             self.observed_previous_turn_tool_history = request.native_exchanges.len() == 2
-                && request.native_exchanges[0].delta_id == "pd_1"
+                && request.native_exchanges[0].delta_id == "pd_2"
+                && request.native_exchanges[1].delta_id == "pd_3"
+                && request.native_exchanges[0].delta_id != request.native_exchanges[1].delta_id
                 && request.native_exchanges[0].calls[0].id == "call_count"
                 && request.native_exchanges[0].results[0]
                     .content

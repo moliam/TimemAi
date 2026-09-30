@@ -649,6 +649,34 @@ fn prompt_renderer_uses_protocol_native_tool_synopses() {
 }
 
 #[test]
+fn empty_delta_boundary_is_visible_only_in_native_mode() {
+    let delta = PromptDelta {
+        delta_id: "pd_empty_native_owner".to_string(),
+        time_ms: 42,
+        slices: Vec::new(),
+        hidden_slice_ids: Vec::new(),
+    };
+
+    let native = render_prompt_with_rendered_static_for_mode(
+        "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]",
+        std::slice::from_ref(&delta),
+        "TIMEM_ASSISTANT",
+        &JsonSuiteV1,
+        ToolCallMode::Native,
+    );
+    let inline = render_prompt_with_rendered_static_for_mode(
+        "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]",
+        &[delta],
+        "TIMEM_ASSISTANT",
+        &JsonSuiteV1,
+        ToolCallMode::Inline,
+    );
+
+    assert!(native.contains("[BEGIN DELTA delta_id: pd_empty_native_owner, time_ms: 42]"));
+    assert!(!inline.contains("pd_empty_native_owner"));
+}
+
+#[test]
 fn native_prompt_encourages_progress_updates_without_changing_finalization_semantics() {
     let rendered = render_static_prompt_for_mode(
         "{{RESPONSE_MODE_INSTRUCTION}}",

@@ -414,7 +414,7 @@ pub(crate) fn append_rendered_deltas_for_mode(
 ) {
     for delta in deltas {
         let slices = render_delta_slices_for_mode(delta, tool_call_mode);
-        if slices.is_empty() {
+        if slices.is_empty() && tool_call_mode != ToolCallMode::Native {
             continue;
         }
         out.push('\n');

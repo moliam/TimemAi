@@ -515,6 +515,255 @@ fn native_test_profile() -> InteractionProfile {
 }
 
 #[test]
+fn each_native_model_interaction_owns_a_distinct_visible_delta() {
+    let mut core = test_core("native_interaction_delta_boundary");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "inspect in two rounds".to_string(),
+    )]);
+
+    for (call_id, self_type) in [("call_round_1", "cwd"), ("call_round_2", "params")] {
+        let arguments = serde_json::json!({"type": self_type});
+        let step = core.apply_model_response(LlmResponse {
+            content: String::new(),
+            tool_calls: vec![NativeToolCall {
+                id: call_id.to_string(),
+                name: "self_tool".to_string(),
+                raw_arguments: arguments.to_string(),
+                arguments,
+            }],
+            model_name: "test".to_string(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        });
+        assert!(matches!(step, CoreStep::NeedModel { .. }));
+    }
+
+    assert_eq!(
+        core.deltas
+            .iter()
+            .map(|delta| delta.delta_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pd_1", "pd_2", "pd_3"]
+    );
+    assert_eq!(
+        core.native_exchanges
+            .iter()
+            .map(|exchange| exchange.delta_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pd_2", "pd_3"]
+    );
+    assert!(core.deltas[1].slices.is_empty());
+    assert!(core.deltas[2].slices.is_empty());
+
+    let prompt = core.render_prompt();
+    assert!(prompt.contains("[BEGIN DELTA delta_id: pd_2"), "{prompt}");
+    assert!(prompt.contains("[BEGIN DELTA delta_id: pd_3"), "{prompt}");
+    let request = core.model_interaction_request(prompt);
+    assert_eq!(request.native_exchanges.len(), 2);
+    assert_eq!(request.native_exchanges[0].calls[0].id, "call_round_1");
+    assert_eq!(request.native_exchanges[1].calls[0].id, "call_round_2");
+}
+
+#[test]
+fn native_approval_resume_keeps_exchange_on_the_interaction_delta() {
+    let mut core = test_core("native_approval_interaction_delta");
+    core.set_interaction_profile(&native_test_profile());
+    core.set_bash_approval_mode(BashApprovalMode::Ask);
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "request a command that needs approval".to_string(),
+    )]);
+    let arguments = serde_json::json!({"cmd": "rm timem_native_approval_probe"});
+
+    let approval = match core.apply_model_response(LlmResponse {
+        content: "waiting for approval".to_string(),
+        tool_calls: vec![NativeToolCall {
+            id: "call_needs_approval".to_string(),
+            name: crate::os::local_shell_tool_name().to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    }) {
+        CoreStep::NeedsUserApproval { request } => request,
+        other => panic!("expected approval boundary, got {other:?}"),
+    };
+
+    assert_eq!(
+        core.deltas
+            .iter()
+            .map(|delta| delta.delta_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pd_1", "pd_2"]
+    );
+    assert!(core.deltas[1].slices.is_empty());
+    assert!(core.native_exchanges.is_empty());
+    assert_eq!(
+        core.pending_native_exchange
+            .as_ref()
+            .map(|pending| pending.0.as_str()),
+        Some("pd_2")
+    );
+
+    let resumed = core.resolve_user_approval(&approval.approval_id, false);
+    assert!(matches!(resumed, CoreStep::NeedModel { .. }));
+    assert!(core.pending_native_exchange.is_none());
+    assert_eq!(core.deltas.len(), 2);
+    assert_eq!(core.native_exchanges.len(), 1);
+    assert_eq!(core.native_exchanges[0].delta_id, "pd_2");
+    assert_eq!(core.native_exchanges[0].calls[0].id, "call_needs_approval");
+    assert_eq!(
+        core.native_exchanges[0].results[0].call_id,
+        "call_needs_approval"
+    );
+
+    let next_arguments = serde_json::json!({"type": "cwd"});
+    let next = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![NativeToolCall {
+            id: "call_after_approval".to_string(),
+            name: "self_tool".to_string(),
+            raw_arguments: next_arguments.to_string(),
+            arguments: next_arguments,
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    assert!(matches!(next, CoreStep::NeedModel { .. }));
+    assert_eq!(core.native_exchanges.len(), 2);
+    assert_eq!(core.native_exchanges[1].delta_id, "pd_3");
+    assert_eq!(core.native_exchanges[1].calls[0].id, "call_after_approval");
+}
+
+#[test]
+fn boundary_only_native_interaction_can_be_offloaded_with_its_exchange() {
+    let mut core = test_core("native_boundary_only_offload");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "collect evidence for offload".to_string(),
+    )]);
+    let arguments = serde_json::json!({"type": "cwd"});
+
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![NativeToolCall {
+            id: "call_boundary_offload".to_string(),
+            name: "self_tool".to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+    assert!(core.deltas[1].slices.is_empty());
+    assert_eq!(core.native_exchanges[0].delta_id, "pd_2");
+
+    let offload = core
+        .collect_prompt_context_for_scratch(&["pd_2".to_string()], &[])
+        .expect("boundary-only owning delta should be offloadable");
+    assert_eq!(offload.delta_ids, vec!["pd_2"]);
+    assert!(offload.content.contains("call_boundary_offload"));
+    assert!(offload.content.contains("self_tool"));
+    assert!(offload.content.contains("tool_output"));
+}
+
+#[test]
+fn native_model_interaction_delta_is_an_independent_compaction_unit() {
+    let mut core = test_core("native_interaction_compaction_unit");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "inspect in two discardable rounds".to_string(),
+    )]);
+
+    for (call_id, self_type) in [("call_discard_me", "cwd"), ("call_keep_me", "params")] {
+        let arguments = serde_json::json!({"type": self_type});
+        let step = core.apply_model_response(LlmResponse {
+            content: String::new(),
+            tool_calls: vec![NativeToolCall {
+                id: call_id.to_string(),
+                name: "self_tool".to_string(),
+                raw_arguments: arguments.to_string(),
+                arguments,
+            }],
+            model_name: "test".to_string(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        });
+        assert!(matches!(step, CoreStep::NeedModel { .. }));
+    }
+
+    let removed = core.apply_prompt_shrink(&["pd_2".to_string()], &[]);
+    assert!(removed.contains("removed_delta_count: 1"));
+    assert_eq!(
+        core.deltas
+            .iter()
+            .map(|delta| delta.delta_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pd_1", "pd_3"]
+    );
+    assert_eq!(core.native_exchanges.len(), 1);
+    assert_eq!(core.native_exchanges[0].delta_id, "pd_3");
+    assert_eq!(core.native_exchanges[0].calls[0].id, "call_keep_me");
+
+    let prompt = core.render_prompt();
+    assert!(!prompt.contains("[BEGIN DELTA delta_id: pd_2"));
+    assert!(prompt.contains("[BEGIN DELTA delta_id: pd_3"));
+    let request = core.model_interaction_request(prompt);
+    assert_eq!(request.native_exchanges.len(), 1);
+    assert_eq!(request.native_exchanges[0].calls[0].id, "call_keep_me");
+}
+
+#[test]
+fn parallel_native_calls_share_one_model_interaction_delta() {
+    let mut core = test_core("parallel_native_interaction_delta");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "inspect paths and params".to_string(),
+    )]);
+    let cwd_arguments = serde_json::json!({"type": "cwd"});
+    let params_arguments = serde_json::json!({"type": "params"});
+
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![
+            NativeToolCall {
+                id: "call_parallel_cwd".to_string(),
+                name: "self_tool".to_string(),
+                raw_arguments: cwd_arguments.to_string(),
+                arguments: cwd_arguments,
+            },
+            NativeToolCall {
+                id: "call_parallel_params".to_string(),
+                name: "self_tool".to_string(),
+                raw_arguments: params_arguments.to_string(),
+                arguments: params_arguments,
+            },
+        ],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+
+    assert_eq!(core.deltas.len(), 2);
+    assert_eq!(core.native_exchanges.len(), 1);
+    assert_eq!(core.native_exchanges[0].delta_id, "pd_2");
+    assert_eq!(core.native_exchanges[0].calls.len(), 2);
+    let prompt = core.render_prompt();
+    assert_eq!(prompt.matches("[BEGIN DELTA delta_id: pd_2").count(), 1);
+}
+
+#[test]
 fn native_context_compact_first_then_executes_later_call_with_correct_id() {
     let mut core = test_core("native_compact_then_call");
     core.set_interaction_profile(&native_test_profile());
