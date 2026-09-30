@@ -356,7 +356,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
                 force_threshold,
             )]);
         }
-        if ui.take_manual_context_compact_request() {
+        if matches!(step, CoreStep::NeedModel { .. }) && ui.take_manual_context_compact_request() {
             core.request_manual_context_compact();
         }
         match step {
@@ -380,6 +380,11 @@ fn run_session_turn_with_model_client_and_reminder_override(
                 let supplements = normalize_user_supplements_with_context(
                     ui.drain_user_supplements_with_context(),
                 );
+                // Draining the mailbox can turn a compact marker into a request
+                // without returning any user text. Consume it before dispatch.
+                if ui.take_manual_context_compact_request() {
+                    core.request_manual_context_compact();
+                }
                 if !supplements.is_empty() {
                     if let Some(next_step) = core.append_user_supplements_with_context_and_audit(
                         supplements,

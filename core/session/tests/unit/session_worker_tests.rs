@@ -5418,3 +5418,28 @@ fn background_exit_topic_arrives_while_model_call_is_blocked() {
     let _ = worker.shutdown();
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn manual_compact_at_finish_is_handed_off_without_waiting_for_user_input() {
+    for already_drained in [false, true] {
+        let (mut ui, mailbox, flag) = manual_compact_ui("compact_finish_handoff");
+        if already_drained {
+            flag.store(true, Ordering::SeqCst);
+        } else {
+            mailbox.lock().unwrap().queue.push(QueuedSupplement {
+                text: String::new(),
+                additional_context: None,
+                command_id: None,
+                queued_at: Instant::now(),
+                manual_context_compact: true,
+            });
+        }
+        let handoff = ui.close_supplements_for_host_handoff();
+        assert_eq!(handoff.len(), 1, "compact must schedule a follow-up turn");
+        assert!(handoff[0].text.is_empty());
+        assert!(handoff[0].manual_context_compact);
+        assert!(!flag.load(Ordering::SeqCst), "handoff owns the request now");
+        assert!(ui.close_supplements_for_host_handoff().is_empty());
+        assert!(!mailbox.lock().unwrap().accepting);
+    }
+}

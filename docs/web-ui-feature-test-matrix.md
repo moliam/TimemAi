@@ -48,3 +48,7 @@ a host/runtime integration test.
 When a Web UI feature changes, update this matrix in the same commit as the
 code and tests. If a row cannot be fully automated, record the manual smoke in
 `docs/manual-release-smoke.md`.
+
+### 模型请求推理提示
+
+请求明确启用推理时，聊天活动显示 Lucide Brain 图标及“使用推理”；普通和 Stream UI 共用同一提示，归档保留。未知或显式禁用不显示。Core 根据最终请求字段判断，Host 只传递 `reasoning_enabled`，不传递请求正文。覆盖：`reasoning_indicator_follows_explicit_outgoing_request_fields` 与 `stream-preview-acceptance.mjs` 双模式启用/禁用断言。

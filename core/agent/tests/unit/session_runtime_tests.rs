@@ -6385,3 +6385,62 @@ fn restart_then_manual_compact_leads_with_notice_and_compact_trailer() {
     assert!(second.contains("restart compact summary"), "{second}");
     let _ = fs::remove_dir_all(dir);
 }
+
+#[test]
+fn mailbox_only_manual_compact_is_consumed_before_model_dispatch() {
+    struct MailboxCompactUi {
+        queued: bool,
+        requested: bool,
+    }
+    impl TurnUi for MailboxCompactUi {
+        fn drain_user_supplements_with_context(&mut self) -> Vec<UserSupplement> {
+            if self.queued {
+                self.queued = false;
+                self.requested = true;
+            }
+            Vec::new()
+        }
+        fn take_manual_context_compact_request(&mut self) -> bool {
+            std::mem::take(&mut self.requested)
+        }
+    }
+    let dir = tmp_dir("mailbox_only_manual_compact");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    let mut model = ReplayModel::new([
+        Ok(llm(
+            r#"{"working_still_action":{"context_compact":{"summary":"compacted","discard":["pd_1"]}}}"#,
+            1000,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"done"}"#,
+            800,
+            false,
+        )),
+    ]);
+    let mut ui = MailboxCompactUi {
+        queued: true,
+        requested: false,
+    };
+    let outcome = run_direct_resume_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+    assert_eq!(outcome.text, "done");
+    assert!(model.prompts[0].contains("User manually requests context compaction."));
+    let _ = fs::remove_dir_all(dir);
+}

@@ -840,6 +840,8 @@ enum WireEvent {
         session_id: String,
         turn_id: Option<String>,
         turn_event_id: Option<String>,
+        timeline_seq: Option<u64>,
+        created_at_ms: Option<u128>,
         event: Value,
     },
     WorkerActivity {
@@ -848,6 +850,8 @@ enum WireEvent {
         worker_id: String,
         turn_id: Option<String>,
         turn_event_id: Option<String>,
+        timeline_seq: Option<u64>,
+        created_at_ms: Option<u128>,
         event: Value,
     },
     TurnFinished {
@@ -916,6 +920,13 @@ enum WireEvent {
     AttachmentRemoved {
         session_id: String,
         attachment_id: String,
+    },
+    TurnHistoryPage {
+        session_id: String,
+        turn_id: String,
+        offset: usize,
+        records: Vec<ChatHistoryRecord>,
+        next_offset: Option<usize>,
     },
     HistoryPage {
         session_id: String,
@@ -1288,6 +1299,12 @@ enum ClientCommand {
         session_id: String,
         attachment_id: String,
     },
+    TurnHistoryPage {
+        session_id: String,
+        turn_id: String,
+        #[serde(default)]
+        offset: usize,
+    },
     HistoryPage {
         session_id: String,
         before_cursor: Option<String>,
@@ -1399,7 +1416,8 @@ enum ClientCommand {
 impl ClientCommand {
     fn mutation_lane(&self) -> Option<String> {
         match self {
-            Self::HistoryPage { .. }
+            Self::TurnHistoryPage { .. }
+            | Self::HistoryPage { .. }
             | Self::ChatSearch { .. }
             | Self::FavoritesList
             | Self::ToolRepoSearch { .. }
@@ -1505,7 +1523,8 @@ impl ClientCommand {
     fn result_is_direct(&self) -> bool {
         matches!(
             self,
-            Self::HistoryPage { .. }
+            Self::TurnHistoryPage { .. }
+                | Self::HistoryPage { .. }
                 | Self::ChatSearch { .. }
                 | Self::FavoritesList
                 | Self::FavoriteCreate { .. }
@@ -4049,6 +4068,24 @@ fn handle_command_with_id(
             let capacity = ChatLibrary::new(memory_dir).update_capacity_limit(max_bytes)?;
             return Ok(Some(WireEvent::FavoriteCapacityUpdated { capacity }));
         }
+        ClientCommand::TurnHistoryPage {
+            session_id,
+            turn_id,
+            offset,
+        } => {
+            let (records, next_offset) = current_session_store(state)?.read_turn_history_page(
+                &session_id,
+                &turn_id,
+                offset,
+            )?;
+            return Ok(Some(WireEvent::TurnHistoryPage {
+                session_id,
+                turn_id,
+                offset,
+                records,
+                next_offset,
+            }));
+        }
         ClientCommand::HistoryPage {
             session_id,
             before_cursor,
@@ -6190,7 +6227,7 @@ fn restored_messages_from_history_records(records: &[ChatHistoryRecord]) -> Vec<
 
 /// Restored history events only feed the compact turn preview UI; the full
 /// action result text stays in the raw chat history on disk and reloads via
-/// the history_page command when the user expands details. Keep oversized
+/// the turn_history_page command when the user expands details. Keep oversized
 /// strings out of the initial snapshot so a large session does not turn the
 /// hello frame into megabytes on slow remote links.
 const RESTORED_EVENT_TEXT_LIMIT_BYTES: usize = 256;
@@ -6241,7 +6278,7 @@ fn truncate_restored_event_value(value: Value, depth: usize) -> Value {
 
 /// Collapsed Thought/Action history items only need the skeleton of an
 /// action (name, status, ids, and a short command preview). Full command
-/// and result text stays on disk and loads via history_page when the user
+/// and result text stays on disk and loads via turn_history_page when the user
 /// expands details, so drop everything else from restored core.action
 /// events before they enter the initial snapshot.
 fn slim_restored_action_event(payload: Value) -> Value {
@@ -7524,6 +7561,8 @@ fn request_session_context_compact(
         WireEvent::CoreTopic {
             session_id: session_id.to_string(),
             turn_id: turn_ref.as_ref().map(|value| value.turn_id.clone()),
+            timeline_seq: turn_ref.as_ref().map(|value| value.timeline_seq),
+            created_at_ms: turn_ref.as_ref().map(|value| value.created_at_ms),
             turn_event_id: turn_ref.map(|value| value.event_id),
             event: wire_payload,
         },
@@ -7852,6 +7891,8 @@ fn submit_turn_with_selected_attachments_and_kind(
             WireEvent::CoreTopic {
                 session_id: session_id.to_string(),
                 turn_id: turn_ref.as_ref().map(|value| value.turn_id.clone()),
+                timeline_seq: turn_ref.as_ref().map(|value| value.timeline_seq),
+                created_at_ms: turn_ref.as_ref().map(|value| value.created_at_ms),
                 turn_event_id: turn_ref.map(|value| value.event_id),
                 event: wire_payload,
             },
@@ -9941,6 +9982,8 @@ fn rollback_web_turn(
 struct ActiveTurnEventRef {
     turn_id: String,
     event_id: String,
+    timeline_seq: u64,
+    created_at_ms: u128,
 }
 
 fn append_active_turn_event(
@@ -10010,11 +10053,12 @@ fn append_turn_event(
     } else {
         next_turn_timeline_seq(turn)
     };
+    let created_at_ms = now_ms();
     turn.events.push(WebTurnEvent {
         event_id: event_id.clone(),
         source: source.to_string(),
         payload,
-        created_at_ms: now_ms(),
+        created_at_ms,
         timeline_seq: Some(timeline_seq),
     });
     let history_event = turn
@@ -10037,6 +10081,8 @@ fn append_turn_event(
     Some(ActiveTurnEventRef {
         turn_id: active_turn_id,
         event_id,
+        timeline_seq,
+        created_at_ms,
     })
 }
 
@@ -10635,6 +10681,8 @@ fn work_instruction_notice_event(state: &AppState, session_id: &str) -> Option<W
     Some(WireEvent::CoreTopic {
         session_id: session_id.to_string(),
         turn_id: turn_ref.as_ref().map(|value| value.turn_id.clone()),
+        timeline_seq: turn_ref.as_ref().map(|value| value.timeline_seq),
+        created_at_ms: turn_ref.as_ref().map(|value| value.created_at_ms),
         turn_event_id: turn_ref.map(|value| value.event_id),
         event: wire_payload,
     })
@@ -10704,6 +10752,8 @@ fn emit_worker_activity(
             context_id: context_id.to_string(),
             worker_id: worker_id.to_string(),
             turn_id: turn_ref.as_ref().map(|value| value.turn_id.clone()),
+            timeline_seq: turn_ref.as_ref().map(|value| value.timeline_seq),
+            created_at_ms: turn_ref.as_ref().map(|value| value.created_at_ms),
             turn_event_id: turn_ref.map(|value| value.event_id),
             event,
         },
@@ -11321,6 +11371,8 @@ fn handle_scoped_worker_event(
                     WireEvent::CoreTopic {
                         session_id: session_id.to_string(),
                         turn_id: turn_ref.as_ref().map(|value| value.turn_id.clone()),
+                        timeline_seq: turn_ref.as_ref().map(|value| value.timeline_seq),
+                        created_at_ms: turn_ref.as_ref().map(|value| value.created_at_ms),
                         turn_event_id: turn_ref.map(|value| value.event_id),
                         event: wire_payload,
                     },
@@ -11412,7 +11464,13 @@ fn handle_scoped_worker_event(
                 session_id,
                 context_id,
                 worker_id,
-                json!({ "kind": "model_request", "round": round }),
+                json!({
+                    "kind": "model_request",
+                    "round": round,
+                    "reasoning_enabled": api_payload
+                        .as_deref()
+                        .is_some_and(agent_core::model_api::request_uses_reasoning)
+                }),
             );
         }
         CoreSessionWorkerEvent::ModelRequestCompleted { latency } => {
@@ -11760,6 +11818,27 @@ fn submit_unconsumed_supplement_handoff(
     session_id: &str,
     supplements: &[timem_session::UnconsumedSupplement],
 ) -> Result<WebTurn, String> {
+    let compact = supplements.iter().any(|item| item.manual_context_compact);
+    if compact {
+        primary_worker_handle(state, session_id)?.request_manual_context_compact()?;
+        if supplements.iter().all(|item| item.manual_context_compact) {
+            return submit_turn_with_selected_attachments_and_kind(
+                state,
+                session_id,
+                String::new(),
+                None,
+                None,
+                Vec::new(),
+                "resume_directly",
+            );
+        }
+    }
+    let text_supplements = supplements
+        .iter()
+        .filter(|item| !item.manual_context_compact)
+        .cloned()
+        .collect::<Vec<_>>();
+    let supplements = text_supplements.as_slice();
     validate_session_model_service_config(state, session_id)?;
     apply_pending_session_mcp(state, session_id)?;
     let previous_session;

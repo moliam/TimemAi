@@ -8461,6 +8461,7 @@ fn failed_unconsumed_handoff_preserves_final_answer_and_pending_supplement() {
         &worker_id,
         CoreSessionWorkerEvent::UnconsumedSupplements {
             supplements: vec![timem_session::UnconsumedSupplement {
+                manual_context_compact: false,
                 text: "Q2".to_string(),
                 additional_context: None,
                 command_id: None,
@@ -8550,6 +8551,7 @@ fn task_finished_handoff_failure_keeps_unconsumed_supplement_in_memory() {
         &worker_id,
         CoreSessionWorkerEvent::UnconsumedSupplements {
             supplements: vec![timem_session::UnconsumedSupplement {
+                manual_context_compact: false,
                 text: "late follow-up".to_string(),
                 additional_context: None,
                 command_id: None,
@@ -8645,6 +8647,7 @@ fn normal_completion_hands_unconsumed_supplement_off_before_ordinary_queue() {
         &worker_id,
         CoreSessionWorkerEvent::UnconsumedSupplements {
             supplements: vec![timem_session::UnconsumedSupplement {
+                manual_context_compact: false,
                 text: "S priority".to_string(),
                 additional_context: Some("RETURNED_CONTEXT_MARKER".to_string()),
                 command_id: Some("supplement-command".to_string()),
@@ -8726,11 +8729,13 @@ fn stopped_primary_turn_preserves_unconsumed_supplements_without_resubmitting() 
     let session_id = "session_a";
     let supplements = vec![
         timem_session::UnconsumedSupplement {
+            manual_context_compact: false,
             text: "follow-up one".to_string(),
             additional_context: None,
             command_id: None,
         },
         timem_session::UnconsumedSupplement {
+            manual_context_compact: false,
             text: "follow-up two".to_string(),
             additional_context: None,
             command_id: None,
@@ -15874,4 +15879,240 @@ async fn background_restore_publishes_sessions_newest_first() {
     let mut expected = ids.clone();
     expected.sort();
     assert_eq!(published_sorted, expected);
+}
+
+#[test]
+fn task_finished_hands_manual_compact_off_to_direct_resume() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "compact-finish-handoff");
+    let first = start_web_turn(&state, &session_id, "Q1").unwrap();
+    let (context_id, worker_id) = primary_worker_scope(&state, &session_id).unwrap();
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::UnconsumedSupplements {
+            supplements: vec![timem_session::UnconsumedSupplement {
+                manual_context_compact: true,
+                text: String::new(),
+                additional_context: None,
+                command_id: None,
+            }],
+        },
+    );
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Finished(
+            agent_core::FinishedTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.clone(),
+                    turn_id: first.turn_id,
+                    epoch: 1,
+                },
+                outcome: agent_core::TurnProjectionOutcome::Completed,
+            },
+        )),
+    );
+    let mut outcome =
+        TurnOutcome::final_response("done", UsageStats::zero(), None, None, Duration::ZERO);
+    outcome.stop_reason = Some(agent_core::TurnStopReason::TurnFinished);
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::TurnFinished { outcome },
+    );
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = sessions.get(&session_id).unwrap();
+        assert_eq!(session.turns.len(), 2);
+        let next = session.turns.last().unwrap();
+        assert_eq!(next.user_entries[0].kind, "resume_directly");
+        assert_eq!(
+            session.pending_turn_id.as_deref(),
+            Some(next.turn_id.as_str())
+        );
+        assert!(session.pending_unconsumed_supplements.is_empty());
+    }
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+}
+
+#[test]
+fn live_worker_wire_preserves_snapshot_timeline_metadata() {
+    let state = routing_test_state();
+    let id = "session_a";
+    start_web_turn(&state, id, "timeline").unwrap();
+    let mut receiver = state.events.subscribe();
+    emit_worker_activity(
+        &state,
+        id,
+        &test_context_id(id),
+        &test_worker_id(id),
+        json!({"kind":"model_request"}),
+    );
+    let events = drain_wire_events(&mut receiver);
+    let wire = events
+        .iter()
+        .find(|event| matches!(event, WireEvent::WorkerActivity { .. }))
+        .unwrap();
+    let json = serde_json::to_value(wire).unwrap();
+    let sessions = state.sessions.lock().unwrap();
+    let saved = sessions[id].turns.last().unwrap().events.last().unwrap();
+    assert_eq!(json["timeline_seq"], json!(saved.timeline_seq));
+    assert_eq!(json["created_at_ms"], json!(saved.created_at_ms));
+    assert_eq!(json["turn_event_id"], json!(saved.event_id));
+}
+
+#[test]
+fn bounded_turn_history_pages_recover_all_events_beyond_snapshot_tail() {
+    let state = routing_test_state();
+    let id = "session_a";
+    let turn = start_web_turn(&state, id, "history pages").unwrap();
+    for index in 0..150 {
+        append_turn_event(
+            &state,
+            id,
+            Some(&turn.turn_id),
+            "core_topic",
+            json!({
+                "topic": {"name":"core.model.response"},
+                "payload": {"free_talk":format!("progress-{index}-{}", "x".repeat(600))}
+            }),
+        )
+        .unwrap();
+    }
+    let store = current_session_store(&state).unwrap();
+    let mut offset = 0;
+    let mut records = Vec::new();
+    loop {
+        let (page, next) = store
+            .read_turn_history_page(id, &turn.turn_id, offset)
+            .unwrap();
+        assert!(page.len() <= 64);
+        records.extend(page);
+        if let Some(next) = next {
+            assert!(next > offset);
+            offset = next;
+        } else {
+            break;
+        }
+    }
+    let events: Vec<_> = records
+        .iter()
+        .filter_map(|record| match record {
+            ChatHistoryRecord::Event { extra, .. }
+                if extra.get("source") == Some(&json!("core_topic")) =>
+            {
+                Some(extra)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(events.len(), 150);
+    assert!(
+        events[0]["payload"]["payload"]["free_talk"]
+            .as_str()
+            .unwrap()
+            .len()
+            > 600
+    );
+    let sessions = state.sessions.lock().unwrap();
+    let slim = slim_restored_turn_for_snapshot(sessions[id].turns.last().unwrap());
+    assert_eq!(slim.events.len(), 40);
+    assert_eq!(
+        store
+            .read_turn_history_page(id, "missing-turn", 0)
+            .unwrap()
+            .0
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn turn_history_detail_rejects_unsafe_session_and_oversized_record() {
+    let state = routing_test_state();
+    let store = current_session_store(&state).unwrap();
+    assert!(store
+        .read_turn_history_page("../outside", "turn", 0)
+        .is_err());
+    let turn = start_web_turn(&state, "session_a", "large record").unwrap();
+    append_turn_event(
+        &state,
+        "session_a",
+        Some(&turn.turn_id),
+        "core_topic",
+        json!({
+            "payload": {"text": "x".repeat(2 * 1024 * 1024 + 1)}
+        }),
+    )
+    .unwrap();
+    let (_, next) = store
+        .read_turn_history_page("session_a", &turn.turn_id, 0)
+        .unwrap();
+    let error = store
+        .read_turn_history_page("session_a", &turn.turn_id, next.unwrap())
+        .unwrap_err();
+    assert_eq!(error, "turn_history_record_too_large");
+}
+
+#[test]
+fn restart_heavy_history_restores_chat_and_only_latest_consecutive_notice() {
+    let state = routing_test_state();
+    let store = current_session_store(&state).unwrap();
+    for (role, text) in [
+        (ChatHistoryRole::User, "legacy task"),
+        (ChatHistoryRole::Assistant, "legacy answer"),
+    ] {
+        store
+            .append_history_record(
+                "session_a",
+                &ChatHistoryRecord::Message {
+                    role,
+                    turn_id: "legacy_chat".to_string(),
+                    created_at_ms: 1,
+                    kind: None,
+                    command_id: None,
+                    delivery_state: None,
+                    content: text.to_string(),
+                },
+            )
+            .unwrap();
+    }
+    for n in 0..40 {
+        store
+            .append_history_record(
+                "session_a",
+                &ChatHistoryRecord::Message {
+                    role: ChatHistoryRole::System,
+                    turn_id: format!("restart_marker_{n}"),
+                    created_at_ms: 100 + n,
+                    kind: Some("runtime_restart".to_string()),
+                    command_id: None,
+                    delivery_state: None,
+                    content: "Runtime restarted".to_string(),
+                },
+            )
+            .unwrap();
+    }
+    let page = store
+        .read_history_page("session_a", None, SESSION_HISTORY_PAGE_LIMIT)
+        .unwrap();
+    let turns = restored_turns_from_history_records(&page.records);
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].user_entries[0].text, "legacy task");
+    assert_eq!(turns[0].final_answer.as_deref(), Some("legacy answer"));
+    let messages = restored_messages_from_history_records(&page.records);
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages.last().unwrap().created_at_ms, 139);
+    assert!(!page.has_more);
 }

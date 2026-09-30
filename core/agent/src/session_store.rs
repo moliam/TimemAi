@@ -2,7 +2,7 @@ use crate::atomic_write_file;
 use crate::MemGuard;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -214,6 +214,11 @@ struct HistoryIndexEntry {
     byte_offset: u64,
     byte_len: u64,
     turn_id: String,
+    is_restart_notice: bool,
+}
+
+fn is_history_restart_notice(record: &ChatHistoryRecord) -> bool {
+    matches!(record, ChatHistoryRecord::Message { role: ChatHistoryRole::System, kind: Some(kind), .. } if kind == "runtime_restart")
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -752,6 +757,7 @@ impl SessionStore {
                     byte_offset: before_len,
                     byte_len: bytes.len() as u64,
                     turn_id: record.turn_id().to_string(),
+                    is_restart_notice: is_history_restart_notice(record),
                 });
                 index.file_len = file_len;
                 index.modified_at_ms = modified_at_ms;
@@ -1149,6 +1155,51 @@ impl SessionStore {
         read_history_page_from_index(&path, &index, before_cursor, turn_limit)
     }
 
+    /// Read one bounded page of a turn's records without scanning other payloads.
+    pub fn read_turn_history_page(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        offset: usize,
+    ) -> Result<(Vec<ChatHistoryRecord>, Option<usize>), String> {
+        validate_session_id(session_id)?;
+        let path = self.history_path_for_session(session_id);
+        let index = self.history_index_for_path(&path)?;
+        let entries: Vec<_> = index
+            .entries
+            .iter()
+            .filter(|entry| entry.turn_id == turn_id)
+            .collect();
+        if offset >= entries.len() {
+            return Ok((Vec::new(), None));
+        }
+        let mut file = fs::File::open(path).map_err(|_| "chat_history_open_failed")?;
+        let mut records = Vec::new();
+        let mut bytes_read = 0usize;
+        let mut next = offset;
+        for entry in entries.iter().skip(offset).take(64) {
+            let len = entry.byte_len as usize;
+            if bytes_read + len > 2 * 1024 * 1024 {
+                if records.is_empty() {
+                    return Err("turn_history_record_too_large".to_string());
+                }
+                break;
+            }
+            file.seek(SeekFrom::Start(entry.byte_offset))
+                .map_err(|_| "chat_history_read_failed")?;
+            let mut bytes = vec![0; len];
+            file.read_exact(&mut bytes)
+                .map_err(|_| "chat_history_read_failed")?;
+            let line = String::from_utf8(bytes).map_err(|_| "chat_history_read_failed")?;
+            if let Some(record) = parse_chat_history_record_line(&line) {
+                records.push(record);
+            }
+            bytes_read += len;
+            next += 1;
+        }
+        Ok((records, (next < entries.len()).then_some(next)))
+    }
+
     fn history_index_for_path(&self, path: &Path) -> Result<HistoryIndex, String> {
         if !path.exists() {
             return Ok(HistoryIndex {
@@ -1316,6 +1367,7 @@ fn build_history_index(
                 byte_offset,
                 byte_len: byte_len as u64,
                 turn_id: record.turn_id().to_string(),
+                is_restart_notice: is_history_restart_notice(&record),
             });
         }
         byte_offset = byte_offset.saturating_add(byte_len as u64);
@@ -1366,6 +1418,12 @@ fn read_history_page_from_index(
             .map_err(|_| "chat_history_read_failed")?;
         let line = String::from_utf8(bytes).map_err(|_| "chat_history_read_failed")?;
         if let Some(record) = parse_chat_history_record_line(&line) {
+            // Collapse only adjacent structured restart markers; keep raw offsets intact.
+            if is_history_restart_notice(&record)
+                && records.last().is_some_and(is_history_restart_notice)
+            {
+                records.pop();
+            }
             records.push(record);
         }
     }
@@ -1385,8 +1443,13 @@ fn page_start_index(entries: &[HistoryIndexEntry], end: usize, limit: usize) -> 
         while turn_start > 0 && entries[turn_start - 1].turn_id == *turn_id {
             turn_start -= 1;
         }
+        let counts_as_turn = entries[turn_start..start]
+            .iter()
+            .any(|entry| !entry.is_restart_notice);
         start = turn_start;
-        turn_count = turn_count.saturating_add(1);
+        if counts_as_turn {
+            turn_count = turn_count.saturating_add(1);
+        }
     }
     start
 }
@@ -1396,11 +1459,7 @@ pub fn read_history_page_from_path(
     before_cursor: Option<&str>,
     turn_limit: usize,
 ) -> Result<ChatHistoryPage, String> {
-    let turn_limit = if turn_limit == 0 {
-        DEFAULT_HISTORY_PAGE_LIMIT
-    } else {
-        turn_limit
-    };
+    // Share page boundaries with the cached reader, including legacy restart notices.
     if !path.exists() {
         return Ok(ChatHistoryPage {
             records: Vec::new(),
@@ -1408,57 +1467,9 @@ pub fn read_history_page_from_path(
             has_more: false,
         });
     }
-    let requested_end = before_cursor
-        .map(|cursor| {
-            cursor
-                .parse::<usize>()
-                .map_err(|_| "invalid_history_cursor")
-        })
-        .transpose()?;
-    let file = fs::File::open(path).map_err(|_| "chat_history_open_failed")?;
-    let mut page = VecDeque::<(usize, String, Vec<ChatHistoryRecord>)>::new();
-    let mut logical_index = 0usize;
-    for line in BufReader::new(file).lines() {
-        let line = line.map_err(|_| "chat_history_read_failed")?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Some(record) = parse_chat_history_record_line(&line) else {
-            continue;
-        };
-        let within_window = requested_end.is_none_or(|end| logical_index < end);
-        if within_window {
-            let turn_id = record.turn_id().to_string();
-            let extends_active_turn = page
-                .back()
-                .is_some_and(|(_, active_turn_id, _)| *active_turn_id == turn_id);
-            if extends_active_turn {
-                page.back_mut().unwrap().2.push(record);
-            } else {
-                page.push_back((logical_index, turn_id, vec![record]));
-            }
-            // The page limit counts complete turns, not JSONL records. A
-            // complex turn may contain many action and result records but is
-            // still one user-visible task in the history UI.
-            while page.len() > turn_limit {
-                page.pop_front();
-            }
-        }
-        logical_index = logical_index.saturating_add(1);
-    }
-    let end = requested_end.unwrap_or(logical_index).min(logical_index);
-    while page.front().is_some_and(|(index, _, _)| *index >= end) {
-        page.pop_front();
-    }
-    let start = page.front().map(|(index, _, _)| *index).unwrap_or(end);
-    Ok(ChatHistoryPage {
-        records: page
-            .into_iter()
-            .flat_map(|(_, _, records)| records)
-            .collect(),
-        before_cursor: (start > 0).then(|| start.to_string()),
-        has_more: start > 0,
-    })
+    let metadata = fs::metadata(path).map_err(|_| "chat_history_open_failed")?;
+    let index = build_history_index(path, metadata.len(), None)?;
+    read_history_page_from_index(path, &index, before_cursor, turn_limit)
 }
 
 pub fn read_all_history_records(path: &Path) -> Result<Vec<ChatHistoryRecord>, String> {

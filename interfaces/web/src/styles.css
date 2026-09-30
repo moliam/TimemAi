@@ -1,3 +1,4 @@
+@font-face { font-family: "IBM Plex Mono"; src: url("/fonts/IBMPlexMono-Latin-300.woff2") format("woff2"); font-style: normal; font-weight: 300; font-display: swap; }
 :root { --ui-font: Inter, Arial, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; --user-other-font: Inter, Arial; --user-chinese-font: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; --user-font-weight: 400; --agent-other-font: Inter, Arial; --agent-chinese-font: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; --agent-font-weight: 400; --content-size: 13.5px; color-scheme: dark; font-family: var(--ui-font); background: #0c1117; color: #e9eef5; }
 :root[data-theme="light"] { color-scheme: light; }
 :root[data-theme="dark"] { color-scheme: dark; }
@@ -5361,7 +5362,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .turn-stream-tools .user-supplement-line .markdown-body { color: inherit; }
 
 /* Count feedback stays local; it does not change the tool archive layout. */
-.stream-tool-count { display: inline-block; font-variant-numeric: tabular-nums; }
+.stream-tool-count { display: inline-block; font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; font-size: calc(var(--content-size) * .888889); font-weight: 300; font-variant-numeric: tabular-nums; }
 /* Visual contract: absorbed tools signal arrival with a 360ms count-only pulse.
    Do not animate container height here or remount rows; respect reduced motion. */
 .stream-tool-count.incremented { animation: stream-tool-count-increment 360ms ease-out; }

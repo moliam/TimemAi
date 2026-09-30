@@ -1227,3 +1227,198 @@ fn temporary_retention_summary_survives_store_restart_and_tracks_appends() {
     );
     assert!(!fs::read_to_string(history).unwrap().contains("expired"));
 }
+
+#[test]
+fn restart_notices_do_not_displace_legacy_chat_turns_from_history_page() {
+    let root = tmp_dir("restart_notice_paging");
+    let store = SessionStore::new(&root);
+    for turn in 0..4 {
+        store
+            .append_history_record("session_a", &message(turn))
+            .unwrap();
+    }
+    // Build the cache before appending notices: both cached and cold paths matter.
+    store.read_history_page("session_a", None, 2).unwrap();
+    for n in 0..40 {
+        store
+            .append_history_record(
+                "session_a",
+                &ChatHistoryRecord::Message {
+                    role: ChatHistoryRole::System,
+                    turn_id: format!("notice_{n}"),
+                    created_at_ms: 100 + n,
+                    kind: Some("runtime_restart".to_string()),
+                    command_id: None,
+                    delivery_state: None,
+                    content: "restart".to_string(),
+                },
+            )
+            .unwrap();
+    }
+    let path = store.history_path_for_session("session_a");
+    let before = std::fs::read(&path).unwrap();
+    for page in [
+        store.read_history_page("session_a", None, 2).unwrap(),
+        SessionStore::new(&root)
+            .read_history_page("session_a", None, 2)
+            .unwrap(),
+        read_history_page_from_path(&path, None, 2).unwrap(),
+    ] {
+        let users: Vec<_> = page
+            .records
+            .iter()
+            .filter_map(|r| match r {
+                ChatHistoryRecord::Message {
+                    role: ChatHistoryRole::User,
+                    turn_id,
+                    ..
+                } => Some(turn_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(users, ["turn_2", "turn_3"]);
+        assert_eq!(page.records.len(), 3);
+        assert_eq!(page.records.last().unwrap().turn_id(), "notice_39");
+        assert_eq!(page.before_cursor.as_deref(), Some("2"));
+        let older = store
+            .read_history_page("session_a", page.before_cursor.as_deref(), 2)
+            .unwrap();
+        assert_eq!(older.records.len(), 2);
+        assert!(!older.has_more);
+    }
+    assert_eq!(std::fs::read(path).unwrap(), before);
+}
+
+#[test]
+#[ignore = "opt-in read-only local history diagnostic"]
+fn local_history_page_read_only_diagnostic() {
+    let path = std::env::var_os("TIMEM_DIAGNOSTIC_HISTORY_PATH").expect("history path required");
+    let path = std::path::PathBuf::from(path);
+    let before = std::fs::read(&path).unwrap();
+    let page = read_history_page_from_path(&path, None, 30).unwrap();
+    let users = page
+        .records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record,
+                ChatHistoryRecord::Message {
+                    role: ChatHistoryRole::User,
+                    ..
+                }
+            )
+        })
+        .count();
+    let assistants = page
+        .records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record,
+                ChatHistoryRecord::Message {
+                    role: ChatHistoryRole::Assistant,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert!(
+        users > 0,
+        "latest page must contain chat, not only restart notices"
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "diagnostic must not rewrite history"
+    );
+    println!(
+        "history page: users={users}, assistants={assistants}, records={}, has_more={}",
+        page.records.len(),
+        page.has_more
+    );
+}
+
+#[test]
+fn restart_notice_coalescing_preserves_separate_runs_and_old_cursors() {
+    let root = tmp_dir("restart_notice_runs");
+    let store = SessionStore::new(&root);
+    for n in 0..6 {
+        if n == 3 {
+            store
+                .append_history_record("session_a", &message(1))
+                .unwrap();
+        }
+        store
+            .append_history_record(
+                "session_a",
+                &ChatHistoryRecord::Message {
+                    role: ChatHistoryRole::System,
+                    turn_id: format!("notice_{n}"),
+                    created_at_ms: n,
+                    kind: Some("runtime_restart".to_string()),
+                    command_id: None,
+                    delivery_state: None,
+                    content: "restart".to_string(),
+                },
+            )
+            .unwrap();
+    }
+    let page = store.read_history_page("session_a", None, 30).unwrap();
+    assert_eq!(
+        page.records
+            .iter()
+            .map(ChatHistoryRecord::turn_id)
+            .collect::<Vec<_>>(),
+        ["notice_2", "turn_1", "notice_5"]
+    );
+    // A legacy cursor inside a restart run still denotes its original record offset.
+    let old = store.read_history_page("session_a", Some("2"), 30).unwrap();
+    assert_eq!(old.records.len(), 1);
+    assert_eq!(old.records[0].turn_id(), "notice_1");
+    assert!(!old.has_more);
+}
+
+#[test]
+fn action_events_split_consecutive_restart_notice_runs() {
+    let root = tmp_dir("restart_action_boundary");
+    let store = SessionStore::new(&root);
+    for n in 0..4 {
+        if n == 2 {
+            store
+                .append_history_record(
+                    "session_a",
+                    &ChatHistoryRecord::Event {
+                        role: ChatHistoryRole::System,
+                        turn_id: "action_turn".to_string(),
+                        created_at_ms: 2,
+                        kind: ChatHistoryEventKind::Action,
+                        content: "action evidence".to_string(),
+                        extra: BTreeMap::new(),
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .append_history_record(
+                "session_a",
+                &ChatHistoryRecord::Message {
+                    role: ChatHistoryRole::System,
+                    turn_id: format!("notice_{n}"),
+                    created_at_ms: n,
+                    kind: Some("runtime_restart".to_string()),
+                    command_id: None,
+                    delivery_state: None,
+                    content: "restart".to_string(),
+                },
+            )
+            .unwrap();
+    }
+    let page = store.read_history_page("session_a", None, 30).unwrap();
+    assert_eq!(
+        page.records
+            .iter()
+            .map(ChatHistoryRecord::turn_id)
+            .collect::<Vec<_>>(),
+        ["notice_1", "action_turn", "notice_3"]
+    );
+}

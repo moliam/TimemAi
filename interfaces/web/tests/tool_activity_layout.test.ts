@@ -106,3 +106,12 @@ it("keeps live text/tool spacing compact without shrinking touch targets", () =>
   expect(styles).toMatch(/\.stream-tool-row \{[^}]*padding: 2px 0;/);
   expect(styles).toContain("min-height: 44px; min-width: 44px;");
 });
+
+it("bundles IBM Plex Mono locally and scopes it to stream tool counts", () => {
+  expect(styles).toContain('src: url("/fonts/IBMPlexMono-Latin-300.woff2") format("woff2")');
+  expect(styles).toMatch(/\.stream-tool-count \{[^}]*font-family: "IBM Plex Mono"/);
+  expect(styles).toMatch(/\.stream-tool-count \{[^}]*font-size: calc\(var\(--content-size\) \* \.888889\); font-weight: 300;/);
+  const font = readFileSync(new URL("../public/fonts/IBMPlexMono-Latin-300.woff2", import.meta.url));
+  expect(font.readUInt32BE(0)).toBe(0x774f4632);
+  expect(readFileSync(new URL("../public/fonts/IBMPlexMono-OFL.txt", import.meta.url), "utf8")).toContain("SIL OPEN FONT LICENSE");
+});

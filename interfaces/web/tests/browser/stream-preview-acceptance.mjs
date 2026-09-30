@@ -179,6 +179,13 @@ async function startHost() {
     let peer;
     peer = makePeer(socket, (command) => {
       commands.push(command);
+      if (command.type === "turn_history_page") {
+        const records = authoritativeSession.historyRecords ?? [];
+        const end = Math.min(command.offset + 16, records.length);
+        peer.send({ type: "turn_history_page", session_id: command.session_id, turn_id: command.turn_id,
+          offset: command.offset, records: records.slice(command.offset, end), next_offset: end < records.length ? end : null });
+        return;
+      }
       if (!command.command_id) return;
       peer.send({ type: "command_ack", command_id: command.command_id, status: "accepted" });
       if (command.type === "turn_submit" && authoritativeSession.state === "working") {
@@ -440,6 +447,48 @@ async function main() {
       await browser.call("Page.reload", { ignoreCache: true });
       await waitFor(() => contains("body", "Long task"), "round snapshot missing");
     };
+    // Real incremental wire metadata must survive a full-turn update in between.
+    const oldThought = { ...thoughtEvent("ordered-old", "ORDER_OLD", 1), timeline_seq: 1 };
+    const ordered = makeSession({ turns: [{ ...turn("turn-1"), events: [oldThought],
+      user_entries: [{ kind: "task", text: "Long task", created_at_ms: 0, timeline_seq: 0 },
+        { kind: "supplement", text: "ORDER_SUPPLEMENT", created_at_ms: 2, timeline_seq: 2 }] }] });
+    host.setSession(ordered);
+    await browser.call("Page.reload", { ignoreCache: true });
+    await waitFor(() => contains("body", "ORDER_OLD"), "ordered snapshot missing");
+    const newer = thoughtEvent("ordered-new", "ORDER_NEW", 3);
+    host.send({ type: "core_topic", session_id: "session-1", turn_id: "turn-1",
+      turn_event_id: newer.event_id, timeline_seq: 3, created_at_ms: 3, event: newer.payload });
+    await waitFor(() => contains("body", "ORDER_NEW"), "incremental thought missing");
+    assert(await browser.evaluate(`(() => { const text = document.querySelector('.turn-stream-tools').textContent;
+      return text.indexOf('ORDER_OLD') < text.indexOf('ORDER_SUPPLEMENT') && text.indexOf('ORDER_SUPPLEMENT') < text.indexOf('ORDER_NEW'); })()`), "incremental wire moved new thought before snapshot items");
+    const completeEvents = Array.from({length: 80}, (_, i) => i % 2
+      ? toolEvent(`archive-tool-${i}`, i + 1) : thoughtEvent(`archive-${i}`, `ARCHIVE_PROGRESS_${i}`, i + 1));
+    const historyRecords = completeEvents.map(event => ({ type: "event", role: "system", turn_id: "turn-1",
+      created_at_ms: event.created_at_ms, kind: "runtime_notice", content: "", source: event.source, payload: event.payload }));
+    host.setSession(makeSession({ state: "ready", active_turn_id: null, historyRecords,
+      turns: [{ ...turn("turn-1"), state: "completed", events: completeEvents.slice(-40), final_answer: "ARCHIVE_DONE" }] }));
+    for (let reload = 0; reload < 2; reload++) {
+      await browser.call("Page.reload", { ignoreCache: true });
+      await waitFor(() => contains("body", "ARCHIVE_DONE"), "archive snapshot missing");
+      await browser.evaluate(`document.querySelector('[aria-label="Show work details"]').click()`);
+      await waitFor(() => contains("body", "ARCHIVE_PROGRESS_0"), "paged archive lost first thought");
+      await waitFor(() => contains("body", "archive-tool-1"), "paged archive lost first tool");
+      assert(await contains("body", "ARCHIVE_PROGRESS_78"), "paged archive lost last thought");
+      assert(await contains("body", "archive-tool-79"), "paged archive lost last tool");
+    }
+    console.log("PASS Chrome wire ordering and paged archive recovery after reload");
+    host.setSession(makeSession());
+    // Reasoning is an explicit Host request fact, shared by both render modes.
+    for (const streamMode of [false, true]) {
+      await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", ${JSON.stringify(String(streamMode))})`);
+      await setRound([{event_id: "reasoning-request", source: "worker_activity", created_at_ms: 1,
+        payload: {kind: "model_request", round: 1, reasoning_enabled: true}}], "");
+      await waitFor(() => browser.evaluate(`!!document.querySelector('.reasoning-notice svg.lucide-brain')`), "reasoning icon missing in mode " + streamMode);
+      assert(await browser.evaluate(`!!document.querySelector('.reasoning-notice').textContent.trim()`), "reasoning label missing");
+      await setRound([{event_id: "plain-request", source: "worker_activity", created_at_ms: 1,
+        payload: {kind: "model_request", round: 2, reasoning_enabled: false}}], "");
+      assert(await browser.evaluate(`!document.querySelector('.reasoning-notice')`), "disabled reasoning must not render");
+    }
     // Lifecycle projections update the same DOM row, not a newly entering command.
     const lifecycle = (id, phase, status, time) => {
       const event = toolEvent(id, time);
@@ -844,6 +893,40 @@ async function main() {
     host.send({type:"hello", snapshot:makeSnapshot(batchCalls)});
     await waitForSubtreeIdle(browser, ".stream-tool-count", "batch replay animation did not settle");
     assert(await browser.evaluate(`window.countAnimations === ${beforeBatchAnimations + 1} && window.countToggle === document.querySelector('.stream-tool-run-toggle') && document.querySelectorAll('.stream-tool-merged-item.merged').length === 26 && document.querySelector('.stream-tool-count').getAnimations().length === 0`), "mixed batch replay animated, remounted toggle, or reopened history");
+    assert(await browser.evaluate(`(async () => {
+      await document.fonts.load('300 12px "IBM Plex Mono"');
+      const node = document.querySelector('.stream-tool-count');
+      if (!node) return false;
+      const style = getComputedStyle(node);
+      const contentSize = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--content-size'));
+      return [...document.fonts].some(font => font.family.includes('IBM Plex Mono') && font.status === 'loaded')
+        && style.fontFamily.includes('IBM Plex Mono') && style.fontWeight === '300'
+        && Math.abs(parseFloat(style.fontSize) - contentSize * .888889) < .1;
+    })()`), "tool count must load local IBM Plex Mono 300 and scale with chat text");
+    assert(await browser.evaluate(`(() => {
+      const root = document.documentElement;
+      const keys = ['userFont', 'agentFont', 'userChineseFont', 'agentChineseFont', 'userBold', 'agentBold'];
+      const previous = keys.map(key => root.dataset[key]);
+      try {
+        for (const font of ['sans', 'serif', 'mono']) {
+          for (const chinese of ['heiti', 'kaiti', 'songti']) {
+            root.dataset.userFont = root.dataset.agentFont = font;
+            root.dataset.userChineseFont = root.dataset.agentChineseFont = chinese;
+            root.dataset.userBold = root.dataset.agentBold = 'true';
+            for (const node of document.querySelectorAll('.stream-tool-count')) {
+              const style = getComputedStyle(node);
+              if (!style.fontFamily.startsWith('"IBM Plex Mono"') || style.fontWeight !== '300') return false;
+            }
+          }
+        }
+        return document.querySelectorAll('.stream-tool-count').length > 0;
+      } finally {
+        keys.forEach((key, index) => {
+          if (previous[index] === undefined) delete root.dataset[key];
+          else root.dataset[key] = previous[index];
+        });
+      }
+    })()`), "chat font and bold preferences must not override the tool count font");
     console.log("PASS Chrome count feedback: exact labels, repeat increments, duplicate suppression, stable nodes, reduced motion");
     await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click(); document.querySelector('.stream-tool-toggle').click();`);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-fold.expanded')`), "output did not open");
@@ -870,8 +953,8 @@ async function main() {
       const toggle = document.querySelector('.stream-tool-run-toggle');
       const spans = [...toggle.querySelectorAll('span')];
       const hasLabel = spans.some(span => span.textContent === '工具');
-      return hasLabel && spans.every(span => getComputedStyle(span).fontWeight === '400');
-    })()`), "tools label and counts must use normal weight");
+      return hasLabel && spans.every(span => getComputedStyle(span).fontWeight === (span.classList.contains('stream-tool-count') ? '300' : '400'));
+    })()`), "tools label must retain normal weight while counts use light weight");
     await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click()`);
     await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-merged-item.merged')`), "merged failure rows cannot reopen");
     for (const width of [390, 768]) {

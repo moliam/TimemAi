@@ -1689,3 +1689,25 @@ fn native_exchanges_follow_owning_delta_order_for_all_providers() {
         );
     }
 }
+
+#[test]
+fn reasoning_indicator_follows_explicit_outgoing_request_fields() {
+    for body in [
+        json!({}),
+        json!({"enable_thinking": false}),
+        json!({"reasoning": {"effort": "none"}}),
+        json!({"reasoning_effort": "disabled"}),
+        json!({"thinking": {"type": "disabled"}, "reasoning_effort": "high"}),
+    ] {
+        assert!(!request_uses_reasoning(&body), "{body}");
+    }
+    for body in [
+        json!({"enable_thinking": true}),
+        json!({"reasoning_effort": "high"}),
+        json!({"reasoning": {"effort": "low"}}),
+        json!({"thinking": {"type": "adaptive"}}),
+        json!({"thinking": {"type": "enabled"}}),
+    ] {
+        assert!(request_uses_reasoning(&body), "{body}");
+    }
+}

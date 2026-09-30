@@ -3954,7 +3954,6 @@ impl AgentCore {
                 .filter(|id| live_delta_ids.contains(&id.trim().to_string()))
                 .cloned()
                 .collect::<Vec<_>>();
-            let live_delta_refs = self.live_delta_refs_hint();
             if missing.is_empty() {
                 let estimated_before = self.dynamic_context_token_estimate();
                 let offload_record = if live_offload_ids.is_empty() {
@@ -3992,14 +3991,18 @@ impl AgentCore {
                     }
                 };
                 let mut shrink_report =
-                    self.apply_prompt_shrink(&compact.delta_ids, &compact.slice_ids);
+                    self.apply_prompt_shrink(&live_delta_ids, &compact.slice_ids);
                 if !stale_delta_ids.is_empty() {
                     shrink_report.push_str(&format!(
                         "\nalready_absent_delta_ids (idempotently ignored): {}",
                         stale_delta_ids.join(", ")
                     ));
                 }
-                shrink_report.push_str(&format!("\ncurrent_live_delta_refs:\n{}", live_delta_refs));
+                // Report the post-shrink state, never the refs just removed.
+                shrink_report.push_str(&format!(
+                    "\ncurrent_live_delta_refs:\n{}",
+                    self.live_delta_refs_hint()
+                ));
                 let mut outcome = ActionOutcome::completed(shrink_report)
                     .with_runtime_metadata("discarded_delta_ids", json!(compact.discard_delta_ids))
                     .with_runtime_metadata("offloaded_delta_ids", json!(compact.offload_delta_ids));
@@ -4039,7 +4042,7 @@ impl AgentCore {
                 let outcome = ActionOutcome::failed(format!(
                     "invalid_prompt_refs\nmissing_ids: {}\ncurrent_live_delta_refs:\n{}",
                     missing.join(", "),
-                    live_delta_refs
+                    self.live_delta_refs_hint()
                 ))
                 .with_runtime_metadata("error_type", "InvalidPromptRefs")
                 .with_runtime_metadata("missing_ids", json!(missing));
