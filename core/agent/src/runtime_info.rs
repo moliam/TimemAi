@@ -17,9 +17,11 @@ pub struct RuntimeInfoInputs {
     pub running: Vec<RunningJobSnapshot>,
     /// Jobs that exited since the last request, with their exit status.
     pub updates: Vec<JobExitSnapshot>,
-    /// Live orphan pids reparented to this runtime after escaping managed
-    /// process groups (e.g. via `setsid`).
-    pub escaped_pids: Vec<u32>,
+    /// Live descendants watched by the Runtime fallback chain after their
+    /// original supervision chain ended.
+    pub fallback_processes: Vec<FallbackProcessSnapshot>,
+    /// Lifecycle events produced by the runtime fallback process supervisor.
+    pub orphan_events: Vec<OrphanProcessEventSnapshot>,
     /// Delta-based disk pressure notice produced by DiskPressureTracker at
     /// its latest sampled observation point, if it triggered.
     pub disk_pressure_notice: Option<String>,
@@ -41,6 +43,24 @@ pub struct RunningJobSnapshot {
     pub command: String,
     pub cwd: String,
     pub created_at_ms: i64,
+    /// Elapsed runtime captured at the request observation point.
+    pub elapsed_ms: i64,
+    /// Concise platform-native observation location, if one is available.
+    pub notes: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FallbackProcessSnapshot {
+    pub pid: u32,
+    pub process_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub struct OrphanProcessEventSnapshot {
+    pub pid: u32,
+    pub process_name: String,
+    pub state: String,
 }
 
 #[derive(Clone)]
@@ -141,7 +161,7 @@ pub fn jobmanager_report(inputs: &RuntimeInfoInputs) -> Option<String> {
 
     if !inputs.running.is_empty() {
         let mut table = String::from(
-            "still running jobs:\n\n| pid | created by tool_call id | command |\n|---:|---|---|",
+            "still running jobs:\n\n| pid | elapsed | created by tool_call id | command | notes |\n|---:|---:|---|---|---|",
         );
         for job in &inputs.running {
             let call_id = if job.tool_call_id.trim().is_empty() {
@@ -151,20 +171,56 @@ pub fn jobmanager_report(inputs: &RuntimeInfoInputs) -> Option<String> {
             };
             let command = job.command.chars().take(500).collect::<String>();
             let command = command.replace('|', "\\|").replace('\n', " ");
-            let _ = writeln!(table, "\n| {} | `{}` | `{}` |", job.pid, call_id, command);
+            let elapsed = crate::format_time_elapsed_hms(job.elapsed_ms.max(0) as u64);
+            let notes = job.notes.replace('|', "\\|").replace('\n', " ");
+            let _ = writeln!(
+                table,
+                "\n| {} | `{}` | `{}` | `{}` | {} |",
+                job.pid, elapsed, call_id, command, notes
+            );
+        }
+        if inputs
+            .running
+            .iter()
+            .any(|job| job.elapsed_ms > 3 * 60 * 1000)
+        {
+            table.push_str("\n\nneed to check whether long running job is making progress");
         }
         parts.push(table);
     }
 
-    if !inputs.escaped_pids.is_empty() {
-        let pids = inputs
-            .escaped_pids
+    if !inputs.fallback_processes.is_empty() {
+        let mut table = String::from(
+            "unowned child processes:\n\n| pid | process | state | model decision |\n|---:|---|---|---|",
+        );
+        for process in &inputs.fallback_processes {
+            let name = process.process_name.replace('|', "\\|").replace('\n', " ");
+            let _ = writeln!(
+                table,
+                "\n| {} | `{}` | `active` | inspect purpose/progress, then keep observing or terminate |",
+                process.pid, name
+            );
+        }
+        table.push_str(
+            "\n\nThese child processes are still running, but no task ownership record is available. Inspect their purpose and progress, then keep observing or terminate them. Do not infer ownership from timing alone.",
+        );
+        parts.push(table);
+    }
+
+    if !inputs.orphan_events.is_empty() {
+        let rows = inputs
+            .orphan_events
             .iter()
-            .map(|pid| pid.to_string())
+            .map(|event| {
+                format!(
+                    "pid={} process={} state={}",
+                    event.pid, event.process_name, event.state
+                )
+            })
             .collect::<Vec<_>>()
-            .join(", ");
+            .join("; ");
         parts.push(format!(
-            "ORPHAN_PROCESS: these programs are still running on this machine but no longer belong to any tracked task: [{pids}]. Check what they are (e.g. `ps -fp <pid>`), and stop them with `kill <pid>` if they are leftovers from earlier work."
+            "UNOWNED_CHILD_UPDATE: previously unowned child processes changed state: {rows}. `reaped` means the process had already exited and its final wait completed; no kill decision is pending for that PID."
         ));
     }
 
@@ -268,8 +324,18 @@ mod tests {
                 command: "sleep 100".into(),
                 cwd: "/tmp".into(),
                 created_at_ms: 0,
+                elapsed_ms: 70_000,
+                notes: "cgroup: /sys/fs/cgroup/example/job-42".into(),
             }],
-            escaped_pids: vec![77],
+            fallback_processes: vec![FallbackProcessSnapshot {
+                pid: 77,
+                process_name: "worker-helper".into(),
+            }],
+            orphan_events: vec![OrphanProcessEventSnapshot {
+                pid: 78,
+                process_name: "helper".into(),
+                state: "reaped".into(),
+            }],
             disk_pressure_notice: Some(
                 "DISK_PRESSURE: total free space across the working disks dropped within the last 15 observation points".into(),
             ),
@@ -285,13 +351,60 @@ mod tests {
         assert!(out.starts_with("### RUNTIME_INFO"), "{out}");
         assert!(out.contains("#### jobmanager"), "{out}");
         assert!(out.contains("#### sysstat"), "{out}");
-        assert!(out.contains("| 42 | `call_1` | `sleep 100` |"), "{out}");
-        assert!(out.contains("ORPHAN_PROCESS"), "{out}");
-        assert!(out.contains("[77]"), "{out}");
+        assert!(
+            out.contains("| 42 | `1m10s` | `call_1` | `sleep 100` |"),
+            "{out}"
+        );
+        assert!(out.contains("unowned child processes"), "{out}");
+        assert!(out.contains("`active`"), "{out}");
+        assert!(out.contains("worker-helper"), "{out}");
+        assert!(out.contains("UNOWNED_CHILD_UPDATE"), "{out}");
         assert!(out.contains("DISK_PRESSURE"), "{out}");
         assert!(out.contains("observation points"), "{out}");
         assert!(out.contains("JOB_KILLED"), "{out}");
         assert!(out.contains("SIGKILL"), "{out}");
+    }
+
+    #[test]
+    fn long_running_progress_reminder_requires_more_than_three_minutes() {
+        let report_for = |elapsed_ms| {
+            jobmanager_report(&RuntimeInfoInputs {
+                running: vec![RunningJobSnapshot {
+                    pid: 7,
+                    tool_call_id: "call_7".into(),
+                    command: "work".into(),
+                    cwd: "/tmp".into(),
+                    created_at_ms: 0,
+                    elapsed_ms,
+                    notes: String::new(),
+                }],
+                ..Default::default()
+            })
+            .expect("running job report")
+        };
+        let reminder = "need to check whether long running job is making progress";
+
+        assert!(!report_for(3 * 60 * 1000 - 1).contains(reminder));
+        assert!(!report_for(3 * 60 * 1000).contains(reminder));
+        assert!(report_for(3 * 60 * 1000 + 1).contains(reminder));
+    }
+
+    #[test]
+    fn running_job_elapsed_time_saturates_at_zero() {
+        let inputs = RuntimeInfoInputs {
+            running: vec![RunningJobSnapshot {
+                pid: 7,
+                tool_call_id: "call_7".into(),
+                command: "work".into(),
+                cwd: "/tmp".into(),
+                created_at_ms: 100,
+                elapsed_ms: -1,
+                notes: String::new(),
+            }],
+            ..Default::default()
+        };
+        let out = jobmanager_report(&inputs).expect("running job report");
+        assert!(out.contains("| 7 | `0.0s` | `call_7` | `work` |"), "{out}");
     }
 
     #[test]

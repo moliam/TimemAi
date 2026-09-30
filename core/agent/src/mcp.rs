@@ -425,6 +425,7 @@ impl McpConnection {
 struct StdioConnection {
     config: McpServerConfig,
     child: Child,
+    _child_registration: crate::os::ManagedChildRegistration,
     stdin: ChildStdin,
     messages: Receiver<Value>,
     next_id: u64,
@@ -451,6 +452,7 @@ impl StdioConnection {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|err| format!("mcp_stdio_spawn_failed:{err}"))?;
+        let child_registration = crate::os::register_managed_child(child.id());
         let stdin = child
             .stdin
             .take()
@@ -489,6 +491,7 @@ impl StdioConnection {
         Ok(Self {
             config,
             child,
+            _child_registration: child_registration,
             stdin,
             messages: rx,
             next_id: 1,
@@ -597,6 +600,7 @@ impl HttpConnection {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|err| format!("mcp_http_spawn_failed:{err}"))?;
+        let _child_registration = crate::os::register_managed_child(child.id());
         if let Some(mut stdin) = child.stdin.take() {
             serde_json::to_writer(&mut stdin, payload)
                 .map_err(|err| format!("mcp_http_write_failed:{err}"))?;
@@ -634,6 +638,7 @@ enum SseInbound {
 struct SseConnection {
     config: McpServerConfig,
     child: Child,
+    _child_registration: crate::os::ManagedChildRegistration,
     endpoint: String,
     headers: BTreeMap<String, String>,
     messages: Receiver<SseInbound>,
@@ -664,6 +669,7 @@ impl SseConnection {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|err| format!("mcp_sse_spawn_failed:{err}"))?;
+        let child_registration = crate::os::register_managed_child(child.id());
         let stdout = child
             .stdout
             .take()
@@ -705,6 +711,7 @@ impl SseConnection {
         Ok(Self {
             config,
             child,
+            _child_registration: child_registration,
             endpoint,
             headers: headers.clone(),
             messages: rx,
@@ -767,6 +774,7 @@ impl SseConnection {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|err| format!("mcp_sse_post_spawn_failed:{err}"))?;
+        let _child_registration = crate::os::register_managed_child(child.id());
         if let Some(mut stdin) = child.stdin.take() {
             serde_json::to_writer(&mut stdin, payload)
                 .map_err(|err| format!("mcp_sse_post_write_failed:{err}"))?;

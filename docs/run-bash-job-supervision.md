@@ -5,11 +5,12 @@
 `run_bash` jobs belong only to the current runtime instance. They are not persisted,
 restored, adopted, or inferred from historical PIDs after restart.
 
-The implementation must provide one authoritative lifecycle per spawned process group:
+The implementation must provide one authoritative lifecycle per spawned Job:
 
 - one supervisor owns and reaps the Bash launcher;
 - stdout and stderr are drained concurrently into bounded buffers;
-- descendants in the managed process group remain cancellable after the launcher exits;
+- on Linux, a delegated cgroup v2 directory provides kernel-backed ownership of every descendant, including `setsid` escapees;
+- descendants remain cancellable after the launcher exits;
 - foreground completion, timeout-to-background, cancellation, session cancellation, and
   runtime shutdown have deterministic ownership and delivery semantics;
 - completed jobs do not accumulate in the manager.
@@ -25,11 +26,32 @@ readers and are joined by the supervisor. The manager and callers may only:
 
 - inspect a job snapshot;
 - atomically promote a still-running direct job to background delivery;
-- signal its process group;
+- signal its kernel-owned Job (or its process group in explicit degraded mode);
 - wait on its condition variable;
 - claim a terminal result through the permitted delivery path.
 
 No OS process query or signal is performed while the manager index lock is held.
+
+## Kernel Job ownership and runtime-wide fallback
+
+Every direct child created by Timem follows one explicit exit-status ownership chain:
+
+1. prepare the per-Job kernel container when the platform supports it;
+2. configure child self-placement before `exec`;
+3. spawn the child and immediately register its PID as managed;
+4. keep the registration guard with the component that owns `Child`;
+5. wait for the child and capture its exit status;
+6. release the registration only after that wait completes.
+
+On Linux the kernel container is a unique directory below a writable delegated cgroup v2 subtree. The child writes `0` to the already-opened `cgroup.procs` descriptor from `pre_exec`, before user-controlled code can fork. Therefore later descendants, including processes that call `setsid`, remain members of that Job. Ownership is never inferred from timing, PID proximity, or subreaper adoption. `cgroup.kill` terminates only that Job, and `cgroup.events: populated 0` is the completion fact. Empty stale Job directories are reclaimed with a bounded scan.
+
+Timem may ask the user for the minimum permission needed to create this subtree. A formal systemd service must use `Delegate=yes` (or an equivalently restricted delegated scope). Internal command capabilities fail closed before execution when Linux cgroup ownership is unavailable because their timeout/error contract requires automatic cleanup of all descendants. `run_bash` may continue in an explicitly reported degraded process-group mode when permission is denied; this mode must not be described as exact containment.
+
+Synchronous `Command` users must use the platform `command_status` or `command_output` helpers, which preserve the registered owner's exit status.
+
+Linux subreaper supervision remains a runtime-wide fallback for descendants whose normal ownership chain is broken. It uses repeated `(PID, process start time)` observations, bounded state, and exact `waitpid`. A fallback process is model-visible but is not attributed to the most recently completed Job. Per-Job code never sweeps all adopted children.
+
+The three layers are intentionally not interchangeable: the Job backend answers membership/control/completion, direct-child registration reserves exit status for the owning supervisor, and the subreaper fallback performs final Unix reaping when no registered owner remains. Job termination does not reap zombies; `waitpid` ownership does not identify or contain a descendant tree.
 
 ## Lifecycle and delivery state
 
@@ -54,11 +76,10 @@ jobs awaiting exactly one legitimate consumer.
 The supervisor publishes `Finished` only after all of these hold:
 
 1. the Bash launcher has been reaped and its exit status captured;
-2. stdout and stderr drain threads reached EOF and were joined;
-3. the runtime-created process group no longer contains a live process.
+2. Linux cgroup v2 reports `populated 0` for that Job (or the process group is empty in explicit degraded mode);
+3. stdout and stderr drain threads reached EOF and were joined.
 
-If the launcher dies from a signal, the remaining process group is killed to prevent a
-signalled launcher from leaving unmanaged descendants.
+Drain threads run while descendants are alive so pipe backpressure cannot block them. If the launcher dies from a signal or Job-state observation fails, the supervisor terminates that Job before publishing a terminal result.
 
 ## Cancellation and shutdown
 
@@ -99,4 +120,12 @@ Tests must cover:
 - large simultaneous stdout/stderr, UTF-8 split boundaries, head/tail truncation;
 - completed-result removal and sustained many-job runs without index growth;
 - legacy directory cleanup without PID adoption;
-- real Web Stop/cancel flows in addition to manager-level tests.
+- real Web Stop/cancel flows in addition to manager-level tests;
+- registered-child exit status isolation from the fallback reaper;
+- spawn-to-registration race tolerance without premature adoption;
+- cgroup self-placement before exec and containment of `setsid` descendants;
+- timeout handoff leaving an owned `setsid` descendant running until explicit cancellation;
+- terminal delivery waiting for an owned `setsid` descendant to exit;
+- internal command timeout/error cleanup of all owned descendants;
+- exact `adopted -> fallback_active -> reaped` lifecycle for genuinely unowned fallback processes;
+- synchronous command helpers preserving exit status and captured streams.

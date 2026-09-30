@@ -63,11 +63,12 @@ pub fn run_web(args: Vec<String>) {
     if agent_core::os::install_process_subreaper() {
         std::thread::Builder::new()
             .name("orphan-reaper".to_string())
-            .spawn(|| loop {
-                for pid in agent_core::os::reparented_detached_child_pids() {
-                    agent_core::os::try_reap_child_process(pid);
+            .spawn(|| {
+                let mut reaper = agent_core::os::FallbackProcessReaper::for_runtime();
+                loop {
+                    reaper.reap_adopted_zombies();
+                    std::thread::sleep(std::time::Duration::from_millis(250));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(250));
             })
             .ok();
     }

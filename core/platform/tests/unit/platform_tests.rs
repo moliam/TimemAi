@@ -534,3 +534,242 @@ fn local_filesystem_mount_points_reports_root_and_skips_pseudo() {
         assert!(!text.starts_with("/run"), "{text}");
     }
 }
+
+#[test]
+fn managed_command_status_preserves_owner_exit_status() {
+    let status = crate::command_status(
+        std::process::Command::new(crate::POSIX_SHELL_EXECUTABLE).args(["-c", "exit 27"]),
+    )
+    .expect("run registered synchronous command");
+    assert_eq!(status.code(), Some(27));
+}
+
+#[test]
+fn managed_command_output_preserves_captured_streams_and_status() {
+    let output = crate::command_output(
+        std::process::Command::new(crate::POSIX_SHELL_EXECUTABLE)
+            .args(["-c", "printf stdout-text; printf stderr-text >&2; exit 9"]),
+    )
+    .expect("run registered captured command");
+    assert_eq!(output.status.code(), Some(9));
+    assert_eq!(output.stdout, b"stdout-text");
+    assert_eq!(output.stderr, b"stderr-text");
+}
+
+#[cfg(target_os = "linux")]
+fn fallback_events_for_pid(pid: u32) -> Vec<crate::OrphanProcessEvent> {
+    crate::take_orphan_process_events()
+        .into_iter()
+        .filter(|event| event.pid == pid)
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn fallback_contains(pid: u32) -> bool {
+    crate::fallback_process_snapshots()
+        .iter()
+        .any(|snapshot| snapshot.pid == pid)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_fallback_reaper_does_not_consume_registered_child_exit_status() {
+    assert!(crate::install_process_subreaper());
+    let _ = crate::take_orphan_process_events();
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", "exit 23"])
+        .spawn()
+        .expect("spawn managed child");
+    let child_pid = child.id();
+    let _registration = crate::register_managed_child(child_pid);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while crate::process_may_be_alive(child_pid) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let mut reaper = crate::FallbackProcessReaper::for_runtime();
+    for _ in 0..8 {
+        assert_eq!(reaper.reap_adopted_zombies(), 0);
+    }
+
+    assert!(!fallback_contains(child_pid));
+    assert!(fallback_events_for_pid(child_pid).is_empty());
+    let status = child.wait().expect("managed owner retains wait status");
+    assert_eq!(status.code(), Some(23));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_fallback_registration_race_requires_stable_unowned_observations() {
+    assert!(crate::install_process_subreaper());
+    let _ = crate::take_orphan_process_events();
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", "sleep 5"])
+        .spawn()
+        .expect("spawn child before ownership registration");
+    let child_pid = child.id();
+    let mut reaper = crate::FallbackProcessReaper::for_runtime();
+
+    // Three scans model the spawn-to-registration window. Adoption requires
+    // four stable unowned observations, so this known PID must remain absent.
+    for _ in 0..3 {
+        assert_eq!(reaper.reap_adopted_zombies(), 0);
+    }
+    assert!(!fallback_contains(child_pid));
+    assert!(fallback_events_for_pid(child_pid).is_empty());
+
+    let registration = crate::register_managed_child(child_pid);
+    for _ in 0..8 {
+        assert_eq!(reaper.reap_adopted_zombies(), 0);
+    }
+    assert!(!fallback_contains(child_pid));
+    assert!(fallback_events_for_pid(child_pid).is_empty());
+
+    unsafe {
+        libc::kill(child_pid as libc::pid_t, libc::SIGKILL);
+    }
+    let _ = child.wait();
+    drop(registration);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_fallback_lifecycle_is_adopted_active_then_exactly_reaped() {
+    assert!(crate::install_process_subreaper());
+    let _ = crate::take_orphan_process_events();
+    let marker = std::env::temp_dir().join(format!(
+        "timem-same-session-orphan-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0)
+    ));
+    let script = format!("sh -c 'echo $$ > {:?}; sleep 5' & exit 0", marker);
+    let mut parent = std::process::Command::new("sh")
+        .args(["-c", &script])
+        .spawn()
+        .expect("spawn intermediate parent");
+    let registration = crate::register_managed_child(parent.id());
+    assert!(parent.wait().expect("wait intermediate parent").success());
+    drop(registration);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !marker.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let orphan_pid: u32 = std::fs::read_to_string(&marker)
+        .expect("descendant pid marker")
+        .trim()
+        .parse()
+        .expect("descendant pid");
+    let _ = std::fs::remove_file(&marker);
+
+    // This descendant did not call setsid, so session-based observation cannot
+    // find it. Its known PID reaches fallback only because its parent exited.
+    assert!(
+        !crate::reparented_detached_child_pids().contains(&orphan_pid),
+        "same-session descendant must exercise runtime-wide fallback"
+    );
+
+    let mut reaper = crate::FallbackProcessReaper::for_runtime();
+    for _ in 0..4 {
+        assert_eq!(reaper.reap_adopted_zombies(), 0);
+    }
+    assert!(fallback_contains(orphan_pid));
+    let adopted = fallback_events_for_pid(orphan_pid);
+    assert_eq!(adopted.len(), 1, "one adoption event per process identity");
+    assert_eq!(adopted[0].state, "adopted");
+
+    // Additional scans while alive must keep one active row without
+    // republishing adoption.
+    for _ in 0..4 {
+        assert_eq!(reaper.reap_adopted_zombies(), 0);
+    }
+    assert!(fallback_contains(orphan_pid));
+    assert!(fallback_events_for_pid(orphan_pid).is_empty());
+
+    unsafe {
+        libc::kill(orphan_pid as libc::pid_t, libc::SIGKILL);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let mut reaped = false;
+    while std::time::Instant::now() < deadline {
+        if reaper.reap_adopted_zombies() == 1 {
+            reaped = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        reaped,
+        "fallback must perform the exact final wait for {orphan_pid}"
+    );
+    assert!(!fallback_contains(orphan_pid));
+    let terminal = fallback_events_for_pid(orphan_pid);
+    assert_eq!(terminal.len(), 1, "one terminal event per process identity");
+    assert_eq!(terminal[0].state, "reaped");
+    assert!(!crate::process_may_be_alive(orphan_pid));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_managed_process_job_contains_and_kills_setsid_descendants() {
+    let job = match ManagedProcessJob::create() {
+        Ok(job) => job,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
+            ) =>
+        {
+            eprintln!("skipping real cgroup-v2 containment test: {error}");
+            return;
+        }
+        Err(error) => panic!("create managed process job: {error}"),
+    };
+    assert_eq!(job.backend_name(), "linux_cgroup_v2");
+    let observation_note = job.observation_note().expect("Linux cgroup note");
+    assert!(observation_note.starts_with("cgroup: /sys/fs/cgroup/"));
+    assert!(observation_note.contains("/timem.jobs/job-"));
+    let root = std::env::temp_dir().join(format!(
+        "timem-linux-cgroup-job-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).expect("create cgroup test directory");
+    let pid_file = root.join("escapee.pid");
+    let script = format!(
+        "setsid --fork sh -c 'printf %s $$ > \"{}\"; sleep 30'; sleep 30",
+        pid_file.display()
+    );
+    let mut command = std::process::Command::new("/bin/sh");
+    command.args(["-c", &script]);
+    configure_child_process_group(&mut command);
+    job.configure_command(&mut command)
+        .expect("configure child self-placement");
+    let mut leader = command.spawn().expect("spawn cgroup-owned command");
+    let leader_pid = leader.id();
+    let escapee_pid = wait_for_file(&pid_file, std::time::Duration::from_secs(2))
+        .trim()
+        .parse::<u32>()
+        .expect("numeric setsid descendant pid");
+
+    let members = job.member_pids().expect("read cgroup members");
+    assert!(members.contains(&leader_pid), "members={members:?}");
+    assert!(members.contains(&escapee_pid), "members={members:?}");
+    assert!(!job.is_empty().expect("read populated state"));
+
+    job.kill_all().expect("kill exactly this managed job");
+    let _ = leader.wait().expect("reap cgroup leader");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !job.is_empty().unwrap_or(false) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(job.is_empty().expect("read final populated state"));
+    wait_until_linux_process_stops(escapee_pid, std::time::Duration::from_secs(2));
+    std::fs::remove_dir_all(root).expect("remove cgroup test directory");
+}

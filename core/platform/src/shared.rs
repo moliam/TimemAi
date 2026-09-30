@@ -8,8 +8,301 @@ pub(super) fn local_time(secs: libc::time_t) -> Option<libc::tm> {
     }
 }
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::process::{Command, ExitStatus};
+use std::sync::{Mutex, OnceLock};
+
+const MAX_MANAGED_CHILD_PIDS: usize = 4096;
+const ORPHAN_STABLE_OBSERVATIONS: u8 = 4;
+const MAX_ORPHAN_PROCESS_EVENTS: usize = 256;
+
+#[derive(Default)]
+struct ManagedChildRegistry {
+    pids: HashMap<u32, usize>,
+    overflowed_registrations: usize,
+}
+
+static MANAGED_CHILDREN: OnceLock<Mutex<ManagedChildRegistry>> = OnceLock::new();
+static ORPHAN_PROCESS_EVENTS: OnceLock<Mutex<VecDeque<OrphanProcessEvent>>> = OnceLock::new();
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct OrphanProcessEvent {
+    pub pid: u32,
+    pub process_name: String,
+    pub state: &'static str,
+}
+
+fn orphan_process_events() -> &'static Mutex<VecDeque<OrphanProcessEvent>> {
+    ORPHAN_PROCESS_EVENTS.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn publish_orphan_process_event(event: OrphanProcessEvent) {
+    let Ok(mut events) = orphan_process_events().lock() else {
+        return;
+    };
+    if events.len() >= MAX_ORPHAN_PROCESS_EVENTS {
+        events.pop_front();
+    }
+    events.push_back(event);
+}
+
+pub(super) fn take_orphan_process_events() -> Vec<OrphanProcessEvent> {
+    orphan_process_events()
+        .lock()
+        .map(|mut events| events.drain(..).collect())
+        .unwrap_or_default()
+}
+
+fn managed_children() -> &'static Mutex<ManagedChildRegistry> {
+    MANAGED_CHILDREN.get_or_init(|| Mutex::new(ManagedChildRegistry::default()))
+}
+
+/// RAII ownership marker for a direct child whose `Child` owner exclusively
+/// owns its exit status. The global orphan reaper must never wait on it.
+pub(super) struct ManagedChildRegistration {
+    pid: u32,
+    tracked: bool,
+}
+
+impl Drop for ManagedChildRegistration {
+    fn drop(&mut self) {
+        let Ok(mut registry) = managed_children().lock() else {
+            return;
+        };
+        if self.tracked {
+            if let Some(refs) = registry.pids.get_mut(&self.pid) {
+                *refs = refs.saturating_sub(1);
+                if *refs == 0 {
+                    registry.pids.remove(&self.pid);
+                }
+            }
+        } else {
+            registry.overflowed_registrations = registry.overflowed_registrations.saturating_sub(1);
+        }
+    }
+}
+
+pub(super) fn register_managed_child(pid: u32) -> ManagedChildRegistration {
+    let Ok(mut registry) = managed_children().lock() else {
+        // A poisoned registry must fail closed: keep the reaper disabled via
+        // an untracked guard rather than risk consuming a managed exit status.
+        return ManagedChildRegistration {
+            pid,
+            tracked: false,
+        };
+    };
+    if let Some(refs) = registry.pids.get_mut(&pid) {
+        *refs = refs.saturating_add(1);
+        return ManagedChildRegistration { pid, tracked: true };
+    }
+    if registry.pids.len() >= MAX_MANAGED_CHILD_PIDS {
+        registry.overflowed_registrations = registry.overflowed_registrations.saturating_add(1);
+        return ManagedChildRegistration {
+            pid,
+            tracked: false,
+        };
+    }
+    registry.pids.insert(pid, 1);
+    ManagedChildRegistration { pid, tracked: true }
+}
+
+fn managed_child_reaping_is_safe(pid: u32) -> bool {
+    managed_children()
+        .lock()
+        .map(|registry| registry.overflowed_registrations == 0 && !registry.pids.contains_key(&pid))
+        .unwrap_or(false)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct DirectChildIdentity {
+    pid: u32,
+    start_ticks: String,
+    process_name: String,
+    zombie: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct FallbackProcessSnapshot {
+    pub pid: u32,
+    pub process_name: String,
+}
+
+static ACTIVE_FALLBACK_PROCESSES: OnceLock<Mutex<HashMap<(u32, String), String>>> = OnceLock::new();
+
+fn active_fallback_processes() -> &'static Mutex<HashMap<(u32, String), String>> {
+    ACTIVE_FALLBACK_PROCESSES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+pub(super) fn fallback_process_snapshots() -> Vec<FallbackProcessSnapshot> {
+    active_fallback_processes()
+        .lock()
+        .map(|active| {
+            let mut snapshots = active
+                .iter()
+                .map(|((pid, _), process_name)| FallbackProcessSnapshot {
+                    pid: *pid,
+                    process_name: process_name.clone(),
+                })
+                .collect::<Vec<_>>();
+            snapshots.sort_by_key(|snapshot| snapshot.pid);
+            snapshots
+        })
+        .unwrap_or_default()
+}
+
+/// Runtime-wide fallback supervisor for descendants whose original parent
+/// exited. Registered direct children remain exclusively owned by their
+/// `Child` supervisor. Unregistered children must be observed repeatedly
+/// before adoption, closing the spawn-to-registration race.
+pub struct FallbackProcessReaper {
+    observations: HashMap<(u32, String), u8>,
+}
+
+impl FallbackProcessReaper {
+    pub(super) fn new() -> Self {
+        Self {
+            observations: HashMap::new(),
+        }
+    }
+
+    pub(super) fn reap_once(&mut self) -> usize {
+        let children = direct_child_identities();
+        let current = children
+            .iter()
+            .map(|child| (child.pid, child.start_ticks.clone()))
+            .collect::<HashSet<_>>();
+        self.observations
+            .retain(|identity, _| current.contains(identity));
+        if let Ok(mut active) = active_fallback_processes().lock() {
+            active.retain(|identity, _| current.contains(identity));
+        }
+
+        let mut reaped = 0;
+        for child in children {
+            let identity = (child.pid, child.start_ticks.clone());
+            if !managed_child_reaping_is_safe(child.pid) {
+                self.observations.remove(&identity);
+                if let Ok(mut active) = active_fallback_processes().lock() {
+                    active.remove(&identity);
+                }
+                continue;
+            }
+            if self.observations.len() >= MAX_MANAGED_CHILD_PIDS
+                && !self.observations.contains_key(&identity)
+            {
+                continue;
+            }
+            let count = self.observations.entry(identity.clone()).or_default();
+            *count = count.saturating_add(1);
+            if *count < ORPHAN_STABLE_OBSERVATIONS {
+                continue;
+            }
+
+            let newly_adopted = active_fallback_processes()
+                .lock()
+                .map(|mut active| {
+                    if active.len() >= MAX_MANAGED_CHILD_PIDS && !active.contains_key(&identity) {
+                        return false;
+                    }
+                    active
+                        .insert(identity.clone(), child.process_name.clone())
+                        .is_none()
+                })
+                .unwrap_or(false);
+            if newly_adopted {
+                publish_orphan_process_event(OrphanProcessEvent {
+                    pid: child.pid,
+                    process_name: child.process_name.clone(),
+                    state: "adopted",
+                });
+            }
+            if !child.zombie {
+                continue;
+            }
+
+            let rc = unsafe {
+                libc::waitpid(
+                    child.pid as libc::pid_t,
+                    std::ptr::null_mut(),
+                    libc::WNOHANG,
+                )
+            };
+            if rc == child.pid as libc::pid_t {
+                publish_orphan_process_event(OrphanProcessEvent {
+                    pid: child.pid,
+                    process_name: child.process_name,
+                    state: "reaped",
+                });
+                self.observations.remove(&identity);
+                if let Ok(mut active) = active_fallback_processes().lock() {
+                    active.remove(&identity);
+                }
+                reaped += 1;
+            } else if rc < 0 {
+                self.observations.remove(&identity);
+                if let Ok(mut active) = active_fallback_processes().lock() {
+                    active.remove(&identity);
+                }
+            }
+        }
+        reaped
+    }
+}
+
+fn direct_child_identities() -> Vec<DirectChildIdentity> {
+    #[cfg(target_os = "linux")]
+    {
+        let self_pid = std::process::id();
+        let mut out = Vec::new();
+        let Ok(dir) = std::fs::read_dir("/proc") else {
+            return out;
+        };
+        for entry in dir.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Ok(pid) = name.parse::<u32>() else {
+                continue;
+            };
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                continue;
+            };
+            let Some((head, rest)) = stat.rsplit_once(") ") else {
+                continue;
+            };
+            let process_name = head
+                .split_once(" (")
+                .map(|(_, name)| name)
+                .unwrap_or("unknown")
+                .to_string();
+            let fields = rest.split_whitespace().collect::<Vec<_>>();
+            let (Some(state), Some(ppid), Some(start_ticks)) =
+                (fields.first(), fields.get(1), fields.get(19))
+            else {
+                continue;
+            };
+            if ppid
+                .parse::<u32>()
+                .ok()
+                .is_none_or(|ppid| !parent_belongs_to_this_process(ppid, self_pid))
+            {
+                continue;
+            }
+            out.push(DirectChildIdentity {
+                pid,
+                start_ticks: (*start_ticks).to_string(),
+                process_name,
+                zombie: *state == "Z",
+            });
+        }
+        out
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Vec::new()
+    }
+}
 
 pub(super) fn configure_private_file_options(options: &mut std::fs::OpenOptions) {
     use std::os::unix::fs::OpenOptionsExt;
@@ -166,11 +459,11 @@ pub(super) fn child_process_running(pid: u32) -> bool {
     if wait == 0 {
         return true;
     }
-    if let Ok(output) = std::process::Command::new("/bin/ps")
-        .args(["-o", "stat=", "-p"])
-        .arg(pid.to_string())
-        .output()
-    {
+    if let Ok(output) = crate::api::command_output(
+        std::process::Command::new("/bin/ps")
+            .args(["-o", "stat=", "-p"])
+            .arg(pid.to_string()),
+    ) {
         if !output.status.success() {
             return false;
         }
