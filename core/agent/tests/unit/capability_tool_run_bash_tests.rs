@@ -139,10 +139,105 @@ fn foreground_large_stdout_and_stderr_are_drained_without_deadlock_and_bounded()
 }
 
 #[test]
+fn unavailable_exact_process_backend_always_degrades_without_blocking() {
+    for kind in [
+        std::io::ErrorKind::Unsupported,
+        std::io::ErrorKind::PermissionDenied,
+        std::io::ErrorKind::NotFound,
+        std::io::ErrorKind::Other,
+    ] {
+        let result = ShellJobManager::select_process_job(Err(std::io::Error::new(
+            kind,
+            "optional exact backend unavailable",
+        )));
+        assert!(result.is_none(), "{kind:?} must use process-group fallback");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_process_group_fallback_supports_foreground_background_timeout_and_cancel() {
+    let dir = tmp_memory_dir("forced_process_group_fallback");
+    let mut store = ShellJobManager::new(&dir);
+    store.force_process_group_fallback_for_tests();
+
+    let foreground = store.run_with_timeout(
+        "printf fallback_foreground",
+        &dir,
+        5000,
+        "fallback-session",
+        "foreground-turn",
+        &mut NeverCancelRuntime,
+    );
+    assert!(foreground.contains("fallback_foreground"), "{foreground}");
+    assert!(!foreground.contains("cgroup"), "{foreground}");
+    assert!(!foreground.contains("containment"), "{foreground}");
+
+    let background = store.spawn_background(
+        "sleep 1; printf fallback_background",
+        &dir,
+        "fallback-session",
+        "background-turn",
+    );
+    assert!(
+        background.contains("now keeps running in background"),
+        "{background}"
+    );
+    assert!(!background.contains("cgroup"), "{background}");
+    assert!(!background.contains("containment"), "{background}");
+
+    let timeout = store.run_with_timeout(
+        "sleep 1; printf fallback_timeout",
+        &dir,
+        50,
+        "fallback-session",
+        "timeout-turn",
+        &mut NeverCancelRuntime,
+    );
+    assert!(timeout.contains("still running"), "{timeout}");
+    assert!(!timeout.contains("cgroup"), "{timeout}");
+    assert!(!timeout.contains("containment"), "{timeout}");
+
+    let child_pid_file = dir.join("fallback-child.pid");
+    let command = format!(
+        "bash -c 'trap \"\" TERM; tail -f /dev/null' & echo $! > {}; wait",
+        shell_quote_path(&child_pid_file)
+    );
+    let cancelled = store.run_with_timeout(
+        &command,
+        &dir,
+        60_000,
+        "fallback-cancel-session",
+        "cancel-turn",
+        &mut CancelAfterFileRuntime {
+            path: child_pid_file.clone(),
+        },
+    );
+    assert!(cancelled.contains("cancelled"), "{cancelled}");
+    let child_pid = fs::read_to_string(&child_pid_file)
+        .expect("fallback child pid")
+        .trim()
+        .parse::<u32>()
+        .expect("numeric fallback child pid");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while process_running(child_pid) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !process_running(child_pid),
+        "fallback descendant survived cancellation"
+    );
+
+    store.terminate_owned_running();
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn manager_drop_terminates_unfinished_process_group() {
     let dir = tmp_memory_dir("drop_cleanup");
     let pid = {
-        let store = ShellJobManager::new(&dir);
+        let mut store = ShellJobManager::new(&dir);
+        store.force_process_group_fallback_for_tests();
         let started = store.spawn_background("sleep 30", &dir, "drop", "turn");
         started
             .lines()
@@ -183,7 +278,6 @@ fn synthetic_managed_job(delivery: ShellJobDelivery) -> ManagedShellJob {
             crate::shell_exec::ShellJobManagerExitHooks::default(),
         )),
         process_job: None,
-        process_job_mode: ProcessJobMode::DegradedProcessGroup,
     }
 }
 
@@ -1347,10 +1441,8 @@ fn background_job_reports_pid_and_running_list_until_exit() {
         started.contains("now keeps running in background"),
         "{started}"
     );
-    assert!(
-        started.contains("Process containment: cgroup v2"),
-        "{started}"
-    );
+    assert!(!started.contains("Process containment:"), "{started}");
+    assert!(!started.contains("cgroup v2"), "{started}");
     let pid = started
         .lines()
         .find_map(|line| line.strip_prefix("pid="))
@@ -1361,20 +1453,7 @@ fn background_job_reports_pid_and_running_list_until_exit() {
     assert_eq!(running.len(), 1);
     assert_eq!(running[0].pid, pid);
     assert_eq!(running[0].kind, "background");
-    #[cfg(target_os = "linux")]
-    {
-        let cgroup = running[0]
-            .notes
-            .strip_prefix("cgroup: ")
-            .expect("minimal Linux cgroup observation note");
-        assert!(cgroup.starts_with("/sys/fs/cgroup/"), "{cgroup}");
-        assert!(cgroup.contains("/timem.jobs/runtime-"), "{cgroup}");
-        assert!(cgroup.contains("/session-"), "{cgroup}");
-        assert!(cgroup.contains("/job-"), "{cgroup}");
-        assert!(!cgroup.contains("session_a"), "{cgroup}");
-        assert!(std::path::Path::new(cgroup).is_dir(), "{cgroup}");
-        assert_eq!(running[0].notes, format!("cgroup: {cgroup}"));
-    }
+    assert!(running[0].notes.is_empty(), "{}", running[0].notes);
 
     let mut running = Vec::new();
     let mut updates = Vec::new();
@@ -1413,10 +1492,8 @@ fn timeout_job_reports_pid_and_later_exit_update() {
     assert!(result.contains("timeout, but is still running"), "{result}");
     assert!(result.contains("process was not killed"), "{result}");
     assert!(result.contains("no final exit code yet"), "{result}");
-    assert!(
-        result.contains("Process containment: cgroup v2"),
-        "{result}"
-    );
+    assert!(!result.contains("Process containment:"), "{result}");
+    assert!(!result.contains("cgroup v2"), "{result}");
     let pid = result
         .lines()
         .find_map(|line| line.strip_prefix("pid="))

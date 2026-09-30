@@ -712,6 +712,76 @@ fn linux_fallback_lifecycle_is_adopted_active_then_exactly_reaped() {
     assert!(!crate::process_may_be_alive(orphan_pid));
 }
 
+#[test]
+fn process_safety_net_initialization_is_idempotent_and_non_blocking() {
+    let first = ensure_process_safety_net();
+    let first_status = first.status();
+    let second = ensure_process_safety_net();
+    assert_eq!(second.status(), first_status);
+    assert!(matches!(
+        first_status,
+        ProcessSafetyNetStatus::Active
+            | ProcessSafetyNetStatus::Unsupported
+            | ProcessSafetyNetStatus::InitializationFailed
+    ));
+    drop(second);
+    drop(first);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_process_safety_cleanup_removes_empty_current_runtime_scopes() {
+    let session_id = format!(
+        "cleanup-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos()
+    );
+    let job = match ManagedProcessJob::create_for_session(&session_id) {
+        Ok(job) => job,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied
+                    | std::io::ErrorKind::Unsupported
+                    | std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::ReadOnlyFilesystem
+            ) =>
+        {
+            eprintln!("skipping real cgroup-v2 cleanup test: {error}");
+            return;
+        }
+        Err(error) => panic!("create cleanup test process job: {error}"),
+    };
+    let job_path = PathBuf::from(
+        job.observation_note()
+            .expect("Linux cgroup note")
+            .strip_prefix("cgroup: ")
+            .expect("cgroup path prefix"),
+    );
+    let session_path = job_path.parent().expect("session parent").to_path_buf();
+    let runtime_path = session_path.parent().expect("runtime parent").to_path_buf();
+    drop(job);
+
+    cleanup_process_safety_net();
+    assert!(!job_path.exists(), "empty Job scope must be removed");
+    assert!(
+        !session_path.exists(),
+        "empty Session scope must be removed"
+    );
+    if runtime_path.exists() {
+        assert!(
+            std::fs::read_dir(&runtime_path)
+                .expect("read surviving Runtime scope")
+                .next()
+                .is_some(),
+            "an empty current Runtime scope must be removed"
+        );
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_managed_process_job_contains_and_kills_setsid_descendants() {
@@ -742,20 +812,6 @@ fn linux_managed_process_job_contains_and_kills_setsid_descendants() {
         !observation_note.contains(raw_session_id),
         "{observation_note}"
     );
-    let aggregate = crate::session_process_scope_snapshot(raw_session_id)
-        .expect("current Session aggregate cgroup scope");
-    let aggregate_path = aggregate
-        .observation_note
-        .strip_prefix("cgroup: ")
-        .expect("aggregate cgroup note");
-    let job_path = observation_note
-        .strip_prefix("cgroup: ")
-        .expect("Job cgroup note");
-    assert_eq!(
-        std::path::Path::new(job_path).parent(),
-        Some(std::path::Path::new(aggregate_path))
-    );
-    assert!(!aggregate.observation_note.contains(raw_session_id));
     let root = std::env::temp_dir().join(format!(
         "timem-linux-cgroup-job-{}-{}",
         std::process::id(),

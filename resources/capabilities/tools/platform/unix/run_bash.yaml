@@ -30,10 +30,9 @@ description: |
   being waited on; obtain that value by making `loop_cmd` read the task's status
   file, wait result, or remote API state.
   For long local work that should keep running across interaction rounds, use
-  background=true. Processes that escape the managed process group are
-  contained by OS-level mechanisms (child subreaper adoption on Linux,
-  kill-on-close job object on Windows) and terminated with the job; prefer
-  background=true rather than manual escape.
+  background=true. Runtime-managed jobs are cleaned up on cancellation or
+  shutdown where the host platform permits; prefer background=true rather than
+  manually detaching child processes.
   Background and timeout jobs return a pid; manage them with
   normal shell commands if the user asks you to inspect or stop them. Tracking
   and captured output are process-local and bounded; a runtime restart

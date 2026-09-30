@@ -10,13 +10,6 @@ pub struct ManagedProcessJob {
     backend: Box<dyn ProcessJobBackend>,
 }
 
-/// Platform-native observation location for one Session process scope.
-/// Models can inspect backend-specific files only when a decision requires it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SessionProcessScopeSnapshot {
-    pub observation_note: String,
-}
-
 /// A scope left by a previous Runtime owner that still has live members.
 /// Runtime never silently adopts or kills these processes.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,19 +78,6 @@ impl ManagedProcessJob {
     /// standard operating-system tools.
     pub fn observation_note(&self) -> Option<String> {
         self.backend.observation_note()
-    }
-}
-
-/// Platform-provided operator guidance for enabling the native exact Job
-/// backend. Callers surface this text without knowing the backend mechanism.
-pub fn managed_process_job_permission_hint() -> Option<&'static str> {
-    #[cfg(target_os = "linux")]
-    {
-        Some("delegate a writable cgroup v2 subtree to Timem (for a systemd service, set Delegate=yes)")
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
     }
 }
 

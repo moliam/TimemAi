@@ -208,18 +208,6 @@ impl Drop for LinuxCgroupProcessJob {
     }
 }
 
-pub(super) fn session_process_scope_snapshot(
-    session_id: &str,
-) -> Option<crate::process_job::SessionProcessScopeSnapshot> {
-    let subtree = timem_job_subtree().ok()?;
-    let runtime_path = subtree.join(current_runtime_scope_name());
-    let session_path = runtime_path.join(format!(
-        "{SESSION_SCOPE_PREFIX}{}",
-        session_scope_key(session_id)
-    ));
-    session_scope_snapshot(&session_path)
-}
-
 pub(super) fn stale_process_scope_snapshots(
     session_id: &str,
 ) -> Vec<crate::process_job::StaleProcessScopeSnapshot> {
@@ -254,16 +242,6 @@ pub(super) fn stale_process_scope_snapshots(
     }
     out.sort_by_key(|scope| (scope.owner_pid, scope.observation_note.clone()));
     out
-}
-
-fn session_scope_snapshot(path: &Path) -> Option<crate::process_job::SessionProcessScopeSnapshot> {
-    let metadata = fs::symlink_metadata(path).ok()?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return None;
-    }
-    Some(crate::process_job::SessionProcessScopeSnapshot {
-        observation_note: format!("cgroup: {}", path.display()),
-    })
 }
 
 fn timem_job_subtree() -> std::io::Result<PathBuf> {
@@ -478,6 +456,37 @@ fn cleanup_empty_runtime_scope(runtime_path: &Path) {
         }
     }
     let _ = fs::remove_dir(runtime_path);
+}
+
+pub(super) fn cleanup_current_runtime_process_scope() {
+    let Ok(subtree) = existing_timem_job_subtree() else {
+        return;
+    };
+    cleanup_empty_runtime_scope(&subtree.join(current_runtime_scope_name()));
+    let _ = fs::remove_dir(&subtree);
+}
+
+fn existing_timem_job_subtree() -> std::io::Result<PathBuf> {
+    let relative = current_cgroup_v2_path()?;
+    let mount = Path::new(CGROUP_ROOT);
+    let current = mount.join(relative.strip_prefix("/").unwrap_or(&relative));
+    let canonical_mount = mount.canonicalize()?;
+    let canonical_current = current.canonicalize()?;
+    if !canonical_current.starts_with(&canonical_mount) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "current cgroup escapes cgroup-v2 mount",
+        ));
+    }
+    let subtree = canonical_current.join(TIMEM_JOB_SUBTREE);
+    let metadata = fs::symlink_metadata(&subtree)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Timem cgroup subtree is not a plain directory",
+        ));
+    }
+    Ok(subtree)
 }
 
 fn cleanup_stale_runtime_scopes(subtree: &Path) {

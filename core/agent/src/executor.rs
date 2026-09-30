@@ -73,7 +73,33 @@ pub(crate) fn execute_command_action_outcome(
     payload: &Value,
     timeout_ms: u64,
 ) -> ActionOutcome {
-    let mut command = match crate::os::command_for_script(path) {
+    execute_command_action_outcome_with_process_job(
+        action,
+        path,
+        payload,
+        timeout_ms,
+        crate::os::ManagedProcessJob::create(),
+    )
+}
+
+fn configured_command_action(path: &Path) -> Result<std::process::Command, String> {
+    let mut command = crate::os::command_for_script(path)?;
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::os::configure_child_process_group(&mut command);
+    Ok(command)
+}
+
+fn execute_command_action_outcome_with_process_job(
+    action: &str,
+    path: &Path,
+    payload: &Value,
+    timeout_ms: u64,
+    process_job_result: std::io::Result<crate::os::ManagedProcessJob>,
+) -> ActionOutcome {
+    let mut command = match configured_command_action(path) {
         Ok(command) => command,
         Err(error) => {
             return ActionOutcome::failed(format!(
@@ -81,39 +107,46 @@ pub(crate) fn execute_command_action_outcome(
             ))
         }
     };
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    crate::os::configure_child_process_group(&mut command);
-    let process_job = match crate::os::ManagedProcessJob::create() {
-        Ok(process_job) => Some(process_job),
-        Err(error) if cfg!(target_os = "linux") => {
-            let permission = crate::os::managed_process_job_permission_hint()
-                .map(|hint| format!("\nrequired_permission: {hint}"))
-                .unwrap_or_default();
-            return ActionOutcome::failed(format!(
-                "Action result: {action}\nerror: command_containment_unavailable\nreason: {}{}",
-                compact_text(&error.to_string(), 1000),
-                permission
-            ));
-        }
-        Err(_) => None,
-    };
-    if let Some(process_job) = &process_job {
-        if let Err(error) = process_job.configure_command(&mut command) {
-            return ActionOutcome::failed(format!(
-                "Action result: {action}\nerror: command_containment_failed\nreason: {}",
-                compact_text(&error.to_string(), 1000)
-            ));
-        }
+    // Exact per-job ownership is optional. Unsupported, undelegated, or
+    // transiently unavailable backends must never block command execution.
+    let mut process_job = process_job_result.ok();
+    if process_job
+        .as_ref()
+        .is_some_and(|job| job.configure_command(&mut command).is_err())
+    {
+        process_job = None;
+        command = match configured_command_action(path) {
+            Ok(command) => command,
+            Err(error) => {
+                return ActionOutcome::failed(format!(
+                "Action result: {action}\nerror: command_interpreter_unavailable\nreason: {error}"
+            ))
+            }
+        };
     }
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(err) => {
+        Err(_) if process_job.is_some() => {
+            // A native backend may disappear between setup and pre-exec. The
+            // failed pre-exec means user code did not run, so retry once with a
+            // fresh command using the process-group fallback.
+            process_job = None;
+            match configured_command_action(path)
+                .and_then(|mut command| command.spawn().map_err(|error| error.to_string()))
+            {
+                Ok(child) => child,
+                Err(error) => {
+                    return ActionOutcome::failed(format!(
+                        "Action result: {action}\nerror: command_spawn_failed\nreason: {}",
+                        compact_text(&error, 1000)
+                    ))
+                }
+            }
+        }
+        Err(error) => {
             return ActionOutcome::failed(format!(
                 "Action result: {action}\nerror: command_spawn_failed\nreason: {}",
-                compact_text(&err.to_string(), 1000)
+                compact_text(&error.to_string(), 1000)
             ))
         }
     };
