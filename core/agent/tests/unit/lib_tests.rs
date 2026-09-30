@@ -2693,6 +2693,32 @@ fn model_prompt_reports_sigkilled_job_in_runtime_info_sysstat() {
 }
 
 #[test]
+fn disk_pressure_sampling_is_lazy_on_model_request_hot_path() {
+    let mut core = test_core("disk_lazy_sampling");
+    core.disk_free_override = Some((5 * 1024 * 1024 * 1024, 10 * 1024 * 1024 * 1024));
+    let request = |core: &mut crate::AgentCore| {
+        core.build_model_request_prompt_from_job_snapshots(
+            &controlled_request_base(),
+            None,
+            (Vec::new(), Vec::new()),
+            || (Vec::new(), Vec::new()),
+        )
+    };
+    for observation in 1..10 {
+        request(&mut core);
+        assert_eq!(
+            core.disk_sample_count, 0,
+            "observation {observation} must not sample before the count gate"
+        );
+    }
+    request(&mut core);
+    assert_eq!(
+        core.disk_sample_count, 1,
+        "the tenth observation must take exactly one sample"
+    );
+}
+
+#[test]
 fn disk_pressure_notice_rides_runtime_info_after_window_with_stub_sample() {
     // Disk sampling cannot be controlled on a real filesystem, so the stub
     // override drives the tracker. The constructor already seeded the

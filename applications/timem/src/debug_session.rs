@@ -818,29 +818,26 @@ fn render_llm_prompt_html(
         // retained response dump; older reasoning flags map onto earlier
         // assistant messages in reverse order.
         let entries = api_payload_message_entries(payload);
-        let assistant_positions: Vec<usize> = entries
+        let assistant_count = entries
             .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
+            .filter(|entry| {
                 let role = payload_entry_role(entry);
                 role == "assistant" || role == "message"
             })
-            .map(|(index, _)| index)
-            .collect();
-        let assistant_count = assistant_positions.len();
-        let mut reasoning_by_offset = vec![false; assistant_count];
-        for (offset, _) in assistant_positions.iter().enumerate() {
-            let reverse_index = assistant_count - 1 - offset;
-            if let Some(flag) = recent_response_reasoning.get(reverse_index) {
-                reasoning_by_offset[offset] = *flag;
-            }
-        }
+            .count();
+        let mut assistant_offset = 0usize;
         for (index, entry) in entries.iter().enumerate() {
-            let used_reasoning = assistant_positions
-                .iter()
-                .position(|p| *p == index)
-                .map(|offset| reasoning_by_offset[offset])
-                .unwrap_or(false);
+            let role = payload_entry_role(entry);
+            let used_reasoning = if role == "assistant" || role == "message" {
+                let reverse_index = assistant_count - 1 - assistant_offset;
+                assistant_offset += 1;
+                recent_response_reasoning
+                    .get(reverse_index)
+                    .copied()
+                    .unwrap_or(false)
+            } else {
+                false
+            };
             let entry = slim_prompt_payload_entry(entry);
             out.push_str(
                 "<article class=\"message\"><div class=\"message-head\"><span class=\"ordinal\">",
@@ -2685,6 +2682,36 @@ mod tests {
         assert!(dump.contains("call_latest"));
         assert!(dump.contains("raw_arguments"));
         store.cleanup().unwrap();
+    }
+
+    #[test]
+    fn large_prompt_reasoning_markers_keep_reverse_response_order() {
+        let messages: Vec<_> = (0..2_000)
+            .map(|index| {
+                if index % 2 == 0 {
+                    serde_json::json!({"role": "user", "content": format!("user-{index}")})
+                } else {
+                    serde_json::json!({"role": "assistant", "content": format!("assistant-{index}")})
+                }
+            })
+            .collect();
+        let request = LlmRequestDumpEntry {
+            sequence: 1,
+            worker_id: "worker_0".to_string(),
+            round: 1,
+            interaction_request: None,
+            api_payload: Some(serde_json::json!({"messages": messages})),
+        };
+        // Newest response flag maps to the newest assistant message. With
+        // alternating flags, exactly half of the 1,000 assistant entries are
+        // marked. This large fixture also guards against reintroducing a
+        // per-entry search through all assistant positions.
+        let flags: VecDeque<bool> = (0..1_000).map(|index| index % 2 == 0).collect();
+        let html = render_llm_prompt_html("linear_reasoning", Some(&request), &flags);
+        assert_eq!(html.matches("USED THINKING HERE").count(), 500);
+        let oldest_marked = html.find("assistant-3").unwrap();
+        let oldest_unmarked = html.find("assistant-1").unwrap();
+        assert!(oldest_unmarked < oldest_marked);
     }
 
     #[test]

@@ -20,12 +20,6 @@ pub struct RuntimeInfoInputs {
     /// Live orphan pids reparented to this runtime after escaping managed
     /// process groups (e.g. via `setsid`).
     pub escaped_pids: Vec<u32>,
-    /// Filesystems the current work may write to (session working dir plus
-    /// the cwd of every running job), already deduplicated per device.
-    /// Kept for tests and future per-filesystem reporters; the sysstat
-    /// report reads the tracker notice instead of re-walking this list.
-    #[allow(dead_code)]
-    pub filesystems: Vec<FilesystemUsage>,
     /// Delta-based disk pressure notice produced by DiskPressureTracker at
     /// its latest sampled observation point, if it triggered.
     pub disk_pressure_notice: Option<String>,
@@ -276,11 +270,6 @@ mod tests {
                 created_at_ms: 0,
             }],
             escaped_pids: vec![77],
-            filesystems: vec![FilesystemUsage {
-                path: "/".into(),
-                total_bytes: 1000,
-                free_bytes: 5,
-            }],
             disk_pressure_notice: Some(
                 "DISK_PRESSURE: total free space across the working disks dropped within the last 15 observation points".into(),
             ),
@@ -308,11 +297,6 @@ mod tests {
     #[test]
     fn healthy_disk_and_normal_exits_are_not_reported() {
         let inputs = RuntimeInfoInputs {
-            filesystems: vec![FilesystemUsage {
-                path: "/".into(),
-                total_bytes: 1000,
-                free_bytes: 500,
-            }],
             disk_pressure_notice: None,
             updates: vec![JobExitSnapshot {
                 pid: 5,
@@ -443,22 +427,41 @@ impl DiskPressureTracker {
     /// is evaluated when either 10 observations accumulated or 3 minutes
     /// elapsed since the previous successful sample. A successful sample
     /// resets both gates and starts the next window.
+    #[cfg(test)]
     pub fn observe(&mut self, sample: Option<(u64, u64)>) -> Option<DiskPressureEvent> {
-        self.observe_at(sample, Instant::now())
+        self.observe_with(|| sample)
     }
 
+    /// Record one observation and obtain a filesystem sample only when the
+    /// count or time gate is due. This keeps ordinary tool completions and
+    /// model requests free of mount enumeration and stat calls.
+    pub fn observe_with<F>(&mut self, sample: F) -> Option<DiskPressureEvent>
+    where
+        F: FnOnce() -> Option<(u64, u64)>,
+    {
+        self.observe_with_at(sample, Instant::now())
+    }
+
+    #[cfg(test)]
     fn observe_at(
         &mut self,
         sample: Option<(u64, u64)>,
         now: Instant,
     ) -> Option<DiskPressureEvent> {
+        self.observe_with_at(|| sample, now)
+    }
+
+    fn observe_with_at<F>(&mut self, sample: F, now: Instant) -> Option<DiskPressureEvent>
+    where
+        F: FnOnce() -> Option<(u64, u64)>,
+    {
         self.observations_since_sample = self.observations_since_sample.saturating_add(1);
         let count_due = self.observations_since_sample >= DISK_SAMPLE_INTERVAL;
         let time_due = now.saturating_duration_since(self.last_sample_at) >= DISK_SAMPLE_MAX_AGE;
         if !count_due && !time_due {
             return None;
         }
-        let (new, capacity) = sample?;
+        let (new, capacity) = sample()?;
         self.observations_since_sample = 0;
         self.last_sample_at = now;
         let Some(base) = self.baseline else {
@@ -505,6 +508,39 @@ mod disk_pressure_tests {
         }
         assert_eq!(t.pending_observations(), 0, "sample must reset count gate");
         event
+    }
+
+    #[test]
+    fn sample_callback_is_lazy_until_a_gate_is_due() {
+        let start = Instant::now();
+        let mut t = tracker();
+        t.seed_baseline_at(Some((5 * GB, CAP)), start);
+        let mut sample_calls = 0;
+        for step in 1..DISK_SAMPLE_INTERVAL {
+            assert!(t
+                .observe_with_at(
+                    || {
+                        sample_calls += 1;
+                        Some((5 * GB, CAP))
+                    },
+                    start + Duration::from_secs(step as u64),
+                )
+                .is_none());
+        }
+        assert_eq!(
+            sample_calls, 0,
+            "sampling must stay lazy before a gate is due"
+        );
+        assert!(t
+            .observe_with_at(
+                || {
+                    sample_calls += 1;
+                    Some((5 * GB, CAP))
+                },
+                start + Duration::from_secs(DISK_SAMPLE_INTERVAL as u64),
+            )
+            .is_none());
+        assert_eq!(sample_calls, 1, "the due observation samples exactly once");
     }
 
     #[test]

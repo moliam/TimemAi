@@ -21,6 +21,8 @@ use tungstenite::client::IntoClientRequest;
 use tungstenite::Message;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_ATTACH_TURN_VIEWS: usize = 200;
+const MAX_ATTACH_PENDING_DECISIONS: usize = 200;
 const ANSI_FAIL: &str = "\x1b[31m";
 
 /// Whether a progress dot line is open. Event lines close it first so live
@@ -401,24 +403,75 @@ fn register_decision_request(
         .get("request_id")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let dedupe_key = request_id.clone().unwrap_or_else(|| prompt.clone());
-    if !seen.insert(dedupe_key) {
+    let worker_id = payload
+        .get("worker_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let topic_name = payload
+        .get("topic")
+        .and_then(|topic| topic.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let dedupe_key = request_id
+        .clone()
+        .unwrap_or_else(|| format!("{topic_name}|{}", worker_id.as_deref().unwrap_or_default()));
+    if !seen.insert(dedupe_key)
+        || pending.iter().any(|existing| {
+            request_id
+                .as_ref()
+                .is_some_and(|id| existing.request_id.as_ref() == Some(id))
+                || (request_id.is_none()
+                    && existing.request_id.is_none()
+                    && existing.worker_id == worker_id
+                    && existing.topic_name == topic_name)
+        })
+    {
         return;
     }
     println!("{prompt}");
+    if pending.len() >= MAX_ATTACH_PENDING_DECISIONS {
+        pending.remove(0);
+    }
     pending.push(PendingDecision {
         request_id,
-        worker_id: payload
-            .get("worker_id")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        topic_name: payload
-            .get("topic")
-            .and_then(|topic| topic.get("name"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+        worker_id,
+        topic_name,
     });
+}
+
+#[derive(Default)]
+struct AttachTurnViews {
+    views: std::collections::HashMap<String, AttachTurnView>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl AttachTurnViews {
+    fn view_mut(&mut self, turn_id: String) -> &mut AttachTurnView {
+        if !self.views.contains_key(&turn_id) {
+            while self.views.len() >= MAX_ATTACH_TURN_VIEWS {
+                let Some(oldest) = self.order.pop_front() else {
+                    break;
+                };
+                self.views.remove(&oldest);
+            }
+            self.order.push_back(turn_id.clone());
+            self.views.insert(turn_id.clone(), AttachTurnView::new());
+        }
+        self.views
+            .get_mut(&turn_id)
+            .expect("inserted attach turn view must exist")
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.views.len()
+    }
+
+    #[cfg(test)]
+    fn contains(&self, turn_id: &str) -> bool {
+        self.views.contains_key(turn_id)
+    }
 }
 
 struct AttachTurnView {
@@ -687,8 +740,7 @@ fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), At
         let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
     }
 
-    let mut turn_views: std::collections::HashMap<String, AttachTurnView> =
-        std::collections::HashMap::new();
+    let mut turn_views = AttachTurnViews::default();
     let mut pending_decisions: Vec<PendingDecision> = Vec::new();
     let mut restart_cwd_decision: Option<Value> = initial_restart_decision;
     if let Some(decision) = restart_cwd_decision.as_ref() {
@@ -885,7 +937,7 @@ fn handle_wire_event(
     host: &HostEndpoint,
     text: &str,
     session_id: &str,
-    turn_views: &mut std::collections::HashMap<String, AttachTurnView>,
+    turn_views: &mut AttachTurnViews,
     pending_decisions: &mut Vec<PendingDecision>,
     restart_cwd_decision: &mut Option<Value>,
 ) -> bool {
@@ -1032,10 +1084,7 @@ fn live_topic_summary(payload: &Value) -> Option<String> {
 
 /// A finished turn never re-broadcasts a full `turn_updated` snapshot with the
 /// final answer; the authoritative text rides on `turn_finished.outcome`.
-fn handle_turn_finished(
-    value: &Value,
-    turn_views: &mut std::collections::HashMap<String, AttachTurnView>,
-) {
+fn handle_turn_finished(value: &Value, turn_views: &mut AttachTurnViews) {
     let turn_id = value
         .get("turn_id")
         .and_then(Value::as_str)
@@ -1046,9 +1095,7 @@ fn handle_turn_finished(
         .and_then(|outcome| outcome.get("text"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let view = turn_views
-        .entry(turn_id)
-        .or_insert_with(AttachTurnView::new);
+    let view = turn_views.view_mut(turn_id);
     view.render_final_answer_once(text);
     close_dots();
     println!(
@@ -1062,7 +1109,7 @@ fn handle_turn_finished(
 fn handle_wire_event_inner(
     inner: &Value,
     session_id: &str,
-    turn_views: &mut std::collections::HashMap<String, AttachTurnView>,
+    turn_views: &mut AttachTurnViews,
     pending_decisions: &mut Vec<PendingDecision>,
     restart_cwd_decision: &mut Option<Value>,
 ) -> bool {
@@ -1106,9 +1153,7 @@ fn handle_wire_event_inner(
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
-                    let view = turn_views
-                        .entry(turn_id)
-                        .or_insert_with(AttachTurnView::new);
+                    let view = turn_views.view_mut(turn_id);
                     view.render_turn(latest, pending_decisions);
                 }
             }
@@ -1138,9 +1183,7 @@ fn handle_wire_event_inner(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            let view = turn_views
-                .entry(turn_id)
-                .or_insert_with(AttachTurnView::new);
+            let view = turn_views.view_mut(turn_id);
             view.render_turn(turn, pending_decisions);
             true
         }
@@ -1257,6 +1300,39 @@ mod tests {
     }
 
     #[test]
+    fn pending_decisions_dedupe_live_replays_and_evict_oldest_at_limit() {
+        let mut pending = Vec::new();
+        let mut first = decision_payload(
+            "core.user.approval.request",
+            json!({"action": "run", "command": "first"}),
+        );
+        register_live_decision_request(&first, &mut pending);
+        register_live_decision_request(&first, &mut pending);
+        assert_eq!(
+            pending.len(),
+            1,
+            "live replay must not duplicate request_id"
+        );
+
+        for index in 2..=(MAX_ATTACH_PENDING_DECISIONS + 5) {
+            first["payload"]["request_id"] = json!(format!("req-{index}"));
+            register_live_decision_request(&first, &mut pending);
+        }
+        assert_eq!(pending.len(), MAX_ATTACH_PENDING_DECISIONS);
+        assert!(
+            pending
+                .iter()
+                .all(|item| item.request_id.as_deref() != Some("req-1")),
+            "oldest pending decision must be evicted"
+        );
+        assert_eq!(
+            pending.last().and_then(|item| item.request_id.as_deref()),
+            Some("req-205"),
+            "newest decision remains the reply target"
+        );
+    }
+
+    #[test]
     fn action_detail_shows_command_and_status() {
         let payload = json!({
             "action": "run_bash",
@@ -1343,6 +1419,19 @@ mod tests {
             topic_summary(&payload),
             Some("- [core.model_health] degraded".to_string())
         );
+    }
+
+    #[test]
+    fn attach_turn_views_evict_oldest_state_at_host_turn_limit() {
+        let mut views = AttachTurnViews::default();
+        for index in 0..(MAX_ATTACH_TURN_VIEWS + 5) {
+            views.view_mut(format!("turn-{index}"));
+        }
+        assert_eq!(views.len(), MAX_ATTACH_TURN_VIEWS);
+        assert!(!views.contains("turn-0"));
+        assert!(!views.contains("turn-4"));
+        assert!(views.contains("turn-5"));
+        assert!(views.contains(&format!("turn-{}", MAX_ATTACH_TURN_VIEWS + 4)));
     }
 
     #[test]

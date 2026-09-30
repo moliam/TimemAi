@@ -2415,6 +2415,7 @@ async fn static_asset(
                 header::CACHE_CONTROL,
                 HeaderValue::from_static(cache_control),
             ),
+            (header::VARY, HeaderValue::from_static("Accept-Encoding")),
         ],
         body,
     )
@@ -5414,16 +5415,35 @@ fn restore_stored_sessions_with_runtime_restart_marker(
             .cmp(&right.updated_at_ms)
             .then_with(|| left.session_id.cmp(&right.session_id))
     });
-    // Restore sessions through a small worker pool (bounded instead of one
-    // thread per session, so huge workspaces do not spawn unbounded threads).
-    // Each session's history is an independent disk read and shared state
-    // (sessions map, MEM role library) is already guarded by mutexes.
+    // Restore and publish the single newest session before starting the
+    // worker pool. Queue pop order alone cannot guarantee publication order:
+    // an older session may finish its disk reads first on another thread.
+    // This serial first item makes newest-first visibility deterministic while
+    // preserving bounded parallel restore for the remaining sessions.
+    let newest = stored_sessions.pop();
+    let restored = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    if let Some(stored) = newest {
+        let session_id = stored.session_id.clone();
+        match restore_stored_session(state, stored, record_runtime_restart) {
+            Ok(()) => {
+                restored.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                publish_restored_session(state, &session_id);
+            }
+            Err(error) => eprintln!(
+                "[timem_web_session_restore_error] session_id={session_id:?} reason={error}"
+            ),
+        }
+    }
+
+    // Restore the remaining sessions through a small worker pool (bounded
+    // instead of one thread per session, so huge workspaces do not spawn
+    // unbounded threads). Each session's history is an independent disk read
+    // and shared state is already guarded by mutexes.
     let worker_count = stored_sessions.len().min(SESSION_RESTORE_WORKERS);
     let queue = std::sync::Arc::new((
         std::sync::Mutex::new(stored_sessions),
         std::sync::Condvar::new(),
     ));
-    let restored = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mut handles = Vec::new();
     for _ in 0..worker_count {
         let state = state.clone();
@@ -5440,19 +5460,7 @@ fn restore_stored_sessions_with_runtime_restart_marker(
                     // immediately so connected clients see the list fill up
                     // (newest first) instead of waiting for the whole
                     // background restore to finish.
-                    if let Some(session) = state
-                        .sessions
-                        .lock()
-                        .ok()
-                        .and_then(|sessions| sessions.get(&session_id).cloned())
-                    {
-                        publish_semantic(
-                            &state,
-                            WireEvent::SessionCreated {
-                                session: Box::new(session),
-                            },
-                        );
-                    }
+                    publish_restored_session(&state, &session_id);
                 }
                 Err(error) => eprintln!(
                     "[timem_web_session_restore_error] session_id={session_id:?} reason={error}"
@@ -5464,6 +5472,22 @@ fn restore_stored_sessions_with_runtime_restart_marker(
         let _ = handle.join();
     }
     Ok(restored.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+fn publish_restored_session(state: &AppState, session_id: &str) {
+    if let Some(session) = state
+        .sessions
+        .lock()
+        .ok()
+        .and_then(|sessions| sessions.get(session_id).cloned())
+    {
+        publish_semantic(
+            state,
+            WireEvent::SessionCreated {
+                session: Box::new(session),
+            },
+        );
+    }
 }
 
 fn list_stored_sessions_resilient(store: &SessionStore) -> Result<Vec<StoredSession>, String> {
