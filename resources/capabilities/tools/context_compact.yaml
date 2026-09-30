@@ -6,8 +6,8 @@ summary: Compact selected dynamic prompt deltas while preserving an essential su
 prompt_synopsis: |
   {"context_compact":{"discard":["pd_1"],"offload":["pd_2"],"summary":"Essential active state..."}}
 description: |
-  Compaction can save prompt windows by summarizing and discarding stale or
-  redundant dynamic prompt deltas, and/or offloading important but bulky deltas
+  Compaction can save prompt windows. You can summarize then discard stale or
+  low-information-density prompt deltas and/or offload important but large deltas
   to scratch memory. Compaction should be ultra-dense, low-loss, and adhere strictly to the dimensions below (keep titles), based on old compaction(if any) and current context:
   * **Design Blueprint**: Authoritative design or root-doc and settled interface contracts; important design rule corrected by user.
   * **Roadmap Coordinates**: High level work plan, active milestone and the current task item
@@ -18,7 +18,7 @@ description: |
   * **Curr state**: curr work status, progress, artifacts, etc. Important: still running jobs, to-be cleaned temp target
   * **Next work**:  next planned action
 
-  After compaction, all old conversation context will be lost, so you must be thorough but concise.
+  After compaction, removed prompt deltas' context will be lost, extract useful things carefully.
   When combined with other capability calls, `context_compact` must be the first
   call. Later calls run only after compaction succeeds.
 prompt_input: |

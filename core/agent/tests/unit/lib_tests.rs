@@ -2154,18 +2154,20 @@ fn workspace_instance_lock_is_exclusive_per_mem_and_reopens_after_release() {
 }
 
 #[test]
-fn prompt_marks_logical_turns_independently_from_deltas() {
+fn prompt_omits_internal_turn_markers_and_preserves_order() {
     let mut core = test_core("explicit_turn_boundaries");
 
     let first = match core.begin_turn("first question", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    let first_marker = first
-        .rfind("[BEGIN TURN turn_id: action_turn_")
-        .expect("first turn marker");
-    let first_question = first.rfind("first question").expect("first question");
-    assert!(first_marker < first_question, "{first}");
+    let first_id = core
+        .current_action_turn_id
+        .clone()
+        .expect("internal turn ID");
+    assert!(!first.contains("BEGIN TURN"));
+    assert!(!first.contains(&first_id));
+    assert!(first.contains("first question"));
 
     let supplemented = core
         .append_user_supplement("same-turn supplement")
@@ -2174,11 +2176,8 @@ fn prompt_marks_logical_turns_independently_from_deltas() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert_eq!(
-        supplemented.matches("[BEGIN TURN turn_id:").count(),
-        1,
-        "a supplement must not open another turn: {supplemented}"
-    );
+    assert!(!supplemented.contains("BEGIN TURN"));
+    assert_eq!(core.current_action_turn_id.as_ref(), Some(&first_id));
     assert!(supplemented.contains("same-turn supplement"));
 
     core.defer_next_turn_slices(vec![(
@@ -2189,20 +2188,18 @@ fn prompt_marks_logical_turns_independently_from_deltas() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert_eq!(
-        second.matches("[BEGIN TURN turn_id:").count(),
-        2,
-        "{second}"
-    );
+    let second_id = core
+        .current_action_turn_id
+        .as_ref()
+        .expect("next internal turn ID");
+    assert_ne!(second_id, &first_id);
+    assert!(!second.contains("BEGIN TURN"));
+    assert!(!second.contains(second_id));
     let deferred = second
         .rfind("deferred previous answer")
         .expect("deferred previous answer");
-    let second_marker = second
-        .rfind("[BEGIN TURN turn_id: action_turn_")
-        .expect("second turn marker");
     let second_question = second.rfind("second question").expect("second question");
-    assert!(deferred < second_marker, "{second}");
-    assert!(second_marker < second_question, "{second}");
+    assert!(deferred < second_question, "{second}");
 }
 
 #[test]

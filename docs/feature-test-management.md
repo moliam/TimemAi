@@ -540,9 +540,10 @@ decisions remain runtime decision/evidence paths, not fabricated user messages.
 
 Turn-start supporting context (restart/history, cwd instructions and attachment
 context) precedes the initial user entry. Later runtime observations retain their
-chronological position; no role-wide sorting is introduced. The BEGIN TURN marker
-still precedes this turn's entries, and prior pending assistant output stays before
-that marker. Empty ordinary user inputs and supplements remain omitted.
+chronological position; no role-wide sorting is introduced. Prior pending assistant
+output stays before the new user input. Internal turn IDs and turn-boundary markers
+are not injected into model prompts or prompt examples; runtime turn ownership and
+audit identities remain unchanged. Empty ordinary user inputs and supplements remain omitted.
 
 Regression coverage: `core/agent/tests/unit/lib_tests.rs` exercises direct resume
 in JSON/XML and inline/native modes, empty component preservation, interruption
@@ -573,3 +574,11 @@ catalog only (comments stripped first). Directory-copy assertions pin
 `--lang=zh-CN --accept-lang=zh-CN` so default-render assertions stay stable.
 CSS pseudo-element labels read localized `data-*` attributes instead of
 hardcoded `content` strings.
+
+### Memo recreation and deletion reminders
+
+Creating or updating an active memo cancels a pending reminder about a previously
+deleted memo and rearms the one-shot reminder for the next deletion. Regression
+`memo_recreation_cancels_stale_delete_notice_and_rearms_next_delete` covers initial
+creation, delete/create before prompt rendering, repeated deletion cycles, and
+one-shot delivery. This does not change the active-memo finish guard.

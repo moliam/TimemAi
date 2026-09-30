@@ -44,9 +44,21 @@ pub(super) fn publish(state: &AppState, session_id: &str, worker_id: &str, event
     {
         return;
     }
+    let attempt = event.payload.get("attempt").and_then(Value::as_u64);
+    let timeline_seq = turn
+        .preview
+        .as_ref()
+        .filter(|preview| preview.get("attempt").and_then(Value::as_u64) == attempt)
+        .and_then(|preview| preview.get("timeline_seq"))
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| next_turn_timeline_seq(turn));
+    let mut preview = event.payload.clone();
+    preview["timeline_seq"] = json!(timeline_seq);
     let web_turn_id = turn.turn_id.clone();
-    turn.preview = Some(event.payload.clone());
+    turn.preview = Some(preview.clone());
     drop(sessions);
+    let mut wire_event = event.wire_payload();
+    wire_event["payload"] = preview;
     publish_core_semantic(
         state,
         session_id,
@@ -54,7 +66,7 @@ pub(super) fn publish(state: &AppState, session_id: &str, worker_id: &str, event
             session_id: session_id.to_string(),
             turn_id: Some(web_turn_id),
             turn_event_id: None,
-            event: event.wire_payload(),
+            event: wire_event,
         },
     );
 }

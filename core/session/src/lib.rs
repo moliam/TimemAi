@@ -321,7 +321,7 @@ pub enum CoreSessionWorkerEvent {
         error: String,
     },
     UnconsumedSupplements {
-        supplements: Vec<String>,
+        supplements: Vec<UnconsumedSupplement>,
     },
     TurnFinished {
         outcome: TurnOutcome,
@@ -391,6 +391,23 @@ enum CoreSessionWorkerCommand {
         snapshot: agent_core::DynamicContextSnapshot,
     },
     Shutdown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UnconsumedSupplement {
+    pub text: String,
+    pub additional_context: Option<String>,
+    pub command_id: Option<String>,
+}
+
+impl From<QueuedSupplement> for UnconsumedSupplement {
+    fn from(supplement: QueuedSupplement) -> Self {
+        Self {
+            text: supplement.text,
+            additional_context: supplement.additional_context,
+            command_id: supplement.command_id,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1841,14 +1858,11 @@ impl CoreSessionWorker {
                                     // A structured stop is a hard boundary. Web-style turn UIs
                                     // also treat a visible final answer as a boundary so a late
                                     // supplement cannot create a second answer in the same turn.
-                                    let supplements = ui.close_supplements_for_main_context();
+                                    let supplements = ui.close_supplements_for_host_handoff();
                                     if !supplements.is_empty() {
                                         let _ = event_tx.send(
                                             CoreSessionWorkerEvent::UnconsumedSupplements {
-                                                supplements: supplements
-                                                    .into_iter()
-                                                    .map(|supplement| supplement.text)
-                                                    .collect(),
+                                                supplements,
                                             },
                                         );
                                     }
@@ -2215,16 +2229,11 @@ impl<M: ModelClient> ToolGenRunner<'_, M> {
                 model_client,
             );
             if current.stop_summary.is_some() || !ui.continue_supplements_after_final_answer {
-                let supplements = ui.close_supplements_for_main_context();
+                let supplements = ui.close_supplements_for_host_handoff();
                 if !supplements.is_empty() {
                     let _ = ui
                         .event_tx
-                        .send(CoreSessionWorkerEvent::UnconsumedSupplements {
-                            supplements: supplements
-                                .into_iter()
-                                .map(|supplement| supplement.text)
-                                .collect(),
-                        });
+                        .send(CoreSessionWorkerEvent::UnconsumedSupplements { supplements });
                 }
                 break current;
             }
@@ -2653,15 +2662,28 @@ impl WorkerTurnUi {
             .unwrap_or_default()
     }
 
-    fn close_supplements_for_main_context(&mut self) -> Vec<agent_core::UserSupplement> {
+    fn close_supplements_for_host_handoff(&mut self) -> Vec<UnconsumedSupplement> {
         self.supplement_dispatch_timeout = None;
-        self.supplement_mailbox
+        let queued = self
+            .supplement_mailbox
             .lock()
             .map(|mut mailbox| {
                 mailbox.accepting = false;
-                self.accept_queued_supplements(std::mem::take(&mut mailbox.queue))
+                std::mem::take(&mut mailbox.queue)
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let mut supplements = Vec::new();
+        for queued in queued {
+            if let Some(command_id) = queued.command_id.as_ref() {
+                publish_command_accepted(&self.event_tx, &self.command_ids, command_id.clone());
+            }
+            if queued.manual_context_compact {
+                self.manual_compact_requested.store(true, Ordering::SeqCst);
+                continue;
+            }
+            supplements.push(UnconsumedSupplement::from(queued));
+        }
+        supplements
     }
 
     fn begin_toolgen_run(&mut self, tool_count: usize) {

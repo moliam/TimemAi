@@ -1767,6 +1767,7 @@ fn stale_turn_started_cannot_revive_an_interrupted_turn_but_new_pending_turn_can
                 text: "old work".to_string(),
                 attachments: Vec::new(),
                 created_at_ms: 1,
+                timeline_seq: None,
                 command_id: Some(stale_command_id.to_string()),
                 delivery_state: Some(ChatCommandDeliveryState::CoreAccepted),
                 worker_roles: Vec::new(),
@@ -7846,6 +7847,139 @@ fn drain_wire_events(receiver: &mut broadcast::Receiver<WireEvent>) -> Vec<WireE
 }
 
 #[test]
+fn response_preview_and_final_event_keep_authoritative_turn_timeline_order() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let web_turn = start_web_turn(&state, session_id, "inspect the stream order").unwrap();
+    let worker_id = test_worker_id(session_id);
+    let core_turn_id = "core_turn_timeline_order";
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Active(
+            agent_core::ActiveTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.to_string(),
+                    turn_id: core_turn_id.to_string(),
+                    epoch: 1,
+                },
+                stop_requested: false,
+                input_admission: agent_core::TurnInputAdmission::Open,
+                activity: agent_core::TurnActivity::Running,
+            },
+        )),
+    );
+
+    let preview = |attempt: u64, revision: u64, text: &str| {
+        CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new("core.model.preview", json!({})),
+            CoreSessionState::WaitingModel,
+            json!({
+                "turn_id": core_turn_id,
+                "attempt": attempt,
+                "revision": revision,
+                "interruption": null,
+                "response": {
+                    "attempt": attempt,
+                    "revision": revision,
+                    "text": text,
+                    "status": "intermediate"
+                }
+            }),
+        )
+        .with_worker_scope(test_context_id(session_id), worker_id.clone())
+    };
+
+    response_preview::publish(&state, session_id, &worker_id, &preview(1, 1, "first"));
+    let first_seq = state.sessions.lock().unwrap()[session_id]
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == web_turn.turn_id)
+        .unwrap()
+        .preview
+        .as_ref()
+        .unwrap()["timeline_seq"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(first_seq, 1);
+
+    response_preview::publish(&state, session_id, &worker_id, &preview(1, 2, "revised"));
+    let revised_seq = state.sessions.lock().unwrap()[session_id]
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == web_turn.turn_id)
+        .unwrap()
+        .preview
+        .as_ref()
+        .unwrap()["timeline_seq"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(revised_seq, first_seq);
+
+    append_turn_user_entry(
+        &state,
+        session_id,
+        "supplement",
+        "later supplement".to_string(),
+    )
+    .unwrap();
+    let supplement_seq = state.sessions.lock().unwrap()[session_id]
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == web_turn.turn_id)
+        .unwrap()
+        .user_entries
+        .last()
+        .unwrap()
+        .timeline_seq
+        .unwrap();
+    assert!(supplement_seq > first_seq);
+
+    append_turn_event(
+        &state,
+        session_id,
+        Some(&web_turn.turn_id),
+        "core_topic",
+        json!({
+            "topic": {"name": CORE_TOPIC_MODEL_RESPONSE},
+            "payload": {"free_talk": "settled first attempt"}
+        }),
+    )
+    .unwrap();
+    let final_seq = state.sessions.lock().unwrap()[session_id]
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == web_turn.turn_id)
+        .unwrap()
+        .events
+        .last()
+        .unwrap()
+        .timeline_seq
+        .unwrap();
+    assert_eq!(final_seq, first_seq);
+    assert!(final_seq < supplement_seq);
+
+    response_preview::publish(
+        &state,
+        session_id,
+        &worker_id,
+        &preview(2, 3, "second attempt"),
+    );
+    let second_attempt_seq = state.sessions.lock().unwrap()[session_id]
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == web_turn.turn_id)
+        .unwrap()
+        .preview
+        .as_ref()
+        .unwrap()["timeline_seq"]
+        .as_u64()
+        .unwrap();
+    assert!(second_attempt_seq > supplement_seq);
+}
+
+#[test]
 fn primary_core_projection_is_cached_revisioned_and_not_rewritten_by_stale_or_subworker_events() {
     let state = routing_test_state();
     let session_id = "session_a";
@@ -8293,7 +8427,7 @@ fn primary_turn_finish_clears_stale_working_workers_and_session_spinner() {
 }
 
 #[test]
-fn final_answer_is_preserved_before_unconsumed_supplement_starts_a_new_turn() {
+fn failed_unconsumed_handoff_preserves_final_answer_and_pending_supplement() {
     let state = routing_test_state();
     let session_id = "session_a";
     let first = start_web_turn(&state, session_id, "Q1").unwrap();
@@ -8326,7 +8460,11 @@ fn final_answer_is_preserved_before_unconsumed_supplement_starts_a_new_turn() {
         &context_id,
         &worker_id,
         CoreSessionWorkerEvent::UnconsumedSupplements {
-            supplements: vec!["Q2".to_string()],
+            supplements: vec![timem_session::UnconsumedSupplement {
+                text: "Q2".to_string(),
+                additional_context: None,
+                command_id: None,
+            }],
         },
     );
     handle_scoped_worker_event(
@@ -8347,23 +8485,24 @@ fn final_answer_is_preserved_before_unconsumed_supplement_starts_a_new_turn() {
 
     let sessions = state.sessions.lock().unwrap();
     let session = sessions.get(session_id).unwrap();
-    assert_eq!(session.turns.len(), 2);
+    assert_eq!(session.turns.len(), 1);
     assert_eq!(session.turns[0].turn_id, first.turn_id);
     assert_eq!(
         session.turns[0].final_answer.as_deref(),
         Some("final_answer1")
     );
     assert_eq!(session.turns[0].state, "finished");
-    assert_ne!(session.turns[1].turn_id, first.turn_id);
-    assert_eq!(session.turns[1].user_entries.len(), 1);
-    assert_eq!(session.turns[1].user_entries[0].kind, "task");
-    assert_eq!(session.turns[1].user_entries[0].text, "Q2");
-    assert!(session.turns[1].final_answer.is_none());
-    assert!(
-        session.active_turn_id.as_deref() == Some(session.turns[1].turn_id.as_str())
-            || session.pending_turn_id.as_deref() == Some(session.turns[1].turn_id.as_str()),
-        "Q2 must have a distinct active or pending turn identity"
+    assert_eq!(
+        session
+            .pending_unconsumed_supplements
+            .iter()
+            .map(|supplement| supplement.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Q2"],
+        "failed in-process handoff must remain retryable in memory"
     );
+    assert!(session.active_turn_id.is_none());
+    assert!(session.pending_turn_id.is_none());
     assert_eq!(
         session
             .messages
@@ -8377,7 +8516,7 @@ fn final_answer_is_preserved_before_unconsumed_supplement_starts_a_new_turn() {
 }
 
 #[test]
-fn task_finished_turn_resubmits_unconsumed_supplements_as_new_turn() {
+fn task_finished_handoff_failure_keeps_unconsumed_supplement_in_memory() {
     let state = routing_test_state();
     let session_id = "session_a";
     start_web_turn(&state, session_id, "Q1").unwrap();
@@ -8410,7 +8549,11 @@ fn task_finished_turn_resubmits_unconsumed_supplements_as_new_turn() {
         &context_id,
         &worker_id,
         CoreSessionWorkerEvent::UnconsumedSupplements {
-            supplements: vec!["late follow-up".to_string()],
+            supplements: vec![timem_session::UnconsumedSupplement {
+                text: "late follow-up".to_string(),
+                additional_context: None,
+                command_id: None,
+            }],
         },
     );
 
@@ -8432,26 +8575,186 @@ fn task_finished_turn_resubmits_unconsumed_supplements_as_new_turn() {
 
     let sessions = state.sessions.lock().unwrap();
     let session = sessions.get(session_id).unwrap();
-    // In the routing-test harness the Core worker handle is absent, so the
-    // resubmit enqueues the queued turn but cannot hand it to Core; the turn
-    // identity and entry below still prove the supplement was not silently
-    // dropped on a TurnFinished completion.
-    assert_eq!(session.turns.len(), 2);
-    assert_eq!(session.turns[1].user_entries.len(), 1);
-    assert_eq!(session.turns[1].user_entries[0].kind, "task");
-    assert_eq!(session.turns[1].user_entries[0].text, "late follow-up");
+    assert_eq!(session.turns.len(), 1);
+    assert_eq!(
+        session
+            .pending_unconsumed_supplements
+            .iter()
+            .map(|supplement| supplement.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["late follow-up"]
+    );
+}
+
+#[test]
+fn normal_completion_hands_unconsumed_supplement_off_before_ordinary_queue() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "unconsumed-priority");
+    let first = start_web_turn(&state, &session_id, "Q1").unwrap();
+    let (context_id, worker_id) = primary_worker_scope(&state, &session_id).unwrap();
+    let role = WorkerRole {
+        id: "priority-role".to_string(),
+        name: "Priority reviewer".to_string(),
+        description: "Preserve this role across terminal handoff.".to_string(),
+    };
+    let attachment = WebAttachment {
+        id: "priority-attachment".to_string(),
+        name: "evidence.txt".to_string(),
+        path: "/tmp/priority-evidence.txt".to_string(),
+        bytes: 8,
+    };
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session
+            .turns
+            .iter_mut()
+            .find(|turn| turn.turn_id == first.turn_id)
+            .unwrap()
+            .user_entries
+            .push(WebTurnUserEntry {
+                kind: "supplement".to_string(),
+                text: "S priority".to_string(),
+                attachments: vec![attachment.clone()],
+                created_at_ms: now_ms(),
+                timeline_seq: Some(1),
+                command_id: Some("supplement-command".to_string()),
+                delivery_state: Some(ChatCommandDeliveryState::CoreAccepted),
+                worker_roles: vec![role.clone()],
+            });
+        session
+            .message_queue
+            .enqueue(
+                "ordinary-q",
+                WebNextTurnPayload {
+                    send_after_cancel: false,
+                    turn_id: "ordinary-q-turn".to_string(),
+                    created_at_ms: now_ms(),
+                    text: "Q ordinary".to_string(),
+                    attachments: Vec::new(),
+                    worker_roles: Vec::new(),
+                },
+            )
+            .unwrap();
+    }
+
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::UnconsumedSupplements {
+            supplements: vec![timem_session::UnconsumedSupplement {
+                text: "S priority".to_string(),
+                additional_context: Some("RETURNED_CONTEXT_MARKER".to_string()),
+                command_id: Some("supplement-command".to_string()),
+            }],
+        },
+    );
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Finished(
+            agent_core::FinishedTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.clone(),
+                    turn_id: first.turn_id.clone(),
+                    epoch: 1,
+                },
+                outcome: agent_core::TurnProjectionOutcome::Completed,
+            },
+        )),
+    );
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::TurnFinished {
+            outcome: TurnOutcome::final_response(
+                "done",
+                UsageStats::zero(),
+                None,
+                None,
+                Duration::from_millis(1),
+            ),
+        },
+    );
+
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = sessions.get(&session_id).unwrap();
+        assert_eq!(session.turns.len(), 2);
+        let priority = session.turns.last().unwrap();
+        assert_eq!(priority.user_entries.len(), 1);
+        assert_eq!(priority.user_entries[0].text, "S priority");
+        assert_eq!(
+            priority.user_entries[0].command_id.as_deref(),
+            Some("supplement-command")
+        );
+        assert_eq!(priority.user_entries[0].attachments, vec![attachment]);
+        assert_eq!(priority.user_entries[0].worker_roles, vec![role]);
+        assert_eq!(
+            session.pending_turn_id.as_deref(),
+            Some(priority.turn_id.as_str())
+        );
+        assert_eq!(session.message_queue.len(), 1);
+        assert_eq!(
+            session.message_queue.projection().items[0].command_id,
+            "ordinary-q"
+        );
+        assert!(session
+            .message_queue
+            .projection()
+            .dispatching_command_id
+            .is_none());
+        assert!(session.pending_unconsumed_supplements.is_empty());
+    }
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
 }
 
 #[test]
 fn stopped_primary_turn_preserves_unconsumed_supplements_without_resubmitting() {
     let state = routing_test_state();
     let session_id = "session_a";
-    let supplements = vec!["follow-up one".to_string(), "follow-up two".to_string()];
+    let supplements = vec![
+        timem_session::UnconsumedSupplement {
+            text: "follow-up one".to_string(),
+            additional_context: None,
+            command_id: None,
+        },
+        timem_session::UnconsumedSupplement {
+            text: "follow-up two".to_string(),
+            additional_context: None,
+            command_id: None,
+        },
+    ];
 
     let turns_before = {
         let mut sessions = state.sessions.lock().unwrap();
         let session = sessions.get_mut(session_id).unwrap();
         session.pending_unconsumed_supplements = supplements.clone();
+        session
+            .message_queue
+            .enqueue(
+                "ordinary-after-cancel",
+                WebNextTurnPayload {
+                    send_after_cancel: false,
+                    turn_id: "ordinary-after-cancel-turn".to_string(),
+                    created_at_ms: now_ms(),
+                    text: "ordinary queued question".to_string(),
+                    attachments: Vec::new(),
+                    worker_roles: Vec::new(),
+                },
+            )
+            .unwrap();
         session.turns.len()
     };
 
@@ -8462,6 +8765,20 @@ fn stopped_primary_turn_preserves_unconsumed_supplements_without_resubmitting() 
     handle_worker_event(
         &state,
         session_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Finished(
+            agent_core::FinishedTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.to_string(),
+                    turn_id: "cancelled-turn".to_string(),
+                    epoch: 1,
+                },
+                outcome: agent_core::TurnProjectionOutcome::Cancelled,
+            },
+        )),
+    );
+    handle_worker_event(
+        &state,
+        session_id,
         CoreSessionWorkerEvent::TurnFinished { outcome },
     );
 
@@ -8469,6 +8786,16 @@ fn stopped_primary_turn_preserves_unconsumed_supplements_without_resubmitting() 
     let session = sessions.get(session_id).unwrap();
     assert_eq!(session.pending_unconsumed_supplements, supplements);
     assert_eq!(session.turns.len(), turns_before);
+    assert_eq!(session.message_queue.len(), 1);
+    assert_eq!(
+        session.message_queue.projection().items[0].command_id,
+        "ordinary-after-cancel"
+    );
+    assert!(session
+        .message_queue
+        .projection()
+        .dispatching_command_id
+        .is_none());
 }
 
 #[test]

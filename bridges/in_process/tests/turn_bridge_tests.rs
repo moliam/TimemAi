@@ -226,8 +226,6 @@ fn stable_prompt_semantics(prompt: &str) -> String {
         .map(|line| {
             if line.starts_with("[BEGIN DELTA delta_id:") {
                 "[BEGIN DELTA <runtime-generated>]".to_string()
-            } else if line.starts_with("[BEGIN TURN turn_id:") {
-                "[BEGIN TURN <runtime-generated>]".to_string()
             } else {
                 line.to_string()
             }

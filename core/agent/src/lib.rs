@@ -3485,6 +3485,9 @@ impl AgentCore {
 
     pub(crate) fn set_active_memo(&mut self, text: String) {
         self.active_memo = Some(text);
+        // A new active goal supersedes any pending deletion reminder.
+        self.memo_deleted_this_turn = None;
+        self.memo_deleted_trailer_shown = false;
     }
 
     /// The turn is finishing while a memo is still active and the guard
@@ -3552,9 +3555,6 @@ impl AgentCore {
         self.memo_finish_guard_tokens = MEMO_FINISH_GUARD_TOKEN_CAP;
         self.memo_deleted_this_turn = None;
         self.memo_deleted_trailer_shown = false;
-        // A final assistant replay may already be pending from the previous turn.
-        // Keep it before the marker below; both may share a transport delta because
-        // BEGIN TURN, rather than delta batching, defines logical ownership.
         let action_turn_id = unique_id("action_turn");
         self.current_action_turn_id = Some(action_turn_id.clone());
         self.current_action_user_question = user_input.trim().to_string();
@@ -3564,12 +3564,6 @@ impl AgentCore {
             &self.current_action_user_question,
         );
         let text = user_input.trim().to_string();
-        self.submit_prompt_component(
-            PromptComponentRole::system(),
-            "turn_boundary",
-            format!("[BEGIN TURN turn_id: {action_turn_id}]"),
-            "runtime",
-        );
         if self.pending_user_interruption_note && (direct_resume || !text.is_empty()) {
             self.pending_user_interruption_note = false;
             self.submit_prompt_component(

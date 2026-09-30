@@ -26,6 +26,7 @@ import {
   clearDecisionsForWorker,
   coalesceActionLifecycle,
   compareTurnTimelineItems,
+  compareTurnStreamItems,
   composerPrimaryAction,
   composerSendDecision,
   decisionKey,
@@ -1435,6 +1436,28 @@ describe("web topic view model", () => {
     expect(workspacePathLabel("timem_shell")).toBe("timem_shell");
   });
 
+  it("orders live Turn stream items by authoritative sequence and legacy items stably", () => {
+    const sequenced = [
+      { id: "supplement", timelineSeq: 2, createdAt: 100, fallbackIndex: 2 },
+      { id: "preview", timelineSeq: 1, createdAt: 300, fallbackIndex: 1 },
+      { id: "task", timelineSeq: 0, createdAt: 200, fallbackIndex: 0 },
+    ].sort(compareTurnStreamItems);
+    expect(sequenced.map((item) => item.id)).toEqual(["task", "preview", "supplement"]);
+
+    const legacy = [
+      { id: "later", createdAt: 20, fallbackIndex: 1 },
+      { id: "first", createdAt: 10, fallbackIndex: 0 },
+      { id: "same-time", createdAt: 20, fallbackIndex: 2 },
+    ].sort(compareTurnStreamItems);
+    expect(legacy.map((item) => item.id)).toEqual(["first", "later", "same-time"]);
+
+    const mixed = [
+      { id: "live", timelineSeq: 0, createdAt: 1, fallbackIndex: 1 },
+      { id: "restored", createdAt: 999, fallbackIndex: 0 },
+    ].sort(compareTurnStreamItems);
+    expect(mixed.map((item) => item.id)).toEqual(["restored", "live"]);
+  });
+
   it("preserves presentation identity and order while keeping authoritative event timestamps", () => {
     const start = actionEvent("1000", "start", "running", { cmd: "sleep 10" }, "stable");
     const execution = actionEvent("2000", "execution_start", "running", { cmd: "sleep 10" }, "stable");
@@ -2662,6 +2685,63 @@ describe("web topic view model", () => {
 
     expect(sessionContextUsage(current)?.prompt_tokens).toBe(8_200);
     expect(sessionContextUsage(session("session_2"))).toBeUndefined();
+  });
+
+  it("refreshes context usage immediately after completed compaction and accepts later model usage", () => {
+    const current = session("session_compacted_context");
+    const activeTurn = turn("active", "working");
+    activeTurn.events = [
+      {
+        event_id: "usage_before",
+        source: "worker_activity",
+        created_at_ms: 10,
+        payload: { kind: "model_response", usage: { prompt_tokens: 116_000, completion_tokens: 40 } },
+      },
+      {
+        event_id: "compact_done",
+        source: "core_topic",
+        created_at_ms: 20,
+        payload: topic("core.context.compact", {
+          phase: "completed",
+          estimated_before_tokens: 116_000,
+          estimated_after_tokens: 19_000,
+        }),
+      },
+    ];
+    current.turns = [activeTurn];
+    expect(sessionContextUsage(current)).toEqual({ prompt_tokens: 19_000 });
+
+    activeTurn.events.push({
+      event_id: "usage_after",
+      source: "worker_activity",
+      created_at_ms: 30,
+      payload: { kind: "model_response", usage: { prompt_tokens: 21_000, completion_tokens: 12 } },
+    });
+    expect(sessionContextUsage(current)).toEqual({ prompt_tokens: 21_000, completion_tokens: 12 });
+  });
+
+  it("ignores requested or stale compaction when deriving live context usage", () => {
+    const current = session("session_pending_compact_context");
+    const activeTurn = turn("active", "working");
+    activeTurn.events = [
+      {
+        event_id: "usage",
+        source: "worker_activity",
+        created_at_ms: 10,
+        payload: { kind: "model_response", usage: { prompt_tokens: 42_000 } },
+      },
+      {
+        event_id: "compact_requested",
+        source: "core_topic",
+        created_at_ms: 20,
+        payload: topic("core.context.compact", {
+          phase: "requested",
+          estimated_after_tokens: 1,
+        }),
+      },
+    ];
+    current.turns = [activeTurn];
+    expect(sessionContextUsage(current)).toEqual({ prompt_tokens: 42_000 });
   });
 
   it("aggregates this runtime instance cache hit rate per session without double counting completion", () => {

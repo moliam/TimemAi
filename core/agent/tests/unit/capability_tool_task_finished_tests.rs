@@ -48,7 +48,7 @@ fn records_summary_and_succeeds() {
     let (mut core, _dir) = setup("success");
     let mut runtime = NoopRuntime;
     let result = execute_action(&mut core, &action("All done."), &mut runtime);
-    assert!(text(result).contains("Turn finished"));
+    assert_eq!(text(result), "Turn finished.");
     assert_eq!(
         core.take_turn_finished_summary().as_deref(),
         Some("All done.")

@@ -109,3 +109,35 @@ fn memo_validates_op_and_text() {
     assert!(run(&mut core, "bogus", "text").contains("error"));
     assert_eq!(core.active_memo(), None);
 }
+
+#[test]
+fn memo_recreation_cancels_stale_delete_notice_and_rearms_next_delete() {
+    let (mut core, dir) = setup("recreate_notice");
+    run(&mut core, "create", "first goal");
+    assert!(!core
+        .build_next_prompt()
+        .contains("You just deleted the memo:"));
+    run(&mut core, "delete", "");
+    run(&mut core, "create", "second goal");
+    assert_eq!(core.active_memo(), Some("second goal"));
+    assert!(!core
+        .build_next_prompt()
+        .contains("You just deleted the memo:"));
+    run(&mut core, "delete", "");
+    assert!(core
+        .build_next_prompt()
+        .contains("You just deleted the memo: \"second goal\""));
+    assert!(!core
+        .build_next_prompt()
+        .contains("You just deleted the memo:"));
+    run(&mut core, "update", "third goal");
+    run(&mut core, "delete", "");
+    assert!(core
+        .build_next_prompt()
+        .contains("You just deleted the memo: \"third goal\""));
+    assert!(!core
+        .build_next_prompt()
+        .contains("You just deleted the memo:"));
+    drop(core);
+    std::fs::remove_dir_all(dir).unwrap();
+}
