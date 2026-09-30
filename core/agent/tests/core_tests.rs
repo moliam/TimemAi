@@ -2028,8 +2028,13 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("max_llm_input_tokens=3000"));
-    assert!(prompt.contains("force_shrink_threshold_tokens=2700"));
+    assert!(prompt.ends_with(
+        "Context is too long. Compact context as the tool context_compact desc suggests. Your tool calls must start with context_compact:"
+    ));
+    let (_, threshold) = core
+        .take_pending_compact_request_notice()
+        .expect("threshold crossing notice");
+    assert_eq!(threshold, 2_700);
 
     let report = core
         .apply_runtime_config_update(
@@ -2093,7 +2098,15 @@ fn runtime_host_configuration_sync_is_core_owned() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("max_llm_input_tokens=3000"));
+    assert!(prompt.ends_with(
+        "Context is too long. Compact context as the tool context_compact desc suggests. Your tool calls must start with context_compact:"
+    ));
+    assert!(!prompt.contains("Long-context maintenance:"));
+    let (estimated, threshold) = core
+        .take_pending_compact_request_notice()
+        .expect("threshold crossing notice");
+    assert!(estimated >= threshold);
+    assert_eq!(threshold, 2_700);
 
     let compact_ids = field_values(&prompt, "delta_id");
     let compact_response = format!(
@@ -3074,10 +3087,15 @@ fn long_context_uses_observed_model_prompt_tokens_plus_new_delta_estimate() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Long-context maintenance:"));
-    assert!(prompt.contains("mode=force_shrink_required"));
-    assert!(prompt.contains("max_llm_input_tokens=3000"));
-    assert!(prompt.contains("force_shrink_threshold_tokens=2700"));
+    assert!(prompt.ends_with(
+        "Context is too long. Compact context as the tool context_compact desc suggests. Your tool calls must start with context_compact:"
+    ));
+    assert!(!prompt.contains("Long-context maintenance:"));
+    let (estimated, threshold) = core
+        .take_pending_compact_request_notice()
+        .expect("threshold crossing notice");
+    assert!(estimated >= threshold);
+    assert_eq!(threshold, 2_700);
 }
 
 #[test]
@@ -3098,25 +3116,23 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("mode=force_shrink_required"));
-    assert!(prompt.contains("Your tool calls must start with context_compact"));
-    assert!(prompt.contains("force_shrink_threshold_tokens=2700"));
-    assert!(prompt.contains("target_dynamic_context_ratio=10%-20%"));
-    assert!(prompt.contains("Summarize all dynamic prompt deltas into about 10%-20%"));
-    assert!(prompt.contains("task description"));
-    assert!(prompt.contains("working environment facts"));
-    assert!(prompt.contains("current progress"));
-    assert!(prompt.contains("todo/next steps"));
-    assert!(prompt.contains("high-level work principles"));
-    assert!(prompt.contains("response protocol's context_compact block"));
-    assert!(prompt.contains("offload important but lengthy delta ids"));
-    assert!(prompt.contains("discard stale delta ids"));
-    assert!(!prompt.contains("use scratch_write"));
-    assert!(!prompt.contains("use prompt_shrink"));
-    assert!(!prompt.contains("shrink_review_threshold_tokens"));
-    assert!(!prompt.contains("first_shrink_review_threshold_tokens"));
-    assert!(!prompt.contains("next_shrink_review_step_tokens"));
-    assert!(!prompt.contains("durable_ctx_score"));
+    assert!(prompt.ends_with(
+        "Context is too long. Compact context as the tool context_compact desc suggests. Your tool calls must start with context_compact:"
+    ));
+    for redundant in [
+        "Long-context maintenance:",
+        "mode=force_shrink_required",
+        "target_dynamic_context_ratio",
+        "dynamic_context_tokens=",
+        "prompt_delta_count=",
+        "Summarize all dynamic prompt deltas",
+        "Pick delta ids yourself",
+    ] {
+        assert!(
+            !prompt.contains(redundant),
+            "unexpected {redundant}: {prompt}"
+        );
+    }
 }
 
 #[test]
@@ -3141,7 +3157,8 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(shrink_prompt.contains("mode=force_shrink_required"));
+    assert!(shrink_prompt.contains("Compact context as the tool context_compact desc suggests"));
+    assert!(!shrink_prompt.contains("Long-context maintenance:"));
     let mut delta_ids = field_values(&shrink_prompt, "delta_id");
     delta_ids.sort();
     delta_ids.dedup();
@@ -3178,7 +3195,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
         "content",
         "Action result: context_compact"
     ));
-    assert!(!next_prompt.contains("mode=force_shrink_required"));
+    assert!(!next_prompt.contains("Compact context as the tool context_compact desc suggests"));
 
     let final_step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -3207,7 +3224,7 @@ fn forced_shrink_is_not_reissued_when_dynamic_context_cannot_reduce_enough() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(!prompt.contains("mode=force_shrink_required"));
+    assert!(!prompt.contains("Compact context as the tool context_compact desc suggests"));
 }
 
 #[test]
@@ -7803,11 +7820,9 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(long_prompt.starts_with("[BEGIN SYSTEM PROMPT]\nSTATIC_GLOBAL_RULES"));
-    assert!(long_prompt.contains("Long-context maintenance:"));
-    assert!(long_prompt.contains("mode=force_shrink_required"));
-    assert!(long_prompt.contains("force_shrink_threshold_tokens=2700"));
-    assert!(long_prompt.contains("target_dynamic_context_ratio=10%-20%"));
-    assert!(long_prompt.contains("prompt_delta_count="));
+    assert!(long_prompt.contains("Compact context as the tool context_compact desc suggests"));
+    assert!(!long_prompt.contains("Long-context maintenance:"));
+    assert!(!long_prompt.contains("target_dynamic_context_ratio"));
 }
 
 #[cfg(unix)]

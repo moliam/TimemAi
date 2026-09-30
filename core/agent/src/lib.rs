@@ -1815,11 +1815,6 @@ pub struct AgentCore {
     max_llm_input_tokens: u32,
     last_observed_prompt_tokens: u32,
     context_compact_required: bool,
-    /// One-time-per-request forced-shrink instruction (with live delta
-    /// refs). Kept out of persistent deltas: it is rebuilt fresh for every
-    /// model request while compaction is required, so no stale ref lists
-    /// linger in context.
-    forced_shrink_review: Option<String>,
     /// Set for a user-initiated compaction request: the next request carries
     /// the manual-compaction trailer wording instead of the forced-shrink one.
     manual_compact_trailer_pending: bool,
@@ -1953,7 +1948,6 @@ impl AgentCore {
             max_llm_input_tokens: 100_000,
             last_observed_prompt_tokens: 0,
             context_compact_required: false,
-            forced_shrink_review: None,
             manual_compact_trailer_pending: false,
             pending_compact_request_notice: None,
             rounds_since_reasoning: 0,
@@ -2724,10 +2718,6 @@ impl AgentCore {
         // wording) until the compaction succeeds: the context may not be over
         // the limit, so retries must not fall back to "Context is too long".
         if self.context_compact_required {
-            if let Some(review) = self.forced_shrink_review.as_deref() {
-                prompt.push_str(review);
-                prompt.push_str("\n\n");
-            }
             if self.manual_compact_trailer_pending {
                 prompt.push_str(prompt_render::MANUAL_CONTEXT_COMPACT_TRAILER);
             } else {
@@ -3329,7 +3319,6 @@ impl AgentCore {
         self.context_message_elements = 0;
         self.last_observed_prompt_tokens = 0;
         self.context_compact_required = false;
-        self.forced_shrink_review = None;
         self.manual_compact_trailer_pending = false;
         self.pending_compact_request_notice = None;
         self.current_round = 0;
@@ -3574,11 +3563,6 @@ impl AgentCore {
             now_ms(),
             &self.current_action_user_question,
         );
-        let pending_token_estimate = self
-            .pending_prompt_components
-            .iter()
-            .map(|component| estimate_prompt_tokens(&component.content))
-            .sum::<u32>();
         let text = user_input.trim().to_string();
         self.submit_prompt_component(
             PromptComponentRole::system(),
@@ -3632,14 +3616,7 @@ impl AgentCore {
             token_estimate_text.push_str(system_text);
         }
         let incoming_prompt_tokens = estimate_prompt_tokens(&token_estimate_text);
-        let pending_dynamic_tokens =
-            estimate_prompt_tokens(&token_estimate_text) + pending_token_estimate;
-        if let Some(shrink_review) =
-            self.consume_shrink_review_if_needed(incoming_prompt_tokens, pending_dynamic_tokens)
-        {
-            // One-shot trailer content: never persisted into deltas.
-            self.forced_shrink_review = Some(format!("Long-context maintenance:\n{shrink_review}"));
-        }
+        self.require_context_compact_if_needed(incoming_prompt_tokens);
         for system_text in system_texts {
             self.submit_prompt_component(
                 PromptComponentRole::system(),
@@ -3815,10 +3792,6 @@ impl AgentCore {
             let (body, response_trailer) = prompt_render::split_formatted_response_trailer(&prompt);
             prompt = body.trim_end().to_string();
             prompt.push_str("\n\n");
-            if let Some(review) = self.forced_shrink_review.as_deref() {
-                prompt.push_str(review);
-                prompt.push_str("\n\n");
-            }
             prompt.push_str(if self.manual_compact_trailer_pending {
                 prompt_render::MANUAL_CONTEXT_COMPACT_TRAILER
             } else {
@@ -4086,9 +4059,6 @@ impl AgentCore {
             self.hide_prompt_slices_matching("force_shrink_required");
             self.hide_prompt_slices_matching("error: invalid_prompt_refs");
             self.hide_prompt_slices_matching("error: scratch_offload_failed");
-        }
-        if compacted_successfully {
-            self.forced_shrink_review = None;
         }
         if compacted_successfully {
             // A successful compaction is accepted as-is: shrink depth cannot
@@ -5341,10 +5311,6 @@ impl AgentCore {
             };
             prompt = body.trim_end().to_string();
             prompt.push_str("\n\n");
-            if let Some(review) = self.forced_shrink_review.as_deref() {
-                prompt.push_str(review);
-                prompt.push_str("\n\n");
-            }
             prompt.push_str(compact_trailer);
             if let Some(response_trailer) = response_trailer {
                 let _ = response_trailer;
@@ -5515,10 +5481,7 @@ impl AgentCore {
     }
 
     fn append_in_turn_shrink_review_if_needed(&mut self) {
-        if let Some(shrink_review) = self.consume_shrink_review_if_needed(0, 0) {
-            // One-shot trailer content: never persisted into deltas.
-            self.forced_shrink_review = Some(format!("Long-context maintenance:\n{shrink_review}"));
-        }
+        self.require_context_compact_if_needed(0);
     }
 
     fn inline_tool_call_labels(&self, parsed: &ParsedEnvelope) -> Vec<(String, String)> {
@@ -5901,49 +5864,21 @@ Runtime tool_call ids:",
         );
     }
 
-    fn consume_shrink_review_if_needed(
-        &mut self,
-        incoming_prompt_tokens: u32,
-        pending_dynamic_tokens: u32,
-    ) -> Option<String> {
+    fn require_context_compact_if_needed(&mut self, incoming_prompt_tokens: u32) {
         let estimated_prompt_tokens = self.estimate_rendered_prompt_tokens(incoming_prompt_tokens);
         let force_threshold = self.max_llm_input_tokens.saturating_mul(90) / 100;
         if !self.context_compact_required && estimated_prompt_tokens < force_threshold {
-            return None;
+            return;
         }
-        // Native exchanges remain structured and keep their original delta
-        // ownership. Forced compaction may remove complete delta closures
-        // without rewriting provider-native history into text.
-        let slices = self.render_prompt_slices();
-        if slices.is_empty() {
-            return None;
+        if self.render_prompt_slices().is_empty() {
+            return;
         }
         if !self.context_compact_required {
             self.pending_compact_request_notice = Some((estimated_prompt_tokens, force_threshold));
         }
         self.context_compact_required = true;
-        // Older maintenance notes carry stale delta refs that already led the
-        // model astray; hide them so only the fresh authoritative list stays.
-        self.hide_prompt_slices_matching("force_shrink_required");
-        let dynamic_tokens = slices
-            .iter()
-            .map(|slice| estimate_prompt_tokens(&slice.text))
-            .sum::<u32>()
-            .saturating_add(pending_dynamic_tokens);
-        let current_count = self.deltas.len();
-        let tip = "TIPS: You can update your job list plan, steer and optimize your work based on the above work.";
-        // A manual compaction request must not claim the threshold was
-        // crossed; it demands a deep shrink of the same 10%-20% footprint.
-        let instruction = if self.manual_compact_trailer_pending {
-            "User manually requests context compaction. Your tool calls must start with context_compact. Try to discard stale deltas and bulky tool results, extract what is valuable into a short summary, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use the response protocol's context_compact block: discard stale delta ids, offload important but lengthy delta ids, and provide the summary. Do not target prompt_0. You may include later tool calls in the same response; they run only after context_compact succeeds. Until compaction succeeds, responses that do not start with context_compact are ignored without being shown or executed."
-        } else {
-            "Context is above 90% of the configured input window. Your tool calls must start with context_compact. Summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use the response protocol's context_compact block: discard stale delta ids, offload important but lengthy delta ids, and provide the summary. Do not target prompt_0. You may include later tool calls in the same response; they run only after context_compact succeeds. Until compaction succeeds, responses that do not start with context_compact are ignored without being shown or executed."
-        };
-        Some(format!(
-            "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\ndynamic_context_tokens={dynamic_tokens}\nprompt_delta_count={current_count}\nPick delta ids yourself from the [BEGIN DELTA delta_id: ...]/[END DELTA delta_id: ...] markers inline in the context; discard the fattest stale deltas first.\n{tip}\n{instruction}",
-            self.max_llm_input_tokens
-        ))
     }
+
     /// Drains the pending forced-compaction request notice (estimated prompt
     /// tokens, force threshold). Called by the turn loop each iteration.
     pub fn take_pending_compact_request_notice(&mut self) -> Option<(u32, u32)> {
