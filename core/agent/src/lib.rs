@@ -4216,8 +4216,9 @@ impl AgentCore {
                 Ok(result_lines) => result_lines,
                 Err((result_lines, pending)) => {
                     if !native_calls.is_empty() {
+                        let delta_id = self.append_native_interaction_delta(slices);
                         self.pending_native_exchange = Some((
-                            self.current_native_delta_id(),
+                            delta_id,
                             response.content.clone(),
                             native_calls,
                             result_lines,
@@ -4228,8 +4229,8 @@ impl AgentCore {
                                 .into_iter()
                                 .map(|result| ("result_of_llm_action".to_string(), result)),
                         );
+                        self.append_delta_with_action_output_budget(slices);
                     }
-                    self.append_delta_with_action_output_budget(slices);
                     let request = pending.request.clone();
                     self.pending_approval = Some(pending);
                     return CoreStep::NeedsUserApproval { request };
@@ -4262,23 +4263,26 @@ impl AgentCore {
                             memo_finish_guard_reminder(&memo),
                         ));
                         if !native_calls.is_empty() {
+                            let exchange_results = native_calls
+                                .iter()
+                                .zip(result_lines.iter())
+                                .map(|(call, result)| NativeToolResult {
+                                    call_id: call.id.clone(),
+                                    name: call.name.clone(),
+                                    content: result.clone(),
+                                    is_error: Self::action_result_is_error(result),
+                                })
+                                .collect();
+                            let delta_id = self.append_native_interaction_delta(slices);
                             self.register_native_exchange(NativeExchange {
-                                delta_id: self.current_native_delta_id(),
+                                delta_id,
                                 assistant_text: response.content.clone(),
-                                results: native_calls
-                                    .iter()
-                                    .zip(result_lines.iter())
-                                    .map(|(call, result)| NativeToolResult {
-                                        call_id: call.id.clone(),
-                                        name: call.name.clone(),
-                                        content: result.clone(),
-                                        is_error: Self::action_result_is_error(result),
-                                    })
-                                    .collect(),
+                                results: exchange_results,
                                 calls: native_calls,
                             });
+                        } else {
+                            self.append_delta_with_action_output_budget(slices);
                         }
-                        self.append_delta_with_action_output_budget(slices);
                         return CoreStep::NeedModel {
                             prompt: self.render_prompt(),
                             rounds_remaining: self.remaining_rounds(),
@@ -4294,29 +4298,32 @@ impl AgentCore {
                 // task_finished was executed among the actions above. Its native
                 // tool exchange is still recorded below so the provider message
                 // sequence stays valid; the turn ends here regardless.
-                if !native_calls.is_empty() {
-                    self.register_native_exchange(NativeExchange {
-                        delta_id: self.current_native_delta_id(),
-                        assistant_text: response.content.clone(),
-                        results: native_calls
-                            .iter()
-                            .zip(result_lines.iter())
-                            .map(|(call, result)| NativeToolResult {
-                                call_id: call.id.clone(),
-                                name: call.name.clone(),
-                                content: result.clone(),
-                                is_error: Self::action_result_is_error(result),
-                            })
-                            .collect(),
-                        calls: native_calls,
-                    });
-                }
                 slices.extend(self.assistant_replay_slices(
                     &raw_model_output,
                     Some(&parsed),
                     Some(&stop_summary),
                 ));
-                self.defer_next_turn_slices(slices);
+                if !native_calls.is_empty() {
+                    let exchange_results = native_calls
+                        .iter()
+                        .zip(result_lines.iter())
+                        .map(|(call, result)| NativeToolResult {
+                            call_id: call.id.clone(),
+                            name: call.name.clone(),
+                            content: result.clone(),
+                            is_error: Self::action_result_is_error(result),
+                        })
+                        .collect();
+                    let delta_id = self.append_native_interaction_delta(slices);
+                    self.register_native_exchange(NativeExchange {
+                        delta_id,
+                        assistant_text: response.content.clone(),
+                        results: exchange_results,
+                        calls: native_calls,
+                    });
+                } else {
+                    self.defer_next_turn_slices(slices);
+                }
                 let stats = self.current_stats.clone();
                 return CoreStep::Final(TurnFinal {
                     final_answer: stop_summary.clone(),
@@ -4327,9 +4334,11 @@ impl AgentCore {
                     stop_summary: Some(TurnStopSummary::turn_finished(stop_summary, stats)),
                 });
             }
-            if !native_calls.is_empty() {
-                self.register_native_exchange(NativeExchange {
-                    delta_id: self.current_native_delta_id(),
+            let native_exchange = if native_calls.is_empty() {
+                None
+            } else {
+                Some(NativeExchange {
+                    delta_id: String::new(),
                     assistant_text: response.content.clone(),
                     results: native_calls
                         .iter()
@@ -4342,11 +4351,16 @@ impl AgentCore {
                         })
                         .collect(),
                     calls: native_calls,
-                });
-            }
+                })
+            };
             self.recharge_memo_guard_tokens();
             self.submit_running_job_updates_for_session(&self.current_session_id(), runtime);
-            self.append_delta_with_action_output_budget(slices);
+            if let Some(mut exchange) = native_exchange {
+                exchange.delta_id = self.append_native_interaction_delta(slices);
+                self.register_native_exchange(exchange);
+            } else {
+                self.append_delta_with_action_output_budget(slices);
+            }
             self.append_in_turn_shrink_review_if_needed();
             if self.remaining_rounds() == 0 {
                 return CoreStep::RoundLimitReached {
@@ -4483,6 +4497,27 @@ impl AgentCore {
             .last()
             .map(|delta| delta.delta_id.clone())
             .unwrap_or_else(|| "pd_0".to_string())
+    }
+
+    fn append_native_interaction_delta(&mut self, slices: Vec<(String, String)>) -> String {
+        // One native model interaction is one transport batch. When the batch has
+        // no textual components, retain an empty PromptDelta so its visible delta
+        // boundary can own the structured assistant/tool exchange and remain
+        // independently addressable by context compaction.
+        let delta_count_before = self.deltas.len();
+        self.append_delta_with_action_output_budget(slices);
+        if self.deltas.len() == delta_count_before {
+            let time_ms = now_ms();
+            let delta_sequence = self.next_delta_sequence;
+            self.next_delta_sequence = self.next_delta_sequence.saturating_add(1);
+            self.deltas.push(PromptDelta {
+                delta_id: format!("pd_{delta_sequence}"),
+                time_ms,
+                slices: Vec::new(),
+                hidden_slice_ids: Vec::new(),
+            });
+        }
+        self.current_native_delta_id()
     }
 
     fn materialize_native_exchanges(&mut self) {

@@ -1554,6 +1554,77 @@ fn openai_compatible_sse_assembles_parallel_tool_arguments_by_index() {
 }
 
 #[test]
+fn native_exchange_can_be_owned_by_a_visible_delta_without_text_slices() {
+    let rendered_prompt = concat!(
+        "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n",
+        "[BEGIN DELTA delta_id: pd_1, time_ms: 1]\n\n## USER\nQ1\n",
+        "[BEGIN DELTA delta_id: pd_2, time_ms: 2]\n",
+        "[BEGIN DELTA delta_id: pd_3, time_ms: 3]\n\n",
+        "Continue the work and express thought in the user's language.  Use tools smartly. When all work is genuinely done, call the task_finished tool with the complete final answer as its summary:"
+    )
+    .to_string();
+    let exchange = |delta_id: &str, call_id: &str, result: &str| NativeExchange {
+        delta_id: delta_id.to_string(),
+        assistant_text: format!("work {call_id}"),
+        calls: vec![NativeToolCall {
+            id: call_id.to_string(),
+            name: "demo".to_string(),
+            arguments: json!({"id": call_id}),
+            raw_arguments: format!(r#"{{"id":"{call_id}"}}"#),
+        }],
+        results: vec![NativeToolResult {
+            call_id: call_id.to_string(),
+            name: "demo".to_string(),
+            content: result.to_string(),
+            is_error: false,
+        }],
+    };
+    let request = ModelInteractionRequest {
+        images: Vec::new(),
+        rendered_prompt,
+        static_tool_count: 0,
+        tools: Vec::new(),
+        native_exchanges: vec![
+            exchange("pd_2", "call_empty_delta_1", "R1"),
+            exchange("pd_3", "call_empty_delta_2", "R2"),
+        ],
+        resolved_mode: ToolCallMode::Native,
+        parallel_tool_calls: false,
+        tool_choice: NativeToolChoice::Auto,
+        critical_reasoning: false,
+    };
+
+    for protocol in [
+        ApiProtocol::OpenAiCompatible,
+        ApiProtocol::OpenAiResponses,
+        ApiProtocol::Anthropic,
+    ] {
+        let body = prepare_model_interaction_http_request(&config(protocol), &request)
+            .model_request
+            .body;
+        let text = body.to_string();
+        assert!(text.contains("delta_id: pd_2"), "{protocol:?}: {text}");
+        assert!(text.contains("delta_id: pd_3"), "{protocol:?}: {text}");
+        assert!(
+            text.find("delta_id: pd_2").unwrap() < text.find("call_empty_delta_1").unwrap(),
+            "{protocol:?}: {text}"
+        );
+        assert!(
+            text.find("R1").unwrap() < text.find("delta_id: pd_3").unwrap(),
+            "{protocol:?}: {text}"
+        );
+        assert!(
+            text.find("delta_id: pd_3").unwrap() < text.find("call_empty_delta_2").unwrap(),
+            "{protocol:?}: {text}"
+        );
+        assert!(
+            text.find("R2").unwrap() < text.find("Continue the work").unwrap(),
+            "{protocol:?}: {text}"
+        );
+    }
+}
+
+#[test]
 fn native_exchanges_follow_owning_delta_order_for_all_providers() {
     let rendered_prompt = concat!(
         "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n",
