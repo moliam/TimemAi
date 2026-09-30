@@ -25,6 +25,7 @@ pub(crate) fn from_action(action: &ParsedAction) -> Result<ParsedContextCompact,
         }
     }
     Ok(ParsedContextCompact {
+        call_id: action.call_id.clone(),
         discard_delta_ids,
         offload_delta_ids,
         delta_ids,

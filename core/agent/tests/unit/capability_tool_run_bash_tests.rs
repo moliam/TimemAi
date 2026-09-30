@@ -114,10 +114,28 @@ fn foreground_large_stdout_and_stderr_are_drained_without_deadlock_and_bounded()
     );
     let result = execute_one_bash_structured(&command, Path::new("."), 10_000, &mut runtime);
     assert_eq!(result.status, Some(0));
-    assert!(result.stdout.contains("retained first"));
-    assert!(result.stderr.contains("retained first"));
-    assert!(result.stdout.len() <= SHELL_OUTPUT_LIMIT_BYTES + 100);
-    assert!(result.stderr.len() <= SHELL_OUTPUT_LIMIT_BYTES + 100);
+    assert_eq!(result.stdout.len(), SHELL_OUTPUT_LIMIT_BYTES);
+    assert_eq!(result.stderr.len(), SHELL_OUTPUT_LIMIT_BYTES);
+    assert!(result.stdout.bytes().all(|byte| byte == b'o'));
+    assert!(result.stderr.bytes().all(|byte| byte == b'e'));
+    assert!(!result.stdout.contains("truncated"));
+    assert!(!result.stderr.contains("truncated"));
+    assert_eq!(
+        result.stdout_truncation,
+        Some(StreamCaptureTruncation {
+            original_bytes: SHELL_OUTPUT_LIMIT_BYTES + 65536,
+            retained_bytes: SHELL_OUTPUT_LIMIT_BYTES,
+            retained: "head",
+        })
+    );
+    assert_eq!(
+        result.stderr_truncation,
+        Some(StreamCaptureTruncation {
+            original_bytes: SHELL_OUTPUT_LIMIT_BYTES + 65536,
+            retained_bytes: SHELL_OUTPUT_LIMIT_BYTES,
+            retained: "head",
+        })
+    );
 }
 
 #[test]
@@ -188,6 +206,8 @@ fn completion_and_timeout_handoff_have_one_state_lock_winner() {
         status: "0".to_string(),
         stdout: "done".to_string(),
         stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output: "done".to_string(),
     });
     let DirectJobDecision::Finished(result) = promote_or_take_direct_result(&finished) else {
@@ -601,6 +621,8 @@ fn bash_command_outcomes_keep_lifecycle_separate_from_result_metadata() {
         signal: None,
         stdout: String::new(),
         stderr: "diagnostic".to_string(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output: "stderr: diagnostic".to_string(),
         error: None,
         job_management: None,
@@ -619,6 +641,8 @@ fn bash_command_outcomes_keep_lifecycle_separate_from_result_metadata() {
         signal: Some(11),
         stdout: String::new(),
         stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output: "<no output>".to_string(),
         error: None,
         job_management: None,
@@ -655,6 +679,8 @@ fn bash_command_outcomes_keep_lifecycle_separate_from_result_metadata() {
         signal: None,
         stdout: "partial".to_string(),
         stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output: "partial".to_string(),
         error: Some("timeout_still_running:4321".to_string()),
         job_management: Some("exact".to_string()),
@@ -683,6 +709,8 @@ fn bash_command_outcomes_keep_lifecycle_separate_from_result_metadata() {
         signal: None,
         stdout: String::new(),
         stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output: String::new(),
         error: Some("long_running_still_running:9876:5000".to_string()),
         job_management: Some("exact".to_string()),
@@ -758,6 +786,8 @@ fn run_bash_action_results_do_not_repeat_command_text() {
         signal: None,
         stdout: String::new(),
         stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output: "unique_command_marker".to_string(),
         error: None,
         job_management: None,
@@ -775,6 +805,8 @@ fn run_bash_action_results_do_not_repeat_command_text() {
         signal: None,
         stdout: String::new(),
         stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output: "<no output>".to_string(),
         error: None,
         job_management: None,
@@ -790,6 +822,8 @@ fn run_bash_action_results_do_not_repeat_command_text() {
         signal: None,
         stdout: String::new(),
         stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output: String::new(),
         error: Some("timeout_still_running:12345".to_string()),
         job_management: Some("exact".to_string()),
@@ -812,6 +846,8 @@ fn bash_result_builder_preserves_raw_output_for_the_model_result_gate() {
         signal: None,
         stdout: String::new(),
         stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output,
         error: None,
         job_management: None,
@@ -2118,10 +2154,9 @@ fn approved_bash_rechecks_safety_before_execution() {
         "{}",
         result.text
     );
-    assert!(
-        result.text.contains("approval_status: approved_by_user"),
-        "{}",
-        result.text
+    assert_eq!(
+        result.runtime_metadata.get("approval_status"),
+        Some(&serde_json::json!("approved_by_user"))
     );
     assert!(
         !marker.exists(),
@@ -2157,6 +2192,57 @@ fn run_bash_allows_safe_tmp_delete() {
             assert!(!target.exists(), "safe temp dir should be removable");
         }
         other => panic!("expected safe command to run, got {other:?}"),
+    }
+}
+
+#[test]
+fn run_bash_action_defaults_capture_to_tail_and_false_overrides_to_head() {
+    let command = format!(
+        "printf BEGIN_MARKER; head -c {} /dev/zero | tr '\\0' x; printf END_MARKER",
+        SHELL_OUTPUT_LIMIT_BYTES + 4096
+    );
+    for (tail_out, expected_retained, expected_marker, absent_marker) in [
+        (None, "tail", "END_MARKER", "BEGIN_MARKER"),
+        (Some(false), "head", "BEGIN_MARKER", "END_MARKER"),
+    ] {
+        let memory_dir = tmp_memory_dir("run_bash_capture_default");
+        let mut core = AgentCore::new(
+            "static prompt\n{{RESPONSE_PROTOCOL_SECTION}}\n{{TOOL_CATALOG}}\n",
+            crate::CoreProfile {
+                model: "test".to_string(),
+            },
+            memory_dir,
+        );
+        core.set_capability_registry(crate::CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ));
+        core.set_bash_approval_mode(BashApprovalMode::Approve);
+        let mut raw_input = serde_json::json!({"cmd": command, "timeout_ms": 10_000});
+        if let Some(tail_out) = tail_out {
+            raw_input["tail_out"] = serde_json::json!(tail_out);
+        }
+        let action = ParsedAction {
+            action: "run_bash".to_string(),
+            name: None,
+            call_id: "capture_default".to_string(),
+            raw_input,
+        };
+        let ActionExecution::Completed(outcome) =
+            execute_run_bash_action(&mut core, &action, &mut NeverCancelRuntime)
+        else {
+            panic!("approve mode should execute directly");
+        };
+        let evidence = outcome.bash_result.expect("structured shell evidence");
+        assert!(evidence.stdout.contains(expected_marker));
+        assert!(!evidence.stdout.contains(absent_marker));
+        assert!(!evidence.stdout.contains("truncated"));
+        assert_eq!(
+            evidence
+                .stdout_truncation
+                .as_ref()
+                .map(|value| value.retained),
+            Some(expected_retained)
+        );
     }
 }
 
@@ -2257,10 +2343,22 @@ fn background_tail_out_retains_bounded_tail_until_exit_refresh() {
         assert!(wait_started.elapsed() < Duration::from_secs(5));
         thread::sleep(Duration::from_millis(20));
     };
-    assert!(update.stdout.len() <= SHELL_OUTPUT_LIMIT_BYTES + 100);
-    assert!(update.stdout.contains("retained last"), "{}", update.stdout);
+    assert_eq!(update.stdout.len(), SHELL_OUTPUT_LIMIT_BYTES);
+    assert!(!update.stdout.contains("truncated"), "{}", update.stdout);
     assert!(update.stdout.contains("END_MARKER"), "{}", update.stdout);
     assert!(!update.stdout.contains("BEGIN_MARKER"), "{}", update.stdout);
+    assert_eq!(
+        update.stdout_truncation,
+        Some(StreamCaptureTruncation {
+            original_bytes: "BEGIN_MARKER".len()
+                + SHELL_OUTPUT_LIMIT_BYTES
+                + 4096
+                + "END_MARKER".len(),
+            retained_bytes: SHELL_OUTPUT_LIMIT_BYTES,
+            retained: "tail",
+        })
+    );
+    assert!(update.stderr_truncation.is_none());
     let (_, repeated) = store.consume_completed_for_session("session_tail_background");
     assert!(repeated.is_empty(), "exit notification must be one-shot");
     let _ = std::fs::remove_dir_all(dir);

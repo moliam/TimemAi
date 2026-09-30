@@ -1359,6 +1359,7 @@ fn parse_context_compacts_from_fields(
             break;
         }
         compacts.push(ParsedContextCompact {
+            call_id: super::generated_inline_tool_call_id(),
             discard_delta_ids,
             offload_delta_ids,
             delta_ids,

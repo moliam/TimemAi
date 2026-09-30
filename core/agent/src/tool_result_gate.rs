@@ -26,6 +26,37 @@ pub(crate) fn gate(text: &str, retention: Retention) -> String {
     fit(text, MAX_MODEL_TOOL_RESULT_BYTES, retention)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RetainedFragment {
+    pub text: String,
+    pub truncated: bool,
+    pub original_bytes: usize,
+    pub retained_bytes: usize,
+    pub retained: &'static str,
+}
+
+pub(crate) fn retain_fragment(text: &str, budget: usize, retention: Retention) -> RetainedFragment {
+    let original_bytes = text.len();
+    let retained_text = if original_bytes <= budget {
+        text.to_string()
+    } else {
+        match retention {
+            Retention::Head => utf8_prefix(text, budget).to_string(),
+            Retention::Tail => text[utf8_suffix_start(text, budget)..].to_string(),
+        }
+    };
+    RetainedFragment {
+        retained_bytes: retained_text.len(),
+        text: retained_text,
+        truncated: original_bytes > budget,
+        original_bytes,
+        retained: match retention {
+            Retention::Head => "head",
+            Retention::Tail => "tail",
+        },
+    }
+}
+
 pub(crate) fn fit(text: &str, budget: usize, retention: Retention) -> String {
     if text.len() <= budget {
         return text.to_string();

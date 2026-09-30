@@ -481,6 +481,7 @@ impl ParsedEnvelope {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedContextCompact {
+    pub call_id: String,
     pub discard_delta_ids: Vec<String>,
     pub offload_delta_ids: Vec<String>,
     pub delta_ids: Vec<String>,

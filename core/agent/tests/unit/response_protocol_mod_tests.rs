@@ -64,6 +64,19 @@ fn actions_without_protocol_metadata(actions: &[ParsedAction]) -> Vec<ParsedActi
         .collect()
 }
 
+fn compacts_without_protocol_metadata(
+    compacts: &[ParsedContextCompact],
+) -> Vec<ParsedContextCompact> {
+    compacts
+        .iter()
+        .cloned()
+        .map(|mut compact| {
+            compact.call_id.clear();
+            compact
+        })
+        .collect()
+}
+
 fn groups_without_protocol_metadata(groups: &[ParsedActionGroup]) -> Vec<ParsedActionGroup> {
     groups
         .iter()
@@ -95,7 +108,10 @@ fn assert_protocols_equivalent(json_raw: &str, xml_raw: &str) {
         groups_without_protocol_metadata(&xml.action_groups),
         groups_without_protocol_metadata(&json.action_groups)
     );
-    assert_eq!(xml.context_compacts, json.context_compacts);
+    assert_eq!(
+        compacts_without_protocol_metadata(&xml.context_compacts),
+        compacts_without_protocol_metadata(&json.context_compacts)
+    );
 }
 
 #[test]
