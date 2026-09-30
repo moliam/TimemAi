@@ -62,14 +62,32 @@ if [[ "$(uname -s)" == "Linux" ]]; then
   fi
   cargo test -p timem_platform --lib --locked "$linux_test_filter" -- --test-threads=1
 
+  echo "== Linux fallback process ownership tests =="
+  for test_name in \
+    linux_fallback_reaper_does_not_consume_registered_child_exit_status \
+    linux_fallback_registration_race_requires_stable_unowned_observations \
+    linux_fallback_lifecycle_is_adopted_active_then_exactly_reaped \
+    linux_managed_process_job_contains_and_kills_setsid_descendants
+  do
+    exact_test_name="$(sed -n 's/: test$//p' <<<"$platform_test_list" | grep -E "(^|::)${test_name}$" || true)"
+    exact_test_count="$(grep -c . <<<"$exact_test_name" || true)"
+    if [[ "$exact_test_count" -ne 1 ]]; then
+      echo "error: required Linux fallback ownership test must exist exactly once: $test_name (found $exact_test_count)" >&2
+      exit 1
+    fi
+    cargo test -p timem_platform --lib --locked \
+      "$exact_test_name" -- --exact --test-threads=1
+  done
+
   echo "== Linux run_bash supervision tests =="
   agent_test_list="$(cargo test -p agent_core --lib --locked -- --list)"
   for test_name in \
     shell_lifecycle_validation_rejects_unmanaged_background_without_wait \
     shell_lifecycle_validation_allows_detach_keywords_under_os_containment \
-    run_bash_sweeps_setsid_orphan_via_subreaper_safety_net \
+    completed_job_waits_for_its_owned_setsid_descendant \
+    command_action_timeout_kills_its_setsid_escapee_with_job_ownership \
     timeout_job_reports_pid_and_later_exit_update \
-    timed_out_job_remains_cancellable_after_launcher_exits \
+    timed_out_job_keeps_owned_setsid_descendant_until_explicit_cancellation \
     supervisor_waits_for_managed_process_group_after_launcher_exits \
     normal_bash_cancel_terminates_the_entire_process_group \
     session_turn_stop_cancels_parallel_bash_after_approval \

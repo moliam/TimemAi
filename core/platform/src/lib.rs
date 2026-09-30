@@ -8,12 +8,14 @@ mod api;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+mod process_job;
 #[cfg(unix)]
 mod shared;
 #[cfg(windows)]
 mod windows;
 
 pub use api::*;
+pub use process_job::*;
 
 #[cfg(test)]
 #[path = "../tests/unit/platform_tests.rs"]

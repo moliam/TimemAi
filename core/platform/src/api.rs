@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::sync::OnceLock;
 
 #[cfg(unix)]
@@ -310,9 +310,111 @@ pub fn install_process_subreaper() -> bool {
     }
 }
 
-/// Orphaned descendants reparented to this runtime that escaped managed
-/// process groups (own session, e.g. via `setsid`). Used by the shell job
-/// manager as a safety net to terminate escapees.
+/// Registers a direct child as owned by its `Child` supervisor. Keep the
+/// returned guard alive until that owner has completed `wait`.
+pub struct ManagedChildRegistration {
+    #[cfg(unix)]
+    _inner: crate::shared::ManagedChildRegistration,
+}
+
+pub fn register_managed_child(pid: u32) -> ManagedChildRegistration {
+    ManagedChildRegistration {
+        #[cfg(unix)]
+        _inner: crate::shared::register_managed_child(pid),
+    }
+}
+
+/// Runs a synchronous command while reserving its child exit status for this
+/// owner, so the Runtime fallback reaper cannot consume it.
+pub fn command_status(command: &mut Command) -> std::io::Result<ExitStatus> {
+    let mut child = command.spawn()?;
+    let registration = register_managed_child(child.id());
+    let status = child.wait();
+    drop(registration);
+    status
+}
+
+/// Runs a synchronous command with captured output while reserving its child
+/// exit status for this owner.
+pub fn command_output(command: &mut Command) -> std::io::Result<Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = command.spawn()?;
+    let registration = register_managed_child(child.id());
+    let output = child.wait_with_output();
+    drop(registration);
+    output
+}
+
+/// Periodic, targeted reaper for dead descendants adopted by a Linux
+/// subreaper. It never waits on a registered managed child.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OrphanProcessEvent {
+    pub pid: u32,
+    pub process_name: String,
+    pub state: &'static str,
+}
+
+/// Drains bounded, not-yet-reported adoption and terminal events from the
+/// runtime fallback process supervisor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FallbackProcessSnapshot {
+    pub pid: u32,
+    pub process_name: String,
+}
+
+/// Current descendants being watched by the Runtime fallback chain because
+/// no registered direct-child owner remains.
+pub fn fallback_process_snapshots() -> Vec<FallbackProcessSnapshot> {
+    #[cfg(unix)]
+    return crate::shared::fallback_process_snapshots()
+        .into_iter()
+        .map(|snapshot| FallbackProcessSnapshot {
+            pid: snapshot.pid,
+            process_name: snapshot.process_name,
+        })
+        .collect();
+    #[cfg(not(unix))]
+    Vec::new()
+}
+
+pub fn take_orphan_process_events() -> Vec<OrphanProcessEvent> {
+    #[cfg(unix)]
+    return crate::shared::take_orphan_process_events()
+        .into_iter()
+        .map(|event| OrphanProcessEvent {
+            pid: event.pid,
+            process_name: event.process_name,
+            state: event.state,
+        })
+        .collect();
+    #[cfg(not(unix))]
+    Vec::new()
+}
+
+pub struct FallbackProcessReaper {
+    #[cfg(unix)]
+    inner: crate::shared::FallbackProcessReaper,
+}
+
+impl FallbackProcessReaper {
+    pub fn for_runtime() -> Self {
+        Self {
+            #[cfg(unix)]
+            inner: crate::shared::FallbackProcessReaper::new(),
+        }
+    }
+
+    pub fn reap_adopted_zombies(&mut self) -> usize {
+        #[cfg(unix)]
+        return self.inner.reap_once();
+        #[cfg(not(unix))]
+        0
+    }
+}
+
+/// Live orphaned descendants reparented to this runtime that escaped into a
+/// different session (for example via `setsid`). This is an observation API,
+/// not proof that a particular job owns the process.
 pub fn reparented_detached_child_pids() -> Vec<u32> {
     #[cfg(unix)]
     return crate::shared::reparented_detached_child_pids();
@@ -572,7 +674,7 @@ fn uname_version() -> Option<String> {
 }
 
 pub(crate) fn command_first_line(program: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(program).args(args).output().ok()?;
+    let output = command_output(Command::new(program).args(args)).ok()?;
     if !output.status.success() {
         return None;
     }

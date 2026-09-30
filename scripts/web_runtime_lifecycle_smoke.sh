@@ -22,7 +22,7 @@ cleanup() {
     kill -TERM "$launcher_pid" >/dev/null 2>&1 || true
     wait "$launcher_pid" >/dev/null 2>&1 || true
   fi
-  if [ -n "$host_pid" ] && kill -0 "$host_pid" >/dev/null 2>&1; then
+  if [ -n "$host_pid" ] && process_is_executing "$host_pid"; then
     kill -TERM "$host_pid" >/dev/null 2>&1 || true
     wait "$host_pid" >/dev/null 2>&1 || true
   fi
@@ -30,12 +30,29 @@ cleanup() {
 }
 trap cleanup EXIT
 
+process_is_executing() {
+  local pid="$1"
+  local state
+  if ! kill -0 "$pid" >/dev/null 2>&1; then
+    return 1
+  fi
+  # A nested Timem runtime may be the subreaper that owns the final wait.
+  # kill -0 remains successful for a zombie, but a zombie has already stopped
+  # executing and released its listener/workspace ownership. Do not conflate
+  # wait-record lifetime with Host execution lifetime.
+  state="$(ps -o stat= -p "$pid" 2>/dev/null | awk 'NR == 1 { print $1 }')"
+  case "$state" in
+    Z*|X*|"") return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 wait_for_url() {
   local log_path="$1"
   local attempt
   local url
   for ((attempt = 1; attempt <= 200; attempt++)); do
-    if ! kill -0 "$host_pid" >/dev/null 2>&1; then
+    if ! process_is_executing "$host_pid"; then
       echo "timem-web exited before becoming ready" >&2
       sed -n '1,120p' "$log_path" >&2
       return 1
@@ -157,13 +174,13 @@ host_pid=$!
 restart_url="$(wait_for_url "$restart_log")"
 
 for _ in $(seq 1 100); do
-  if ! kill -0 "$old_host_pid" >/dev/null 2>&1; then
+  if ! process_is_executing "$old_host_pid"; then
     break
   fi
   sleep 0.05
 done
-if kill -0 "$old_host_pid" >/dev/null 2>&1; then
-  echo "the old timem-web Host survived after its launcher shell was killed" >&2
+if process_is_executing "$old_host_pid"; then
+  echo "the old timem-web Host remained executable after its launcher shell was killed" >&2
   sed -n '1,160p' "$launcher_log" >&2
   exit 1
 fi

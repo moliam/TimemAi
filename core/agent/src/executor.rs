@@ -86,6 +86,28 @@ pub(crate) fn execute_command_action_outcome(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::os::configure_child_process_group(&mut command);
+    let process_job = match crate::os::ManagedProcessJob::create() {
+        Ok(process_job) => Some(process_job),
+        Err(error) if cfg!(target_os = "linux") => {
+            let permission = crate::os::managed_process_job_permission_hint()
+                .map(|hint| format!("\nrequired_permission: {hint}"))
+                .unwrap_or_default();
+            return ActionOutcome::failed(format!(
+                "Action result: {action}\nerror: command_containment_unavailable\nreason: {}{}",
+                compact_text(&error.to_string(), 1000),
+                permission
+            ));
+        }
+        Err(_) => None,
+    };
+    if let Some(process_job) = &process_job {
+        if let Err(error) = process_job.configure_command(&mut command) {
+            return ActionOutcome::failed(format!(
+                "Action result: {action}\nerror: command_containment_failed\nreason: {}",
+                compact_text(&error.to_string(), 1000)
+            ));
+        }
+    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
@@ -95,6 +117,7 @@ pub(crate) fn execute_command_action_outcome(
             ))
         }
     };
+    let _child_registration = crate::os::register_managed_child(child.id());
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(payload.to_string().as_bytes());
         let _ = stdin.write_all(b"\n");
@@ -113,14 +136,14 @@ pub(crate) fn execute_command_action_outcome(
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= timeout => {
-                terminate_command_process(&mut child);
+                terminate_command_process(&mut child, process_job.as_ref());
                 let _ = join_bounded_reader(stdout_reader);
                 let _ = join_bounded_reader(stderr_reader);
                 return ActionOutcome::timeout(format!("Action result: {action}\nerror: timeout"));
             }
             Ok(None) => thread::sleep(COMMAND_POLL_INTERVAL),
             Err(err) => {
-                terminate_command_process(&mut child);
+                terminate_command_process(&mut child, process_job.as_ref());
                 let _ = join_bounded_reader(stdout_reader);
                 let _ = join_bounded_reader(stderr_reader);
                 return ActionOutcome::failed(format!(
@@ -130,6 +153,11 @@ pub(crate) fn execute_command_action_outcome(
             }
         }
     };
+    // Command capabilities are finite executions: descendants are not allowed
+    // to outlive the registered tool process, even when the leader exits 0.
+    // Kill residual members before joining pipe drains because a descendant may
+    // still hold stdout/stderr open.
+    terminate_command_descendants(child.id(), process_job.as_ref());
     let stdout = match join_bounded_reader(stdout_reader) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(error) => {
@@ -219,16 +247,24 @@ fn render_command_output(
     }
 }
 
-fn terminate_command_process(child: &mut std::process::Child) {
-    crate::os::kill_process_group(child.id());
+fn terminate_command_process(
+    child: &mut std::process::Child,
+    process_job: Option<&crate::os::ManagedProcessJob>,
+) {
+    terminate_command_descendants(child.id(), process_job);
     let _ = child.kill();
     let _ = child.wait();
-    // Same safety net as shell jobs: with the subreaper flag installed, a
-    // `setsid`-style escapee is reparented to this runtime in its own
-    // session; terminate and reap it so no orphan outlives the command.
-    for pid in crate::os::reparented_detached_child_pids() {
-        crate::os::terminate_process(pid);
-        crate::os::reap_child_process(pid);
+}
+
+fn terminate_command_descendants(
+    leader_pid: u32,
+    process_job: Option<&crate::os::ManagedProcessJob>,
+) {
+    if process_job.is_none_or(|process_job| process_job.kill_all().is_err()) {
+        // Explicit degraded mode, or best-effort fallback if the native Job backend
+        // control file becomes unavailable after spawn. This reaches only
+        // descendants that did not escape the process group.
+        crate::os::kill_process_group(leader_pid);
     }
 }
 

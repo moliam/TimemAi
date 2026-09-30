@@ -164,6 +164,8 @@ fn synthetic_managed_job(delivery: ShellJobDelivery) -> ManagedShellJob {
         exit_hooks: Arc::new(Mutex::new(
             crate::shell_exec::ShellJobManagerExitHooks::default(),
         )),
+        process_job: None,
+        process_job_mode: ProcessJobMode::DegradedProcessGroup,
     }
 }
 
@@ -601,6 +603,7 @@ fn bash_command_outcomes_keep_lifecycle_separate_from_result_metadata() {
         stderr: "diagnostic".to_string(),
         output: "stderr: diagnostic".to_string(),
         error: None,
+        job_management: None,
         tail_out: false,
     }
     .to_action_outcome("run_bash");
@@ -618,6 +621,7 @@ fn bash_command_outcomes_keep_lifecycle_separate_from_result_metadata() {
         stderr: String::new(),
         output: "<no output>".to_string(),
         error: None,
+        job_management: None,
         tail_out: false,
     }
     .to_action_outcome("run_bash");
@@ -653,6 +657,7 @@ fn bash_command_outcomes_keep_lifecycle_separate_from_result_metadata() {
         stderr: String::new(),
         output: "partial".to_string(),
         error: Some("timeout_still_running:4321".to_string()),
+        job_management: Some("exact".to_string()),
         tail_out: false,
     }
     .to_action_outcome("run_bash");
@@ -680,6 +685,7 @@ fn bash_command_outcomes_keep_lifecycle_separate_from_result_metadata() {
         stderr: String::new(),
         output: String::new(),
         error: Some("long_running_still_running:9876:5000".to_string()),
+        job_management: Some("exact".to_string()),
         tail_out: false,
     }
     .to_action_outcome("run_bash");
@@ -754,6 +760,7 @@ fn run_bash_action_results_do_not_repeat_command_text() {
         stderr: String::new(),
         output: "unique_command_marker".to_string(),
         error: None,
+        job_management: None,
         tail_out: false,
     }
     .to_action_result("run_bash");
@@ -770,6 +777,7 @@ fn run_bash_action_results_do_not_repeat_command_text() {
         stderr: String::new(),
         output: "<no output>".to_string(),
         error: None,
+        job_management: None,
         tail_out: false,
     }
     .to_action_result("run_bash");
@@ -784,6 +792,7 @@ fn run_bash_action_results_do_not_repeat_command_text() {
         stderr: String::new(),
         output: String::new(),
         error: Some("timeout_still_running:12345".to_string()),
+        job_management: Some("exact".to_string()),
         tail_out: false,
     }
     .to_action_result("run_bash");
@@ -805,6 +814,7 @@ fn bash_result_builder_preserves_raw_output_for_the_model_result_gate() {
         stderr: String::new(),
         output,
         error: None,
+        job_management: None,
         tail_out: false,
     }
     .to_action_result("run_bash");
@@ -1301,6 +1311,10 @@ fn background_job_reports_pid_and_running_list_until_exit() {
         started.contains("now keeps running in background"),
         "{started}"
     );
+    assert!(
+        started.contains("Process containment: cgroup v2"),
+        "{started}"
+    );
     let pid = started
         .lines()
         .find_map(|line| line.strip_prefix("pid="))
@@ -1311,6 +1325,17 @@ fn background_job_reports_pid_and_running_list_until_exit() {
     assert_eq!(running.len(), 1);
     assert_eq!(running[0].pid, pid);
     assert_eq!(running[0].kind, "background");
+    #[cfg(target_os = "linux")]
+    {
+        let cgroup = running[0]
+            .notes
+            .strip_prefix("cgroup: ")
+            .expect("minimal Linux cgroup observation note");
+        assert!(cgroup.starts_with("/sys/fs/cgroup/"), "{cgroup}");
+        assert!(cgroup.contains("/timem.jobs/job-"), "{cgroup}");
+        assert!(std::path::Path::new(cgroup).is_dir(), "{cgroup}");
+        assert_eq!(running[0].notes, format!("cgroup: {cgroup}"));
+    }
 
     let mut running = Vec::new();
     let mut updates = Vec::new();
@@ -1349,6 +1374,10 @@ fn timeout_job_reports_pid_and_later_exit_update() {
     assert!(result.contains("timeout, but is still running"), "{result}");
     assert!(result.contains("process was not killed"), "{result}");
     assert!(result.contains("no final exit code yet"), "{result}");
+    assert!(
+        result.contains("Process containment: cgroup v2"),
+        "{result}"
+    );
     let pid = result
         .lines()
         .find_map(|line| line.strip_prefix("pid="))
@@ -1382,14 +1411,14 @@ fn timeout_job_reports_pid_and_later_exit_update() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
-fn timed_out_job_remains_cancellable_after_launcher_exits() {
-    let dir = tmp_memory_dir("timeout_group_cancel_after_launcher");
+fn timed_out_job_keeps_owned_setsid_descendant_until_explicit_cancellation() {
+    let dir = tmp_memory_dir("timeout_cgroup_cancel_after_launcher");
     let store = ShellJobManager::new(&dir);
     let descendant_pid_file = dir.join("descendant.pid");
     let command = format!(
-        r#"tail -f /dev/null & child=$!; printf '%s' "$child" > {}; exit 0"#,
+        r#"setsid --fork sh -c 'printf %s $$ > {}; sleep 60'; exit 0"#,
         shell_quote_path(&descendant_pid_file)
     );
     let mut runtime = NeverCancelRuntime;
@@ -1397,43 +1426,53 @@ fn timed_out_job_remains_cancellable_after_launcher_exits() {
         &command,
         &dir,
         100,
-        "timeout-group-session",
-        "timeout-group-turn",
+        "timeout-cgroup-session",
+        "timeout-cgroup-turn",
         &mut runtime,
     );
     assert!(result.contains("timeout, but is still running"), "{result}");
-    let leader_pid = result
-        .lines()
-        .find_map(|line| line.strip_prefix("pid="))
-        .and_then(|rest| rest.split(',').next())
-        .and_then(|pid| pid.parse::<u32>().ok())
-        .expect("managed group leader pid");
     let descendant_pid = fs::read_to_string(&descendant_pid_file)
-        .expect("descendant pid file")
+        .expect("setsid descendant pid file")
         .trim()
         .parse::<u32>()
         .expect("numeric descendant pid");
+    let still_executing = |pid: u32| {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| stat.rsplit_once(") ").map(|(_, tail)| tail.to_string()))
+            .and_then(|tail| tail.split_whitespace().next().map(str::to_string))
+            .is_some_and(|state| state != "Z" && state != "X")
+    };
 
-    assert!(crate::os::process_group_running(leader_pid));
-    assert!(process_running(descendant_pid));
+    assert!(
+        still_executing(descendant_pid),
+        "timeout must hand off, not kill owned setsid descendant {descendant_pid}"
+    );
     assert_eq!(
         store
-            .cancel_unfinished_for_session("timeout-group-session")
+            .cancel_unfinished_for_session("timeout-cgroup-session")
             .len(),
         1
     );
 
     let deadline = Instant::now() + Duration::from_secs(3);
-    while process_running(descendant_pid) && Instant::now() < deadline {
+    while still_executing(descendant_pid) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(20));
     }
     assert!(
-        !process_running(descendant_pid),
-        "descendant {descendant_pid} survived timeout-job cancellation"
+        !still_executing(descendant_pid),
+        "owned setsid descendant {descendant_pid} survived explicit cancellation"
     );
-    assert!(!crate::os::process_group_running(leader_pid));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !store
+        .query_running_for_session("timeout-cgroup-session")
+        .is_empty()
+        && Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(20));
+    }
     assert!(store
-        .query_running_for_session("timeout-group-session")
+        .query_running_for_session("timeout-cgroup-session")
         .is_empty());
     let _ = fs::remove_dir_all(&dir);
 }
@@ -1766,8 +1805,8 @@ fn shell_lifecycle_validation_ignores_heredoc_body_content() {
 #[test]
 fn shell_lifecycle_validation_allows_detach_keywords_under_os_containment() {
     // Detach keywords are no longer semantically blocked: escaped processes
-    // are contained by OS mechanisms (child subreaper on Linux, kill-on-close
-    // job object on Windows) and swept by the job manager.
+    // are contained by OS mechanisms (per-Job cgroup v2 on Linux and the
+    // platform job mechanism on Windows), not by keyword rejection.
     for command in [
         "setsid sleep 30",
         "command setsid sleep 30",
@@ -1790,32 +1829,17 @@ fn shell_lifecycle_validation_allows_detach_keywords_under_os_containment() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
-fn run_bash_sweeps_setsid_orphan_via_subreaper_safety_net() {
-    // End-to-end: with the subreaper installed, a real `setsid` command is
-    // allowed through (no semantic blacklist) and the escaped orphan it
-    // leaves behind must be reparented, detected, and terminated by the
-    // supervisor sweep after the shell job finishes.
-    //
-    // Nested-runtime note (Timem developing Timem): when this test runs
-    // under an outer Timem instance, the subreaper that adopts the escaped
-    // orphan may be the OUTER runtime process, not this test binary. The
-    // orphan is then outside our process tree and only /proc-based
-    // liveness/state checks stay correct at any nesting level; never probe
-    // with kill(pid,0) alone, which also succeeds for unreaped zombies.
-    assert!(
-        crate::os::install_process_subreaper(),
-        "Linux runtime must support PR_SET_CHILD_SUBREAPER"
-    );
-    let store = ShellJobManager::new(&tmp_memory_dir("subreaper_e2e"));
-    let cwd = tmp_cwd("subreaper_e2e");
-    let marker = cwd.join("orphan.pid");
-    let _ = std::fs::remove_file(&marker);
+fn completed_job_waits_for_its_owned_setsid_descendant() {
+    let store = ShellJobManager::new(&tmp_memory_dir("setsid_completion_ownership"));
+    let cwd = tmp_cwd("setsid_completion_ownership");
+    let marker = cwd.join("descendant.pid");
     let command = format!(
-        "setsid --fork sh -c 'echo $$ > {m}; sleep 60' >/dev/null 2>&1\n",
+        "setsid --fork sh -c 'echo $$ > {m}; sleep 0.3' >/dev/null 2>&1",
         m = marker.display()
     );
+    let started = Instant::now();
     let result = execute_run_bash(
         &command,
         &cwd,
@@ -1831,29 +1855,25 @@ fn run_bash_sweeps_setsid_orphan_via_subreaper_safety_net() {
         &mut NeverCancelRuntime,
     );
     let ActionExecution::Completed(outcome) = result else {
-        panic!("setsid command must execute under OS containment");
+        panic!("setsid command must complete under per-job containment");
     };
     assert_ne!(outcome.status, ActionStatus::Failed, "{}", outcome.text);
-    let orphan_pid: u32 = std::fs::read_to_string(&marker)
-        .expect("escapee marker file")
+    assert!(
+        started.elapsed() >= Duration::from_millis(250),
+        "job completed before its owned setsid descendant"
+    );
+    let descendant_pid: u32 = std::fs::read_to_string(&marker)
+        .expect("descendant marker")
         .trim()
         .parse()
-        .expect("escapee pid");
+        .expect("descendant pid");
+    let executing = std::fs::read_to_string(format!("/proc/{descendant_pid}/stat"))
+        .ok()
+        .and_then(|stat| stat.rsplit_once(") ").map(|(_, tail)| tail.to_string()))
+        .and_then(|tail| tail.split_whitespace().next().map(str::to_string))
+        .is_some_and(|state| state != "Z" && state != "X");
+    assert!(!executing, "terminal result preceded owned descendant exit");
     let _ = std::fs::remove_file(&marker);
-    // The supervisor sweep must have terminated the orphan shortly after the
-    // job finished.
-    let mut gone = false;
-    for _ in 0..100 {
-        if !crate::os::process_may_be_alive(orphan_pid) {
-            gone = true;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    assert!(
-        gone,
-        "setsid orphan {orphan_pid} must be swept by the safety net"
-    );
 }
 
 #[test]

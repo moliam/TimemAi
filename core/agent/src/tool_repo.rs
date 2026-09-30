@@ -436,6 +436,7 @@ fn run_self_test(root: &Path, manifest: &ToolManifest) -> Result<String, String>
     let mut child = command
         .spawn()
         .map_err(|error| format!("tool_self_test_spawn_failed:{error}"))?;
+    let _child_registration = crate::os::register_managed_child(child.id());
     let stdout_reader = child
         .stdout
         .take()

@@ -2449,33 +2449,6 @@ impl AgentCore {
         );
     }
 
-    fn still_running_cmds_context_from(&self, running: Vec<RunningShellJob>) -> Option<String> {
-        if running.is_empty() {
-            return None;
-        }
-        let mut text = String::from(
-            "still running cmds:
-
-### STILL RUNNING
-| pid | created by tool_call id | command |
-|---:|---|---|",
-        );
-        for job in running {
-            let call_id = markdown_table_cell(if job.tool_call_id.trim().is_empty() {
-                "unknown_tool_call"
-            } else {
-                &job.tool_call_id
-            });
-            let command = markdown_table_cell(&compact_text(&job.command, 500));
-            text.push_str(&format!(
-                "
-| {} | `{}` | `{}` |",
-                job.pid, call_id, command
-            ));
-        }
-        Some(text)
-    }
-
     /// One observation point for the disk pressure tracker. The tracker
     /// invokes the filesystem sampler only when its count or time gate is
     /// due, keeping ordinary tool completions and model requests free of
@@ -2596,14 +2569,33 @@ impl AgentCore {
         &mut self,
         current_prompt: &str,
         runtime: Option<&mut dyn ActionRuntime>,
-        (running, mut updates): (Vec<RunningShellJob>, Vec<ShellJobExitUpdate>),
+        (mut running, mut updates): (Vec<RunningShellJob>, Vec<ShellJobExitUpdate>),
         final_scan: F,
     ) -> String
     where
         F: FnOnce() -> (Vec<RunningShellJob>, Vec<ShellJobExitUpdate>),
     {
-        let oldest_running_created_ms = running.iter().map(|job| job.created_at_ms).min();
-        let still_running = self.still_running_cmds_context_from(running.clone());
+        let (body, trailer) = prompt_render::split_formatted_response_trailer(current_prompt);
+        let mut prompt = body.trim_end().to_string();
+
+        // Capture state changes that race the first snapshot. Preserve jobs seen
+        // in the first scan so a job that finishes between scans is rendered in
+        // historical order (running, then exit), and merge newly registered jobs
+        // from the final scan so their still-running state is never omitted.
+        let (final_running, final_updates) = final_scan();
+        let mut known_running_pids = running
+            .iter()
+            .map(|job| job.pid)
+            .collect::<std::collections::HashSet<_>>();
+        running.extend(
+            final_running
+                .into_iter()
+                .filter(|job| known_running_pids.insert(job.pid)),
+        );
+        running.sort_by_key(|job| (job.created_at_ms, job.pid));
+        updates.extend(final_updates);
+
+        let has_still_running = !running.is_empty();
         let running_snapshot_for_info: Vec<runtime_info::RunningJobSnapshot> = running
             .iter()
             .map(|job| runtime_info::RunningJobSnapshot {
@@ -2612,9 +2604,11 @@ impl AgentCore {
                 command: job.command.clone(),
                 cwd: job.cwd.clone(),
                 created_at_ms: job.created_at_ms,
+                elapsed_ms: job.elapsed_ms(),
+                notes: job.notes.clone(),
             })
             .collect();
-        let mut updates_snapshot_for_info: Vec<runtime_info::JobExitSnapshot> = updates
+        let updates_snapshot_for_info: Vec<runtime_info::JobExitSnapshot> = updates
             .iter()
             .map(|update| runtime_info::JobExitSnapshot {
                 pid: update.pid,
@@ -2624,55 +2618,28 @@ impl AgentCore {
                 status: update.status.clone(),
             })
             .collect();
-        // Request-local progress check driven by the runtime shell-job state:
-        // when any tracked job has already run for over 3 minutes without
-        // finishing, the trailer asks the model to verify real progress. It is
-        // recomputed for every request and never persisted into prompt
-        // history, so once the job finishes later requests carry no reminder.
-        let long_running_progress_check = (still_running.is_some()
-            && oldest_running_created_ms.is_some_and(|earliest_ms| {
-                (now_ms() - earliest_ms).max(0) as u64 >= 3 * 60 * 1000
-            }))
-        .then(|| {
-            "Need to check whether the long running job is really making progress ? ".to_string()
-        });
-        let (body, trailer) = prompt_render::split_formatted_response_trailer(current_prompt);
-        let mut prompt = body.trim_end().to_string();
-
-        // RUNTIME_INFO: aggregated observation from registered module
-        // reporters (jobmanager, sysstat). Built only when some reporter
-        // has important state; rides along with this request and is never
-        // persisted into prompt history.
-        // Capture jobs that finish while the base prompt and running table are rendered.
-        // The request-local order is historical tool results, running snapshot, then exits.
-        // The final scan runs BEFORE RUNTIME_INFO so exit events found here
-        // (e.g. SIGKILL/OOM) are never lost from the sysstat report: exit
-        // updates are events that must be consumed, not dropped.
-        let (_, final_updates) = final_scan();
-        updates_snapshot_for_info.extend(final_updates.iter().map(|update| {
-            runtime_info::JobExitSnapshot {
-                pid: update.pid,
-                tool_call_id: update.tool_call_id.clone(),
-                command: update.command.clone(),
-                elapsed_ms: update.elapsed_ms,
-                status: update.status.clone(),
-            }
-        }));
-        updates.extend(final_updates);
-
-        // RUNTIME_INFO: aggregated observation from registered module
-        // reporters (jobmanager, sysstat). Built only when some reporter
-        // has important state; rides along with this request and is never
-        // persisted into prompt history.
+        // RUNTIME_INFO is request-local. It is built only when a registered
+        // reporter has important state and is never persisted into history.
         // Model API request observation point for disk pressure sampling.
         let api_disk_notice = self.observe_disk_pressure(&running_snapshot_for_info);
         let runtime_info = {
             let inputs = runtime_info::RuntimeInfoInputs {
                 running: running_snapshot_for_info,
                 updates: updates_snapshot_for_info,
-                escaped_pids: os::reparented_detached_child_pids()
+                fallback_processes: os::fallback_process_snapshots()
                     .into_iter()
-                    .filter(|pid| process_is_alive(u64::from(*pid)) != Some(false))
+                    .map(|process| runtime_info::FallbackProcessSnapshot {
+                        pid: process.pid,
+                        process_name: process.process_name,
+                    })
+                    .collect(),
+                orphan_events: os::take_orphan_process_events()
+                    .into_iter()
+                    .map(|event| runtime_info::OrphanProcessEventSnapshot {
+                        pid: event.pid,
+                        process_name: event.process_name,
+                        state: event.state.to_string(),
+                    })
                     .collect(),
                 disk_pressure_notice: api_disk_notice,
             };
@@ -2686,11 +2653,6 @@ impl AgentCore {
             prompt.push_str("\n\n");
             prompt.push_str(&update_text);
         }
-        if let Some(reminder) = long_running_progress_check.as_ref() {
-            prompt.push_str("\n\n");
-            prompt.push_str(reminder);
-        }
-
         if let Some(runtime) = runtime {
             let events = updates
                 .iter()
@@ -2709,7 +2671,7 @@ impl AgentCore {
         self.submit_running_job_updates(updates.clone(), false);
         self.flush_pending_prompt_components();
 
-        if still_running.is_none()
+        if !has_still_running
             && updates.is_empty()
             && runtime_info.is_none()
             && !self.context_compact_required
@@ -7494,51 +7456,56 @@ impl FileMemoryStore {
         if !self.file.exists() {
             return;
         }
-        if Command::new("git")
-            .arg("-C")
-            .arg(&self.dir)
-            .arg("init")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| !status.success())
-            .unwrap_or(true)
+        if timem_platform::command_status(
+            Command::new("git")
+                .arg("-C")
+                .arg(&self.dir)
+                .arg("init")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .map(|status| !status.success())
+        .unwrap_or(true)
         {
             return;
         }
-        let _ = Command::new("git")
-            .arg("-C")
-            .arg(&self.dir)
-            .args(["config", "user.name", "timem-memory"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let _ = Command::new("git")
-            .arg("-C")
-            .arg(&self.dir)
-            .args(["config", "user.email", "timem-memory@example.invalid"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if Command::new("git")
-            .arg("-C")
-            .arg(&self.dir)
-            .args(["add", "memory.jsonl"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| !status.success())
-            .unwrap_or(true)
+        let _ = timem_platform::command_status(
+            Command::new("git")
+                .arg("-C")
+                .arg(&self.dir)
+                .args(["config", "user.name", "timem-memory"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
+        let _ = timem_platform::command_status(
+            Command::new("git")
+                .arg("-C")
+                .arg(&self.dir)
+                .args(["config", "user.email", "timem-memory@example.invalid"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
+        if timem_platform::command_status(
+            Command::new("git")
+                .arg("-C")
+                .arg(&self.dir)
+                .args(["add", "memory.jsonl"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .map(|status| !status.success())
+        .unwrap_or(true)
         {
             return;
         }
-        let _ = Command::new("git")
-            .arg("-C")
-            .arg(&self.dir)
-            .args(["commit", "-m", message])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = timem_platform::command_status(
+            Command::new("git")
+                .arg("-C")
+                .arg(&self.dir)
+                .args(["commit", "-m", message])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
     }
 
     fn read_all_unlocked(&self) -> std::io::Result<Vec<MemoryRecord>> {
@@ -7557,21 +7524,22 @@ impl FileMemoryStore {
     }
 
     fn git_commit_count(&self) -> usize {
-        Command::new("git")
-            .arg("-C")
-            .arg(&self.dir)
-            .args(["rev-list", "--count", "HEAD"])
-            .output()
-            .ok()
-            .and_then(|output| {
-                if output.status.success() {
-                    String::from_utf8(output.stdout).ok()
-                } else {
-                    None
-                }
-            })
-            .and_then(|text| text.trim().parse::<usize>().ok())
-            .unwrap_or_default()
+        timem_platform::command_output(
+            Command::new("git")
+                .arg("-C")
+                .arg(&self.dir)
+                .args(["rev-list", "--count", "HEAD"]),
+        )
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                String::from_utf8(output.stdout).ok()
+            } else {
+                None
+            }
+        })
+        .and_then(|text| text.trim().parse::<usize>().ok())
+        .unwrap_or_default()
     }
 
     fn schema_text(&self) -> String {
@@ -8364,14 +8332,6 @@ fn memory_missing_expected_version_result(
 fn should_run_memory_precheck(supporting_context: &str) -> bool {
     supporting_context.contains("memory_lookup_hint:")
 }
-fn markdown_table_cell(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('|', "\\|")
-        .replace('`', "\\`")
-        .replace(['\r', '\n'], " ")
-}
-
 fn compact_text(text: &str, max_chars: usize) -> String {
     let mut out = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if out.chars().count() > max_chars {

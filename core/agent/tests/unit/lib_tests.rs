@@ -2179,7 +2179,8 @@ fn controlled_job_snapshot(pid: u32) -> RunningShellJob {
         cwd: "/tmp".to_string(),
         session_id: "test_session".to_string(),
         turn_id: "test_turn".to_string(),
-        created_at_ms: 1,
+        created_at_ms: crate::now_ms(),
+        notes: String::new(),
     }
 }
 
@@ -2210,30 +2211,6 @@ fn controlled_request_base() -> String {
 }
 
 #[test]
-fn still_running_table_includes_bounded_escaped_original_command() {
-    let core = test_core("running_command_context");
-    let mut job = controlled_job_snapshot(77);
-    job.tool_call_id = "call|`77".to_string();
-    job.command = format!("printf 'a|b'\nprintf `date`; {}", "x".repeat(600));
-
-    let context = core
-        .still_running_cmds_context_from(vec![job])
-        .expect("running context");
-
-    assert!(
-        context.contains("| pid | created by tool_call id | command |"),
-        "{context}"
-    );
-    assert!(context.contains(r#"`call\|\`77`"#), "{context}");
-    assert!(
-        context.contains(r#"`printf 'a\|b' printf \`date\`;"#),
-        "{context}"
-    );
-    assert!(context.contains('…'), "{context}");
-    assert!(!context.contains("\nprintf"), "{context}");
-}
-
-#[test]
 fn model_prompt_job_finished_before_first_scan_has_only_exit_update() {
     let mut core = test_core("job_status_before_first_scan");
     let prompt = core.build_model_request_prompt_from_job_snapshots(
@@ -2259,6 +2236,24 @@ fn model_prompt_job_finished_before_first_scan_has_only_exit_update() {
 }
 
 #[test]
+fn model_prompt_job_started_between_scans_is_reported_as_still_running() {
+    let mut core = test_core("job_started_between_scans");
+    let prompt = core.build_model_request_prompt_from_job_snapshots(
+        &controlled_request_base(),
+        None,
+        (Vec::new(), Vec::new()),
+        || (vec![controlled_job_snapshot(151)], Vec::new()),
+    );
+
+    assert!(prompt.contains("#### jobmanager"), "{prompt}");
+    assert!(
+        prompt.contains("| 151 | `0.0s` | `call_151` | `job-151` |  |"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("RUNNING_JOB_UPDATE"), "{prompt}");
+}
+
+#[test]
 fn model_prompt_job_finished_between_scans_orders_running_before_exit() {
     let mut core = test_core("job_status_between_scans");
     let prompt = core.build_model_request_prompt_from_job_snapshots(
@@ -2274,11 +2269,11 @@ fn model_prompt_job_finished_between_scans_orders_running_before_exit() {
     assert!(tool < running && running < exit, "{prompt}");
     assert_eq!(prompt.matches("#### jobmanager").count(), 1, "{prompt}");
     assert!(
-        prompt.contains("| pid | created by tool_call id | command |"),
+        prompt.contains("| pid | elapsed | created by tool_call id | command | notes |"),
         "{prompt}"
     );
     assert!(
-        prompt.contains("| 202 | `call_202` | `job-202` |"),
+        prompt.contains("| 202 | `0.0s` | `call_202` | `job-202` |  |"),
         "{prompt}"
     );
     assert_eq!(prompt.matches("RUNNING_JOB_UPDATE").count(), 1, "{prompt}");
@@ -2547,46 +2542,38 @@ fn time_elapsed_trailer_marks_unfinished_long_running_jobs() {
 }
 
 #[test]
-fn long_running_progress_check_trailer_requires_still_running_table() {
+fn long_running_progress_check_is_inside_still_running_runtime_info() {
     let mut core = test_core("long_running_progress_check");
     let base = controlled_request_base();
 
-    // A job older than 3 minutes: the reminder appears together with the
-    // still-running table in the same request-local prompt.
-    let mut old_job = controlled_job_snapshot(404);
-    old_job.created_at_ms = 1;
+    let mut over_three_minutes = controlled_job_snapshot(404);
+    over_three_minutes.created_at_ms = crate::now_ms() - 3 * 60 * 1000 - 1;
     let prompt = core.build_model_request_prompt_from_job_snapshots(
         &base,
         None,
-        (vec![old_job], Vec::new()),
+        (vec![over_three_minutes], Vec::new()),
+        || (Vec::new(), Vec::new()),
+    );
+    let jobmanager = prompt.find("#### jobmanager").expect("jobmanager field");
+    let reminder = prompt
+        .find("need to check whether long running job is making progress")
+        .expect("long-running progress reminder");
+    assert!(jobmanager < reminder, "{prompt}");
+
+    let mut under_three_minutes = controlled_job_snapshot(406);
+    under_three_minutes.created_at_ms = crate::now_ms() - 3 * 60 * 1000 + 1_000;
+    let prompt = core.build_model_request_prompt_from_job_snapshots(
+        &base,
+        None,
+        (vec![under_three_minutes], Vec::new()),
         || (Vec::new(), Vec::new()),
     );
     assert!(prompt.contains("#### jobmanager"), "{prompt}");
     assert!(
-        prompt.contains("Need to check whether the long running job is really making progress ? "),
-        "{prompt}"
-    );
-    // The user's invariant: whenever the reminder exists, the same prompt
-    // delta must carry the still-running table.
-    assert!(prompt.contains("Need to check") && prompt.contains("#### jobmanager"));
-
-    // A fresh job under 3 minutes: the table is shown without the reminder.
-    let mut fresh_job = controlled_job_snapshot(405);
-    fresh_job.created_at_ms = crate::now_ms();
-    let prompt = core.build_model_request_prompt_from_job_snapshots(
-        &base,
-        None,
-        (vec![fresh_job], Vec::new()),
-        || (Vec::new(), Vec::new()),
-    );
-    assert!(prompt.contains("#### jobmanager"), "{prompt}");
-    assert!(
-        !prompt.contains("Need to check whether the long running job"),
+        !prompt.contains("need to check whether long running job is making progress"),
         "{prompt}"
     );
 
-    // No running jobs: neither the table nor the reminder appears, and the
-    // base prompt is untouched so history stays unaffected.
     let prompt = core.build_model_request_prompt_from_job_snapshots(
         &base,
         None,
@@ -2634,7 +2621,10 @@ fn model_prompt_reports_setsid_escaped_process_as_runtime_info() {
     let escapee = escapee.expect("expected an adopted escapee pid");
 
     let inputs = crate::runtime_info::RuntimeInfoInputs {
-        escaped_pids: vec![escapee],
+        fallback_processes: vec![crate::runtime_info::FallbackProcessSnapshot {
+            pid: escapee,
+            process_name: "bash".to_string(),
+        }],
         ..Default::default()
     };
     let mut registry = crate::runtime_info::RuntimeInfoRegistry::new();
@@ -2644,7 +2634,8 @@ fn model_prompt_reports_setsid_escaped_process_as_runtime_info() {
     });
     let out = registry.render(&inputs).expect("expected RUNTIME_INFO");
     assert!(out.starts_with("### RUNTIME_INFO"), "{out}");
-    assert!(out.contains("ORPHAN_PROCESS"), "{out}");
+    assert!(out.contains("unowned child processes"), "{out}");
+    assert!(out.contains("`active`"), "{out}");
     assert!(out.contains(&escapee.to_string()), "{out}");
 
     // Cleanup: terminate the escapee, then close.
@@ -2788,6 +2779,8 @@ fn filesystems_for_info_deduplicates_same_device() {
         command: "true".into(),
         cwd: a.display().to_string(),
         created_at_ms: 0,
+        elapsed_ms: 0,
+        notes: String::new(),
     }];
     // filesystems_for_info samples cwd of running jobs; a and b are on the
     // same device, so even if both were sampled only one entry remains.

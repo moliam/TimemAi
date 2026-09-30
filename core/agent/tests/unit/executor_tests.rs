@@ -332,21 +332,10 @@ fn windows_command_action_rejects_unknown_script_extension() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
-fn command_action_timeout_sweeps_setsid_escapee_and_leaves_no_zombie() {
-    // A capability command may spawn a `setsid` child that escapes the
-    // managed process group. With the subreaper flag installed the escapee is
-    // reparented to this test process, so the timeout path must terminate AND
-    // reap it: a lingering zombie would keep kill(pid,0) succeeding forever
-    // (nested-runtime trap: under an outer Timem instance the adopting
-    // subreaper may be the outer process, and the zombie is never reaped by
-    // us). Assert via /proc state, not signal probing.
-    assert!(
-        crate::os::install_process_subreaper(),
-        "Linux runtime must support PR_SET_CHILD_SUBREAPER"
-    );
-    let dir = temp_case_dir("command_timeout_setsid_sweep");
+fn command_action_timeout_kills_its_setsid_escapee_with_job_ownership() {
+    let dir = temp_case_dir("command_timeout_setsid_owned");
     let pid_file = dir.join("escapee.pid");
     fs::write(
         dir.join("escape.sh"),
@@ -360,31 +349,25 @@ fn command_action_timeout_sweeps_setsid_escapee_and_leaves_no_zombie() {
     let result = execute_command_action("escape_tool", &dir.join("escape.sh"), &json!({}), 1000);
     assert!(result.contains("error: timeout"), "{result}");
 
-    let escapee_pid: i32 = fs::read_to_string(&pid_file)
-        .unwrap()
+    let escapee_pid: u32 = fs::read_to_string(&pid_file)
+        .expect("escapee PID marker")
         .trim()
         .parse()
-        .unwrap();
-    // Zombie-aware liveness: gone or zombie both prove the sweep worked.
-    let zombie_or_gone = |pid: i32| match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(stat) => stat
-            .rsplit(')')
-            .next()
-            .unwrap_or("")
-            .trim_start()
-            .starts_with('Z'),
-        Err(_) => true,
+        .expect("numeric escapee PID");
+    let still_executing = |pid: u32| {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| stat.rsplit_once(") ").map(|(_, tail)| tail.to_string()))
+            .and_then(|tail| tail.split_whitespace().next().map(str::to_string))
+            .is_some_and(|state| state != "Z" && state != "X")
     };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while unsafe { libc::kill(escapee_pid, 0) } == 0
-        && !zombie_or_gone(escapee_pid)
-        && std::time::Instant::now() < deadline
-    {
+    while still_executing(escapee_pid) && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert!(
-        unsafe { libc::kill(escapee_pid, 0) } != 0 || zombie_or_gone(escapee_pid),
-        "setsid escapee {escapee_pid} must be swept after command timeout"
+        !still_executing(escapee_pid),
+        "owned setsid escapee {escapee_pid} remained executable after command timeout"
     );
     let _ = fs::remove_dir_all(dir);
 }

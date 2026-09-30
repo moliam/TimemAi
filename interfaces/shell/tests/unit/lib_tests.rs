@@ -296,6 +296,7 @@ fn shell_does_not_append_running_job_list_after_final_answer() {
         session_id: "session_a".to_string(),
         turn_id: "turn_a".to_string(),
         created_at_ms: 1000,
+        notes: String::new(),
     }]);
 
     let rendered = render_turn_outcome_text(&outcome);

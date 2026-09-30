@@ -68,12 +68,13 @@ pub(crate) fn terminate_process(pid: u32) {
     if pid == 0 || pid == std::process::id() {
         return;
     }
-    let _ = Command::new("taskkill.exe")
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let _ = crate::api::command_status(
+        Command::new("taskkill.exe")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    );
     if process_is_alive(u64::from(pid)) == Some(true) {
         let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
         if !handle.is_null() {

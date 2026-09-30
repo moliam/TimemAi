@@ -6658,7 +6658,7 @@ fn still_running_table_survives_discard_of_the_original_action_delta() {
     assert!(prompt.contains("#### jobmanager"), "{prompt}");
     assert!(prompt.contains("created by tool_call id"), "{prompt}");
     assert!(
-        prompt.contains("| pid | created by tool_call id | command |"),
+        prompt.contains("| pid | elapsed | created by tool_call id | command | notes |"),
         "{prompt}"
     );
     assert!(prompt.contains("`sleep 5; printf late`"), "{prompt}");

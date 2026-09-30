@@ -567,14 +567,14 @@ fn every_model_request_lists_still_running_commands_with_the_creating_tool_call_
     assert!(second.contains("### RUNTIME_INFO"), "{second}");
     assert!(second.contains("#### jobmanager"), "{second}");
     assert!(
-        second.contains("| pid | created by tool_call id | command |"),
+        second.contains("| pid | elapsed | created by tool_call id | command | notes |"),
         "{second}"
     );
     assert!(second.contains("`sleep 30`"), "{second}");
     let call_id = second
         .lines()
         .find(|line| line.starts_with("| ") && line.contains('`'))
-        .and_then(|line| line.split('`').nth(1))
+        .and_then(|line| line.split('`').nth(3))
         .expect("tool call id in still-running table");
     assert_eq!(call_id.len(), 6, "{second}");
     assert!(call_id.chars().all(|ch| ch.is_ascii_hexdigit()), "{second}");

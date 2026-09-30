@@ -43,6 +43,7 @@ pub struct RunningShellJob {
     pub session_id: String,
     pub turn_id: String,
     pub created_at_ms: i64,
+    pub notes: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +147,21 @@ impl BoundedShellOutput {
 type SharedShellOutput = Arc<Mutex<BoundedShellOutput>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessJobMode {
+    Exact,
+    DegradedProcessGroup,
+}
+
+impl ProcessJobMode {
+    fn evidence_line(self) -> &'static str {
+        match self {
+            Self::Exact => "Process containment: cgroup v2",
+            Self::DegradedProcessGroup => "Process containment: process group only",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShellJobDelivery {
     Direct,
     Background,
@@ -196,6 +212,8 @@ struct ManagedShellJob {
     supervisor: Mutex<Option<thread::JoinHandle<()>>>,
     completion_publication: Arc<Mutex<u64>>,
     exit_hooks: Arc<Mutex<ShellJobManagerExitHooks>>,
+    process_job: Option<crate::os::ManagedProcessJob>,
+    process_job_mode: ProcessJobMode,
 }
 
 impl ManagedShellJob {
@@ -209,6 +227,11 @@ impl ManagedShellJob {
             session_id: self.session_id.clone(),
             turn_id: self.turn_id.clone(),
             created_at_ms: self.created_at_ms,
+            notes: self
+                .process_job
+                .as_ref()
+                .and_then(|process_job| process_job.observation_note())
+                .unwrap_or_default(),
         }
     }
 
@@ -242,7 +265,15 @@ impl ManagedShellJob {
     }
 
     fn signal(&self) {
-        crate::os::terminate_process_group(self.pid);
+        if self
+            .process_job
+            .as_ref()
+            .is_none_or(|process_job| process_job.kill_all().is_err())
+        {
+            // Explicit degraded mode, or best-effort fallback if the native Job backend
+            // control file becomes unavailable after spawn.
+            crate::os::terminate_process_group(self.pid);
+        }
     }
 
     fn join_supervisor(&self) {
@@ -305,7 +336,6 @@ impl Drop for ShellJobManagerState {
         for job in jobs {
             job.join_supervisor();
         }
-        sweep_detached_reparented_children();
     }
 }
 
@@ -391,9 +421,10 @@ impl ShellJobManager {
             }
         };
         ActionOutcome::background_running(format!(
-            "Action result: {}\npid={}, now keeps running in background",
+            "Action result: {}\npid={}, now keeps running in background\n{}",
             crate::os::local_shell_tool_name(),
-            job.pid
+            job.pid,
+            job.process_job_mode.evidence_line()
         ))
         .with_bash_result(BashResultEvidence {
             stdout: String::new(),
@@ -428,8 +459,18 @@ impl ShellJobManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         crate::os::configure_child_process_group(&mut command);
+        let process_job = crate::os::ManagedProcessJob::create().ok();
+        let process_job_mode = if process_job.is_some() {
+            ProcessJobMode::Exact
+        } else {
+            ProcessJobMode::DegradedProcessGroup
+        };
+        if let Some(process_job) = &process_job {
+            process_job.configure_command(&mut command)?;
+        }
         let mut child = command.spawn()?;
         let pid = child.id();
+        let child_registration = crate::os::register_managed_child(pid);
         // OS-level containment: on Windows the child joins the runtime's
         // kill-on-close job object; on Unix this is a no-op and the subreaper
         // safety net covers escapees instead.
@@ -477,9 +518,12 @@ impl ShellJobManager {
             supervisor: Mutex::new(None),
             completion_publication: Arc::clone(&self.state.completion_publication),
             exit_hooks: Arc::clone(&self.state.exit_hooks),
+            process_job,
+            process_job_mode,
         });
         let supervised = Arc::clone(&job);
         let supervisor = thread::spawn(move || {
+            let _child_registration = child_registration;
             supervise_shell_job(supervised, child, stdout_drain, stderr_drain)
         });
         *job.supervisor
@@ -896,6 +940,10 @@ fn running_output_for_job(
         stdout,
         stderr,
         error: Some(error),
+        job_management: Some(match job.process_job_mode {
+            ProcessJobMode::Exact => "cgroup v2".to_string(),
+            ProcessJobMode::DegradedProcessGroup => "process group only".to_string(),
+        }),
         tail_out,
     }
 }
@@ -914,6 +962,7 @@ fn finished_output(
         stdout: finished.stdout.clone(),
         stderr: finished.stderr.clone(),
         error: None,
+        job_management: None,
         tail_out,
     }
 }
@@ -974,15 +1023,6 @@ fn shell_output_text(output: &SharedShellOutput) -> String {
         .unwrap_or_default()
 }
 
-fn sweep_detached_reparented_children() {
-    for pid in crate::os::reparented_detached_child_pids() {
-        crate::os::terminate_process(pid);
-        // The reparented orphan is our child; after termination it stays a
-        // zombie until reaped, and kill(pid, 0) keeps succeeding for zombies.
-        crate::os::reap_child_process(pid);
-    }
-}
-
 fn supervise_shell_job(
     job: Arc<ManagedShellJob>,
     mut child: Child,
@@ -992,24 +1032,36 @@ fn supervise_shell_job(
     let status = match child.wait() {
         Ok(status) => {
             if exit_signal(&status).is_some() {
-                crate::os::kill_process_group(job.pid);
+                job.signal();
             }
             exit_status_text(&status)
         }
         Err(_) => {
-            crate::os::kill_process_group(job.pid);
+            job.signal();
             "unknown".to_string()
         }
     };
-    join_output_drains(stdout_drain, stderr_drain);
-    while crate::os::process_group_running(job.pid) {
-        thread::sleep(Duration::from_millis(20));
+    if let Some(process_job) = &job.process_job {
+        loop {
+            match process_job.is_empty() {
+                Ok(true) => break,
+                Ok(false) => thread::sleep(Duration::from_millis(20)),
+                Err(_) => {
+                    job.signal();
+                    break;
+                }
+            }
+        }
+    } else {
+        while crate::os::process_group_running(job.pid) {
+            thread::sleep(Duration::from_millis(20));
+        }
     }
-    // Safety net for processes that escaped the managed process group via
-    // `setsid`-style detach: with the subreaper flag installed they are
-    // reparented to this runtime in their own session; terminate them so no
-    // orphan outlives the job.
-    sweep_detached_reparented_children();
+    // Drain threads run concurrently while descendants are alive, preventing
+    // pipe backpressure. Join only after kernel ownership reports no members.
+    join_output_drains(stdout_drain, stderr_drain);
+    // A terminal update is published only after the kernel reports this job's
+    // native Job empty. In degraded mode, only process-group membership is known.
     let stdout = shell_output_text(&job.stdout);
     let stderr = shell_output_text(&job.stderr);
     let Ok(mut publication_sequence) = job.completion_publication.lock() else {
@@ -2443,6 +2495,7 @@ pub struct BashCommandOutput {
     pub stderr: String,
     pub output: String,
     pub error: Option<String>,
+    pub job_management: Option<String>,
     pub tail_out: bool,
 }
 
@@ -2500,6 +2553,10 @@ impl BashCommandOutput {
                     "Action result: {}\nLONG_RUNNING_COMMAND_STATUS:\nPID: {}\nElapsed: {} ms\nStatus: still running\n{}",
                     action_name, pid, elapsed_ms, LONG_RUNNING_ACTION_GUIDANCE
                 );
+                if let Some(mode) = &self.job_management {
+                    out.push_str("\nProcess containment: ");
+                    out.push_str(mode);
+                }
 
                 if !self.output.trim().is_empty() {
                     out.push_str("\nPartial return:\n");
@@ -2512,6 +2569,10 @@ impl BashCommandOutput {
                     "Action result: {}\npid={}, timeout, but is still running\nTimeout means Timem stopped waiting; the process was not killed and there is no final exit code yet.",
                     action_name, pid
                 );
+                if let Some(mode) = &self.job_management {
+                    out.push_str("\nProcess containment: ");
+                    out.push_str(mode);
+                }
 
                 if !self.output.trim().is_empty() {
                     out.push_str("\nPartial return:\n");
@@ -2581,6 +2642,7 @@ fn execute_one_bash_structured_with_prompt_after(
         Ok(child) => child,
         Err(_) => return bash_error(command, "command_failed"),
     };
+    let _child_registration = crate::os::register_managed_child(child.id());
     let stdout = Arc::new(Mutex::new(BoundedShellOutput::new(false)));
     let stderr = Arc::new(Mutex::new(BoundedShellOutput::new(false)));
     let stdout_drain = child
@@ -2641,6 +2703,7 @@ fn execute_one_bash_structured_with_prompt_after(
         stdout,
         stderr,
         error: None,
+        job_management: None,
         tail_out: false,
     }
 }
@@ -2724,6 +2787,7 @@ fn bash_error(command: &str, error: &str) -> BashCommandOutput {
         stderr: diagnostic.clone(),
         output: diagnostic,
         error: Some(error.to_string()),
+        job_management: None,
         tail_out: false,
     }
 }
