@@ -1433,9 +1433,20 @@ fn prompt_cut_terminal_ownership_stress_is_seeded_and_bounded() {
             "seed={seed} iteration={iteration} stage=stats"
         );
         assert_eq!(
-            returned,
-            vec![in_flight, parsed],
+            returned
+                .iter()
+                .map(|supplement| supplement.text.as_str())
+                .collect::<Vec<_>>(),
+            vec![in_flight.as_str(), parsed.as_str()],
             "seed={seed} iteration={iteration} stage=unconsumed_ownership"
+        );
+        assert_eq!(
+            returned
+                .iter()
+                .filter_map(|supplement| supplement.command_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec![in_flight_id.as_str(), parsed_id.as_str()],
+            "seed={seed} iteration={iteration} stage=unconsumed_command_ownership"
         );
         let expected = [task_id, early_id, in_flight_id, parsed_id]
             .into_iter()
@@ -1550,7 +1561,13 @@ fn worker_option_returns_late_supplement_after_preserving_the_first_final_answer
 
     assert_eq!(outcome.text, "STALE");
     assert_eq!(outcome.stats.llm_calls, 1);
-    assert_eq!(returned, vec!["Q2 SUPPLEMENT".to_string()]);
+    assert_eq!(
+        returned
+            .iter()
+            .map(|supplement| supplement.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Q2 SUPPLEMENT"]
+    );
     assert_eq!(*calls.lock().unwrap(), 1);
     handle.request_shutdown().unwrap();
     worker.shutdown().unwrap();
@@ -1622,8 +1639,11 @@ fn session_worker_does_not_revive_terminal_repair_failure_with_late_supplement()
         agent_core::MAX_PROTOCOL_REPAIR_ATTEMPTS + 1
     );
     assert_eq!(
-        unconsumed_supplements,
-        vec!["补充不能复活硬停止".to_string()],
+        unconsumed_supplements
+            .iter()
+            .map(|supplement| supplement.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["补充不能复活硬停止"],
         "a supplement accepted before a hard stop must be returned to the host before TurnFinished"
     );
     handle.request_shutdown().unwrap();

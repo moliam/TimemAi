@@ -155,6 +155,30 @@ export function compareTurnTimelineItems(
   return left.id.localeCompare(right.id);
 }
 
+export type TurnStreamOrderItem = {
+  timelineSeq?: number;
+  createdAt: number;
+  fallbackIndex: number;
+};
+
+/**
+ * New live Turn entries carry an authoritative sequence. Legacy restored
+ * entries do not; keep those in their stable timestamp order and place the
+ * sequenced live suffix after them during migration.
+ */
+export function compareTurnStreamItems(
+  left: TurnStreamOrderItem,
+  right: TurnStreamOrderItem,
+): number {
+  const leftSequenced = left.timelineSeq !== undefined;
+  const rightSequenced = right.timelineSeq !== undefined;
+  if (leftSequenced && rightSequenced) {
+    return left.timelineSeq! - right.timelineSeq! || left.fallbackIndex - right.fallbackIndex;
+  }
+  if (leftSequenced !== rightSequenced) return leftSequenced ? 1 : -1;
+  return left.createdAt - right.createdAt || left.fallbackIndex - right.fallbackIndex;
+}
+
 export function visibleRuntimeRestartMarkers(
   turns: WebTurn[],
   markers: ChatMessage[],
@@ -738,6 +762,7 @@ export function coalesceActionLifecycle(events: WebTurnEvent[]) {
     execution_order: (next as typeof visible[number]).execution_order ?? previous.execution_order,
     presentation_id: previous.presentation_id ?? previous.event_id,
     presentation_created_at_ms: previous.presentation_created_at_ms ?? previous.created_at_ms,
+    timeline_seq: previous.timeline_seq ?? next.timeline_seq,
   });
   const pendingStarts = new Map<string, number[]>();
   const pendingBackgroundFinishes = new Map<string, number[]>();
@@ -1389,35 +1414,49 @@ export function sessionContextCompactPending(session: Session): boolean {
 export function sessionContextUsage(
   session: Session,
 ): import("./protocol").UsageStats | undefined {
-  const runtimeRestartAtMs = sessionContextUsageFloorMs(session);
+  const floorMs = sessionContextUsageFloorMs(session);
 
-  for (let index = session.turns.length - 1; index >= 0; index -= 1) {
-    const turn = session.turns[index];
+  for (let turnIndex = session.turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
+    const turn = session.turns[turnIndex];
     if (turn.state === "restored") continue;
 
-    // A restarted host restores historical turns for display, but Core starts
-    // with a fresh context. Only model responses emitted by the new runtime
-    // instance may refill the context meter.
-    const live = turnLiveUsageSince(turn, runtimeRestartAtMs);
-    if (live) return live.latest;
+    // Event order is the authoritative observation order inside a Turn. A
+    // completed compaction immediately replaces the previous prompt-token
+    // reading; a later model response may replace it again.
+    for (let eventIndex = turn.events.length - 1; eventIndex >= 0; eventIndex -= 1) {
+      const event = turn.events[eventIndex];
+      if (floorMs !== undefined && event.created_at_ms < floorMs) continue;
+      if (event.source === "worker_activity" && event.payload.kind === "model_response") {
+        const usage = event.payload.usage;
+        if (usage && typeof usage === "object")
+          return usage as import("./protocol").UsageStats;
+      }
+      if (event.source !== "core_topic") continue;
+      const topic = event.payload as {
+        topic?: { name?: string };
+        payload?: { phase?: string; estimated_after_tokens?: number };
+      };
+      const after = topic.payload?.estimated_after_tokens;
+      if (
+        topic.topic?.name === "core.context.compact" &&
+        topic.payload?.phase === "completed" &&
+        typeof after === "number" &&
+        Number.isFinite(after) &&
+        after >= 0
+      ) {
+        return { prompt_tokens: after };
+      }
+    }
 
-    // Completion telemetry has no independent timestamp. It is safe only when
-    // the whole turn began after the latest runtime restart boundary.
-    if (
-      runtimeRestartAtMs !== undefined &&
-      turn.created_at_ms < runtimeRestartAtMs
-    )
-      continue;
+    // Completion telemetry has no independent timestamp. Use it only when no
+    // timestamped observation in this Turn supersedes it and the Turn belongs
+    // to the live runtime context.
+    if (floorMs !== undefined && turn.created_at_ms < floorMs) continue;
     const latest = turn.completion?.latest_usage;
     if (latest) return latest;
   }
-  // No model usage from the new runtime instance yet. If the restart
-  // restored the persisted prompt context, show its token baseline so the
-  // meter reflects the live context instead of reading as 0.
   const restored = session.restored_context_prompt_tokens;
-  if (restored && restored > 0) {
-    return { prompt_tokens: restored };
-  }
+  if (restored && restored > 0) return { prompt_tokens: restored };
   return undefined;
 }
 

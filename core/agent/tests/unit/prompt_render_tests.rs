@@ -581,7 +581,7 @@ fn prompt_renderer_injects_only_the_active_protocol_delta_example() {
     );
 
     assert!(json.contains("[BEGIN DELTA delta_id: pd_1, time_ms: 123]"));
-    assert!(json.contains("[BEGIN TURN turn_id: turn_1]"));
+    assert!(!json.contains("BEGIN TURN"));
     assert!(!json.contains("[END DELTA]"));
     assert!(!json.contains("<prompt_delta "));
     assert!(!json.contains("</prompt_delta>"));
@@ -595,7 +595,7 @@ fn prompt_renderer_injects_only_the_active_protocol_delta_example() {
     assert!(!json.contains("this whole xml-root is your response"));
 
     assert!(xml.contains(r#"<prompt_delta id="pd_1" time_ms="123">"#));
-    assert!(xml.contains("[BEGIN TURN turn_id: turn_1]"));
+    assert!(!xml.contains("BEGIN TURN"));
     assert!(xml.contains("</prompt_delta>"));
     assert!(!xml.contains("[BEGIN DELTA "));
     assert!(!xml.contains("[END DELTA]"));

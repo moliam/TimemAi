@@ -251,6 +251,7 @@ export type SessionWorker = {
 
 export type ResponsePreview = {
   attempt: number;
+  timeline_seq?: number;
   revision: number;
   interruption?: string | null;
   response?: { attempt: number; revision: number; text: string; status: "streaming" | "intermediate" | "final" } | null;
@@ -277,12 +278,14 @@ export type WebTurnUserEntry = {
   worker_roles?: WorkerRole[];
   /** Legacy history compatibility. */ worker_role?: WorkerRole;
   created_at_ms: number;
+  timeline_seq?: number;
 };
 export type WebTurnEvent = {
   event_id: string;
   source: "core_topic" | "worker_activity" | string;
   payload: Record<string, unknown>;
   created_at_ms: number;
+  timeline_seq?: number;
 };
 
 export type Attachment = {
@@ -355,6 +358,7 @@ export type Activity = {
   native_before_tokens?: number;
   native_after_tokens?: number;
   createdAt: number;
+  timelineSeq?: number;
 };
 
 export type Decision = {

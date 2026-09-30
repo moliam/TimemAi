@@ -6,16 +6,16 @@ summary: Let the runtime hold one persistent reminder memo for long-running work
 prompt_synopsis: |
   {"memo":{"op":"create","text":"refined long-task reminder"}}
 description: |
-  Use this tool to record/update your goal with the help of the runtime, especially when the user's task needs long run, step by step, multi turns of work. Distill
-  the user's demand/goal, constraints, methodology as your work anchor into one concise memo
-  sentence and ask the runtime to remember it for you. An agent holds at most ONE memo.
+  Use this tool to record/update your goals with the help of the runtime, especially when the user's task requires long-running, step-by-step, multi-turn work. Distill
+  the user's demands/goals, constraints, methodology as your work anchor into one concise memo
+  sentence and ask the runtime to remember it for you. An agent holds ONE memo.
 
   ops:
-  - create: create a new memo. Any existing memo is replaced. Should be overall goal instead of planned steps.
+  - create: create a new memo. Any existing memo is replaced. The memo should capture goals rather than planned steps.
   - update: overwrite/refresh the current memo content.
   - delete: delete the current memo. No error if none exists.
 
-  IMPORTANT: before all work/final goal is fully done and declaring `task finish`, you MUST
+  IMPORTANT: before all goals are fully done and declaring `task finish`, you MUST
   delete the memo. You cannot finish some planned intermediate steps and declare work is done unless user asks.
 prompt_input: |
   Provide `op` ("create" | "update" | "delete") and `text` (required for
@@ -33,4 +33,4 @@ input_schema: |
     "required": ["op"]
   }
 example_json: |
-  {"memo":{"op":"create","text":"Long task: migrate docs; user requires docs/migration.md updated and all gates green before finish."}}
+  {"memo":{"op":"create","text":"1. Long task: refactor the architecture of xxx to achieve the new design in xxx.md; 2. after refactor, fix the bug xxx."}}

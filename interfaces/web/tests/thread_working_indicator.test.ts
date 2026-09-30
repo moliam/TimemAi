@@ -48,4 +48,12 @@ describe("thread working indicator", () => {
       /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.thread-working-away\.is-working \.thread-working-arc \{ animation: none; transition: none; \}/,
     );
   });
+
+  it("uses one clipboard-check identity for every memo surface", () => {
+    expect(source).toContain("ClipboardCheck,");
+    expect(source).toContain("return <ClipboardCheck size={size} />;");
+    expect(source.match(/<MemoIcon size=\{(?:12|13)\} \/>/g)).toHaveLength(3);
+    expect(source).not.toContain("<StickyNote");
+    expect(source).not.toContain("<Pin size={13}");
+  });
 });

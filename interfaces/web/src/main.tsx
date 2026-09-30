@@ -40,6 +40,7 @@ import {
   ChevronRight,
   ChevronUp,
   CircleStop,
+  ClipboardCheck,
   Clock3,
   Copy,
   CornerUpLeft,
@@ -59,7 +60,6 @@ import {
   Minimize2,
   Palette,
   FolderInput,
-  Pin,
   Paperclip,
   Pencil,
   Plug,
@@ -72,7 +72,6 @@ import {
   Settings,
   Sparkles,
   Star,
-  StickyNote,
   Terminal,
   TriangleAlert,
   Trash2,
@@ -167,6 +166,7 @@ import {
   clearDecisionsForWorker,
   coalesceActionLifecycle,
   compareTurnTimelineItems,
+  compareTurnStreamItems,
   composerPrimaryAction,
   composerSendDecision,
   turnCommandId,
@@ -9534,7 +9534,7 @@ function TimemThread({
                   </svg>
                   {activeSession.active_memo ? (
                     <span className="thread-working-pin" aria-hidden="true">
-                      <StickyNote size={12} />
+                      <MemoIcon size={12} />
                     </span>
                   ) : (
                     <span className="thread-working-core" />
@@ -9562,7 +9562,7 @@ function TimemThread({
             aria-label={t("messageNav.memoIndicator")}
           >
             <span className="thread-memo-icon" aria-hidden="true">
-              <Pin size={13} />
+              <MemoIcon size={13} />
             </span>
             <span className="thread-memo-tooltip" role="tooltip">
               <span className="thread-memo-caption">
@@ -9701,10 +9701,11 @@ const TurnInteraction = memo(function TurnInteraction({
         type: "event" as const,
         key: event.presentation_id ?? event.event_id,
         createdAt: event.presentation_created_at_ms ?? event.created_at_ms,
+        timelineSeq: event.timeline_seq,
         event,
         activity: (() => {
           const activity = activityFromTurnEvent({ ...event, event_id: event.presentation_id ?? event.event_id }, sessionId);
-          return activity ? { ...activity, execution_order: event.execution_order, settled_order: event.settled_order } : activity;
+          return activity ? { ...activity, timelineSeq: event.timeline_seq, execution_order: event.execution_order, settled_order: event.settled_order } : activity;
         })(),
       })),
     [lifecycleEvents, sessionId],
@@ -9718,6 +9719,7 @@ const TurnInteraction = memo(function TurnInteraction({
           type: "supplement" as const,
           key: `user-supplement-${entry.created_at_ms}-${roleIndex}`,
           createdAt: entry.created_at_ms,
+          timelineSeq: entry.timeline_seq,
           activity: {
             id: `user-supplement-${turn.turn_id}-${entry.created_at_ms}-${roleIndex}`,
             sessionId,
@@ -9726,15 +9728,16 @@ const TurnInteraction = memo(function TurnInteraction({
             title: t("composer.supplementTitle"),
             detail: entry.text,
             createdAt: entry.created_at_ms,
+            timelineSeq: entry.timeline_seq,
           },
         })),
     [sessionId, turn.turn_id, turn.user_entries],
   );
   const timelineItems = useMemo(
     () =>
-      [...lifecycleItems, ...supplementItems].sort(
-        (left, right) => left.createdAt - right.createdAt,
-      ),
+      [...lifecycleItems, ...supplementItems]
+        .map((item, fallbackIndex) => ({ ...item, fallbackIndex }))
+        .sort(compareTurnStreamItems),
     [lifecycleItems, supplementItems],
   );
   const visibleItems = timelineItems;
@@ -10336,14 +10339,30 @@ function StreamProcess({ closing, onArchived, children }: {
   return <div ref={ref} className={`stream-continuous-process${closing ? " archiving" : ""}`}>{children}</div>;
 }
 
-function StreamActivityPresentation({ thoughtText, activities, responseArriving }: {
+function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activities, responseArriving }: {
   responseArriving: boolean;
   thoughtText: string;
+  thoughtTimelineSeq?: number;
   activities: Activity[];
 }) {
   const entries = [
-    ...activities.map(activity => ({ key: activity.id, time: activity.createdAt, activity })),
-  ].sort((a, b) => a.time - b.time);
+    ...activities.map((activity, fallbackIndex) => ({
+      key: activity.id,
+      time: activity.createdAt,
+      timelineSeq: activity.timelineSeq,
+      fallbackIndex,
+      activity,
+      thoughtText: "",
+    })),
+    ...(thoughtText ? [{
+      key: "model-thought-preview",
+      time: Number.MAX_SAFE_INTEGER,
+      timelineSeq: thoughtTimelineSeq,
+      fallbackIndex: activities.length,
+      activity: null,
+      thoughtText,
+    }] : []),
+  ].map(entry => ({ ...entry, createdAt: entry.time })).sort(compareTurnStreamItems);
   const groups: (typeof entries)[] = [];
   for (const entry of entries) {
     const previous = groups.at(-1);
@@ -10369,11 +10388,13 @@ function StreamActivityPresentation({ thoughtText, activities, responseArriving 
         const superseded = responseArriving || !!thoughtText || index < lastReplyIndex;
         return <StreamToolRun key={key} activities={group.map(entry => entry.activity!)} superseded={superseded} handoffIds={handoffIds} />;
       }
+      const previewText = group[0].thoughtText;
+      if (previewText)
+        return <div key={key} className="stream-thought-text" aria-label="Model thought preview"><StreamText text={previewText} /></div>;
       return activity?.kind === "free_talk"
           ? <div key={key} className="stream-thought-text"><MarkdownContent text={activity.detail ?? ""} /></div>
           : activity ? <ActivityView key={key} activity={activity} /> : null;
     })}
-    {thoughtText && <div className="stream-thought-text" aria-label="Model thought preview"><StreamText text={thoughtText} /></div>}
   </section>;
 }
 
@@ -10577,7 +10598,12 @@ function TurnAnswerDelivery({
   return (
     <section className="turn-answer-delivery">
       {streamRetained && <StreamProcess closing={turn.state !== "working"} onArchived={onStreamArchived}>
-        <StreamActivityPresentation thoughtText={intermediate && !retainedThought ? thoughtText : ""} activities={streamTools} responseArriving={!!previewText} />
+        <StreamActivityPresentation
+          thoughtText={intermediate && !retainedThought ? thoughtText : ""}
+          thoughtTimelineSeq={preview?.timeline_seq}
+          activities={streamTools}
+          responseArriving={!!previewText}
+        />
       </StreamProcess>}
       {hasPreview && preview?.interruption && <div className="response-preview-interruption" role="status">{preview.interruption === "cancelled" ? "Stopped — partial response" : preview.interruption === "network_error" ? "Network error — partial response" : "Model error — partial response"}</div>}
       {(hasFinal || !!previewText) && (
@@ -11640,6 +11666,10 @@ function ToolActivity({ activity }: { activity: Activity }) {
   );
 }
 
+function MemoIcon({ size }: { size: number }) {
+  return <ClipboardCheck size={size} />;
+}
+
 function MemoNotice({ activity }: { activity: Activity }) {
   const op =
     activity.title === "memo created"
@@ -11651,15 +11681,9 @@ function MemoNotice({ activity }: { activity: Activity }) {
           : activity.title === "memo forcibly deleted by runtime"
             ? "messageNav.memoForceDeleted"
             : "messageNav.memoStopsFinish";
-  // One memo icon for create/update/delete notices; only the runtime
-  // finish-guard keeps its distinct stop signal. Matches the minimal lucide
-  // line-icon style used by the dynamic-context notices.
-  const icon =
-    activity.title === "memo stops_finish" || activity.title === "memo stops finish" ? (
-      <CircleStop size={13} />
-    ) : (
-      <StickyNote size={13} />
-    );
+  // Keep every memo surface on the same Lucide identity, including the
+  // runtime finish guard and the working-state indicator.
+  const icon = <MemoIcon size={13} />;
   return (
     <div className="turn-work-item notice memo-notice">
       <span className="activity-mark" aria-hidden="true">

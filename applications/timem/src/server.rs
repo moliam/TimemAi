@@ -580,7 +580,7 @@ struct WebSession {
     #[serde(skip)]
     pending_completion_message_id: Option<String>,
     #[serde(skip)]
-    pending_unconsumed_supplements: Vec<String>,
+    pending_unconsumed_supplements: Vec<timem_session::UnconsumedSupplement>,
     #[serde(skip)]
     reported_session_working_worker_count: Option<usize>,
     /// Prompt-token baseline restored from the persisted context snapshot.
@@ -685,6 +685,8 @@ struct WebTurnUserEntry {
     attachments: Vec<WebAttachment>,
     created_at_ms: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
+    timeline_seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     command_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     delivery_state: Option<ChatCommandDeliveryState>,
@@ -698,6 +700,23 @@ struct WebTurnEvent {
     source: String,
     payload: Value,
     created_at_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeline_seq: Option<u64>,
+}
+
+fn next_turn_timeline_seq(turn: &WebTurn) -> u64 {
+    turn.user_entries
+        .iter()
+        .filter_map(|entry| entry.timeline_seq)
+        .chain(turn.events.iter().filter_map(|event| event.timeline_seq))
+        .chain(
+            turn.preview
+                .as_ref()
+                .and_then(|preview| preview.get("timeline_seq"))
+                .and_then(Value::as_u64),
+        )
+        .max()
+        .map_or(0, |value| value.saturating_add(1))
 }
 
 #[derive(Debug, Clone)]
@@ -5769,6 +5788,7 @@ fn interrupted_turn_from_queued_message(
                 text: payload.text.clone(),
                 attachments: payload.attachments.clone(),
                 created_at_ms: payload.created_at_ms,
+                timeline_seq: Some(0),
                 command_id: Some(item.command_id.clone()),
                 delivery_state: Some(ChatCommandDeliveryState::Recorded),
                 worker_roles: payload.worker_roles.clone(),
@@ -6323,6 +6343,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                         text: content,
                         attachments: Vec::new(),
                         created_at_ms: created_at_ms as u128,
+                        timeline_seq: Some(next_turn_timeline_seq(turn)),
                         command_id,
                         delivery_state,
                         worker_roles: Vec::new(),
@@ -6431,6 +6452,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     source,
                     payload,
                     created_at_ms: created_at_ms as u128,
+                    timeline_seq: Some(next_turn_timeline_seq(turn)),
                 });
             }
         }
@@ -7720,10 +7742,12 @@ fn attach_worker_to_session_context(
     Ok(worker_id)
 }
 
+#[cfg(test)]
 fn submit_turn(state: &AppState, session_id: &str, text: String) -> Result<WebTurn, String> {
     submit_turn_with_command_id(state, session_id, text, None)
 }
 
+#[cfg(test)]
 fn submit_turn_with_command_id(
     state: &AppState,
     session_id: &str,
@@ -9496,6 +9520,7 @@ fn start_web_turn_with_selected_attachments_and_roles(
             text: text.to_string(),
             attachments,
             created_at_ms: now_ms(),
+            timeline_seq: Some(0),
             command_id: command_id.map(str::to_string),
             delivery_state: command_id.map(|_| ChatCommandDeliveryState::Recorded),
             worker_roles,
@@ -9657,6 +9682,7 @@ fn start_web_toolgen_turn(
                 text: text.to_string(),
                 attachments: Vec::new(),
                 created_at_ms,
+                timeline_seq: Some(0),
                 command_id: command_id.map(str::to_string),
                 delivery_state: command_id.map(|_| ChatCommandDeliveryState::Recorded),
                 worker_roles: Vec::new(),
@@ -9825,11 +9851,13 @@ fn append_turn_user_entry_with_attachments(
         .iter_mut()
         .find(|turn| turn.turn_id == active_turn_id)
         .expect("active turn existence checked before attachment consumption");
+    let timeline_seq = next_turn_timeline_seq(turn);
     turn.user_entries.push(WebTurnUserEntry {
         kind: kind.to_string(),
         text,
         attachments,
         created_at_ms: now_ms(),
+        timeline_seq: Some(timeline_seq),
         command_id: command_id.map(str::to_string),
         delivery_state: command_id.map(|_| ChatCommandDeliveryState::Recorded),
         worker_roles,
@@ -9972,11 +10000,22 @@ fn append_turn_event(
         .iter_mut()
         .find(|turn| turn.turn_id == active_turn_id)?;
     let event_id = unique_web_id("turn_event");
+    let is_model_response = payload["topic"]["name"].as_str() == Some(CORE_TOPIC_MODEL_RESPONSE);
+    let timeline_seq = if is_model_response {
+        turn.preview
+            .as_ref()
+            .and_then(|preview| preview.get("timeline_seq"))
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| next_turn_timeline_seq(turn))
+    } else {
+        next_turn_timeline_seq(turn)
+    };
     turn.events.push(WebTurnEvent {
         event_id: event_id.clone(),
         source: source.to_string(),
         payload,
         created_at_ms: now_ms(),
+        timeline_seq: Some(timeline_seq),
     });
     let history_event = turn
         .events
@@ -10817,6 +10856,7 @@ fn activate_core_started_turn(
                     text: payload.text.clone(),
                     attachments: payload.attachments.clone(),
                     created_at_ms: consumed_at_ms,
+                    timeline_seq: Some(0),
                     command_id: Some(command_id.to_string()),
                     delivery_state: Some(ChatCommandDeliveryState::CoreAccepted),
                     worker_roles: payload.worker_roles.clone(),
@@ -11630,21 +11670,16 @@ fn handle_scoped_worker_event(
                     outcome: json!({ "text": outcome.text, "message_id": message_id, "completion": completion }),
                 },
             );
-            dispatch_next_turn_intent_if_ready(state, session_id);
-            if should_resubmit_unconsumed_supplements {
-                let has_queued_intent = state
-                    .sessions
-                    .lock()
-                    .ok()
-                    .and_then(|sessions| {
-                        sessions
-                            .get(session_id)
-                            .map(|session| !session.message_queue.is_empty())
-                    })
-                    .unwrap_or(false);
-                if !has_queued_intent {
-                    resubmit_unconsumed_supplements(state, session_id, context_id, worker_id);
-                }
+            // Accepted-but-unconsumed supplements belong to the just-finished
+            // turn's terminal handoff and have priority over ordinary queued
+            // next-turn intents. Resubmit them first; on success the new active
+            // turn makes the queue dispatch below a no-op. If resubmission fails,
+            // keep the ordinary queue blocked so it cannot overtake the user's
+            // higher-priority follow-up.
+            let priority_handoff_ready = !should_resubmit_unconsumed_supplements
+                || resubmit_unconsumed_supplements(state, session_id, context_id, worker_id);
+            if priority_handoff_ready {
+                dispatch_next_turn_intent_if_ready(state, session_id);
             }
         }
         CoreSessionWorkerEvent::WorkerStopped => {
@@ -11665,7 +11700,7 @@ fn resubmit_unconsumed_supplements(
     session_id: &str,
     context_id: &str,
     worker_id: &str,
-) {
+) -> bool {
     let supplements = state
         .sessions
         .lock()
@@ -11677,10 +11712,14 @@ fn resubmit_unconsumed_supplements(
         })
         .unwrap_or_default();
     if supplements.is_empty() {
-        return;
+        return true;
     }
-    let text = supplements.join("\n\n");
-    match submit_turn(state, session_id, text.clone()) {
+    let text = supplements
+        .iter()
+        .map(|supplement| supplement.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    match submit_unconsumed_supplement_handoff(state, session_id, &supplements) {
         Ok(turn) => {
             publish_core_semantic(
                 state,
@@ -11690,6 +11729,7 @@ fn resubmit_unconsumed_supplements(
                     turn,
                 },
             );
+            true
         }
         Err(error) => {
             if let Ok(mut sessions) = state.sessions.lock() {
@@ -11710,8 +11750,163 @@ fn resubmit_unconsumed_supplements(
                     "text": text,
                 }),
             );
+            false
         }
     }
+}
+
+fn submit_unconsumed_supplement_handoff(
+    state: &AppState,
+    session_id: &str,
+    supplements: &[timem_session::UnconsumedSupplement],
+) -> Result<WebTurn, String> {
+    validate_session_model_service_config(state, session_id)?;
+    apply_pending_session_mcp(state, session_id)?;
+    let previous_session;
+    let turn;
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        if current_turn_id(session).is_some() {
+            return Err("turn_already_active_use_supplement".to_string());
+        }
+        previous_session = session.clone();
+        let created_at_ms = now_ms();
+        let mut user_entries = Vec::with_capacity(supplements.len());
+        for (index, supplement) in supplements.iter().enumerate() {
+            let original = supplement.command_id.as_deref().and_then(|command_id| {
+                session.turns.iter().rev().find_map(|candidate| {
+                    candidate
+                        .user_entries
+                        .iter()
+                        .rev()
+                        .find(|entry| entry.command_id.as_deref() == Some(command_id))
+                        .cloned()
+                })
+            });
+            user_entries.push(WebTurnUserEntry {
+                kind: if index == 0 { "task" } else { "supplement" }.to_string(),
+                text: supplement.text.clone(),
+                attachments: original
+                    .as_ref()
+                    .map(|entry| entry.attachments.clone())
+                    .unwrap_or_default(),
+                created_at_ms,
+                timeline_seq: Some(index as u64),
+                command_id: supplement.command_id.clone(),
+                delivery_state: Some(ChatCommandDeliveryState::CoreAccepted),
+                worker_roles: original.map(|entry| entry.worker_roles).unwrap_or_default(),
+            });
+        }
+        turn = WebTurn {
+            preview: None,
+            turn_id: unique_web_id("web_turn"),
+            state: "pending".to_string(),
+            created_at_ms,
+            interrupted_at_ms: None,
+            user_entries,
+            events: Vec::new(),
+            final_answer: None,
+            completion: None,
+        };
+        session.pending_turn_id = Some(turn.turn_id.clone());
+        session.turns.push(turn.clone());
+        if session.turns.len() > MAX_SESSION_TURNS {
+            let excess = session.turns.len() - MAX_SESSION_TURNS;
+            session.turns.drain(..excess);
+        }
+        session.messages.push(WebChatMessage {
+            id: unique_web_id("msg_user"),
+            role: "user".to_string(),
+            text: supplements
+                .iter()
+                .map(|supplement| supplement.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            created_at_ms,
+            kind: None,
+            completion: None,
+        });
+    }
+
+    let persist_result = turn
+        .user_entries
+        .iter()
+        .try_for_each(|entry| {
+            append_chat_history_message(
+                state,
+                session_id,
+                &turn.turn_id,
+                "user",
+                Some(&entry.kind),
+                entry.command_id.as_deref(),
+                entry.created_at_ms as i64,
+                entry.text.clone(),
+            )
+            .and_then(|()| {
+                append_worker_roles_history(
+                    state,
+                    session_id,
+                    &turn.turn_id,
+                    entry.created_at_ms as i64,
+                    &entry.worker_roles,
+                )
+            })
+        })
+        .and_then(|()| persist_web_session(state, session_id));
+    if let Err(error) = persist_result {
+        if let Ok(mut sessions) = state.sessions.lock() {
+            sessions.insert(session_id.to_string(), previous_session);
+        }
+        return Err(error);
+    }
+
+    let attachments = turn
+        .user_entries
+        .iter()
+        .flat_map(|entry| entry.attachments.iter().cloned())
+        .collect::<Vec<_>>();
+    let roles = turn
+        .user_entries
+        .iter()
+        .flat_map(|entry| entry.worker_roles.iter().cloned())
+        .collect::<Vec<_>>();
+    let host_context = session_context_with_roles(state, session_id, &attachments, &roles)?;
+    let returned_context = combine_additional_contexts(
+        supplements
+            .iter()
+            .filter_map(|supplement| supplement.additional_context.as_deref())
+            .map(Some),
+    );
+    let additional_context =
+        combine_additional_contexts([host_context.as_deref(), returned_context.as_deref()]);
+    let input = supplements
+        .iter()
+        .map(|supplement| supplement.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let enqueue = primary_worker_handle(state, session_id).and_then(|worker| {
+        turn_image_parts(&attachments).and_then(|images| {
+            // The original command IDs were already accepted by Core when the
+            // supplements entered the finishing turn. Preserve them on the Web
+            // entries, but use an internal handoff (no external command ID) for
+            // this new Core turn so deduplication cannot suppress it.
+            worker.run_turn_with_command_id_and_images(input, additional_context, None, images)
+        })
+    });
+    if let Err(error) = enqueue {
+        if let Ok(mut sessions) = state.sessions.lock() {
+            sessions.insert(session_id.to_string(), previous_session);
+        }
+        let _ = persist_web_session(state, session_id);
+        return Err(error);
+    }
+    Ok(turn)
 }
 
 fn is_primary_worker(state: &AppState, session_id: &str, worker_id: &str) -> bool {
@@ -11778,6 +11973,7 @@ fn slim_restored_turn_for_snapshot(turn: &WebTurn) -> WebTurn {
                 0,
             )),
             created_at_ms: event.created_at_ms,
+            timeline_seq: event.timeline_seq,
         })
         .collect();
     const SNAPSHOT_TURN_EVENT_LIMIT: usize = 40;
