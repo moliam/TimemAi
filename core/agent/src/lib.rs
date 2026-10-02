@@ -1836,6 +1836,10 @@ pub struct AgentCore {
     /// injects the compaction request. The turn loop drains it into a
     /// `core.context.compact` phase="requested" topic event for live UI.
     pending_compact_request_notice: Option<(u32, u32)>,
+    /// Consecutive successful threshold-triggered compactions whose resulting
+    /// dynamic context still occupies more than 25% of the model input window.
+    /// Manual and spontaneous compactions are excluded from this sequence.
+    consecutive_poor_threshold_compactions: u8,
     rounds_since_reasoning: u32,
     reasoning_review_due: bool,
     /// Incrementally maintained count of user/assistant/summary message
@@ -1971,6 +1975,7 @@ impl AgentCore {
             context_compact_required: false,
             manual_compact_trailer_pending: false,
             pending_compact_request_notice: None,
+            consecutive_poor_threshold_compactions: 0,
             rounds_since_reasoning: 0,
             reasoning_review_due: false,
             context_message_elements: 0,
@@ -3364,6 +3369,7 @@ impl AgentCore {
         self.context_compact_required = false;
         self.manual_compact_trailer_pending = false;
         self.pending_compact_request_notice = None;
+        self.consecutive_poor_threshold_compactions = 0;
         self.current_round = 0;
         self.current_stats = UsageStats::zero();
         self.repair_attempted = false;
@@ -3963,6 +3969,8 @@ impl AgentCore {
         let compact_result_slice_start = slices.len();
         let mut compacted_successfully = false;
         let mut successful_compact_summaries = Vec::new();
+        let threshold_compaction_requested =
+            self.context_compact_required && !self.manual_compact_trailer_pending;
         for compact in &parsed.context_compacts {
             // Idempotent refs: a delta id that no longer exists has already
             // reached the compaction target state (an earlier compact
@@ -4046,11 +4054,13 @@ impl AgentCore {
                 slices.push(("result_of_llm_action".to_string(), result));
                 let estimated_after = self.dynamic_context_token_estimate();
                 let summary_tokens = estimate_prompt_tokens(&compact.summary);
+                let estimated_before_tokens = estimated_before.total_tokens();
+                let estimated_after_tokens = estimated_after
+                    .total_tokens()
+                    .saturating_add(summary_tokens);
                 let compact_report = host::CoreContextCompactTopic {
-                    estimated_before_tokens: estimated_before.total_tokens(),
-                    estimated_after_tokens: estimated_after
-                        .total_tokens()
-                        .saturating_add(summary_tokens),
+                    estimated_before_tokens,
+                    estimated_after_tokens,
                     estimated_text_before_tokens: estimated_before.text_tokens,
                     estimated_text_after_tokens: estimated_after
                         .text_tokens
@@ -4065,6 +4075,13 @@ impl AgentCore {
                     self.current_session_id(),
                     &compact_report,
                 )]);
+                if let Some(note) = self.threshold_compaction_quality_note(
+                    threshold_compaction_requested,
+                    estimated_before_tokens,
+                    estimated_after_tokens,
+                ) {
+                    slices.push(("runtime_note".to_string(), note));
+                }
                 successful_compact_summaries.push(compact.summary.trim().to_string());
                 compacted_successfully = true;
             } else {
@@ -6011,6 +6028,40 @@ Runtime tool_call ids:",
         // immediately by the Host when the user clicks, so Core must not
         // schedule a second requested notice here; only the forced-shrink
         // threshold path still emits its own notice.
+    }
+
+    fn threshold_compaction_quality_note(
+        &mut self,
+        threshold_triggered: bool,
+        estimated_before_tokens: u32,
+        estimated_after_tokens: u32,
+    ) -> Option<String> {
+        if !threshold_triggered {
+            return None;
+        }
+        let window_tokens = self.max_llm_input_tokens;
+        let remains_above_target =
+            u64::from(estimated_after_tokens) * 100 > u64::from(window_tokens) * 25;
+        if !remains_above_target {
+            self.consecutive_poor_threshold_compactions = 0;
+            return None;
+        }
+
+        let previous = self.consecutive_poor_threshold_compactions;
+        self.consecutive_poor_threshold_compactions = previous.saturating_add(1);
+        if previous != 1 {
+            return None;
+        }
+
+        let occupancy_percent = |tokens: u32| {
+            let numerator = u64::from(tokens) * 100;
+            ((numerator + u64::from(window_tokens) - 1) / u64::from(window_tokens)) as u32
+        };
+        Some(format!(
+            "NOTE: context compaction ratio is not very good, {}% -> {}%, try to compress more by retaining only necessary part and discard bulky along-side info if possible.",
+            occupancy_percent(estimated_before_tokens),
+            occupancy_percent(estimated_after_tokens)
+        ))
     }
 
     fn estimate_rendered_prompt_tokens(&self, incoming_prompt_tokens: u32) -> u32 {

@@ -383,6 +383,105 @@ fn forced_compaction_ignores_non_compact_output_then_unlocks_after_success() {
 }
 
 #[test]
+fn threshold_compaction_quality_warning_tracks_only_consecutive_poor_forced_results() {
+    let mut core = test_core("threshold_compaction_quality_warning");
+    core.set_max_llm_input_tokens(4_000);
+
+    assert!(core
+        .threshold_compaction_quality_note(false, 3_601, 1_001)
+        .is_none());
+    assert_eq!(core.consecutive_poor_threshold_compactions, 0);
+
+    assert!(core
+        .threshold_compaction_quality_note(true, 3_601, 1_001)
+        .is_none());
+    assert_eq!(core.consecutive_poor_threshold_compactions, 1);
+
+    assert_eq!(
+        core.threshold_compaction_quality_note(true, 3_601, 1_001),
+        Some("NOTE: context compaction ratio is not very good, 91% -> 26%, try to compress more by retaining only necessary part and discard bulky along-side info if possible.".to_string())
+    );
+    assert_eq!(core.consecutive_poor_threshold_compactions, 2);
+
+    assert!(core
+        .threshold_compaction_quality_note(true, 3_601, 1_001)
+        .is_none());
+    assert_eq!(core.consecutive_poor_threshold_compactions, 3);
+
+    assert!(core
+        .threshold_compaction_quality_note(true, 3_601, 1_000)
+        .is_none());
+    assert_eq!(core.consecutive_poor_threshold_compactions, 0);
+
+    assert!(core
+        .threshold_compaction_quality_note(true, 3_601, 1_001)
+        .is_none());
+    assert!(core
+        .threshold_compaction_quality_note(false, 3_601, 500)
+        .is_none());
+    assert_eq!(core.consecutive_poor_threshold_compactions, 1);
+    assert!(core
+        .threshold_compaction_quality_note(true, 3_601, 1_001)
+        .is_some());
+
+    core.clear_dynamic_context();
+    assert_eq!(core.consecutive_poor_threshold_compactions, 0);
+}
+
+#[test]
+fn second_poor_threshold_compaction_injects_one_quality_warning() {
+    let mut core = test_core("threshold_compaction_quality_warning_in_prompt");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "retained active context ".repeat(4_400),
+    )]);
+    assert!(core.dynamic_context_estimated_tokens() > core.max_llm_input_tokens / 4);
+    let warning = "NOTE: context compaction ratio is not very good,";
+    let attempts = [
+        ("first threshold", false, 0),
+        ("manual", true, 0),
+        ("second threshold", false, 1),
+        ("third threshold", false, 1),
+    ];
+
+    for (label, manual, expected_warning_count) in attempts {
+        core.append_delta(vec![(
+            "runtime_note".to_string(),
+            format!("discardable context for {label}"),
+        )]);
+        let discard_id = core.deltas.last().unwrap().delta_id.clone();
+        if manual {
+            core.request_manual_context_compact();
+        } else {
+            core.context_compact_required = true;
+            core.manual_compact_trailer_pending = false;
+        }
+        let step = core.apply_model_response(LlmResponse {
+            content: serde_json::json!({
+                "context_compact": {
+                    "discard": [discard_id],
+                    "summary": format!("retain active state after {label}")
+                }
+            })
+            .to_string(),
+            tool_calls: Vec::new(),
+            model_name: "test".to_string(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        });
+        let CoreStep::NeedModel { prompt, .. } = step else {
+            panic!("successful compaction must continue")
+        };
+        assert_eq!(
+            prompt.matches(warning).count(),
+            expected_warning_count,
+            "{label}: {prompt}"
+        );
+    }
+}
+
+#[test]
 fn native_context_compact_persists_summary_after_discarding_all_old_deltas() {
     let mut core = test_core("native_compact_summary_all");
     core.set_response_protocol(ResponseProtocolKind::Json);
