@@ -1,6 +1,7 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { memo, useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
+  ClipboardPaste,
   Copy,
   KeyRound,
   LoaderCircle,
@@ -31,7 +32,7 @@ export function endpointShareErrorMessage(error: string): string {
   }
 }
 
-export function EndpointSharePanel({ endpoint, transport, onClose }: {
+export const EndpointSharePanel = memo(function EndpointSharePanel({ endpoint, transport, onClose }: {
   endpoint?: { id: string; name: string };
   transport: ShareTransport;
   onClose: () => void;
@@ -42,24 +43,37 @@ export function EndpointSharePanel({ endpoint, transport, onClose }: {
   const [basic, setBasic] = useState(true);
   const [advanced, setAdvanced] = useState(false);
   const [personal, setPersonal] = useState(false);
-  const [data, setData] = useState("");
+  const [exportData, setExportData] = useState("");
+  const [hasImportData, setHasImportData] = useState(false);
   const [message, setMessage] = useState("");
   const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const importRef = useRef<HTMLTextAreaElement>(null);
+  const hasImportDataRef = useRef(false);
   const cancel = useRef<() => void>(() => {});
   useEffect(() => () => cancel.current(), []);
   const close = () => {
     cancel.current();
     cancel.current = () => {};
+    if (importRef.current) importRef.current.value = "";
     onClose();
   };
-  const invalidate = () => {
+  const invalidateExport = () => {
     cancel.current();
     cancel.current = () => {};
     setBusy(false);
     setFailed(false);
-    setData("");
+    setExportData("");
     setMessage("");
+  };
+  const setImportPresence = (present: boolean) => {
+    if (hasImportDataRef.current === present) return;
+    hasImportDataRef.current = present;
+    setHasImportData(present);
+  };
+  const clearImport = () => {
+    if (importRef.current) importRef.current.value = "";
+    setImportPresence(false);
   };
   const finish = (result: ShareResult) => {
     cancel.current = () => {};
@@ -68,15 +82,17 @@ export function EndpointSharePanel({ endpoint, transport, onClose }: {
     if (result.error) {
       setMessage(`${t("endpoints.shareFailed")} ${endpointShareErrorMessage(result.error)}`);
     } else if (result.data !== undefined) {
-      setData(result.data);
+      setExportData(result.data);
     } else if (result.name !== undefined) {
-      setData("");
+      clearImport();
       setMessage(t("endpoints.shareImported", { name: result.name }));
     }
   };
   const submit = () => {
     cancel.current();
     cancel.current = () => {};
+    const importData = endpoint ? "" : importRef.current?.value ?? "";
+    if (!endpoint && !importData.trim()) return;
     setBusy(true);
     setFailed(false);
     setMessage("");
@@ -86,7 +102,7 @@ export function EndpointSharePanel({ endpoint, transport, onClose }: {
       const stop = transport(endpoint ? {
         type: "model_endpoint_share_export", request_id, endpoint_id: endpoint.id,
         basic, advanced, personal,
-      } : { type: "model_endpoint_share_import", request_id, data }, result => {
+      } : { type: "model_endpoint_share_import", request_id, data: importData }, result => {
         completedSynchronously = true;
         finish(result);
       });
@@ -95,6 +111,20 @@ export function EndpointSharePanel({ endpoint, transport, onClose }: {
       cancel.current = completedSynchronously ? () => {} : stop;
     } catch {
       finish({ error: "endpoint_share_client_failed" });
+    }
+  };
+  const pasteImport = async () => {
+    try {
+      const clipboard = await navigator.clipboard.readText();
+      if (!importRef.current) return;
+      importRef.current.value = clipboard.slice(0, 262144);
+      setImportPresence(/\S/.test(importRef.current.value));
+      setFailed(false);
+      setMessage(t("endpoints.sharePasted"));
+      importRef.current.focus();
+    } catch {
+      setFailed(true);
+      setMessage(t("endpoints.sharePasteFailed"));
     }
   };
   if (typeof document === "undefined") return null;
@@ -137,29 +167,51 @@ export function EndpointSharePanel({ endpoint, transport, onClose }: {
             {optionRows.map(({ key, checked, set, icon: Icon, label, sensitive }) => <label key={key} className={sensitive ? "sensitive" : ""}>
               <span className="endpoint-share-option-icon"><Icon size={15} aria-hidden="true" /></span>
               <span className="endpoint-share-option-label">{label}{sensitive && <TriangleAlert size={14} aria-hidden="true" />}</span>
-              <input type="checkbox" checked={checked} onChange={event => { invalidate(); set(event.target.checked); }} />
+              <input type="checkbox" checked={checked} onChange={event => { invalidateExport(); set(event.target.checked); }} />
             </label>)}
             {!basic && <small>{t("endpoints.shareBasicRequired")}</small>}
           </div>}
           <p className="endpoint-share-warning" id={warningId}><TriangleAlert size={16} aria-hidden="true" /><span>{t("endpoints.shareWarning")}</span></p>
-          {(!endpoint || data) && <label className="endpoint-share-data">
+          {endpoint && exportData && <div className="endpoint-share-data endpoint-share-export-data">
             <span>{t("endpoints.shareString")}</span>
-            <textarea aria-label={t("endpoints.shareString")} rows={5} wrap="off" maxLength={262144} spellCheck={false} autoComplete="off" readOnly={!!endpoint || busy} value={data} onChange={event => { setData(event.target.value); setFailed(false); setMessage(""); }} />
+            <output className="endpoint-share-code" aria-label={t("endpoints.shareString")} tabIndex={0}><code>{exportData}</code></output>
+          </div>}
+          {!endpoint && <label className="endpoint-share-data endpoint-share-import">
+            <span>{t("endpoints.shareString")}</span>
+            <textarea
+              ref={importRef}
+              aria-label={t("endpoints.shareString")}
+              rows={5}
+              wrap="soft"
+              maxLength={262144}
+              spellCheck={false}
+              autoComplete="off"
+              readOnly={busy}
+              placeholder={t("endpoints.shareImportHint")}
+              onInput={event => {
+                setImportPresence(/\S/.test(event.currentTarget.value));
+                if (message) {
+                  setFailed(false);
+                  setMessage("");
+                }
+              }}
+            />
           </label>}
           {message && <p className="endpoint-share-message" role={failed ? "alert" : "status"}>{message}</p>}
           <div className="endpoint-share-actions">
-            <button type="button" className={`primary compact ${busy ? "sending" : ""}`} aria-live="polite" disabled={busy || (endpoint ? !basic && !advanced && !personal : !data.trim())} onClick={submit}>
+            <button type="button" className={`primary compact ${busy ? "sending" : ""}`} aria-live="polite" disabled={busy || (endpoint ? !basic && !advanced && !personal : !hasImportData)} onClick={submit}>
               {busy && <LoaderCircle size={14} aria-hidden="true" />}
               {busy ? workingLabel : t(endpoint ? "endpoints.shareGenerate" : "endpoints.shareImport")}
             </button>
-            {endpoint && data && <button type="button" className="secondary compact" onClick={async () => {
-              try { await navigator.clipboard.writeText(data); setFailed(false); setMessage(t("endpoints.shareCopied")); }
+            {endpoint && exportData && <button type="button" className="secondary compact" onClick={async () => {
+              try { await navigator.clipboard.writeText(exportData); setFailed(false); setMessage(t("endpoints.shareCopied")); }
               catch { setFailed(true); setMessage(t("endpoints.shareCopyFailed")); }
             }}><Copy size={14} />{t("endpoints.shareCopy")}</button>}
+            {!endpoint && <button type="button" className="secondary compact" disabled={busy} onClick={pasteImport}><ClipboardPaste size={14} />{t("endpoints.sharePaste")}</button>}
           </div>
         </div>
       </section>
     </div>,
     document.body,
   );
-}
+});

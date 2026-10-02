@@ -81,8 +81,12 @@ representation. It must not merge events from different session or request ids.
 
 Endpoint sharing is isolated in `src/endpoint_share.tsx`: a transient top-level
 Portal dialog above Settings owns category checkboxes, opaque share content,
-Lucide warning/progress icons, copy, and local result presentation. Basic is
-selected by default; advanced and personal are opt-in. Host commands perform
+Lucide warning/progress icons, copy/paste, and local result presentation. Exported
+content is a copy-only, focusable, automatically wrapping code output; import uses
+an uncontrolled bounded textarea so large pasted payloads do not enter React state
+on every keystroke. The modal uses opaque surfaces rather than live backdrop
+sampling and is memoized behind stable parent callbacks. Basic is selected by
+default; advanced and personal are opt-in. Host commands perform
 encoding, validation, collision resolution and persistence. The browser must
 not export redacted snapshots as original configurations, interpret ACK as
 import success, retain share strings across dialog unmount/MEM switch/disconnect,

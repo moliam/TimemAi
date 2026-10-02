@@ -785,8 +785,8 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 导出不读取脱敏投影，不广播、不进入语义重放和命令结果缓存；仅显式勾选个人配置时包含其密钥。导入落盘成功后更新内存与脱敏投影；取消/超时清理相关临时命令引用，关闭面板丢弃迟到结果。
 - `applications/timem/tests/unit/web_host_tests.rs`：`endpoint_share_*`三项测试覆盖全部七种非空类别组合、Unicode、默认无密钥、私有直接回复、去重缓存排除、原配置不变、连续重名、持久化、无效Base64/JSON/版本/配置/超长/ID注入、写入失败不修改内存及原文件、8个并发导入唯一名称。
 - `interfaces/web/tests/wire_delivery.test.ts`：两种分享结果作为直接事件，不被语义事件游标误过滤。
-- `interfaces/web/tests/browser/endpoint-share-e2e.mjs`：只针对隔离Host，以 `TIMEM_SHARE_TEST_URL=http://127.0.0.1:<port> node interfaces/web/tests/browser/endpoint-share-e2e.mjs` 执行。真实鼠标操作验证默认选项、三类内容、切换后清空旧输出、Lucide图标、明暗主题/390px窄屏、256 KiB 分享串保持单行水平滚动且布局/滚动耗时受限，并以同元素同内容仅切换换行处理的受控对照验证几何差异、第二连接无秘密广播、关闭重开清空秘密、无选择禁用、错误导入不新增、连续名称后缀、刷新后完整配置再次导出。脚本自行清理Chrome与临时目录；Host由调用者隔离启动并清理。
-- 本次验证：Rust分享专项3项、Web552项、类型检查、5项性能检查、架构/模块/测试契约守卫及diff检查通过；隔离Host+Chrome分享验收及原模板/编辑器浏览器回归通过。Vite dist及嵌入Host构建已更新。未运行完整Rust工作区测试，未调用远端模型服务，未重启开发实例。
+- `interfaces/web/tests/browser/endpoint-share-e2e.mjs`：只针对隔离Host，以 `TIMEM_SHARE_TEST_URL=http://127.0.0.1:<port> node interfaces/web/tests/browser/endpoint-share-e2e.mjs` 执行。真实鼠标操作验证默认选项、三类内容、切换后清空旧输出、Lucide图标、明暗主题/390px窄屏、导出为只读自动换行代码区且仅提供复制、256 KiB 导入使用无控有界输入并保持响应、剪贴板粘贴、第二连接无秘密广播、关闭重开清空秘密、无选择禁用、错误导入不新增、连续名称后缀、刷新后完整配置再次导出。脚本自行清理Chrome与临时目录；Host由调用者隔离启动并清理。
+- 最新分享弹窗优化验证：Rust分享专项3项、Web671项、类型检查、5项性能检查、架构/模块/测试契约守卫及diff检查通过；以临时MEM和独立回环端口运行隔离Host+Chrome完整分享验收，覆盖只读换行导出、复制/剪贴板粘贴、256 KiB无控导入、错误/重名/刷新回环和秘密不广播。实测最大输入不重挂弹窗或面板、无React `value` 属性回写，输入处理约43ms。Vite dist及嵌入Host构建已更新。未运行完整Rust工作区测试，未调用远端模型服务，未重启开发实例。
 
 
 ## 内置工具语义摘要与整行展开交互

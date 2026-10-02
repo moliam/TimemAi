@@ -51,10 +51,36 @@ describe("endpoint share dialog", () => {
     expect(component).toContain("completedSynchronously ? () => {} : stop");
   });
 
-  it("keeps opaque share strings on one scrollable line", () => {
-    expect(component).toContain('rows={5} wrap="off" maxLength={262144}');
-    expect(styles).toMatch(/\.endpoint-share-data textarea \{[^}]*white-space: pre;[^}]*overflow: auto;[^}]*overflow-wrap: normal;[^}]*word-break: normal;/);
-    expect(styles).not.toMatch(/\.endpoint-share-data textarea \{[^}]*overflow-wrap: anywhere;/);
+  it("renders export content as copy-only wrapped output and keeps import uncontrolled", () => {
+    expect(component).toContain('<output className="endpoint-share-code"');
+    expect(component).toContain('<code>{exportData}</code>');
+    const exportBlock = component.slice(
+      component.indexOf('endpoint-share-export-data'),
+      component.indexOf('{!endpoint && <label'),
+    );
+    expect(exportBlock).not.toContain("<textarea");
+    expect(component).toContain('ref={importRef}');
+    expect(component).toContain('rows={5}');
+    expect(component).toContain('wrap="soft"');
+    expect(component).not.toContain('value={data}');
+    expect(component).toContain('const importData = endpoint ? "" : importRef.current?.value ?? "";');
+    expect(styles).toMatch(/\.endpoint-share-code \{[^}]*white-space: pre-wrap;[^}]*overflow-wrap: anywhere;[^}]*word-break: break-word;/);
+    expect(styles).toMatch(/\.endpoint-share-code,[\s\S]*max-height: 190px;[\s\S]*overflow: auto;/);
+  });
+
+  it("isolates the modal from parent updates and avoids live backdrop sampling", () => {
+    expect(component).toContain("export const EndpointSharePanel = memo(function EndpointSharePanel");
+    expect(main).toContain("const closeEndpointShare = useCallback(() => setShareTarget(null), []);");
+    expect(main).toContain("onClose={closeEndpointShare}");
+    expect(styles).not.toMatch(/\.endpoint-share-(?:backdrop|heading) \{[^}]*backdrop-filter/);
+  });
+
+  it("offers clipboard paste without storing the import payload in React state", () => {
+    expect(component).toContain("navigator.clipboard.readText()");
+    expect(component).toContain("importRef.current.value = clipboard.slice(0, 262144)");
+    expect(component).toContain("const [hasImportData, setHasImportData] = useState(false)");
+    expect(component).not.toMatch(/useState\([^)]*data/);
+    expect(component).toContain("setImportPresence(/\\S/.test(event.currentTarget.value))");
   });
 
   it("keeps the dialog above Settings and responsive on narrow screens", () => {

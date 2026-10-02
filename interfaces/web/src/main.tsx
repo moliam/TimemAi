@@ -14156,6 +14156,7 @@ function EndpointSettingsPane({
   onSave: (endpoint: ModelEndpointDraft) => void;
 }) {
   const [shareTarget, setShareTarget] = useState<ModelEndpoint | "import" | null>(null);
+  const closeEndpointShare = useCallback(() => setShareTarget(null), []);
   const [deleteMode, setDeleteMode] = useState(false);
   const [selectedEndpointIds, setSelectedEndpointIds] = useState<Set<string>>(
     () => new Set(),
@@ -14341,7 +14342,7 @@ function EndpointSettingsPane({
         </div>
       </div>
       {shareTarget && <EndpointSharePanel key={shareTarget === "import" ? "import" : shareTarget.id}
-        endpoint={shareTarget === "import" ? undefined : shareTarget} transport={shareTransport} onClose={() => setShareTarget(null)} />}
+        endpoint={shareTarget === "import" ? undefined : shareTarget} transport={shareTransport} onClose={closeEndpointShare} />}
       {showImport && (
         <div className="endpoint-import-panel">
           <div className="endpoint-import-heading">

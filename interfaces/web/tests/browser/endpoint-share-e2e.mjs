@@ -139,7 +139,7 @@ const click = async (selector) => {
   await sleep(100);
 };
 const setData = async data => {
-  await evaluate(`(() => {const e=document.querySelector('.endpoint-share-data textarea');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(e,${JSON.stringify(data)});e.dispatchEvent(new Event('input',{bubbles:true}));})()`);
+  await evaluate(`(() => {const e=document.querySelector('.endpoint-share-import textarea');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(e,${JSON.stringify(data)});e.dispatchEvent(new Event('input',{bubbles:true}));})()`);
   await sleep(100);
 };
 // Second authenticated connection observes broadcasts and seeds one fixture.
@@ -167,14 +167,14 @@ const generate = async () => {
  const started=Date.now();
  const button=await hitTest("document.querySelector('.endpoint-share-actions .primary')",'share submit');
  await realMouseClick(button.x,button.y);
- await waitFor(()=>evaluate(`document.querySelector('.endpoint-share-dialog')?.getAttribute('aria-busy')==='true' || !!document.querySelector('.endpoint-share-data textarea')?.value`),'visible export progress or result');
- await waitFor(()=>evaluate(`!!document.querySelector('.endpoint-share-data textarea')?.value`),'export data');
+ await waitFor(()=>evaluate(`document.querySelector('.endpoint-share-dialog')?.getAttribute('aria-busy')==='true' || !!document.querySelector('.endpoint-share-code')?.textContent`),'visible export progress or result');
+ await waitFor(()=>evaluate(`!!document.querySelector('.endpoint-share-code')?.textContent`),'export data');
  const elapsed=Date.now()-started;
  const progress=await evaluate(`(() => {window.shareGeneratingObserver?.disconnect();return {counts:window.shareGeneratingCounts,progressNodes:document.querySelectorAll('.endpoint-share-progress').length};})()`);
  assert(Math.max(0,...progress.counts)<=1,'generating label rendered more than once: '+JSON.stringify(progress.counts));
  assert(progress.progressNodes===0,'duplicate standalone progress row rendered');
  assert(elapsed<3000,'local share export should settle quickly, took '+elapsed+'ms');
- return evaluate(`document.querySelector('.endpoint-share-data textarea').value`);
+ return evaluate(`document.querySelector('.endpoint-share-code').textContent`);
 };
 await openExport();
 assert(await evaluate(`JSON.stringify([...document.querySelectorAll('.endpoint-share-options input')].map(e=>e.checked))==='[true,false,false]'`),'safe defaults');
@@ -183,7 +183,7 @@ const basic = await generate();
 const decode = data=>JSON.parse(Buffer.from(data,'base64').toString('utf8'));
 assert(decode(basic).basic && !decode(basic).advanced && !decode(basic).personal,'basic only default');
 await click("document.querySelectorAll('.endpoint-share-options label')[1]");
-assert(await evaluate(`!document.querySelector('.endpoint-share-data textarea')`),'selection clears previous export');
+assert(await evaluate(`!document.querySelector('.endpoint-share-code')`),'selection clears previous export');
 const advanced = await generate();
 assert(decode(advanced).advanced.request_fields.vendor_options.custom==='中文' && !decode(advanced).personal,'advanced custom fields');
 await click("document.querySelectorAll('.endpoint-share-options label')[2]");
@@ -194,13 +194,23 @@ for (const width of [1280,390]) {
  await call('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:false});
  for(const theme of ['dark','light']) {
   await evaluate(`document.documentElement.dataset.theme=${JSON.stringify(theme)}`);
-  assert(await evaluate(`(() => {const p=document.querySelector('.endpoint-share-dialog');const r=p.getBoundingClientRect();return r.top>=0 && r.bottom<=innerHeight+1 && p.scrollWidth<=p.clientWidth+1 && [...p.querySelectorAll('input,textarea,button')].every(e=>{const b=e.getBoundingClientRect();return b.left>=r.left && b.right<=r.right;});})()`),'share modal fits '+width+' '+theme);
+  assert(await evaluate(`(() => {const p=document.querySelector('.endpoint-share-dialog');const r=p.getBoundingClientRect();return r.top>=0 && r.bottom<=innerHeight+1 && p.scrollWidth<=p.clientWidth+1 && [...p.querySelectorAll('input,textarea,button,.endpoint-share-code')].every(e=>{const b=e.getBoundingClientRect();return b.left>=r.left && b.right<=r.right;});})()`),'share modal fits '+width+' '+theme);
  }
 }
+// Export is copy-only and wraps inside a bounded, selectable code viewport.
+assert(await evaluate(`(() => {
+ const code=document.querySelector('.endpoint-share-code');
+ if(!code || code.tagName!=='OUTPUT' || code.querySelector('textarea,input')) return false;
+ const style=getComputedStyle(code);
+ const actions=[...document.querySelectorAll('.endpoint-share-actions button')].map(button=>button.textContent.trim());
+ return code.tabIndex===0 && style.whiteSpace==='pre-wrap' && style.overflowWrap==='anywhere' &&
+   code.scrollWidth<=code.clientWidth+2 && code.scrollHeight>code.clientHeight &&
+   actions.some(label=>/复制|copy/i.test(label)) && !actions.some(label=>/编辑|edit/i.test(label));
+})()`),'export must be a focusable, wrapped, copy-only output');
 await close();
 assert(await evaluate(`!document.querySelector('.endpoint-share-backdrop') && !!document.querySelector('.settings-center')`),'closing share keeps settings open');
 await openExport();
-assert(await evaluate(`!document.querySelector('.endpoint-share-data textarea') && JSON.stringify([...document.querySelectorAll('.endpoint-share-options input')].map(e=>e.checked))==='[true,false,false]'`),'close clears secrets and resets selections');
+assert(await evaluate(`!document.querySelector('.endpoint-share-code') && JSON.stringify([...document.querySelectorAll('.endpoint-share-options input')].map(e=>e.checked))==='[true,false,false]'`),'close clears secrets and resets selections');
 // All unchecked disallows export, basic-less fragment cannot create a new endpoint.
 await click("document.querySelectorAll('.endpoint-share-options label')[0]");
 assert(await evaluate(`document.querySelector('.endpoint-share-actions .primary').disabled`),'empty selection blocked');
@@ -208,40 +218,47 @@ await click("document.querySelectorAll('.endpoint-share-options label')[1]");
 const fragment=await generate();
 await close();
 await click("[...document.querySelectorAll('.endpoint-settings-toolbar button')].find(b=>/导入分享|import shared endpoint/i.test(b.textContent))");
-// A share string is opaque Base64. Wrapping 256 KiB into tens of thousands of
-// visual lines makes Chromium layout and vertical scrolling pathologically
-// expensive. Keep it one logical line and verify the real textarea geometry.
+// The import field is intentionally uncontrolled. A maximum-size paste updates
+// the DOM value without replacing the dialog/panel or reflecting the payload in
+// a React value attribute; wrapping stays inside a bounded scroll viewport.
 const largeShareMetrics=await evaluate(`new Promise(resolve=>{
- const e=document.querySelector('.endpoint-share-data textarea');
+ const dialog=document.querySelector('.endpoint-share-dialog');
+ const panel=document.querySelector('.endpoint-share-panel');
+ const e=document.querySelector('.endpoint-share-import textarea');
+ window.endpointShareDialogIdentity=dialog;window.endpointSharePanelIdentity=panel;
  const setter=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set;
  const started=performance.now();
  setter.call(e,'A'.repeat(262144));e.dispatchEvent(new Event('input',{bubbles:true}));
  requestAnimationFrame(()=>requestAnimationFrame(()=>{
-  const layoutMs=performance.now()-started;
-  const scrollStarted=performance.now();
-  for(let i=0;i<200;i++)e.scrollLeft=i%2?e.scrollWidth:0;
-  resolve({wrap:e.wrap,whiteSpace:getComputedStyle(e).whiteSpace,clientHeight:e.clientHeight,scrollHeight:e.scrollHeight,clientWidth:e.clientWidth,scrollWidth:e.scrollWidth,layoutMs,scrollMs:performance.now()-scrollStarted});
+  const style=getComputedStyle(e);
+  resolve({
+   sameDialog:window.endpointShareDialogIdentity===document.querySelector('.endpoint-share-dialog'),
+   samePanel:window.endpointSharePanelIdentity===document.querySelector('.endpoint-share-panel'),
+   valueAttribute:e.getAttribute('value'),valueLength:e.value.length,wrap:e.wrap,
+   whiteSpace:style.whiteSpace,overflowWrap:style.overflowWrap,
+   clientHeight:e.clientHeight,scrollHeight:e.scrollHeight,
+   clientWidth:e.clientWidth,scrollWidth:e.scrollWidth,
+   layoutMs:performance.now()-started,
+   importEnabled:!document.querySelector('.endpoint-share-actions .primary').disabled,
+  });
  }));
 })`);
-assert(largeShareMetrics.wrap==='off' && largeShareMetrics.whiteSpace==='pre','large share textarea must disable wrapping: '+JSON.stringify(largeShareMetrics));
-assert(largeShareMetrics.scrollHeight<=largeShareMetrics.clientHeight+4 && largeShareMetrics.scrollWidth>largeShareMetrics.clientWidth,'256 KiB share must use horizontal, not giant vertical, scrolling: '+JSON.stringify(largeShareMetrics));
-assert(largeShareMetrics.layoutMs<1500 && largeShareMetrics.scrollMs<500,'256 KiB share interaction regressed: '+JSON.stringify(largeShareMetrics));
-// Controlled comparison: keep the same textarea, content, dimensions, and
-// browser process, and change only its wrapping treatment. This demonstrates
-// the geometry difference without treating two runs' ordering as causality.
-const wrappedComparator=await evaluate(`(() => {
- const e=document.querySelector('.endpoint-share-data textarea');
- const previous={wrap:e.getAttribute('wrap'),whiteSpace:e.style.whiteSpace,overflowWrap:e.style.overflowWrap,wordBreak:e.style.wordBreak};
- e.wrap='soft';e.style.whiteSpace='pre-wrap';e.style.overflowWrap='anywhere';e.style.wordBreak='break-word';
- const wrapped={scrollHeight:e.scrollHeight,scrollWidth:e.scrollWidth};
- if(previous.wrap===null)e.removeAttribute('wrap');else e.setAttribute('wrap',previous.wrap);
- e.style.whiteSpace=previous.whiteSpace;e.style.overflowWrap=previous.overflowWrap;e.style.wordBreak=previous.wordBreak;
- const restored={scrollHeight:e.scrollHeight,scrollWidth:e.scrollWidth};
- return {wrapped,restored};
+assert(largeShareMetrics.sameDialog && largeShareMetrics.samePanel && largeShareMetrics.valueAttribute===null && largeShareMetrics.valueLength===262144,'large import must stay uncontrolled without remounting: '+JSON.stringify(largeShareMetrics));
+assert(largeShareMetrics.wrap==='soft' && largeShareMetrics.whiteSpace==='pre-wrap' && largeShareMetrics.overflowWrap==='anywhere','large import must wrap automatically: '+JSON.stringify(largeShareMetrics));
+assert(largeShareMetrics.scrollHeight>largeShareMetrics.clientHeight && largeShareMetrics.scrollWidth<=largeShareMetrics.clientWidth+2,'large import must use bounded vertical scrolling: '+JSON.stringify(largeShareMetrics));
+assert(largeShareMetrics.layoutMs<1500 && largeShareMetrics.importEnabled,'256 KiB import interaction regressed: '+JSON.stringify(largeShareMetrics));
+console.log('METRIC endpoint share 256 KiB '+JSON.stringify(largeShareMetrics));
+// Exercise the explicit clipboard action independently of manual paste.
+await evaluate(`(() => {
+ Object.defineProperty(navigator,'clipboard',{configurable:true,value:{
+  readText:async()=>${JSON.stringify('invalid!!!')},
+  writeText:async()=>{},
+ }});return true;
 })()`);
-assert(wrappedComparator.wrapped.scrollHeight>largeShareMetrics.scrollHeight+1000,'controlled wrapped treatment must reproduce tall layout: '+JSON.stringify(wrappedComparator));
-assert(wrappedComparator.restored.scrollHeight<=largeShareMetrics.clientHeight+4,'restoring no-wrap treatment must restore compact height: '+JSON.stringify(wrappedComparator));
-console.log('METRIC endpoint share 256 KiB '+JSON.stringify({noWrap:largeShareMetrics,wrappedTreatment:wrappedComparator.wrapped,restored:wrappedComparator.restored}));
+await setData('');
+await click("[...document.querySelectorAll('.endpoint-share-actions button')].find(b=>/粘贴|paste/i.test(b.textContent))");
+await waitFor(()=>evaluate(`document.querySelector('.endpoint-share-import textarea').value==='invalid!!!'`),'clipboard paste fills import');
+assert(await evaluate(`!!document.querySelector('.endpoint-share-panel [role=status]')`),'clipboard paste feedback missing');
 await setData('');
 for(const invalid of ['invalid!!!',fragment]) {
  await setData(invalid);await click("document.querySelector('.endpoint-share-actions .primary')");
@@ -251,7 +268,7 @@ for(const invalid of ['invalid!!!',fragment]) {
 for(const [data,name] of [[basic,'mygpt1'],[full,'mygpt2'],[full,'mygpt3']]) {
  await setData(data);await click("document.querySelector('.endpoint-share-actions .primary')");
  await waitFor(()=>evaluate(`document.querySelector('.endpoint-share-panel [role=status]')?.textContent.includes(${JSON.stringify(name)})`),'import success '+name);
- assert(await evaluate(`document.querySelector('.endpoint-share-data textarea').value===''`),'import clears sensitive input');
+ assert(await evaluate(`document.querySelector('.endpoint-share-import textarea').value===''`),'import clears sensitive input');
 }
 assert(await evaluate(`JSON.stringify([...document.querySelectorAll('.endpoint-settings-row strong')].map(e=>e.textContent))==='["mygpt","mygpt1","mygpt2","mygpt3"]'`),'collision suffixes no overwrite');
 await close();
@@ -267,7 +284,7 @@ await click("document.querySelectorAll('.endpoint-share-options label')[2]");
 const roundtrip=decode(await generate());
 assert(roundtrip.name==='mygpt2' && roundtrip.personal.api_key==='e2e-private-key' && roundtrip.advanced.request_fields.vendor_options.custom==='中文','full import roundtrip after reload');
 await close();
-console.log('PASS endpoint sharing modal: insecure-context IDs, single progress state, fast settlement, 256 KiB no-wrap scrolling, polished responsive layout, defaults, export categories, Unicode, secret isolation, cleanup, invalid import, collisions, reload roundtrip');
+console.log('PASS endpoint sharing modal: insecure-context IDs, single progress state, wrapped copy-only export, uncontrolled 256 KiB import, clipboard paste, polished responsive layout, defaults, export categories, Unicode, secret isolation, cleanup, invalid import, collisions, reload roundtrip');
 } finally {
   ws?.close();
   if (chrome && chrome.exitCode === null) {
