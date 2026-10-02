@@ -334,6 +334,10 @@ export type Activity = {
   tool_name?: string;
   tool_status?: string;
   tool_mode?: string;
+  memory_search?: import("./tool_presentation").MemorySearchPresentation;
+  self_tool?: import("./tool_presentation").SelfToolPresentation;
+  readfile?: import("./tool_presentation").ReadFilePresentation;
+  run_bash_edit?: import("./tool_presentation").RunBashEditPresentation;
   elapsed_ms?: number;
   timeout_ms?: number;
   loop_timeout_ms?: number;
@@ -370,6 +374,8 @@ export type Decision = {
 };
 
 export type ModelEndpoint = {
+  requirements?: import("./model_endpoints").EndpointRequirements;
+  catalog_id?: string | null;
   id: string;
   name: string;
   model: string;
@@ -444,6 +450,8 @@ export type ChatFavorite = {
   deleted?: boolean;
 };
 
+export type ModelToolResultBytes = 8192 | 10240 | 16384 | 20480 | 30720;
+
 export type Snapshot = {
   server: {
     version: string;
@@ -463,6 +471,7 @@ export type Snapshot = {
       temporary_capacity_bytes: number | null;
       conversation_capacity_bytes: number | null;
       claude_codex_tool_discovery: boolean;
+      model_tool_result_bytes: ModelToolResultBytes;
     };
     runtime_options: Array<{
       key: string;
@@ -472,6 +481,7 @@ export type Snapshot = {
     session_env_defaults: Record<string, string>;
     workspace_dirs: string[];
     mcp_servers: McpServerReport[];
+    model_catalog?: import("./model_endpoints").CatalogModel[];
     model_endpoints: ModelEndpoint[];
   };
   sessions: Session[];
@@ -631,6 +641,7 @@ export type WireEvent =
       temporary_capacity_bytes: number | null;
       conversation_capacity_bytes: number | null;
       claude_codex_tool_discovery: boolean;
+      model_tool_result_bytes: ModelToolResultBytes;
     }
   | { type: "mem_temporary_items"; items: MemTemporaryItem[]; error?: string }
   | { type: "file_uploaded"; session_id: string; file: Attachment }
@@ -669,6 +680,8 @@ export type WireEvent =
       server_id: string;
       values: Record<string, string>;
     }
+  | { type: "model_endpoint_share_exported"; request_id: string; data: string }
+  | { type: "model_endpoint_share_imported"; request_id: string; name: string }
   | { type: "model_endpoints_updated"; endpoints: ModelEndpoint[] }
   | {
       type: "model_endpoint_import_scanned";
@@ -849,6 +862,8 @@ export type ClientCommand =
         request_fields: Record<string, unknown>;
         allow_cross_origin_redirects: boolean;
         private_ca_pem?: string;
+        requirements?: import("./model_endpoints").EndpointRequirements;
+  catalog_id?: string | null;
         reasoning_effort?: string | null;
       };
   }
@@ -864,6 +879,8 @@ export type ClientCommand =
       type: "model_endpoint_import_apply";
       candidate_ids: string[];
     }
+  | { type: "model_endpoint_share_export"; request_id: string; endpoint_id: string; basic: boolean; advanced: boolean; personal: boolean }
+  | { type: "model_endpoint_share_import"; request_id: string; data: string }
   | { type: "model_endpoint_secret_reveal"; endpoint_id: string }
   | { type: "mcp_server_upsert"; session_id: string; config: McpServerConfig }
   | { type: "mcp_server_delete"; server_id: string }
@@ -883,6 +900,7 @@ export type ClientCommand =
     }
   | { type: "mem_conversation_capacity_update"; max_bytes: number | null }
   | { type: "beta_claude_codex_tool_discovery_update"; enabled: boolean }
+  | { type: "system_model_tool_result_bytes_update"; max_bytes: ModelToolResultBytes }
   | { type: "mem_temporary_items_list" }
   | { type: "mem_temporary_items_delete"; ids: string[] }
   | {

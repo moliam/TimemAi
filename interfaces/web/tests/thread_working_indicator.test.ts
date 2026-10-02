@@ -37,7 +37,7 @@ describe("thread working indicator", () => {
 
     expect(source).toContain('<circle cx="12" cy="12" r="11" pathLength="100" />');
     expect(arc).toContain("animation: thread-working-spin 1.8s linear infinite");
-    expect(stroke).toContain("stroke-width: 2");
+    expect(stroke).toContain("stroke-width: 1.5");
     expect(stroke).toContain("stroke-linecap: round");
     expect(stroke).toContain("stroke-dasharray: 18 82");
     expect(stroke).toContain("fill: none");

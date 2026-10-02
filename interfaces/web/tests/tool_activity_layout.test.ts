@@ -12,13 +12,14 @@ describe("tool activity row layout", () => {
     );
   });
 
-  it("uses the leading icon as the expand control without a redundant trailing chevron", () => {
-    expect(source).toContain('className="tool-activity-icon tool-activity-chevron"');
+  it("uses the whole row as disclosure without a persistent expand glyph", () => {
+    const activity = source.slice(source.indexOf("function ToolActivity("), source.indexOf("function MemoIcon("));
+    expect(activity).not.toContain('tool-activity-icon tool-activity-chevron');
     expect(source).toContain('className="tool-activity-group-icon tool-activity-chevron"');
-    expect(source).not.toContain('<ChevronRight className="tool-activity-chevron" size={14} />');
-    expect(styles).toContain(".tool-activity-command { min-width: 0; grid-column: 4; justify-self: start;");
-    expect(styles).toContain("grid-template-columns: 16px max-content max-content minmax(0, 1fr);");
-    expect(styles).not.toContain("grid-template-columns: 16px max-content max-content minmax(0, 1fr) 14px;");
+    expect(styles).toContain(".tool-activity-command { min-width: 0; grid-column: 3; justify-self: start;");
+    expect(styles).toContain("grid-template-columns: max-content max-content minmax(0, 1fr);");
+    expect(activity).toMatch(/className="tool-activity-meta"[\s\S]*<b>[\s\S]*tool-activity-command/);
+    expect(activity).toContain("event.currentTarget.contains(selection.anchorNode)");
   });
   it("keeps the top-level background status before the shrinkable tool counts", () => {
     expect(source).toContain('toolActivityGroupStatusLabel(summary, showResults)');
@@ -49,10 +50,15 @@ describe("tool activity row layout", () => {
 });
 
 describe("stream tool status continuity", () => {
-  it("keeps the dot and terminal status in one leading cell before the name", () => {
+  it("keeps status, tool identity and command in order on a row-wide disclosure", () => {
     const row = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
-    expect(row).toMatch(/className="stream-tool-status-slot"[\s\S]*className="stream-tool-dot"[\s\S]*<ActionStatus[\s\S]*<b>\{toolName\}<\/b>/);
-    expect(styles).toContain("min-width: 14px; align-self: center;");
+    expect(row).toMatch(/className="stream-tool-status-slot"[\s\S]*className="stream-tool-dot"[\s\S]*<ActionStatus[\s\S]*<b>[\s\S]*stream-tool-command-preview/);
+    expect(row).not.toContain("<ChevronRight");
+    expect(row).toContain('role={hasExpandableDetail ? "button" : undefined}');
+    expect(row).toContain('event.key !== "Enter" && event.key !== " "');
+    expect(styles).toContain(".stream-tool-head.stream-tool-toggle:hover");
+    expect(styles).toContain("min-width: 14px; height: 17px; line-height: 17px; align-self: center;");
+    expect(styles).toContain(".stream-tool-head { display: flex; align-items: center;");
     expect(row).toContain('className="stream-tool-background">(bg)');
     expect(styles).toContain(".stream-tool-background { color: #98afbc; opacity: .65; }");
   });
@@ -83,7 +89,7 @@ describe("collapsed tool summary", () => {
       summary?.indexOf("stream-tool-run-glyph") ?? -1,
     );
     expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*font-weight: 400;/);
-    expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*padding: 2px 4px;/);
+    expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*padding: 2px 4px 2px 0;/);
   });
 });
 
@@ -104,7 +110,7 @@ it("keeps live text/tool spacing compact without shrinking touch targets", () =>
   expect(styles).toContain("clamp(.125rem, calc(var(--content-size) * .125), .25rem)");
   expect(styles).toContain(".turn-stream-tools > .stream-thought-text { margin-bottom: 0; }");
   expect(styles).toMatch(/\.stream-tool-row \{[^}]*padding: 2px 0;/);
-  expect(styles).toContain("min-height: 44px; min-width: 44px;");
+  expect(styles).toContain(".stream-tool-head.stream-tool-toggle, .stream-tool-run-toggle { min-height: 44px; }");
 });
 
 it("bundles IBM Plex Mono locally and scopes it to stream tool counts", () => {
@@ -114,4 +120,53 @@ it("bundles IBM Plex Mono locally and scopes it to stream tool counts", () => {
   const font = readFileSync(new URL("../public/fonts/IBMPlexMono-Latin-300.woff2", import.meta.url));
   expect(font.readUInt32BE(0)).toBe(0x774f4632);
   expect(readFileSync(new URL("../public/fonts/IBMPlexMono-OFL.txt", import.meta.url), "utf8")).toContain("SIL OPEN FONT LICENSE");
+});
+
+it("uses the structured run_bash edit summary in ordinary and stream rows", () => {
+  const stream = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
+  const ordinary = source.slice(source.indexOf("function ToolActivity("), source.indexOf("function MemoIcon("));
+  expect(source).toContain('MemorySearchInvocation');
+  expect(source).toContain('SelfToolIcon');
+  expect(source).toContain('SelfToolInvocation');
+  expect(stream).toContain('activity.run_bash_edit ? <RunBashEditIcon />');
+  expect(stream).toContain('<RunBashEditInvocation edit={activity.run_bash_edit} />');
+  expect(ordinary).toContain('activity.run_bash_edit ? <RunBashEditIcon />');
+  expect(ordinary).toContain('<RunBashEditInvocation edit={activity.run_bash_edit} />');
+  expect(styles).toContain('.tool-activity .bash-edit-preview { grid-column: 3; width: 100%; }');
+  expect(styles).toContain('.stream-tool-head > .bash-edit-preview { flex: 1; }');
+});
+
+
+it("uses one 11px size for readable tool invocation summaries", () => {
+  expect(styles).toContain('.tool-invocation-preview { font-size: 11px !important; line-height: 1.5; }');
+  expect(source).toContain('className="stream-tool-command-preview tool-invocation-preview"');
+  expect(source).toContain('className="tool-activity-command tool-invocation-preview"');
+  expect(styles).toMatch(/\.file-tool-preview \{[^}]*font-size: 11px;/);
+  expect(styles).toMatch(/\.bash-edit-preview \{[^}]*font-size: 11px;/);
+});
+
+it("uses structured memory and self-tool summaries in ordinary and stream rows", () => {
+  const stream = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
+  const ordinary = source.slice(source.indexOf("function ToolActivity("), source.indexOf("function MemoIcon("));
+  for (const section of [stream, ordinary]) {
+    expect(section).toContain('<MemorySearchInvocation search={activity.memory_search} />');
+    expect(section).toContain('<SelfToolIcon />');
+    expect(section).toContain('<SelfToolInvocation operation={activity.self_tool} />');
+  }
+  expect(stream).toContain('!structuredInvocation ? toolInvocationPreview(activity) : ""');
+  expect(ordinary).toContain('activity.tool_name === "sub_answer" || structuredInvocation ? undefined');
+});
+
+it("uses terminal glyphs for Bash and reduces default Lucide stroke weight", () => {
+  expect(source).toContain('<SquareTerminal size={14} aria-hidden="true" />');
+  expect(source).toContain('className="bash-tool-icon" title={toolName}');
+  expect(styles).toContain(':where(svg.lucide[stroke-width="2"]) { stroke-width: 1.5; }');
+  expect(source).toContain('strokeWidth={1.575}');
+});
+
+it("renders an Infinity reasoning notice only from Core upgrade projections", () => {
+  expect(source).toContain('kind === "reasoning_upgrade"');
+  expect(source).not.toContain('event.payload.reasoning_enabled === true');
+  expect(source).toContain('<InfinityIcon size={13} />');
+  expect(source).toContain('t("context.reasoningUpgrade", { from: event.payload.from, to: event.payload.to })');
 });

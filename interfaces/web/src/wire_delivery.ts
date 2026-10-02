@@ -22,6 +22,8 @@ const DIRECT_EVENT_TYPES: ReadonlySet<WireEvent["type"]> = new Set([
   "mcp_server_secrets_revealed",
   "model_endpoint_import_scanned",
   "model_endpoint_secret_revealed",
+  "model_endpoint_share_exported",
+  "model_endpoint_share_imported",
   "session_api_key_revealed",
   "tool_repo_detail",
   "tool_repo_search_result",
