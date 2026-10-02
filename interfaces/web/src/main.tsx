@@ -33,6 +33,8 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
+  ArrowBigDown,
+  ArrowBigUp,
   ArrowDown,
   ArrowDownToLine,
   ArrowLeftRight,
@@ -11476,10 +11478,13 @@ function HeaderContextUsage({
     ? Math.min(100, Math.ceil(((usage?.prompt_tokens ?? 0) * 100) / limit))
     : 0;
   const level = ratio >= 90 ? "critical" : ratio >= 75 ? "warning" : "normal";
-  const cacheLabel =
-    cacheHitPercent === undefined
-      ? "cache: —"
-      : `cache: ${cacheHitPercent.toFixed(1)}%, in: ${formatTokensCoarse(cacheTotals?.prompt_tokens ?? 0)}, out: ${formatTokensCoarse(cacheTotals?.completion_tokens ?? 0)}`;
+  const cachePercentLabel =
+    cacheHitPercent === undefined ? "cache: —" : `cache: ${cacheHitPercent.toFixed(1)}%`;
+  const cacheInputLabel = formatTokensCoarse(cacheTotals?.prompt_tokens ?? 0) ?? "0";
+  const cacheOutputLabel = formatTokensCoarse(cacheTotals?.completion_tokens ?? 0) ?? "0";
+  const cacheLabel = cacheHitPercent === undefined
+    ? cachePercentLabel
+    : `${cachePercentLabel}, input: ${cacheInputLabel}, output: ${cacheOutputLabel}`;
   const contextUsageLabel = limit
     ? `Context usage ${ratio}% · ${formatTokens(usage?.prompt_tokens ?? 0)} / ${formatTokens(limit)} input tokens · ${cacheLabel}`
     : `Context usage waiting for runtime usage · ${cacheLabel}`;
@@ -11542,9 +11547,20 @@ function HeaderContextUsage({
           </span>
         )}
       </span>
-      <span className="header-cache-rate">
-        <span aria-hidden="true">· </span>
-        {cacheLabel}
+      <span className="header-cache-rate" aria-hidden="true">
+        <span>· {cachePercentLabel}</span>
+        {cacheHitPercent !== undefined && (
+          <>
+            <span className="header-cache-token header-cache-input">
+              <ArrowBigUp size={10} strokeWidth={1.8} />
+              {cacheInputLabel}
+            </span>
+            <span className="header-cache-token header-cache-output">
+              <ArrowBigDown size={10} strokeWidth={1.8} />
+              {cacheOutputLabel}
+            </span>
+          </>
+        )}
       </span>
     </span>
   );
