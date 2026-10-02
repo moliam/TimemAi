@@ -1,5 +1,5 @@
 import { DatabaseSearch } from "./database_search_icon";
-import { Database, FilePen, FileText, Info } from "lucide-react";
+import { Database, FileText, Info, PenLine } from "lucide-react";
 import { t } from "./i18n";
 import type { FileSelector, MemorySearchPresentation, ReadFilePresentation, RunBashEditPresentation, SelfToolPresentation } from "./tool_presentation";
 
@@ -39,7 +39,7 @@ export function ReadFileInvocation({ file }: { file: ReadFilePresentation }) {
 
 
 export function RunBashEditIcon() {
-  return <span className="bash-edit-icon" title="run_bash edit"><FilePen size={14} aria-hidden="true" /><span className="sr-only">run_bash edit</span></span>;
+  return <span className="bash-edit-icon" title="run_bash edit"><PenLine size={14} aria-hidden="true" /><span className="sr-only">run_bash edit</span></span>;
 }
 
 export function RunBashEditInvocation({ edit }: { edit: RunBashEditPresentation }) {

@@ -109,13 +109,14 @@ describe("structured run_bash edit presentation", () => {
     expect(runBashEditPresentation(action as string, value)).toBeUndefined();
   });
 
-  it("renders FilePen followed by the declared comma-separated paths", () => {
+  it("renders PenLine followed by the declared comma-separated paths", () => {
     const edit = runBashEditPresentation("run_bash", {
       cmd: "ignored in the compact summary",
       edit: ["src/<main>.tsx", "src/styles.css"],
     })!;
     const html = renderToStaticMarkup(<><RunBashEditIcon /><RunBashEditInvocation edit={edit} /></>);
-    expect(html).toContain("lucide-file-pen");
+    expect(html).toContain("lucide-pen-line");
+    expect(html).not.toContain("lucide-file-pen");
     expect(html).toContain("src/&lt;main&gt;.tsx, src/styles.css");
     expect(html).not.toContain("ignored in the compact summary");
   });
