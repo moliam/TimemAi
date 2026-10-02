@@ -1,3 +1,4 @@
+import { memorySearchPresentation, readFilePresentation, runBashEditPresentation, selfToolPresentation } from "./tool_presentation";
 import {
   Activity,
   ChatHistoryRecord,
@@ -528,6 +529,59 @@ export function turnElapsedMs(
   endedAtMs?: number | null,
 ): number {
   return Math.max(0, (endedAtMs ?? nowMs) - createdAtMs);
+}
+
+export type TurnWorkPhase = "model" | "local";
+
+export type TurnWorkPhaseBoundary = {
+  id: string;
+  startedAtMs?: number;
+};
+
+/**
+ * Return only the latest authoritative boundary for the current work segment.
+ * A model request starts the current model wait; a model response starts the
+ * current local-work segment. Before the first request, local work starts with
+ * the Turn itself. We compare timestamps explicitly rather than trusting event
+ * array order, so restored or paged history yields the same current boundary.
+ */
+export function turnWorkPhaseBoundary(
+  turn: WebTurn,
+  phase: TurnWorkPhase,
+): TurnWorkPhaseBoundary {
+  const laterEvent = (
+    candidate: WebTurn["events"][number],
+    current: WebTurn["events"][number] | undefined,
+  ) => {
+    if (!current) return true;
+    if (candidate.created_at_ms !== current.created_at_ms)
+      return candidate.created_at_ms > current.created_at_ms;
+    if (candidate.timeline_seq !== undefined && current.timeline_seq !== undefined)
+      return candidate.timeline_seq > current.timeline_seq;
+    return false;
+  };
+  let latestRequest: WebTurn["events"][number] | undefined;
+  let latestResponse: WebTurn["events"][number] | undefined;
+  for (const event of turn.events) {
+    if (event.source !== "worker_activity" || !Number.isFinite(event.created_at_ms))
+      continue;
+    if (event.payload.kind === "model_request" && laterEvent(event, latestRequest))
+      latestRequest = event;
+    if (event.payload.kind === "model_response" && laterEvent(event, latestResponse))
+      latestResponse = event;
+  }
+  if (phase === "model") {
+    return latestRequest
+      ? { id: latestRequest.event_id, startedAtMs: latestRequest.created_at_ms }
+      : { id: "pending:model" };
+  }
+  if (!latestRequest) {
+    return { id: `turn:${turn.turn_id}`, startedAtMs: turn.created_at_ms };
+  }
+  if (latestResponse && laterEvent(latestResponse, latestRequest)) {
+    return { id: latestResponse.event_id, startedAtMs: latestResponse.created_at_ms };
+  }
+  return { id: "pending:local" };
 }
 
 export function turnInteractionPhase(
@@ -2016,6 +2070,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         payload.kind && typeof payload.kind === "object"
           ? (payload.kind as Record<string, unknown>)
           : undefined;
+      const redactedInput = redactSensitiveToolValue("", input);
       const toolMode =
         typeof kind?.mode === "string"
           ? kind.mode
@@ -2041,6 +2096,10 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         tone: "action",
         title: `${toolActivityDisplayName(action, toolMode)} · ${statusText}`,
         tool_name: action,
+        memory_search: memorySearchPresentation(action, redactedInput),
+        self_tool: selfToolPresentation(action, redactedInput),
+        readfile: readFilePresentation(action, redactedInput),
+        run_bash_edit: runBashEditPresentation(action, redactedInput),
         tool_status: status,
         tool_mode: toolMode,
         elapsed_ms:

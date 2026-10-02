@@ -1,6 +1,11 @@
+import { MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation } from "./tool_invocation";
+import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
+import { initialEndpointRequirements, applyEndpointTemplate, editEndpoint, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning } from "./model_endpoints";
+import type { CatalogModel } from "./model_endpoints";
 import { applyBetaDebugDefault } from "./beta_preferences";
 import { StreamUiModeSetting, useStreamUiMode, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
 import { StreamText } from "./stream_reveal";
+import { UserText } from "./user_text";
 import {
   AssistantRuntimeProvider,
   ThreadMessageLike,
@@ -42,6 +47,7 @@ import {
   CircleStop,
   ClipboardCheck,
   Clock3,
+  Clock8,
   Copy,
   CornerUpLeft,
   Cpu,
@@ -52,7 +58,7 @@ import {
   FolderOpen,
   FolderPlus,
   Gauge,
-  Brain,
+  Infinity as InfinityIcon,
   GripVertical,
   KeyRound,
   LoaderCircle,
@@ -69,11 +75,13 @@ import {
   RefreshCw,
   Search,
   Send,
+  Share2,
   Hand,
   Settings,
   Sparkles,
   Star,
   Terminal,
+  SquareTerminal,
   TriangleAlert,
   Trash2,
   Wrench,
@@ -121,6 +129,7 @@ import {
   McpServerReport,
   McpTransport,
   MemTemporaryItem,
+  ModelToolResultBytes,
   ModelEndpoint,
   ModelEndpointImportCandidate,
   Session,
@@ -208,6 +217,7 @@ import {
   toolActivityDisplayName,
   toolDisplayName,
   turnElapsedMs,
+  turnWorkPhaseBoundary,
   turnLiveUsage,
   turnShouldRenderInTimeline,
   turnTimelinePlacement,
@@ -249,6 +259,7 @@ import {
 } from "./model_service_ui";
 import {
   endpointDraftValid,
+  MAX_LLM_INPUT_TOKENS_CEILING,
   REASONING_EFFORT_DISABLED,
   REASONING_EFFORT_OPTIONS,
   endpointMatchesProfile,
@@ -705,6 +716,8 @@ function TimemApp() {
     useState(false);
   const [pendingClaudeCodexToolDiscovery, setPendingClaudeCodexToolDiscovery] =
     useState(false);
+  const [pendingModelToolResultBytes, setPendingModelToolResultBytes] =
+    useState(false);
   const [rejectedSubmitCommandIds, setRejectedSubmitCommandIds] = useState<
     Set<string>
   >(() => new Set());
@@ -1042,6 +1055,7 @@ function TimemApp() {
       !pendingMemRetention &&
       !pendingMemConversationCapacity &&
       !pendingClaudeCodexToolDiscovery &&
+      !pendingModelToolResultBytes &&
       !favoriteCapacityUpdating &&
       !pendingMemSwitch &&
       !memTemporaryItemsDeleting
@@ -1052,6 +1066,7 @@ function TimemApp() {
     favoriteCapacityUpdating,
     memTemporaryItemsDeleting,
     pendingClaudeCodexToolDiscovery,
+    pendingModelToolResultBytes,
     pendingMemConversationCapacity,
     pendingMemRetention,
     pendingMemSwitch,
@@ -1070,6 +1085,42 @@ function TimemApp() {
     },
     [sendCommand],
   );
+  const endpointSharePending = useRef<{
+    id: string;
+    receive: (result: ShareResult) => void;
+    timer: number;
+  } | null>(null);
+  const cancelEndpointShare = useCallback((requestId?: string) => {
+    const pending = endpointSharePending.current;
+    if (!pending || (requestId && pending.id !== requestId)) return false;
+    window.clearTimeout(pending.timer);
+    sentCommandsRef.current.delete(pending.id);
+    endpointSharePending.current = null;
+    return true;
+  }, []);
+  const finishEndpointShare = useCallback((requestId: string, result: ShareResult) => {
+    const pending = endpointSharePending.current;
+    if (!pending || pending.id !== requestId) return false;
+    window.clearTimeout(pending.timer);
+    sentCommandsRef.current.delete(requestId);
+    endpointSharePending.current = null;
+    pending.receive(result);
+    return true;
+  }, []);
+  const interruptEndpointShare = useCallback((error = "endpoint_share_disconnected") => {
+    const pending = endpointSharePending.current;
+    if (pending) finishEndpointShare(pending.id, { error });
+  }, [finishEndpointShare]);
+  const endpointShareTransport: ShareTransport = useCallback((command, receive) => {
+    cancelEndpointShare();
+    const timer = window.setTimeout(() => {
+      finishEndpointShare(command.request_id, { error: "endpoint_share_timeout" });
+    }, 15000);
+    endpointSharePending.current = { id: command.request_id, receive, timer };
+    if (!sendCommand(command, command.request_id))
+      finishEndpointShare(command.request_id, { error: "endpoint_share_disconnected" });
+    return () => { cancelEndpointShare(command.request_id); };
+  }, [cancelEndpointShare, finishEndpointShare, sendCommand]);
   const revealModelEndpoint = useCallback(
     (endpointId: string) => {
       sendCommand({
@@ -1087,22 +1138,34 @@ function TimemApp() {
   );
   const scanModelEndpointImport = useCallback(
     (codexDir: string, claudeDir: string) => {
-      sendCommand({
+      if (!sendCommand({
         type: "model_endpoint_import_scan",
         codex_dir: codexDir.trim() || null,
         claude_dir: claudeDir.trim() || null,
-      });
+      })) {
+        reportUiError(
+          t("errors.endpointImportScanTitle"),
+          t("errors.checkConnection"),
+          "system",
+        );
+      }
     },
-    [sendCommand],
+    [reportUiError, sendCommand, t],
   );
   const importModelEndpoints = useCallback(
     (candidateIds: string[]) => {
-      sendCommand({
+      if (!sendCommand({
         type: "model_endpoint_import_apply",
         candidate_ids: candidateIds,
-      });
+      })) {
+        reportUiError(
+          t("errors.endpointImportApplyTitle"),
+          t("errors.checkConnection"),
+          "system",
+        );
+      }
     },
-    [sendCommand],
+    [reportUiError, sendCommand, t],
   );
   const confirmModelEndpointDelete = useCallback(
     (endpoints: ModelEndpoint[]) => {
@@ -1169,6 +1232,25 @@ function TimemApp() {
         reportUiError(
           "Mem settings failed",
           "Reconnect to Timem Web before updating conversation capacity.",
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand],
+  );
+  const saveModelToolResultBytes = useCallback(
+    (maxBytes: ModelToolResultBytes) => {
+      setPendingModelToolResultBytes(true);
+      if (
+        !sendCommand({
+          type: "system_model_tool_result_bytes_update",
+          max_bytes: maxBytes,
+        })
+      ) {
+        setPendingModelToolResultBytes(false);
+        reportUiError(
+          "System setting failed",
+          "Reconnect to Timem Web before changing the tool result retention length.",
           "system",
         );
       }
@@ -1344,6 +1426,7 @@ function TimemApp() {
   );
 
   const clearAllPendingCommands = useCallback(() => {
+    interruptEndpointShare();
     creatingSessionRef.current = false;
     cancellingSessionIds.current.clear();
     setStopClickLockedSessionIds(new Set());
@@ -1394,7 +1477,7 @@ function TimemApp() {
     setPendingMemSwitch(false);
     setPendingClaudeCodexToolDiscovery(false);
     setMemSwitchCandidate(null);
-  }, []);
+  }, [interruptEndpointShare]);
 
   useEffect(() => {
     const liveSessionIds = new Set(
@@ -1595,8 +1678,19 @@ function TimemApp() {
         eventCursorRef.current = event.event_seq;
         return;
       }
+      if (event.type === "model_endpoint_share_exported" || event.type === "model_endpoint_share_imported") {
+        finishEndpointShare(
+          event.request_id,
+          event.type === "model_endpoint_share_exported" ? { data: event.data } : { name: event.name },
+        );
+        return;
+      }
       if (event.type === "command_ack") {
         if (event.status === "accepted") return;
+        if (event.status === "rejected" && finishEndpointShare(
+          event.command_id,
+          { error: event.error ?? "model_endpoint_share_failed" },
+        )) return;
         const completed = sentCommandsRef.current.get(event.command_id);
         sentCommandsRef.current.delete(event.command_id);
         if (
@@ -1673,6 +1767,8 @@ function TimemApp() {
             setPendingMemConversationCapacity(false);
           if (completed?.type === "beta_claude_codex_tool_discovery_update")
             setPendingClaudeCodexToolDiscovery(false);
+          if (completed?.type === "system_model_tool_result_bytes_update")
+            setPendingModelToolResultBytes(false);
           const memSwitchNeedsConfirmation =
             completed?.type === "mem_switch" &&
             !completed.stop_running &&
@@ -1700,7 +1796,7 @@ function TimemApp() {
             // model_endpoints_updated event closes it after a commit.
             reportUiError(
               t("errors.endpointSaveTitle"),
-              event.error || t("errors.endpointSaveRetry"),
+              endpointSaveErrorMessage(event.error),
               "system",
             );
             return;
@@ -1715,6 +1811,22 @@ function TimemApp() {
             reportUiError(
               t("errors.endpointDeleteTitle"),
               event.error || t("errors.endpointDeleteRetry"),
+              "system",
+            );
+            return;
+          }
+          if (completed?.type === "model_endpoint_import_scan") {
+            reportUiError(
+              t("errors.endpointImportScanTitle"),
+              endpointImportCommandErrorMessage("scan", event.error),
+              "system",
+            );
+            return;
+          }
+          if (completed?.type === "model_endpoint_import_apply") {
+            reportUiError(
+              t("errors.endpointImportApplyTitle"),
+              endpointImportCommandErrorMessage("apply", event.error),
               "system",
             );
             return;
@@ -1761,6 +1873,7 @@ function TimemApp() {
         setPendingMemRetention(false);
         setPendingMemConversationCapacity(false);
         setPendingClaudeCodexToolDiscovery(false);
+        setPendingModelToolResultBytes(false);
         setServer((current) =>
           current
             ? {
@@ -1773,6 +1886,7 @@ function TimemApp() {
                     event.conversation_capacity_bytes,
                   claude_codex_tool_discovery:
                     event.claude_codex_tool_discovery,
+                  model_tool_result_bytes: event.model_tool_result_bytes,
                 },
               }
             : current,
@@ -2801,6 +2915,7 @@ function TimemApp() {
         cancelAllPendingSessionApiKeyCommands(
           "The runtime connection closed before the credential update completed. Your input was kept; reconnect and try again.",
         );
+        interruptEndpointShare();
         const nextAttempt = retryAttempt + 1;
         retryAttempt = nextAttempt;
         setReconnectAttempt(nextAttempt);
@@ -2835,10 +2950,11 @@ function TimemApp() {
       inboundEvents.dispose();
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       cancelAllPendingSessionApiKeyCommands();
+      cancelEndpointShare();
       socket.current?.close();
       socket.current = null;
     };
-  }, [cancelAllPendingSessionApiKeyCommands, pushActivity, receive]);
+  }, [cancelAllPendingSessionApiKeyCommands, cancelEndpointShare, interruptEndpointShare, pushActivity, receive]);
 
   const sendTextForSession = useCallback(
     (
@@ -3692,7 +3808,7 @@ function TimemApp() {
                   aria-label={t("sessions.cancelDelete")}
                   onClick={cancelSessionDeleteMode}
                 >
-                  <X size={14} strokeWidth={3} />
+                  <X size={14} strokeWidth={2.25} />
                 </button>
               )}
               <button
@@ -3728,7 +3844,7 @@ function TimemApp() {
                 }}
               >
                 {sessionDeleteMode ? (
-                  <Check size={15} strokeWidth={3} />
+                  <Check size={15} strokeWidth={2.25} />
                 ) : (
                   <Trash2 size={15} />
                 )}
@@ -4637,6 +4753,11 @@ function TimemApp() {
               toolGenEnabled={toolGenEnabled}
               toolGenToggleDisabled={pendingToolgenRequests.size > 0}
               onToolGenEnabledChange={setToolGenEnabled}
+              modelToolResultBytes={
+                server?.mem?.model_tool_result_bytes ?? 16384
+              }
+              modelToolResultBytesPending={pendingModelToolResultBytes}
+              onModelToolResultBytesChange={saveModelToolResultBytes}
               claudeCodexToolDiscoveryEnabled={
                 server?.mem?.claude_codex_tool_discovery ?? false
               }
@@ -4661,12 +4782,14 @@ function TimemApp() {
               temporaryItemsLoading={memTemporaryItemsLoading}
               temporaryItemsDeleting={memTemporaryItemsDeleting}
               temporaryItemsError={memTemporaryItemsError}
+              catalog={server?.model_catalog ?? []}
               endpoints={server?.model_endpoints ?? []}
               endpointEditor={endpointEditor}
               endpointImportCandidates={endpointImportCandidates}
               endpointImportIssues={endpointImportIssues}
               onScanEndpointImport={scanModelEndpointImport}
               onImportEndpoints={importModelEndpoints}
+              endpointShareTransport={endpointShareTransport}
               revealedEndpointApiKeys={revealedEndpointApiKeys}
               revealedEndpointHeaders={revealedEndpointHeaders}
               revealedEndpointRequestFields={revealedEndpointRequestFields}
@@ -4718,7 +4841,7 @@ function TimemApp() {
               session={activeSession}
               onEdit={openEndpointSettings}
               onApply={(endpointId) => {
-                if (!activeSession || activeSession.state === "working") return;
+                if (!activeSession) return;
                 sendCommand({
                   type: "model_endpoint_apply",
                   session_id: activeSession.session_id,
@@ -5899,7 +6022,7 @@ function WorkerRolePanel({
                     setSelectedDeleteRoleId("");
                   }}
                 >
-                  <X size={14} strokeWidth={3} />
+                  <X size={14} strokeWidth={2.25} />
                 </button>
               )}
               <button
@@ -5946,7 +6069,7 @@ function WorkerRolePanel({
                 }}
               >
                 {roleDeleteMode ? (
-                  <Check size={14} strokeWidth={3} />
+                  <Check size={14} strokeWidth={2.25} />
                 ) : (
                   <Trash2 size={14} />
                 )}
@@ -6362,7 +6485,7 @@ const ChatLibraryFavoriteRow = memo(function ChatLibraryFavoriteRow({
       >
         {deleteMode && (
           <span className="chat-library-favorite-check" aria-hidden="true">
-            {selected && <Check size={13} strokeWidth={3} />}
+            {selected && <Check size={13} strokeWidth={2.25} />}
           </span>
         )}
         <span className="chat-library-favorite-copy">
@@ -9511,7 +9634,7 @@ function TimemThread({
           disabled={!userMessageNavigation.previous}
           onClick={() => navigateUserMessage("previous")}
         >
-          <ChevronUp size={14} strokeWidth={2.2} aria-hidden="true" />
+          <ChevronUp size={14} strokeWidth={1.65} aria-hidden="true" />
         </button>
         <button
           type="button"
@@ -9529,7 +9652,7 @@ function TimemThread({
             else navigateToThreadBottom();
           }}
         >
-          <ChevronDown size={14} strokeWidth={2.2} aria-hidden="true" />
+          <ChevronDown size={14} strokeWidth={1.65} aria-hidden="true" />
         </button>
         {activeSession && (
           <button
@@ -9584,7 +9707,7 @@ function TimemThread({
                 <ArrowDownToLine
                   className="thread-idle-bottom-icon"
                   size={17}
-                  strokeWidth={2.35}
+                  strokeWidth={1.7625}
                 />
               )}
             </span>
@@ -9665,9 +9788,15 @@ type TurnInteractionProps = {
 const WorkingElapsed = memo(function WorkingElapsed({
   createdAtMs,
   endedAtMs,
+  hideBeforeMs = 0,
+  liveFormat = false,
+  className = "working-elapsed",
 }: {
   createdAtMs: number;
   endedAtMs?: number | null;
+  hideBeforeMs?: number;
+  liveFormat?: boolean;
+  className?: string;
 }) {
   const elapsedAt = useCallback(
     () => turnElapsedMs(createdAtMs, Date.now(), endedAtMs),
@@ -9677,12 +9806,20 @@ const WorkingElapsed = memo(function WorkingElapsed({
   useEffect(() => {
     setElapsedMs(elapsedAt());
     if (endedAtMs != null) return;
-    const timer = window.setInterval(() => setElapsedMs(elapsedAt()), 1_000);
-    return () => window.clearInterval(timer);
+    let timer = 0;
+    const refresh = () => {
+      const next = elapsedAt();
+      setElapsedMs(next);
+      timer = window.setTimeout(refresh, Math.max(50, 1_000 - (next % 1_000)));
+    };
+    const initial = elapsedAt();
+    timer = window.setTimeout(refresh, Math.max(50, 1_000 - (initial % 1_000)));
+    return () => window.clearTimeout(timer);
   }, [elapsedAt, endedAtMs]);
+  if (elapsedMs < hideBeforeMs) return null;
   return (
-    <span className="working-elapsed" aria-hidden="true">
-      {formatDuration(elapsedMs)}
+    <span className={className} aria-hidden="true">
+      {liveFormat ? formatLiveElapsed(elapsedMs) : formatDuration(elapsedMs)}
     </span>
   );
 });
@@ -10031,7 +10168,7 @@ const TurnInteraction = memo(function TurnInteraction({
                     <Trash2 size={13} />
                   </button>
                   {entry.kind === "supplement" && <span>{t("composer.supplementTag")}</span>}
-                  <MarkdownContent text={entry.text} />
+                  <UserText text={entry.text} />
                   {(
                     entry.worker_roles ??
                     (entry.worker_role ? [entry.worker_role] : [])
@@ -10497,7 +10634,7 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
   // 收起态只报数量 xN，不表达对错状态；保留按钮与行节点，仅新计数可重放反馈。
   return <div ref={runRef} className="stream-tool-run">
     {completed.length > 0 && <button className="stream-tool-run-toggle" type="button" aria-expanded={!merged} onClick={() => setExpanded(value => !value)}>
-      <span className="stream-tool-run-sign" aria-hidden="true">{merged ? <Plus size={11} strokeWidth={2.2} /> : <Minus size={11} strokeWidth={2.2} />}</span><Wrench size={13} strokeWidth={2.1} className="stream-tool-run-glyph" aria-hidden="true" /><span className="sr-only">{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={merged ? t("tools.doneCount", { count: completed.length }) : showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{merged ? `x${completed.length}` : showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
+      <span className="stream-tool-run-sign" aria-hidden="true">{merged ? <Plus size={11} strokeWidth={1.65} /> : <Minus size={11} strokeWidth={1.65} />}</span><Wrench size={13} strokeWidth={1.575} className="stream-tool-run-glyph" aria-hidden="true" /><span className="sr-only">{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={merged ? t("tools.doneCount", { count: completed.length }) : showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{merged ? `x${completed.length}` : showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
     </button>}
     {activities.map(activity => <div key={activity.id} className={`stream-tool-merged-item${merged && completedIds.has(activity.id) ? " merged" : ""}`} inert={merged && completedIds.has(activity.id)}>
       <div><StreamToolRow activity={activity} /></div>
@@ -10530,8 +10667,9 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
     activity.tool_name || activity.title,
     activity.tool_mode,
   );
+  const structuredInvocation = !!activity.run_bash_edit || !!activity.readfile || !!activity.memory_search || !!activity.self_tool;
   const command =
-    activity.code?.trim() || toolInvocationPreview(activity) || "";
+    activity.code?.trim() || (!structuredInvocation ? toolInvocationPreview(activity) : "") || "";
   const detail = activity.detail?.trim();
   const [liveElapsedMs, setLiveElapsedMs] = useState(() =>
     Math.max(0, Date.now() - activity.createdAt),
@@ -10559,18 +10697,31 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
     return subscribeStreamInteraction(update);
   }, []);
   const open = expanded || interactionHeld;
+  const hasExpandableDetail = !!command || !!detail;
+  const toggle = () => {
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed && rowRef.current?.contains(selection.anchorNode)) return;
+    setExpanded(current => !current);
+  };
   return (
     <div ref={rowRef} className={`stream-tool-row${running ? " running" : ""}`}>
-      <div className="stream-tool-head">
-        <button type="button" className="stream-tool-toggle" aria-expanded={open} aria-label={open ? t("tools.collapseOutput") : t("tools.expandOutput")} onClick={() => setExpanded(!open)}><ChevronRight size={13} /></button>
+      <div className={`stream-tool-head${hasExpandableDetail ? " stream-tool-toggle" : ""}`}
+        role={hasExpandableDetail ? "button" : undefined} tabIndex={hasExpandableDetail ? 0 : undefined}
+        aria-expanded={hasExpandableDetail ? open : undefined}
+        aria-label={hasExpandableDetail ? (open ? t("tools.collapseOutput") : t("tools.expandOutput")) : undefined}
+        onClick={hasExpandableDetail ? toggle : undefined}
+        onKeyDown={hasExpandableDetail ? event => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault(); toggle();
+        } : undefined}>
         {/* One fixed leading slot keeps execution and result markers in place. */}
         <span className="stream-tool-status-slot" aria-label={running ? (status === "background_running" ? t("tools.runningBg") : t("tools.running")) : undefined}>
           {running && <span className="stream-tool-dot" aria-hidden="true" />}
           <ActionStatus status={status} label={running ? "" : humanizeToolStatus(status)} className="stream-tool-status" />
         </span>
-        <b>{toolName}</b>
+        <b>{activity.run_bash_edit ? <RunBashEditIcon /> : activity.readfile ? <ReadFileIcon /> : activity.memory_search ? <MemorySearchIcon /> : activity.self_tool ? <SelfToolIcon /> : activity.tool_name === "memmgr" ? <MemoryIcon /> : (activity.tool_name || activity.title) === "run_bash" ? <span className="bash-tool-icon" title={toolName}><SquareTerminal size={14} aria-hidden="true" /><span className="sr-only">{toolName}</span></span> : toolName}</b>
         {status === "background_running" && <span className="stream-tool-background">(bg)</span>}
-        {command && <span className="stream-tool-command-preview" title={command}>{command.replace(/\s+/g, " ")}</span>}
+        {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : command && <span className="stream-tool-command-preview tool-invocation-preview" title={command}>{command.replace(/\s+/g, " ")}</span>}
         {(running
           ? liveElapsedMs
           : activity.elapsed_ms) !== undefined && (
@@ -10583,7 +10734,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
       </div>
       <div className={`stream-tool-fold${open ? " expanded" : ""}`} inert={!open}>
         <div>
-          {command && <pre className="stream-tool-command">{command}</pre>}
+          {command && !activity.readfile && <pre className="stream-tool-command">{command}</pre>}
           {detail && <div className="stream-tool-detail">{detail}</div>}
         </div>
       </div>
@@ -10594,7 +10745,9 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
   const b = next.activity;
   return a.id === b.id && a.tool_status === b.tool_status && a.tool_name === b.tool_name &&
     a.tool_mode === b.tool_mode && a.title === b.title && a.code === b.code && a.detail === b.detail &&
-    a.elapsed_ms === b.elapsed_ms;
+    a.elapsed_ms === b.elapsed_ms && JSON.stringify(a.memory_search) === JSON.stringify(b.memory_search) &&
+    JSON.stringify(a.self_tool) === JSON.stringify(b.self_tool) && JSON.stringify(a.readfile) === JSON.stringify(b.readfile) &&
+    JSON.stringify(a.run_bash_edit) === JSON.stringify(b.run_bash_edit);
 });
 
 function TurnAnswerDelivery({
@@ -10639,6 +10792,14 @@ function TurnAnswerDelivery({
     (streamWorking && intermediate ? preview?.response?.text ?? "" : "");
   const hasPreview = !!previewText;
   const hasFinal = !!turn.final_answer;
+  const modelPhase = waitingModel || preview?.response?.status === "streaming";
+  const phase = modelPhase ? "model" : "local";
+  const phaseBoundary = turnWorkPhaseBoundary(turn, phase);
+  const phaseStartedAt = useMemo(
+    () => phaseBoundary.startedAtMs ?? Date.now(),
+    [phaseBoundary.id, phaseBoundary.startedAtMs],
+  );
+  const phaseTimerKey = `${phase}:${phaseBoundary.id}`;
   return (
     <section className="turn-answer-delivery">
       {streamRetained && <StreamProcess closing={turn.state !== "working"} onArchived={onStreamArchived}>
@@ -10667,27 +10828,29 @@ function TurnAnswerDelivery({
       )}
       {streamUiMode && streamWorking && (
         <div
-          className={`stream-working-trailer${waitingModel || preview?.response?.status === "streaming" ? " model-waiting" : " tool-active"}`}
+          className={`stream-working-trailer${modelPhase ? " model-waiting" : " tool-active"}`}
           role="status"
-          title={
-            waitingModel || preview?.response?.status === "streaming"
-              ? t("tools.waitingModel")
-              : t("tools.localWorking")
-          }
-          aria-label={
-            waitingModel || preview?.response?.status === "streaming"
-              ? t("tools.waitingModel")
-              : t("tools.localWorking")
-          }
+          title={modelPhase ? t("tools.waitingModel") : t("tools.localWorking")}
+          aria-label={modelPhase ? t("tools.waitingModel") : t("tools.localWorking")}
         >
-          {waitingModel || preview?.response?.status === "streaming" ? (
-            <span className="stream-working-star" aria-hidden="true">✦</span>
-          ) : (
-            <span className="stream-working-dot" aria-hidden="true" />
-          )}
-          <WorkingElapsed createdAtMs={turn.created_at_ms} />
-          <span className="stream-working-calls" aria-hidden="true">
-            ✦ {countTurnModelRequests(turn)}
+          <span className="stream-working-current">
+            {modelPhase ? (
+              <span className="stream-working-star" aria-hidden="true">✦</span>
+            ) : (
+              <span className="stream-working-dot" aria-hidden="true" />
+            )}
+            <WorkingElapsed
+              key={phaseTimerKey}
+              createdAtMs={phaseStartedAt}
+              hideBeforeMs={1_000}
+              liveFormat
+              className="stream-working-phase-elapsed"
+            />
+          </span>
+          <span className="stream-working-total" aria-hidden="true">
+            <Clock8 size={12} />
+            <WorkingElapsed createdAtMs={turn.created_at_ms} liveFormat className="stream-working-turn-elapsed" />
+            <span className="stream-working-calls">✦ {countTurnModelRequests(turn)}</span>
           </span>
         </div>
       )}
@@ -11181,11 +11344,11 @@ function FinalAnswerContent({ text, provisional = false }: { text: string; provi
                   title="Show table of contents"
                   onClick={() => setOutlineCollapsed(false)}
                 >
-                  <BookText size={19} strokeWidth={1.8} aria-hidden="true" />
+                  <BookText size={19} strokeWidth={1.35} aria-hidden="true" />
                   <ChevronRight
                     className="final-answer-outline-toggle-arrow"
                     size={14}
-                    strokeWidth={2.4}
+                    strokeWidth={1.8}
                     aria-hidden="true"
                   />
                 </button>
@@ -11202,14 +11365,14 @@ function FinalAnswerContent({ text, provisional = false }: { text: string; provi
                     >
                       <ChevronLeft
                         size={16}
-                        strokeWidth={2.4}
+                        strokeWidth={1.8}
                         aria-hidden="true"
                       />
                     </button>
                     <span>
                       <BookText
                         size={13}
-                        strokeWidth={1.8}
+                        strokeWidth={1.35}
                         aria-hidden="true"
                       />
                       {t("outline.contents")}
@@ -11412,8 +11575,8 @@ function LiveTurnUsage({ turn }: { turn: WebTurn }) {
 function ActivityView({ activity, enterPulse = false }: { activity: Activity; enterPulse?: boolean }) {
   if (activity.kind === "reasoning_notice")
     return <div className="turn-work-item notice compact-notice reasoning-notice" role="status">
-      <span className="activity-mark" aria-hidden="true"><Brain size={13} /></span>
-      <div className="compact-notice-line"><span>{t("context.usingReasoning")}</span></div>
+      <span className="activity-mark" aria-hidden="true"><InfinityIcon size={13} /></span>
+      <div className="compact-notice-line"><span>{activity.title}</span></div>
     </div>;
   if (activity.kind === "context_compact")
     return <ContextCompactNotice activity={activity} />;
@@ -11427,7 +11590,7 @@ function ActivityView({ activity, enterPulse = false }: { activity: Activity; en
         </span>
         <div className="user-supplement-line">
           <strong>{activity.title}</strong>
-          {activity.detail && <MarkdownContent text={activity.detail} />}
+          {activity.detail && <UserText text={activity.detail} />}
         </div>
       </div>
     );
@@ -11615,7 +11778,8 @@ function ToolActivity({ activity }: { activity: Activity }) {
     const timer = window.setInterval(updateElapsed, 1_000);
     return () => window.clearInterval(timer);
   }, [activity.createdAt, pollingActivity, running, waitBudgetMs]);
-  const invocationPreview = activity.tool_name === "sub_answer" ? undefined : toolInvocationPreview(activity);
+  const structuredInvocation = !!activity.run_bash_edit || !!activity.readfile || !!activity.memory_search || !!activity.self_tool;
+  const invocationPreview = activity.tool_name === "sub_answer" || structuredInvocation ? undefined : toolInvocationPreview(activity);
   const detail = activity.detail?.trim();
   const code = activity.code?.trim();
   const hasExpandableDetail = !!detail || !!code;
@@ -11640,21 +11804,6 @@ function ToolActivity({ activity }: { activity: Activity }) {
   });
   const summaryContent = (
     <>
-      {hasExpandableDetail ? (
-        <ChevronRight
-          className="tool-activity-icon tool-activity-chevron"
-          size={14}
-          aria-hidden="true"
-        />
-      ) : (
-        <span
-          className={`tool-activity-icon ${pollingActivity ? "poll-activity-icon" : "tool-command-symbol"}`}
-          aria-hidden="true"
-        >
-          {pollingActivity ? <Clock3 size={13} /> : ">_"}
-        </span>
-      )}
-      <b>{toolName}</b>
       <span className="tool-activity-meta">
         <ActionStatus status={status} label={statusLabel} className="tool-activity-status" />
         {remainingWaitMs !== undefined && (
@@ -11670,8 +11819,9 @@ function ToolActivity({ activity }: { activity: Activity }) {
           </span>
         )}
       </span>
-      {invocationPreview && (
-        <code className="tool-activity-command" title={invocationPreview}>
+      <b>{activity.run_bash_edit ? <RunBashEditIcon /> : activity.readfile ? <ReadFileIcon /> : activity.memory_search ? <MemorySearchIcon /> : activity.self_tool ? <SelfToolIcon /> : activity.tool_name === "memmgr" ? <MemoryIcon /> : (activity.tool_name || activity.title) === "run_bash" ? <span className="bash-tool-icon" title={toolName}><SquareTerminal size={14} aria-hidden="true" /><span className="sr-only">{toolName}</span></span> : toolName}</b>
+      {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : invocationPreview && (
+        <code className="tool-activity-command tool-invocation-preview" title={invocationPreview}>
           {invocationPreview}
         </code>
       )}
@@ -11696,6 +11846,11 @@ function ToolActivity({ activity }: { activity: Activity }) {
       <summary
         title={open ? t("tools.detailCollapse") : t("tools.detailExpand")}
         aria-label={summaryLabel}
+        onClick={event => {
+          const selection = window.getSelection();
+          if (selection && !selection.isCollapsed && event.currentTarget.contains(selection.anchorNode))
+            event.preventDefault();
+        }}
       >
         {summaryContent}
       </summary>
@@ -11780,9 +11935,9 @@ function activityFromTurnEvent(
   }
   if (event.source !== "worker_activity") return null;
   const kind = String(event.payload.kind ?? "worker_event");
-  if (kind === "model_request" && event.payload.reasoning_enabled === true)
+  if (kind === "reasoning_upgrade" && typeof event.payload.from === "string" && typeof event.payload.to === "string")
     return { id: event.event_id, sessionId, tone: "notice", kind: "reasoning_notice",
-      title: "", createdAt: event.created_at_ms };
+      title: t("context.reasoningUpgrade", { from: event.payload.from, to: event.payload.to }), createdAt: event.created_at_ms };
 
   if (
     kind === "model_request" ||
@@ -11976,7 +12131,7 @@ function McpPanel({
               aria-label={t("mcp.cancelDelete")}
               onClick={cancelDeleteMode}
             >
-              <X size={14} strokeWidth={3} />
+              <X size={14} strokeWidth={2.25} />
             </button>
           )}
           {!editing && (
@@ -12011,7 +12166,7 @@ function McpPanel({
               }}
             >
               {deleteMode ? (
-                <Check size={14} strokeWidth={3} />
+                <Check size={14} strokeWidth={2.25} />
               ) : (
                 <Trash2 size={14} />
               )}
@@ -12709,7 +12864,7 @@ function McpEditor({
   );
 }
 
-type SettingsSection = "appearance" | "endpoints" | "memory" | "beta";
+type SettingsSection = "appearance" | "endpoints" | "memory" | "system";
 
 type SettingsCenterProps = {
   panelRef: MutableRefObject<HTMLElement | null>;
@@ -12720,6 +12875,9 @@ type SettingsCenterProps = {
   toolGenEnabled: boolean;
   toolGenToggleDisabled: boolean;
   onToolGenEnabledChange: (enabled: boolean) => void;
+  modelToolResultBytes: ModelToolResultBytes;
+  modelToolResultBytesPending: boolean;
+  onModelToolResultBytesChange: (maxBytes: ModelToolResultBytes) => void;
   claudeCodexToolDiscoveryEnabled: boolean;
   claudeCodexToolDiscoveryPending: boolean;
   onClaudeCodexToolDiscoveryChange: (enabled: boolean) => void;
@@ -12738,12 +12896,14 @@ type SettingsCenterProps = {
   temporaryItemsLoading: boolean;
   temporaryItemsDeleting: boolean;
   temporaryItemsError: string;
+  catalog: CatalogModel[];
   endpoints: ModelEndpoint[];
   endpointEditor: ModelEndpoint | "new" | null;
   endpointImportCandidates: ModelEndpointImportCandidate[];
   endpointImportIssues: string[];
   onScanEndpointImport: (codexDir: string, claudeDir: string) => void;
   onImportEndpoints: (candidateIds: string[]) => void;
+  endpointShareTransport: ShareTransport;
   revealedEndpointApiKeys: Record<string, string>;
   revealedEndpointHeaders: Record<string, Record<string, string>>;
   revealedEndpointRequestFields: Record<string, Record<string, unknown>>;
@@ -12778,6 +12938,9 @@ const SettingsCenter = memo(function SettingsCenter(
     toolGenEnabled,
     toolGenToggleDisabled,
     onToolGenEnabledChange,
+    modelToolResultBytes,
+    modelToolResultBytesPending,
+    onModelToolResultBytesChange,
     claudeCodexToolDiscoveryEnabled,
     claudeCodexToolDiscoveryPending,
     onClaudeCodexToolDiscoveryChange,
@@ -12796,12 +12959,14 @@ const SettingsCenter = memo(function SettingsCenter(
     temporaryItemsLoading,
     temporaryItemsDeleting,
     temporaryItemsError,
+    catalog,
     endpoints,
     endpointEditor,
     endpointImportCandidates,
     endpointImportIssues,
     onScanEndpointImport,
     onImportEndpoints,
+    endpointShareTransport,
     revealedEndpointApiKeys,
     revealedEndpointHeaders,
     revealedEndpointRequestFields,
@@ -12840,6 +13005,7 @@ const SettingsCenter = memo(function SettingsCenter(
   const busy =
     retentionPending ||
     conversationCapacityPending ||
+    modelToolResultBytesPending ||
     claudeCodexToolDiscoveryPending ||
     favoriteCapacityPending ||
     switchPending ||
@@ -12996,14 +13162,14 @@ const SettingsCenter = memo(function SettingsCenter(
             </button>
             <button
               type="button"
-              className={section === "beta" ? "active" : ""}
-              aria-current={section === "beta" ? "page" : undefined}
+              className={section === "system" ? "active" : ""}
+              aria-current={section === "system" ? "page" : undefined}
               disabled={switchPending}
-              onClick={() => selectSettingsSection("beta")}
+              onClick={() => selectSettingsSection("system")}
             >
-              <TriangleAlert size={16} />
+              <Settings size={16} />
               <span>
-                <strong>{t("settings.beta")}</strong>
+                <strong>{t("settings.system")}</strong>
               </span>
             </button>
           </nav>
@@ -13085,7 +13251,7 @@ const SettingsCenter = memo(function SettingsCenter(
                       }
                     />
                     <span className="appearance-checkbox" aria-hidden="true">
-                      <Check size={12} strokeWidth={3} />
+                      <Check size={12} strokeWidth={2.25} />
                     </span>
                     <span>{t("settings.bold")}</span>
                   </label>
@@ -13142,7 +13308,7 @@ const SettingsCenter = memo(function SettingsCenter(
                       }
                     />
                     <span className="appearance-checkbox" aria-hidden="true">
-                      <Check size={12} strokeWidth={3} />
+                      <Check size={12} strokeWidth={2.25} />
                     </span>
                     <span>{t("settings.bold")}</span>
                   </label>
@@ -13190,6 +13356,9 @@ const SettingsCenter = memo(function SettingsCenter(
             )}
             {section === "endpoints" && (
               <EndpointSettingsPane
+                key={`${connected}:${memPath}`}
+                shareTransport={endpointShareTransport}
+                catalog={catalog}
                 endpoints={endpoints}
                 endpointEditor={endpointEditor}
                 importCandidates={endpointImportCandidates}
@@ -13207,16 +13376,52 @@ const SettingsCenter = memo(function SettingsCenter(
                 onSave={onSaveEndpoint}
               />
             )}
-            {section === "beta" && (
+            {section === "system" && (
               <section
                 className="settings-pane toolgen-settings-pane"
-                aria-labelledby="beta-settings-title"
+                aria-labelledby="system-settings-title"
               >
                 <div className="settings-pane-heading">
-                  <h3 id="beta-settings-title">{t("beta.title")}</h3>
-                  <TriangleAlert size={19} aria-hidden="true" />
+                  <h3 id="system-settings-title">{t("system.title")}</h3>
+                  <Settings size={19} aria-hidden="true" />
                 </div>
+                <section className="settings-group system-tool-result-limit">
+                  <div className="settings-group-heading">
+                    <div>
+                      <strong>{t("system.toolResultLimitTitle")}</strong>
+                      <p>{t("system.toolResultLimitDesc")}</p>
+                    </div>
+                  </div>
+                  <div
+                    className="segmented-control system-tool-result-options"
+                    aria-label={t("system.toolResultLimitAria")}
+                  >
+                    {([30720, 20480, 16384, 10240, 8192] as const).map(
+                      (maxBytes) => (
+                        <button
+                          type="button"
+                          key={maxBytes}
+                          className={modelToolResultBytes === maxBytes ? "active" : ""}
+                          aria-pressed={modelToolResultBytes === maxBytes}
+                          disabled={modelToolResultBytesPending || !connected}
+                          onClick={() => onModelToolResultBytesChange(maxBytes)}
+                        >
+                          {maxBytes / 1024}K
+                        </button>
+                      ),
+                    )}
+                  </div>
+                  {modelToolResultBytesPending && (
+                    <small className="system-setting-status" role="status" aria-live="polite">
+                      {t("system.saving")}
+                    </small>
+                  )}
+                </section>
                 <StreamUiModeSetting />
+                <div className="system-subsection-heading">
+                  <strong>{t("system.betaFeaturesTitle")}</strong>
+                  <p>{t("system.betaFeaturesDesc")}</p>
+                </div>
                 <ToolResultStatusSetting />
                 <section className="settings-group toolgen-beta-card">
                   <div className="settings-group-heading">
@@ -13275,31 +13480,6 @@ const SettingsCenter = memo(function SettingsCenter(
                     >
                       <span className="settings-feature-switch-thumb" />
                     </button>
-                  </div>
-                  <div
-                    className="toolgen-beta-status"
-                    role="status"
-                    aria-live="polite"
-                  >
-                    <span
-                      className={
-                        claudeCodexToolDiscoveryEnabled ? "enabled" : "disabled"
-                      }
-                    />
-                    <strong>
-                      {claudeCodexToolDiscoveryPending
-                        ? t("beta.saving")
-                        : claudeCodexToolDiscoveryEnabled
-                          ? t("beta.enabled")
-                          : t("beta.disabledByDefault")}
-                    </strong>
-                    <small>
-                      {claudeCodexToolDiscoveryPending
-                        ? t("beta.pendingWait")
-                        : claudeCodexToolDiscoveryEnabled
-                          ? t("beta.instructionPresent")
-                          : t("beta.instructionAbsent")}
-                    </small>
                   </div>
                 </section>
                 <section className="toolgen-beta-note">
@@ -13863,6 +14043,8 @@ const SettingsCenter = memo(function SettingsCenter(
 });
 
 function EndpointSettingsPane({
+  shareTransport,
+  catalog,
   endpoints,
   endpointEditor,
   importCandidates,
@@ -13879,6 +14061,8 @@ function EndpointSettingsPane({
   onReveal,
   onSave,
 }: {
+  shareTransport: ShareTransport;
+  catalog: CatalogModel[];
   endpoints: ModelEndpoint[];
   endpointEditor: ModelEndpoint | "new" | null;
   importCandidates: ModelEndpointImportCandidate[];
@@ -13895,6 +14079,7 @@ function EndpointSettingsPane({
   onReveal: (endpointId: string) => void;
   onSave: (endpoint: ModelEndpointDraft) => void;
 }) {
+  const [shareTarget, setShareTarget] = useState<ModelEndpoint | "import" | null>(null);
   const [deleteMode, setDeleteMode] = useState(false);
   const [selectedEndpointIds, setSelectedEndpointIds] = useState<Set<string>>(
     () => new Set(),
@@ -13939,6 +14124,7 @@ function EndpointSettingsPane({
         aria-label="Model endpoint editor"
       >
         <ModelEndpointEditor
+          catalog={catalog}
           endpoint={endpointEditor === "new" ? undefined : endpointEditor}
           revealedApiKey={
             endpointEditor === "new"
@@ -14065,6 +14251,9 @@ function EndpointSettingsPane({
               ? t("endpoints.importHide")
               : t("endpoints.importButton")}
           </button>
+          <button type="button" className="secondary compact" disabled={deleteMode} onClick={() => { setShowImport(false); setShareTarget("import"); }}>
+            <FolderInput size={14} /> {t("endpoints.shareImport")}
+          </button>
           <button
             type="button"
             className="primary compact"
@@ -14075,6 +14264,8 @@ function EndpointSettingsPane({
           </button>
         </div>
       </div>
+      {shareTarget && <EndpointSharePanel key={shareTarget === "import" ? "import" : shareTarget.id}
+        endpoint={shareTarget === "import" ? undefined : shareTarget} transport={shareTransport} onClose={() => setShareTarget(null)} />}
       {showImport && (
         <div className="endpoint-import-panel">
           <div className="endpoint-import-heading">
@@ -14112,7 +14303,7 @@ function EndpointSettingsPane({
           {importIssues.length > 0 && (
             <ul className="endpoint-import-issues">
               {importIssues.map((issue) => (
-                <li key={issue}>{issue}</li>
+                <li key={issue}>{endpointImportIssueMessage(issue)}</li>
               ))}
             </ul>
           )}
@@ -14237,24 +14428,31 @@ function EndpointSettingsPane({
                   </button>
                 )}
                 {!deleteMode && (
-                  <button
-                    type="button"
-                    className="endpoint-settings-edit"
-                    title={t("endpoints.editEndpoint")}
-                    aria-label={t("endpoints.editEndpoint")}
-                    onClick={() => {
-                      onEdit(endpoint);
-                      if (
-                        (endpoint.api_key_configured ||
-                          Object.keys(endpoint.http_headers).length > 0 ||
-                          Object.keys(endpoint.request_fields).length > 0) &&
-                        revealedEndpointApiKeys[endpoint.id] === undefined
-                      )
-                        onReveal(endpoint.id);
-                    }}
-                  >
-                    <Pencil size={14} />
-                  </button>
+                  <div className="endpoint-settings-actions">
+                    <button
+                      type="button"
+                      className="secondary compact endpoint-settings-action endpoint-share-export"
+                      onClick={() => setShareTarget(endpoint)}
+                    >
+                      <Share2 size={14} /> {t("endpoints.shareExport")}
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary compact endpoint-settings-action endpoint-settings-edit"
+                      onClick={() => {
+                        onEdit(endpoint);
+                        if (
+                          (endpoint.api_key_configured ||
+                            Object.keys(endpoint.http_headers).length > 0 ||
+                            Object.keys(endpoint.request_fields).length > 0) &&
+                          revealedEndpointApiKeys[endpoint.id] === undefined
+                        )
+                          onReveal(endpoint.id);
+                      }}
+                    >
+                      <Pencil size={14} /> {t("common.edit")}
+                    </button>
+                  </div>
                 )}
               </div>
             );
@@ -14493,7 +14691,7 @@ function ModelEndpointPanel({
                   type="button"
                   className="endpoint-select"
                   aria-pressed={active}
-                  disabled={!session || session.state === "working"}
+                  disabled={!session}
                   onClick={() => onApply(endpoint.id)}
                 >
                   <span className="endpoint-copy">
@@ -14531,7 +14729,7 @@ function ModelEndpointPanel({
                     className={`endpoint-choice-box ${active ? "selected" : ""}`}
                     aria-hidden="true"
                   >
-                    {active && <Check size={11} strokeWidth={3} />}
+                    {active && <Check size={11} strokeWidth={2.25} />}
                   </span>
                 </button>
               </div>
@@ -14549,6 +14747,7 @@ function ModelEndpointPanel({
 }
 
 function ModelEndpointEditor({
+  catalog,
   endpoint,
   revealedApiKey,
   revealedHeaders,
@@ -14557,6 +14756,7 @@ function ModelEndpointEditor({
   onClose,
   onSave,
 }: {
+  catalog: CatalogModel[];
   endpoint?: ModelEndpoint;
   revealedApiKey?: string;
   revealedHeaders?: Record<string, string>;
@@ -14566,6 +14766,8 @@ function ModelEndpointEditor({
   onSave: (endpoint: ModelEndpointDraft) => void;
 }) {
   const [draft, setDraft] = useState<ModelEndpointDraft>(() => ({
+    requirements: initialEndpointRequirements(endpoint, catalog),
+    catalog_id: endpoint?.catalog_id ?? null,
     id: endpoint?.id,
     name: endpoint?.name ?? "",
     model: endpoint?.model ?? "",
@@ -14576,28 +14778,31 @@ function ModelEndpointEditor({
     max_llm_output_tokens: endpoint?.max_llm_output_tokens ?? 10_000,
     stream: endpoint?.stream ?? true,
     api_key: revealedApiKey,
-    http_headers: endpoint?.http_headers ?? {},
-    request_fields: endpoint?.request_fields ?? {},
+    http_headers: revealedHeaders ?? endpoint?.http_headers ?? {},
+    request_fields: revealedRequestFields ?? endpoint?.request_fields ?? {},
     allow_cross_origin_redirects:
       endpoint?.allow_cross_origin_redirects ?? false,
     private_ca_pem: revealedPrivateCaPem,
     reasoning_effort: endpoint?.reasoning_effort ?? null,
   }));
   const [headerRows, setHeaderRows] = useState<StructuredRow[]>(() =>
-    structuredRows(endpoint?.http_headers ?? {}),
+    structuredRows(revealedHeaders ?? endpoint?.http_headers ?? {}),
   );
   const [requestRows, setRequestRows] = useState<StructuredRow[]>(() =>
-    requestFieldRows(endpoint?.request_fields ?? {}),
+    requestFieldRows(revealedRequestFields ?? endpoint?.request_fields ?? {}),
   );
+  const initialDraftRef = useRef<ModelEndpointDraft>(structuredClone(draft));
   const [showApiKey, setShowApiKey] = useState(false);
   const [showHeaders, setShowHeaders] = useState(!endpoint);
   const [showRequestFields, setShowRequestFields] = useState(!endpoint);
   useEffect(() => {
-    if (revealedApiKey !== undefined)
-      setDraft((current) => ({ ...current, api_key: revealedApiKey }));
+    if (revealedApiKey === undefined) return;
+    initialDraftRef.current = { ...initialDraftRef.current, api_key: revealedApiKey };
+    setDraft((current) => ({ ...current, api_key: revealedApiKey }));
   }, [revealedApiKey]);
   useEffect(() => {
     if (!revealedHeaders) return;
+    initialDraftRef.current = { ...initialDraftRef.current, http_headers: structuredClone(revealedHeaders) };
     setHeaderRows((rows) =>
       rows.map((row) => ({
         ...row,
@@ -14606,14 +14811,16 @@ function ModelEndpointEditor({
     );
   }, [revealedHeaders]);
   useEffect(() => {
-    if (revealedPrivateCaPem !== undefined)
-      setDraft((current) => ({
-        ...current,
-        private_ca_pem: revealedPrivateCaPem,
-      }));
+    if (revealedPrivateCaPem === undefined) return;
+    initialDraftRef.current = { ...initialDraftRef.current, private_ca_pem: revealedPrivateCaPem };
+    setDraft((current) => ({
+      ...current,
+      private_ca_pem: revealedPrivateCaPem,
+    }));
   }, [revealedPrivateCaPem]);
   useEffect(() => {
     if (!revealedRequestFields) return;
+    initialDraftRef.current = { ...initialDraftRef.current, request_fields: structuredClone(revealedRequestFields) };
     setRequestRows((rows) =>
       rows.map((row) => ({
         ...row,
@@ -14628,6 +14835,43 @@ function ModelEndpointEditor({
     setShowHeaders(!endpoint);
     setShowRequestFields(!endpoint);
   }, [endpoint?.id]);
+  const selectedTemplate = catalog.find((model) => model.id === draft.catalog_id);
+  const selectedModel = catalog.find((model) => model.provider === draft.requirements?.provider && model.model === draft.model);
+  const selectedProtocol = selectedModel?.protocols.find((p) => p.protocol === draft.api_protocol);
+  const selectModel = (id: string) => setDraft(current => applyEndpointTemplate(current, catalog.find(m => m.id === id)));
+  const edit = (patch: Partial<ModelEndpointDraft>) => setDraft(current => editEndpoint(current, patch));
+  const editRequirements = (patch: Parameters<typeof editEndpointRequirements>[1]) => setDraft(current => editEndpointRequirements(current, patch));
+  const allowed = draft.requirements?.allowed_reasoning;
+  const daily = draft.reasoning_effort === "disabled" ? "none" : draft.reasoning_effort ?? selectedModel?.default_effort;
+  const displayedAllowed = effectiveAllowedReasoning(allowed, selectedModel?.efforts, daily);
+  const updateAllowedReasoning = (level: string, checked: boolean) => setDraft((current) => {
+    const model = catalog.find((candidate) => candidate.provider === current.requirements?.provider && candidate.model === current.model);
+    const currentDaily = current.reasoning_effort === REASONING_EFFORT_DISABLED
+      ? "none"
+      : current.reasoning_effort ?? model?.default_effort;
+    const next = toggleAllowedReasoning(
+      current.requirements?.allowed_reasoning,
+      model?.efforts,
+      currentDaily,
+      model?.default_effort,
+      level,
+      checked,
+    );
+    let updated = editEndpointRequirements(current, { allowed_reasoning: next.allowedReasoning });
+    if (next.dailyReasoning !== currentDaily) {
+      updated = editEndpoint(updated, {
+        reasoning_effort: next.dailyReasoning === "none" && !model
+          ? REASONING_EFFORT_DISABLED
+          : next.dailyReasoning,
+      });
+    }
+    return updated;
+  });
+  const capabilityIssue = endpointCapabilityIssue(draft, selectedModel);
+  const catalogInvalid = capabilityIssue !== null;
+  const dailyReasoningOptions = allowed != null
+    ? displayedAllowed
+    : selectedModel?.efforts ?? REASONING_EFFORT_OPTIONS;
   const apiKey = draft.api_key ?? "";
   const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(
     apiKey,
@@ -14647,7 +14891,10 @@ function ModelEndpointEditor({
   };
   const duplicateHeaderNames = hasDuplicateStructuredKeys(headerRows);
   const duplicateRequestNames = hasDuplicateStructuredKeys(requestRows);
+  const hasChanges = endpointDraftChanged(initialDraftRef.current, endpointDraft);
   const saveDisabled =
+    !hasChanges ||
+    catalogInvalid ||
     duplicateHeaderNames ||
     duplicateRequestNames ||
     !!parsedRequestFields.error ||
@@ -14657,17 +14904,33 @@ function ModelEndpointEditor({
   };
   return (
     <div className="endpoint-editor">
-      <div className="endpoint-editor-heading">
-        <strong>{endpoint ? t("endpoints.editEndpoint") : t("endpoints.newEndpoint")}</strong>
-        <button
-          type="button"
-          aria-label={t("endpoints.closeEditor")}
-          onClick={onClose}
-        >
-          <X size={14} />
-        </button>
+      <div className="endpoint-editor-topbar">
+        <div className="endpoint-editor-heading">
+          <strong>{endpoint ? t("endpoints.editEndpoint") : t("endpoints.newEndpoint")}</strong>
+          <div className="endpoint-editor-buttons">
+            <button type="button" className="secondary compact" onClick={onClose}>
+              {t("common.cancel")}
+            </button>
+            <button
+              type="button"
+              className="primary compact"
+              disabled={saveDisabled}
+              onClick={save}
+            >
+              {t("endpoints.saveEndpoint")}
+            </button>
+          </div>
+        </div>
       </div>
+      <label className="endpoint-catalog-picker">
+        <span>{t("endpoints.useTemplate")}</span>
+        <select aria-label={t("endpoints.useTemplate")} value={draft.catalog_id ?? ""} onChange={(e) => selectModel(e.target.value)}>
+          <option value="">{t("endpoints.noTemplate")}</option>
+          {catalog.map((m) => <option key={m.id} value={m.id}>{m.provider === "openai" ? "OpenAI" : m.provider === "zhipu" ? t("endpoints.zhipu") : m.provider}: {m.label}</option>)}
+        </select>
+      </label>
       <div className="endpoint-editor-grid">
+        <h4 className="wide endpoint-section-title">{t("endpoints.connectionSection")}</h4>
         <label>
           {t("endpoints.nameLabel")}
           <input
@@ -14675,7 +14938,7 @@ function ModelEndpointEditor({
             value={draft.name}
             placeholder={t("endpoints.namePlaceholder")}
             onChange={(event) =>
-              setDraft({ ...draft, name: event.target.value })
+              edit({ name: event.target.value })
             }
           />
         </label>
@@ -14683,9 +14946,9 @@ function ModelEndpointEditor({
           {t("endpoints.modelIdLabel")}
           <input
             value={draft.model}
-            placeholder="gpt-4.1"
+            placeholder="my-model-id"
             onChange={(event) =>
-              setDraft({ ...draft, model: event.target.value })
+              edit({ model: event.target.value })
             }
           />
         </label>
@@ -14695,9 +14958,16 @@ function ModelEndpointEditor({
             value={draft.base_url}
             placeholder="https://api.example.com/v1"
             onChange={(event) =>
-              setDraft({ ...draft, base_url: event.target.value })
+              edit({ base_url: event.target.value })
             }
           />
+        </label>
+        {canRestoreEndpointTemplateUrl(draft, selectedTemplate) && <div className="wide endpoint-base-reset"><button type="button" onClick={() => setDraft(current => restoreEndpointTemplateUrl(current, selectedTemplate))}>{t("endpoints.restoreBaseUrl")}</button><small>{t("endpoints.baseOverrideHint")}</small></div>}
+        <label>{t("endpoints.provider")}
+          <select value={draft.requirements?.provider ?? ""} onChange={e => editRequirements({ provider: e.target.value || null })}>
+            <option value="">{t("endpoints.genericProvider")}</option>
+            <option value="openai">OpenAI</option><option value="zhipu">{t("endpoints.zhipu")}</option>
+          </select>
         </label>
         <label className="wide">
           API Key
@@ -14742,6 +15012,7 @@ function ModelEndpointEditor({
             </div>
           </div>
         </label>
+        <h4 className="wide endpoint-section-title">{t("endpoints.parametersSection")}</h4>
         <div className="endpoint-api-protocol">
           <label>
             {t("endpoints.apiProtocol")}
@@ -14749,16 +15020,14 @@ function ModelEndpointEditor({
               value={draft.api_protocol}
               onChange={(event) => {
                 const api_protocol = event.target.value;
-                setDraft({
-                  ...draft,
-                  api_protocol,
-                  stream: api_protocol === "openai-compatible",
-                });
+                setDraft(current => changeEndpointProtocol(current, api_protocol, selectedTemplate));
               }}
             >
-              <option value="openai-compatible">openai-compatible</option>
-              <option value="openai-responses">openai-responses</option>
-              <option value="anthropic">anthropic</option>
+              {endpointProtocolOptions(draft, selectedModel).map(({ protocol, disabled }) => (
+                <option key={protocol} value={protocol} disabled={disabled}>
+                  {({ "openai-compatible": "Chat Completions", "openai-responses": "Responses", anthropic: "Anthropic Messages" } as Record<string, string>)[protocol] ?? protocol}{disabled ? ` (${t("endpoints.protocolUnavailable")})` : ""}
+                </option>
+              ))}
             </select>
           </label>
           <label
@@ -14768,9 +15037,9 @@ function ModelEndpointEditor({
             <input
               type="checkbox"
               checked={draft.stream}
-              disabled={draft.api_protocol !== "openai-compatible"}
+              disabled={draft.api_protocol === "anthropic"}
               onChange={(event) =>
-                setDraft({ ...draft, stream: event.target.checked })
+                edit({ stream: event.target.checked })
               }
             />
             <span>{t("endpoints.streamLabel")}</span>
@@ -14790,102 +15059,76 @@ function ModelEndpointEditor({
         </label>
 
         <label>
-          {t("endpoints.contextWindow")}
-          <select
-            value={
-              MODEL_CONTEXT_WINDOW_OPTIONS.includes(
-                draft.max_llm_input_tokens as (typeof MODEL_CONTEXT_WINDOW_OPTIONS)[number],
-              )
-                ? draft.max_llm_input_tokens
-                : "custom"
-            }
-            onChange={(event) => {
-              const value = event.target.value;
-              if (value === "custom") {
-                setDraft((current) => ({
-                  ...current,
-                  max_llm_input_tokens: current.max_llm_input_tokens + 1,
-                }));
-                return;
-              }
-              setDraft({
-                ...draft,
-                max_llm_input_tokens: Number(value),
-              });
-            }}
-          >
-            {MODEL_CONTEXT_WINDOW_OPTIONS.map((tokens) => (
-              <option key={tokens} value={tokens}>
-                {formatContextWindowTokens(tokens)}
-              </option>
-            ))}
-            <option value="custom">{t("endpoints.contextWindowCustom")}</option>
-          </select>
-          {!MODEL_CONTEXT_WINDOW_OPTIONS.includes(
-            draft.max_llm_input_tokens as (typeof MODEL_CONTEXT_WINDOW_OPTIONS)[number],
-          ) && (
-            <input
-              className="endpoint-context-custom-input"
-              type="number"
-              inputMode="numeric"
-              min={1}
-              step={1}
-              value={draft.max_llm_input_tokens}
-              onChange={(event) => {
-                const parsed = Number(event.target.value);
-                if (!Number.isInteger(parsed)) return;
-                setDraft({
-                  ...draft,
-                  max_llm_input_tokens: parsed,
-                });
-              }}
-            />
-          )}
+          {t("endpoints.inputBudget")}
+          <input className="endpoint-token-budget" type="number" inputMode="numeric" onKeyDown={(event) => { if (event.key === "ArrowUp" || event.key === "ArrowDown") event.preventDefault(); }} min={selectedModel?.min_input ?? 3000} max={selectedModel ? Math.min(selectedModel.max_input, selectedModel.context_window - draft.max_llm_output_tokens) : MAX_LLM_INPUT_TOKENS_CEILING} step={1}
+            value={draft.max_llm_input_tokens} onChange={(e) => edit({ max_llm_input_tokens: Number(e.target.value) })} />
+          {selectedModel && <small>{selectedModel.min_input.toLocaleString()} – {Math.min(selectedModel.max_input, selectedModel.context_window - draft.max_llm_output_tokens).toLocaleString()}</small>}
         </label>
         <label>
           {t("endpoints.maxOutput")}
-          <select
-            value={draft.max_llm_output_tokens}
-            onChange={(event) =>
-              setDraft({
-                ...draft,
-                max_llm_output_tokens: Number(event.target.value),
-              })
-            }
-          >
-            {MODEL_OUTPUT_TOKEN_OPTIONS.map((tokens) => (
-              <option key={tokens} value={tokens}>
-                {tokens / 1_000}K
-              </option>
-            ))}
-          </select>
+          <input className="endpoint-token-budget" type="number" inputMode="numeric" onKeyDown={(event) => { if (event.key === "ArrowUp" || event.key === "ArrowDown") event.preventDefault(); }} min={selectedModel?.min_output ?? 512} max={selectedModel ? Math.min(selectedModel.max_output, selectedModel.context_window - draft.max_llm_input_tokens) : MAX_LLM_INPUT_TOKENS_CEILING} step={1}
+            value={draft.max_llm_output_tokens} onChange={(e) => edit({ max_llm_output_tokens: Number(e.target.value) })} />
+          {selectedModel && <small>{selectedModel.min_output.toLocaleString()} – {Math.min(selectedModel.max_output, selectedModel.context_window - draft.max_llm_input_tokens).toLocaleString()}</small>}
         </label>
-        <label>
-          {t("endpoints.reasoningEffort")}
-          <select
-            value={draft.reasoning_effort ?? ""}
-            disabled={
-              draft.api_protocol !== "openai-compatible" &&
-              draft.api_protocol !== "openai-responses"
-            }
-            onChange={(event) =>
-              setDraft({
-                ...draft,
-                reasoning_effort: event.target.value || null,
-              })
-            }
-          >
-            <option value="">{t("endpoints.reasoningEffortDefault")}</option>
-            {REASONING_EFFORT_OPTIONS.map((effort) => (
-              <option key={effort} value={effort}>
-                {effort}
-              </option>
-            ))}
-            <option value={REASONING_EFFORT_DISABLED}>
-              {t("endpoints.reasoningEffortDisabled")}
-            </option>
-          </select>
-        </label>
+        <section className="wide endpoint-reasoning-panel" aria-label={t("endpoints.reasoningSettings")}>
+          <details className="endpoint-reasoning-config">
+            <summary><strong>{t("endpoints.configureReasoningClick")}</strong><span>{t("endpoints.configureReasoningLevels")}</span></summary>
+          <fieldset className="endpoint-allowed-reasoning">
+            <legend className="endpoint-reasoning-legend">{t("endpoints.allowedReasoning")}</legend>
+            <div className="endpoint-reasoning-levels">
+            {(selectedModel?.efforts ?? ["none", ...REASONING_EFFORT_OPTIONS]).map(level => <label className="endpoint-reasoning-chip" key={level}>
+              <input type="checkbox" checked={displayedAllowed.includes(level)} onChange={e =>
+                updateAllowedReasoning(level, e.target.checked)
+              } /><span>{level}<Check className="endpoint-reasoning-check" size={11} strokeWidth={3} aria-hidden="true" /></span>
+            </label>)}
+            </div>
+            <button
+              className="endpoint-reasoning-default"
+              type="button"
+              aria-pressed={selectedTemplate
+                ? JSON.stringify(allowed) === JSON.stringify(selectedTemplate.efforts)
+                : allowed == null}
+              onClick={() => selectedTemplate
+                ? setDraft((current) => restoreEndpointTemplateReasoning(current, selectedTemplate))
+                : editRequirements({ allowed_reasoning: null })}
+            >
+              {t(selectedTemplate
+                ? "endpoints.restoreTemplateDefault"
+                : selectedModel
+                  ? "endpoints.modelReasoningRange"
+                  : "endpoints.unknownCapabilities")}
+            </button>
+          </fieldset>
+          </details>
+          <div className="endpoint-reasoning-policy">
+            <label className="endpoint-reasoning-daily">
+              <span>{t("endpoints.dailyReasoningLevel")}</span>
+              <select
+                value={draft.reasoning_effort ?? ""}
+                disabled={
+                  (draft.api_protocol !== "openai-compatible" &&
+                  draft.api_protocol !== "openai-responses")
+                }
+                onChange={(event) =>
+                  edit({ reasoning_effort: event.target.value || null })
+                }
+              >
+                {<option value="">{t("endpoints.reasoningEffortDefault")}</option>}
+                {dailyReasoningOptions.map((effort) => (
+                  <option key={effort} value={effort}>{effort}{selectedModel?.default_effort === effort && !selectedProtocol?.fixed_effort ? t("endpoints.defaultSuffix") : ""}</option>
+                ))}
+                {!selectedModel && <option value={REASONING_EFFORT_DISABLED}>{t("endpoints.reasoningEffortDisabled")}</option>}
+              </select>
+              {selectedProtocol?.fixed_effort ? <small className="endpoint-constraint-note">{t("endpoints.fixedReasoningNote", { level: selectedProtocol.fixed_effort })}</small> : selectedModel?.middle_default ? <small>{t("endpoints.middleDefaultNote")}</small> : null}
+            </label>
+            <label className="endpoint-reasoning-adaptive">
+              <input type="checkbox" checked={draft.requirements?.adaptive_reasoning ?? (!!daily && daily !== "none")} onChange={e => editRequirements({ adaptive_reasoning: e.target.checked })} />
+              <strong>{t("endpoints.adaptiveReasoning")}</strong>
+            </label>
+          </div>
+        </section>
+        {capabilityIssue && <p role="alert" className="wide endpoint-validation-note">{endpointCapabilityIssueMessage(capabilityIssue)}</p>}
+        <details className="wide endpoint-advanced"><summary>{t("endpoints.advancedSection")}</summary><div className="endpoint-editor-grid">
         <label className="wide endpoint-transport-toggle">
           <span>
             <input
@@ -15014,20 +15257,9 @@ function ModelEndpointEditor({
             </small>
           )}
         </div>
+        </div></details>
       </div>
-      <div className="endpoint-editor-buttons">
-        <button type="button" className="secondary compact" onClick={onClose}>
-          {t("common.cancel")}
-        </button>
-        <button
-          type="button"
-          className="primary compact"
-          disabled={saveDisabled}
-          onClick={save}
-        >
-          {t("endpoints.saveEndpoint")}
-        </button>
-      </div>
+
     </div>
   );
 }

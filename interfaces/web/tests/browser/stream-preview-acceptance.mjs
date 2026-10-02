@@ -482,13 +482,20 @@ async function main() {
     for (const streamMode of [false, true]) {
       await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", ${JSON.stringify(String(streamMode))})`);
       await setRound([{event_id: "reasoning-request", source: "worker_activity", created_at_ms: 1,
-        payload: {kind: "model_request", round: 1, reasoning_enabled: true}}], "");
-      await waitFor(() => browser.evaluate(`!!document.querySelector('.reasoning-notice svg.lucide-brain')`), "reasoning icon missing in mode " + streamMode);
+        payload: {kind: "reasoning_upgrade", from: "low", to: "high"}}], "");
+      await waitFor(() => browser.evaluate(`!!document.querySelector('.reasoning-notice svg.lucide-infinity')`), "reasoning icon missing in mode " + streamMode);
       assert(await browser.evaluate(`!!document.querySelector('.reasoning-notice').textContent.trim()`), "reasoning label missing");
       await setRound([{event_id: "plain-request", source: "worker_activity", created_at_ms: 1,
         payload: {kind: "model_request", round: 2, reasoning_enabled: false}}], "");
       assert(await browser.evaluate(`!document.querySelector('.reasoning-notice')`), "disabled reasoning must not render");
     }
+    const reasoningEvent = { event_id: 'reasoning-enabled', source: 'worker_activity', created_at_ms: 1,
+      payload: { kind: 'reasoning_upgrade', from: 'low', to: 'high' } };
+    await setRound([reasoningEvent], 'Reasoning indicator check');
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.reasoning-notice .lucide-infinity')`), 'enabled reasoning indicator missing');
+    assert(await browser.evaluate(`getComputedStyle(document.querySelector('.reasoning-notice .lucide-infinity')).strokeWidth === '1.5px'`), 'reasoning icon stroke inconsistent');
+    await setRound([{ ...reasoningEvent, payload: { kind: 'model_request', reasoning_enabled: false } }], 'No reasoning');
+    assert(await browser.evaluate(`!document.querySelector('.reasoning-notice')`), 'disabled reasoning must not show an indicator');
     // Lifecycle projections update the same DOM row, not a newly entering command.
     const lifecycle = (id, phase, status, time) => {
       const event = toolEvent(id, time);
@@ -498,12 +505,17 @@ async function main() {
     const actionEvents = [thoughtEvent("stable-thought", "Stable thought", 1), lifecycle("start", "start", "running", 2)];
     await setRound(actionEvents, "Stable thought");
     await waitFor(() => contains(".stream-tool-row", "Bash"), "initial action missing");
+    assert(await browser.evaluate(`(() => {
+      const icon = document.querySelector('.stream-tool-row .bash-tool-icon svg.lucide-square-terminal');
+      return !!icon && getComputedStyle(icon).strokeWidth === '1.5px'
+        && document.querySelector('.bash-tool-icon .sr-only')?.textContent === 'Bash';
+    })()`), "Bash must render an accessible terminal glyph with a 25% thinner stroke");
     await browser.evaluate(`window.actionRow = document.querySelector('.stream-tool-row'); window.actionCommand = document.querySelector('.stream-tool-command'); window.actionHead = document.querySelector('.stream-tool-head'); true;`);
     assert(await browser.evaluate(`!document.querySelector('.stream-tool-fold.expanded') && document.querySelector('.stream-tool-command-preview').textContent === 'echo hello' && document.querySelector('.stream-tool-toggle').getAttribute('aria-expanded') === 'false'`), "running tool must default to one-line closed summary");
     await browser.evaluate(`document.querySelector('.stream-tool-toggle').click()`);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-fold.expanded')`), "running command cannot expand");
     await waitForSubtreeIdle(browser, ".stream-tool-fold", "row expansion animation did not settle before capture");
-    await browser.evaluate(`window.toolHeight = document.querySelector('.stream-tool-row').getBoundingClientRect().height; true`);
+    await browser.evaluate(`window.toolGeometry = (()=>{const q=s=>{const e=document.querySelector(s),r=e.getBoundingClientRect(),c=getComputedStyle(e);return {h:r.height,mt:c.marginTop,mb:c.marginBottom,pt:c.paddingTop,pb:c.paddingBottom,font:c.font,line:c.lineHeight}};return {row:q('.stream-tool-row'),head:q('.stream-tool-head'),fold:q('.stream-tool-fold'),command:q('.stream-tool-command'),status:q('.stream-tool-status-slot')}})(); window.toolHeight=window.toolGeometry.row.h; true`);
     for (const [phase, status, time] of [["execution_start", "running", 3], ["finish", "background_running", 4], ["finish", "completed", 5]]) {
       actionEvents.push(lifecycle(`update-${time}`, phase, status, time));
       const base = host.getSession();
@@ -532,7 +544,8 @@ async function main() {
     }
     await waitFor(() => contains(".stream-tool-status", "✓"), "terminal status missing");
     await sleep(700);
-    assert(await browser.evaluate(`!!document.querySelector('.stream-tool-fold.expanded') && Math.abs(document.querySelector('.stream-tool-row').getBoundingClientRect().height - window.toolHeight) < 1 && !document.querySelector('.stream-tool-merged-item.merged')`), "completion changed user expansion or geometry before AI reply");
+    const completionGeometry = await browser.evaluate(`({expanded:!!document.querySelector('.stream-tool-fold.expanded'),height:document.querySelector('.stream-tool-row').getBoundingClientRect().height,before:window.toolHeight,merged:!!document.querySelector('.stream-tool-merged-item.merged'),head:document.querySelector('.stream-tool-head').getBoundingClientRect().height,status:document.querySelector('.stream-tool-status-slot').getBoundingClientRect().height,beforeGeometry:window.toolGeometry})`);
+    assert(completionGeometry.expanded && Math.abs(completionGeometry.height - completionGeometry.before) < 1 && !completionGeometry.merged, "completion changed user expansion or geometry before AI reply: "+JSON.stringify(completionGeometry));
     // Same-round serial execution advances logical order without any AI text.
     const serialStart = lifecycle("serial-start", "execution_start", "running", 6);
     serialStart.payload.payload.action_id = "serial-b";
@@ -556,11 +569,13 @@ async function main() {
     }
     for (const width of [1440, 390]) {
       await browser.call("Emulation.setDeviceMetricsOverride", {width, height:1000, deviceScaleFactor:1, mobile:false});
-      assert(await browser.evaluate(`(() => {
+      const alignment = await browser.evaluate(`(() => {
         const summary = document.querySelector('.stream-tool-run-toggle .stream-tool-run-sign');
-        const live = document.querySelector('.stream-tool-row.running .stream-tool-toggle > svg');
-        return !!summary && !!live && Math.abs(summary.getBoundingClientRect().left - live.getBoundingClientRect().left) < 1;
-      })()`), `collapsed summary and live tool must be peers at ${width}px`);
+        const live = document.querySelector('.stream-tool-row.running .stream-tool-status-slot');
+        const a=summary?.getBoundingClientRect(),b=live?.getBoundingClientRect();
+        return {ok:!!a&&!!b&&Math.abs(a.left-b.left)<1,summary:a&&{left:a.left,width:a.width},live:b&&{left:b.left,width:b.width}};
+      })()`);
+      assert(alignment.ok, `collapsed summary and live tool must be peers at ${width}px: ${JSON.stringify(alignment)}`);
     }
     await browser.call("Emulation.clearDeviceMetricsOverride");
 

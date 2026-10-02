@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { extname, join, resolve } from "node:path";
@@ -356,6 +356,7 @@ async function main() {
   await writeFile(join(mem, "Cargo.toml"), "stream readfile acceptance fixture");
   const scenario = process.env.STREAM_PREVIEW_SCENARIO ?? "normal";
   const protocol = process.env.STREAM_PREVIEW_PROTOCOL ?? "xml";
+  const responses = process.env.STREAM_API_PROTOCOL === "openai-responses";
   const streamMode = process.env.STREAM_UI_MODE !== "false";
   assert(["xml", "json", "native"].includes(protocol), "unsupported preview protocol");
   assert(["normal", "invalid", "network", "stop", "supplement", "interaction", "tools"].includes(scenario), "unsupported preview scenario");
@@ -374,8 +375,31 @@ async function main() {
     assert(JSON.parse(body).stream === true, "streaming request must not require TIMEM_STREAM environment configuration");
     requests++;
     res.writeHead(200, {"Content-Type":"text/event-stream"});
-    const write = (content) => res.write(`data: ${JSON.stringify({choices:[{delta:{content}}]})}\n\n`);
+    let fullText = "";
+    const write = (content) => {
+      fullText += content;
+      res.write(`data: ${JSON.stringify(responses ? {type:"response.output_text.delta",delta:content} : {choices:[{delta:{content}}]})}\n\n`);
+    };
     appendStreaming = write;
+    if (protocol === "native" && responses) {
+      assert(req.url === "/v1/responses", "wrong Responses route");
+      assert(Array.isArray(JSON.parse(body).tools), "native tools missing from request");
+      let output;
+      if (requests === 1) {
+        write("HTTP early response");
+        await new Promise(resolve => { release = resolve; });
+        output = [{type:"message",content:[{type:"output_text",text:fullText}]},
+          {type:"function_call",id:"fc_read",call_id:"call_read",name:"readfile",arguments:JSON.stringify({path:"Cargo.toml",max_bytes:200})}];
+        res.write(`data: ${JSON.stringify({type:"response.function_call_arguments.delta",item_id:"fc_read",output_index:1,delta:'{"path":'})}\n\n`);
+        res.write(`data: ${JSON.stringify({type:"response.function_call_arguments.delta",item_id:"fc_read",output_index:1,delta:'"Cargo.toml","max_bytes":200}'})}\n\n`);
+      } else {
+        assert(body.includes("function_call_output") && body.includes("stream readfile acceptance fixture"), "tool result not returned to Responses input");
+        await new Promise(resolve => { releaseFinal = resolve; });
+        output = [{type:"function_call",id:"fc_final",call_id:"call_final",name:"task_finished",arguments:JSON.stringify({summary:"HTTP final"})}];
+      }
+      res.end(`data: ${JSON.stringify({type:"response.completed",response:{status:"completed",model:"preview-test",output,usage:{input_tokens:100,output_tokens:20,total_tokens:120}}})}\n\n`);
+      return;
+    }
     if (protocol === "native") {
       if (requests === 1) {
         write("HTTP early response");
@@ -386,7 +410,7 @@ async function main() {
         // deltas alone never terminate the turn.
         res.write(`data: ${JSON.stringify({choices:[{delta:{tool_calls:[{index:0,id:"call_final",type:"function",function:{name:"task_finished",arguments:JSON.stringify({summary:"HTTP final"})}}]}}]})}\n\n`);
       }
-      res.end("data: [DONE]\n\n"); return;
+      res.end(responses ? `data: ${JSON.stringify({type:"response.completed",response:{status:"completed",model:"preview-test",output:[{type:"message",content:[{type:"output_text",text:fullText}]}],usage:{input_tokens:100,output_tokens:20,total_tokens:120}}})}\n\n` : "data: [DONE]\n\n"); return;
     }
     if (requests === 1) {
       // For the interaction scenario keep <free_talk> open so appended
@@ -404,11 +428,11 @@ async function main() {
       if (scenario === "normal" || scenario === "tools") await new Promise(resolve => { releaseFinal = resolve; });
       write(protocol === "json" ? JSON.stringify({status:"all_finished",final_answer:"HTTP final"}) : "<ASSISTANT><finish_confirm>Now let me think seriously twice before I announce stop. Review user's task list. Is my delivery consistent with user's demand?</finish_confirm><final_answer>HTTP final</final_answer></ASSISTANT>");
     }
-    res.end("data: [DONE]\n\n");
+    res.end(responses ? `data: ${JSON.stringify({type:"response.completed",response:{status:"completed",model:"preview-test",output:[{type:"message",content:[{type:"output_text",text:fullText}]}],usage:{input_tokens:100,output_tokens:20,total_tokens:120}}})}\n\n` : "data: [DONE]\n\n");
   });
   await new Promise(resolve => model.listen(0,"127.0.0.1",resolve));
   const child = spawn(resolve(root,"../../target/debug/timem"), ["--no-open","--space",mem,"--port","18987"], {
-    env:{PATH:process.env.PATH,HOME:mem,TIMEM_API_KEY:"dummy",TIMEM_API_PROTOCOL:"openai-compatible",TIMEM_RESPONSE_PROTOCOL:protocol === "native" ? "xml" : protocol,TIMEM_TOOL_CALL_MODE:protocol === "native" ? "native" : "inline",TIMEM_BASE_URL:`http://127.0.0.1:${model.address().port}/v1`,TIMEM_MODEL:"preview-test",TIMEM_WORK_INSTRUCTIONS:"off"}, stdio:["ignore","pipe","pipe"]
+    env:{PATH:process.env.PATH,HOME:mem,TIMEM_API_KEY:"dummy",TIMEM_API_PROTOCOL:responses ? "openai-responses" : "openai-compatible",TIMEM_RESPONSE_PROTOCOL:protocol === "native" ? "xml" : protocol,TIMEM_TOOL_CALL_MODE:protocol === "native" ? "native" : "inline",TIMEM_BASE_URL:`http://127.0.0.1:${model.address().port}/v1`,TIMEM_MODEL:"preview-test",TIMEM_WORK_INSTRUCTIONS:"off"}, stdio:["ignore","pipe","pipe"]
   });
   let logs = ""; child.stdout.on("data",x=>logs+=x); child.stderr.on("data",x=>logs+=x);
   let browser, socket;
@@ -421,6 +445,10 @@ async function main() {
     await new Promise((resolve,reject)=>{socket.addEventListener("open",resolve,{once:true});socket.addEventListener("error",reject,{once:true});});
     socket.send(JSON.stringify({type:"session_create",display_name:"HTTP streaming acceptance",workspace_dir:mem}));
     await waitFor(()=>sessionId,"session creation failed");
+    socket.send(JSON.stringify({type:"model_endpoint_upsert",command_id:"fixture-endpoint",endpoint:{id:"e2e-stream",name:"E2E stream",model:"preview-test",api_protocol:responses?"openai-responses":"openai-compatible",response_protocol:protocol==="native"?"xml":protocol,base_url:`http://127.0.0.1:${model.address().port}/v1`,api_key:"dummy",max_llm_input_tokens:100000,max_llm_output_tokens:10000,stream:true}}));
+    await waitFor(()=>received.some(e=>e.type==="command_ack" && e.command_id==="fixture-endpoint" && e.status==="committed"),"endpoint creation failed");
+    socket.send(JSON.stringify({type:"model_endpoint_apply",command_id:"fixture-apply",session_id:sessionId,endpoint_id:"e2e-stream"}));
+    await waitFor(()=>received.some(e=>e.type==="command_ack" && e.command_id==="fixture-apply" && e.status==="committed"),"endpoint apply failed");
     browser = await startBrowser("http://127.0.0.1:18987/");
     // The CDP target may still be on about:blank right after creation, where
     // localStorage access is denied; wait until the app origin is live.
@@ -435,7 +463,10 @@ async function main() {
     await waitFor(()=>browser.evaluate(`!!document.querySelector('textarea[aria-label="Message Timem"]')`),"composer missing");
     await waitFor(() => browser.evaluate(`!!document.querySelector('button.session[title="HTTP streaming acceptance"]')`), "session button missing");
     await browser.evaluate(`document.querySelector('button.session[title="HTTP streaming acceptance"]')?.click()`);
-    socket.send(JSON.stringify({type:"turn_submit",session_id:sessionId,text:"HTTP streaming acceptance"}));
+    await browser.evaluate(`(() => { const e=document.querySelector('textarea[aria-label="Message Timem"]'); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(e,'HTTP streaming acceptance'); e.dispatchEvent(new Event('input',{bubbles:true})); })()`);
+    await browser.evaluate(`document.querySelector('textarea[aria-label="Message Timem"]').focus()`);
+    await browser.call("Input.dispatchKeyEvent",{type:"keyDown",key:"Enter",code:"Enter",windowsVirtualKeyCode:13});
+    await browser.call("Input.dispatchKeyEvent",{type:"keyUp",key:"Enter",code:"Enter",windowsVirtualKeyCode:13});
     if (!streamMode) {
       await waitFor(() => !!release, "initial model request missing");
       assert(await browser.evaluate(`!document.querySelector('.response-preview, .turn-stream-tools')`), "non-stream mode leaked provisional UI");
@@ -539,7 +570,23 @@ async function main() {
     if (scenario === "invalid") {
       assert(received.some(raw => { const e = raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.model.preview" && e.event.payload.attempt === 1 && e.event.payload.response === null; }), "invalid attempt did not retract all previews");
     }
-    console.log(`PASS actual Host + HTTP SSE + Chrome: protocol=${protocol} scenario=${scenario}; response visible before HTTP completion, final delivered`);
+    const persistedFinal = async (dir) => {
+      for (const entry of await readdir(dir, {withFileTypes:true})) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) { if (await persistedFinal(path)) return true; }
+        else if (entry.isFile() && (entry.name.endsWith(".jsonl") || entry.name.endsWith(".json"))) {
+          const text = await readFile(path,"utf8");
+          if (text.includes("HTTP final") && text.includes(sessionId)) return true;
+        }
+      }
+      return false;
+    };
+    await waitFor(() => persistedFinal(mem), "final not found in persisted JSON/JSONL records");
+    await browser.call("Page.reload", {ignoreCache:true});
+    await waitFor(() => browser.evaluate(`!!document.querySelector('button.session[title="HTTP streaming acceptance"]')`), "session missing after final reload");
+    await browser.evaluate(`document.querySelector('button.session[title="HTTP streaming acceptance"]').click()`);
+    await waitFor(() => browser.evaluate(`document.querySelector('.turn-final-delivery')?.textContent.includes('HTTP final')`), "final lost on reload");
+    console.log(`PASS actual Host + HTTP SSE + Chrome: api=${responses ? "responses" : "chat"} protocol=${protocol} scenario=${scenario}; browser submission, early preview, final persisted and restored on reload`);
   } catch(error) { console.error(logs); console.error("requests",requests); console.error("action evidence", JSON.stringify(received.flatMap(raw => { const e=raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.action" ? [e.event.payload] : []; }))); console.error("host errors", JSON.stringify(received.filter(e => JSON.stringify(e).includes("host_error")))); if(browser)console.error(await browser.evaluate("document.body.innerText")); throw error; }
   finally {
     release?.(); releaseFinal?.(); socket?.close(); if(browser)await browser.close();

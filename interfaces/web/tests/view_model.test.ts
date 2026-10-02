@@ -3583,6 +3583,7 @@ describe("web topic view model", () => {
       tone: "action",
       title: "MemMgr · running",
       tool_name: "memmgr",
+      memory_search: { kind: "sql", source: "durable" },
       detail: 'type="durable" op="sql" sql="SELECT id, content FROM memories"',
     });
   });
@@ -3608,6 +3609,21 @@ describe("web topic view model", () => {
     expect(activity?.detail).toContain('api_key="****"');
     expect(activity?.detail).not.toContain("top-secret");
     expect(activity?.detail).not.toContain("other-secret");
+  });
+
+  it("keeps readable self_tool presentation separate from complete details", () => {
+    const activity = activityFromTopic(
+      topic("core.action", {
+        action: "self_tool",
+        status: "running",
+        input: { type: "cwd", new_path: "/work/project" },
+      }),
+    );
+    expect(activity).toMatchObject({
+      tool_name: "self_tool",
+      self_tool: { kind: "change_cwd", path: "/work/project" },
+      detail: 'type="cwd" new_path="/work/project"',
+    });
   });
 
   it("applies a structured cwd update only to the matching session", () => {

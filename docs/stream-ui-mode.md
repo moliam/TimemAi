@@ -1,6 +1,6 @@
 # Stream UI Mode
 
-Settings → Beta → **Stream UI Mode** is disabled by default and stored only in the browser.
+Settings → System → **Show answers as they arrive** is a standard presentation setting. It is disabled by default and stored only in the browser. Existing choices continue to use the `timem-web-stream-ui-mode-v1` key so upgrading does not reset the preference.
 
 Core emits a provisional `core.model.preview` snapshot scoped to the current response attempt. The Host validates the active Core Turn and primary Worker, maps it to the existing Web turn, and retains only the latest preview. Preview chunks do not become chat history events. Browser reload restores the Host snapshot; a Host restart is not a resumable model request.
 

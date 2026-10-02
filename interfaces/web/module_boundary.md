@@ -30,6 +30,7 @@ It may contain:
   rename groups, and use dnd-kit for keyboard/pointer-accessible ordering and
   cross-group movement. The Host remains authoritative for persisted library
   state.
+- System settings presentation. The first-level System category may expose Host-owned, MEM-persisted configuration such as the exact per-tool model-visible result budget, plus stable browser presentation preferences such as showing answers while they are generated. Experimental switches remain grouped in a distinct Beta subsection. The browser sends intent and renders authoritative snapshot/events; it must not independently enforce Core prompt-size policy.
 - MCP server management presentation: transport-specific forms, connection and
   tool-count status, per-Session enable switches, reconnect/edit/delete
   controls, responsive layout, and redacted secret placeholders.
@@ -76,3 +77,34 @@ It must not contain:
 
 The browser may understand every public topic field and choose its own visual
 representation. It must not merge events from different session or request ids.
+
+
+Endpoint sharing is isolated in `src/endpoint_share.tsx`: a transient top-level
+Portal dialog above Settings owns category checkboxes, opaque share content,
+Lucide warning/progress icons, copy, and local result presentation. Basic is
+selected by default; advanced and personal are opt-in. Host commands perform
+encoding, validation, collision resolution and persistence. The browser must
+not export redacted snapshots as original configurations, interpret ACK as
+import success, retain share strings across dialog unmount/MEM switch/disconnect,
+or put them in replay storage. Success, rejection, timeout and disconnect share
+one correlated completion path; closing/cancelling clears that correlation and
+drops late replies. Unknown Host errors use a safe localized fallback rather
+than exposing internal codes or paths.
+
+
+Built-in tool activity rows may derive visual summaries only from structured
+Host `core.action.input`: `src/tool_presentation.ts` validates known shapes and
+falls back to the generic redacted argument string for malformed, unknown or
+third-party inputs. `readfile` uses `FileText` with path and selector-aware
+line/byte/match summaries; historical `max_bytes` is validated only as a legacy
+input field and omitted from the primary summary while remaining in expanded
+redacted details. `memmgr` search/SQL uses `DatabaseSearch`, while its
+other operations use `Database`; `self_tool` uses `Info` with a schema-validated
+action summary. A recognized structured summary replaces raw parameters only in
+the primary chat row: the expandable disclosure retains the complete redacted
+argument detail supplied by the Host projection. These are Interface affordances
+only and must not reinterpret action status, success, persistence or capability
+semantics. Ordinary and stream presentations share the same identity and summary. Rows
+show status, tool identity and command/argument preview in that order; rows
+with details are the disclosure target themselves, with hover/focus feedback,
+keyboard activation and selection protection rather than a persistent arrow.
