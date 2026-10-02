@@ -4,7 +4,8 @@
 //! process and file-reading safety limits belong to those layers; prompt-size policy
 //! belongs here so inline and native tool calling cannot drift apart.
 
-pub(crate) const MAX_MODEL_TOOL_RESULT_BYTES: usize = 32 * 1024;
+pub const MAX_MODEL_TOOL_RESULT_BYTES: usize = 30 * 1024;
+pub const DEFAULT_MODEL_TOOL_RESULT_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Retention {
@@ -22,8 +23,12 @@ impl Retention {
     }
 }
 
-pub(crate) fn gate(text: &str, retention: Retention) -> String {
-    fit(text, MAX_MODEL_TOOL_RESULT_BYTES, retention)
+pub fn validate_model_tool_result_bytes(max_bytes: usize) -> Result<(), String> {
+    if matches!(max_bytes, 8_192 | 10_240 | 16_384 | 20_480 | 30_720) {
+        Ok(())
+    } else {
+        Err("model_tool_result_bytes_invalid".to_string())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

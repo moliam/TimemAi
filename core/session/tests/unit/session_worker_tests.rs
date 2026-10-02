@@ -4709,6 +4709,296 @@ fn wait_for_stress_turn_finished(
 }
 
 #[test]
+fn model_tool_result_budget_hot_update_consumes_newest_and_preserves_other_updates() {
+    let (mut ui, _mailbox, _manual_flag) = manual_compact_ui("tool_result_budget_selective");
+    {
+        let mut updates = ui.pending_runtime_updates.lock().unwrap();
+        updates.push(PendingRuntimeUpdate::Config {
+            field: agent_core::RuntimeConfigField::Model,
+            value: "next-model".to_string(),
+        });
+        updates.push(PendingRuntimeUpdate::ModelToolResultBytes(20 * 1024));
+        updates.push(PendingRuntimeUpdate::ClaudeCodexToolDiscovery(true));
+        updates.push(PendingRuntimeUpdate::ModelToolResultBytes(8 * 1024));
+    }
+
+    assert_eq!(
+        ui.take_model_tool_result_bytes_update(),
+        Some(8 * 1024),
+        "the newest pending budget must win"
+    );
+    let updates = ui.pending_runtime_updates.lock().unwrap();
+    assert_eq!(updates.len(), 2, "only budget updates should be consumed");
+    assert!(matches!(
+        &updates[0],
+        PendingRuntimeUpdate::Config {
+            field: agent_core::RuntimeConfigField::Model,
+            value,
+        } if value == "next-model"
+    ));
+    assert!(matches!(
+        updates[1],
+        PendingRuntimeUpdate::ClaudeCodexToolDiscovery(true)
+    ));
+}
+
+#[test]
+fn model_tool_result_budget_changed_during_model_call_applies_to_that_responses_tool_result() {
+    use std::sync::mpsc;
+
+    struct BlockingReadfileModel {
+        read_path: String,
+        prompts: Arc<Mutex<Vec<String>>>,
+        first_call_entered: mpsc::Sender<()>,
+        release_first_call: mpsc::Receiver<()>,
+        calls: usize,
+    }
+
+    impl ModelClient for BlockingReadfileModel {
+        fn call_model(
+            &mut self,
+            config: &ModelServiceConfig,
+            prompt: &str,
+            _audit_file: &std::path::Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.prompts.lock().unwrap().push(prompt.to_string());
+            self.calls += 1;
+            let content = if self.calls == 1 {
+                self.first_call_entered.send(()).unwrap();
+                self.release_first_call
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("test should release the blocked model request");
+                serde_json::json!({
+                    "status": "working",
+                    "working_still_action": {
+                        "readfile": {
+                            "path": self.read_path
+                        }
+                    }
+                })
+                .to_string()
+            } else {
+                r#"{"status":"ALL_FINISHED","final_answer":"Done"}"#.to_string()
+            };
+            Ok(LlmResponse {
+                tool_calls: Vec::new(),
+                content,
+                model_name: config.model.clone(),
+                usage: UsageStats::zero(),
+                truncated: false,
+            })
+        }
+    }
+
+    let dir = tmp_dir("tool_result_budget_update_during_model_call");
+    let large_file = dir.join("large.txt");
+    std::fs::write(&large_file, "0123456789abcdef".repeat(1536)).unwrap();
+    let mut core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    core.set_response_protocol(ResponseProtocolKind::Json);
+
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let (first_call_entered_tx, first_call_entered_rx) = mpsc::channel();
+    let (release_first_call_tx, release_first_call_rx) = mpsc::channel();
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "tool_result_budget_update_during_model_call", 1),
+        BlockingReadfileModel {
+            read_path: large_file.to_string_lossy().into_owned(),
+            prompts: Arc::clone(&prompts),
+            first_call_entered: first_call_entered_tx,
+            release_first_call: release_first_call_rx,
+            calls: 0,
+        },
+    );
+    let handle = worker.handle();
+    handle.run_turn("read the file", None).unwrap();
+    first_call_entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first model request should be in flight");
+    handle
+        .update_model_tool_result_bytes(8 * 1024)
+        .expect("budget update should enqueue while the model request is active");
+    release_first_call_tx.send(()).unwrap();
+
+    loop {
+        match worker.events().recv_timeout(Duration::from_secs(5)) {
+            Ok(CoreSessionWorkerEvent::TurnFinished { .. }) => break,
+            Ok(_) => {}
+            Err(error) => panic!("timed out waiting for turn finish: {error}"),
+        }
+    }
+
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(
+        prompts.len(),
+        2,
+        "tool result should trigger a second request"
+    );
+    assert!(
+        !prompts[1].contains("User changes some runtime config"),
+        "a display-only tool-result budget update must not create a model round"
+    );
+    let envelope_line = prompts[1]
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("{\"action_result\":"))
+        .expect("second prompt should contain the structured readfile result");
+    assert!(
+        envelope_line.len() <= 8 * 1024,
+        "hot-updated 8K budget must bound the complete envelope, got {} bytes",
+        envelope_line.len()
+    );
+    let envelope: serde_json::Value =
+        serde_json::from_str(envelope_line).expect("bounded envelope must remain valid JSON");
+    assert_eq!(
+        envelope["action_result"]["runtime_metadata"]["status"],
+        "completed"
+    );
+    assert!(
+        envelope["action_result"]["runtime_metadata"]["truncation"].is_object(),
+        "the 24K read must report truncation under the 8K envelope budget"
+    );
+
+    worker.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn model_tool_result_budget_updated_while_idle_applies_without_model_notice() {
+    struct ReadfileThenFinalModel {
+        read_path: String,
+        prompts: Arc<Mutex<Vec<String>>>,
+        calls: usize,
+    }
+
+    impl ModelClient for ReadfileThenFinalModel {
+        fn call_model(
+            &mut self,
+            config: &ModelServiceConfig,
+            prompt: &str,
+            _audit_file: &std::path::Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.prompts.lock().unwrap().push(prompt.to_string());
+            self.calls += 1;
+            let content = if self.calls == 1 {
+                serde_json::json!({
+                    "status": "working",
+                    "working_still_action": {
+                        "readfile": { "path": self.read_path }
+                    }
+                })
+                .to_string()
+            } else {
+                r#"{"status":"ALL_FINISHED","final_answer":"Done"}"#.to_string()
+            };
+            Ok(LlmResponse {
+                tool_calls: Vec::new(),
+                content,
+                model_name: config.model.clone(),
+                usage: UsageStats::zero(),
+                truncated: false,
+            })
+        }
+    }
+
+    let dir = tmp_dir("idle_tool_result_budget_update");
+    let large_file = dir.join("large.txt");
+    std::fs::write(&large_file, "0123456789abcdef".repeat(1536)).unwrap();
+    let mut core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    core.set_response_protocol(ResponseProtocolKind::Json);
+
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "idle_tool_result_budget_update", 1),
+        ReadfileThenFinalModel {
+            read_path: large_file.to_string_lossy().into_owned(),
+            prompts: Arc::clone(&prompts),
+            calls: 0,
+        },
+    );
+    let handle = worker.handle();
+    handle
+        .update_model_tool_result_bytes(8 * 1024)
+        .expect("idle budget update should enqueue");
+    handle.run_turn("read the file", None).unwrap();
+
+    loop {
+        match worker.events().recv_timeout(Duration::from_secs(5)) {
+            Ok(CoreSessionWorkerEvent::TurnFinished { .. }) => break,
+            Ok(_) => {}
+            Err(error) => panic!("timed out waiting for turn finish: {error}"),
+        }
+    }
+
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 2);
+    assert!(
+        prompts
+            .iter()
+            .all(|prompt| !prompt.contains("User changes some runtime config")),
+        "a display-only budget update must stay out of model-visible runtime notices"
+    );
+    let envelope_line = prompts[1]
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("{\"action_result\":"))
+        .expect("second prompt should contain the structured readfile result");
+    assert!(envelope_line.len() <= 8 * 1024);
+    let envelope: serde_json::Value = serde_json::from_str(envelope_line).unwrap();
+    assert_eq!(
+        envelope["action_result"]["runtime_metadata"]["status"],
+        "completed"
+    );
+    assert!(envelope["action_result"]["runtime_metadata"]["truncation"].is_object());
+
+    worker.shutdown().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn model_tool_result_budget_runtime_update_reaches_core_and_rejects_invalid_values() {
+    let dir = tmp_dir("model_tool_result_budget_runtime_update");
+    let mut core = AgentCore::new(
+        "static prompt\n{{RESPONSE_PROTOCOL_SECTION}}\n{{TOOL_CATALOG}}\n",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let mut config = test_config();
+    assert_eq!(core.model_tool_result_bytes(), 16 * 1024);
+
+    apply_worker_runtime_update(
+        &mut core,
+        &mut config,
+        PendingRuntimeUpdate::ModelToolResultBytes(8 * 1024),
+    );
+    assert_eq!(core.model_tool_result_bytes(), 8 * 1024);
+
+    assert_eq!(
+        agent_core::validate_model_tool_result_bytes(12 * 1024).unwrap_err(),
+        "model_tool_result_bytes_invalid"
+    );
+}
+
+#[test]
 fn claude_codex_tool_discovery_updates_before_next_model_request_of_active_turn() {
     use std::sync::mpsc;
 
@@ -5108,6 +5398,127 @@ fn update_runtime_config_changes_worker_model_service_config() {
 }
 
 #[test]
+fn replace_model_service_config_applies_one_complete_snapshot() {
+    struct ConfigCapturingModel {
+        captured: Arc<Mutex<Vec<(ModelServiceConfig, String)>>>,
+        calls: usize,
+    }
+
+    impl ModelClient for ConfigCapturingModel {
+        fn call_model(
+            &mut self,
+            config: &ModelServiceConfig,
+            prompt: &str,
+            _audit_file: &std::path::Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.captured
+                .lock()
+                .unwrap()
+                .push((config.clone(), prompt.to_string()));
+            self.calls += 1;
+            let content = if self.calls == 1 {
+                r#"{"status":"working","working_still_action":{"self_tool":{"type":"params"}}}"#
+            } else {
+                r#"{"status":"ALL_FINISHED","final_answer":"Done"}"#
+            };
+            Ok(LlmResponse {
+                tool_calls: Vec::new(),
+                content: content.to_string(),
+                model_name: config.model.clone(),
+                usage: UsageStats::zero(),
+                truncated: false,
+            })
+        }
+    }
+
+    let dir = tmp_dir("replace_model_service_config");
+    let core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "replace_model_service_config_test", 1),
+        ConfigCapturingModel {
+            captured: Arc::clone(&captured),
+            calls: 0,
+        },
+    );
+    let handle = worker.handle();
+
+    match worker.events().recv_timeout(Duration::from_secs(2)) {
+        Ok(CoreSessionWorkerEvent::TurnProjection(_) | CoreSessionWorkerEvent::Topics(_)) => {}
+        Ok(CoreSessionWorkerEvent::ModelRequestCompleted { .. })
+        | Ok(CoreSessionWorkerEvent::ModelResponseParsed { .. }) => {}
+        other => panic!("expected lifecycle topics, got: {other:?}"),
+    }
+
+    let mut replacement = test_config();
+    replacement.model = "replacement-model".to_string();
+    replacement.base_url = "https://replacement.example.test/v1".to_string();
+    replacement.api_key = "replacement-secret".to_string();
+    replacement.http_headers = BTreeMap::from([
+        (
+            "Authorization".to_string(),
+            "Bearer header-secret".to_string(),
+        ),
+        ("X-Tenant".to_string(), "tenant-a".to_string()),
+    ]);
+    replacement.request_fields = BTreeMap::from([
+        ("service_tier".to_string(), serde_json::json!("priority")),
+        ("seed".to_string(), serde_json::json!(7)),
+    ]);
+    replacement.timeout_secs = 42;
+    replacement.max_llm_output_tokens = 16_000;
+    replacement.max_llm_input_tokens = 64_000;
+    replacement.openai_compatible.reasoning_effort = Some("high".to_string());
+    replacement.openai_compatible.stream = true;
+    replacement.http_transport = agent_core::ModelHttpTransportOptions {
+        allow_cross_origin_redirects: true,
+        private_ca_pem: Some("private-ca-secret".to_string()),
+    };
+
+    handle
+        .replace_model_service_config(replacement.clone())
+        .expect("complete model-service config replacement should succeed");
+    handle.run_turn("hello", None).expect("turn should start");
+
+    loop {
+        match worker.events().recv_timeout(Duration::from_secs(5)) {
+            Ok(CoreSessionWorkerEvent::TurnFinished { .. }) => break,
+            Ok(_) => {}
+            Err(error) => panic!("timed out waiting for turn finish: {error}"),
+        }
+    }
+
+    let captured = captured.lock().unwrap();
+    assert!(captured.len() >= 2);
+    assert!(captured.iter().all(|(config, _)| config == &replacement));
+    let prompts = captured
+        .iter()
+        .map(|(_, prompt)| prompt.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(prompts.contains("replacement-model"));
+    assert!(prompts.contains("https://replacement.example.test/v1"));
+    assert!(prompts.contains("64000"));
+    assert!(prompts.contains("16000"));
+    assert!(prompts.contains("high"));
+    assert!(!prompts.contains("replacement-secret"));
+    assert!(!prompts.contains("header-secret"));
+    assert!(!prompts.contains("private-ca-secret"));
+
+    worker.shutdown().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn update_runtime_config_max_input_also_updates_core() {
     use agent_core::RuntimeConfigField;
 
@@ -5275,7 +5686,8 @@ fn queued_mcp_update_is_applied_before_the_next_user_turn_prompt() {
     assert!(static_end < dynamic_heading);
     assert!(!prompt[..static_end].contains("mcp_demo__echo"));
     assert!(prompt.contains("MCP update: newly available actions: mcp_demo__echo."));
-    assert!(prompt.contains("## USER\n\nUse the new capability."));
+    assert!(prompt.contains("## USER\n\n[User input time:"));
+    assert!(prompt.contains(" UTC]\n\nUse the new capability."));
 
     worker.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(dir);

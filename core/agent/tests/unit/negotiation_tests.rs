@@ -39,6 +39,7 @@ impl ModelClient for ProbeClient {
         Ok(LlmResponse {
             tool_calls: (0..count)
                 .map(|index| NativeToolCall {
+                    assistant_continuation: None,
                     id: format!("probe_{index}"),
                     name: PROBE_TOOL_NAME.to_string(),
                     arguments: json!({"slot": index + 1}),
@@ -79,6 +80,7 @@ impl ModelClient for CancelledThenNativeClient {
         Ok(LlmResponse {
             tool_calls: (0..count)
                 .map(|index| NativeToolCall {
+                    assistant_continuation: None,
                     id: format!("probe_{index}"),
                     name: PROBE_TOOL_NAME.to_string(),
                     arguments: json!({"slot": index + 1}),

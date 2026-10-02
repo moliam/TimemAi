@@ -519,6 +519,7 @@ fn durable_command_result(event: &WireEvent) -> Option<Value> {
         WireEvent::SessionApiKeyRevealed { .. }
             | WireEvent::McpServerSecretsRevealed { .. }
             | WireEvent::ModelEndpointSecretRevealed { .. }
+            | WireEvent::ModelEndpointShareExported { .. }
     ) {
         return None;
     }

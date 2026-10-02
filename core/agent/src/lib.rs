@@ -49,11 +49,15 @@ pub mod memmgr;
 #[path = "../../../resources/capabilities/tools/memo.rs"]
 pub mod memo;
 pub mod model_api;
+pub mod model_catalog;
+mod model_payload;
+pub mod model_requirements;
 pub mod model_service_config;
 pub mod model_stream;
 pub mod model_transport;
 pub mod negotiation;
 mod notification;
+pub mod reasoning;
 pub use timem_platform as os;
 pub mod profiler;
 pub mod prompt_cache;
@@ -85,6 +89,9 @@ pub mod tool_jobs;
 pub(crate) mod tool_registry;
 pub mod tool_repo;
 mod tool_result_gate;
+pub use tool_result_gate::{
+    validate_model_tool_result_bytes, DEFAULT_MODEL_TOOL_RESULT_BYTES, MAX_MODEL_TOOL_RESULT_BYTES,
+};
 mod tool_schema_renderer;
 #[path = "../../../resources/capabilities/tools/toolgen.rs"]
 pub mod toolgen;
@@ -1253,6 +1260,12 @@ pub trait ActionRuntime {
     fn take_bash_always_allow(&mut self) -> bool {
         false
     }
+
+    /// Returns the newest pending model-visible tool-result budget, if any.
+    /// Called immediately before action-result envelope formatting.
+    fn take_model_tool_result_bytes_update(&mut self) -> Option<usize> {
+        None
+    }
 }
 
 pub(crate) struct CancelOnlyActionRuntime<'a> {
@@ -1813,6 +1826,7 @@ pub struct AgentCore {
     pub(crate) self_tool: SelfToolState,
     deltas: Vec<PromptDelta>,
     max_llm_input_tokens: u32,
+    model_tool_result_bytes: usize,
     last_observed_prompt_tokens: u32,
     context_compact_required: bool,
     /// Set for a user-initiated compaction request: the next request carries
@@ -1841,6 +1855,11 @@ pub struct AgentCore {
     pub(crate) bash_approval_mode: BashApprovalMode,
     current_action_turn_id: Option<String>,
     current_session_id: Option<String>,
+    /// Session whose current Runtime/Session aggregate process scopes have
+    /// already been persisted into the visible dynamic context.
+    process_scope_prompted_session: Option<String>,
+    #[cfg(test)]
+    process_scope_snapshot_override: Option<os::ProcessAggregateScopeSnapshot>,
     current_action_user_question: String,
     last_notifications: Vec<CoreNotification>,
     loaded_work_instruction_fingerprints: HashSet<String>,
@@ -1911,6 +1930,7 @@ impl AgentCore {
         let configured_round_budget = configured_round_budget_from_env();
         let assistant_speaker_name = "TIMEM_ASSISTANT".to_string();
         let current_prompt_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let model_tool_result_bytes = tool_result_gate::DEFAULT_MODEL_TOOL_RESULT_BYTES;
         let rendered_static_prompt = prompt_render::render_static_prompt_for_mode_with_preferences(
             &static_prompt,
             &capabilities,
@@ -1946,6 +1966,7 @@ impl AgentCore {
             self_tool,
             deltas: Vec::new(),
             max_llm_input_tokens: 100_000,
+            model_tool_result_bytes,
             last_observed_prompt_tokens: 0,
             context_compact_required: false,
             manual_compact_trailer_pending: false,
@@ -1966,6 +1987,9 @@ impl AgentCore {
             bash_approval_mode: BashApprovalMode::Approve,
             current_action_turn_id: None,
             current_session_id: None,
+            process_scope_prompted_session: None,
+            #[cfg(test)]
+            process_scope_snapshot_override: None,
             current_action_user_question: String::new(),
             last_notifications: Vec::new(),
             loaded_work_instruction_fingerprints: HashSet::new(),
@@ -2115,7 +2139,7 @@ impl AgentCore {
         }
         self.rounds_since_reasoning = self.rounds_since_reasoning.saturating_add(1);
         self.reasoning_review_due = self.rounds_since_reasoning
-            > PERIODIC_REASONING_REVIEW_ROUND_INTERVAL
+            >= PERIODIC_REASONING_REVIEW_ROUND_INTERVAL
             && self.context_message_elements > PERIODIC_REASONING_REVIEW_MIN_MESSAGES;
         if self.reasoning_review_due {
             self.rounds_since_reasoning = 0;
@@ -2169,6 +2193,7 @@ impl AgentCore {
         fork.configured_inline_response_protocol = self.configured_inline_response_protocol;
         fork.response_protocol = self.response_protocol;
         fork.max_llm_input_tokens = self.max_llm_input_tokens;
+        fork.model_tool_result_bytes = self.model_tool_result_bytes;
         fork.configured_round_budget = self.configured_round_budget;
         fork.round_budget = self.configured_round_budget;
         fork.bash_approval_mode = self.bash_approval_mode;
@@ -2208,6 +2233,16 @@ impl AgentCore {
 
     pub fn set_assistant_replay_mode(&mut self, mode: AssistantReplayMode) {
         self.assistant_replay_mode = mode;
+    }
+
+    pub fn set_model_tool_result_bytes(&mut self, max_bytes: usize) -> Result<(), String> {
+        tool_result_gate::validate_model_tool_result_bytes(max_bytes)?;
+        self.model_tool_result_bytes = max_bytes;
+        Ok(())
+    }
+
+    pub fn model_tool_result_bytes(&self) -> usize {
+        self.model_tool_result_bytes
     }
 
     pub fn set_claude_codex_tool_discovery(&mut self, enabled: bool) {
@@ -2591,6 +2626,7 @@ impl AgentCore {
     where
         F: FnOnce() -> (Vec<RunningShellJob>, Vec<ShellJobExitUpdate>),
     {
+        self.evaluate_periodic_reasoning_review();
         let (body, trailer) = prompt_render::split_formatted_response_trailer(current_prompt);
         let mut prompt = body.trim_end().to_string();
 
@@ -2652,12 +2688,14 @@ impl AgentCore {
                     .into_iter()
                     .map(|scope| runtime_info::StaleProcessScopeSnapshot {
                         owner_pid: scope.owner_pid,
+                        notes: scope.observation_note,
                     })
                     .collect(),
                 fallback_processes: os::fallback_process_snapshots()
                     .into_iter()
                     .map(|process| runtime_info::FallbackProcessSnapshot {
                         pid: process.pid,
+                        notes: os::process_observation_note(process.pid),
                         process_name: process.process_name,
                         zombie: process.zombie,
                     })
@@ -3244,6 +3282,11 @@ impl AgentCore {
         let mut visible_slice_count = 0usize;
         let mut text_tokens = 0_u32;
         for delta in &self.deltas {
+            // Native rendering retains delta boundaries even without text slices:
+            // their owned tool exchanges still enter the model request.
+            if self.resolved_tool_call_mode == ToolCallMode::Native {
+                visible_delta_ids.insert(delta.delta_id.clone());
+            }
             for slice in prompt_render::render_delta_slices(delta) {
                 visible_delta_ids.insert(delta.delta_id.clone());
                 visible_slice_count += 1;
@@ -3329,6 +3372,7 @@ impl AgentCore {
         self.pending_approval = None;
         self.current_action_turn_id = None;
         self.current_session_id = None;
+        self.process_scope_prompted_session = None;
         self.current_action_user_question.clear();
         self.last_notifications.clear();
         self.turn_finished_summary = None;
@@ -3935,7 +3979,6 @@ impl AgentCore {
                 .iter()
                 .map(|delta| delta.delta_id.clone())
                 .collect::<HashSet<_>>();
-            let mut stale_delta_ids = Vec::new();
             let mut live_delta_ids = Vec::new();
             for id in &compact.delta_ids {
                 let id = id.trim();
@@ -3944,8 +3987,6 @@ impl AgentCore {
                 }
                 if existing_delta_ids.contains(id) {
                     live_delta_ids.push(id.to_string());
-                } else {
-                    stale_delta_ids.push(id.to_string());
                 }
             }
             let live_offload_ids = compact
@@ -3960,60 +4001,48 @@ impl AgentCore {
                     None
                 } else {
                     match self.collect_prompt_context_for_scratch(&live_offload_ids, &[]) {
-                        Ok(offload) => match self.scratch.write_record(
-                            "context_offload",
-                            "context compact offload",
-                            &offload.content,
-                            &offload.delta_ids,
-                            &offload.slice_ids,
-                        ) {
-                            Ok(record) => Some(record),
-                            Err(err) => {
-                                let outcome =
-                                    ActionOutcome::failed(format!("scratch_offload_failed: {err}"))
-                                        .with_runtime_metadata(
-                                            "error_type",
-                                            "ScratchOffloadFailed",
-                                        );
-                                let result = self.format_context_compact_outcome(compact, &outcome);
-                                slices.push(("result_of_llm_action".to_string(), result));
-                                continue;
+                        Ok(offload) => {
+                            match self.scratch.write_record(
+                                "context_offload",
+                                "context compact offload",
+                                &offload.content,
+                                &offload.delta_ids,
+                                &offload.slice_ids,
+                            ) {
+                                Ok(record) => Some(record),
+                                Err(err) => {
+                                    let outcome = ActionOutcome::failed(format!(
+                                        "scratch_offload_failed: {err}"
+                                    ))
+                                    .with_runtime_metadata("error_type", "ScratchOffloadFailed");
+                                    let result = self
+                                        .format_context_compact_outcome(compact, &outcome, runtime);
+                                    slices.push(("result_of_llm_action".to_string(), result));
+                                    continue;
+                                }
                             }
-                        },
+                        }
                         Err(err) => {
                             let outcome =
                                 ActionOutcome::failed(format!("scratch_offload_failed: {err}"))
                                     .with_runtime_metadata("error_type", "ScratchOffloadFailed");
-                            let result = self.format_context_compact_outcome(compact, &outcome);
+                            let result =
+                                self.format_context_compact_outcome(compact, &outcome, runtime);
                             slices.push(("result_of_llm_action".to_string(), result));
                             continue;
                         }
                     }
                 };
-                let mut shrink_report =
-                    self.apply_prompt_shrink(&live_delta_ids, &compact.slice_ids);
-                if !stale_delta_ids.is_empty() {
-                    shrink_report.push_str(&format!(
-                        "\nalready_absent_delta_ids (idempotently ignored): {}",
-                        stale_delta_ids.join(", ")
-                    ));
-                }
-                // Report the post-shrink state, never the refs just removed.
-                shrink_report.push_str(&format!(
-                    "\ncurrent_live_delta_refs:\n{}",
-                    self.live_delta_refs_hint()
-                ));
-                let mut outcome = ActionOutcome::completed(shrink_report)
-                    .with_runtime_metadata("discarded_delta_ids", json!(compact.discard_delta_ids))
-                    .with_runtime_metadata("offloaded_delta_ids", json!(compact.offload_delta_ids));
+                // The detailed shrink report and selected ids are internal accounting.
+                // Re-injecting them would immediately spend the context that compaction
+                // just recovered. A completed action status is enough for the model;
+                // only an offload scratch id remains actionable afterward.
+                let _shrink_report = self.apply_prompt_shrink(&live_delta_ids, &compact.slice_ids);
+                let mut outcome = ActionOutcome::completed(String::new());
                 if let Some(record) = offload_record.as_ref() {
                     outcome = outcome.with_runtime_metadata("scratch_id", record.id.clone());
                 }
-                if !stale_delta_ids.is_empty() {
-                    outcome = outcome
-                        .with_runtime_metadata("already_absent_delta_ids", json!(stale_delta_ids));
-                }
-                let result = self.format_context_compact_outcome(compact, &outcome);
+                let result = self.format_context_compact_outcome(compact, &outcome, runtime);
                 slices.push(("result_of_llm_action".to_string(), result));
                 let estimated_after = self.dynamic_context_token_estimate();
                 let summary_tokens = estimate_prompt_tokens(&compact.summary);
@@ -4046,7 +4075,7 @@ impl AgentCore {
                 ))
                 .with_runtime_metadata("error_type", "InvalidPromptRefs")
                 .with_runtime_metadata("missing_ids", json!(missing));
-                let result = self.format_context_compact_outcome(compact, &outcome);
+                let result = self.format_context_compact_outcome(compact, &outcome, runtime);
                 slices.push(("result_of_llm_action".to_string(), result));
             }
         }
@@ -4064,6 +4093,10 @@ impl AgentCore {
             // a valuable short summary) rather than a numeric gate.
             self.context_compact_required = false;
             self.manual_compact_trailer_pending = false;
+            self.process_scope_prompted_session = None;
+            if let Some(note) = self.take_process_aggregate_scopes_if_needed() {
+                slices.push(("runtime_note".to_string(), note));
+            }
         }
         if compacted_successfully {
             // A successful compact gets a dedicated assistant checkpoint in both
@@ -4927,7 +4960,7 @@ impl AgentCore {
             },
             runtime,
         );
-        let prompt_result = self.format_pending_action_result(&pending, &outcome);
+        let prompt_result = self.format_pending_action_result(&pending, &outcome, runtime);
         if !self.complete_pending_native_exchange(vec![prompt_result.clone()]) {
             self.append_delta_with_action_output_budget(vec![(
                 "result_of_llm_action".to_string(),
@@ -5005,7 +5038,9 @@ impl AgentCore {
             match self.execute_action(action.clone(), runtime) {
                 ActionExecution::Completed(outcome) => {
                     if let Some(slot) = results.get_mut(idx) {
-                        *slot = Some(self.format_action_outcome(&action, &outcome));
+                        *slot = Some(
+                            self.format_action_outcome_with_runtime(&action, &outcome, runtime),
+                        );
                     }
                 }
                 ActionExecution::NeedsApproval(pending) => {
@@ -5067,7 +5102,7 @@ impl AgentCore {
         } else {
             let outcome = self.denied_approval_outcome(&pending);
             self.record_pending_approval_audit(&pending, false, &outcome.text);
-            let prompt_result = self.format_pending_action_result(&pending, &outcome);
+            let prompt_result = self.format_pending_action_result(&pending, &outcome, runtime);
             denied_results.push((current_index, prompt_result));
         }
 
@@ -5078,8 +5113,10 @@ impl AgentCore {
             }
             match self.execute_action(action.clone(), runtime) {
                 ActionExecution::Completed(outcome) => {
-                    completed_results
-                        .push((next_index, self.format_action_outcome(&action, &outcome)));
+                    completed_results.push((
+                        next_index,
+                        self.format_action_outcome_with_runtime(&action, &outcome, runtime),
+                    ));
                 }
                 ActionExecution::NeedsApproval(next_pending) => {
                     let pending = Self::pending_approval_with_parallel_continuation(
@@ -5306,7 +5343,54 @@ impl AgentCore {
         ))
     }
 
+    const PROCESS_AGGREGATE_SCOPES_MARKER: &'static str = "PROCESS_AGGREGATE_SCOPES:";
+
+    fn current_process_aggregate_scope_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Option<os::ProcessAggregateScopeSnapshot> {
+        #[cfg(test)]
+        if let Some(snapshot) = self.process_scope_snapshot_override.clone() {
+            return Some(snapshot);
+        }
+        os::process_aggregate_scope_snapshot(session_id)
+            .ok()
+            .flatten()
+    }
+
+    fn take_process_aggregate_scopes_if_needed(&mut self) -> Option<String> {
+        let session_id = self.current_session_id.clone()?;
+        if self.process_scope_prompted_session.as_deref() == Some(session_id.as_str()) {
+            return None;
+        }
+        // A restored Context can contain a path from a previous Runtime. Hide
+        // it before publishing the current Runtime identity. If cgroup
+        // delegation is unavailable, do not leave stale scope claims visible.
+        self.hide_prompt_slices_matching(Self::PROCESS_AGGREGATE_SCOPES_MARKER);
+        let snapshot = self.current_process_aggregate_scope_snapshot(&session_id)?;
+        self.process_scope_prompted_session = Some(session_id);
+        Some(format!(
+            "{}\n- Runtime process scope: {}\n- Current Session process scope: {}\nThese are aggregate observation directories; exact process ownership and cancellation use their per-Job child scopes. Inspect standard cgroup files there when resource or process diagnosis is needed.",
+            Self::PROCESS_AGGREGATE_SCOPES_MARKER,
+            snapshot.runtime_observation_note,
+            snapshot.session_observation_note,
+        ))
+    }
+
+    fn submit_process_aggregate_scopes_if_needed(&mut self) {
+        let Some(note) = self.take_process_aggregate_scopes_if_needed() else {
+            return;
+        };
+        self.submit_prompt_component(
+            PromptComponentRole::system(),
+            "runtime_note",
+            note,
+            "runtime_process_scope",
+        );
+    }
+
     pub fn build_next_prompt(&mut self) -> String {
+        self.submit_process_aggregate_scopes_if_needed();
         if self.runtime_config_changed_notice_pending {
             self.runtime_config_changed_notice_pending = false;
             self.submit_prompt_component(
@@ -5348,12 +5432,7 @@ impl AgentCore {
                 let _ = response_trailer;
             }
         }
-        self.evaluate_periodic_reasoning_review();
-        if self.reasoning_review_due {
-            format!("{}\n\n{}", prompt, prompt_render::REASONING_REVIEW_TRAILER)
-        } else {
-            prompt
-        }
+        prompt
     }
 
     fn guard_pending_action_output_budget(&mut self) -> bool {
@@ -5633,7 +5712,11 @@ Runtime tool_call ids:",
             // Defensive ingress for legacy/internal producers that do not originate
             // from a typed action. Structured action envelopes have already applied
             // their per-call model budget and must remain valid JSON end to end.
-            content = tool_result_gate::gate(&content, tool_result_gate::Retention::Head);
+            content = tool_result_gate::fit(
+                &content,
+                self.model_tool_result_bytes,
+                tool_result_gate::Retention::Head,
+            );
         }
         // Explicit resume is a header-only user behavior, not synthetic text.
         if content.trim().is_empty()
@@ -6148,7 +6231,7 @@ Runtime tool_call ids:",
             .and_then(Value::as_bool)
             .unwrap_or_else(|| shell_exec::is_local_shell_action(&action.action));
         let retention = tool_result_gate::Retention::from_tail_out(tail_out);
-        let output_budget = output_budget.min(prompt_render::MAX_ACTION_RESULT_PROMPT_BYTES);
+        let output_budget = output_budget.min(self.model_tool_result_bytes);
         if shell_exec::is_local_shell_action(&action.action) {
             if let Some(result) = outcome.bash_result.as_ref() {
                 let stdout_budget = if result.stderr.is_empty() {
@@ -6408,10 +6491,22 @@ Runtime tool_call ids:",
         })
     }
 
+    fn format_action_outcome_with_runtime(
+        &mut self,
+        action: &ParsedAction,
+        outcome: &ActionOutcome,
+        runtime: &mut dyn ActionRuntime,
+    ) -> String {
+        if let Some(max_bytes) = runtime.take_model_tool_result_bytes_update() {
+            let _ = self.set_model_tool_result_bytes(max_bytes);
+        }
+        self.format_action_outcome(action, outcome)
+    }
+
     fn format_action_outcome(&mut self, action: &ParsedAction, outcome: &ActionOutcome) -> String {
         let runtime_notes = self.action_runtime_notes(action, outcome);
         let runtime_metadata = self.action_runtime_metadata(outcome, runtime_notes);
-        let max_bytes = tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES;
+        let max_bytes = self.model_tool_result_bytes;
         let mut low = 0usize;
         let mut high = max_bytes;
         let mut best = self.render_action_result_envelope(action, outcome, &runtime_metadata, 0);
@@ -6439,6 +6534,7 @@ Runtime tool_call ids:",
         &mut self,
         compact: &ParsedContextCompact,
         outcome: &ActionOutcome,
+        runtime: &mut dyn ActionRuntime,
     ) -> String {
         let action = ParsedAction {
             action: "context_compact".to_string(),
@@ -6446,7 +6542,7 @@ Runtime tool_call ids:",
             call_id: compact.call_id.clone(),
             raw_input: json!({}),
         };
-        self.format_action_outcome(&action, outcome)
+        self.format_action_outcome_with_runtime(&action, outcome, runtime)
     }
 
     fn action_result_is_error(content: &str) -> bool {
@@ -6463,6 +6559,7 @@ Runtime tool_call ids:",
         &mut self,
         pending: &PendingApproval,
         outcome: &ActionOutcome,
+        runtime: &mut dyn ActionRuntime,
     ) -> String {
         let action = ParsedAction {
             action: pending.request.action.clone(),
@@ -6470,7 +6567,7 @@ Runtime tool_call ids:",
             call_id: pending.action_call_id.clone(),
             raw_input: json!({ "tail_out": pending.approved_action.tail_out() }),
         };
-        self.format_action_outcome(&action, outcome)
+        self.format_action_outcome_with_runtime(&action, outcome, runtime)
     }
 
     #[allow(clippy::result_large_err)]
@@ -6494,7 +6591,9 @@ Runtime tool_call ids:",
             for action in group.actions {
                 match self.execute_action(action.clone(), runtime) {
                     ActionExecution::Completed(outcome) => {
-                        result_lines.push(self.format_action_outcome(&action, &outcome));
+                        result_lines.push(
+                            self.format_action_outcome_with_runtime(&action, &outcome, runtime),
+                        );
                     }
                     ActionExecution::NeedsApproval(pending) => {
                         return Err((result_lines, pending));
@@ -6533,15 +6632,17 @@ Runtime tool_call ids:",
     ) -> ParallelActionHandle {
         let action_for_thread = action.clone();
         let cwd = self.current_prompt_cwd().to_path_buf();
+        let model_tool_result_bytes = self.model_tool_result_bytes;
         self.current_stats.tool_calls += 1;
         thread::spawn(move || {
             let wall_start = Instant::now();
             let cpu_start = thread_cpu_time();
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                readfile::execute_with_timeout_outcome(
+                readfile::execute_with_timeout_outcome_and_limit(
                     &cwd,
                     &action_for_thread.raw_input,
                     readfile::DEFAULT_TIMEOUT,
+                    model_tool_result_bytes,
                 )
             }))
             .unwrap_or_else(|_| {
@@ -6742,7 +6843,9 @@ Runtime tool_call ids:",
                     self.record_action_audit(&action, outcome.status.as_str(), Some(&outcome.text));
                     self.emit_action_finish_topic(&action, &outcome, cpu_time, runtime);
                     if let Some(slot) = results.get_mut(idx) {
-                        *slot = Some(self.format_action_outcome(&action, &outcome));
+                        *slot = Some(
+                            self.format_action_outcome_with_runtime(&action, &outcome, runtime),
+                        );
                     }
                 }
                 Err(_) => {
@@ -6777,7 +6880,9 @@ Runtime tool_call ids:",
                     self.record_pending_approval_audit(&pending, true, &outcome.text);
                     self.emit_action_finish_topic(&action, &outcome, cpu_time, runtime);
                     if let Some(slot) = results.get_mut(idx) {
-                        *slot = Some(self.format_action_outcome(&action, &outcome));
+                        *slot = Some(
+                            self.format_action_outcome_with_runtime(&action, &outcome, runtime),
+                        );
                     }
                 }
                 Err(_) => {
@@ -6842,7 +6947,8 @@ Runtime tool_call ids:",
             }
             match self.execute_action(action.clone(), runtime) {
                 ActionExecution::Completed(outcome) => {
-                    results[idx] = Some(self.format_action_outcome(&action, &outcome));
+                    results[idx] =
+                        Some(self.format_action_outcome_with_runtime(&action, &outcome, runtime));
                 }
                 ActionExecution::NeedsApproval(pending) => {
                     self.collect_parallel_action_handles(
@@ -8480,6 +8586,7 @@ fn estimate_native_exchange_tokens(exchange: &NativeExchange) -> u32 {
                 "id": call.id,
                 "name": call.name,
                 "arguments": call.raw_arguments,
+                "assistant_continuation": call.assistant_continuation,
             })
         })
         .collect::<Vec<_>>();

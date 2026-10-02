@@ -5399,6 +5399,40 @@ fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web(
 }
 
 #[test]
+fn restored_session_rejects_invalid_cached_headers_and_request_fields() {
+    let state = routing_test_state();
+
+    for (key, value, expected) in [
+        (
+            "TIMEM_HTTP_HEADERS",
+            "not-json",
+            "invalid_session_http_headers",
+        ),
+        (
+            "TIMEM_HTTP_HEADERS",
+            r#"{"Bad\nHeader":"value"}"#,
+            "invalid_session_http_headers",
+        ),
+        (
+            "TIMEM_REQUEST_FIELDS",
+            "[]",
+            "invalid_session_request_fields",
+        ),
+        (
+            "TIMEM_REQUEST_FIELDS",
+            r#"{"model":"must-not-override"}"#,
+            "invalid_session_request_fields",
+        ),
+    ] {
+        let env = BTreeMap::from([(key.to_string(), value.to_string())]);
+        assert_eq!(
+            state.template.restored_session_settings(&env).unwrap_err(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn restored_web_turns_follow_history_time_not_turn_id_lexical_order() {
     let records = vec![
         ChatHistoryRecord::Message {
@@ -6160,6 +6194,7 @@ fn snapshot_reports_the_active_mem_space_and_paths() {
         Some(MEM_CAPACITY_128_MB)
     );
     assert!(snapshot.server.mem.claude_codex_tool_discovery);
+    assert_eq!(snapshot.server.mem.model_tool_result_bytes, 16 * 1024);
 }
 
 #[test]
@@ -6175,6 +6210,7 @@ fn web_mem_capacity_defaults_follow_launch_mode_without_overriding_saved_values(
         Some(MEM_CAPACITY_128_MB)
     );
     assert!(normal.claude_codex_tool_discovery);
+    assert_eq!(normal.model_tool_result_bytes, 16 * 1024);
 
     let debug = load_web_mem_settings(&root, true).unwrap();
     assert_eq!(debug.temporary_retention_days, Some(5));
@@ -6191,6 +6227,7 @@ fn web_mem_capacity_defaults_follow_launch_mode_without_overriding_saved_values(
     assert_eq!(saved.temporary_capacity_bytes, None);
     assert_eq!(saved.conversation_capacity_bytes, Some(MEM_CAPACITY_512_MB));
     assert!(saved.claude_codex_tool_discovery);
+    assert_eq!(saved.model_tool_result_bytes, 16 * 1024);
 
     std::fs::write(
         web_mem_settings_path(&root),
@@ -6207,6 +6244,7 @@ fn web_mem_capacity_defaults_follow_launch_mode_without_overriding_saved_values(
         migrated_normal.conversation_capacity_bytes,
         Some(MEM_CAPACITY_128_MB)
     );
+    assert_eq!(migrated_normal.model_tool_result_bytes, 16 * 1024);
     let migrated_debug = load_web_mem_settings(&root, true).unwrap();
     assert_eq!(
         migrated_debug.temporary_capacity_bytes,
@@ -6218,6 +6256,62 @@ fn web_mem_capacity_defaults_follow_launch_mode_without_overriding_saved_values(
     );
 
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn model_tool_result_budget_is_authoritative_mem_persistent_and_validated() {
+    let state = routing_test_state();
+    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+    assert_eq!(
+        snapshot_for(&state, TEST_PORT)
+            .server
+            .mem
+            .model_tool_result_bytes,
+        16 * 1024
+    );
+
+    for max_bytes in [30, 20, 16, 10, 8].map(|kib| kib * 1024) {
+        let event = handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::SystemModelToolResultBytesUpdate { max_bytes },
+        )
+        .unwrap()
+        .unwrap();
+        let WireEvent::MemSettingsUpdated {
+            model_tool_result_bytes,
+            ..
+        } = event
+        else {
+            panic!("expected authoritative MEM settings event")
+        };
+        assert_eq!(model_tool_result_bytes, max_bytes);
+        assert_eq!(
+            load_web_mem_settings(&memory_dir, false)
+                .unwrap()
+                .model_tool_result_bytes,
+            max_bytes
+        );
+    }
+
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::SystemModelToolResultBytesUpdate {
+                max_bytes: 32 * 1024,
+            },
+        )
+        .unwrap_err(),
+        "model_tool_result_bytes_invalid"
+    );
+    assert_eq!(
+        snapshot_for(&state, TEST_PORT)
+            .server
+            .mem
+            .model_tool_result_bytes,
+        8 * 1024
+    );
 }
 
 #[test]
@@ -6395,6 +6489,7 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
         temporary_capacity_bytes,
         conversation_capacity_bytes,
         claude_codex_tool_discovery,
+        ..
     } = event
     else {
         panic!("expected authoritative MEM settings event")
@@ -10242,6 +10337,7 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
                     delta_id: "pd_1".to_string(),
                     assistant_text: "previous".to_string(),
                     calls: vec![agent_core::NativeToolCall {
+                        assistant_continuation: None,
                         id: "call_previous".to_string(),
                         name: "self_tool".to_string(),
                         arguments: json!({"type": "cwd"}),
@@ -10288,6 +10384,7 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
             usage: UsageStats::zero(),
             content: "I will inspect the workspace.".to_string(),
             tool_calls: vec![agent_core::NativeToolCall {
+                assistant_continuation: None,
                 id: "call_current".to_string(),
                 name: "self_tool".to_string(),
                 arguments: json!({"type": "cwd"}),
@@ -14436,13 +14533,7 @@ wire_api = "responses"
         .find(|candidate| candidate.source == "claude")
         .unwrap();
     assert_eq!(claude.reasoning_effort, None);
-    assert_eq!(
-        claude.request_fields.get("thinking"),
-        Some(&serde_json::json!({
-            "type": "enabled",
-            "budget_tokens": 16000
-        }))
-    );
+    assert!(claude.request_fields.is_empty());
     assert_eq!(
         claude.http_headers.get("X-Tenant").map(String::as_str),
         Some("tenant-one")
@@ -14451,6 +14542,10 @@ wire_api = "responses"
         .issues
         .iter()
         .any(|issue| issue == "claude_effort_level_not_imported"));
+    assert!(scanned
+        .issues
+        .iter()
+        .any(|issue| issue == "claude_thinking_tokens_not_imported"));
 
     let codex_id = codex.id.clone();
     let claude_id = claude.id.clone();
@@ -14474,7 +14569,7 @@ wire_api = "responses"
         .find(|endpoint| endpoint.name == "Claude Code")
         .unwrap();
     assert_eq!(imported_claude.reasoning_effort, None);
-    assert!(imported_claude.request_fields.contains_key("thinking"));
+    assert!(imported_claude.request_fields.is_empty());
     drop(mem);
 
     // Reasoning effort cannot be stored on an Anthropic endpoint directly.
@@ -14482,6 +14577,8 @@ wire_api = "responses"
         normalize_model_endpoint_input(
             None,
             ModelEndpointInput {
+                requirements: Default::default(),
+                catalog_id: None,
                 id: None,
                 name: "Bad Claude".to_string(),
                 model: "claude-sonnet-4-5".to_string(),
@@ -14525,6 +14622,8 @@ fn model_endpoint_import_scan_and_apply_round_trip() {
     upsert_model_endpoint(
         &state,
         ModelEndpointInput {
+            requirements: Default::default(),
+            catalog_id: None,
             id: None,
             name: "Claude Code".to_string(),
             model: "existing-model".to_string(),
@@ -14638,6 +14737,8 @@ fn model_endpoint_delete_many_is_atomic_and_bounded() {
     let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_delete_many"));
     set_test_mem(&state, root.clone(), ".test_mem");
     let endpoint = |id: &str, name: &str| ModelEndpointConfig {
+        requirements: Default::default(),
+        catalog_id: None,
         id: id.to_string(),
         name: name.to_string(),
         model: format!("{name}-model"),
@@ -14761,6 +14862,8 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
 
     fn endpoint(index: usize) -> ModelEndpointConfig {
         ModelEndpointConfig {
+            requirements: Default::default(),
+            catalog_id: None,
             id: format!("endpoint-{index:05}"),
             name: format!("Endpoint {index:05}"),
             model: "gpt-4.1-mini".to_string(),
@@ -14821,6 +14924,8 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
         upsert_model_endpoint(
             &state,
             ModelEndpointInput {
+                requirements: Default::default(),
+                catalog_id: None,
                 id: Some(format!("endpoint-{:05}", count - 1)),
                 name: format!("Endpoint {:05} renamed", count - 1),
                 model: "gpt-4.1".to_string(),
@@ -14879,6 +14984,8 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                 upsert_model_endpoint(
                     &state,
                     ModelEndpointInput {
+                        requirements: Default::default(),
+                        catalog_id: None,
                         id: Some(format!("endpoint-{index:05}")),
                         name: format!("Concurrent {index:05}"),
                         model: "gpt-4.1-mini".to_string(),
@@ -14925,6 +15032,7 @@ fn legacy_model_endpoints_load_with_default_token_limits() {
     .unwrap();
 
     let endpoints = load_model_endpoints_resilient(&memory_dir).unwrap();
+    assert!(endpoints[0].catalog_id.is_none());
     assert_eq!(endpoints[0].max_llm_input_tokens, 100_000);
     assert_eq!(endpoints[0].max_llm_output_tokens, 10_000);
     assert!(!endpoints[0].stream);
@@ -14963,6 +15071,8 @@ fn model_endpoint_headers_accept_safe_special_values_and_reject_injection() {
 #[test]
 fn model_endpoint_rejects_token_limits_outside_supported_lists() {
     let zero_input = ModelEndpointInput {
+        requirements: Default::default(),
+        catalog_id: None,
         id: None,
         name: "Invalid input".to_string(),
         model: "gpt".to_string(),
@@ -14985,6 +15095,8 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
     );
 
     let custom_input = ModelEndpointInput {
+        requirements: Default::default(),
+        catalog_id: None,
         id: None,
         name: "Custom window".to_string(),
         model: "gpt".to_string(),
@@ -15004,6 +15116,8 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
     assert!(normalize_model_endpoint_input(None, custom_input).is_ok());
 
     let invalid_output = ModelEndpointInput {
+        requirements: Default::default(),
+        catalog_id: None,
         id: None,
         name: "Invalid output".to_string(),
         model: "gpt".to_string(),
@@ -15011,7 +15125,7 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         response_protocol: "xml".to_string(),
         base_url: "https://api.example.test/v1".to_string(),
         max_llm_input_tokens: 200_000,
-        max_llm_output_tokens: 8_000,
+        max_llm_output_tokens: 511,
         stream: false,
         allow_cross_origin_redirects: false,
         private_ca_pem: None,
@@ -15029,6 +15143,8 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
 #[test]
 fn model_endpoint_rejects_invalid_private_ca_before_persisting() {
     let input = ModelEndpointInput {
+        requirements: Default::default(),
+        catalog_id: None,
         id: None,
         name: "Invalid private CA".to_string(),
         model: "gpt".to_string(),
@@ -15053,8 +15169,10 @@ fn model_endpoint_rejects_invalid_private_ca_before_persisting() {
 }
 
 #[test]
-fn model_endpoint_stream_requires_openai_compatible_protocol() {
+fn model_endpoint_stream_accepts_responses_but_not_anthropic() {
     let input = ModelEndpointInput {
+        requirements: Default::default(),
+        catalog_id: None,
         id: None,
         name: "Responses stream".to_string(),
         model: "gpt".to_string(),
@@ -15071,10 +15189,647 @@ fn model_endpoint_stream_requires_openai_compatible_protocol() {
         request_fields: Default::default(),
         reasoning_effort: None,
     };
+    assert!(
+        normalize_model_endpoint_input(None, input.clone())
+            .unwrap()
+            .stream
+    );
+    let mut input = input;
+    input.api_protocol = "anthropic".into();
     assert_eq!(
         normalize_model_endpoint_input(None, input).unwrap_err(),
         "model_endpoint_stream_requires_openai_compatible"
     );
+}
+
+struct EndpointRequestBoundaryModel {
+    captured: Arc<Mutex<Vec<ModelServiceConfig>>>,
+    entered: std::sync::mpsc::Sender<usize>,
+    release: std::sync::mpsc::Receiver<()>,
+    calls: usize,
+}
+
+impl ModelClient for EndpointRequestBoundaryModel {
+    fn call_model(
+        &mut self,
+        config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.captured.lock().unwrap().push(config.clone());
+        self.calls += 1;
+        self.entered
+            .send(self.calls)
+            .map_err(|error| format!("endpoint_boundary_entered_send_failed:{error}"))?;
+        self.release
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|error| format!("endpoint_boundary_release_failed:{error}"))?;
+        Ok(LlmResponse {
+            tool_calls: Vec::new(),
+            content: confirmed_xml_response("<final_answer>request complete</final_answer>"),
+            model_name: config.model.clone(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        })
+    }
+}
+
+fn endpoint_boundary_input(id: &str, effort: &str) -> ModelEndpointInput {
+    let endpoint_b = id == "endpoint-boundary-b";
+    ModelEndpointInput {
+        catalog_id: None,
+        requirements: agent_core::model_requirements::EndpointRequirements {
+            version: 1,
+            provider: None,
+            allowed_reasoning: Some(if endpoint_b {
+                vec!["low".to_string(), "high".to_string()]
+            } else {
+                vec!["medium".to_string(), "high".to_string()]
+            }),
+            adaptive_reasoning: Some(false),
+            field_sources: Default::default(),
+        },
+        id: Some(id.to_string()),
+        name: if endpoint_b {
+            "Boundary B".to_string()
+        } else {
+            "Boundary A".to_string()
+        },
+        model: if endpoint_b {
+            "boundary-model-b".to_string()
+        } else {
+            "boundary-model-a".to_string()
+        },
+        api_protocol: if endpoint_b {
+            "openai-responses".to_string()
+        } else {
+            "openai-compatible".to_string()
+        },
+        response_protocol: "xml".to_string(),
+        base_url: if endpoint_b {
+            "https://boundary-b.example.test/v1".to_string()
+        } else {
+            "https://boundary-a.example.test/v1".to_string()
+        },
+        max_llm_input_tokens: if endpoint_b { 64_000 } else { 32_000 },
+        max_llm_output_tokens: if endpoint_b { 8_000 } else { 4_000 },
+        stream: endpoint_b,
+        api_key: Some(if endpoint_b {
+            "boundary-secret-b".to_string()
+        } else {
+            "boundary-secret-a".to_string()
+        }),
+        http_headers: BTreeMap::from([(
+            "X-Boundary".to_string(),
+            if endpoint_b { "b" } else { "a" }.to_string(),
+        )]),
+        request_fields: BTreeMap::from([(
+            "route".to_string(),
+            json!(if endpoint_b { "b" } else { "a" }),
+        )]),
+        allow_cross_origin_redirects: endpoint_b,
+        private_ca_pem: None,
+        reasoning_effort: Some(effort.to_string()),
+    }
+}
+
+fn register_endpoint_boundary_worker(
+    state: &AppState,
+    captured: Arc<Mutex<Vec<ModelServiceConfig>>>,
+    entered: std::sync::mpsc::Sender<usize>,
+    release: std::sync::mpsc::Receiver<()>,
+    worker_dir: &Path,
+) -> String {
+    let session_id = unique_web_id("endpoint_boundary_session");
+    let context_id = test_context_id(&session_id);
+    std::fs::create_dir_all(worker_dir).unwrap();
+    let core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        worker_dir,
+    );
+    let worker_id = state
+        .manager
+        .lock()
+        .unwrap()
+        .spawn_worker_in_session_with_model_client(
+            core,
+            state.template.settings.lock().unwrap().config.clone(),
+            CoreSessionWorkerWorkspace::new(
+                worker_dir,
+                worker_dir.join("audit.json"),
+                "test-web",
+                "local",
+            ),
+            session_id.clone(),
+            context_id.clone(),
+            Some("Endpoint boundary".to_string()),
+            None,
+            EndpointRequestBoundaryModel {
+                captured,
+                entered,
+                release,
+                calls: 0,
+            },
+        )
+        .unwrap();
+    let mut session = test_web_session(&session_id, 0, "Endpoint boundary".to_string());
+    session.current_dir = worker_dir.display().to_string();
+    session.contexts[0] = WebContext {
+        context_id: context_id.clone(),
+        current_dir: worker_dir.display().to_string(),
+        worker_ids: vec![worker_id.clone()],
+    };
+    session.workers[0].worker_id = worker_id.clone();
+    session.workers[0].context_id = context_id.clone();
+    session.active_context_id = context_id;
+    session.primary_worker_id = worker_id;
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session);
+    persist_web_session(state, &session_id).unwrap();
+    session_id
+}
+
+fn drive_endpoint_boundary_turn_until_ready(state: &AppState, session_id: &str) {
+    let started = Instant::now();
+    loop {
+        for (event_session_id, context_id, worker_id, event) in drain_worker_events(state) {
+            handle_scoped_worker_event(state, &event_session_id, &context_id, &worker_id, event);
+        }
+        let ready = {
+            let sessions = state.sessions.lock().unwrap();
+            let session = &sessions[session_id];
+            session.pending_turn_id.is_none()
+                && session.active_turn_id.is_none()
+                && session.state == "ready"
+                && session
+                    .turns
+                    .last()
+                    .is_some_and(|turn| turn.state != "pending" && turn.state != "working")
+        };
+        if ready {
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "endpoint boundary Turn did not finish"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn endpoint_edits_and_switches_apply_at_the_next_new_request_boundary() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_boundary"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let worker_dir = root.join("worker");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let session_id = register_endpoint_boundary_worker(
+        &state,
+        Arc::clone(&captured),
+        entered_tx,
+        release_rx,
+        &worker_dir,
+    );
+
+    for endpoint in [
+        endpoint_boundary_input("endpoint-boundary-a", "medium"),
+        endpoint_boundary_input("endpoint-boundary-b", "low"),
+    ] {
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::ModelEndpointUpsert { endpoint },
+        )
+        .unwrap();
+    }
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointApply {
+            session_id: session_id.clone(),
+            endpoint_id: "endpoint-boundary-a".to_string(),
+        },
+    )
+    .unwrap();
+
+    submit_turn(&state, &session_id, "first request".to_string()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+    {
+        let calls = captured.lock().unwrap();
+        assert_eq!(calls[0].model, "boundary-model-a");
+        assert_eq!(
+            calls[0].openai_compatible.reasoning_effort.as_deref(),
+            Some("medium")
+        );
+    }
+
+    // Editing only the daily effort used to be missed by endpoint equality.
+    // The in-flight request keeps medium; the following new Turn must use high.
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointUpsert {
+            endpoint: endpoint_boundary_input("endpoint-boundary-a", "high"),
+        },
+    )
+    .unwrap();
+    {
+        let session = &state.sessions.lock().unwrap()[&session_id];
+        assert_eq!(
+            session
+                .runtime
+                .settings
+                .config
+                .openai_compatible
+                .reasoning_effort
+                .as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            session.runtime.model_endpoint_id.as_deref(),
+            Some("endpoint-boundary-a")
+        );
+    }
+    assert_eq!(
+        captured.lock().unwrap()[0]
+            .openai_compatible
+            .reasoning_effort
+            .as_deref(),
+        Some("medium")
+    );
+    release_tx.send(()).unwrap();
+    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
+
+    submit_turn(&state, &session_id, "second request".to_string()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+    {
+        let calls = captured.lock().unwrap();
+        assert_eq!(calls[1].model, "boundary-model-a");
+        assert_eq!(calls[1].base_url, "https://boundary-a.example.test/v1");
+        assert_eq!(calls[1].api_key, "boundary-secret-a");
+        assert_eq!(
+            calls[1].http_headers.get("X-Boundary").map(String::as_str),
+            Some("a")
+        );
+        assert_eq!(calls[1].request_fields.get("route"), Some(&json!("a")));
+        assert_eq!(
+            calls[1].openai_compatible.reasoning_effort.as_deref(),
+            Some("high")
+        );
+    }
+
+    // Switching while this request is active changes only the durable binding.
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointApply {
+            session_id: session_id.clone(),
+            endpoint_id: "endpoint-boundary-b".to_string(),
+        },
+    )
+    .unwrap();
+    {
+        let session = &state.sessions.lock().unwrap()[&session_id];
+        assert_eq!(
+            session.runtime.model_endpoint_id.as_deref(),
+            Some("endpoint-boundary-b")
+        );
+        assert_eq!(session.runtime.settings.config.model, "boundary-model-a");
+        assert_eq!(
+            session
+                .runtime
+                .settings
+                .config
+                .openai_compatible
+                .reasoning_effort
+                .as_deref(),
+            Some("high")
+        );
+    }
+    assert_eq!(captured.lock().unwrap()[1].model, "boundary-model-a");
+    release_tx.send(()).unwrap();
+    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
+
+    submit_turn(&state, &session_id, "third request".to_string()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 3);
+    {
+        let calls = captured.lock().unwrap();
+        let config = &calls[2];
+        assert_eq!(config.model, "boundary-model-b");
+        assert_eq!(config.base_url, "https://boundary-b.example.test/v1");
+        assert_eq!(config.api_protocol.label(), "openai-responses");
+        assert_eq!(config.max_llm_input_tokens, 64_000);
+        assert_eq!(config.max_llm_output_tokens, 8_000);
+        assert!(config.openai_compatible.stream);
+        assert_eq!(config.api_key, "boundary-secret-b");
+        assert_eq!(
+            config.http_headers.get("X-Boundary").map(String::as_str),
+            Some("b")
+        );
+        assert_eq!(config.request_fields.get("route"), Some(&json!("b")));
+        assert!(config.http_transport.allow_cross_origin_redirects);
+        assert_eq!(
+            config.openai_compatible.reasoning_effort.as_deref(),
+            Some("low")
+        );
+        assert_eq!(
+            config
+                .openai_compatible
+                .requirements
+                .allowed_reasoning
+                .as_deref(),
+            Some(["low".to_string(), "high".to_string()].as_slice())
+        );
+    }
+    release_tx.send(()).unwrap();
+    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn model_endpoint_apply_persistence_failure_rolls_back_worker_memory_and_disk() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("endpoint_apply_atomic"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let worker_dir = root.join("worker");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let session_id = register_endpoint_boundary_worker(
+        &state,
+        Arc::clone(&captured),
+        entered_tx,
+        release_rx,
+        &worker_dir,
+    );
+
+    for endpoint in [
+        endpoint_boundary_input("endpoint-boundary-a", "medium"),
+        endpoint_boundary_input("endpoint-boundary-b", "low"),
+    ] {
+        upsert_model_endpoint(&state, endpoint).unwrap();
+    }
+    apply_model_endpoint(&state, &session_id, "endpoint-boundary-a").unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session
+            .runtime
+            .env_overrides
+            .insert("TIMEM_MODEL".to_string(), "stale-manual-model".to_string());
+        session.runtime.env_overrides.insert(
+            "TIMEM_BASE_URL".to_string(),
+            "https://stale-manual.example.test/v1".to_string(),
+        );
+        session.runtime.forward_compatible_cache.insert(
+            "TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS".to_string(),
+            "false".to_string(),
+        );
+        session.runtime.forward_compatible_cache.insert(
+            "TIMEM_PRIVATE_CA_PEM".to_string(),
+            "stale-private-ca".to_string(),
+        );
+    }
+
+    let (
+        before_config,
+        before_profile,
+        before_max_input,
+        before_binding,
+        before_overrides,
+        before_forward_cache,
+    ) = {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        (
+            session.runtime.settings.config.clone(),
+            session.runtime_profile.clone(),
+            session.max_llm_input_tokens,
+            session.runtime.model_endpoint_id.clone(),
+            session.runtime.env_overrides.clone(),
+            session.runtime.forward_compatible_cache.clone(),
+        )
+    };
+    let store = current_session_store(&state).unwrap();
+    let metadata = store.metadata_path_for_session(&session_id);
+    let before_disk = std::fs::read(&metadata).unwrap();
+
+    // The Worker receives B first. Replacing the destination file with a
+    // directory then forces the later atomic rename to fail, exercising the
+    // Worker rollback path rather than rejecting before any live update.
+    std::fs::remove_file(&metadata).unwrap();
+    std::fs::create_dir(&metadata).unwrap();
+    assert_eq!(
+        apply_model_endpoint(&state, &session_id, "endpoint-boundary-b").unwrap_err(),
+        "session_metadata_write_failed"
+    );
+
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(session.runtime.settings.config, before_config);
+        assert_eq!(session.runtime_profile, before_profile);
+        assert_eq!(session.max_llm_input_tokens, before_max_input);
+        assert_eq!(session.runtime.model_endpoint_id, before_binding);
+        assert_eq!(session.runtime.env_overrides, before_overrides);
+        assert_eq!(
+            session.runtime.forward_compatible_cache,
+            before_forward_cache
+        );
+    }
+    let metadata_parent = metadata.parent().unwrap();
+    assert!(std::fs::read_dir(metadata_parent).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".session.json.tmp-")
+    }));
+
+    std::fs::remove_dir(&metadata).unwrap();
+    std::fs::write(&metadata, &before_disk).unwrap();
+    assert_eq!(std::fs::read(&metadata).unwrap(), before_disk);
+
+    submit_turn(
+        &state,
+        &session_id,
+        "request after failed apply".to_string(),
+    )
+    .unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+    {
+        let calls = captured.lock().unwrap();
+        assert_eq!(calls[0], before_config);
+        assert_eq!(calls[0].model, "boundary-model-a");
+        assert_eq!(calls[0].api_key, "boundary-secret-a");
+        assert_eq!(calls[0].request_fields.get("route"), Some(&json!("a")));
+    }
+    release_tx.send(()).unwrap();
+    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
+
+    apply_model_endpoint(&state, &session_id, "endpoint-boundary-b").unwrap();
+    submit_turn(
+        &state,
+        &session_id,
+        "request after successful retry".to_string(),
+    )
+    .unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+    {
+        let calls = captured.lock().unwrap();
+        let config = &calls[1];
+        assert_eq!(config.model, "boundary-model-b");
+        assert_eq!(config.api_protocol.label(), "openai-responses");
+        assert_eq!(config.base_url, "https://boundary-b.example.test/v1");
+        assert_eq!(config.max_llm_input_tokens, 64_000);
+        assert_eq!(config.max_llm_output_tokens, 8_000);
+        assert_eq!(config.api_key, "boundary-secret-b");
+        assert_eq!(
+            config.http_headers.get("X-Boundary").map(String::as_str),
+            Some("b")
+        );
+        assert_eq!(config.request_fields.get("route"), Some(&json!("b")));
+        assert!(config.http_transport.allow_cross_origin_redirects);
+        assert!(config.openai_compatible.stream);
+        assert_eq!(
+            config.openai_compatible.reasoning_effort.as_deref(),
+            Some("low")
+        );
+    }
+    release_tx.send(()).unwrap();
+    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
+
+    let persisted = current_session_store(&state)
+        .unwrap()
+        .load_session(&session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        persisted.model_endpoint_id.as_deref(),
+        Some("endpoint-boundary-b")
+    );
+    assert_eq!(persisted.profile.model, "boundary-model-b");
+    assert_eq!(
+        persisted.env.get("TIMEM_BASE_URL").map(String::as_str),
+        Some("https://boundary-b.example.test/v1")
+    );
+    assert_eq!(
+        persisted.env.get("TIMEM_API_KEY").map(String::as_str),
+        Some("boundary-secret-b")
+    );
+    assert_eq!(
+        persisted
+            .env
+            .get("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS")
+            .map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        persisted
+            .env
+            .get("TIMEM_PRIVATE_CA_PEM")
+            .map(String::as_str),
+        Some("")
+    );
+    let persisted_overrides = persisted.env_overrides.as_ref().unwrap();
+    assert_eq!(
+        persisted_overrides.get("TIMEM_MODEL").map(String::as_str),
+        Some("boundary-model-b")
+    );
+    assert_eq!(
+        persisted_overrides
+            .get("TIMEM_BASE_URL")
+            .map(String::as_str),
+        Some("https://boundary-b.example.test/v1")
+    );
+    assert!(!persisted_overrides.contains_key("TIMEM_API_KEY"));
+    assert!(!persisted_overrides.contains_key("TIMEM_HTTP_HEADERS"));
+    assert!(!persisted_overrides.contains_key("TIMEM_REQUEST_FIELDS"));
+    assert!(!persisted_overrides.contains_key("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS"));
+    assert!(!persisted_overrides.contains_key("TIMEM_PRIVATE_CA_PEM"));
+
+    let restored_env = sanitize_restored_session_env(
+        persisted.env.clone(),
+        persisted.env_overrides.as_ref().unwrap(),
+    );
+    let restored_settings = state
+        .template
+        .restored_session_settings(&restored_env)
+        .unwrap();
+    assert_eq!(restored_settings.config.model, "boundary-model-b");
+    assert_eq!(
+        restored_settings.config.base_url,
+        "https://boundary-b.example.test/v1"
+    );
+    assert_eq!(restored_settings.config.api_key, "boundary-secret-b");
+    assert_eq!(
+        restored_settings
+            .config
+            .http_headers
+            .get("X-Boundary")
+            .map(String::as_str),
+        Some("b")
+    );
+    assert_eq!(
+        restored_settings.config.request_fields.get("route"),
+        Some(&json!("b"))
+    );
+    // Transport security options are intentionally not trusted from the
+    // effective cache. A bound endpoint reapplies them authoritatively at the
+    // next request boundary.
+    assert!(
+        !restored_settings
+            .config
+            .http_transport
+            .allow_cross_origin_redirects
+    );
+    assert!(restored_settings
+        .config
+        .http_transport
+        .private_ca_pem
+        .is_none());
+    let mut restored_session = state.sessions.lock().unwrap()[&session_id].clone();
+    restored_session.runtime.settings = restored_settings;
+    let endpoint_b = model_endpoint_config(&state, "endpoint-boundary-b").unwrap();
+    let rebound = model_endpoint_session_candidate(&restored_session, &endpoint_b).unwrap();
+    assert!(
+        rebound
+            .runtime
+            .settings
+            .config
+            .http_transport
+            .allow_cross_origin_redirects
+    );
+    assert!(rebound
+        .runtime
+        .settings
+        .config
+        .http_transport
+        .private_ca_pem
+        .is_none());
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -15089,6 +15844,8 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
         TEST_PORT,
         ClientCommand::ModelEndpointUpsert {
             endpoint: ModelEndpointInput {
+                requirements: Default::default(),
+                catalog_id: None,
                 id: Some("endpoint-one".to_string()),
                 name: "Production".to_string(),
                 model: "gpt-4.1".to_string(),
@@ -15209,6 +15966,8 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
         TEST_PORT,
         ClientCommand::ModelEndpointUpsert {
             endpoint: ModelEndpointInput {
+                requirements: Default::default(),
+                catalog_id: None,
                 id: Some("endpoint-one".to_string()),
                 name: "Production".to_string(),
                 model: "gpt-4.1".to_string(),
@@ -15258,6 +16017,8 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
         TEST_PORT,
         ClientCommand::ModelEndpointUpsert {
             endpoint: ModelEndpointInput {
+                requirements: Default::default(),
+                catalog_id: None,
                 id: Some("endpoint-one".to_string()),
                 name: "Production renamed".to_string(),
                 model: "gpt-4.1-mini".to_string(),
@@ -16115,4 +16876,870 @@ fn restart_heavy_history_restores_chat_and_only_latest_consecutive_notice() {
     assert_eq!(messages.len(), 3);
     assert_eq!(messages.last().unwrap().created_at_ms, 139);
     assert!(!page.has_more);
+}
+
+fn context_handoff_fixture(id: &str) -> agent_core::DynamicContextSnapshot {
+    serde_json::from_value(json!({
+        "deltas": [{"delta_id": id, "time_ms": 1, "slices": [], "hidden_slice_ids": []}],
+        "native_exchanges": [], "last_observed_prompt_tokens": 213371
+    }))
+    .unwrap()
+}
+
+#[test]
+fn context_handoff_is_consumed_before_import_and_cannot_replay_after_crash() {
+    let state = routing_test_state();
+    let id = register_real_worker(&state, "handoff-consume");
+    let snapshot = context_handoff_fixture("pd_76");
+    write_prompt_context_snapshot(&state, &id, &snapshot).unwrap();
+    let path = current_session_store(&state)
+        .unwrap()
+        .prompt_context_path_for_session(&id);
+    restore_prompt_context_snapshot(&state, &id).unwrap();
+    assert!(
+        !path.exists(),
+        "restored generation must not remain replayable"
+    );
+    let handle = session_worker_handle(&state, &id, None).unwrap();
+    assert_eq!(
+        handle.export_dynamic_context().unwrap().unwrap().deltas,
+        snapshot.deltas
+    );
+    // Simulate the next runtime's empty worker after an ungraceful exit.
+    handle.clear_dynamic_context().unwrap();
+    restore_prompt_context_snapshot(&state, &id).unwrap();
+    assert!(handle
+        .export_dynamic_context()
+        .unwrap()
+        .unwrap()
+        .deltas
+        .is_empty());
+    std::mem::take(&mut *state.manager.lock().unwrap())
+        .shutdown_all_detached()
+        .unwrap();
+    std::fs::remove_dir_all(&state.template.data_dir).unwrap();
+}
+
+#[test]
+fn context_handoff_shutdown_uses_registered_primary_not_first_worker() {
+    let state = routing_test_state();
+    state.sessions.lock().unwrap().clear();
+    let id = register_real_worker(&state, "handoff-primary");
+    let old = session_worker_handle(&state, &id, None).unwrap();
+    old.import_dynamic_context(context_handoff_fixture("pd_76"))
+        .unwrap();
+    let dir = state.template.data_dir.join("replacement");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (_, primary) =
+        create_context_with_worker(&state, &id, dir, Some("new primary".into()), None, true)
+            .unwrap();
+    let current = state.manager.lock().unwrap().handle(&primary).unwrap();
+    let compacted = context_handoff_fixture("pd_82");
+    current.import_dynamic_context(compacted.clone()).unwrap();
+    persist_prompt_context_snapshots(&state, &state.manager.lock().unwrap()).unwrap();
+    let path = current_session_store(&state)
+        .unwrap()
+        .prompt_context_path_for_session(&id);
+    let saved: agent_core::DynamicContextSnapshot =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved.deltas, compacted.deltas);
+    current.clear_dynamic_context().unwrap();
+    restore_prompt_context_snapshot(&state, &id).unwrap();
+    assert_eq!(
+        current.export_dynamic_context().unwrap().unwrap().deltas,
+        compacted.deltas
+    );
+    assert!(!path.exists());
+    std::mem::take(&mut *state.manager.lock().unwrap())
+        .shutdown_all_detached()
+        .unwrap();
+    std::fs::remove_dir_all(&state.template.data_dir).unwrap();
+}
+
+#[test]
+fn context_handoff_failed_export_invalidates_previous_snapshot() {
+    let state = routing_test_state();
+    state.sessions.lock().unwrap().clear();
+    let id = register_real_worker(&state, "handoff-failure");
+    write_prompt_context_snapshot(&state, &id, &context_handoff_fixture("pd_76")).unwrap();
+    std::mem::take(&mut *state.manager.lock().unwrap())
+        .shutdown_all_detached()
+        .unwrap();
+    assert!(persist_prompt_context_snapshots(&state, &state.manager.lock().unwrap()).is_err());
+    let path = current_session_store(&state)
+        .unwrap()
+        .prompt_context_path_for_session(&id);
+    assert!(!path.exists());
+    std::fs::remove_dir_all(&state.template.data_dir).unwrap();
+}
+
+#[test]
+fn context_handoff_real_compaction_survives_graceful_restart() {
+    let state = routing_test_state();
+    state.sessions.lock().unwrap().clear();
+    let id = register_real_worker(&state, "handoff-compact");
+    let mut core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test".into(),
+        },
+        &state.template.data_dir,
+    );
+    let mut initial = context_handoff_fixture("pd_76");
+    initial.last_observed_prompt_tokens = 100;
+    core.import_dynamic_context(initial);
+    write_prompt_context_snapshot(&state, &id, &core.export_dynamic_context()).unwrap();
+    core.set_capability_registry(
+        agent_core::capability::CapabilityRegistry::builtin_for_host(
+            agent_core::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
+    );
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    core.set_interaction_profile(&agent_core::InteractionProfile {
+        api_protocol: "openai_compatible".into(),
+        model: "test".into(),
+        gateway: "test".into(),
+        requested_mode: agent_core::ToolCallMode::Native,
+        resolved_mode: agent_core::ToolCallMode::Native,
+        active_prompt_protocol: "json".into(),
+        parallel_supported: true,
+        parallel_enabled: true,
+        source: agent_core::CapabilityProbeSource::Explicit,
+        reason: "test".into(),
+        probe_latency_ms: None,
+        observed_tool_calls: 1,
+    });
+    let arguments = json!({"discard": ["pd_76"], "summary": "ONLY_COMPACTED_STATE"});
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![agent_core::NativeToolCall {
+            assistant_continuation: None,
+            id: "compact_handoff".into(),
+            name: "context_compact".into(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "test".into(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    assert!(matches!(step, agent_core::CoreStep::NeedModel { .. }));
+    let compacted = core.export_dynamic_context();
+    assert!(!compacted.deltas.iter().any(|d| d.delta_id == "pd_76"));
+    assert!(
+        core.render_prompt().contains("ONLY_COMPACTED_STATE"),
+        "step={step:?} snapshot={compacted:?}"
+    );
+    let handle = session_worker_handle(&state, &id, None).unwrap();
+    handle.import_dynamic_context(compacted.clone()).unwrap();
+    persist_prompt_context_snapshots(&state, &state.manager.lock().unwrap()).unwrap();
+    handle.clear_dynamic_context().unwrap();
+    restore_prompt_context_snapshot(&state, &id).unwrap();
+    let restored = handle.export_dynamic_context().unwrap().unwrap();
+    assert_eq!(restored.deltas, compacted.deltas);
+    let mut next = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test".into(),
+        },
+        &state.template.data_dir,
+    );
+    next.import_dynamic_context(restored);
+    let prompt = next.build_next_prompt();
+    assert!(prompt.contains("ONLY_COMPACTED_STATE"));
+    assert!(!prompt.contains("delta_id: pd_76,"));
+    std::mem::take(&mut *state.manager.lock().unwrap())
+        .shutdown_all_detached()
+        .unwrap();
+    std::fs::remove_dir_all(&state.template.data_dir).unwrap();
+}
+
+#[test]
+fn catalog_endpoint_admission_enforces_rules_and_preserves_overrides() {
+    let value = serde_json::json!({
+        "name":"Catalog test", "catalog_id":"openai/gpt-6-sol", "model":"gpt-6-sol",
+        "api_protocol":"openai-compatible", "response_protocol":"xml",
+        "base_url":"https://proxy.example.test/v1", "max_llm_input_tokens":120000,
+        "max_llm_output_tokens":30000, "reasoning_effort":"none"
+    });
+    let input: ModelEndpointInput = serde_json::from_value(value).unwrap();
+    let saved = normalize_model_endpoint_input(None, input.clone()).unwrap();
+    assert_eq!(saved.catalog_id.as_deref(), Some("openai/gpt-6-sol"));
+    assert_eq!(saved.max_llm_output_tokens, 30000);
+    assert_eq!(saved.base_url, "https://proxy.example.test/v1");
+    let mut invalid = input.clone();
+    invalid.reasoning_effort = Some("high".into());
+    assert!(normalize_model_endpoint_input(None, invalid).is_err());
+    let mut invalid = input.clone();
+    invalid.max_llm_output_tokens = 128001;
+    assert!(normalize_model_endpoint_input(None, invalid).is_err());
+    let mut custom = input;
+    custom.catalog_id = None;
+    custom.reasoning_effort = Some("high".into());
+    assert!(normalize_model_endpoint_input(None, custom).is_ok());
+}
+
+#[test]
+fn catalog_legacy_session_restore_accepts_missing_empty_and_explicit_binding() {
+    let state = routing_test_state();
+    state
+        .template
+        .settings
+        .lock()
+        .unwrap()
+        .config
+        .openai_compatible
+        .catalog_id = Some("openai/gpt-6-sol".into());
+    let restored = state
+        .template
+        .restored_session_settings(&BTreeMap::new())
+        .unwrap();
+    assert!(restored.config.openai_compatible.catalog_id.is_none());
+    for value in ["", "  "] {
+        let env = BTreeMap::from([("TIMEM_MODEL_CATALOG_ID".into(), value.into())]);
+        let restored = state.template.restored_session_settings(&env).unwrap();
+        assert!(restored.config.openai_compatible.catalog_id.is_none());
+        let configured = state.template.session_settings(&env).unwrap();
+        assert!(configured.config.openai_compatible.catalog_id.is_none());
+        let cached = session_cached_env_values(&restored);
+        let again = state.template.restored_session_settings(&cached).unwrap();
+        assert!(again.config.openai_compatible.catalog_id.is_none());
+    }
+    let env = BTreeMap::from([("TIMEM_MODEL_CATALOG_ID".into(), "openai/gpt-6-astra".into())]);
+    let restored = state.template.restored_session_settings(&env).unwrap();
+    assert_eq!(
+        restored.config.openai_compatible.catalog_id.as_deref(),
+        Some("openai/gpt-6-astra")
+    );
+    let env = BTreeMap::from([("TIMEM_MODEL_CATALOG_ID".into(), "unknown/model".into())]);
+    assert!(state
+        .template
+        .restored_session_settings(&env)
+        .unwrap()
+        .config
+        .openai_compatible
+        .catalog_id
+        .is_none());
+}
+
+#[test]
+fn catalog_persisted_sessions_restore_missing_and_empty_bindings_with_history() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_legacy_sessions"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let space = "legacy_sessions_mem";
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template.clone());
+    set_test_mem(&state, data_dir.clone(), space);
+    state.sessions.lock().unwrap().clear();
+
+    for name in ["ADstart", "self-dev"] {
+        let session_id = create_session(
+            &state,
+            Some(name.to_string()),
+            Some(root.display().to_string()),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        start_web_turn(&state, &session_id, &format!("legacy history {name}")).unwrap();
+        let store = current_session_store(&state).unwrap();
+        let mut stored = store.load_session(&session_id).unwrap().unwrap();
+        stored.env.insert(
+            "TIMEM_GATEWAY_PROVIDER".to_string(),
+            "retired-provider".to_string(),
+        );
+        stored.env_overrides = None;
+        if name == "ADstart" {
+            stored.env.remove("TIMEM_MODEL_CATALOG_ID");
+        } else {
+            stored
+                .env
+                .insert("TIMEM_MODEL_CATALOG_ID".into(), String::new());
+        }
+        store.upsert_session(&stored).unwrap();
+    }
+
+    let mut restarted = routing_test_state();
+    restarted.sessions.lock().unwrap().clear();
+    template
+        .settings
+        .lock()
+        .unwrap()
+        .config
+        .openai_compatible
+        .catalog_id = Some("openai/gpt-6-sol".into());
+    restarted.template = Arc::new(template);
+    set_test_mem(&restarted, data_dir, space);
+
+    assert_eq!(restore_stored_sessions(&restarted).unwrap(), 2);
+    let sessions = restarted.sessions.lock().unwrap();
+    let names = sessions
+        .values()
+        .map(|session| session.display_name.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(names, BTreeSet::from(["ADstart", "self-dev"]));
+    for session in sessions.values() {
+        assert!(session
+            .runtime
+            .settings
+            .config
+            .openai_compatible
+            .catalog_id
+            .is_none());
+        assert_eq!(
+            session.messages[0].text,
+            format!("legacy history {}", session.display_name)
+        );
+    }
+    drop(sessions);
+
+    for stored in current_session_store(&restarted)
+        .unwrap()
+        .list_sessions()
+        .unwrap()
+    {
+        assert!(!stored.env.contains_key("TIMEM_GATEWAY_PROVIDER"));
+    }
+    // Read the persisted result a second time, not only the original fixture.
+    restarted.sessions.lock().unwrap().clear();
+    assert_eq!(restore_stored_sessions(&restarted).unwrap(), 2);
+    let sessions = restarted.sessions.lock().unwrap();
+    for session in sessions.values() {
+        assert!(session
+            .runtime
+            .settings
+            .config
+            .openai_compatible
+            .catalog_id
+            .is_none());
+        assert_eq!(
+            session.messages[0].text,
+            format!("legacy history {}", session.display_name)
+        );
+    }
+}
+
+#[test]
+fn catalog_legacy_endpoint_file_round_trip_preserves_configuration_and_log_bytes() {
+    let root = std::env::temp_dir().join(unique_web_id("legacy_endpoint_roundtrip"));
+    std::fs::create_dir_all(&root).unwrap();
+    let value = json!([{
+        "id":"old", "name":"旧配置", "model":"gpt-6-sol",
+        "api_protocol":"openai-compatible", "response_protocol":"xml",
+        "base_url":"https://proxy.example.test/v1", "api_key":"legacy-secret",
+        "max_llm_input_tokens":200000, "max_llm_output_tokens":8000,
+        "stream":true, "reasoning_effort":"high",
+        "http_headers":{"X-Tenant":"历史用户"},
+        "request_fields":{"vendor_options":{"custom":true}}
+    }]);
+    let bytes = serde_json::to_vec(&value).unwrap();
+    std::fs::write(model_endpoints_path(&root), &bytes).unwrap();
+    let log = root.join("legacy-audit.jsonl");
+    let log_bytes = b"{\"type\":\"legacy_event\",\"content\":\"preserve me\"}\n";
+    std::fs::write(&log, log_bytes).unwrap();
+    let mut endpoints = load_model_endpoints_resilient(&root).unwrap();
+    assert!(endpoints[0].catalog_id.is_none());
+    assert_eq!(std::fs::read(model_endpoints_path(&root)).unwrap(), bytes);
+    endpoints[0].name = "修改名称".into();
+    save_model_endpoints(&root, &endpoints).unwrap();
+    let loaded = load_model_endpoints_resilient(&root).unwrap();
+    let actual = serde_json::to_value(&loaded[0]).unwrap();
+    for (key, expected) in value[0].as_object().unwrap() {
+        if key != "name" {
+            assert_eq!(&actual[key], expected, "{key}");
+        }
+    }
+    assert_eq!(loaded[0].name, "修改名称");
+    assert!(loaded[0].catalog_id.is_none());
+    assert_eq!(std::fs::read(&log).unwrap(), log_bytes);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unknown_catalog_import_and_persisted_endpoint_become_custom_without_parameter_loss() {
+    let root = std::env::temp_dir().join(unique_web_id("unknown_catalog_custom"));
+    std::fs::create_dir_all(&root).unwrap();
+    let value = json!({"id":"unknown", "catalog_id":"other/future-model", "name":"Imported",
+        "model":"private-model", "api_protocol":"openai-compatible", "response_protocol":"xml",
+        "base_url":"https://private.example.test/v1", "api_key":"retained-secret",
+        "max_llm_input_tokens":100000,"max_llm_output_tokens":8000,"reasoning_effort":"high",
+        "request_fields":{"vendor_options":{"flag":true}}});
+    let input: ModelEndpointInput = serde_json::from_value(value.clone()).unwrap();
+    let normalized = normalize_model_endpoint_input(None, input).unwrap();
+    assert!(normalized.catalog_id.is_none());
+    let original = serde_json::to_vec(&json!([value])).unwrap();
+    std::fs::write(model_endpoints_path(&root), &original).unwrap();
+    let loaded = load_model_endpoints_resilient(&root).unwrap();
+    assert!(loaded[0].catalog_id.is_none());
+    assert_eq!(
+        std::fs::read(model_endpoints_path(&root)).unwrap(),
+        original
+    );
+    for endpoint in [&normalized, &loaded[0]] {
+        assert_eq!(endpoint.model, "private-model");
+        assert_eq!(endpoint.api_key, "retained-secret");
+        assert_eq!(endpoint.max_llm_output_tokens, 8000);
+        assert_eq!(
+            endpoint.request_fields["vendor_options"],
+            json!({"flag":true})
+        );
+    }
+    save_model_endpoints(&root, &loaded).unwrap();
+    assert!(load_model_endpoints_resilient(&root).unwrap()[0]
+        .catalog_id
+        .is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn zhipu_catalog_endpoints_roundtrip_and_reject_forbidden_efforts() {
+    let root = std::env::temp_dir().join(unique_web_id("zhipu_catalog"));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut endpoints = Vec::new();
+    for suffix in ["5.2", "5.3", "5.3-flash"] {
+        let value = json!({"name":format!("z-glm{suffix}"),"catalog_id":format!("z-glm{suffix}"),
+            "model":format!("glm-{suffix}"),"api_protocol":"openai-compatible","response_protocol":"xml",
+            "base_url":"https://open.bigmodel.cn/api/paas/v4","max_llm_input_tokens":200000,
+            "max_llm_output_tokens":131072,"reasoning_effort":"max","stream":true});
+        let input: ModelEndpointInput = serde_json::from_value(value).unwrap();
+        let endpoint = normalize_model_endpoint_input(None, input.clone()).unwrap();
+        assert_eq!(
+            endpoint.catalog_id.as_deref(),
+            Some(format!("z-glm{suffix}").as_str())
+        );
+        assert_eq!(endpoint.reasoning_effort.as_deref(), Some("max"));
+        let mut wrong = input.clone();
+        wrong.reasoning_effort = Some("none".into());
+        assert_eq!(
+            normalize_model_endpoint_input(None, wrong).is_ok(),
+            suffix == "5.2"
+        );
+        let mut wrong = input;
+        wrong.api_protocol = "openai-responses".into();
+        assert!(normalize_model_endpoint_input(None, wrong).is_err());
+        endpoints.push(endpoint);
+    }
+    save_model_endpoints(&root, &endpoints).unwrap();
+    let restored = load_model_endpoints_resilient(&root).unwrap();
+    assert_eq!(
+        serde_json::to_value(&restored).unwrap(),
+        serde_json::to_value(&endpoints).unwrap()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn endpoint_requirements_and_cleared_preferences_survive_session_cache_roundtrip() {
+    let state = routing_test_state();
+    {
+        let mut settings = state.template.settings.lock().unwrap();
+        settings.config.openai_compatible.enable_thinking = Some(false);
+        settings.config.openai_compatible.reasoning_effort = Some("max".into());
+        settings.config.openai_compatible.requirements =
+            serde_json::from_value(json!({"version":1,"provider":"zhipu"})).unwrap();
+    }
+    assert_eq!(
+        state
+            .template
+            .restored_session_settings(&BTreeMap::new())
+            .unwrap()
+            .config
+            .openai_compatible
+            .requirements
+            .version,
+        0
+    );
+    let demand = json!({"version":1,"provider":"openai","allowed_reasoning":["low","high"],"adaptive_reasoning":false,"field_sources":{"model":"user","provider":"template"}});
+    let env = BTreeMap::from([
+        ("TIMEM_MODEL_REQUIREMENTS".into(), demand.to_string()),
+        ("TIMEM_ENABLE_THINKING".into(), "".into()),
+        ("TIMEM_REASONING_EFFORT".into(), "".into()),
+    ]);
+    let restored = state.template.restored_session_settings(&env).unwrap();
+    let cached = session_cached_env_values(&restored);
+    assert_eq!(cached["TIMEM_ENABLE_THINKING"], "");
+    assert_eq!(cached["TIMEM_REASONING_EFFORT"], "");
+    let again = state.template.restored_session_settings(&cached).unwrap();
+    assert_eq!(again.config.openai_compatible.enable_thinking, None);
+    assert_eq!(again.config.openai_compatible.reasoning_effort, None);
+    assert_eq!(
+        serde_json::to_value(again.config.openai_compatible.requirements).unwrap(),
+        demand
+    );
+    let root = std::env::temp_dir().join(unique_web_id("requirements_roundtrip"));
+    let input: ModelEndpointInput = serde_json::from_value(json!({
+        "name":"Requirements", "model":"custom-openai-fixture", "api_protocol":"openai-responses", "response_protocol":"xml",
+        "base_url":"https://proxy.example.test/v1", "max_llm_input_tokens":120000, "max_llm_output_tokens":20000,
+        "requirements":demand,"reasoning_effort":"low"
+    })).unwrap();
+    let endpoint = normalize_model_endpoint_input(None, input).unwrap();
+    save_model_endpoints(&root, &[endpoint]).unwrap();
+    let loaded = load_model_endpoints_resilient(&root).unwrap();
+    assert_eq!(
+        serde_json::to_value(&loaded[0].requirements).unwrap(),
+        demand
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn endpoint_share_commands_roundtrip_categories_collisions_and_private_delivery() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("endpoint_share"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let input: ModelEndpointInput = serde_json::from_value(json!({
+        "name":"mygpt", "model":"custom-model", "api_protocol":"openai-compatible",
+        "response_protocol":"xml", "base_url":"https://example.test/v1",
+        "max_llm_input_tokens":100000, "max_llm_output_tokens":10000,
+        "stream":true, "api_key":"share-test-secret", "reasoning_effort":"high",
+        "http_headers":{"X-Tenant":"tenant-secret"},
+        "request_fields":{"vendor_options":{"custom":"中文"}},
+        "allow_cross_origin_redirects":true
+    }))
+    .unwrap();
+    let id = upsert_model_endpoint(&state, input).unwrap();
+    let original = model_endpoint_config(&state, &id).unwrap();
+    let mut events = state.events.subscribe();
+    for (basic, advanced, personal) in [
+        (true, false, false),
+        (true, true, false),
+        (true, false, true),
+        (true, true, true),
+        (false, true, false),
+        (false, false, true),
+        (false, true, true),
+    ] {
+        let command = ClientCommand::ModelEndpointShareExport {
+            request_id: "share-request".into(),
+            endpoint_id: id.clone(),
+            basic,
+            advanced,
+            personal,
+        };
+        assert!(command.result_is_direct() && command.result_is_sensitive());
+        let completion = execute_browser_command(
+            &state,
+            TEST_PORT,
+            BrowserCommand {
+                command_id: Some("share-request".into()),
+                accepted_mem_epoch: 1,
+                accepted_lane: None,
+                accepted_at_ms: now_ms(),
+                performance_sent_at_ms: None,
+                command,
+            },
+        );
+        let Some(WireEvent::ModelEndpointShareExported { request_id, data }) = completion.event
+        else {
+            panic!("export must be a direct reply");
+        };
+        assert_eq!(request_id, "share-request");
+        assert!(events.try_recv().is_err(), "export must not broadcast");
+        assert!(!state
+            .command_dedup
+            .lock()
+            .unwrap()
+            .contains("share-request"));
+        let raw = STANDARD.decode(&data).unwrap();
+        let share: Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(share["format"], "timem.endpoint");
+        assert_eq!(share["version"], 1);
+        assert_eq!(share.get("basic").is_some(), basic);
+        assert_eq!(share.get("advanced").is_some(), advanced);
+        assert_eq!(share.get("personal").is_some(), personal);
+        assert!(share.get("id").is_none());
+        if !personal {
+            assert!(!String::from_utf8(raw).unwrap().contains("secret"));
+        }
+        if !basic {
+            assert_eq!(
+                model_endpoint_share::import(&state, &data).unwrap_err(),
+                "model_endpoint_share_basic_required"
+            );
+            continue;
+        }
+        let result = handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::ModelEndpointShareImport {
+                request_id: "import-request".into(),
+                data,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        let WireEvent::ModelEndpointShareImported { name, request_id } = result else {
+            panic!("missing import reply")
+        };
+        assert_eq!(request_id, "import-request");
+        let report = model_endpoint_reports(&state)
+            .unwrap()
+            .into_iter()
+            .find(|v| v.name == name)
+            .unwrap();
+        let imported = model_endpoint_config(&state, &report.id).unwrap();
+        assert_ne!(imported.id, id);
+        assert_eq!(imported.model, original.model);
+        assert_eq!(imported.stream, original.stream);
+        assert_eq!(imported.reasoning_effort, original.reasoning_effort);
+        assert_eq!(imported.requirements, original.requirements);
+        assert_eq!(!imported.api_key.is_empty(), personal);
+        assert_eq!(!imported.http_headers.is_empty(), personal);
+        assert_eq!(!imported.request_fields.is_empty(), advanced);
+        assert_eq!(imported.allow_cross_origin_redirects, advanced);
+        while let Ok(event) = events.try_recv() {
+            let json = serde_json::to_string(&event).unwrap();
+            assert!(!json.contains("share-test-secret") && !json.contains("tenant-secret"));
+            assert!(!json.contains("model_endpoint_share_exported"));
+        }
+    }
+    let reports = model_endpoint_reports(&state).unwrap();
+    assert_eq!(
+        reports.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+        vec!["mygpt", "mygpt1", "mygpt2", "mygpt3", "mygpt4"]
+    );
+    assert_eq!(model_endpoint_config(&state, &id).unwrap(), original);
+    let mem = state.mem.lock().unwrap();
+    assert_eq!(
+        load_model_endpoints_resilient(&mem.layout.memory_dir()).unwrap(),
+        mem.model_endpoints
+    );
+    drop(mem);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn endpoint_share_invalid_input_is_bounded_redacted_and_never_mutates() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("endpoint_share_invalid"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let input: ModelEndpointInput = serde_json::from_value(json!({
+        "name":"中文接入点", "model":"model", "api_protocol":"openai-compatible",
+        "response_protocol":"xml", "base_url":"https://example.test/v1",
+        "max_llm_input_tokens":100000, "max_llm_output_tokens":10000
+    }))
+    .unwrap();
+    let endpoint = normalize_model_endpoint_input(None, input).unwrap();
+    let valid = model_endpoint_share::export(&endpoint, true, true, true).unwrap();
+    let share: Value = serde_json::from_slice(&STANDARD.decode(&valid).unwrap()).unwrap();
+    let mut invalids = vec![
+        "not base64!!!".into(),
+        STANDARD.encode(b"not json"),
+        "A".repeat(262145),
+    ];
+    for (path, value) in [
+        ("/version", json!(2)),
+        ("/format", json!("other-format")),
+        ("/basic/max_llm_input_tokens", json!(0)),
+        ("/basic/api_protocol", json!("secret-invalid-protocol")),
+        ("/personal/api_key", json!({"secret":"do-not-echo"})),
+    ] {
+        let mut changed = share.clone();
+        *changed.pointer_mut(path).unwrap() = value;
+        invalids.push(STANDARD.encode(serde_json::to_vec(&changed).unwrap()));
+    }
+    let mut injected_id = share.clone();
+    injected_id["id"] = json!("existing-id");
+    invalids.push(STANDARD.encode(serde_json::to_vec(&injected_id).unwrap()));
+    for data in invalids {
+        let error = model_endpoint_share::import(&state, &data).unwrap_err();
+        assert!(error.starts_with("model_endpoint_share_"));
+        assert!(!error.contains("secret") && !error.contains("do-not-echo"));
+        assert!(model_endpoint_reports(&state).unwrap().is_empty());
+    }
+    assert!(model_endpoint_share::export(&endpoint, false, false, false).is_err());
+    assert_eq!(
+        model_endpoint_share::import(&state, &format!(" \n{valid}\n ")).unwrap(),
+        "中文接入点"
+    );
+    let command = ClientCommand::ModelEndpointShareImport {
+        request_id: "import".into(),
+        data: valid,
+    };
+    assert_eq!(command.mutation_lane().as_deref(), Some("global"));
+    assert!(command.uses_global_mutation_barrier() && command.result_is_direct());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn endpoint_share_failed_persistence_is_atomic_and_concurrent_names_are_unique() {
+    let state = Arc::new(routing_test_state());
+    let root = std::env::temp_dir().join(unique_web_id("endpoint_share_atomic"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let input: ModelEndpointInput = serde_json::from_value(json!({
+        "name":"mygpt", "model":"model", "api_protocol":"openai-compatible",
+        "response_protocol":"xml", "base_url":"https://example.test/v1",
+        "max_llm_input_tokens":100000, "max_llm_output_tokens":10000
+    }))
+    .unwrap();
+    let id = upsert_model_endpoint(&state, input).unwrap();
+    let endpoint = model_endpoint_config(&state, &id).unwrap();
+    let data = model_endpoint_share::export(&endpoint, true, false, false).unwrap();
+    let path = model_endpoints_path(&state.mem.lock().unwrap().layout.memory_dir());
+    let before = std::fs::read(&path).unwrap();
+    // A directory at the temp-file path forces a portable open failure.
+    let temporary = path.with_extension("json.tmp");
+    std::fs::create_dir(&temporary).unwrap();
+    assert!(model_endpoint_share::import(&state, &data).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(
+        state.mem.lock().unwrap().model_endpoints,
+        vec![endpoint.clone()]
+    );
+    std::fs::remove_dir(&temporary).unwrap();
+    let jobs: Vec<_> = (0..8)
+        .map(|_| {
+            let state = state.clone();
+            let data = data.clone();
+            std::thread::spawn(move || model_endpoint_share::import(&state, &data).unwrap())
+        })
+        .collect();
+    let names: BTreeSet<_> = jobs.into_iter().map(|job| job.join().unwrap()).collect();
+    assert_eq!(names, (1..=8).map(|n| format!("mygpt{n}")).collect());
+    assert_eq!(model_endpoint_config(&state, &id).unwrap(), endpoint);
+    let mem = state.mem.lock().unwrap();
+    assert_eq!(
+        load_model_endpoints_resilient(&mem.layout.memory_dir()).unwrap(),
+        mem.model_endpoints
+    );
+    drop(mem);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn model_endpoint_persistence_failures_leave_memory_and_disk_unchanged() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("endpoint_store_atomic"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+
+    let original_id = upsert_model_endpoint(
+        &state,
+        endpoint_boundary_input("endpoint-boundary-a", "medium"),
+    )
+    .unwrap();
+    let original = model_endpoint_config(&state, &original_id).unwrap();
+    let path = model_endpoints_path(&state.mem.lock().unwrap().layout.memory_dir());
+    let before = std::fs::read(&path).unwrap();
+    let temporary = path.with_extension("json.tmp");
+    std::fs::create_dir(&temporary).unwrap();
+
+    assert!(upsert_model_endpoint(
+        &state,
+        endpoint_boundary_input("endpoint-boundary-b", "low"),
+    )
+    .is_err());
+
+    let mut edited = endpoint_boundary_input("endpoint-boundary-a", "high");
+    edited.name = "Boundary A edited".to_string();
+    assert!(upsert_model_endpoint(&state, edited).is_err());
+    assert!(delete_model_endpoint(&state, &original_id).is_err());
+
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(
+        state.mem.lock().unwrap().model_endpoints,
+        vec![original.clone()]
+    );
+    assert_eq!(
+        model_endpoint_config(&state, &original_id).unwrap(),
+        original
+    );
+
+    std::fs::remove_dir(&temporary).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn model_endpoint_import_persistence_failure_is_atomic_and_retryable() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("endpoint_import_atomic"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+
+    let original_id = upsert_model_endpoint(
+        &state,
+        endpoint_boundary_input("endpoint-boundary-a", "medium"),
+    )
+    .unwrap();
+    let original = model_endpoint_config(&state, &original_id).unwrap();
+    let candidates = vec![
+        ModelEndpointImportCandidate {
+            id: "atomic-import-a".to_string(),
+            source: "codex",
+            name: "Imported A".to_string(),
+            model: "imported-a".to_string(),
+            api_protocol: "openai-compatible".to_string(),
+            response_protocol: "xml".to_string(),
+            base_url: "https://import-a.example.test/v1".to_string(),
+            max_llm_input_tokens: 64_000,
+            max_llm_output_tokens: 8_000,
+            stream: true,
+            api_key: "import-secret-a".to_string(),
+            reasoning_effort: Some("medium".to_string()),
+            http_headers: BTreeMap::from([("X-Import".to_string(), "a".to_string())]),
+            request_fields: BTreeMap::from([("route".to_string(), json!("a"))]),
+        },
+        ModelEndpointImportCandidate {
+            id: "atomic-import-b".to_string(),
+            source: "claude",
+            name: "Imported B".to_string(),
+            model: "imported-b".to_string(),
+            api_protocol: "anthropic".to_string(),
+            response_protocol: "xml".to_string(),
+            base_url: "https://import-b.example.test".to_string(),
+            max_llm_input_tokens: 200_000,
+            max_llm_output_tokens: 20_000,
+            stream: false,
+            api_key: "import-secret-b".to_string(),
+            reasoning_effort: None,
+            http_headers: BTreeMap::new(),
+            request_fields: BTreeMap::new(),
+        },
+    ];
+    let candidate_ids: Vec<_> = candidates
+        .iter()
+        .map(|candidate| candidate.id.clone())
+        .collect();
+    *state.model_endpoint_imports.lock().unwrap() = candidates;
+
+    let path = model_endpoints_path(&state.mem.lock().unwrap().layout.memory_dir());
+    let before = std::fs::read(&path).unwrap();
+    let temporary = path.with_extension("json.tmp");
+    std::fs::create_dir(&temporary).unwrap();
+
+    assert!(import_model_endpoints(&state, &candidate_ids).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(
+        state.mem.lock().unwrap().model_endpoints,
+        vec![original.clone()]
+    );
+    assert_eq!(
+        state
+            .model_endpoint_imports
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|candidate| candidate.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["atomic-import-a", "atomic-import-b"]
+    );
+
+    std::fs::remove_dir(&temporary).unwrap();
+    let imported_ids = import_model_endpoints(&state, &candidate_ids).unwrap();
+    assert_eq!(imported_ids.len(), 2);
+    assert!(state.model_endpoint_imports.lock().unwrap().is_empty());
+    let mem = state.mem.lock().unwrap();
+    assert_eq!(mem.model_endpoints.len(), 3);
+    assert_eq!(
+        load_model_endpoints_resilient(&mem.layout.memory_dir()).unwrap(),
+        mem.model_endpoints
+    );
+    drop(mem);
+
+    std::fs::remove_dir_all(root).unwrap();
 }

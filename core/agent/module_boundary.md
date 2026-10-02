@@ -118,6 +118,12 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   structured turn input. Core consumes these values when assembling model
   context; reusable runtime loops should not hard-code a terminal host identity.
 - Memory, scratch, raw chat, context shrink/compact, and conflict handling.
+  Successful compaction action results stay minimal: the next model prompt gets
+  completion status and only actionable follow-up data such as an offload
+  `scratch_id`, never the full discarded/offloaded delta-id lists, shrink
+  counters, or post-shrink live-ref diagnostics. Detailed ids and token
+  accounting remain available to structured host topics; failed compaction may
+  include missing ids and current live refs so the model can repair its call.
   A successful compact re-injects one bounded RUNTIME snapshot of currently
   applied MCP actions when any are active; pending host configuration and MCP
   secrets are never included.
@@ -141,6 +147,7 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   `core.toolgen` lifecycle topics.
   ToolGen failure must not replace a successful source-turn result. Hosts own
   the manual trigger and repository presentation, not candidate validation.
+- The single model-visible tool-result gate. Core validates the supported per-tool result budgets, defaults each AgentCore to 16 KiB, and bounds the complete structured action-result envelope while preserving valid JSON and head/tail retention semantics; Hosts may configure the value but may not recreate the gate.
 - Local tool execution abstractions that return structured action evidence.
 - Registered command-tool foreground/background execution semantics. Core owns
   background job ids, persisted status/output files, polling, cancellation,
@@ -376,3 +383,35 @@ an explicitly test-only hook needed for private white-box access.
 Session metadata also preserves an optional `model_endpoint_id` for stable
 host-managed endpoint selection. Old records deserialize without this field;
 secrets remain in owner-protected configuration, never in the binding ID.
+
+## Reasoning policy boundary
+
+`reasoning.rs` owns protocol-independent preference, per-request demand and effective
+policy. Version 0 retains legacy ordinary/required behavior; version 1 uses daily H0
+and optional critical-call H1 within the model-ordered allowed subset. Unknown
+capabilities never invent an ordering. Explicit adaptive disable is retained.
+Existing persisted `OpenAiCompatibleOptions` reasoning fields are a compatibility
+input, not independent policy authority in each adapter. `model_api` resolves them
+once through `model_requirements`; `model_payload` maps the effective policy to
+Chat Completions, Responses or the legacy Anthropic path.
+Callers may also supply `EffectiveReasoning` to `build_model_request_with_policy`.
+Protocol adapters must not reinterpret scheduling flags or downgrade intensity.
+Anthropic uses adaptive thinking and output effort, not invented token budgets;
+unsupported protocol-level effort is rejected before HTTP. Model-specific adaptive
+support is validated upstream (no model-name heuristics or silent legacy fallback). A model-facing reasoning trailer is injected only when the resolved request policy is a real increase above the normal H0 baseline; a critical scheduling flag or enabled thinking alone is insufficient. The trailer asks the model to use the stronger pass for direction, methodology, and corrective reflection while preserving the active response/compaction protocol.
+
+### 模型白名单接入
+`model_catalog` 负责内置/启动目录 JSON 描述、UI 无关投影、默认值、native-safe 约束及预算准入。`model_requirements` 以显式供应商+模型匹配能力并解析本次需求，模板 ID 仅为建议来源（v0 保留绑定兼容）。`model_payload` 选择描述中已注册的适配器并做最终字段一致性校验。配置不能执行脚本或任意 JSON path；新增同协议模型只需描述文件，新 wire 行为必须实现并测试处理器。详见 `docs/model-endpoint-architecture.md`。
+
+### Responses SSE
+Responses 复用有界 SSE 分帧与 HTTP 取消/超时传输。会话预览只接收 response.output_text.delta，忽略 reasoning 与函数参数增量；权威结果必须来自 response.completed 或 response.incomplete 的完整 response，复用非流式的文本、函数调用、用量解析。缺失/重复/结构错误的结束事件或 error/response.failed 均拒绝作为成功结果。函数调用不从未完成参数增量执行。
+
+### Zhipu catalog adapter
+
+Built-in model profiles select a typed reasoning adapter in Core. Zhipu Chat
+profiles map thinking fields and enforce final-wire consistency before I/O.
+Assistant reasoning continuation is bounded opaque metadata carried on the first
+native call of an exchange, not tool arguments or public assistant text. It is
+replayed only for the same capability descriptor and model (not the editable template source); absent legacy metadata is
+valid. Cross-turn preserved thinking is not promised across context compaction.
+See `docs/zhipu-model-catalog.md` for scope, evidence and tests.

@@ -748,6 +748,19 @@ fn shell_session_env_values(
             config.interaction.parallel_tool_calls.label().to_string(),
         ),
     ]);
+    env.insert(
+        "TIMEM_MODEL_REQUIREMENTS".to_owned(),
+        serde_json::to_string(&config.openai_compatible.requirements)
+            .expect("requirements serialize"),
+    );
+    env.insert(
+        "TIMEM_MODEL_CATALOG_ID".to_owned(),
+        config
+            .openai_compatible
+            .catalog_id
+            .clone()
+            .unwrap_or_default(),
+    );
     if let Some(value) = config.openai_compatible.enable_thinking {
         env.insert("TIMEM_ENABLE_THINKING".to_string(), value.to_string());
     }

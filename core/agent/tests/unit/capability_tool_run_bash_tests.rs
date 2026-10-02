@@ -1453,7 +1453,20 @@ fn background_job_reports_pid_and_running_list_until_exit() {
     assert_eq!(running.len(), 1);
     assert_eq!(running[0].pid, pid);
     assert_eq!(running[0].kind, "background");
-    assert!(running[0].notes.is_empty(), "{}", running[0].notes);
+    #[cfg(target_os = "linux")]
+    {
+        let notes = &running[0].notes;
+        assert!(
+            notes.starts_with("cgroup: ") || notes.contains(&format!("/proc/{pid}/cgroup")),
+            "{notes}"
+        );
+        if let Some(path) = notes.strip_prefix("cgroup: ") {
+            assert!(
+                std::path::Path::new(path).join("cgroup.procs").is_file(),
+                "{notes}"
+            );
+        }
+    }
 
     let mut running = Vec::new();
     let mut updates = Vec::new();

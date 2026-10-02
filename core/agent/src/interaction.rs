@@ -110,8 +110,20 @@ pub struct ToolDefinition {
     pub input_schema: Value,
 }
 
+/// Opaque assistant-message metadata carried on the first call of an exchange.
+/// It is not tool input or visible assistant text. Identity prevents replay to a
+/// different endpoint template after a model switch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AssistantContinuation {
+    pub catalog_id: String,
+    pub model: String,
+    pub reasoning_content: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NativeToolCall {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_continuation: Option<AssistantContinuation>,
     pub id: String,
     pub name: String,
     pub arguments: Value,
@@ -154,9 +166,8 @@ pub struct ModelInteractionRequest {
     pub resolved_mode: ToolCallMode,
     pub parallel_tool_calls: bool,
     pub tool_choice: NativeToolChoice,
-    /// Marks a critical request (currently: forced context compaction).
-    /// The endpoint's reasoning effort applies only to critical requests;
-    /// ordinary requests disable thinking to save latency and cost.
+    /// Core scheduling signal (compaction or periodic review). Requirements v1
+    /// applies H0 daily and may boost this call; v0 retains legacy behavior.
     pub critical_reasoning: bool,
 }
 

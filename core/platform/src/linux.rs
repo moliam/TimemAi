@@ -82,8 +82,6 @@ static STALE_SCOPE_CLEANUP: std::sync::OnceLock<()> = std::sync::OnceLock::new()
 /// leaf Job before any user-controlled program executes.
 pub(super) struct LinuxCgroupProcessJob {
     path: PathBuf,
-    session_path: PathBuf,
-    runtime_path: PathBuf,
     procs: std::fs::File,
 }
 
@@ -99,13 +97,8 @@ impl LinuxCgroupProcessJob {
     pub(super) fn create(session_id: Option<&str>) -> std::io::Result<Self> {
         use std::os::unix::fs::OpenOptionsExt;
 
-        let subtree = timem_job_subtree()?;
-        STALE_SCOPE_CLEANUP.get_or_init(|| cleanup_stale_runtime_scopes(&subtree));
-        let runtime_path = ensure_plain_directory(&subtree.join(current_runtime_scope_name()))?;
-        let session_key = session_scope_key(session_id.unwrap_or("runtime"));
-        let session_path = ensure_plain_directory(
-            &runtime_path.join(format!("{SESSION_SCOPE_PREFIX}{session_key}")),
-        )?;
+        let (_runtime_path, session_path) =
+            ensure_aggregate_scope_paths(session_id.unwrap_or("runtime"))?;
 
         for _ in 0..64 {
             let id = NEXT_JOB_CGROUP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -120,30 +113,22 @@ impl LinuxCgroupProcessJob {
                         Ok(file) => file,
                         Err(error) => {
                             let _ = fs::remove_dir(&path);
-                            cleanup_empty_scope_parents(&session_path, &runtime_path);
                             return Err(error);
                         }
                     };
                     if !path.join("cgroup.kill").is_file() {
                         let _ = fs::remove_dir(&path);
-                        cleanup_empty_scope_parents(&session_path, &runtime_path);
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::Unsupported,
                             "cgroup.kill is unavailable",
                         ));
                     }
-                    return Ok(Self {
-                        path,
-                        session_path,
-                        runtime_path,
-                        procs,
-                    });
+                    return Ok(Self { path, procs });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(error),
             }
         }
-        cleanup_empty_scope_parents(&session_path, &runtime_path);
         Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
             "could not allocate a unique managed-job cgroup",
@@ -204,7 +189,9 @@ impl Drop for LinuxCgroupProcessJob {
         // the kernel says the leaf is empty. Parent scopes are removed only
         // after their final Job disappears.
         let _ = fs::remove_dir(&self.path);
-        cleanup_empty_scope_parents(&self.session_path, &self.runtime_path);
+        // Runtime and Session parents are stable aggregate observation scopes.
+        // The Runtime safety-net guard removes them on normal shutdown after
+        // all Job leaves have been checked and removed.
     }
 }
 
@@ -405,9 +392,24 @@ fn runtime_scope_has_live_members(runtime_path: &Path) -> std::io::Result<bool> 
     Ok(false)
 }
 
-fn cleanup_empty_scope_parents(session_path: &Path, runtime_path: &Path) {
-    cleanup_empty_session_scope(session_path);
-    let _ = fs::remove_dir(runtime_path);
+fn ensure_aggregate_scope_paths(session_id: &str) -> std::io::Result<(PathBuf, PathBuf)> {
+    let subtree = timem_job_subtree()?;
+    STALE_SCOPE_CLEANUP.get_or_init(|| cleanup_stale_runtime_scopes(&subtree));
+    let runtime_path = ensure_plain_directory(&subtree.join(current_runtime_scope_name()))?;
+    let session_key = session_scope_key(session_id);
+    let session_path =
+        ensure_plain_directory(&runtime_path.join(format!("{SESSION_SCOPE_PREFIX}{session_key}")))?;
+    Ok((runtime_path, session_path))
+}
+
+pub(super) fn process_aggregate_scope_snapshot(
+    session_id: &str,
+) -> std::io::Result<crate::process_job::ProcessAggregateScopeSnapshot> {
+    let (runtime_path, session_path) = ensure_aggregate_scope_paths(session_id)?;
+    Ok(crate::process_job::ProcessAggregateScopeSnapshot {
+        runtime_observation_note: format!("cgroup: {}", runtime_path.display()),
+        session_observation_note: format!("cgroup: {}", session_path.display()),
+    })
 }
 
 fn is_plain_named_directory(path: &Path, prefix: &str) -> bool {

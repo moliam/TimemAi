@@ -82,6 +82,66 @@ fn oversized_readfile_action_result_has_common_prompt_truncation_notice() {
     ));
 }
 
+#[test]
+fn readfile_runtime_budget_reaches_serial_and_parallel_model_results() {
+    let cwd = tmp_dir("readfile_runtime_budget_paths");
+    fs::write(cwd.join("short.txt"), "short evidence").unwrap();
+    fs::write(cwd.join("large-a.txt"), "a".repeat(20 * 1024)).unwrap();
+    fs::write(cwd.join("large-b.txt"), "b".repeat(20 * 1024)).unwrap();
+
+    let run = |content: &str, memory_label: &str| {
+        let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir(memory_label));
+        core.set_model_tool_result_bytes(8 * 1024).unwrap();
+        core.change_prompt_cwd(cwd.to_string_lossy()).unwrap();
+        let _ = core.begin_turn("read files", None);
+        match core.apply_model_response(LlmResponse {
+            tool_calls: Vec::new(),
+            content: scored(content),
+            model_name: "qwen-plus".to_string(),
+            usage: usage(),
+            truncated: false,
+        }) {
+            CoreStep::NeedModel { prompt, .. } => prompt,
+            other => panic!("expected readfile action result, got {other:?}"),
+        }
+    };
+
+    let short = run(
+        r#"{"working_still_action":{"readfile":{"path":"short.txt"}}}"#,
+        "readfile_runtime_budget_short_mem",
+    );
+    let short_result = &action_results(&short)[0]["action_result"];
+    assert_eq!(short_result["runtime_metadata"]["content_bytes"], 14);
+    assert!(short_result["runtime_metadata"].get("truncation").is_none());
+    assert_eq!(short_result["tool_output"]["content"], "short evidence");
+
+    let serial = run(
+        r#"{"working_still_action":{"readfile":{"path":"large-a.txt"}}}"#,
+        "readfile_runtime_budget_serial_mem",
+    );
+    let serial_result = &action_results(&serial)[0]["action_result"];
+    assert_eq!(serial_result["runtime_metadata"]["content_bytes"], 8 * 1024);
+    assert_eq!(
+        serial_result["runtime_metadata"]["truncation"]["content"]["tool_selection"]["truncated"],
+        true
+    );
+
+    let parallel = run(
+        r#"{"working_still_action":[[{"readfile":{"path":"large-a.txt"}},{"readfile":{"path":"large-b.txt"}}]]}"#,
+        "readfile_runtime_budget_parallel_mem",
+    );
+    let parallel_results = action_results(&parallel);
+    assert_eq!(parallel_results.len(), 2, "{parallel}");
+    for result in parallel_results {
+        let result = &result["action_result"];
+        assert_eq!(result["runtime_metadata"]["content_bytes"], 8 * 1024);
+        assert_eq!(
+            result["runtime_metadata"]["truncation"]["content"]["tool_selection"]["truncated"],
+            true
+        );
+    }
+}
+
 fn count_occurrences(haystack: &str, needle: &str) -> usize {
     haystack.match_indices(needle).count()
 }
@@ -1157,7 +1217,8 @@ fn prompt_is_append_only_and_segmented() {
     assert!(first.contains("## USER"));
     assert!(!first.contains("slice_id: ps_"));
     assert!(!first.contains("prompt_type: user_question"));
-    assert!(first.contains(", time_ms: "));
+    assert!(!first.contains(", time_ms: "));
+    assert!(first.contains("[User input time:"));
     assert!(!first.contains("{\"segment_type\""));
 
     let final_step = core.apply_model_response(LlmResponse {
@@ -1176,7 +1237,7 @@ fn prompt_is_append_only_and_segmented() {
     assert!(second.contains("## TIMEM_ASSISTANT"));
     assert!(second.contains(r#"{"status":"ALL_FINISHED","final_answer":"你好"}"#));
     assert!(!second.contains("All previous pending open tasks are completed."));
-    assert!(second.contains("## USER\n\n继续"));
+    assert!(second.contains("\n\n继续"));
 }
 
 #[test]
@@ -1814,7 +1875,7 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
     assert_eq!(events[0]["max_rounds"], 1);
     assert_eq!(events[0]["continued"], true);
     assert_eq!(rounds_remaining, UNLIMITED_ROUND_BUDGET);
-    assert!(prompt.contains("## USER\n\n需要两步完成"));
+    assert!(prompt.contains("\n\n需要两步完成"));
     assert!(prompt.contains("Runtime round budget continued by user."));
     assert!(!prompt.contains("rounds_remaining:"));
 
@@ -2029,7 +2090,7 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.ends_with(
-        "Context is too long. Compact context as the tool context_compact desc suggests. Your tool calls must start with context_compact:"
+        "Context is too long. Compact context as the tool context_compact desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compact:"
     ));
     let (_, threshold) = core
         .take_pending_compact_request_notice()
@@ -2099,7 +2160,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.ends_with(
-        "Context is too long. Compact context as the tool context_compact desc suggests. Your tool calls must start with context_compact:"
+        "Context is too long. Compact context as the tool context_compact desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compact:"
     ));
     assert!(!prompt.contains("Long-context maintenance:"));
     let (estimated, threshold) = core
@@ -2148,7 +2209,7 @@ fn one_prompt_delta_can_render_to_multiple_slices() {
         other => panic!("unexpected step: {other:?}"),
     };
 
-    assert!(prompt.contains("[BEGIN DELTA delta_id: pd_1, time_ms: "));
+    assert!(prompt.contains("[BEGIN DELTA delta_id: pd_1]"));
     assert!(!prompt.contains("slice_id: ps_"));
     assert!(!prompt.contains("prompt_type: user_question"));
     assert_eq!(prompt.matches("[BEGIN DELTA ").count(), 1);
@@ -2612,7 +2673,7 @@ fn prompt_rendering_does_not_expose_durable_ctx_score() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("## USER\n\n不要记住：纪念日这个词只是测试"));
+    assert!(prompt.contains("\n\n不要记住：纪念日这个词只是测试"));
     assert!(!prompt.contains("durable_ctx_score"));
 }
 
@@ -2641,7 +2702,7 @@ fn prompt_discard_can_remove_whole_delta_by_delta_id() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(has_action_status(&prompt, "completed"), "{prompt}");
-    assert!(has_tool_output_containing(
+    assert!(!has_tool_output_containing(
         &prompt,
         "content",
         "removed_delta_count:"
@@ -2827,7 +2888,7 @@ fn response_context_compact_hides_refs_and_appends_summary_slice() {
     assert!(prompt.contains("context compacted successfully."));
     assert!(prompt.contains("CWD: "));
     assert!(has_action_status(&prompt, "completed"), "{prompt}");
-    assert!(has_tool_output_containing(
+    assert!(!has_tool_output_containing(
         &prompt,
         "content",
         "removed_delta_count:"
@@ -2923,7 +2984,7 @@ fn prompt_discard_can_remove_visible_delta_by_delta_id() {
     };
     assert!(prompt.contains("context compacted successfully."));
     assert!(has_action_status(&prompt, "completed"), "{prompt}");
-    assert!(has_tool_output_containing(
+    assert!(!has_tool_output_containing(
         &prompt,
         "content",
         "removed_delta_count:"
@@ -2965,9 +3026,9 @@ fn prompt0_is_static_global_only() {
     assert!(prompt0.contains("STATIC_GLOBAL"));
     assert!(!prompt0.contains("secret user question"));
     assert!(!prompt0.contains("runtime_time: now"));
-    assert!(prompt.contains("## USER\n\nsecret user question"));
+    assert!(prompt.contains("\n\nsecret user question"));
     let runtime = prompt.find("runtime_time: now").unwrap();
-    let user = prompt.find("## USER\n\nsecret user question").unwrap();
+    let user = prompt.find("\n\nsecret user question").unwrap();
     assert!(prompt[..runtime].rfind("## RUNTIME").is_some());
     assert!(runtime < user);
     assert!(!prompt[..runtime].contains("## USER"));
@@ -3088,7 +3149,7 @@ fn long_context_uses_observed_model_prompt_tokens_plus_new_delta_estimate() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.ends_with(
-        "Context is too long. Compact context as the tool context_compact desc suggests. Your tool calls must start with context_compact:"
+        "Context is too long. Compact context as the tool context_compact desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compact:"
     ));
     assert!(!prompt.contains("Long-context maintenance:"));
     let (estimated, threshold) = core
@@ -3117,7 +3178,7 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.ends_with(
-        "Context is too long. Compact context as the tool context_compact desc suggests. Your tool calls must start with context_compact:"
+        "Context is too long. Compact context as the tool context_compact desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compact:"
     ));
     for redundant in [
         "Long-context maintenance:",
@@ -3185,7 +3246,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
         has_action_status(&next_prompt, "completed"),
         "{next_prompt}"
     );
-    assert!(has_tool_output_containing(
+    assert!(!has_tool_output_containing(
         &next_prompt,
         "content",
         "removed_delta_count"
@@ -5305,6 +5366,16 @@ fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
         "Action result: context_compact"
     ));
     assert!(!prompt.contains("scratch_id:"));
+    let results = action_results(&prompt);
+    assert_eq!(results.len(), 1, "{prompt}");
+    let metadata = &results[0]["action_result"]["runtime_metadata"];
+    assert!(metadata["scratch_id"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("scratch_")));
+    assert!(metadata.get("discarded_delta_ids").is_none(), "{prompt}");
+    assert!(metadata.get("offloaded_delta_ids").is_none(), "{prompt}");
+    assert!(!prompt.contains("removed_delta_count:"), "{prompt}");
+    assert!(!prompt.contains("current_live_delta_refs:"), "{prompt}");
 
     let stored = fs::read_to_string(core.scratch_file()).unwrap();
     let scratch_id = stored
@@ -5373,6 +5444,12 @@ fn context_compact_offload_rejects_invalid_prompt_refs_without_writing() {
     assert!(result["tool_output"]["content"]
         .as_str()
         .is_some_and(|content| content.contains("current_live_delta_refs:")));
+    assert!(result["runtime_metadata"]
+        .get("discarded_delta_ids")
+        .is_none());
+    assert!(result["runtime_metadata"]
+        .get("offloaded_delta_ids")
+        .is_none());
     assert!(prompt.contains("checking compact refs"));
     assert!(prompt.contains("bad refs should not write scratch"));
     let assistant = prompt.find("## TIMEM_ASSISTANT").unwrap();
@@ -7651,7 +7728,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(first_prompt.contains("## USER\n\n测试项目纪念日是 2099-06-12"));
+    assert!(first_prompt.contains("\n\n测试项目纪念日是 2099-06-12"));
     let runtime = first_prompt.find("runtime_time:").unwrap();
     let user = first_prompt.find("## USER\n").unwrap();
     assert!(first_prompt[..runtime].rfind("## RUNTIME").is_some());
@@ -8437,12 +8514,11 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(json_prompt.contains("organized as JSON"));
     assert!(json_prompt.contains("\"working_still_action\""));
     assert!(json_prompt.contains("\"ALL_FINISHED\""));
-    assert!(json_prompt.contains("[BEGIN DELTA delta_id: pd_1, time_ms: 123]"));
+    assert!(json_prompt.contains("[BEGIN DELTA delta_id: pd_1]"));
     assert!(!json_prompt.contains("[END DELTA]"));
     assert!(!json_prompt.contains("<prompt_delta "));
     assert!(!json_prompt.contains("</prompt_delta>"));
-    assert!(json_prompt
-        .contains("A dynamic delta starts with `[BEGIN DELTA delta_id: <id>, time_ms: <time>]`"));
+    assert!(json_prompt.contains("A dynamic delta starts with `[BEGIN DELTA delta_id: <id>]`"));
     assert!(!json_prompt.contains("Each `<prompt_delta>` is an outer dynamic container"));
     assert!(!json_prompt.contains("{{PROMPT_DELTA_EXAMPLE}}"));
     assert!(!json_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
@@ -8472,7 +8548,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(xml_prompt.contains("<summary>"));
     assert!(xml_prompt.contains("will be saved into scratch memory"));
     assert!(xml_prompt.contains("## RESPONSE EXAMPLES"));
-    assert!(xml_prompt.contains(r#"<prompt_delta id="pd_1" time_ms="123">"#));
+    assert!(xml_prompt.contains(r#"<prompt_delta id="pd_1">"#));
     assert!(xml_prompt.contains("</prompt_delta>"));
     assert!(xml_prompt.contains(
         "Each `<prompt_delta>` is an outer dynamic transport container that may wrap `<USER>"
@@ -8481,7 +8557,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(xml_prompt.contains(r#"<USER kind="supplement">"#));
     assert!(!xml_prompt.contains("[BEGIN DELTA] and [END DELTA]"));
     let example_start = xml_prompt
-        .find(r#"<prompt_delta id="pd_1" time_ms="123">"#)
+        .find(r#"<prompt_delta id="pd_1">"#)
         .expect("XML delta example should render");
     let example_end = xml_prompt[example_start..]
         .find("</prompt_delta>")

@@ -4,10 +4,10 @@ binding_type: builtin
 binding_name: readfile
 summary: Read a bounded range from a normal text file.
 prompt_synopsis: |
-  {"readfile":{"path":"src/main.rs","starter":{"line_nr":20},"ender":{"line_nr":80},"max_bytes":32768}}
-  {"readfile":{"path":"logs/app.log","starter":{"byte_nr":0},"ender":{"byte_nr":4095},"max_bytes":4096}}
-  {"readfile":{"path":"logs/app.log","max_bytes":4096,"tail_out":true}}
-  {"readfile":{"path":"src/main.rs","starter":{"match":"fn main"},"ender":{"match":"}"},"max_bytes":32768}}
+  {"readfile":{"path":"src/main.rs","starter":{"line_nr":20},"ender":{"line_nr":80}}}
+  {"readfile":{"path":"logs/app.log","starter":{"byte_nr":0},"ender":{"byte_nr":4095}}}
+  {"readfile":{"path":"logs/app.log","tail_out":true}}
+  {"readfile":{"path":"src/main.rs","starter":{"match":"fn main"},"ender":{"match":"}"}}}
 description: |
   Please use `readfile` instead of shell commands when reading text files; the Runtime can
   better monitor and serve you through this tool. Relative
@@ -59,7 +59,7 @@ input_schema: |
         "properties": {
           "line_nr": {"type": "integer", "minimum": 1, "description": "1-based inclusive line number; values beyond EOF clamp to the actual last line."},
           "byte_nr": {"type": "integer", "minimum": 0, "description": "0-based inclusive original-file byte number."},
-          "match": {"type": "string", "minLength": 1, "description": "Non-empty exact string; at most 65536 UTF-8 bytes. End after its last complete match in the max_bytes window."}
+          "match": {"type": "string", "minLength": 1, "description": "Non-empty exact string; at most 65536 UTF-8 bytes. End after its last complete match in the bounded read window."}
         },
         "oneOf": [
           {"required": ["line_nr"]},
@@ -67,7 +67,6 @@ input_schema: |
           {"required": ["match"]}
         ]
       },
-      "max_bytes": {"type": "integer", "minimum": 1, "maximum": 32768, "description": "Maximum returned UTF-8 content bytes. Default and maximum 32768."},
       "tail_out": {"type": "boolean", "description": "Controls which side of an oversized selected range is retained. True retains the ending; false retains the beginning. Default: false. Truncation facts are reported in runtime metadata, not inserted into content."}
     }
   }
@@ -76,7 +75,6 @@ example_json: |
     "readfile": {
       "path": "src/main.rs",
       "starter": {"line_nr": 20},
-      "ender": {"line_nr": 80},
-      "max_bytes": 32768
+      "ender": {"line_nr": 80}
     }
   }

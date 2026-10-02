@@ -297,6 +297,7 @@ pub enum CoreSessionWorkerEvent {
         interaction_request: Option<Box<agent_core::ModelInteractionRequest>>,
         api_payload: Option<Box<serde_json::Value>>,
     },
+    ReasoningUpgrade(agent_core::model_requirements::ReasoningUpgrade),
     ModelRequestCompleted {
         latency: Duration,
     },
@@ -358,6 +359,7 @@ enum CoreSessionWorkerCommand {
     RuntimeConfigUpdated,
     MaxRoundsUpdated,
     InterfacePreferencesUpdated,
+    ModelToolResultBytesUpdated,
     UpdateApiKey {
         api_key: String,
     },
@@ -369,6 +371,10 @@ enum CoreSessionWorkerCommand {
     },
     UpdateModelHttpTransport {
         options: agent_core::ModelHttpTransportOptions,
+    },
+    ReplaceModelServiceConfig {
+        config: ModelServiceConfig,
+        result_tx: Sender<Result<(), String>>,
     },
     UpdateMcp {
         base_capabilities: agent_core::capability::CapabilityRegistry,
@@ -446,6 +452,7 @@ enum PendingRuntimeUpdate {
     },
     MaxRounds(u32),
     ClaudeCodexToolDiscovery(bool),
+    ModelToolResultBytes(usize),
 }
 
 const CORE_COMMAND_ID_CAPACITY: usize = 1_024;
@@ -1049,6 +1056,17 @@ impl CoreSessionWorkerHandle {
         )
     }
 
+    pub fn update_model_tool_result_bytes(&self, max_bytes: usize) -> Result<(), String> {
+        agent_core::validate_model_tool_result_bytes(max_bytes)?;
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        self.enqueue_runtime_update(
+            PendingRuntimeUpdate::ModelToolResultBytes(max_bytes),
+            CoreSessionWorkerCommand::ModelToolResultBytesUpdated,
+        )
+    }
+
     pub fn update_claude_codex_tool_discovery(&self, enabled: bool) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
@@ -1119,6 +1137,22 @@ impl CoreSessionWorkerHandle {
         self.command_tx
             .send(CoreSessionWorkerCommand::UpdateRequestFields { request_fields })
             .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    /// Replaces the complete model-service request configuration as one worker
+    /// command. The response channel is a barrier: after this returns, every
+    /// subsequently queued turn observes the new snapshot.
+    pub fn replace_model_service_config(&self, config: ModelServiceConfig) -> Result<(), String> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        let (result_tx, result_rx) = mpsc::channel();
+        self.command_tx
+            .send(CoreSessionWorkerCommand::ReplaceModelServiceConfig { config, result_tx })
+            .map_err(|_| "core_session_worker_stopped".to_string())?;
+        result_rx
+            .recv()
+            .map_err(|_| "core_session_worker_stopped".to_string())?
     }
 
     pub fn update_mcp(
@@ -1770,10 +1804,12 @@ impl CoreSessionWorker {
                     | CoreSessionWorkerCommand::RuntimeConfigUpdated
                     | CoreSessionWorkerCommand::MaxRoundsUpdated
                     | CoreSessionWorkerCommand::InterfacePreferencesUpdated
+                    | CoreSessionWorkerCommand::ModelToolResultBytesUpdated
                     | CoreSessionWorkerCommand::UpdateApiKey { .. }
                     | CoreSessionWorkerCommand::UpdateHttpHeaders { .. }
                     | CoreSessionWorkerCommand::UpdateRequestFields { .. }
                     | CoreSessionWorkerCommand::UpdateModelHttpTransport { .. }
+                    | CoreSessionWorkerCommand::ReplaceModelServiceConfig { .. }
                     | CoreSessionWorkerCommand::UpdateMcp { .. }
                     | CoreSessionWorkerCommand::ExportContext { .. }
                     | CoreSessionWorkerCommand::ClearContext
@@ -2023,6 +2059,11 @@ impl CoreSessionWorker {
                     | CoreSessionWorkerCommand::InterfacePreferencesUpdated => {
                         ui.apply_pending_runtime_updates(&mut core, &mut config);
                     }
+                    CoreSessionWorkerCommand::ModelToolResultBytesUpdated => {
+                        if let Some(max_bytes) = ui.take_model_tool_result_bytes_update() {
+                            let _ = core.set_model_tool_result_bytes(max_bytes);
+                        }
+                    }
                     CoreSessionWorkerCommand::UpdateApiKey { api_key } => {
                         config.api_key = api_key;
                         core.notify_runtime_config_changed();
@@ -2038,6 +2079,13 @@ impl CoreSessionWorker {
                     CoreSessionWorkerCommand::UpdateModelHttpTransport { options } => {
                         config.http_transport = options;
                         core.notify_runtime_config_changed();
+                    }
+                    CoreSessionWorkerCommand::ReplaceModelServiceConfig {
+                        config: replacement,
+                        result_tx,
+                    } => {
+                        replace_worker_model_service_config(&mut core, &mut config, replacement);
+                        let _ = result_tx.send(Ok(()));
                     }
                     CoreSessionWorkerCommand::UpdateMcp {
                         base_capabilities,
@@ -2325,6 +2373,82 @@ fn toolgen_failure_detail(outcome: &TurnOutcome) -> Option<String> {
     })
 }
 
+fn replace_worker_model_service_config(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    replacement: ModelServiceConfig,
+) {
+    *config = replacement;
+    core.set_max_llm_input_tokens(config.max_llm_input_tokens);
+    core.set_response_protocol(config.response_protocol);
+
+    let requirements = serde_json::to_string(&config.openai_compatible.requirements)
+        .expect("model endpoint requirements serialize");
+    let runtime_params = [
+        ("TIMEM_MODEL", config.model.clone()),
+        (
+            "TIMEM_API_PROTOCOL",
+            config.api_protocol.label().to_string(),
+        ),
+        (
+            "TIMEM_RESPONSE_PROTOCOL",
+            config.response_protocol.name().to_string(),
+        ),
+        ("TIMEM_BASE_URL", config.base_url.clone()),
+        ("TIMEM_TIMEOUT", config.timeout_secs.to_string()),
+        (
+            "TIMEM_MAX_LLM_INPUT",
+            config.max_llm_input_tokens.to_string(),
+        ),
+        (
+            "TIMEM_MAX_LLM_OUTPUT",
+            config.max_llm_output_tokens.to_string(),
+        ),
+        (
+            "TIMEM_MODEL_CATALOG_ID",
+            config
+                .openai_compatible
+                .catalog_id
+                .clone()
+                .unwrap_or_default(),
+        ),
+        ("TIMEM_MODEL_REQUIREMENTS", requirements),
+        (
+            "TIMEM_ENABLE_THINKING",
+            config
+                .openai_compatible
+                .enable_thinking
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "TIMEM_REASONING_EFFORT",
+            config
+                .openai_compatible
+                .reasoning_effort
+                .clone()
+                .unwrap_or_default(),
+        ),
+        ("TIMEM_STREAM", config.openai_compatible.stream.to_string()),
+        (
+            "TIMEM_OPENAI_CACHE_MODE",
+            config.openai_compatible.cache_mode.label().to_string(),
+        ),
+        (
+            "TIMEM_TOOL_CALL_MODE",
+            config.interaction.tool_call_mode.label().to_string(),
+        ),
+        (
+            "TIMEM_PARALLEL_TOOL_CALLS",
+            config.interaction.parallel_tool_calls.label().to_string(),
+        ),
+    ];
+    for (key, value) in runtime_params {
+        core.set_self_tool_runtime_param(key, value);
+    }
+    core.notify_runtime_config_changed();
+}
+
 fn apply_worker_runtime_update(
     core: &mut AgentCore,
     config: &mut ModelServiceConfig,
@@ -2403,8 +2527,28 @@ fn apply_worker_runtime_update(
         PendingRuntimeUpdate::ClaudeCodexToolDiscovery(enabled) => {
             core.set_claude_codex_tool_discovery(enabled);
         }
+        PendingRuntimeUpdate::ModelToolResultBytes(max_bytes) => {
+            let _ = core.set_model_tool_result_bytes(max_bytes);
+        }
     }
     core.notify_runtime_config_changed();
+}
+
+impl WorkerTurnUi {
+    fn take_model_tool_result_bytes_update(&mut self) -> Option<usize> {
+        let Ok(mut updates) = self.pending_runtime_updates.lock() else {
+            return None;
+        };
+        let mut newest = None;
+        updates.retain(|update| match update {
+            PendingRuntimeUpdate::ModelToolResultBytes(max_bytes) => {
+                newest = Some(*max_bytes);
+                false
+            }
+            _ => true,
+        });
+        newest
+    }
 }
 
 impl TurnUi for WorkerTurnUi {
@@ -2419,16 +2563,28 @@ impl TurnUi for WorkerTurnUi {
         core: &mut AgentCore,
         config: &mut ModelServiceConfig,
     ) -> bool {
-        let updates = self
-            .pending_runtime_updates
-            .lock()
-            .map(|mut updates| std::mem::take(&mut *updates))
-            .unwrap_or_default();
+        let updates =
+            self.pending_runtime_updates
+                .lock()
+                .map(|mut updates| {
+                    let (deferred, applicable) = std::mem::take(&mut *updates)
+                        .into_iter()
+                        .partition(|update| {
+                            matches!(update, PendingRuntimeUpdate::ModelToolResultBytes(_))
+                        });
+                    *updates = deferred;
+                    applicable
+                })
+                .unwrap_or_default();
         let changed = !updates.is_empty();
         for update in updates {
             apply_worker_runtime_update(core, config, update);
         }
         changed
+    }
+
+    fn take_model_tool_result_bytes_update(&mut self) -> Option<usize> {
+        WorkerTurnUi::take_model_tool_result_bytes_update(self)
     }
 
     fn is_cancel_requested(&mut self) -> bool {
@@ -2494,6 +2650,17 @@ impl TurnUi for WorkerTurnUi {
             interaction_request: Some(Box::new(request.clone())),
             api_payload: Some(Box::new(api_payload.clone())),
         });
+    }
+
+    fn on_reasoning_upgrade(
+        &mut self,
+        upgrade: Option<agent_core::model_requirements::ReasoningUpgrade>,
+    ) {
+        if let Some(upgrade) = upgrade {
+            let _ = self
+                .event_tx
+                .send(CoreSessionWorkerEvent::ReasoningUpgrade(upgrade));
+        }
     }
 
     fn on_model_request_completed(&mut self, latency: Duration) {

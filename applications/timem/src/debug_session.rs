@@ -2400,6 +2400,7 @@ mod tests {
                 delta_id: "pd_1".to_string(),
                 assistant_text: "checking".to_string(),
                 calls: vec![agent_core::NativeToolCall {
+                    assistant_continuation: None,
                     id: "call_previous".to_string(),
                     name: "self_tool".to_string(),
                     arguments: serde_json::json!({"type": "cwd"}),
@@ -2494,6 +2495,7 @@ mod tests {
                     delta_id: "pd_1".to_string(),
                     assistant_text: "I will inspect the file.".to_string(),
                     calls: vec![agent_core::NativeToolCall {
+                        assistant_continuation: None,
                         id: "call_read".to_string(),
                         name: "readfile".to_string(),
                         arguments: serde_json::json!({"path": "README.md"}),
@@ -2510,6 +2512,7 @@ mod tests {
                     delta_id: "pd_1".to_string(),
                     assistant_text: "Now I will run the checks.".to_string(),
                     calls: vec![agent_core::NativeToolCall {
+                        assistant_continuation: None,
                         id: "call_test".to_string(),
                         name: "run_bash".to_string(),
                         arguments: serde_json::json!({"cmd": "cargo test"}),
@@ -2650,6 +2653,7 @@ mod tests {
         for index in 1..=12 {
             let tool_calls = if index == 12 {
                 vec![agent_core::NativeToolCall {
+                    assistant_continuation: None,
                     id: "call_latest".to_string(),
                     name: "self_tool".to_string(),
                     arguments: serde_json::json!({"type": "cwd"}),

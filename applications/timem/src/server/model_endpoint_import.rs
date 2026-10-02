@@ -725,8 +725,10 @@ fn scan_claude_directory(dir: &Path, scan: &mut ModelEndpointImportScan) {
         .or_else(|| claude_env_string(env, "ANTHROPIC_API_KEY"))
         .unwrap_or_default();
     // Claude Code exposes reasoning as an effort level, but the Anthropic
-    // Messages API has no effort parameter; only an explicit thinking token
-    // budget can be mapped without inventing a conversion.
+    // Messages API has no effort parameter. Its fixed thinking-token budget
+    // also cannot be represented as a custom request field because Core owns
+    // the reserved `thinking` payload. Report both instead of inventing or
+    // persisting a configuration that the request boundary would overwrite.
     if settings
         .get("effortLevel")
         .and_then(Value::as_str)
@@ -735,15 +737,12 @@ fn scan_claude_directory(dir: &Path, scan: &mut ModelEndpointImportScan) {
         scan.issues
             .push("claude_effort_level_not_imported".to_string());
     }
-    let mut request_fields = BTreeMap::new();
+    let request_fields = BTreeMap::new();
     if let Some(budget) = claude_env_string(env, "MAX_THINKING_TOKENS") {
         match budget.parse::<u64>() {
-            Ok(budget) if budget >= 1024 => {
-                request_fields.insert(
-                    "thinking".to_string(),
-                    json!({ "type": "enabled", "budget_tokens": budget }),
-                );
-            }
+            Ok(budget) if budget >= 1024 => scan
+                .issues
+                .push("claude_thinking_tokens_not_imported".to_string()),
             _ => scan
                 .issues
                 .push("claude_thinking_tokens_invalid".to_string()),

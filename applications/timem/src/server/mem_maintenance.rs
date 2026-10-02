@@ -107,6 +107,8 @@ pub(super) struct WebMemSettings {
     pub(super) conversation_capacity_bytes: Option<u64>,
     #[serde(default = "default_claude_codex_tool_discovery")]
     pub(super) claude_codex_tool_discovery: bool,
+    #[serde(default = "default_model_tool_result_bytes")]
+    pub(super) model_tool_result_bytes: usize,
 }
 
 impl Default for WebMemSettings {
@@ -126,12 +128,21 @@ impl WebMemSettings {
             }),
             conversation_capacity_bytes: Some(MEM_CAPACITY_128_MB),
             claude_codex_tool_discovery: default_claude_codex_tool_discovery(),
+            model_tool_result_bytes: default_model_tool_result_bytes(),
         }
     }
 }
 
 const fn default_claude_codex_tool_discovery() -> bool {
     true
+}
+
+pub(super) const fn default_model_tool_result_bytes() -> usize {
+    agent_core::DEFAULT_MODEL_TOOL_RESULT_BYTES
+}
+
+pub(super) fn validate_model_tool_result_bytes(max_bytes: usize) -> Result<(), String> {
+    agent_core::validate_model_tool_result_bytes(max_bytes)
 }
 
 pub(super) fn default_mem_temporary_retention_days() -> Option<u16> {
@@ -183,7 +194,8 @@ pub(super) fn validate_mem_conversation_capacity_bytes(bytes: Option<u64>) -> Re
 fn validate_web_mem_settings(settings: &WebMemSettings) -> Result<(), String> {
     validate_mem_temporary_retention_days(settings.temporary_retention_days)?;
     validate_mem_temporary_capacity_bytes(settings.temporary_capacity_bytes)?;
-    validate_mem_conversation_capacity_bytes(settings.conversation_capacity_bytes)
+    validate_mem_conversation_capacity_bytes(settings.conversation_capacity_bytes)?;
+    validate_model_tool_result_bytes(settings.model_tool_result_bytes)
 }
 
 pub(super) fn web_mem_settings_path(memory_dir: &Path) -> PathBuf {

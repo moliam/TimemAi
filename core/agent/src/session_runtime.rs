@@ -453,6 +453,8 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     core.build_model_request_prompt_with_runtime(prompt, &mut action_runtime);
                 let mut interaction_request = core.model_interaction_request(prompt);
                 interaction_request.images = request.images.to_vec();
+                let reasoning_upgrade =
+                    apply_higher_than_h0_trailer(config, &mut interaction_request);
                 let api_payload =
                     crate::prepare_model_interaction_http_request(config, &interaction_request)
                         .model_request
@@ -461,6 +463,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     ui,
                     turn_projection.set_activity(TurnActivity::WaitingModel { round: rounds }),
                 );
+                ui.on_reasoning_upgrade(reasoning_upgrade);
                 ui.on_model_api_request(rounds, &interaction_request, &api_payload);
                 match call_model_with_system_retries(
                     model_client,
@@ -851,6 +854,10 @@ impl<'a> TurnActionRuntime<'a> {
 }
 
 impl ActionRuntime for TurnActionRuntime<'_> {
+    fn take_model_tool_result_bytes_update(&mut self) -> Option<usize> {
+        self.ui.take_model_tool_result_bytes_update()
+    }
+
     fn on_model_response_validated(&mut self, accepted: bool, final_response: bool) {
         if let Some((preview, session, turn_id)) = self.preview.as_mut() {
             preview.validated(accepted, final_response);
@@ -930,6 +937,9 @@ fn call_model_with_system_retries(
                 };
                 let content = event
                     .pointer("/choices/0/delta/content")
+                    .or_else(|| {
+                        (event["type"] == "response.output_text.delta").then(|| &event["delta"])
+                    })
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("");
                 let parsed = if request.is_native() {
@@ -1091,6 +1101,19 @@ fn turn_stop_parts(
     Option<(UsageStats, Option<UsageStats>, Option<String>, String)>,
 ) {
     (String::new(), Some(stop.into_stopped_turn()), None)
+}
+
+fn apply_higher_than_h0_trailer(
+    config: &ModelServiceConfig,
+    request: &mut crate::ModelInteractionRequest,
+) -> Option<crate::model_requirements::ReasoningUpgrade> {
+    let upgrade = crate::model_requirements::reasoning_upgrade(config, request.critical_reasoning);
+    if upgrade.is_some() {
+        request.rendered_prompt = crate::prompt_render::apply_reasoning_intensity_upgrade_trailer(
+            &request.rendered_prompt,
+        );
+    }
+    upgrade
 }
 
 fn epoch_millis() -> u128 {
