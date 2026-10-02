@@ -539,6 +539,84 @@ fn repeated_poor_threshold_compactions_keep_injecting_quality_warnings() {
 }
 
 #[test]
+fn clear_dynamic_context_removes_native_history_and_pending_context_notices() {
+    let mut core = test_core("clear_native_dynamic_context");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "old context".to_string(),
+    )]);
+    core.native_exchanges.push(NativeExchange {
+        delta_id: core.deltas[0].delta_id.clone(),
+        assistant_text: "old native exchange".to_string(),
+        calls: vec![NativeToolCall {
+            assistant_continuation: None,
+            id: "old_call".to_string(),
+            name: "self_tool".to_string(),
+            arguments: serde_json::json!({"type":"cwd"}),
+            raw_arguments: r#"{"type":"cwd"}"#.to_string(),
+        }],
+        results: vec![NativeToolResult {
+            call_id: "old_call".to_string(),
+            name: "self_tool".to_string(),
+            content: "old result".to_string(),
+            is_error: false,
+        }],
+    });
+    core.pending_forcible_memo_note = Some("old forced memo".to_string());
+    core.pending_interrupted_memo_note = Some("old interrupted memo".to_string());
+
+    core.clear_dynamic_context();
+
+    assert!(core.deltas.is_empty());
+    assert!(core.native_exchanges.is_empty());
+    assert!(core.pending_forcible_memo_note.is_none());
+    assert!(core.pending_interrupted_memo_note.is_none());
+    assert_eq!(core.dynamic_context_estimated_tokens(), 0);
+    let prompt = match core.begin_turn("fresh task", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected fresh model request, got {other:?}"),
+    };
+    let request = core.model_interaction_request(prompt.clone());
+    assert!(request.native_exchanges.is_empty());
+    assert!(!prompt.contains("old forced memo"));
+    assert!(!prompt.contains("old interrupted memo"));
+}
+
+#[test]
+fn importing_empty_dynamic_context_replaces_existing_state() {
+    let mut core = test_core("import_empty_dynamic_context");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "old context".to_string(),
+    )]);
+    core.native_exchanges.push(NativeExchange {
+        delta_id: core.deltas[0].delta_id.clone(),
+        assistant_text: "old native exchange".to_string(),
+        calls: Vec::new(),
+        results: Vec::new(),
+    });
+    core.pending_forcible_memo_note = Some("old memo note".to_string());
+
+    core.import_dynamic_context(DynamicContextSnapshot {
+        deltas: Vec::new(),
+        native_exchanges: Vec::new(),
+        last_observed_prompt_tokens: 0,
+        active_memo: None,
+        pending_forcible_memo_note: None,
+        pending_interrupted_memo_note: None,
+    });
+
+    let snapshot = core.export_dynamic_context();
+    assert!(snapshot.deltas.is_empty());
+    assert!(snapshot.native_exchanges.is_empty());
+    assert_eq!(snapshot.last_observed_prompt_tokens, 0);
+    assert!(snapshot.pending_forcible_memo_note.is_none());
+    assert_eq!(core.dynamic_context_estimated_tokens(), 0);
+}
+
+#[test]
 fn native_context_compact_persists_summary_after_discarding_all_old_deltas() {
     let mut core = test_core("native_compact_summary_all");
     core.set_response_protocol(ResponseProtocolKind::Json);
@@ -2421,6 +2499,128 @@ fn multiple_successful_compacts_emit_one_minimal_runtime_confirmation() {
         "compacting the active catalog must persist exactly one replacement catalog: {prompt}"
     );
     assert!(prompt.contains("mcp_test__echo"));
+}
+
+#[test]
+fn later_successful_compact_retires_previous_runtime_confirmation() {
+    let mut core = test_core("successive_compact_confirmation");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "first stale context".to_string(),
+    )]);
+    let first_id = core.deltas[0].delta_id.clone();
+
+    let first = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: serde_json::json!({
+            "context_compact": {
+                "discard": [first_id],
+                "summary": "FIRST AUTHORITATIVE SUMMARY"
+            }
+        })
+        .to_string(),
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = first else {
+        panic!("first compact should continue with a model request")
+    };
+    assert_eq!(prompt.matches("context compacted successfully.").count(), 1);
+    assert!(prompt.contains("FIRST AUTHORITATIVE SUMMARY"));
+
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "second stale context".to_string(),
+    )]);
+    let second_id = core.deltas.last().unwrap().delta_id.clone();
+    let second = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: serde_json::json!({
+            "context_compact": {
+                "discard": [second_id],
+                "summary": "SECOND AUTHORITATIVE SUMMARY"
+            }
+        })
+        .to_string(),
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = second else {
+        panic!("second compact should continue with a model request")
+    };
+
+    assert_eq!(
+        prompt.matches("context compacted successfully.").count(),
+        1,
+        "only the latest runtime confirmation should remain visible: {prompt}"
+    );
+    assert!(prompt.contains("FIRST AUTHORITATIVE SUMMARY"));
+    assert!(prompt.contains("SECOND AUTHORITATIVE SUMMARY"));
+}
+
+#[test]
+fn later_compact_does_not_hide_summary_that_quotes_runtime_confirmation() {
+    let mut core = test_core("compact_summary_quotes_runtime_confirmation");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "first stale context".to_string(),
+    )]);
+    let first_id = core.deltas[0].delta_id.clone();
+    let first_summary =
+        "AUTHORITATIVE SUMMARY: the prior runtime said context compacted successfully. KEEP THIS";
+
+    let first = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: serde_json::json!({
+            "context_compact": {
+                "discard": [first_id],
+                "summary": first_summary
+            }
+        })
+        .to_string(),
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    assert!(matches!(first, CoreStep::NeedModel { .. }));
+
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "second stale context".to_string(),
+    )]);
+    let second_id = core.deltas.last().unwrap().delta_id.clone();
+    let second = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: serde_json::json!({
+            "context_compact": {
+                "discard": [second_id],
+                "summary": "SECOND AUTHORITATIVE SUMMARY"
+            }
+        })
+        .to_string(),
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = second else {
+        panic!("second compact should continue with a model request")
+    };
+
+    assert!(
+        prompt.contains(first_summary),
+        "assistant summary text must not be retired by runtime-marker cleanup: {prompt}"
+    );
+    assert_eq!(
+        prompt
+            .matches("context compacted successfully.\nCWD: ")
+            .count(),
+        1,
+        "only one structured runtime confirmation should remain: {prompt}"
+    );
 }
 
 #[test]

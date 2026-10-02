@@ -6642,7 +6642,7 @@ fn capability_probe_topics_are_live_and_durable_result_updates_current_config() 
     let persisted = outcome.persisted_probe.expect("durable probe result");
     assert!(persisted.native_supported);
     assert!(persisted.parallel_supported);
-    assert_eq!(ui.persisted, [persisted.clone()]);
+    assert_eq!(ui.persisted.as_slice(), std::slice::from_ref(&persisted));
     assert_eq!(
         config.interaction.persisted_capability_probe,
         Some(persisted)

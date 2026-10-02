@@ -352,9 +352,12 @@ fn should_reprobe_negative_capability(
         && config.api_protocol != crate::ApiProtocol::OpenAiResponses
         && profile.resolved_mode == crate::ToolCallMode::Inline
         && round > 0
-        && (round - 1) % CAPABILITY_NEGATIVE_REPROBE_ROUND_INTERVAL == 0
+        && (round - 1).is_multiple_of(CAPABILITY_NEGATIVE_REPROBE_ROUND_INTERVAL)
 }
 
+// This internal orchestration boundary deliberately keeps the turn-owned services
+// explicit; grouping them would obscure borrowing and lifecycle ownership.
+#[allow(clippy::too_many_arguments)]
 fn run_session_turn_with_model_client_and_reminder_override(
     core: &mut AgentCore,
     config: &mut ModelServiceConfig,

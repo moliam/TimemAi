@@ -1405,7 +1405,7 @@ enum ClientCommand {
         data: String,
     },
     ModelEndpointUpsert {
-        endpoint: ModelEndpointInput,
+        endpoint: Box<ModelEndpointInput>,
     },
     ModelEndpointDelete {
         endpoint_id: String,
@@ -1984,7 +1984,7 @@ fn write_prompt_context_snapshot(
     snapshot: &agent_core::DynamicContextSnapshot,
 ) -> Result<(), String> {
     remove_prompt_context_snapshot(state, session_id)?;
-    if snapshot.deltas.is_empty() {
+    if snapshot.is_empty() {
         return Ok(());
     }
     let payload = serde_json::to_string(snapshot)
@@ -4367,7 +4367,7 @@ fn handle_command_with_id(
                 .map(|endpoint_id| model_endpoint_config_if_exists(state, endpoint_id))
                 .transpose()?
                 .flatten();
-            let endpoint_id = upsert_model_endpoint(state, endpoint)?;
+            let endpoint_id = upsert_model_endpoint(state, *endpoint)?;
             let updated_endpoint = model_endpoint_config(state, &endpoint_id)?;
             let event = WireEvent::ModelEndpointsUpdated {
                 endpoints: model_endpoint_reports(state)?,
@@ -11307,7 +11307,7 @@ fn persist_capability_probe_event(
     identity: &agent_core::CapabilityProbeIdentity,
     record: Option<agent_core::PersistedCapabilityProbe>,
 ) -> Result<(), String> {
-    let matches_current_binding = {
+    let session_snapshot = {
         let sessions = state
             .sessions
             .lock()
@@ -11315,13 +11315,14 @@ fn persist_capability_probe_event(
         let Some(session) = sessions.get(session_id) else {
             return Ok(());
         };
-        session.runtime.model_endpoint_id.as_deref() == Some(identity.endpoint_id.as_str())
-            && agent_core::capability_probe_identity(&session.runtime.settings.config).as_ref()
-                == Some(identity)
+        if session.runtime.model_endpoint_id.as_deref() != Some(identity.endpoint_id.as_str())
+            || agent_core::capability_probe_identity(&session.runtime.settings.config).as_ref()
+                != Some(identity)
+        {
+            return Ok(());
+        }
+        session.clone()
     };
-    if !matches_current_binding {
-        return Ok(());
-    }
     if record
         .as_ref()
         .is_some_and(|value| &value.identity != identity)
@@ -11340,6 +11341,15 @@ fn persist_capability_probe_event(
     else {
         return Ok(());
     };
+    let current_endpoint_identity =
+        model_endpoint_session_candidate(&session_snapshot, &mem.model_endpoints[index])
+            .ok()
+            .and_then(|candidate| {
+                agent_core::capability_probe_identity(&candidate.runtime.settings.config)
+            });
+    if current_endpoint_identity.as_ref() != Some(identity) {
+        return Ok(());
+    }
     if mem.model_endpoints[index].capability_probe == record {
         return Ok(());
     }
