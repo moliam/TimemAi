@@ -102,6 +102,13 @@ const realMouseClick = async (x, y) => {
 };
 
 await waitFor(() => evaluate("!!document.querySelector('.endpoint-settings-toolbar') || !!document.querySelector('nav, aside, .settings')"), "app rendered");
+// LAN HTTP is not a secure context in Chromium. Reproduce it even though this
+// acceptance host uses localhost, where randomUUID is normally available.
+assert(await evaluate(`(() => {
+  try { Object.defineProperty(globalThis.crypto, 'randomUUID', { configurable: true, value: undefined }); }
+  catch { try { Object.defineProperty(Crypto.prototype, 'randomUUID', { configurable: true, value: undefined }); } catch {} }
+  return typeof globalThis.crypto?.randomUUID === 'undefined';
+})()`), 'randomUUID disabled for insecure-context regression');
 
 await sleep(2500);
 // 打开设置（aria-label/title 为中文）
@@ -149,10 +156,24 @@ const openExport = async () => {
 };
 const close = ()=>click("document.querySelector('.endpoint-share-heading button')");
 const generate = async () => {
+ await evaluate(`(() => {
+   window.shareGeneratingCounts=[];
+   window.shareGeneratingObserver?.disconnect();
+   const sample=()=>window.shareGeneratingCounts.push((document.querySelector('.endpoint-share-panel')?.textContent.match(/正在生成|Generating/g)||[]).length);
+   window.shareGeneratingObserver=new MutationObserver(sample);
+   window.shareGeneratingObserver.observe(document.body,{subtree:true,childList:true,characterData:true,attributes:true});
+   sample();
+ })()`);
+ const started=Date.now();
  const button=await hitTest("document.querySelector('.endpoint-share-actions .primary')",'share submit');
  await realMouseClick(button.x,button.y);
- await waitFor(()=>evaluate(`document.querySelector('.endpoint-share-dialog')?.getAttribute('aria-busy')==='true' || !!document.querySelector('.endpoint-share-progress') || !!document.querySelector('.endpoint-share-data textarea')?.value`),'visible export progress or result');
+ await waitFor(()=>evaluate(`document.querySelector('.endpoint-share-dialog')?.getAttribute('aria-busy')==='true' || !!document.querySelector('.endpoint-share-data textarea')?.value`),'visible export progress or result');
  await waitFor(()=>evaluate(`!!document.querySelector('.endpoint-share-data textarea')?.value`),'export data');
+ const elapsed=Date.now()-started;
+ const progress=await evaluate(`(() => {window.shareGeneratingObserver?.disconnect();return {counts:window.shareGeneratingCounts,progressNodes:document.querySelectorAll('.endpoint-share-progress').length};})()`);
+ assert(Math.max(0,...progress.counts)<=1,'generating label rendered more than once: '+JSON.stringify(progress.counts));
+ assert(progress.progressNodes===0,'duplicate standalone progress row rendered');
+ assert(elapsed<3000,'local share export should settle quickly, took '+elapsed+'ms');
  return evaluate(`document.querySelector('.endpoint-share-data textarea').value`);
 };
 await openExport();
@@ -211,7 +232,7 @@ await click("document.querySelectorAll('.endpoint-share-options label')[2]");
 const roundtrip=decode(await generate());
 assert(roundtrip.name==='mygpt2' && roundtrip.personal.api_key==='e2e-private-key' && roundtrip.advanced.request_fields.vendor_options.custom==='中文','full import roundtrip after reload');
 await close();
-console.log('PASS endpoint sharing modal: top-level layering, progress, defaults, export categories, Unicode, secret isolation, narrow/themes, cleanup, invalid import, collisions, reload roundtrip');
+console.log('PASS endpoint sharing modal: insecure-context IDs, single progress state, fast settlement, polished responsive layout, defaults, export categories, Unicode, secret isolation, cleanup, invalid import, collisions, reload roundtrip');
 } finally {
   ws?.close();
   if (chrome && chrome.exitCode === null) {

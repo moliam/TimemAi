@@ -36,18 +36,26 @@ describe("endpoint share dialog", () => {
     expect(component).toContain('aria-busy={busy}');
     expect(component).toContain('event.key === "Escape"');
     expect(component).toContain('onClick={close}');
-    expect(component).toContain('className="endpoint-share-progress" role="status"');
+    expect(component).not.toContain('className="endpoint-share-progress"');
+    expect(component).toContain('aria-live="polite"');
     expect(component).toContain('endpoints.shareGenerating');
     expect(component).toContain('endpoints.shareImporting');
     expect(component).toMatch(/const close = \(\) => \{[\s\S]*cancel\.current\(\);[\s\S]*onClose\(\);/);
     expect(component).not.toContain("errors[result.error] ?? result.error");
   });
 
+  it("uses the insecure-context-safe request ID helper and always settles synchronous failures", () => {
+    expect(component).toContain('clientId("endpoint-share")');
+    expect(component).not.toContain("crypto.randomUUID()");
+    expect(component).toMatch(/const submit = \(\) => \{[\s\S]*setBusy\(true\);[\s\S]*try \{[\s\S]*transport\([\s\S]*\} catch \{[\s\S]*finish\(\{ error: "endpoint_share_client_failed" \}\);/);
+    expect(component).toContain("completedSynchronously ? () => {} : stop");
+  });
+
   it("keeps the dialog above Settings and responsive on narrow screens", () => {
     expect(styles).toMatch(/\.settings-center-backdrop \{ position: fixed; z-index: 45;/);
     expect(styles).toMatch(/\.endpoint-share-backdrop \{ position: fixed; z-index: 70;/);
-    expect(styles).toContain(".endpoint-share-dialog { width: min(520px, 100%);");
-    expect(styles).toMatch(/@media \(max-width: 600px\) \{[\s\S]*\.endpoint-share-backdrop \{ padding: 18px 12px;/);
+    expect(styles).toContain(".endpoint-share-dialog { width: min(540px, 100%);");
+    expect(styles).toMatch(/@media \(max-width: 600px\) \{[\s\S]*\.endpoint-share-backdrop \{ padding: 12px;/);
   });
 });
 

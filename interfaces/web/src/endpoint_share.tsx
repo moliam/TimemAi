@@ -1,8 +1,17 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Copy, LoaderCircle, TriangleAlert, X } from "lucide-react";
+import {
+  Copy,
+  KeyRound,
+  LoaderCircle,
+  Settings2,
+  Share2,
+  SlidersHorizontal,
+  TriangleAlert,
+  X,
+} from "lucide-react";
 import { t, useT } from "./i18n";
-import type { ClientCommand } from "./protocol";
+import { clientId, type ClientCommand } from "./protocol";
 
 export type ShareCommand = Extract<ClientCommand, { type: "model_endpoint_share_export" | "model_endpoint_share_import" }>;
 export type ShareResult = { data?: string; name?: string; error?: string };
@@ -52,31 +61,49 @@ export function EndpointSharePanel({ endpoint, transport, onClose }: {
     setData("");
     setMessage("");
   };
+  const finish = (result: ShareResult) => {
+    cancel.current = () => {};
+    setBusy(false);
+    setFailed(!!result.error);
+    if (result.error) {
+      setMessage(`${t("endpoints.shareFailed")} ${endpointShareErrorMessage(result.error)}`);
+    } else if (result.data !== undefined) {
+      setData(result.data);
+    } else if (result.name !== undefined) {
+      setData("");
+      setMessage(t("endpoints.shareImported", { name: result.name }));
+    }
+  };
   const submit = () => {
     cancel.current();
+    cancel.current = () => {};
     setBusy(true);
     setFailed(false);
     setMessage("");
-    const request_id = crypto.randomUUID();
-    cancel.current = transport(endpoint ? {
-      type: "model_endpoint_share_export", request_id, endpoint_id: endpoint.id,
-      basic, advanced, personal,
-    } : { type: "model_endpoint_share_import", request_id, data }, result => {
-      cancel.current = () => {};
-      setBusy(false);
-      setFailed(!!result.error);
-      if (result.error) {
-        setMessage(`${t("endpoints.shareFailed")} ${endpointShareErrorMessage(result.error)}`);
-      } else if (result.data !== undefined) {
-        setData(result.data);
-      } else if (result.name !== undefined) {
-        setData("");
-        setMessage(t("endpoints.shareImported", { name: result.name }));
-      }
-    });
+    try {
+      const request_id = clientId("endpoint-share");
+      let completedSynchronously = false;
+      const stop = transport(endpoint ? {
+        type: "model_endpoint_share_export", request_id, endpoint_id: endpoint.id,
+        basic, advanced, personal,
+      } : { type: "model_endpoint_share_import", request_id, data }, result => {
+        completedSynchronously = true;
+        finish(result);
+      });
+      // A test transport or an immediate local failure may complete before it
+      // returns its cancellation function. Do not resurrect a settled request.
+      cancel.current = completedSynchronously ? () => {} : stop;
+    } catch {
+      finish({ error: "endpoint_share_client_failed" });
+    }
   };
   if (typeof document === "undefined") return null;
   const workingLabel = t(endpoint ? "endpoints.shareGenerating" : "endpoints.shareImporting");
+  const optionRows = endpoint ? [
+    { key: "basic", checked: basic, set: setBasic, icon: Settings2, label: t("endpoints.shareBasic") },
+    { key: "advanced", checked: advanced, set: setAdvanced, icon: SlidersHorizontal, label: t("endpoints.shareAdvanced") },
+    { key: "personal", checked: personal, set: setPersonal, icon: KeyRound, label: t("endpoints.sharePersonal"), sensitive: true },
+  ] : [];
   return createPortal(
     <div className="endpoint-share-backdrop" role="presentation" onClick={close}>
       <section
@@ -96,23 +123,32 @@ export function EndpointSharePanel({ endpoint, transport, onClose }: {
         }}
       >
         <div className="endpoint-share-heading">
-          <strong id={titleId}>{t(endpoint ? "endpoints.shareExport" : "endpoints.shareImport")}{endpoint ? ` · ${endpoint.name}` : ""}</strong>
+          <div className="endpoint-share-title">
+            <span className="endpoint-share-title-icon"><Share2 size={17} aria-hidden="true" /></span>
+            <div>
+              <strong id={titleId}>{t(endpoint ? "endpoints.shareExport" : "endpoints.shareImport")}</strong>
+              {endpoint && <span>{endpoint.name}</span>}
+            </div>
+          </div>
           <button type="button" className="icon-button" onClick={close} aria-label={t("common.close")} autoFocus><X size={16} /></button>
         </div>
         <div className="endpoint-share-panel">
           {endpoint && <div className="endpoint-share-options">
-            <label><input type="checkbox" checked={basic} onChange={event => { invalidate(); setBasic(event.target.checked); }} />{t("endpoints.shareBasic")}</label>
-            <label><input type="checkbox" checked={advanced} onChange={event => { invalidate(); setAdvanced(event.target.checked); }} />{t("endpoints.shareAdvanced")}</label>
-            <label><input type="checkbox" checked={personal} onChange={event => { invalidate(); setPersonal(event.target.checked); }} />{t("endpoints.sharePersonal")}<TriangleAlert size={16} aria-hidden="true" /></label>
+            {optionRows.map(({ key, checked, set, icon: Icon, label, sensitive }) => <label key={key} className={sensitive ? "sensitive" : ""}>
+              <span className="endpoint-share-option-icon"><Icon size={15} aria-hidden="true" /></span>
+              <span className="endpoint-share-option-label">{label}{sensitive && <TriangleAlert size={14} aria-hidden="true" />}</span>
+              <input type="checkbox" checked={checked} onChange={event => { invalidate(); set(event.target.checked); }} />
+            </label>)}
             {!basic && <small>{t("endpoints.shareBasicRequired")}</small>}
           </div>}
-          <p className="endpoint-share-warning" id={warningId}><TriangleAlert size={16} aria-hidden="true" />{t("endpoints.shareWarning")}</p>
+          <p className="endpoint-share-warning" id={warningId}><TriangleAlert size={16} aria-hidden="true" /><span>{t("endpoints.shareWarning")}</span></p>
           {(!endpoint || data) && <label className="endpoint-share-data">
-            {t("endpoints.shareString")}
-            <textarea aria-label={t("endpoints.shareString")} rows={4} maxLength={262144} spellCheck={false} autoComplete="off" readOnly={!!endpoint || busy} value={data} onChange={event => { setData(event.target.value); setFailed(false); setMessage(""); }} />
+            <span>{t("endpoints.shareString")}</span>
+            <textarea aria-label={t("endpoints.shareString")} rows={5} maxLength={262144} spellCheck={false} autoComplete="off" readOnly={!!endpoint || busy} value={data} onChange={event => { setData(event.target.value); setFailed(false); setMessage(""); }} />
           </label>}
+          {message && <p className="endpoint-share-message" role={failed ? "alert" : "status"}>{message}</p>}
           <div className="endpoint-share-actions">
-            <button type="button" className={`primary compact ${busy ? "sending" : ""}`} disabled={busy || (endpoint ? !basic && !advanced && !personal : !data.trim())} onClick={submit}>
+            <button type="button" className={`primary compact ${busy ? "sending" : ""}`} aria-live="polite" disabled={busy || (endpoint ? !basic && !advanced && !personal : !data.trim())} onClick={submit}>
               {busy && <LoaderCircle size={14} aria-hidden="true" />}
               {busy ? workingLabel : t(endpoint ? "endpoints.shareGenerate" : "endpoints.shareImport")}
             </button>
@@ -121,8 +157,6 @@ export function EndpointSharePanel({ endpoint, transport, onClose }: {
               catch { setFailed(true); setMessage(t("endpoints.shareCopyFailed")); }
             }}><Copy size={14} />{t("endpoints.shareCopy")}</button>}
           </div>
-          {busy && <p className="endpoint-share-progress" role="status"><LoaderCircle size={14} aria-hidden="true" />{workingLabel}</p>}
-          {message && <p className="endpoint-share-message" role={failed ? "alert" : "status"}>{message}</p>}
         </div>
       </section>
     </div>,
