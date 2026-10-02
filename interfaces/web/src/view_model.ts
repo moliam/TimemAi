@@ -2060,6 +2060,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
       return null;
     case "core.action": {
       const action = label(payload.action) || "action";
+      if (action === "task_finished" || action === "turn_finished") return null;
       const status = label(payload.status) || label(payload.event) || "running";
       const statusText = humanizeToolStatus(status);
       const input =

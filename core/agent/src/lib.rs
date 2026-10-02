@@ -254,6 +254,10 @@ static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const ACTION_OUTPUT_CONTEXT_SAFETY_PERCENT: u32 = 95;
 const PROMPT_DELTA_RENDER_OVERHEAD_TOKENS: u32 = 64;
 
+fn action_counts_as_tool_call(action: &str) -> bool {
+    !matches!(action, "task_finished" | "turn_finished")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoreProfile {
     pub model: String,
@@ -6685,7 +6689,9 @@ Runtime tool_call ids:",
         let action_for_thread = action.clone();
         let cwd = self.current_prompt_cwd().to_path_buf();
         let model_tool_result_bytes = self.model_tool_result_bytes;
-        self.current_stats.tool_calls += 1;
+        if action_counts_as_tool_call(&action.action) {
+            self.current_stats.tool_calls += 1;
+        }
         thread::spawn(move || {
             let wall_start = Instant::now();
             let cpu_start = thread_cpu_time();
@@ -6747,7 +6753,9 @@ Runtime tool_call ids:",
         };
         let pending_for_thread = pending.clone();
         let shell_jobs = self.shell_jobs.clone();
-        self.current_stats.tool_calls += 1;
+        if action_counts_as_tool_call(&action.action) {
+            self.current_stats.tool_calls += 1;
+        }
         thread::spawn(move || {
             let wall_start = Instant::now();
             let result = match &pending_for_thread.approved_action {
@@ -6811,7 +6819,9 @@ Runtime tool_call ids:",
         let session_id = self.current_session_id();
         let turn_id = self.current_action_turn_id();
         let cwd = self.current_prompt_cwd().to_path_buf();
-        self.current_stats.tool_calls += 1;
+        if action_counts_as_tool_call(&action.action) {
+            self.current_stats.tool_calls += 1;
+        }
         thread::spawn(move || {
             let wall_start = Instant::now();
             let loop_command = action.input_str("loop_cmd");
@@ -7116,7 +7126,9 @@ Runtime tool_call ids:",
             tool_name,
         } = &executor_target
         {
-            self.current_stats.tool_calls += 1;
+            if action_counts_as_tool_call(&action.action) {
+                self.current_stats.tool_calls += 1;
+            }
             self.emit_action_execution_start_topic(&action, runtime);
             let outcome = match self.mcp_servers.get(server_id) {
                 Some(config) => {
@@ -7155,7 +7167,9 @@ Runtime tool_call ids:",
             }
         };
 
-        self.current_stats.tool_calls += 1;
+        if action_counts_as_tool_call(&action.action) {
+            self.current_stats.tool_calls += 1;
+        }
         if !shell_exec::is_local_shell_action(&action.action)
             || self.bash_approval_mode == BashApprovalMode::Approve
         {
@@ -7280,7 +7294,9 @@ Runtime tool_call ids:",
     }
 
     fn execute_command_capability(&mut self, action: &ParsedAction, path: &Path) -> ActionOutcome {
-        self.current_stats.tool_calls += 1;
+        if action_counts_as_tool_call(&action.action) {
+            self.current_stats.tool_calls += 1;
+        }
         let payload = json!({
             "action": action.action,
             "args": action.raw_input,

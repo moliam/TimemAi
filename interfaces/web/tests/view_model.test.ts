@@ -427,6 +427,45 @@ describe("web topic view model", () => {
     expect(hasOnlyFreeTalkActivity(freeTalk ? [freeTalk] : [], 1)).toBe(false);
   });
 
+  it("omits completion control actions from live and restored activity", () => {
+    for (const action of ["task_finished", "turn_finished"]) {
+      for (const event of ["start", "execution_start", "finish"]) {
+        expect(
+          activityFromTopic(
+            topic("core.action", {
+              action,
+              event,
+              status: event === "finish" ? "completed" : "running",
+              input: { summary: "Final answer" },
+            }),
+          ),
+        ).toBeNull();
+      }
+    }
+
+    const start = actionEvent(
+      "1000",
+      "start",
+      "running",
+      { summary: "Final answer" },
+      "finish-control",
+    );
+    const finish = actionEvent(
+      "2000",
+      "finish",
+      "completed",
+      { summary: "Final answer" },
+      "finish-control",
+    );
+    for (const event of [start, finish]) {
+      (event.payload as unknown as CoreTopicEvent).payload.action = "task_finished";
+    }
+    const [restored] = coalesceActionLifecycle([start, finish]);
+    expect(
+      activityFromTopic(restored.payload as unknown as CoreTopicEvent),
+    ).toBeNull();
+  });
+
   it("maps core.memo lifecycle ops to memo notice activities", () => {
     const created = activityFromTopic(
       topic("core.memo", { op: "created", active: true, text: "目标 A" }),
