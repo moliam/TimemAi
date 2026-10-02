@@ -10,12 +10,22 @@ pub enum ReasoningAdapter {
     ZhipuChatReasoning,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FunctionCallingSupport {
+    Supported,
+    Conditional,
+    Unsupported,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CatalogProtocol {
     pub protocol: String,
     /// Resolved protocol override, falling back to the model connection URL.
     pub base_url: String,
     pub reasoning_adapter: ReasoningAdapter,
+    pub function_calling: FunctionCallingSupport,
     pub disabled_reason: Option<String>,
     pub fixed_effort: Option<String>,
     pub fixed_reason: Option<String>,
@@ -212,6 +222,13 @@ pub fn parse(text: &str) -> Result<Vec<CatalogModel>, String> {
                 }
                 _ => return Err("catalog_unsupported_binding".into()),
             };
+            let function_calling = match p["function_calling"].as_str() {
+                Some("supported") => FunctionCallingSupport::Supported,
+                Some("conditional") => FunctionCallingSupport::Conditional,
+                Some("unsupported") => FunctionCallingSupport::Unsupported,
+                Some("unknown") => FunctionCallingSupport::Unknown,
+                _ => return Err("catalog_function_calling_missing".into()),
+            };
             let mut projection = CatalogProtocol {
                 protocol: protocol.clone(),
                 base_url: string(
@@ -219,6 +236,7 @@ pub fn parse(text: &str) -> Result<Vec<CatalogModel>, String> {
                         .unwrap_or(&entry["connection"]["default_base_url"]),
                 )?,
                 reasoning_adapter,
+                function_calling,
                 disabled_reason: None,
                 fixed_effort: None,
                 fixed_reason: None,
@@ -274,12 +292,10 @@ pub fn parse(text: &str) -> Result<Vec<CatalogModel>, String> {
                     }
                 }
             }
-            if matches!(
-                p["function_calling"].as_str(),
-                Some("unknown" | "unsupported")
-            ) && projection.disabled_reason.is_none()
+            if function_calling == FunctionCallingSupport::Unsupported
+                && projection.disabled_reason.is_none()
             {
-                return Err("catalog_native_tools_not_supported".into());
+                return Err("catalog_native_tools_unsupported_without_constraint".into());
             }
             protocols.push(projection);
         }

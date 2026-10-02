@@ -88,6 +88,7 @@ impl EndpointRequirements {
             "provider",
             "api_protocol",
             "base_url",
+            "function_calling",
             "stream",
             "reasoning_effort",
             "allowed_reasoning",

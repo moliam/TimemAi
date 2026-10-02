@@ -13,7 +13,7 @@ describe("structured built-in tool presentation", () => {
     expect(file).toMatchObject({ path: input.path, starter: {line_nr:15190}, ender:{line_nr:15244}, tail:false });
     expect(readFileRangeLabel(file)).toContain("15190–15244");
     const html = renderToStaticMarkup(<><ReadFileIcon /><ReadFileInvocation file={file} /></>);
-    expect(html).toContain("lucide-file-text");
+    expect(html).toContain("lucide-square-text");
     expect(html).toContain("file-tool-directory");
     expect(html).toContain("web_host_tests.rs");
     expect(html).not.toContain("line_nr");
@@ -169,7 +169,7 @@ describe("readable memory and self-tool summaries", () => {
     const search = memorySearchPresentation("memmgr", input)!;
     expect(search).toEqual({ kind: "search", source: "raw_chat", query: "模型接入点" });
     const html = renderToStaticMarkup(<MemorySearchInvocation search={search} />);
-    expect(html).toContain("Search &quot;模型接入点&quot; in <code>raw_chat</code>");
+    expect(html).toContain("在对话记录中搜索“模型接入点”");
     expect(html).not.toMatch(/limit|scope|current_session|op=/);
 
     const activity = activityFromTopic({

@@ -1,10 +1,17 @@
 import { DatabaseSearch } from "./database_search_icon";
-import { Database, FileText, Info, PenLine } from "lucide-react";
+import { createLucideIcon, Database, Info, PenLine } from "lucide-react";
 import { t } from "./i18n";
 import type { FileSelector, MemorySearchPresentation, ReadFilePresentation, RunBashEditPresentation, SelfToolPresentation } from "./tool_presentation";
 
+const SquareText = createLucideIcon("SquareText", [
+  ["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2", key: "square" }],
+  ["path", { d: "M7 8h8", key: "line-1" }],
+  ["path", { d: "M7 12h10", key: "line-2" }],
+  ["path", { d: "M7 16h6", key: "line-3" }],
+]);
+
 export function ReadFileIcon() {
-  return <span className="file-tool-icon" title="readfile"><FileText size={14} aria-hidden="true" /><span className="sr-only">readfile</span></span>;
+  return <span className="file-tool-icon" title="readfile"><SquareText size={14} aria-hidden="true" /><span className="sr-only">readfile</span></span>;
 }
 
 function selectorLabel(value: FileSelector, start: boolean): string {
@@ -61,6 +68,12 @@ export function MemoryIcon() {
 export function MemorySearchInvocation({ search }: { search: MemorySearchPresentation }) {
   if (search.kind === "sql")
     return <span className="memory-search-preview tool-invocation-preview">{t("tools.queryMemoryIn")} <code>{search.source}</code></span>;
+  if (search.source === "raw_chat")
+    return <span className="memory-search-preview tool-invocation-preview">
+      {search.query
+        ? t("tools.searchConversationHistory", { query: search.query })
+        : t("tools.searchAllConversationHistory")}
+    </span>;
   return <span className="memory-search-preview tool-invocation-preview">
     {search.query ? <>{t("tools.searchMemory")} &quot;{search.query}&quot;</> : t("tools.searchAllMemory")} {t("tools.inMemory")} <code>{search.source}</code>
   </span>;

@@ -314,6 +314,14 @@ struct ModelEndpointConfig {
     private_ca_pem: String,
     #[serde(default)]
     reasoning_effort: Option<String>,
+    #[serde(default = "default_true")]
+    function_calling: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capability_probe: Option<agent_core::PersistedCapabilityProbe>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_endpoint_max_input_tokens() -> u32 {
@@ -345,6 +353,7 @@ struct ModelEndpointReport {
     allow_cross_origin_redirects: bool,
     private_ca_configured: bool,
     reasoning_effort: Option<String>,
+    function_calling: bool,
 }
 
 impl From<&ModelEndpointConfig> for ModelEndpointReport {
@@ -375,6 +384,7 @@ impl From<&ModelEndpointConfig> for ModelEndpointReport {
             allow_cross_origin_redirects: endpoint.allow_cross_origin_redirects,
             private_ca_configured: !endpoint.private_ca_pem.is_empty(),
             reasoning_effort: endpoint.reasoning_effort.clone(),
+            function_calling: endpoint.function_calling,
         }
     }
 }
@@ -1162,6 +1172,8 @@ struct ModelEndpointInput {
     private_ca_pem: Option<String>,
     #[serde(default)]
     reasoning_effort: Option<String>,
+    #[serde(default = "default_true")]
+    function_calling: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -8529,14 +8541,16 @@ fn normalize_model_endpoint_input(
     settings.config.openai_compatible.requirements = input.requirements.clone();
     settings.config.openai_compatible.reasoning_effort = reasoning_effort.clone();
     agent_core::model_requirements::validate_config(&settings.config)?;
-    Ok(ModelEndpointConfig {
+    let endpoint_id = existing
+        .map(|item| item.id.clone())
+        .or(input.id)
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| unique_web_id("endpoint"));
+    let function_calling = input.function_calling || api_protocol == "openai-responses";
+    let mut endpoint = ModelEndpointConfig {
         catalog_id: input.catalog_id,
         requirements: input.requirements,
-        id: existing
-            .map(|item| item.id.clone())
-            .or(input.id)
-            .filter(|id| !id.trim().is_empty())
-            .unwrap_or_else(|| unique_web_id("endpoint")),
+        id: endpoint_id,
         name,
         model,
         api_protocol,
@@ -8551,7 +8565,22 @@ fn normalize_model_endpoint_input(
         allow_cross_origin_redirects: input.allow_cross_origin_redirects,
         private_ca_pem,
         reasoning_effort,
-    })
+        function_calling,
+        capability_probe: None,
+    };
+    settings.config.interaction.native_tools_supported =
+        model_endpoint_native_tools_knowledge(&endpoint);
+    settings.config.interaction.capability_probe_endpoint_id = settings
+        .config
+        .interaction
+        .native_tools_supported
+        .is_none()
+        .then(|| endpoint.id.clone());
+    let capability_identity = agent_core::capability_probe_identity(&settings.config);
+    endpoint.capability_probe = existing
+        .and_then(|item| item.capability_probe.clone())
+        .filter(|record| capability_identity.as_ref() == Some(&record.identity));
+    Ok(endpoint)
 }
 
 fn testable_endpoint_validation_settings() -> RuntimeSettings {
@@ -8711,6 +8740,7 @@ fn import_model_endpoints(
                 stream: candidate.stream,
                 api_key,
                 reasoning_effort: candidate.reasoning_effort.clone(),
+                function_calling: true,
                 http_headers: candidate.http_headers.clone(),
                 request_fields: candidate.request_fields.clone(),
                 allow_cross_origin_redirects: false,
@@ -8884,10 +8914,12 @@ fn refresh_bound_model_endpoint(state: &AppState, session_id: &str) -> Result<()
                 .sessions
                 .lock()
                 .map_err(|_| "session_store_poisoned".to_string())?;
-            session_uses_model_endpoint(
-                sessions.get(session_id).ok_or("session_not_found")?,
-                &endpoint,
-            )
+            let session = sessions.get(session_id).ok_or("session_not_found")?;
+            session_uses_model_endpoint(session, &endpoint)
+                && model_endpoint_capability_projection_matches(
+                    &session.runtime.settings.config,
+                    &endpoint,
+                )
         };
         if !matches || migrated {
             let runtime_profile = apply_model_endpoint(state, session_id, &id)?;
@@ -8976,6 +9008,75 @@ fn model_endpoint_secrets(
         .ok_or_else(|| "model_endpoint_not_found".to_string())
 }
 
+fn normalized_endpoint_base_url(value: &str) -> &str {
+    value.trim().trim_end_matches('/')
+}
+
+fn model_endpoint_native_tools_knowledge(endpoint: &ModelEndpointConfig) -> Option<bool> {
+    if endpoint.api_protocol == "openai-responses" {
+        return Some(true);
+    }
+    if !endpoint.function_calling {
+        return Some(false);
+    }
+    let template = endpoint.catalog_id.as_deref().and_then(|id| {
+        agent_core::model_catalog::models()
+            .iter()
+            .find(|model| model.id == id)
+    })?;
+    let protocol = template
+        .protocols
+        .iter()
+        .find(|protocol| protocol.protocol == endpoint.api_protocol)?;
+    let provider = endpoint
+        .requirements
+        .provider
+        .as_deref()
+        .unwrap_or(template.provider.as_str());
+    if endpoint.model != template.model
+        || provider != template.provider
+        || normalized_endpoint_base_url(&endpoint.base_url)
+            != normalized_endpoint_base_url(&protocol.base_url)
+    {
+        return None;
+    }
+    match protocol.function_calling {
+        agent_core::model_catalog::FunctionCallingSupport::Supported
+        | agent_core::model_catalog::FunctionCallingSupport::Conditional => Some(true),
+        agent_core::model_catalog::FunctionCallingSupport::Unsupported
+        | agent_core::model_catalog::FunctionCallingSupport::Unknown => None,
+    }
+}
+
+fn project_model_endpoint_capability(
+    config: &mut ModelServiceConfig,
+    endpoint: &ModelEndpointConfig,
+) {
+    let knowledge = model_endpoint_native_tools_knowledge(endpoint);
+    config.interaction.native_tools_supported = knowledge;
+    config.interaction.capability_probe_endpoint_id =
+        knowledge.is_none().then(|| endpoint.id.clone());
+    let identity = agent_core::capability_probe_identity(config);
+    config.interaction.persisted_capability_probe = knowledge
+        .is_none()
+        .then(|| endpoint.capability_probe.clone())
+        .flatten()
+        .filter(|record| identity.as_ref() == Some(&record.identity));
+}
+
+fn model_endpoint_capability_projection_matches(
+    config: &ModelServiceConfig,
+    endpoint: &ModelEndpointConfig,
+) -> bool {
+    let mut expected = config.clone();
+    project_model_endpoint_capability(&mut expected, endpoint);
+    config.interaction.native_tools_supported == expected.interaction.native_tools_supported
+        && config.interaction.capability_probe_endpoint_id
+            == expected.interaction.capability_probe_endpoint_id
+        && config.interaction.persisted_capability_probe
+            == expected.interaction.persisted_capability_probe
+}
+
 fn model_endpoint_session_candidate(
     session: &WebSession,
     endpoint: &ModelEndpointConfig,
@@ -9002,6 +9103,7 @@ fn model_endpoint_session_candidate(
             private_ca_pem: (!endpoint.private_ca_pem.is_empty())
                 .then_some(endpoint.private_ca_pem.clone()),
         };
+        project_model_endpoint_capability(config, endpoint);
     }
 
     candidate.runtime.model_endpoint_id = Some(endpoint.id.clone());
@@ -11199,6 +11301,55 @@ fn activate_core_started_turn(
     Some((session.turns[turn_index].clone(), materialized_payload))
 }
 
+fn persist_capability_probe_event(
+    state: &AppState,
+    session_id: &str,
+    identity: &agent_core::CapabilityProbeIdentity,
+    record: Option<agent_core::PersistedCapabilityProbe>,
+) -> Result<(), String> {
+    let matches_current_binding = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let Some(session) = sessions.get(session_id) else {
+            return Ok(());
+        };
+        session.runtime.model_endpoint_id.as_deref() == Some(identity.endpoint_id.as_str())
+            && agent_core::capability_probe_identity(&session.runtime.settings.config).as_ref()
+                == Some(identity)
+    };
+    if !matches_current_binding {
+        return Ok(());
+    }
+    if record
+        .as_ref()
+        .is_some_and(|value| &value.identity != identity)
+    {
+        return Ok(());
+    }
+
+    let mut mem = state
+        .mem
+        .lock()
+        .map_err(|_| "mem_state_poisoned".to_string())?;
+    let Some(index) = mem
+        .model_endpoints
+        .iter()
+        .position(|endpoint| endpoint.id == identity.endpoint_id)
+    else {
+        return Ok(());
+    };
+    if mem.model_endpoints[index].capability_probe == record {
+        return Ok(());
+    }
+    let mut next = mem.model_endpoints.clone();
+    next[index].capability_probe = record;
+    save_model_endpoints(&mem.layout.memory_dir(), &next)?;
+    mem.model_endpoints = next;
+    Ok(())
+}
+
 fn handle_scoped_worker_event(
     state: &AppState,
     session_id: &str,
@@ -11587,6 +11738,21 @@ fn handle_scoped_worker_event(
                         turn_event_id: turn_ref.map(|value| value.event_id),
                         event: wire_payload,
                     },
+                );
+            }
+        }
+        CoreSessionWorkerEvent::CapabilityProbePersistence { identity, record } => {
+            if let Err(error) = persist_capability_probe_event(state, session_id, &identity, record)
+            {
+                state.runtime_log.record(
+                    "capability_probe_persistence_failed",
+                    json!({
+                        "session_id": session_id,
+                        "context_id": context_id,
+                        "worker_id": worker_id,
+                        "endpoint_id": identity.endpoint_id,
+                        "error": error,
+                    }),
                 );
             }
         }

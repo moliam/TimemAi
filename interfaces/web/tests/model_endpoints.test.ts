@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointLabelForProfile, endpointDraftValid, endpointMatchesProfile, endpointNameForProfile, endpointSaveErrorMessage, formatContextWindowTokens, isValidMaxLlmInputTokens, MODEL_CONTEXT_WINDOW_OPTIONS, toggleAllowedReasoning } from "../src/model_endpoints";
 import { setLocale } from "../src/i18n";
 
-const endpoint = { id: "one", name: "Production", model: "gpt-4.1", api_protocol: "openai-compatible", response_protocol: "xml", base_url: "https://api.example/v1", max_llm_input_tokens: 100_000, max_llm_output_tokens: 10_000, stream: false, api_key_configured: true };
+const endpoint = { id: "one", name: "Production", model: "gpt-4.1", api_protocol: "openai-compatible", response_protocol: "xml", base_url: "https://api.example/v1", max_llm_input_tokens: 100_000, max_llm_output_tokens: 10_000, stream: false, function_calling: true, api_key_configured: true };
 
 describe("shared model endpoints", () => {
   it("matches an endpoint to the complete active Session route", () => {
@@ -92,9 +92,54 @@ it("does not silently fall back when the bound endpoint is deleted", () => {
   expect(endpointMatchesProfile(endpoint, profile)).toBe(false);
 });
 
-import { endpointProtocolOptions, canRestoreEndpointTemplateUrl, changeEndpointProtocol, restoreEndpointTemplateReasoning, restoreEndpointTemplateUrl, templateBaseUrl, applyEndpointTemplate, editEndpoint, editEndpointRequirements, initialEndpointRequirements, type CatalogModel, type ModelEndpointDraft } from "../src/model_endpoints";
-const template: CatalogModel = { id:"fixture/model", revision:1, provider:"openai", model:"fixture-model", label:"Fixture", base_url:"https://example.test/v1", efforts:["none","low","high","max"], default_effort:"low", middle_default:false, min_input:3000, max_input:200000, min_output:512, max_output:30000, context_window:230000, protocols:[{protocol:"openai-responses",disabled_reason:null,fixed_effort:null,fixed_reason:null}] };
+import { endpointProtocolOptions, canRestoreEndpointTemplateUrl, changeEndpointProtocol, restoreEndpointTemplateReasoning, restoreEndpointTemplateUrl, templateBaseUrl, applyEndpointTemplate, editEndpoint, editEndpointRequirements, functionCallingDefault, initialEndpointRequirements, type CatalogModel, type ModelEndpointDraft } from "../src/model_endpoints";
+const template: CatalogModel = { id:"fixture/model", revision:1, provider:"openai", model:"fixture-model", label:"Fixture", base_url:"https://example.test/v1", efforts:["none","low","high","max"], default_effort:"low", middle_default:false, min_input:3000, max_input:200000, min_output:512, max_output:30000, context_window:230000, protocols:[{protocol:"openai-responses",disabled_reason:null,function_calling:"supported",fixed_effort:null,fixed_reason:null}] };
 const blank = (): ModelEndpointDraft => ({ ...endpoint, http_headers:{}, request_fields:{}, allow_cross_origin_redirects:false, requirements:initialEndpointRequirements() });
+describe("function calling defaults and ownership", () => {
+  const modelWith = (support: "supported" | "conditional" | "unsupported" | "unknown"): CatalogModel => ({
+    ...template,
+    protocols: [{
+      protocol: "openai-compatible",
+      disabled_reason: null,
+      function_calling: support,
+      fixed_effort: null,
+      fixed_reason: null,
+    }],
+  });
+
+  it("defaults custom and catalog routes according to the protocol declaration", () => {
+    expect(functionCallingDefault(undefined, "openai-compatible")).toBe(true);
+    expect(functionCallingDefault(modelWith("supported"), "openai-compatible")).toBe(true);
+    expect(functionCallingDefault(modelWith("conditional"), "openai-compatible")).toBe(true);
+    expect(functionCallingDefault(modelWith("unknown"), "openai-compatible")).toBe(true);
+    expect(functionCallingDefault(modelWith("unsupported"), "openai-compatible")).toBe(false);
+    expect(functionCallingDefault(modelWith("unsupported"), "openai-responses")).toBe(true);
+  });
+
+  it("initializes template-owned values and preserves user overrides on ordinary routes", () => {
+    const unsupported = modelWith("unsupported");
+    const supported = { ...modelWith("supported"), id: "fixture/supported" };
+    const initialized = applyEndpointTemplate(blank(), unsupported);
+    expect(initialized.function_calling).toBe(false);
+    expect(initialized.requirements?.field_sources.function_calling).toBe("template");
+
+    const overridden = editEndpoint(initialized, { function_calling: true });
+    expect(overridden.requirements?.field_sources.function_calling).toBe("user");
+    const switchedTemplate = applyEndpointTemplate(overridden, supported);
+    expect(switchedTemplate.function_calling).toBe(true);
+    expect(switchedTemplate.requirements?.field_sources.function_calling).toBe("user");
+    expect(changeEndpointProtocol(switchedTemplate, "anthropic", supported).function_calling).toBe(true);
+  });
+
+  it("forces Responses on even after a user disabled function calling", () => {
+    const ordinary = modelWith("supported");
+    const disabled = editEndpoint(applyEndpointTemplate(blank(), ordinary), { function_calling: false });
+    const responses = changeEndpointProtocol(disabled, "openai-responses", ordinary);
+    expect(responses.function_calling).toBe(true);
+    expect(responses.requirements?.field_sources.function_calling).toBe("template");
+  });
+});
+
 describe("editable endpoint templates", () => {
   it("defaults token budgets from the selected model limits", () => {
     const standard = applyEndpointTemplate(blank(), template);

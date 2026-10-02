@@ -238,6 +238,8 @@ export const zh = {
   },
   tools: {
     memorySearch: "记忆搜索",
+    searchConversationHistory: "在对话记录中搜索“{query}”",
+    searchAllConversationHistory: "搜索全部对话记录",
     searchMemory: "Search",
     searchAllMemory: "Search all",
     inMemory: "in",
@@ -410,6 +412,9 @@ export const zh = {
     empty: "还没有可用接入点。请在 Settings 中添加后再选择。",
     workingNote: "当前请求继续使用原配置；所选接入点将在下一次请求生效。",
     apiProtocol: "API 协议",
+    functionCallingLabel: "函数调用",
+    functionCallingHint: "启用原生函数调用。未知的自定义或修改后接入点会在使用前探测。",
+    functionCallingResponsesHint: "Responses 是 Agent 原生协议，始终启用函数调用。",
     maxOutput: "最大输出",
     redirectLabel: "允许跨 Origin / 跨协议重定向",
     saveEndpoint: "保存接入点",

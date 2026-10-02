@@ -6529,3 +6529,177 @@ fn mailbox_only_manual_compact_is_consumed_before_model_dispatch() {
     assert!(model.prompts[0].contains("User manually requests context compaction."));
     let _ = fs::remove_dir_all(dir);
 }
+
+struct CapabilityProbeTimingModel {
+    probing_visible: std::rc::Rc<std::cell::Cell<bool>>,
+    calls: usize,
+}
+
+impl ModelClient for CapabilityProbeTimingModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        Err("unexpected_inline_capability_probe_call".to_string())
+    }
+
+    fn call_model_interaction(
+        &mut self,
+        config: &ModelServiceConfig,
+        request: &ModelInteractionRequest,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        assert!(
+            self.probing_visible.get(),
+            "probing topic must be emitted before the provider probe starts"
+        );
+        self.calls += 1;
+        let count = usize::from(request.parallel_tool_calls) + 1;
+        Ok(LlmResponse {
+            tool_calls: (0..count)
+                .map(|index| crate::NativeToolCall {
+                    assistant_continuation: None,
+                    id: format!("probe_{index}"),
+                    name: "timem_capability_probe".to_string(),
+                    arguments: serde_json::json!({"slot": index + 1}),
+                    raw_arguments: format!("{{\"slot\":{}}}", index + 1),
+                })
+                .collect(),
+            content: String::new(),
+            model_name: config.model.clone(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        })
+    }
+}
+
+struct CapabilityProbeTimingUi {
+    probing_visible: std::rc::Rc<std::cell::Cell<bool>>,
+    phases: Vec<String>,
+    persisted: Vec<crate::PersistedCapabilityProbe>,
+}
+
+impl TurnUi for CapabilityProbeTimingUi {
+    fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
+        for event in events {
+            if let Some(phase) = event.payload["phase"].as_str() {
+                self.phases.push(phase.to_string());
+                if phase == "probing" {
+                    self.probing_visible.set(true);
+                }
+            }
+        }
+    }
+
+    fn on_persisted_capability_probe(
+        &mut self,
+        _identity: &crate::CapabilityProbeIdentity,
+        record: Option<&crate::PersistedCapabilityProbe>,
+    ) {
+        if let Some(record) = record {
+            self.persisted.push(record.clone());
+        }
+    }
+}
+
+#[test]
+fn capability_probe_topics_are_live_and_durable_result_updates_current_config() {
+    let dir = tmp_dir("capability_probe_topic_timing");
+    let audit = dir.join("audit.json");
+    let mut config = test_config();
+    config.model = format!("capability-probe-timing-{}", epoch_millis());
+    config.interaction.tool_call_mode = crate::ToolCallMode::Auto;
+    config.interaction.parallel_tool_calls = crate::ParallelToolCalls::Auto;
+    config.interaction.native_tools_supported = None;
+    config.interaction.capability_probe_endpoint_id =
+        Some(format!("endpoint-capability-timing-{}", epoch_millis()));
+    let probing_visible = std::rc::Rc::new(std::cell::Cell::new(false));
+    let mut model = CapabilityProbeTimingModel {
+        probing_visible: probing_visible.clone(),
+        calls: 0,
+    };
+    let mut ui = CapabilityProbeTimingUi {
+        probing_visible,
+        phases: Vec::new(),
+        persisted: Vec::new(),
+    };
+
+    let outcome = negotiate_interaction_for_turn(
+        &mut model,
+        &mut config,
+        &audit,
+        &mut ui,
+        "capability_probe_timing_session",
+        false,
+    );
+
+    assert_eq!(model.calls, 2);
+    assert_eq!(ui.phases, ["probing", "completed"]);
+    let persisted = outcome.persisted_probe.expect("durable probe result");
+    assert!(persisted.native_supported);
+    assert!(persisted.parallel_supported);
+    assert_eq!(ui.persisted, [persisted.clone()]);
+    assert_eq!(
+        config.interaction.persisted_capability_probe,
+        Some(persisted)
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn negative_capability_reprobe_uses_first_and_every_tenth_formal_round_only() {
+    let mut config = test_config();
+    config.interaction.tool_call_mode = crate::ToolCallMode::Auto;
+    config.interaction.native_tools_supported = None;
+    config.api_protocol = crate::ApiProtocol::OpenAiCompatible;
+    let mut profile = crate::InteractionProfile {
+        api_protocol: "openai-compatible".to_string(),
+        model: "negative-capability-boundary".to_string(),
+        gateway: "https://example.test/v1".to_string(),
+        requested_mode: crate::ToolCallMode::Auto,
+        resolved_mode: crate::ToolCallMode::Inline,
+        active_prompt_protocol: "inline_xml".to_string(),
+        parallel_supported: false,
+        parallel_enabled: false,
+        source: crate::CapabilityProbeSource::Cache,
+        reason: "persisted_explicit_native_tools_unsupported".to_string(),
+        probe_latency_ms: None,
+        observed_tool_calls: 0,
+    };
+
+    for round in [1, 11, 21] {
+        assert!(
+            should_reprobe_negative_capability(&config, &profile, round),
+            "round {round} must force a negative capability reprobe"
+        );
+    }
+    for round in [0, 2, 10, 12, 20, 22] {
+        assert!(
+            !should_reprobe_negative_capability(&config, &profile, round),
+            "round {round} must not force a negative capability reprobe"
+        );
+    }
+
+    for known in [Some(true), Some(false)] {
+        config.interaction.native_tools_supported = known;
+        assert!(!should_reprobe_negative_capability(&config, &profile, 1));
+    }
+    config.interaction.native_tools_supported = None;
+
+    for mode in [crate::ToolCallMode::Native, crate::ToolCallMode::Inline] {
+        config.interaction.tool_call_mode = mode;
+        assert!(!should_reprobe_negative_capability(&config, &profile, 1));
+    }
+    config.interaction.tool_call_mode = crate::ToolCallMode::Auto;
+
+    config.api_protocol = crate::ApiProtocol::OpenAiResponses;
+    assert!(!should_reprobe_negative_capability(&config, &profile, 1));
+    config.api_protocol = crate::ApiProtocol::OpenAiCompatible;
+
+    profile.resolved_mode = crate::ToolCallMode::Native;
+    assert!(!should_reprobe_negative_capability(&config, &profile, 1));
+}

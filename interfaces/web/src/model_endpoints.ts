@@ -11,6 +11,7 @@ export type ModelEndpoint = {
   max_llm_input_tokens: number;
   max_llm_output_tokens: number;
   stream: boolean;
+  function_calling: boolean;
   api_key_configured: boolean;
   http_headers: Record<string, string>;
   request_fields: Record<string, unknown>;
@@ -31,6 +32,7 @@ export type ModelEndpointDraft = {
   max_llm_input_tokens: number;
   max_llm_output_tokens: number;
   stream: boolean;
+  function_calling: boolean;
   api_key?: string;
   http_headers: Record<string, string>;
   request_fields: Record<string, unknown>;
@@ -183,6 +185,7 @@ function comparableEndpointDraft(draft: ModelEndpointDraft): unknown {
     max_llm_input_tokens: draft.max_llm_input_tokens,
     max_llm_output_tokens: draft.max_llm_output_tokens,
     stream: draft.stream,
+    function_calling: draft.function_calling,
     api_key: draft.api_key ?? null,
     http_headers: draft.http_headers ?? {},
     request_fields: draft.request_fields ?? {},
@@ -214,6 +217,7 @@ export type CatalogModel = {
   min_input: number; max_input: number; min_output: number; max_output: number;
   context_window: number;
   protocols: { protocol: string; base_url?: string; disabled_reason: string | null;
+    function_calling: "supported" | "conditional" | "unsupported" | "unknown";
     fixed_effort: string | null; fixed_reason: string | null }[];
 };
 
@@ -440,7 +444,7 @@ export function endpointSaveErrorMessage(error: string | undefined): string {
   return t("errors.endpointSaveRetry");
 }
 
-const suggestionFields = ["name", "model", "provider", "api_protocol", "base_url", "stream", "reasoning_effort", "allowed_reasoning", "adaptive_reasoning", "max_llm_input_tokens", "max_llm_output_tokens"];
+const suggestionFields = ["name", "model", "provider", "api_protocol", "base_url", "stream", "function_calling", "reasoning_effort", "allowed_reasoning", "adaptive_reasoning", "max_llm_input_tokens", "max_llm_output_tokens"];
 export function initialEndpointRequirements(endpoint?: ModelEndpoint, catalog: readonly CatalogModel[] = []): EndpointRequirements {
   if (endpoint?.requirements?.version === 1) return structuredClone(endpoint.requirements);
   return { version: 1, provider: endpoint?.requirements?.provider ?? catalog.find(m => m.id === endpoint?.catalog_id)?.provider, field_sources: endpoint ? Object.fromEntries(suggestionFields.map(k => [k, "user" as const])) : {} };
@@ -498,8 +502,29 @@ export function restoreEndpointTemplateReasoning(
   };
 }
 
+export function functionCallingDefault(model: CatalogModel | undefined, protocol: string): boolean {
+  if (protocol === "openai-responses") return true;
+  return model?.protocols.find((profile) => profile.protocol === protocol)?.function_calling !== "unsupported";
+}
+
 export function changeEndpointProtocol(draft: ModelEndpointDraft, api_protocol: string, model?: CatalogModel): ModelEndpointDraft {
-  const next = editEndpoint(draft, { api_protocol, stream: api_protocol !== "anthropic" });
+  let next = editEndpoint(draft, { api_protocol, stream: api_protocol !== "anthropic" });
+  const followsTemplate = draft.catalog_id === model?.id
+    && draft.requirements?.field_sources.function_calling !== "user";
+  if (api_protocol === "openai-responses" || followsTemplate) {
+    const requirements = next.requirements ?? initialEndpointRequirements();
+    next = {
+      ...next,
+      function_calling: functionCallingDefault(model, api_protocol),
+      requirements: {
+        ...requirements,
+        field_sources: {
+          ...requirements.field_sources,
+          function_calling: model ? "template" : requirements.field_sources.function_calling ?? "user",
+        },
+      },
+    };
+  }
   return draft.requirements?.field_sources.base_url === "template" && draft.catalog_id === model?.id
     ? restoreEndpointTemplateUrl(next, model) : next;
 }
@@ -514,7 +539,8 @@ export function applyEndpointTemplate(draft: ModelEndpointDraft, model?: Catalog
   const base_url = templateBaseUrl(model, effectiveProtocol);
   const suggestions: Partial<ModelEndpointDraft> = {
     name: model.label, model: model.model, ...(base_url === undefined ? {} : { base_url }), api_protocol: protocol.protocol,
-    stream: true, reasoning_effort: protocol.fixed_effort ?? model.default_effort,
+    stream: true, function_calling: functionCallingDefault(model, effectiveProtocol),
+    reasoning_effort: protocol.fixed_effort ?? model.default_effort,
     max_llm_input_tokens: Math.min(256_000, model.max_input),
     max_llm_output_tokens: Math.min(10_000, model.max_output),
   };
@@ -522,6 +548,10 @@ export function applyEndpointTemplate(draft: ModelEndpointDraft, model?: Catalog
     if (requirements.field_sources[key] !== "user") {
       Object.assign(next, { [key]: value }); requirements.field_sources[key] = "template";
     }
+  }
+  if (effectiveProtocol === "openai-responses") {
+    next.function_calling = true;
+    requirements.field_sources.function_calling = "template";
   }
   for (const [key, value] of Object.entries({ provider: model.provider, allowed_reasoning: model.efforts, adaptive_reasoning: model.default_effort !== "none" })) {
     if (requirements.field_sources[key] !== "user") {

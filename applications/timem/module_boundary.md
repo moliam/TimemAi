@@ -224,7 +224,12 @@ durable ID. The active Turn retains its complete start configuration across all
 model rounds; submission resolves the latest saved endpoint and applies its full
 configuration before the next new Turn/model request. Deleted endpoints fail
 closed. Legacy migration requires a unique full configuration match, including
-secrets and reasoning policy.
+secrets and reasoning policy. The Host also persists the endpoint's Function calling preference
+and any Core-produced negative capability probe. A probe record is injected, replaced, or cleared
+only when its complete secret-free Core identity matches the currently bound endpoint, protocol,
+normalized base URL, model, and relevant reasoning options. The Host may project exact catalog
+knowledge or an unknown value into Core, but it must not classify provider failures or invent a
+capability result.
 
 ### Embedded Web build artifacts
 

@@ -14590,6 +14590,7 @@ wire_api = "responses"
                 stream: false,
                 api_key: None,
                 reasoning_effort: Some("high".to_string()),
+                function_calling: true,
                 http_headers: Default::default(),
                 request_fields: Default::default(),
                 allow_cross_origin_redirects: false,
@@ -14639,6 +14640,7 @@ fn model_endpoint_import_scan_and_apply_round_trip() {
             allow_cross_origin_redirects: false,
             private_ca_pem: None,
             reasoning_effort: None,
+            function_calling: true,
         },
     )
     .unwrap();
@@ -14754,6 +14756,8 @@ fn model_endpoint_delete_many_is_atomic_and_bounded() {
         http_headers: Default::default(),
         request_fields: Default::default(),
         reasoning_effort: None,
+        capability_probe: None,
+        function_calling: true,
     };
     let endpoints = vec![
         endpoint("endpoint-one", "One"),
@@ -14879,6 +14883,8 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
             http_headers: Default::default(),
             request_fields: Default::default(),
             reasoning_effort: None,
+            capability_probe: None,
+            function_calling: true,
         }
     }
 
@@ -14944,6 +14950,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                 ]),
                 request_fields: Default::default(),
                 reasoning_effort: None,
+                function_calling: true,
             },
         )
         .unwrap();
@@ -15001,6 +15008,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                         http_headers: Default::default(),
                         request_fields: Default::default(),
                         reasoning_effort: None,
+                        function_calling: true,
                     },
                 )
                 .unwrap();
@@ -15088,6 +15096,7 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         http_headers: Default::default(),
         request_fields: Default::default(),
         reasoning_effort: None,
+        function_calling: true,
     };
     assert_eq!(
         normalize_model_endpoint_input(None, zero_input).unwrap_err(),
@@ -15112,6 +15121,7 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         http_headers: Default::default(),
         request_fields: Default::default(),
         reasoning_effort: None,
+        function_calling: true,
     };
     assert!(normalize_model_endpoint_input(None, custom_input).is_ok());
 
@@ -15133,6 +15143,7 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         http_headers: Default::default(),
         request_fields: Default::default(),
         reasoning_effort: None,
+        function_calling: true,
     };
     assert_eq!(
         normalize_model_endpoint_input(None, invalid_output).unwrap_err(),
@@ -15160,6 +15171,7 @@ fn model_endpoint_rejects_invalid_private_ca_before_persisting() {
         http_headers: Default::default(),
         request_fields: Default::default(),
         reasoning_effort: None,
+        function_calling: true,
     };
     let error = normalize_model_endpoint_input(None, input).unwrap_err();
     assert!(
@@ -15188,6 +15200,7 @@ fn model_endpoint_stream_accepts_responses_but_not_anthropic() {
         http_headers: Default::default(),
         request_fields: Default::default(),
         reasoning_effort: None,
+        function_calling: true,
     };
     assert!(
         normalize_model_endpoint_input(None, input.clone())
@@ -15291,6 +15304,7 @@ fn endpoint_boundary_input(id: &str, effort: &str) -> ModelEndpointInput {
         allow_cross_origin_redirects: endpoint_b,
         private_ca_pem: None,
         reasoning_effort: Some(effort.to_string()),
+        function_calling: true,
     }
 }
 
@@ -15870,6 +15884,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                     ),
                 ]),
                 reasoning_effort: None,
+                function_calling: true,
             },
         },
     )
@@ -15983,6 +15998,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 http_headers: Default::default(),
                 request_fields: Default::default(),
                 reasoning_effort: None,
+                function_calling: true,
             },
         },
     )
@@ -16034,6 +16050,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 http_headers: Default::default(),
                 request_fields: Default::default(),
                 reasoning_effort: None,
+                function_calling: true,
             },
         },
     )
@@ -17742,4 +17759,114 @@ fn model_endpoint_import_persistence_failure_is_atomic_and_retryable() {
     drop(mem);
 
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn model_endpoint_native_tools_knowledge_requires_an_exact_catalog_route() {
+    use agent_core::model_catalog::FunctionCallingSupport;
+
+    agent_core::model_catalog::ensure_loaded().unwrap();
+    let find = |support| {
+        agent_core::model_catalog::models()
+            .iter()
+            .find_map(|model| {
+                model
+                    .protocols
+                    .iter()
+                    .find(|protocol| {
+                        protocol.protocol != "openai-responses"
+                            && protocol.function_calling == support
+                    })
+                    .map(|protocol| (model, protocol))
+            })
+            .unwrap_or_else(|| panic!("catalog must contain a non-Responses {support:?} profile"))
+    };
+    let endpoint_for =
+        |model: &agent_core::model_catalog::CatalogModel,
+         protocol: &agent_core::model_catalog::CatalogProtocol| {
+            ModelEndpointConfig {
+                catalog_id: Some(model.id.clone()),
+                requirements: agent_core::model_requirements::EndpointRequirements {
+                    provider: Some(model.provider.clone()),
+                    ..Default::default()
+                },
+                id: format!("catalog-route-{}-{}", model.id, protocol.protocol),
+                name: model.label.clone(),
+                model: model.model.clone(),
+                api_protocol: protocol.protocol.clone(),
+                response_protocol: "xml".to_string(),
+                base_url: protocol.base_url.clone(),
+                max_llm_input_tokens: model.max_input,
+                max_llm_output_tokens: model.max_output,
+                stream: true,
+                api_key: String::new(),
+                http_headers: Default::default(),
+                request_fields: Default::default(),
+                allow_cross_origin_redirects: false,
+                private_ca_pem: String::new(),
+                reasoning_effort: None,
+                function_calling: true,
+                capability_probe: None,
+            }
+        };
+
+    for support in [
+        FunctionCallingSupport::Supported,
+        FunctionCallingSupport::Conditional,
+    ] {
+        let (model, protocol) = find(support);
+        let endpoint = endpoint_for(model, protocol);
+        assert_eq!(model_endpoint_native_tools_knowledge(&endpoint), Some(true));
+    }
+
+    let (model, protocol) = find(FunctionCallingSupport::Supported);
+    let exact = endpoint_for(model, protocol);
+    for changed in [
+        ModelEndpointConfig {
+            model: format!("{}-custom", exact.model),
+            ..exact.clone()
+        },
+        ModelEndpointConfig {
+            requirements: agent_core::model_requirements::EndpointRequirements {
+                provider: Some("custom-provider".to_string()),
+                ..exact.requirements.clone()
+            },
+            ..exact.clone()
+        },
+        ModelEndpointConfig {
+            base_url: format!("{}/proxy", exact.base_url.trim_end_matches('/')),
+            ..exact.clone()
+        },
+    ] {
+        assert_eq!(model_endpoint_native_tools_knowledge(&changed), None);
+    }
+
+    let custom = ModelEndpointConfig {
+        catalog_id: None,
+        ..exact.clone()
+    };
+    assert_eq!(model_endpoint_native_tools_knowledge(&custom), None);
+    let disabled = ModelEndpointConfig {
+        function_calling: false,
+        ..exact.clone()
+    };
+    assert_eq!(
+        model_endpoint_native_tools_knowledge(&disabled),
+        Some(false)
+    );
+
+    let (unsupported_model, unsupported_protocol) = find(FunctionCallingSupport::Unsupported);
+    let unsupported = endpoint_for(unsupported_model, unsupported_protocol);
+    assert_eq!(model_endpoint_native_tools_knowledge(&unsupported), None);
+
+    let responses = ModelEndpointConfig {
+        api_protocol: "openai-responses".to_string(),
+        function_calling: false,
+        catalog_id: None,
+        ..exact
+    };
+    assert_eq!(
+        model_endpoint_native_tools_knowledge(&responses),
+        Some(true)
+    );
 }

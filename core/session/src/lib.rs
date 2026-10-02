@@ -289,6 +289,10 @@ pub enum CoreSessionWorkerEvent {
     /// but must not rewrite it from worker/topic arrival order.
     TurnProjection(agent_core::TurnProjection),
     Topics(Vec<CoreTopicEvent>),
+    CapabilityProbePersistence {
+        identity: agent_core::CapabilityProbeIdentity,
+        record: Option<agent_core::PersistedCapabilityProbe>,
+    },
     ModelRequest {
         round: u32,
         emitted_at_ms: u128,
@@ -2677,6 +2681,19 @@ impl TurnUi for WorkerTurnUi {
 
     fn on_interaction_profile(&mut self, profile: &agent_core::InteractionProfile) {
         self.interaction_profile = Some(profile.clone());
+    }
+
+    fn on_persisted_capability_probe(
+        &mut self,
+        identity: &agent_core::CapabilityProbeIdentity,
+        record: Option<&agent_core::PersistedCapabilityProbe>,
+    ) {
+        let _ = self
+            .event_tx
+            .send(CoreSessionWorkerEvent::CapabilityProbePersistence {
+                identity: identity.clone(),
+                record: record.cloned(),
+            });
     }
 
     fn on_model_interaction_response(&mut self, round: u32, response: &agent_core::LlmResponse) {

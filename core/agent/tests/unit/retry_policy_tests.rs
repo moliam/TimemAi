@@ -62,6 +62,35 @@ fn non_retryable_model_errors_do_not_waste_rounds() {
 }
 
 #[test]
+fn explicit_native_tool_rejection_requires_status_field_and_rejection_signal() {
+    for error in [
+        "model_http_400: unknown parameter: tools",
+        "model_http_400: tool_choice is not supported for this model",
+        "model_http_404: functions are not allowed by this endpoint",
+        "model_http_422: extra inputs are not permitted: parallel_tool_calls",
+    ] {
+        assert!(is_explicit_native_tools_unsupported(error), "{error}");
+    }
+    for error in [
+        "cancelled_by_user",
+        "model_network_error: tools connection reset",
+        "model_http_500: tools unsupported upstream",
+        "model_http_401: tools are not permitted without authentication",
+        "model_http_403: tools are not allowed for this account",
+        "model_http_408: unknown parameter tools",
+        "model_http_409: tools not supported while deployment starts",
+        "model_http_413: tools request body too large",
+        "model_http_425: tools unsupported before deployment is ready",
+        "model_http_429: tools are not allowed over quota",
+        "model_http_400: invalid model",
+        "model_http_400: invalid parameter: tools",
+        "model_http_400: tools must be a non-empty array",
+    ] {
+        assert!(!is_explicit_native_tools_unsupported(error), "{error}");
+    }
+}
+
+#[test]
 fn input_too_large_errors_are_detected_without_matching_unrelated_failures() {
     for error in [
         "Argument list too long (os error 7)",

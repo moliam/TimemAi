@@ -17,6 +17,8 @@ use std::hash::{BuildHasher, Hash, Hasher};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+const CAPABILITY_NEGATIVE_REPROBE_ROUND_INTERVAL: u32 = 10;
+
 struct TimeReminderSchedule {
     interval: Duration,
     last_emitted_period: u64,
@@ -288,6 +290,71 @@ fn run_session_turn_with_model_client_and_focus_interval(
     )
 }
 
+fn negotiate_interaction_for_turn(
+    model_client: &mut dyn ModelClient,
+    config: &mut ModelServiceConfig,
+    audit_file: &Path,
+    ui: &mut dyn TurnUi,
+    session: &str,
+    force_probe: bool,
+) -> crate::NegotiationOutcome {
+    let identity = crate::capability_probe_identity(config);
+    let ui_cell = std::cell::RefCell::new(ui);
+    let outcome = crate::negotiation::negotiate_interaction_outcome_with_observer(
+        model_client,
+        config,
+        audit_file,
+        &mut || ui_cell.borrow_mut().is_cancel_requested(),
+        force_probe,
+        &mut || {
+            ui_cell.borrow_mut().on_core_topic_events(&[
+                crate::capability_negotiation_topic_event(
+                    session,
+                    "probing",
+                    identity.as_ref(),
+                    None,
+                    None,
+                ),
+            ]);
+        },
+    );
+    let ui = ui_cell.into_inner();
+    if outcome.profile.source == crate::CapabilityProbeSource::Cache {
+        ui.on_core_topic_events(&[crate::capability_negotiation_topic_event(
+            session,
+            "cache_hit",
+            identity.as_ref(),
+            Some(&outcome.profile),
+            Some(&outcome.profile.reason),
+        )]);
+    }
+    ui.on_core_topic_events(&[crate::capability_negotiation_topic_event(
+        session,
+        "completed",
+        identity.as_ref(),
+        Some(&outcome.profile),
+        Some(&outcome.profile.reason),
+    )]);
+    if let Some(record) = outcome.persisted_probe.as_ref() {
+        config.interaction.persisted_capability_probe = Some(record.clone());
+        ui.on_persisted_capability_probe(&record.identity, Some(record));
+    }
+    outcome
+}
+
+fn should_reprobe_negative_capability(
+    config: &ModelServiceConfig,
+    profile: &crate::InteractionProfile,
+    round: u32,
+) -> bool {
+    config.interaction.tool_call_mode == crate::ToolCallMode::Auto
+        && config.interaction.native_tools_supported.is_none()
+        && config.api_protocol != crate::ApiProtocol::OpenAiResponses
+        && profile.resolved_mode == crate::ToolCallMode::Inline
+        && round > 0
+        && (round - 1) % CAPABILITY_NEGATIVE_REPROBE_ROUND_INTERVAL == 0
+}
+
 fn run_session_turn_with_model_client_and_reminder_override(
     core: &mut AgentCore,
     config: &mut ModelServiceConfig,
@@ -320,10 +387,15 @@ fn run_session_turn_with_model_client_and_reminder_override(
         &turn_id,
         effective_input,
     );
-    let profile =
-        crate::negotiate_interaction(model_client, config, request.audit_file, &mut || {
-            ui.is_cancel_requested()
-        });
+    let mut profile = negotiate_interaction_for_turn(
+        model_client,
+        config,
+        request.audit_file,
+        ui,
+        request.session,
+        false,
+    )
+    .profile;
     core.set_interaction_profile(&profile);
     ui.on_interaction_profile(&profile);
     let start = Instant::now();
@@ -363,12 +435,15 @@ fn run_session_turn_with_model_client_and_reminder_override(
             CoreStep::NeedModel { ref prompt, .. } => {
                 if ui.apply_pending_runtime_updates(core, config) {
                     core.set_response_protocol(config.response_protocol);
-                    let profile = crate::negotiate_interaction(
+                    profile = negotiate_interaction_for_turn(
                         model_client,
                         config,
                         request.audit_file,
-                        &mut || ui.is_cancel_requested(),
-                    );
+                        ui,
+                        request.session,
+                        false,
+                    )
+                    .profile;
                     core.set_interaction_profile(&profile);
                     ui.on_interaction_profile(&profile);
                     step = CoreStep::NeedModel {
@@ -448,6 +523,35 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     }
                 }
                 rounds += 1;
+                if should_reprobe_negative_capability(config, &profile, rounds) {
+                    let identity = crate::capability_probe_identity(config);
+                    ui.on_core_topic_events(&[crate::capability_negotiation_topic_event(
+                        request.session,
+                        "retrying",
+                        identity.as_ref(),
+                        Some(&profile),
+                        Some("periodic_negative_capability_reprobe"),
+                    )]);
+                    let outcome = negotiate_interaction_for_turn(
+                        model_client,
+                        config,
+                        request.audit_file,
+                        ui,
+                        request.session,
+                        true,
+                    );
+                    if outcome.profile.resolved_mode == crate::ToolCallMode::Native
+                        && outcome.persisted_probe.is_none()
+                    {
+                        if let Some(identity) = identity.as_ref() {
+                            ui.on_persisted_capability_probe(identity, None);
+                        }
+                        config.interaction.persisted_capability_probe = None;
+                    }
+                    profile = outcome.profile;
+                    core.set_interaction_profile(&profile);
+                    ui.on_interaction_profile(&profile);
+                }
                 let mut action_runtime = TurnActionRuntime::new(ui);
                 let prompt =
                     core.build_model_request_prompt_with_runtime(prompt, &mut action_runtime);
@@ -465,7 +569,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
                 );
                 ui.on_reasoning_upgrade(reasoning_upgrade);
                 ui.on_model_api_request(rounds, &interaction_request, &api_payload);
-                match call_model_with_system_retries(
+                let model_call = call_model_with_system_retries(
                     model_client,
                     config,
                     &interaction_request,
@@ -475,7 +579,8 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     request.session,
                     &turn_id,
                     &mut response_preview,
-                ) {
+                );
+                match model_call {
                     Ok(response) => {
                         publish_turn_projection(
                             ui,

@@ -377,6 +377,7 @@ pub struct CoreTopicEvent {
 
 pub const CORE_TOPIC_MODEL_RESPONSE: &str = "core.model.response";
 pub const CORE_TOPIC_MODEL_REPAIR: &str = "core.model.repair";
+pub const CORE_TOPIC_MODEL_CAPABILITY_NEGOTIATION: &str = "core.model.capability_negotiation";
 pub const CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP: &str = "core.runtime_root_repair_help";
 pub const CORE_TOPIC_ACTION: &str = "core.action";
 pub const CORE_TOPIC_CONTEXT_COMPACT: &str = "core.context.compact";
@@ -770,6 +771,32 @@ pub fn runtime_root_repair_help_topic_event(session_id: impl Into<String>) -> Co
         CoreSessionState::Running,
         json!({
             "count": 1,
+        }),
+    )
+}
+
+pub fn capability_negotiation_topic_event(
+    session_id: impl Into<String>,
+    phase: &str,
+    identity: Option<&crate::CapabilityProbeIdentity>,
+    profile: Option<&crate::InteractionProfile>,
+    reason: Option<&str>,
+) -> CoreTopicEvent {
+    CoreTopicEvent::new(
+        session_id,
+        CoreTopic::new(
+            CORE_TOPIC_MODEL_CAPABILITY_NEGOTIATION,
+            json!({
+                "name": CORE_TOPIC_MODEL_CAPABILITY_NEGOTIATION,
+                "phase": phase,
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "phase": phase,
+            "identity": identity,
+            "profile": profile,
+            "reason": reason,
         }),
     )
 }
@@ -1844,6 +1871,15 @@ pub trait TurnUi {
     fn on_model_response_parsed(&mut self, _tool_count: usize) {}
 
     fn on_interaction_profile(&mut self, _profile: &crate::InteractionProfile) {}
+
+    /// Persists or clears a Core-owned capability result. Hosts must key this
+    /// only by the stable endpoint id and must not reinterpret probe semantics.
+    fn on_persisted_capability_probe(
+        &mut self,
+        _identity: &crate::CapabilityProbeIdentity,
+        _record: Option<&crate::PersistedCapabilityProbe>,
+    ) {
+    }
 
     fn on_core_topic_events(&mut self, _events: &[CoreTopicEvent]) {}
 

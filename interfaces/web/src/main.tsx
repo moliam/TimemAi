@@ -14795,6 +14795,7 @@ function ModelEndpointEditor({
     max_llm_input_tokens: endpoint?.max_llm_input_tokens ?? 100_000,
     max_llm_output_tokens: endpoint?.max_llm_output_tokens ?? 10_000,
     stream: endpoint?.stream ?? true,
+    function_calling: endpoint?.function_calling ?? true,
     api_key: revealedApiKey,
     http_headers: revealedHeaders ?? endpoint?.http_headers ?? {},
     request_fields: revealedRequestFields ?? endpoint?.request_fields ?? {},
@@ -15062,6 +15063,17 @@ function ModelEndpointEditor({
             />
             <span>{t("endpoints.streamLabel")}</span>
           </label>
+          {draft.api_protocol !== "openai-responses" && <label
+            className="endpoint-stream-toggle"
+            title={t("endpoints.functionCallingHint")}
+          >
+            <input
+              type="checkbox"
+              checked={draft.function_calling}
+              onChange={(event) => edit({ function_calling: event.target.checked })}
+            />
+            <span>{t("endpoints.functionCallingLabel")}</span>
+          </label>}
         </div>
         <label>
           {t("endpoints.responseProtocol")}
