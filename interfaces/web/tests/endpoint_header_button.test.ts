@@ -17,6 +17,17 @@ describe("header endpoint selector", () => {
     expect(source).toContain("aria-expanded={showRuntime}");
   });
 
+  it("uses Lucide direction icons instead of in/out text in the cache readout", () => {
+    expect(source).toContain("ArrowBigUp");
+    expect(source).toContain("ArrowBigDown");
+    expect(source).toContain('className="header-cache-token header-cache-input"');
+    expect(source).toContain('className="header-cache-token header-cache-output"');
+    expect(source).not.toContain('`cache: ${cacheHitPercent.toFixed(1)}%, in:');
+    expect(source).toContain('`${cachePercentLabel}, input: ${cacheInputLabel}, output: ${cacheOutputLabel}`');
+    expect(styles).toContain('.header-cache-rate { justify-self: start; display: inline-flex; align-items: center; gap: 5px;');
+    expect(styles).toContain('.header-cache-token { display: inline-flex; align-items: center; gap: 1px; }');
+  });
+
   it("uses a deep borderless surface with the same height as the ctx/cache readout", () => {
     expect(styles).toContain(
       ".header-context-actions { align-self: center; border-left: 1px solid #2a3944; padding-left: 12px; margin-left: 2px; height: 38px; }",
