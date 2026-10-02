@@ -5741,7 +5741,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .endpoint-share-warning { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 15px; border-radius: 9px; padding: 10px 11px; background: #211e17; color: #c7b384; font-size: 11px; line-height: 1.55; box-shadow: inset 0 0 0 1px #c9903018; }
 .endpoint-share-warning svg { flex: none; margin-top: 1px; color: #c99030; }
 .endpoint-share-data { display: grid; gap: 7px; color: #9aa8a2; font-size: 11px; font-weight: 650; }
-.endpoint-share-data textarea { width: 100%; min-height: 112px; box-sizing: border-box; resize: vertical; overflow-wrap: anywhere; border: 0; border-radius: 9px; background: #0f1412; color: #dce6e2; padding: 11px 12px; box-shadow: inset 0 0 0 1px #ffffff0a, 0 5px 15px #0003; font: 11px/1.55 "SFMono-Regular", Consolas, monospace; outline: none; }
+.endpoint-share-data textarea { width: 100%; min-height: 112px; box-sizing: border-box; resize: vertical; white-space: pre; overflow: auto; overflow-wrap: normal; word-break: normal; border: 0; border-radius: 9px; background: #0f1412; color: #dce6e2; padding: 11px 12px; box-shadow: inset 0 0 0 1px #ffffff0a, 0 5px 15px #0003; font: 11px/1.55 "SFMono-Regular", Consolas, monospace; outline: none; }
 .endpoint-share-data textarea:focus { background: #121a17; box-shadow: 0 0 0 2px #68b8a72b, 0 8px 22px #0005; }
 .endpoint-share-message { display: flex; align-items: center; gap: 7px; margin: 12px 0 0; border-radius: 8px; padding: 8px 10px; background: #17221e; color: #90b9ac; font-size: 11px; line-height: 1.5; }
 .endpoint-share-message[role="alert"] { background: #2b1d1c; color: #e7a09a; }

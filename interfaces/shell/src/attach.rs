@@ -6,8 +6,8 @@
 //! existing WebSocket command transport. It never owns domain state.
 
 use crate::{
-    dim_line, local_time_label, render_final_answer_markdown, ANSI_BOLD, ANSI_BRIGHT_TIMEM,
-    ANSI_DIM, ANSI_RESET, TIMEM_LOGO,
+    dim_line, local_time_label, render_final_answer_markdown, ANSI_BRIGHT_TIMEM, ANSI_DIM,
+    ANSI_RESET, TIMEM_LOGO,
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use serde::Deserialize;
@@ -20,10 +20,18 @@ use std::time::Duration;
 use tungstenite::client::IntoClientRequest;
 use tungstenite::Message;
 
+mod view;
+
+use view::{
+    activity_summary, attach_error_card, connected_intro, decision_request_prompt,
+    disconnected_card, format_user_echo, guidance_card, host_error_card, invalid_command_card,
+    invalid_restart_choice_card, no_sessions_card, rejected_command_card, restart_cwd_prompt,
+    session_selector, topic_summary, worker_event_summary,
+};
+
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_ATTACH_TURN_VIEWS: usize = 200;
 const MAX_ATTACH_PENDING_DECISIONS: usize = 200;
-const ANSI_FAIL: &str = "\x1b[31m";
 
 /// Whether a progress dot line is open. Event lines close it first so live
 /// output and progress never interleave on one terminal row.
@@ -66,10 +74,22 @@ enum AttachError {
 impl AttachError {
     fn message(&self) -> String {
         match self {
-            Self::NoHost => "no running timem web host found".to_string(),
-            Self::HostUnreachable(detail) => format!("host unreachable: {detail}"),
-            Self::Http(detail) => format!("attach endpoint failed: {detail}"),
-            Self::Protocol(detail) => format!("attach protocol error: {detail}"),
+            Self::NoHost => "No running Web Host was found for this workspace.".to_string(),
+            Self::HostUnreachable(detail) => format!("The Web Host could not be reached: {detail}"),
+            Self::Http(detail) => format!("The attach endpoint failed: {detail}"),
+            Self::Protocol(detail) => {
+                format!("The Host returned an invalid attach response: {detail}")
+            }
+        }
+    }
+
+    fn next_step(&self) -> &'static str {
+        match self {
+            Self::NoHost => "Start Timem in this workspace, then run `timem attach` again.",
+            Self::HostUnreachable(_) => "Check that the Web Host is still running, then reconnect.",
+            Self::Http(_) | Self::Protocol(_) => {
+                "Restart the Web Host if the problem persists, then reconnect."
+            }
         }
     }
 }
@@ -80,7 +100,14 @@ pub fn run_attach(space: Option<&str>) {
     let memory_dir = match crate::resolve_memory_dir(space) {
         Ok(path) => path,
         Err(error) => {
-            eprintln!("[attach_error] {error}");
+            eprintln!(
+                "{}",
+                guidance_card(
+                    "Unable to attach",
+                    &error.to_string(),
+                    "Check the workspace path and try again."
+                )
+            );
             std::process::exit(2);
         }
     };
@@ -88,19 +115,19 @@ pub fn run_attach(space: Option<&str>) {
     let host = match discover_host(&instance_path) {
         Ok(host) => host,
         Err(error) => {
-            eprintln!("[attach_error] {}", error.message());
+            eprintln!("{}", attach_error_card(&error));
             std::process::exit(2);
         }
     };
     let sessions = match fetch_attach_sessions(&host) {
         Ok(sessions) => sessions,
         Err(error) => {
-            eprintln!("[attach_error] {}", error.message());
+            eprintln!("{}", attach_error_card(&error));
             std::process::exit(2);
         }
     };
     if sessions.is_empty() {
-        eprintln!("[attach_error] the host has no sessions");
+        eprintln!("{}", no_sessions_card());
         std::process::exit(2);
     }
     let selected = match select_session(&sessions) {
@@ -108,7 +135,7 @@ pub fn run_attach(space: Option<&str>) {
         None => return,
     };
     if let Err(error) = attach_session(&host, &selected) {
-        eprintln!("[attach_error] {}", error.message());
+        eprintln!("{}", attach_error_card(&error));
         std::process::exit(2);
     }
 }
@@ -256,32 +283,7 @@ fn select_session(sessions: &[AttachSession]) -> Option<AttachSession> {
                 Clear(ClearType::FromCursorDown)
             );
         }
-        let mut out = String::new();
-        out.push_str(&format!(
-            "{ANSI_DIM}选择一个 session（↑/↓ 移动，Enter attach，Esc 退出）{ANSI_RESET}\r\n"
-        ));
-        for (index, session) in sessions.iter().enumerate() {
-            let marker = if index == selected {
-                format!("{ANSI_BRIGHT_TIMEM}❯{ANSI_RESET}")
-            } else {
-                " ".to_string()
-            };
-            let name = if session.working {
-                format!("{ANSI_BOLD}{}{ANSI_RESET}", session.display_name)
-            } else {
-                session.display_name.clone()
-            };
-            let work = if session.working { " working" } else { "" };
-            let line = format!(
-                "{marker} {ANSI_DIM}{}.{}{ANSI_RESET} {name}{ANSI_DIM}{work} · workers: {}, {}{ANSI_RESET}\r\n",
-                index + 1,
-                " ",
-                session.worker_count,
-                session.current_dir,
-            );
-            out.push_str(&line);
-        }
-        print!("{out}");
+        print!("{}", session_selector(sessions, selected));
         let _ = stdout.flush();
     };
     render(selected, rendered_once);
@@ -320,73 +322,6 @@ struct PendingDecision {
     request_id: Option<String>,
     worker_id: Option<String>,
     topic_name: String,
-}
-
-fn decision_request_prompt(payload: &Value) -> Option<String> {
-    let topic = payload.get("topic")?;
-    if topic
-        .get("attributes")
-        .and_then(|a| a.get("expects_reply"))
-        .and_then(Value::as_bool)
-        != Some(true)
-    {
-        return None;
-    }
-    let topic_name = topic
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let request = payload.get("payload")?.get("request")?;
-    let line = match topic_name {
-        "core.user.approval.request" => {
-            let action = request
-                .get("action")
-                .and_then(Value::as_str)
-                .unwrap_or("run");
-            let command = request.get("command").and_then(Value::as_str).unwrap_or("");
-            let risk = request.get("risk").and_then(Value::as_str).unwrap_or("?");
-            format!("approve {action}: {command} (risk: {risk})")
-        }
-        "core.user.round_limit.request" => {
-            let recharge = request
-                .get("recharge_rounds")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            format!("continue for {recharge} more rounds past the round limit")
-        }
-        "core.user.output_expand.request" => {
-            let increment = request
-                .get("increment_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            format!("expand output by +{increment} tokens")
-        }
-        "core.user.stale_context.request" => {
-            let idle = request.get("idle_ms").and_then(Value::as_u64).unwrap_or(0);
-            format!("continue after {}ms idle (keeps dynamic context)", idle)
-        }
-        "core.work_instruction_load" => {
-            let directory = request
-                .get("directory")
-                .and_then(Value::as_str)
-                .unwrap_or("?");
-            format!("load work instructions from {directory}")
-        }
-        "core.user.long_running_command.request" => {
-            let action = request
-                .get("action")
-                .and_then(Value::as_str)
-                .unwrap_or("command");
-            let command = request.get("command").and_then(Value::as_str).unwrap_or("");
-            let elapsed = request
-                .get("elapsed_ms")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            format!("{action} still running: {command} ({elapsed}ms)")
-        }
-        _ => format!("host decision request on {topic_name}"),
-    };
-    Some(format!("\n[needs reply] {line}\n  输入 1 或 2 后回车:  1 = 接受   2 = 拒绝   3 = 总是允许(仅审批)  (等效 !y / !n / !a)"))
 }
 
 fn register_decision_request(
@@ -552,80 +487,6 @@ fn print_turn_event(event: &Value) {
     }
 }
 
-fn activity_summary(payload: &Value) -> Option<String> {
-    let kind = payload.get("kind").and_then(Value::as_str)?;
-    let detail = payload
-        .get("detail")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    Some(format!("- {kind} {detail}").trim_end().to_string())
-}
-
-fn topic_summary(payload: &Value) -> Option<String> {
-    let topic = payload
-        .get("topic")
-        .and_then(|topic| topic.get("name"))
-        .and_then(Value::as_str)
-        .unwrap_or("core.topic");
-    if topic == "core.action" {
-        return action_detail(payload.get("payload")?);
-    }
-    if topic == "core.model.preview" {
-        // Streaming text deltas: keep them silent. Progress is already
-        // conveyed by the projection dots; per-delta lines would flood
-        // the terminal.
-        return None;
-    }
-    let event_name = payload.get("event").and_then(Value::as_str).unwrap_or("");
-    Some(format!("- [{topic}] {event_name}").trim_end().to_string())
-}
-
-/// Renders live tool execution detail: command lines, file reads, tool status.
-fn action_detail(payload: &Value) -> Option<String> {
-    let action = payload.get("action").and_then(Value::as_str)?;
-    let event = payload.get("event").and_then(Value::as_str).unwrap_or("");
-    let status = payload.get("status").and_then(Value::as_str).unwrap_or("");
-    let input = payload.get("input");
-    let describe_input = |input: Option<&Value>| -> String {
-        let Some(input) = input else {
-            return String::new();
-        };
-        match action {
-            "run_bash" => input
-                .get("cmd")
-                .and_then(Value::as_str)
-                .map(|cmd| format!("`{}`", truncate_line(cmd, 120)))
-                .unwrap_or_default(),
-            "readfile" => input
-                .get("path")
-                .and_then(Value::as_str)
-                .map(|path| truncate_line(path, 120))
-                .unwrap_or_default(),
-            _ => String::new(),
-        }
-    };
-    let detail = describe_input(input);
-    let prefix = match event {
-        "start" => format!("{ANSI_BRIGHT_TIMEM}>{ANSI_RESET}"),
-        _ => format!("{ANSI_DIM}<{ANSI_RESET}"),
-    };
-    let status_style = if status.contains("error") || status.contains("fail") {
-        ANSI_FAIL
-    } else {
-        ANSI_DIM
-    };
-    let status_label = if status.is_empty() {
-        String::new()
-    } else {
-        format!(" {status_style}{status}{ANSI_RESET}")
-    };
-    Some(
-        format!("{prefix} {ANSI_BOLD}{action}{ANSI_RESET} {detail}{status_label}")
-            .trim_end()
-            .to_string(),
-    )
-}
-
 /// Shell-style attach prompt, shown while the session is idle.
 fn print_attach_prompt() {
     close_dots();
@@ -636,64 +497,26 @@ fn print_attach_prompt() {
     let _ = std::io::stdout().flush();
 }
 
-/// Renders a pending restart-cwd decision (Web shows the same gate as a modal).
-fn restart_cwd_prompt(decision: &Value) -> Option<String> {
-    let runtime_cwd = decision.get("runtime_cwd")?.as_str()?;
-    let session_cwd = decision
-        .get("session_cwd")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let available = decision
-        .get("session_cwd_available")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let keep_num_hint = if available {
-        ""
-    } else {
-        "  (session 目录不可用，只能选 2)"
-    };
-    Some(format!(
-        "\n[needs reply] restart cwd mismatch\n  host dir:   {runtime_cwd}\n  session dir: {session_cwd}\n  输入 1 或 2 后回车:  1 = 保持 session 目录{keep_num_hint}   2 = 切到 host 目录  (等效 !k / !r)"
-    ))
-}
-
-/// Echoes an accepted user line in the same style as the interactive shell.
-fn format_user_echo(text: &str) -> String {
-    format!(
-        "\x1b[94;1m[{}] You ❯❯{ANSI_RESET} {text}",
-        local_time_label()
-    )
-}
-
-fn truncate_line(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
+fn restart_cwd_numeric_decision(
+    text: &str,
+    gate_pending: bool,
+) -> Option<Result<&'static str, ()>> {
+    if !gate_pending {
+        return None;
     }
-    let truncated: String = text.chars().take(max_chars).collect();
-    format!("{truncated}...")
-}
-
-fn worker_event_summary(payload: &Value) -> Option<String> {
-    let kind = payload
-        .get("kind")
-        .and_then(Value::as_str)
-        .unwrap_or("worker_event");
-    Some(format!("- {kind}").to_string())
+    match text {
+        "1" => Some(Ok("keep_session")),
+        "2" => Some(Ok("use_runtime")),
+        "3" => Some(Err(())),
+        _ => None,
+    }
 }
 
 /// Connects to the Host WebSocket and runs the attach loop: stream-render
 /// authoritative events for the chosen session and submit every entered line
 /// as a forced supplement (no message queueing).
 fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), AttachError> {
-    println!(
-        "{ANSI_BRIGHT_TIMEM}{TIMEM_LOGO}{ANSI_RESET} {ANSI_DIM}attach ·{ANSI_RESET} {} {ANSI_DIM}({}){ANSI_RESET}",
-        session.display_name, session.session_id
-    );
     let initial_restart_decision = session.restart_cwd_decision.clone();
-    println!(
-        "{ANSI_DIM}空闲时输入即提交新 turn；working 时作为 supplement 注入。命令：提示出现时按数字 1/2(/3) 回车即可选择；!c 取消正在跑的 turn，!s 停止 session；Ctrl+C 仅断开 attach。{ANSI_RESET}"
-    );
-    print_attach_prompt();
     let token_query = host
         .token
         .as_deref()
@@ -743,13 +566,6 @@ fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), At
     let mut turn_views = AttachTurnViews::default();
     let mut pending_decisions: Vec<PendingDecision> = Vec::new();
     let mut restart_cwd_decision: Option<Value> = initial_restart_decision;
-    if let Some(decision) = restart_cwd_decision.as_ref() {
-        // The gate blocks all turns; surface it immediately so the user is
-        // never stuck without knowing the valid replies.
-        if let Some(prompt) = restart_cwd_prompt(decision) {
-            println!("{prompt}");
-        }
-    }
     let session_id = session.session_id.clone();
     let mut command_sequence: u64 = 0;
 
@@ -768,16 +584,17 @@ fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), At
                 "1" | "2" | "3" => Some(text.as_str()),
                 _ => None,
             };
-            if let (Some(choice), Some(_)) = (numeric_choice, &restart_cwd_decision) {
-                // Gate menu: 1 = keep session dir, 2 = use host dir.
-                let decision = if choice == "1" {
-                    "keep_session"
-                } else {
-                    "use_runtime"
+            if let Some(decision) =
+                restart_cwd_numeric_decision(&text, restart_cwd_decision.is_some())
+            {
+                let Ok(decision) = decision else {
+                    close_dots();
+                    println!("{}", invalid_restart_choice_card(&text));
+                    print_attach_prompt();
+                    continue;
                 };
-                command_sequence += 0; // counted above
                 let message = json!({
-                    "command_id": format!("attach_{}_{}", std::process::id(), command_sequence),
+                    "command_id": command_id,
                     "type": "session_restart_cwd_resolve",
                     "session_id": session_id,
                     "decision": decision,
@@ -859,9 +676,8 @@ fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), At
                 })
             } else {
                 if text.starts_with('!') {
-                    println!(
-                            "[no pending request; ignored {text}. valid: !y !n !a (decisions), !r !k (restart cwd), !c (cancel running turn), !s (stop session)]"
-                        );
+                    close_dots();
+                    println!("{}", invalid_command_card(&text));
                     continue;
                 }
                 json!({
@@ -890,7 +706,7 @@ fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), At
                 if !handle_wire_event(
                     host,
                     &text,
-                    &session_id,
+                    session,
                     &mut turn_views,
                     &mut pending_decisions,
                     &mut restart_cwd_decision,
@@ -899,7 +715,8 @@ fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), At
                 }
             }
             Ok(Message::Close(_)) => {
-                println!("{}", dim_line("[attach disconnected]"));
+                close_dots();
+                println!("{}", disconnected_card(None));
                 return Ok(());
             }
             Ok(_) => {}
@@ -912,7 +729,8 @@ fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), At
             Err(other) => {
                 // A quiet socket after detach input ends the loop naturally.
                 if input_rx.try_recv().is_err() && !ws.can_read() {
-                    println!("{}", dim_line("[attach disconnected]"));
+                    close_dots();
+                    println!("{}", disconnected_card(None));
                     return Ok(());
                 }
                 // Capacity/protocol errors never recover on retry; surface
@@ -923,7 +741,11 @@ fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), At
                         | tungstenite::Error::Protocol(_)
                         | tungstenite::Error::Utf8
                 ) {
-                    println!("[attach error] {other}");
+                    close_dots();
+                    println!(
+                        "{}",
+                        disconnected_card(Some(&format!("WebSocket protocol error: {other}")))
+                    );
                     return Ok(());
                 }
                 thread::sleep(Duration::from_millis(50));
@@ -936,11 +758,12 @@ fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), At
 fn handle_wire_event(
     host: &HostEndpoint,
     text: &str,
-    session_id: &str,
+    session: &AttachSession,
     turn_views: &mut AttachTurnViews,
     pending_decisions: &mut Vec<PendingDecision>,
     restart_cwd_decision: &mut Option<Value>,
 ) -> bool {
+    let session_id = session.session_id.as_str();
     let Ok(value) = serde_json::from_str::<Value>(text) else {
         return true;
     };
@@ -954,7 +777,7 @@ fn handle_wire_event(
             };
             handle_wire_event_inner(
                 &inner,
-                session_id,
+                session,
                 turn_views,
                 pending_decisions,
                 restart_cwd_decision,
@@ -995,6 +818,8 @@ fn handle_wire_event(
                     close_dots();
                     println!("  {line}");
                 }
+            } else if let Some(line) = worker_event_summary(&payload) {
+                println!("  {line}");
             }
             true
         }
@@ -1006,7 +831,7 @@ fn handle_wire_event(
                     .get("error")
                     .and_then(Value::as_str)
                     .unwrap_or("unknown");
-                println!("[rejected] {error}");
+                println!("{}", rejected_command_card(error));
                 if error == "session_restart_cwd_decision_required"
                     && restart_cwd_decision.is_none()
                 {
@@ -1038,7 +863,11 @@ fn handle_wire_event(
                     } else {
                         println!(
                             "{}",
-                            dim_line("[hint] reply !r (switch session to host dir) or !k (keep session dir)")
+                            guidance_card(
+                                "Working-directory choice required",
+                                "The authoritative choice could not be reloaded.",
+                                "Reply `!r` to use the Host directory or `!k` to keep the session directory.",
+                            )
                         );
                     }
                 }
@@ -1053,14 +882,18 @@ fn handle_wire_event(
                 .and_then(Value::as_str)
                 .unwrap_or("");
             if !error.is_empty() {
-                println!("[host error] {error}");
+                println!("{}", host_error_card(error));
             }
             if error == "session_restart_cwd_decision_required" && restart_cwd_decision.is_none() {
                 // The gate state lives in the authoritative snapshot; refetch
                 // is not available here, so tell the user the valid replies.
                 println!(
                     "{}",
-                    dim_line("[hint] restart cwd decision pending; reply !r (use host dir) or !k (keep session dir)")
+                    guidance_card(
+                        "Working-directory choice required",
+                        "The Host is waiting for a restored-session directory choice.",
+                        "Reply `!r` to use the Host directory or `!k` to keep the session directory.",
+                    )
                 );
             }
             true
@@ -1108,11 +941,12 @@ fn handle_turn_finished(value: &Value, turn_views: &mut AttachTurnViews) {
 #[allow(clippy::type_complexity)]
 fn handle_wire_event_inner(
     inner: &Value,
-    session_id: &str,
+    session: &AttachSession,
     turn_views: &mut AttachTurnViews,
     pending_decisions: &mut Vec<PendingDecision>,
     restart_cwd_decision: &mut Option<Value>,
 ) -> bool {
+    let session_id = session.session_id.as_str();
     let event_type = inner.get("type").and_then(Value::as_str).unwrap_or("");
     match event_type {
         "hello" => {
@@ -1130,22 +964,17 @@ fn handle_wire_event_inner(
                 return true;
             };
             let working = target.get("state").and_then(Value::as_str) == Some("working");
+            close_dots();
+            println!("{}", connected_intro(session, working));
             if let Some(decision) = target.get("restart_cwd_decision") {
                 let decision = decision.clone();
                 if let Some(prompt) = restart_cwd_prompt(&decision) {
                     println!("{prompt}");
                 }
                 *restart_cwd_decision = Some(decision);
+            } else {
+                *restart_cwd_decision = None;
             }
-            println!(
-                "{}",
-                dim_line(if working {
-                    "[attached] session is working"
-                } else {
-                    "[attached] session is idle"
-                })
-            );
-            print_attach_prompt();
             if let Some(turns) = target.get("turns").and_then(Value::as_array) {
                 if let Some(latest) = turns.last() {
                     let turn_id = latest
@@ -1157,6 +986,7 @@ fn handle_wire_event_inner(
                     view.render_turn(latest, pending_decisions);
                 }
             }
+            print_attach_prompt();
             true
         }
         "session_restart_cwd_resolved" => {
@@ -1167,7 +997,7 @@ fn handle_wire_event_inner(
                 == Some(session_id)
                 && restart_cwd_decision.take().is_some()
             {
-                println!("{}", dim_line("[restart cwd resolved]"));
+                println!("{}", dim_line("Working directory updated."));
             }
             true
         }
@@ -1195,7 +1025,9 @@ fn handle_wire_event_inner(
         }
         "host_error" => {
             let error = inner.get("error").and_then(Value::as_str).unwrap_or("");
-            println!("[host error] {error}");
+            if !error.is_empty() {
+                println!("{}", host_error_card(error));
+            }
             true
         }
         // semantic_event-wrapped streaming traffic: mid-turn Core actions and
@@ -1237,44 +1069,6 @@ mod tests {
                 "request": request,
             },
         })
-    }
-
-    #[test]
-    fn decision_request_prompt_renders_approval() {
-        let payload = decision_payload(
-            "core.user.approval.request",
-            json!({
-                "action": "run",
-                "command": "cargo test",
-                "risk": "medium",
-            }),
-        );
-        let prompt = decision_request_prompt(&payload).expect("approval prompt");
-        assert!(prompt.contains("approve run: cargo test"));
-        assert!(prompt.contains("risk: medium"));
-        assert!(prompt.contains("!y"));
-        assert!(prompt.contains("!n"));
-        assert!(prompt.contains("!a"));
-    }
-
-    #[test]
-    fn decision_request_prompt_ignores_non_expecting_topics() {
-        let mut payload = decision_payload(
-            "core.user.approval.request",
-            json!({"action": "run", "command": "ls"}),
-        );
-        payload["topic"]["attributes"]["expects_reply"] = json!(false);
-        assert!(decision_request_prompt(&payload).is_none());
-    }
-
-    #[test]
-    fn decision_request_prompt_renders_round_limit() {
-        let payload = decision_payload(
-            "core.user.round_limit.request",
-            json!({"recharge_rounds": 8}),
-        );
-        let prompt = decision_request_prompt(&payload).expect("round limit prompt");
-        assert!(prompt.contains("8 more rounds"));
     }
 
     #[test]
@@ -1333,92 +1127,17 @@ mod tests {
     }
 
     #[test]
-    fn action_detail_shows_command_and_status() {
-        let payload = json!({
-            "action": "run_bash",
-            "event": "start",
-            "status": "running",
-            "input": {"cmd": "cargo build --release"},
-        });
-        let line = action_detail(&payload).expect("action detail");
-        let plain: String = strip_ansi(&line);
-        assert_eq!(plain, "> run_bash `cargo build --release` running");
-    }
-
-    #[test]
-    fn action_detail_marks_failed_status_in_red() {
-        let payload = json!({
-            "action": "run_bash",
-            "event": "finish",
-            "status": "error",
-            "input": {"cmd": "false"},
-        });
-        let line = action_detail(&payload).expect("action detail");
-        assert!(line.contains(ANSI_FAIL));
-    }
-
-    #[test]
-    fn restart_cwd_prompt_lists_both_dirs_and_replies() {
-        let decision = json!({
-            "runtime_cwd": "/host/dir",
-            "session_cwd": "/session/dir",
-            "session_cwd_available": true,
-        });
-        let prompt = restart_cwd_prompt(&decision).expect("prompt");
-        assert!(prompt.contains("/host/dir"));
-        assert!(prompt.contains("/session/dir"));
-        assert!(prompt.contains("!r"));
-        assert!(prompt.contains("!k"));
-    }
-
-    #[test]
-    fn user_echo_matches_shell_style() {
-        let echo = format_user_echo("你好");
-        assert!(echo.contains("You ❯❯"));
-        assert!(echo.ends_with("你好"));
-    }
-
-    fn strip_ansi(text: &str) -> String {
-        let mut out = String::new();
-        let mut chars = text.chars();
-        while let Some(c) = chars.next() {
-            if c == '\x1b' {
-                for c in chars.by_ref() {
-                    if c.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            } else {
-                out.push(c);
-            }
-        }
-        out
-    }
-
-    #[test]
-    fn action_detail_truncates_long_commands() {
-        let long_cmd = "x".repeat(200);
-        let payload = json!({
-            "action": "run_bash",
-            "event": "finish",
-            "status": "ok",
-            "input": {"cmd": long_cmd},
-        });
-        let line = action_detail(&payload).expect("action detail");
-        assert!(line.contains("..."));
-        assert!(line.chars().count() < 200);
-    }
-
-    #[test]
-    fn topic_summary_passes_through_non_action_topics() {
-        let payload = json!({
-            "topic": {"name": "core.model_health"},
-            "event": "degraded",
-        });
+    fn restart_cwd_gate_accepts_only_its_two_numbered_choices() {
         assert_eq!(
-            topic_summary(&payload),
-            Some("- [core.model_health] degraded".to_string())
+            restart_cwd_numeric_decision("1", true),
+            Some(Ok("keep_session"))
         );
+        assert_eq!(
+            restart_cwd_numeric_decision("2", true),
+            Some(Ok("use_runtime"))
+        );
+        assert_eq!(restart_cwd_numeric_decision("3", true), Some(Err(())));
+        assert_eq!(restart_cwd_numeric_decision("3", false), None);
     }
 
     #[test]
