@@ -94,6 +94,7 @@ fn forced_compaction_preserves_native_history_and_restricts_model_request() {
         delta_id: "pd_1".to_string(),
         assistant_text: "old tool work".to_string(),
         calls: vec![NativeToolCall {
+            assistant_continuation: None,
             id: "call_old".to_string(),
             name: "readfile".to_string(),
             arguments: serde_json::json!({"path":"large.txt"}),
@@ -122,7 +123,7 @@ fn forced_compaction_preserves_native_history_and_restricts_model_request() {
     assert!(!request_prompt.contains("Long-context maintenance:"));
     assert!(!request_prompt.contains("target_dynamic_context_ratio"));
     assert!(request_prompt
-        .ends_with("Context is too long. Compact context as the tool context_compact desc suggests. Your tool calls must start with context_compact:"));
+        .ends_with("Context is too long. Compact context as the tool context_compact desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compact:"));
     let request = core.model_interaction_request(request_prompt);
     assert_eq!(request.tool_choice, NativeToolChoice::Required);
     assert!(request
@@ -157,6 +158,7 @@ fn native_final_keeps_structured_tool_history_before_final_replay() {
         delta_id: "pd_1".to_string(),
         assistant_text: "I will inspect it.".to_string(),
         calls: vec![NativeToolCall {
+            assistant_continuation: None,
             id: "call_read".to_string(),
             name: "readfile".to_string(),
             arguments: serde_json::json!({"path":"README.md"}),
@@ -183,6 +185,7 @@ fn native_final_keeps_structured_tool_history_before_final_replay() {
     let step = core.apply_model_response(LlmResponse {
         content: String::new(),
         tool_calls: vec![crate::NativeToolCall {
+            assistant_continuation: None,
             id: "call_finish".to_string(),
             name: "task_finished".to_string(),
             arguments: serde_json::json!({"summary": "Final answer based on PROJECT-EVIDENCE-42"}),
@@ -240,6 +243,7 @@ fn dynamic_context_estimate_and_shrink_stats_include_native_exchanges() {
         delta_id: "pd_1".to_string(),
         assistant_text: "inspect the large result".to_string(),
         calls: vec![NativeToolCall {
+            assistant_continuation: None,
             id: "call_large".to_string(),
             name: "readfile".to_string(),
             arguments: serde_json::json!({"path":"large.txt"}),
@@ -281,6 +285,7 @@ fn native_exchange_is_discarded_with_its_owning_delta() {
             delta_id: delta_id.to_string(),
             assistant_text: format!("work {call_id}"),
             calls: vec![NativeToolCall {
+                assistant_continuation: None,
                 id: call_id.to_string(),
                 name: "readfile".to_string(),
                 arguments: serde_json::json!({"path": format!("{call_id}.txt")}),
@@ -309,6 +314,7 @@ fn native_exchange_is_included_when_owning_delta_is_offloaded() {
         delta_id: "pd_1".to_string(),
         assistant_text: "inspect evidence".to_string(),
         calls: vec![NativeToolCall {
+            assistant_continuation: None,
             id: "call_1".to_string(),
             name: "readfile".to_string(),
             arguments: serde_json::json!({"path":"evidence.txt"}),
@@ -408,6 +414,7 @@ fn native_context_compact_persists_summary_after_discarding_all_old_deltas() {
     let step = core.apply_model_response(LlmResponse {
         content: String::new(),
         tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
             id: "call_compact_all".to_string(),
             name: "context_compact".to_string(),
             raw_arguments: arguments.to_string(),
@@ -467,6 +474,7 @@ fn native_context_compact_summary_does_not_depend_on_discarded_owning_delta() {
     let step = core.apply_model_response(LlmResponse {
         content: String::new(),
         tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
             id: "call_compact_owner".to_string(),
             name: "context_compact".to_string(),
             raw_arguments: arguments.to_string(),
@@ -528,6 +536,7 @@ fn each_native_model_interaction_owns_a_distinct_visible_delta() {
         let step = core.apply_model_response(LlmResponse {
             content: String::new(),
             tool_calls: vec![NativeToolCall {
+                assistant_continuation: None,
                 id: call_id.to_string(),
                 name: "self_tool".to_string(),
                 raw_arguments: arguments.to_string(),
@@ -580,6 +589,7 @@ fn native_approval_resume_keeps_exchange_on_the_interaction_delta() {
     let approval = match core.apply_model_response(LlmResponse {
         content: "waiting for approval".to_string(),
         tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
             id: "call_needs_approval".to_string(),
             name: crate::os::local_shell_tool_name().to_string(),
             raw_arguments: arguments.to_string(),
@@ -625,6 +635,7 @@ fn native_approval_resume_keeps_exchange_on_the_interaction_delta() {
     let next = core.apply_model_response(LlmResponse {
         content: String::new(),
         tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
             id: "call_after_approval".to_string(),
             name: "self_tool".to_string(),
             raw_arguments: next_arguments.to_string(),
@@ -653,6 +664,7 @@ fn boundary_only_native_interaction_can_be_offloaded_with_its_exchange() {
     let step = core.apply_model_response(LlmResponse {
         content: String::new(),
         tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
             id: "call_boundary_offload".to_string(),
             name: "self_tool".to_string(),
             raw_arguments: arguments.to_string(),
@@ -689,6 +701,7 @@ fn native_model_interaction_delta_is_an_independent_compaction_unit() {
         let step = core.apply_model_response(LlmResponse {
             content: String::new(),
             tool_calls: vec![NativeToolCall {
+                assistant_continuation: None,
                 id: call_id.to_string(),
                 name: "self_tool".to_string(),
                 raw_arguments: arguments.to_string(),
@@ -737,12 +750,14 @@ fn parallel_native_calls_share_one_model_interaction_delta() {
         content: String::new(),
         tool_calls: vec![
             NativeToolCall {
+                assistant_continuation: None,
                 id: "call_parallel_cwd".to_string(),
                 name: "self_tool".to_string(),
                 raw_arguments: cwd_arguments.to_string(),
                 arguments: cwd_arguments,
             },
             NativeToolCall {
+                assistant_continuation: None,
                 id: "call_parallel_params".to_string(),
                 name: "self_tool".to_string(),
                 raw_arguments: params_arguments.to_string(),
@@ -782,12 +797,14 @@ fn native_context_compact_first_then_executes_later_call_with_correct_id() {
         content: "compacting before continuing".to_string(),
         tool_calls: vec![
             NativeToolCall {
+                assistant_continuation: None,
                 id: "call_compact_first".to_string(),
                 name: "context_compact".to_string(),
                 raw_arguments: compact_arguments.to_string(),
                 arguments: compact_arguments,
             },
             NativeToolCall {
+                assistant_continuation: None,
                 id: "call_after_compact".to_string(),
                 name: "self_tool".to_string(),
                 raw_arguments: cwd_arguments.to_string(),
@@ -815,7 +832,7 @@ fn native_context_compact_first_then_executes_later_call_with_correct_id() {
 }
 
 #[test]
-fn context_compact_live_refs_report_only_surviving_exchanges() {
+fn context_compact_success_hides_ref_details_and_preserves_surviving_exchanges() {
     for native in [false, true] {
         for remove_all in [false, true] {
             let mut core = test_core(&format!("compact_live_refs_{native}_{remove_all}"));
@@ -849,6 +866,7 @@ fn context_compact_live_refs_report_only_surviving_exchanges() {
                 },
                 tool_calls: if native {
                     vec![NativeToolCall {
+                        assistant_continuation: None,
                         id: "call_compact".to_string(),
                         name: "context_compact".to_string(),
                         raw_arguments: arguments.to_string(),
@@ -868,19 +886,10 @@ fn context_compact_live_refs_report_only_surviving_exchanges() {
                 prompt.contains("context compacted successfully."),
                 "{prompt}"
             );
-            assert!(prompt.contains("current_live_delta_refs:"));
-            assert!(
-                !prompt.contains("- delta_id=pd_1 ("),
-                "deleted delta leaked into live refs"
-            );
-            assert_eq!(
-                prompt.contains("- delta_id=pd_2 ("),
-                !remove_all,
-                "{prompt}"
-            );
-            assert!(prompt.contains("missing_ids: none"), "{prompt}");
-            assert!(prompt
-                .contains("already_absent_delta_ids (idempotently ignored): pd_already_absent"));
+            assert!(!prompt.contains("current_live_delta_refs:"), "{prompt}");
+            assert!(!prompt.contains("missing_ids: none"), "{prompt}");
+            assert!(!prompt.contains("pd_already_absent"), "{prompt}");
+            assert!(!prompt.contains(r#""discarded_delta_ids""#), "{prompt}");
             assert_eq!(core.native_exchanges.len(), usize::from(!remove_all));
         }
     }
@@ -905,12 +914,14 @@ fn native_context_compact_after_another_call_is_rejected() {
         content: String::new(),
         tool_calls: vec![
             NativeToolCall {
+                assistant_continuation: None,
                 id: "call_before_compact".to_string(),
                 name: "self_tool".to_string(),
                 raw_arguments: cwd_arguments.to_string(),
                 arguments: cwd_arguments,
             },
             NativeToolCall {
+                assistant_continuation: None,
                 id: "call_compact_second".to_string(),
                 name: "context_compact".to_string(),
                 raw_arguments: compact_arguments.to_string(),
@@ -951,12 +962,14 @@ fn stale_delta_refs_compact_idempotently_succeeds_and_runs_later_calls() {
         content: String::new(),
         tool_calls: vec![
             NativeToolCall {
+                assistant_continuation: None,
                 id: "call_stale_compact".to_string(),
                 name: "context_compact".to_string(),
                 raw_arguments: compact_arguments.to_string(),
                 arguments: compact_arguments,
             },
             NativeToolCall {
+                assistant_continuation: None,
                 id: "call_may_run".to_string(),
                 name: "self_tool".to_string(),
                 raw_arguments: cwd_arguments.to_string(),
@@ -973,8 +986,9 @@ fn stale_delta_refs_compact_idempotently_succeeds_and_runs_later_calls() {
 
     assert!(!prompt.contains("error: invalid_prompt_refs"));
     assert!(prompt.contains("context compacted successfully."));
-    assert!(prompt.contains("already_absent_delta_ids (idempotently ignored): pd_missing"));
-    assert!(prompt.contains("current_live_delta_refs:"));
+    assert!(!prompt.contains("pd_missing"));
+    assert!(!prompt.contains("current_live_delta_refs:"));
+    assert!(!prompt.contains(r#""discarded_delta_ids""#));
     assert!(prompt.contains("ACTIVE STATE"));
 }
 
@@ -996,12 +1010,14 @@ fn prompt_zero_compact_still_fails_closed_and_blocks_later_native_calls() {
         content: String::new(),
         tool_calls: vec![
             NativeToolCall {
+                assistant_continuation: None,
                 id: "call_bad_compact".to_string(),
                 name: "context_compact".to_string(),
                 raw_arguments: compact_arguments.to_string(),
                 arguments: compact_arguments,
             },
             NativeToolCall {
+                assistant_continuation: None,
                 id: "call_must_not_run".to_string(),
                 name: "self_tool".to_string(),
                 raw_arguments: cwd_arguments.to_string(),
@@ -1353,7 +1369,7 @@ fn build_next_prompt_orders_pending_components_without_role_merging() {
     let prompt = core.build_next_prompt();
     let system_first = prompt.find("<RUNTIME>\n\nAction result: run_bash").unwrap();
     let action_result = prompt.find("Action result: run_bash").unwrap();
-    let user = prompt.find("<USER>\n\nnew input").unwrap();
+    let user = prompt.find("\n\nnew input").unwrap();
     let system_second = prompt.find("<RUNTIME>\n\nfound something new").unwrap();
     let assistant = prompt.find("<ASSISTANT>\n\nassistant note").unwrap();
 
@@ -1432,6 +1448,51 @@ fn structured_action_result_ingress_preserves_complete_json_envelope() {
             .map(str::len),
         Some(content.len())
     );
+}
+
+#[test]
+fn model_tool_result_budget_defaults_to_16k_and_accepts_only_system_choices() {
+    let mut core = test_core("model_tool_result_budget_choices");
+    assert_eq!(core.model_tool_result_bytes(), 16 * 1024);
+
+    for max_bytes in [8, 10, 16, 20, 30].map(|kib| kib * 1024) {
+        core.set_model_tool_result_bytes(max_bytes)
+            .expect("documented system choice should be accepted");
+        assert_eq!(core.model_tool_result_bytes(), max_bytes);
+    }
+
+    for invalid in [0, 9 * 1024, 32 * 1024] {
+        assert_eq!(
+            core.set_model_tool_result_bytes(invalid).unwrap_err(),
+            "model_tool_result_bytes_invalid"
+        );
+    }
+}
+
+#[test]
+fn selected_model_tool_result_budget_bounds_complete_action_envelope() {
+    let action = ParsedAction {
+        action: "readfile".to_string(),
+        name: None,
+        call_id: "budgeted_readfile".to_string(),
+        raw_input: json!({"path": "large.txt"}),
+    };
+    let outcome = ActionOutcome::completed("x".repeat(64 * 1024));
+    let mut core = test_core("selected_model_tool_result_budget");
+
+    for max_bytes in [8, 10, 16, 20, 30].map(|kib| kib * 1024) {
+        core.set_model_tool_result_bytes(max_bytes).unwrap();
+        let envelope = core.format_action_outcome(&action, &outcome);
+        assert!(
+            envelope.len() <= max_bytes,
+            "{} byte envelope exceeded {} byte setting",
+            envelope.len(),
+            max_bytes
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&envelope).expect("budgeting must preserve valid JSON");
+        assert_eq!(parsed["action_result"]["tool_call_id"], "budgeted_readfile");
+    }
 }
 
 #[test]
@@ -2176,8 +2237,25 @@ fn multiple_successful_compacts_emit_one_minimal_runtime_confirmation() {
     assert!(!prompt.contains("Active MCP capabilities after context compaction"));
     assert_eq!(prompt.matches(r#""action_result":"#).count(), 2);
     assert_eq!(prompt.matches(r#""status":"completed""#).count(), 2);
-    assert!(prompt.contains(r#""discarded_delta_ids":"#));
-    assert!(prompt.contains(r#""tool_output":{"content":"#));
+    assert!(!prompt.contains(r#""discarded_delta_ids""#));
+    assert!(!prompt.contains("removed_delta_count:"));
+    assert!(!prompt.contains("current_live_delta_refs:"));
+    for envelope in prompt
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|value| value.get("action_result").is_some())
+    {
+        assert_eq!(
+            envelope["action_result"]["runtime_metadata"]["status"],
+            "completed"
+        );
+        assert!(envelope["action_result"]["runtime_metadata"]
+            .get("discarded_delta_ids")
+            .is_none());
+        assert!(envelope["action_result"]["runtime_metadata"]
+            .get("offloaded_delta_ids")
+            .is_none());
+    }
     assert!(!prompt.contains(r#""scratch_id":"#));
     assert_eq!(
         prompt
@@ -2187,6 +2265,53 @@ fn multiple_successful_compacts_emit_one_minimal_runtime_confirmation() {
         "compacting the active catalog must persist exactly one replacement catalog: {prompt}"
     );
     assert!(prompt.contains("mcp_test__echo"));
+}
+
+#[test]
+fn successful_compact_does_not_reinject_large_discard_id_lists() {
+    let mut core = test_core("compact_result_stays_small");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    for index in 0..96 {
+        core.append_delta(vec![(
+            "user_question".to_string(),
+            format!("stale compact payload {index}"),
+        )]);
+    }
+    let discard = core
+        .deltas
+        .iter()
+        .map(|delta| delta.delta_id.clone())
+        .collect::<Vec<_>>();
+    let last_discarded = discard.last().cloned().unwrap();
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: serde_json::json!({
+            "context_compact": {
+                "discard": discard,
+                "summary": "Only the active compacted state remains."
+            }
+        })
+        .to_string(),
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("context compact should continue with a model request")
+    };
+
+    assert!(
+        prompt.contains("context compacted successfully."),
+        "{prompt}"
+    );
+    assert!(prompt.contains(r#""status":"completed""#), "{prompt}");
+    assert!(!prompt.contains(r#""discarded_delta_ids""#), "{prompt}");
+    assert!(!prompt.contains(r#""offloaded_delta_ids""#), "{prompt}");
+    assert!(!prompt.contains("removed_delta_count:"), "{prompt}");
+    assert!(!prompt.contains("current_live_delta_refs:"), "{prompt}");
+    assert!(!prompt.contains(&last_discarded), "{prompt}");
+    assert!(!prompt.contains("stale compact payload"), "{prompt}");
 }
 
 #[test]
@@ -2894,7 +3019,7 @@ fn literal_resume_text_stays_user_authored() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("## USER\n\nuser resume directly"));
+    assert!(prompt.contains("\n\nuser resume directly"));
     assert!(!prompt.contains("## USER (user resume directly)"));
     assert!(prompt.find("Existing startup context").unwrap() < prompt.find("## USER\n").unwrap());
 }
@@ -2937,22 +3062,19 @@ fn periodic_reasoning_review_triggers_after_round_interval_with_enough_messages(
             "user_input",
         );
     }
-    for _ in 0..35 {
-        let prompt = core.build_next_prompt();
-        assert!(!prompt.contains(prompt_render::REASONING_REVIEW_TRAILER));
+    for _ in 0..34 {
+        let base = core.build_next_prompt();
+        let prompt = core.build_model_request_prompt(&base);
+        assert!(!prompt.contains(prompt_render::REASONING_INTENSITY_UPGRADE_TRAILER));
         assert!(!core.reasoning_critical());
     }
-    let prompt = core.build_next_prompt();
-    assert!(prompt.contains(prompt_render::REASONING_REVIEW_TRAILER));
-    assert_eq!(
-        prompt
-            .matches(prompt_render::REASONING_REVIEW_TRAILER)
-            .count(),
-        1
-    );
+    let base = core.build_next_prompt();
+    let prompt = core.build_model_request_prompt(&base);
+    assert!(!prompt.contains(prompt_render::REASONING_INTENSITY_UPGRADE_TRAILER));
     assert!(core.reasoning_critical());
-    let prompt = core.build_next_prompt();
-    assert!(!prompt.contains(prompt_render::REASONING_REVIEW_TRAILER));
+    let base = core.build_next_prompt();
+    let prompt = core.build_model_request_prompt(&base);
+    assert!(!prompt.contains(prompt_render::REASONING_INTENSITY_UPGRADE_TRAILER));
     assert!(!core.reasoning_critical());
 }
 
@@ -2968,8 +3090,9 @@ fn periodic_reasoning_review_requires_enough_messages() {
         );
     }
     for _ in 0..40 {
-        let prompt = core.build_next_prompt();
-        assert!(!prompt.contains(prompt_render::REASONING_REVIEW_TRAILER));
+        let base = core.build_next_prompt();
+        let prompt = core.build_model_request_prompt(&base);
+        assert!(!prompt.contains(prompt_render::REASONING_INTENSITY_UPGRADE_TRAILER));
     }
     assert!(!core.reasoning_critical());
 }
@@ -3273,6 +3396,7 @@ fn model_prompt_reports_setsid_escaped_process_as_runtime_info() {
 
     let inputs = crate::runtime_info::RuntimeInfoInputs {
         fallback_processes: vec![crate::runtime_info::FallbackProcessSnapshot {
+            notes: crate::os::process_observation_note(escapee),
             pid: escapee,
             process_name: "bash".to_string(),
             zombie: false,
@@ -3521,4 +3645,212 @@ fn normal_background_exit_does_not_emit_job_killed() {
         || (Vec::new(), Vec::new()),
     );
     assert!(!prompt.contains("JOB_KILLED"), "{prompt}");
+}
+
+#[test]
+fn aggregate_process_scope_is_one_shot_and_rearmed_after_compaction() {
+    let mut core = test_core("aggregate_process_scope_prompt");
+    core.current_session_id = Some("session-a".to_string());
+    core.process_scope_snapshot_override = Some(crate::os::ProcessAggregateScopeSnapshot {
+        runtime_observation_note: "cgroup: /sys/fs/cgroup/timem.jobs/runtime-test".into(),
+        session_observation_note: "cgroup: /sys/fs/cgroup/timem.jobs/runtime-test/session-opaque"
+            .into(),
+    });
+
+    let first = core.build_next_prompt();
+    assert_eq!(
+        first.matches("PROCESS_AGGREGATE_SCOPES:").count(),
+        1,
+        "{first}"
+    );
+    assert!(first.contains("Runtime process scope: cgroup: /sys/fs/cgroup/timem.jobs/runtime-test"));
+    assert!(first.contains("Current Session process scope: cgroup: /sys/fs/cgroup/timem.jobs/runtime-test/session-opaque"));
+    assert!(
+        !first.contains("session-a"),
+        "raw Session id leaked: {first}"
+    );
+
+    let second = core.build_next_prompt();
+    assert_eq!(
+        second.matches("PROCESS_AGGREGATE_SCOPES:").count(),
+        1,
+        "{second}"
+    );
+
+    let scope_delta = core
+        .deltas
+        .iter()
+        .find(|delta| {
+            prompt_render::render_delta_slices(delta)
+                .iter()
+                .any(|slice| slice.text.contains("PROCESS_AGGREGATE_SCOPES:"))
+        })
+        .expect("scope prompt delta")
+        .delta_id
+        .clone();
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    let arguments = serde_json::json!({
+        "discard": [scope_delta],
+        "summary": "Keep active work",
+    });
+    let step = core.apply_model_response(LlmResponse {
+        content: serde_json::json!({"context_compact": arguments}).to_string(),
+        tool_calls: Vec::new(),
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("successful compaction must continue")
+    };
+    assert_eq!(
+        prompt.matches("PROCESS_AGGREGATE_SCOPES:").count(),
+        1,
+        "{prompt}"
+    );
+    assert!(prompt.contains("runtime-test/session-opaque"), "{prompt}");
+}
+
+#[test]
+fn process_decision_reports_preserve_observation_paths() {
+    use crate::runtime_info::*;
+    let report = jobmanager_report(&RuntimeInfoInputs {
+        running: vec![RunningJobSnapshot {
+            pid: 42,
+            tool_call_id: "call".into(),
+            command: "work".into(),
+            cwd: "/tmp".into(),
+            created_at_ms: 0,
+            elapsed_ms: 200_000,
+            notes: "cgroup: /sys/fs/cgroup/job-test".into(),
+        }],
+        stale_process_scopes: vec![StaleProcessScopeSnapshot {
+            owner_pid: 7,
+            notes: "cgroup: /sys/fs/cgroup/stale-test".into(),
+        }],
+        fallback_processes: vec![FallbackProcessSnapshot {
+            pid: 9,
+            process_name: "worker".into(),
+            zombie: false,
+            notes: "cgroup membership: /proc/9/cgroup".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    for path in [
+        "/sys/fs/cgroup/job-test",
+        "/sys/fs/cgroup/stale-test",
+        "/proc/9/cgroup",
+    ] {
+        assert!(report.contains(path), "{report}");
+    }
+}
+
+#[test]
+fn compaction_prompts_include_reasoning_guidance_on_repeated_builds() {
+    for manual in [false, true] {
+        let mut core = test_core("compact_reasoning_guidance");
+        if manual {
+            core.request_manual_context_compact();
+        } else {
+            core.context_compact_required = true;
+        }
+        for _ in 0..2 {
+            let prompt = core.build_next_prompt();
+            assert!(core.reasoning_critical());
+            assert_eq!(prompt.matches("Use this reasoning pass").count(), 1);
+            assert!(prompt.contains("Your tool calls must start with context_compact:"));
+            assert_eq!(
+                prompt.contains("User manually requests context compaction"),
+                manual
+            );
+            let (body, trailer) = prompt_render::split_formatted_response_trailer(&prompt);
+            assert!(!body.contains("Use this reasoning pass"));
+            assert!(trailer.unwrap().contains("Use this reasoning pass"));
+        }
+    }
+}
+
+#[test]
+fn reasoning_counts_actual_request_preparation_not_prompt_rebuilds() {
+    let mut core = test_core("reasoning_dispatch");
+    for i in 0..31 {
+        core.submit_prompt_component(
+            PromptComponentRole::User,
+            "user_question",
+            format!("message {i}"),
+            "user_input",
+        );
+    }
+    for _ in 0..80 {
+        core.build_next_prompt();
+    }
+    assert!(!core.reasoning_critical());
+    for request in 1..=70 {
+        // Tool continuation paths render directly, without build_next_prompt.
+        let base = core.render_prompt();
+        let prompt = core.build_model_request_prompt(&base);
+        let interaction = core.model_interaction_request(prompt.clone());
+        assert_eq!(
+            interaction.critical_reasoning,
+            request % 35 == 0,
+            "request {request}"
+        );
+        assert!(!prompt.contains(prompt_render::REASONING_INTENSITY_UPGRADE_TRAILER));
+    }
+    core.request_manual_context_compact();
+    let base = core.build_next_prompt();
+    let prompt = core.build_model_request_prompt(&base);
+    assert!(core.model_interaction_request(prompt).critical_reasoning);
+}
+
+#[test]
+fn dynamic_context_estimate_counts_tool_only_deltas_and_excludes_orphans() {
+    let mut core = test_core("native_tool_only_token_estimate");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "small text delta".to_string(),
+    )]);
+    core.native_exchanges.push(NativeExchange {
+        delta_id: "pd_1".to_string(),
+        assistant_text: "inspect the large result".to_string(),
+        calls: vec![NativeToolCall {
+            assistant_continuation: None,
+            id: "call_large".to_string(),
+            name: "readfile".to_string(),
+            arguments: serde_json::json!({"path":"large.txt"}),
+            raw_arguments: r#"{"path":"large.txt"}"#.to_string(),
+        }],
+        results: vec![NativeToolResult {
+            call_id: "call_large".to_string(),
+            name: "readfile".to_string(),
+            content: "NATIVE-EVIDENCE-".repeat(1_000),
+            is_error: false,
+        }],
+    });
+
+    core.deltas[0].slices.clear();
+    let expected_native = estimate_native_exchange_tokens(&core.native_exchanges[0]);
+    let mut orphan = core.native_exchanges[0].clone();
+    orphan.delta_id = "pd_absent".into();
+    core.native_exchanges.push(orphan);
+    let before = core.dynamic_context_token_estimate();
+    assert_eq!(before.visible_delta_count, 1);
+    assert_eq!(before.native_tokens, expected_native);
+    assert_eq!(before.text_tokens, 0);
+    assert!(before.native_tokens > before.text_tokens);
+    assert_eq!(
+        core.dynamic_context_summary().estimated_tokens,
+        before.total_tokens()
+    );
+
+    let result = core.apply_prompt_shrink(&["pd_1".to_string()], &[]);
+
+    assert_eq!(core.dynamic_context_summary().estimated_tokens, 0);
+    assert_eq!(core.current_stats.shrunk_tokens, before.total_tokens());
+    assert!(result.contains(&format!(
+        "shrunk_tokens_estimate: {}",
+        before.total_tokens()
+    )));
 }

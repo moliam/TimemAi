@@ -528,6 +528,16 @@ impl HttpModelClient {
         should_cancel: &mut dyn FnMut() -> bool,
         mut on_content: Option<&mut dyn FnMut(&serde_json::Value)>,
     ) -> Result<LlmResponse, String> {
+        crate::model_catalog::validate_request(config, &http_request.model_request.body)?;
+        crate::model_api::validate_reasoning_wire(
+            config.api_protocol,
+            &http_request.model_request.body,
+        )?;
+        crate::model_payload::validate_request(
+            config,
+            &http_request.model_request.body,
+            http_request.model_request.critical_reasoning,
+        )?;
         let first = self.execute_model_http_request(
             config,
             &http_request,
@@ -661,7 +671,10 @@ impl ModelClient for HttpModelClient {
         // separately configured TIMEM_STREAM flag: the browser preference only
         // controls presentation, while transport streaming is Core-owned.
         let mut streaming_config = config.clone();
-        if streaming_config.api_protocol == ApiProtocol::OpenAiCompatible {
+        if matches!(
+            streaming_config.api_protocol,
+            ApiProtocol::OpenAiCompatible | ApiProtocol::OpenAiResponses
+        ) {
             streaming_config.openai_compatible.stream = true;
         }
         let http_request = prepare_model_interaction_http_request(&streaming_config, request);

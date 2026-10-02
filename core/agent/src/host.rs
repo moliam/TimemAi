@@ -1799,6 +1799,13 @@ pub trait TurnUi {
         false
     }
 
+    /// Consumes only a pending tool-result budget update. This narrow hook may
+    /// run after a model response has arrived and immediately before its tool
+    /// results are formatted, without applying unrelated model/runtime changes.
+    fn take_model_tool_result_bytes_update(&mut self) -> Option<usize> {
+        None
+    }
+
     fn on_model_request(&mut self, _round: u32, _prompt: &str) {}
 
     fn on_model_interaction_request(
@@ -1818,6 +1825,12 @@ pub trait TurnUi {
         _api_payload: &serde_json::Value,
     ) {
         self.on_model_interaction_request(round, request);
+    }
+
+    fn on_reasoning_upgrade(
+        &mut self,
+        _upgrade: Option<crate::model_requirements::ReasoningUpgrade>,
+    ) {
     }
 
     fn on_model_request_completed(&mut self, _latency: Duration) {}

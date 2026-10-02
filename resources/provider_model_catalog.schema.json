@@ -1,0 +1,611 @@
+{
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "const": "provider_model_catalog.schema.json"
+    },
+    "schema_version": {
+      "const": 2
+    },
+    "kind": {
+      "const": "timem.provider_model_catalog"
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "activation": {
+      "const": "runtime_supported"
+    },
+    "coverage": {
+      "const": "specified_model_pages_only"
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/model"
+      },
+      "minItems": 1
+    }
+  },
+  "required": [
+    "$schema",
+    "schema_version",
+    "kind",
+    "revision",
+    "activation",
+    "coverage",
+    "models"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Timem provider-model catalog v2 (runtime contract)",
+  "$defs": {
+    "model": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "provider_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "model_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "connection": {
+          "type": "object",
+          "properties": {
+            "default_base_url": {
+              "type": "string",
+              "format": "uri"
+            },
+            "allow_base_url_override": {
+              "const": true
+            },
+            "auth_handler": {
+              "const": "bearer_api_key"
+            }
+          },
+          "required": [
+            "default_base_url",
+            "allow_base_url_override",
+            "auth_handler"
+          ],
+          "additionalProperties": false
+        },
+        "dimensions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dimension"
+          },
+          "minItems": 1
+        },
+        "profiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/profile"
+          },
+          "minItems": 1
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/constraint"
+          }
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "context_window_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            },
+            "max_input_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            },
+            "max_output_tokens": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            },
+            "source_refs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1
+            }
+          },
+          "required": [
+            "context_window_tokens",
+            "max_input_tokens",
+            "max_output_tokens",
+            "source_refs"
+          ],
+          "additionalProperties": false
+        },
+        "documented_facts": {
+          "type": "object",
+          "properties": {
+            "source_refs": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1
+            },
+            "input_modalities": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "text",
+                  "image",
+                  "video",
+                  "file"
+                ]
+              },
+              "minItems": 1
+            },
+            "output_modalities": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "text",
+                  "image"
+                ]
+              },
+              "minItems": 1
+            },
+            "streaming": {
+              "enum": [
+                "supported",
+                "unsupported",
+                "unknown"
+              ]
+            },
+            "default_snapshot": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "source_refs",
+            "input_modalities",
+            "output_modalities",
+            "streaming",
+            "default_snapshot"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "id",
+        "revision",
+        "provider_id",
+        "model_id",
+        "label",
+        "connection",
+        "dimensions",
+        "profiles",
+        "constraints",
+        "limits",
+        "documented_facts"
+      ],
+      "additionalProperties": false
+    },
+    "dimension": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "enum": [
+            "api.protocol",
+            "reasoning.effort"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "const": "enum"
+        },
+        "ordered": {
+          "type": "boolean"
+        },
+        "allow_unset": {
+          "type": "boolean"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "id",
+              "label"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1
+        },
+        "default_policy": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "explicit"
+                },
+                "value": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "source": {
+                  "enum": [
+                    "product"
+                  ]
+                }
+              },
+              "required": [
+                "type",
+                "value",
+                "source"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "official_value": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "fallback": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "const": "middle_option"
+                    },
+                    "candidates": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "minItems": 1,
+                      "uniqueItems": true
+                    },
+                    "even_count": {
+                      "const": "lower"
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "candidates",
+                    "even_count"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "official_value",
+                "fallback"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "handler": {
+          "enum": [
+            "api_protocol",
+            "reasoning_effort"
+          ]
+        },
+        "ui": {
+          "type": "object",
+          "properties": {
+            "group": {
+              "type": "string",
+              "minLength": 1
+            },
+            "order": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "group",
+            "order"
+          ],
+          "additionalProperties": false
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "type",
+        "ordered",
+        "allow_unset",
+        "options",
+        "default_policy",
+        "handler",
+        "ui",
+        "source_refs"
+      ],
+      "additionalProperties": false
+    },
+    "profile": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "enum": [
+            "openai-responses",
+            "openai-compatible"
+          ]
+        },
+        "route": {
+          "enum": [
+            "/responses",
+            "/chat/completions"
+          ]
+        },
+        "dimension_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        },
+        "function_calling": {
+          "enum": [
+            "supported",
+            "conditional",
+            "unsupported",
+            "unknown"
+          ]
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        },
+        "binding_status": {
+          "enum": [
+            "pending_api_reference_review",
+            "api_reference_reviewed"
+          ]
+        },
+        "bindings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "dimension": {
+                "const": "reasoning.effort"
+              },
+              "handler": {
+                "enum": [
+                  "enum_body_field",
+                  "zhipu_chat_reasoning"
+                ]
+              },
+              "path": {
+                "enum": [
+                  "/reasoning/effort",
+                  "/reasoning_effort"
+                ]
+              }
+            },
+            "required": [
+              "dimension",
+              "handler",
+              "path"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1
+        },
+        "default_base_url": {
+          "type": "string",
+          "format": "uri",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "protocol",
+        "route",
+        "dimension_ids",
+        "function_calling",
+        "source_refs",
+        "binding_status",
+        "bindings"
+      ],
+      "additionalProperties": false
+    },
+    "constraint": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "when": {
+          "type": "object",
+          "properties": {
+            "all": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "dimension": {
+                        "const": "api.protocol"
+                      },
+                      "equals": {
+                        "enum": [
+                          "openai-compatible",
+                          "openai-responses"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "dimension",
+                      "equals"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "context": {
+                        "const": "tool_mode"
+                      },
+                      "equals": {
+                        "enum": [
+                          "native_function_calling",
+                          "text_protocol",
+                          "none"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "context",
+                      "equals"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "minItems": 1
+            }
+          },
+          "required": [
+            "all"
+          ],
+          "additionalProperties": false
+        },
+        "effects": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "const": "fixed_selection"
+                  },
+                  "dimension": {
+                    "const": "reasoning.effort"
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "send_policy": {
+                    "const": "explicit"
+                  }
+                },
+                "required": [
+                  "type",
+                  "dimension",
+                  "value",
+                  "send_policy"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "const": "disable_option"
+                  },
+                  "dimension": {
+                    "const": "api.protocol"
+                  },
+                  "value": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "type",
+                  "dimension",
+                  "value"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "minItems": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_refs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "id",
+        "when",
+        "effects",
+        "reason",
+        "source_refs"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

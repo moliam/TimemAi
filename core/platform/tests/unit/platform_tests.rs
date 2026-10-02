@@ -765,11 +765,19 @@ fn linux_process_safety_cleanup_removes_empty_current_runtime_scopes() {
     let runtime_path = session_path.parent().expect("runtime parent").to_path_buf();
     drop(job);
 
-    cleanup_process_safety_net();
     assert!(!job_path.exists(), "empty Job scope must be removed");
     assert!(
+        session_path.exists(),
+        "Session aggregate scope must remain until Runtime cleanup"
+    );
+    assert!(
+        runtime_path.exists(),
+        "Runtime aggregate scope must remain until Runtime cleanup"
+    );
+    cleanup_process_safety_net();
+    assert!(
         !session_path.exists(),
-        "empty Session scope must be removed"
+        "empty Session scope must be removed during Runtime cleanup"
     );
     if runtime_path.exists() {
         assert!(
@@ -780,6 +788,48 @@ fn linux_process_safety_cleanup_removes_empty_current_runtime_scopes() {
             "an empty current Runtime scope must be removed"
         );
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_process_aggregate_scope_snapshot_exposes_runtime_and_opaque_session_directories() {
+    let raw_session_id = format!("aggregate-private-session-{}", std::process::id());
+    let snapshot = match process_aggregate_scope_snapshot(&raw_session_id) {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => panic!("Linux must expose its cgroup aggregate scopes"),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied
+                    | std::io::ErrorKind::Unsupported
+                    | std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::ReadOnlyFilesystem
+            ) =>
+        {
+            eprintln!("skipping real aggregate cgroup-v2 test: {error}");
+            return;
+        }
+        Err(error) => panic!("create aggregate process scopes: {error}"),
+    };
+    let runtime = PathBuf::from(
+        snapshot
+            .runtime_observation_note
+            .strip_prefix("cgroup: ")
+            .expect("runtime cgroup prefix"),
+    );
+    let session = PathBuf::from(
+        snapshot
+            .session_observation_note
+            .strip_prefix("cgroup: ")
+            .expect("session cgroup prefix"),
+    );
+    assert!(runtime.is_dir(), "{}", runtime.display());
+    assert!(session.is_dir(), "{}", session.display());
+    assert_eq!(session.parent(), Some(runtime.as_path()));
+    assert!(runtime.join("cgroup.procs").is_file());
+    assert!(session.join("cgroup.procs").is_file());
+    assert!(!snapshot.runtime_observation_note.contains(&raw_session_id));
+    assert!(!snapshot.session_observation_note.contains(&raw_session_id));
 }
 
 #[cfg(target_os = "linux")]
@@ -852,4 +902,14 @@ fn linux_managed_process_job_contains_and_kills_setsid_descendants() {
     assert!(job.is_empty().expect("read final populated state"));
     wait_until_linux_process_stops(escapee_pid, std::time::Duration::from_secs(2));
     std::fs::remove_dir_all(root).expect("remove cgroup test directory");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_process_observation_note_points_to_readable_membership() {
+    let pid = std::process::id();
+    let note = crate::process_observation_note(pid);
+    assert!(note.contains(&format!("/proc/{pid}/cgroup")));
+    assert!(std::fs::read_to_string(format!("/proc/{pid}/cgroup")).is_ok());
+    assert!(note.contains("not task ownership"));
 }

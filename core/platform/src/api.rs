@@ -428,6 +428,19 @@ pub struct FallbackProcessSnapshot {
     pub zombie: bool,
 }
 
+/// Read-only diagnostic entry point; this does not establish task ownership.
+pub fn process_observation_note(pid: u32) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        format!("proc: /proc/{pid}; cgroup membership: /proc/{pid}/cgroup (observation only, not task ownership)")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        String::new()
+    }
+}
+
 /// Current descendants being watched by the Runtime fallback chain because
 /// no registered direct-child owner remains.
 pub fn fallback_process_snapshots() -> Vec<FallbackProcessSnapshot> {
@@ -442,6 +455,22 @@ pub fn fallback_process_snapshots() -> Vec<FallbackProcessSnapshot> {
         .collect();
     #[cfg(not(unix))]
     Vec::new()
+}
+
+/// Current Runtime and Session aggregate process-observation scopes.
+/// Linux creates stable empty cgroup-v2 parent directories above per-Job
+/// leaves. Other platforms return `Ok(None)` until they provide an equivalent
+/// native read-only observation scope.
+pub fn process_aggregate_scope_snapshot(
+    session_id: &str,
+) -> std::io::Result<Option<crate::ProcessAggregateScopeSnapshot>> {
+    #[cfg(target_os = "linux")]
+    return crate::linux::process_aggregate_scope_snapshot(session_id).map(Some);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = session_id;
+        Ok(None)
+    }
 }
 
 /// Previous Runtime scopes for this exact Session that still contain live

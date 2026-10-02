@@ -158,6 +158,24 @@ fn formatted_response_trailer_is_not_cached_or_merged_into_delta() {
 }
 
 #[test]
+fn higher_reasoning_intensity_trailer_is_an_uncached_final_block() {
+    let prompt = format!(
+        "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\ndelta1\n[END DELTA]\n\n{}",
+        crate::prompt_render::REASONING_INTENSITY_UPGRADE_TRAILER,
+    );
+
+    let blocks = plan_prompt_cache(&prompt);
+    assert_eq!(
+        blocks.last().unwrap().text,
+        crate::prompt_render::REASONING_INTENSITY_UPGRADE_TRAILER
+    );
+    assert_eq!(blocks.last().unwrap().cache, CacheControl::None);
+    assert!(!blocks[blocks.len() - 2]
+        .text
+        .contains("stronger reasoning than the normal H0 baseline"));
+}
+
+#[test]
 fn temporary_repair_delta_is_not_cache_controlled() {
     let prompt = format!(
             "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nnormal delta\n[END DELTA]\n[BEGIN DELTA]\ndelta_id: temp_repair_123_1\n\n## TIMEM_ASSISTANT\nwrong\n\n## RUNTIME\nrepair\n[END DELTA]\n\n{}",

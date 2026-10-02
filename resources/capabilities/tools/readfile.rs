@@ -1,5 +1,8 @@
 use crate::response_protocol::ParsedAction;
-use crate::{ActionOutcome, AgentCore, ReadfileResultEvidence};
+use crate::{
+    ActionOutcome, AgentCore, ReadfileResultEvidence, DEFAULT_MODEL_TOOL_RESULT_BYTES,
+    MAX_MODEL_TOOL_RESULT_BYTES,
+};
 use encoding_rs::{Encoding, UTF_8};
 use serde_json::Value;
 use std::fs::{self, File, OpenOptions};
@@ -13,8 +16,6 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub const DEFAULT_MAX_BYTES: usize = 32 * 1024;
-pub const MAX_RETURN_BYTES: usize = 32 * 1024;
 pub const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_MATCH_BYTES: usize = 64 * 1024;
@@ -171,24 +172,36 @@ fn readfile_error_evidence(
 }
 
 pub(crate) fn execute_action_outcome(core: &AgentCore, action: &ParsedAction) -> ActionOutcome {
-    execute_with_timeout_outcome(
+    execute_with_timeout_outcome_and_limit(
         core.current_prompt_cwd(),
         &action.raw_input,
         DEFAULT_TIMEOUT,
+        core.model_tool_result_bytes(),
     )
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn execute_with_timeout_outcome(
     cwd: &Path,
     input: &Value,
     timeout: Duration,
 ) -> ActionOutcome {
+    execute_with_timeout_outcome_and_limit(cwd, input, timeout, DEFAULT_MODEL_TOOL_RESULT_BYTES)
+}
+
+pub(crate) fn execute_with_timeout_outcome_and_limit(
+    cwd: &Path,
+    input: &Value,
+    timeout: Duration,
+    runtime_read_budget: usize,
+) -> ActionOutcome {
     let cwd = cwd.to_path_buf();
     let input = input.clone();
+    let runtime_read_budget = runtime_read_budget.min(MAX_MODEL_TOOL_RESULT_BYTES);
     let path = input_path(&input).unwrap_or("<unknown>").to_string();
     let (sender, receiver) = mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let outcome = execute_outcome(&cwd, &input);
+        let outcome = execute_outcome_with_limit(&cwd, &input, runtime_read_budget);
         let _ = sender.send(outcome);
     });
 
@@ -228,7 +241,19 @@ pub fn execute(cwd: &Path, input: &Value) -> String {
 }
 
 pub(crate) fn execute_outcome(cwd: &Path, input: &Value) -> ActionOutcome {
-    match execute_inner(cwd, input) {
+    execute_outcome_with_limit(cwd, input, DEFAULT_MODEL_TOOL_RESULT_BYTES)
+}
+
+fn execute_outcome_with_limit(
+    cwd: &Path,
+    input: &Value,
+    runtime_read_budget: usize,
+) -> ActionOutcome {
+    match execute_inner(
+        cwd,
+        input,
+        runtime_read_budget.min(MAX_MODEL_TOOL_RESULT_BYTES),
+    ) {
         Ok(result) => ActionOutcome::completed(result.text).with_readfile_result(result.evidence),
         Err(error) => {
             let path = input_path(input).unwrap_or("<unknown>");
@@ -239,14 +264,18 @@ pub(crate) fn execute_outcome(cwd: &Path, input: &Value) -> ActionOutcome {
     }
 }
 
-fn execute_inner(cwd: &Path, input: &Value) -> Result<ReadfileSuccess, ReadfileError> {
+fn execute_inner(
+    cwd: &Path,
+    input: &Value,
+    runtime_read_budget: usize,
+) -> Result<ReadfileSuccess, ReadfileError> {
     let object = input.as_object().ok_or_else(|| {
         ReadfileError::new("invalid_input", "The readfile input must be an object.")
     })?;
     if let Some(field) = object.keys().find(|field| {
         !matches!(
             field.as_str(),
-            "path" | "encoding" | "starter" | "ender" | "max_bytes" | "tail_out"
+            "path" | "encoding" | "starter" | "ender" | "tail_out"
         )
     }) {
         return Err(ReadfileError::new(
@@ -265,7 +294,6 @@ fn execute_inner(cwd: &Path, input: &Value) -> Result<ReadfileSuccess, ReadfileE
         ));
     }
 
-    let max_bytes = parse_max_bytes(object.get("max_bytes"))?;
     let tail_out = parse_tail_out(object.get("tail_out"))?;
     let starter = parse_selector(object.get("starter"), "starter")?;
     let ender = parse_selector(object.get("ender"), "ender")?;
@@ -325,7 +353,9 @@ fn execute_inner(cwd: &Path, input: &Value) -> Result<ReadfileSuccess, ReadfileE
     } else {
         floor_char_boundary(
             text,
-            requested_start.saturating_add(max_bytes).min(text.len()),
+            requested_start
+                .saturating_add(runtime_read_budget)
+                .min(text.len()),
         )
     };
     let (requested_end, match_window_limited) = resolve_end(
@@ -347,7 +377,9 @@ fn execute_inner(cwd: &Path, input: &Value) -> Result<ReadfileSuccess, ReadfileE
     }
 
     let (start, end) = if tail_out {
-        let earliest = requested_end.saturating_sub(max_bytes).max(requested_start);
+        let earliest = requested_end
+            .saturating_sub(runtime_read_budget)
+            .max(requested_start);
         (
             ceil_char_boundary(text, earliest),
             floor_char_boundary(text, requested_end),
@@ -442,25 +474,6 @@ fn parse_tail_out(value: Option<&Value>) -> Result<bool, ReadfileError> {
     value
         .as_bool()
         .ok_or_else(|| ReadfileError::new("invalid_tail_out", "`tail_out` must be a boolean."))
-}
-
-fn parse_max_bytes(value: Option<&Value>) -> Result<usize, ReadfileError> {
-    let Some(value) = value else {
-        return Ok(DEFAULT_MAX_BYTES);
-    };
-    let Some(value) = value.as_u64() else {
-        return Err(ReadfileError::new(
-            "invalid_max_bytes",
-            "`max_bytes` must be a positive integer.",
-        ));
-    };
-    if value == 0 || value > MAX_RETURN_BYTES as u64 {
-        return Err(ReadfileError::new(
-            "invalid_max_bytes",
-            format!("`max_bytes` must be between 1 and {}.", MAX_RETURN_BYTES),
-        ));
-    }
-    Ok(value as usize)
 }
 
 fn parse_encoding_label(value: Option<&Value>) -> Result<Option<&str>, ReadfileError> {
@@ -644,7 +657,14 @@ fn resolve_start(
         Some(Selector::Line(line)) => line_start(text, *line).ok_or_else(|| {
             ReadfileError::new(
                 "start_line_not_found",
-                format!("Starter line {line} does not exist."),
+                format!(
+                    "Starter line {line} does not exist. File has {} lines.",
+                    if text.is_empty() {
+                        0
+                    } else {
+                        selected_end_line(text, 0, text.len())
+                    }
+                ),
             )
         }),
         Some(Selector::Byte(byte)) => {
@@ -707,7 +727,7 @@ fn resolve_end(
                 ReadfileError::new(
                     "end_match_not_found",
                     format!(
-                        "Ender match {} was not found after the start within the max_bytes window.",
+                        "Ender match {} was not found after the start within the bounded read window.",
                         quote(pattern)
                     ),
                 )

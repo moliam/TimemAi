@@ -9,9 +9,9 @@ pub(crate) const RESPONSE_TRAILER: &str =
     "Please continue the work and respond as protocol requires in user's language:";
 pub(crate) const NATIVE_RESPONSE_TRAILER: &str = "Continue the work and express thought in the user's language.  Use tools smartly. When all work is genuinely done, call the task_finished tool with the complete final answer as its summary:";
 pub(crate) const CONTEXT_COMPACT_REQUIRED_TRAILER: &str =
-    "Context is too long. Compact context as the tool context_compact desc suggests. Your tool calls must start with context_compact:";
+    "Context is too long. Compact context as the tool context_compact desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compact:";
 pub(crate) const MANUAL_CONTEXT_COMPACT_TRAILER: &str =
-    "User manually requests context compaction. Compact context as the tool context_compact desc suggests, before further work. Your tool calls must start with context_compact:";
+    "User manually requests context compaction. Compact context as the tool context_compact desc suggests, before further work. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compact:";
 const NATIVE_PROTOCOL_SECTION: &str = "## Tool Calling\n\nCapabilities are provided through the model API. Call them through the API tool-call channel. You may request independent calls together. Text accompanying calls is a user-visible progress note. A response without tool calls does not finish the turn; explicitly call the task_finished tool with the final answer to end it. `context_compact` may be followed by other capability calls in the same response, but it must be the first call. Later calls run only after compaction succeeds.";
 const NATIVE_RESPONSE_MODE_INSTRUCTION: &str = "Use the API tool-call channel for runtime capabilities. Ordinary response text is user-visible, you should report to user your progress often, or answer questions while working; text without tool calls keeps the loop running; call task_finished to end it.";
 const INLINE_RESPONSE_MODE_INSTRUCTION: &str =
@@ -21,7 +21,11 @@ const NATIVE_BUILTIN_TOOL_DESCRIPTIONS_HEADING: &str =
     "## Built-in Tool Descriptions\n\nBuilt-in tool parameter schemas are provided separately through the model API. One response can reasonably contain multiple tool calls for better performance.";
 pub(crate) const MAX_ACTION_RESULT_PROMPT_BYTES: usize =
     tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES;
-pub(crate) const REASONING_REVIEW_TRAILER: &str = "Note: reasoning effort is enabled for this request, while most work rounds run without it. Take advantage of this reasoning pass to review current work, update or adjust the work direction/plan if needed, and express in remarks as appropriate.";
+pub(crate) const REASONING_INTENSITY_UPGRADE_TRAILER: &str = "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. Please continue the work and respond as protocol requires in user's language:";
+pub(crate) const NATIVE_REASONING_INTENSITY_UPGRADE_TRAILER: &str = "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. Continue the work and express thought in the user's language. Use tools smartly. When all work is genuinely done, call the task_finished tool with the complete final answer as its summary:";
+const LEGACY_REASONING_REVIEW_TRAILER: &str = "Note: reasoning effort is enabled for this request, while most work rounds run without it. Take advantage of this reasoning pass to review current work, update or adjust the work direction/plan if needed, and express in remarks as appropriate.";
+pub(crate) const REASONING_UPGRADED_CONTEXT_COMPACT_TRAILER: &str = "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. Context is too long. Compact context as the tool context_compact desc suggests. Carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compact:";
+pub(crate) const REASONING_UPGRADED_MANUAL_CONTEXT_COMPACT_TRAILER: &str = "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. User manually requests context compaction. Compact context as the tool context_compact desc suggests, before further work. Carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compact:";
 
 pub(crate) fn is_structured_action_result_envelope(text: &str) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text.trim()) else {
@@ -48,7 +52,7 @@ pub(crate) fn truncate_action_result_for_prompt(text: &str) -> String {
     if is_structured_action_result_envelope(text) {
         text.to_string()
     } else {
-        tool_result_gate::gate(text, Retention::Head)
+        tool_result_gate::fit(text, MAX_ACTION_RESULT_PROMPT_BYTES, Retention::Head)
     }
 }
 
@@ -59,6 +63,17 @@ pub(crate) fn formatted_response_trailer(
     RESPONSE_TRAILER.to_string()
 }
 
+pub(crate) fn apply_reasoning_intensity_upgrade_trailer(rendered_prompt: &str) -> String {
+    let (body, trailer) = split_formatted_response_trailer(rendered_prompt);
+    let upgraded_trailer = match trailer.as_deref() {
+        Some(CONTEXT_COMPACT_REQUIRED_TRAILER) => REASONING_UPGRADED_CONTEXT_COMPACT_TRAILER,
+        Some(MANUAL_CONTEXT_COMPACT_TRAILER) => REASONING_UPGRADED_MANUAL_CONTEXT_COMPACT_TRAILER,
+        Some(NATIVE_RESPONSE_TRAILER) => NATIVE_REASONING_INTENSITY_UPGRADE_TRAILER,
+        _ => REASONING_INTENSITY_UPGRADE_TRAILER,
+    };
+    format!("{}\n\n{}", body.trim_end(), upgraded_trailer)
+}
+
 pub(crate) fn split_formatted_response_trailer(rendered_prompt: &str) -> (&str, Option<String>) {
     let trimmed = rendered_prompt.trim_end();
     for trailer in [
@@ -66,7 +81,11 @@ pub(crate) fn split_formatted_response_trailer(rendered_prompt: &str) -> (&str, 
         NATIVE_RESPONSE_TRAILER,
         CONTEXT_COMPACT_REQUIRED_TRAILER,
         MANUAL_CONTEXT_COMPACT_TRAILER,
-        REASONING_REVIEW_TRAILER,
+        REASONING_INTENSITY_UPGRADE_TRAILER,
+        NATIVE_REASONING_INTENSITY_UPGRADE_TRAILER,
+        REASONING_UPGRADED_CONTEXT_COMPACT_TRAILER,
+        REASONING_UPGRADED_MANUAL_CONTEXT_COMPACT_TRAILER,
+        LEGACY_REASONING_REVIEW_TRAILER,
     ] {
         let marker = format!("\n\n{trailer}");
         if let Some(trailer_start) = trimmed.strip_suffix(&marker).map(str::len) {
@@ -171,9 +190,9 @@ fn render_prompt_context_structure(
         "Each `<prompt_delta>` is an outer dynamic transport container that may wrap `<USER>`, \
 `<ASSISTANT>`, and `<RUNTIME>` entries in chronological order. Initial \
 user input uses `<USER>` and later input in the same turn uses \
-`<USER kind=\"supplement\">`. Explicit direct resume uses `<USER kind=\"user resume directly\">` with an empty body. User-kind attributes describe structured behavior, not user-authored text. Restart/supporting context precedes the user entry; later runtime observations remain after it. Static system content is separate in `<Timem System Prompt>`."
+`<USER kind=\"supplement\">`. Explicit direct resume uses `<USER kind=\"user resume directly\">` with an empty body. User-kind attributes describe structured behavior, not user-authored text. Readable UTC input timestamps annotate non-empty user questions and supplements only, never synthetic transport messages. Restart/supporting context precedes the user entry; later runtime observations remain after it. Static system content is separate in `<Timem System Prompt>`."
     } else {
-        "A dynamic delta starts with `[BEGIN DELTA delta_id: <id>, time_ms: <time>]` and extends through every following provider-native message until the next BEGIN DELTA marker or the end of the current model input. Deltas are transport batches, not user turns. Initial user input uses `## USER`; later input in the same turn uses `## USER (supplement)`. Explicit direct resume uses the header `## USER (user resume directly)` with an empty body (XML: `<USER kind=\"user resume directly\">`). These annotations describe structured user behavior, not user-authored text. Restart/supporting context precedes the user entry; later runtime observations remain after it. There is no END DELTA marker. Static system content is enclosed separately by the system-prompt boundaries."
+        "A dynamic delta starts with `[BEGIN DELTA delta_id: <id>]` and extends through every following provider-native message until the next BEGIN DELTA marker or the end of the current model input. Deltas are transport batches, not user turns. Initial user input uses `## USER`; later input in the same turn uses `## USER (supplement)`. Explicit direct resume uses the header `## USER (user resume directly)` with an empty body (XML: `<USER kind=\"user resume directly\">`). These annotations describe structured user behavior, not user-authored text. Readable UTC input timestamps annotate non-empty user questions and supplements only, never synthetic transport messages. Restart/supporting context precedes the user entry; later runtime observations remain after it. There is no END DELTA marker. Static system content is enclosed separately by the system-prompt boundaries."
     }
 }
 
@@ -448,6 +467,27 @@ pub(crate) fn append_rendered_deltas_for_mode(
                 out.push('\n');
                 last_role = Some(role);
                 last_was_action_result = false;
+            }
+            // Semantic input kinds, not provider message roles: native transport
+            // uses user messages for synthetic delta separators too.
+            if matches!(
+                slice.prompt_type.as_str(),
+                "user_question" | "user_supplement"
+            ) && !slice.text.trim().is_empty()
+            {
+                if let Ok(time) =
+                    time::OffsetDateTime::from_unix_timestamp(slice.time_ms.div_euclid(1000))
+                {
+                    out.push_str(&format!(
+                        "\n[User input time: {:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC]\n",
+                        time.year(),
+                        time.month() as u8,
+                        time.day(),
+                        time.hour(),
+                        time.minute(),
+                        time.second()
+                    ));
+                }
             }
             let is_action_result = is_action_result_prompt_type(&slice.prompt_type);
             if is_action_result && !last_was_action_result {

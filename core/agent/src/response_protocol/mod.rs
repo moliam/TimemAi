@@ -91,13 +91,13 @@ impl PromptBoundarySpec {
         }
     }
 
-    pub fn render_delta_open(self, delta_id: &str, time_ms: i64) -> String {
+    pub fn render_delta_open(self, delta_id: &str, _time_ms: i64) -> String {
         match self.delta_boundary {
             PromptDeltaBoundary::Bracketed => {
-                format!("[BEGIN DELTA delta_id: {delta_id}, time_ms: {time_ms}]\n")
+                format!("[BEGIN DELTA delta_id: {delta_id}]\n")
             }
             PromptDeltaBoundary::XmlElement => {
-                format!("<prompt_delta id=\"{delta_id}\" time_ms=\"{time_ms}\">\n")
+                format!("<prompt_delta id=\"{delta_id}\">\n")
             }
         }
     }
@@ -122,7 +122,10 @@ impl PromptBoundarySpec {
                 let first_line = segment.lines().next().unwrap_or_default();
                 if let Some(rest) = first_line.strip_prefix(self.delta_start_marker()) {
                     let rest = rest.strip_prefix("delta_id:")?.trim_start();
-                    let (id, _) = rest.split_once(',')?;
+                    let id = rest
+                        .split_once(',')
+                        .map(|(id, _)| id)
+                        .unwrap_or(rest.strip_suffix(']')?);
                     let id = id.trim();
                     return (!id.is_empty()).then(|| id.to_string());
                 }

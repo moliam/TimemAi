@@ -223,7 +223,11 @@ impl ManagedShellJob {
             session_id: self.session_id.clone(),
             turn_id: self.turn_id.clone(),
             created_at_ms: self.created_at_ms,
-            notes: String::new(),
+            notes: self
+                .process_job
+                .as_ref()
+                .and_then(|job| job.observation_note())
+                .unwrap_or_else(|| crate::os::process_observation_note(self.pid)),
         }
     }
 

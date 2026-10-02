@@ -51,6 +51,7 @@ pub struct RunningJobSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FallbackProcessSnapshot {
+    pub notes: String,
     pub pid: u32,
     pub process_name: String,
     pub zombie: bool,
@@ -58,6 +59,7 @@ pub struct FallbackProcessSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StaleProcessScopeSnapshot {
+    pub notes: String,
     pub owner_pid: u32,
 }
 
@@ -189,7 +191,7 @@ pub fn jobmanager_report(inputs: &RuntimeInfoInputs) -> Option<String> {
 
     if !inputs.fallback_processes.is_empty() {
         let mut table = String::from(
-            "unowned child processes:\n\n| pid | process | state | model decision |\n|---:|---|---|---|",
+            "unowned child processes:\n\n| pid | process | state | model decision | notes |\n|---:|---|---|---|---|",
         );
         for process in &inputs.fallback_processes {
             let name = process.process_name.replace('|', "\\|").replace('\n', " ");
@@ -201,8 +203,12 @@ pub fn jobmanager_report(inputs: &RuntimeInfoInputs) -> Option<String> {
             };
             let _ = writeln!(
                 table,
-                "\n| {} | `{}` | `{}` | {} |",
-                process.pid, name, state, decision
+                "\n| {} | `{}` | `{}` | {} | {} |",
+                process.pid,
+                name,
+                state,
+                decision,
+                process.notes.replace('|', "\\|").replace('\n', " ")
             );
         }
         table.push_str(
@@ -215,14 +221,15 @@ pub fn jobmanager_report(inputs: &RuntimeInfoInputs) -> Option<String> {
         let mut table = String::from(
             "stale process scopes from previous Runtime owners still contain live work:
 
-| previous owner pid | model decision |
-|---:|---|",
+| previous owner pid | model decision | notes |
+|---:|---|---|",
         );
         for scope in &inputs.stale_process_scopes {
             let _ = writeln!(
                 table,
-                "\n| {} | inspect residual processes, then preserve or terminate explicitly |",
-                scope.owner_pid
+                "\n| {} | inspect residual processes, then preserve or terminate explicitly | {} |",
+                scope.owner_pid,
+                scope.notes.replace('|', "\\|").replace('\n', " ")
             );
         }
         table.push_str(
@@ -334,14 +341,16 @@ mod tests {
                 elapsed_ms: 70_000,
                 notes: String::new(),
             }],
-            stale_process_scopes: vec![StaleProcessScopeSnapshot { owner_pid: 7 }],
+            stale_process_scopes: vec![StaleProcessScopeSnapshot { owner_pid: 7, notes: "cgroup: /sys/fs/cgroup/test-stale".into() }],
             fallback_processes: vec![
                 FallbackProcessSnapshot {
+                    notes: "cgroup membership: /proc/77/cgroup".into(),
                     pid: 77,
                     process_name: "worker-helper".into(),
                     zombie: false,
                 },
                 FallbackProcessSnapshot {
+                    notes: "cgroup membership: /proc/78/cgroup".into(),
                     pid: 78,
                     process_name: "dead-helper".into(),
                     zombie: true,

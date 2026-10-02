@@ -57,6 +57,85 @@ fn test_config() -> ModelServiceConfig {
     }
 }
 
+#[test]
+fn higher_than_h0_trailer_is_injected_only_for_a_real_reasoning_upgrade() {
+    use crate::model_requirements::EndpointRequirements;
+
+    let mut config = test_config();
+    config.openai_compatible.requirements = EndpointRequirements {
+        version: 1,
+        provider: Some("openai".into()),
+        allowed_reasoning: Some(vec!["low".into(), "high".into(), "max".into()]),
+        adaptive_reasoning: Some(true),
+        ..Default::default()
+    };
+    config.openai_compatible.reasoning_effort = Some("low".into());
+
+    let base = format!("body\n\n{}", crate::prompt_render::RESPONSE_TRAILER);
+    let mut h0_request = crate::ModelInteractionRequest::inline(base.clone());
+    h0_request.critical_reasoning = false;
+    assert_eq!(apply_higher_than_h0_trailer(&config, &mut h0_request), None);
+    assert_eq!(h0_request.rendered_prompt, base);
+
+    let mut upgraded_request = crate::ModelInteractionRequest::inline(base.clone());
+    upgraded_request.critical_reasoning = true;
+    let upgrade = apply_higher_than_h0_trailer(&config, &mut upgraded_request).unwrap();
+    assert_eq!(
+        (upgrade.from.as_str(), upgrade.to.as_str()),
+        ("low", "high")
+    );
+    assert!(upgraded_request
+        .rendered_prompt
+        .ends_with(crate::prompt_render::REASONING_INTENSITY_UPGRADE_TRAILER));
+    assert!(!upgraded_request
+        .rendered_prompt
+        .contains("most work rounds run without it"));
+
+    config.openai_compatible.requirements.adaptive_reasoning = Some(false);
+    let mut non_upgraded_critical = crate::ModelInteractionRequest::inline(base.clone());
+    non_upgraded_critical.critical_reasoning = true;
+    assert_eq!(
+        apply_higher_than_h0_trailer(&config, &mut non_upgraded_critical),
+        None
+    );
+    assert_eq!(non_upgraded_critical.rendered_prompt, base);
+}
+
+#[test]
+fn higher_than_h0_trailer_preserves_context_compaction_protocol() {
+    use crate::model_requirements::EndpointRequirements;
+
+    let mut config = test_config();
+    config.openai_compatible.requirements = EndpointRequirements {
+        version: 1,
+        provider: Some("openai".into()),
+        allowed_reasoning: Some(vec!["low".into(), "high".into(), "max".into()]),
+        adaptive_reasoning: Some(true),
+        ..Default::default()
+    };
+    config.openai_compatible.reasoning_effort = Some("low".into());
+
+    for (source, expected) in [
+        (
+            crate::prompt_render::CONTEXT_COMPACT_REQUIRED_TRAILER,
+            crate::prompt_render::REASONING_UPGRADED_CONTEXT_COMPACT_TRAILER,
+        ),
+        (
+            crate::prompt_render::MANUAL_CONTEXT_COMPACT_TRAILER,
+            crate::prompt_render::REASONING_UPGRADED_MANUAL_CONTEXT_COMPACT_TRAILER,
+        ),
+    ] {
+        let mut request = crate::ModelInteractionRequest::inline(format!("body\n\n{source}"));
+        request.critical_reasoning = true;
+        assert!(apply_higher_than_h0_trailer(&config, &mut request).is_some());
+        assert!(request.rendered_prompt.ends_with(expected));
+        assert!(request
+            .rendered_prompt
+            .ends_with("Your tool calls must start with context_compact:"));
+        assert_eq!(request.rendered_prompt.matches(source).count(), 0);
+    }
+}
+
 fn usage(prompt_tokens: u32, completion_tokens: u32) -> UsageStats {
     UsageStats {
         llm_calls: 1,
@@ -1375,7 +1454,7 @@ fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
     assert_eq!(model.prompts.len(), 3);
     assert!(model.prompts[1].contains("Your action's output is too large:"));
     assert!(model.prompts[1]
-        .ends_with("Context is too long. Compact context as the tool context_compact desc suggests. Your tool calls must start with context_compact:"));
+        .ends_with("Context is too long. Compact context as the tool context_compact desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compact:"));
     assert!(model.prompts[2].contains("context compacted successfully."));
     assert!(model.prompts[1].contains("optimize your action or compact context"));
     assert!(!model.prompts[1].contains(&"0".repeat(1_000)));
@@ -5422,6 +5501,7 @@ impl ModelClient for TruncatedNativeRecoveryModel {
         {
             return Ok(LlmResponse {
                 tool_calls: vec![crate::NativeToolCall {
+                    assistant_continuation: None,
                     id: "probe_0".to_string(),
                     name: "timem_capability_probe".to_string(),
                     arguments: serde_json::json!({"slot": 1}),
@@ -5470,6 +5550,7 @@ impl ModelClient for TruncatedNativeRecoveryModel {
                 }
                 Ok(LlmResponse {
                     tool_calls: vec![crate::NativeToolCall {
+                        assistant_continuation: None,
                         id: "call_small_step".to_string(),
                         name: "run_bash".to_string(),
                         arguments: serde_json::json!({"cmd": "printf 'recovered_value=42\\n'"}),
@@ -5497,6 +5578,7 @@ impl ModelClient for TruncatedNativeRecoveryModel {
                 }
                 Ok(LlmResponse {
                     tool_calls: vec![crate::NativeToolCall {
+                        assistant_continuation: None,
                         id: "call_finish_3".to_string(),
                         name: "task_finished".to_string(),
                         arguments: serde_json::json!({"summary": "恢复成功，分块执行得到正确结果：42。"}),
@@ -5604,6 +5686,7 @@ impl ModelClient for NativeRoundTripModel {
             return Ok(LlmResponse {
                 tool_calls: (0..count)
                     .map(|index| crate::NativeToolCall {
+                        assistant_continuation: None,
                         id: format!("probe_{index}"),
                         name: "timem_capability_probe".to_string(),
                         arguments: serde_json::json!({"slot": index + 1}),
@@ -5639,6 +5722,7 @@ impl ModelClient for NativeRoundTripModel {
         if self.business_calls == 1 {
             return Ok(LlmResponse {
                 tool_calls: vec![crate::NativeToolCall {
+                    assistant_continuation: None,
                     id: "call_count".to_string(),
                     name: "run_bash".to_string(),
                     arguments: serde_json::json!({"cmd": "printf 'Rust 42\\n'"}),
@@ -5675,6 +5759,7 @@ impl ModelClient for NativeRoundTripModel {
         };
         Ok(LlmResponse {
             tool_calls: vec![crate::NativeToolCall {
+                assistant_continuation: None,
                 id: format!("call_finish_{}", self.business_calls),
                 name: "task_finished".to_string(),
                 arguments: serde_json::json!({"summary": summary}),

@@ -138,8 +138,8 @@ fn json_xml_protocols_treat_protocol_language_inside_final_text_as_text() {
 #[test]
 fn json_xml_protocols_parse_readfile_selector_objects() {
     assert_protocols_equivalent(
-        r#"{"free_talk":"reading","working_still_action":{"readfile":{"path":"src/main.rs","encoding":"utf-8","starter":{"line_nr":20},"ender":{"match":"fn main"},"max_bytes":8192}}}"#,
-        "\x3cASSISTANT>\x3cfree_talk>reading\x3c/free_talk>\x3cactions>\x3creadfile name=\"read main source range\" encoding=\"utf-8\" max_bytes=\"8192\">\x3cpath>src/main.rs\x3c/path>\x3cstarter>\x3cline_nr>20\x3c/line_nr>\x3c/starter>\x3cender>\x3cmatch>fn main\x3c/match>\x3c/ender>\x3c/readfile>\x3c/actions>\x3c/ASSISTANT>",
+        r#"{"free_talk":"reading","working_still_action":{"readfile":{"path":"src/main.rs","encoding":"utf-8","starter":{"line_nr":20},"ender":{"match":"fn main"}}}}"#,
+        "\x3cASSISTANT>\x3cfree_talk>reading\x3c/free_talk>\x3cactions>\x3creadfile name=\"read main source range\" encoding=\"utf-8\">\x3cpath>src/main.rs\x3c/path>\x3cstarter>\x3cline_nr>20\x3c/line_nr>\x3c/starter>\x3cender>\x3cmatch>fn main\x3c/match>\x3c/ender>\x3c/readfile>\x3c/actions>\x3c/ASSISTANT>",
     );
 }
 

@@ -18,6 +18,15 @@ pub struct StaleProcessScopeSnapshot {
     pub owner_pid: u32,
 }
 
+/// Read-only aggregate observation locations owned by the current Runtime.
+/// Parent scopes contain no user processes; per-Job child scopes establish
+/// exact ownership. Platform-specific backends may expose no snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessAggregateScopeSnapshot {
+    pub runtime_observation_note: String,
+    pub session_observation_note: String,
+}
+
 impl std::fmt::Debug for ManagedProcessJob {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ManagedProcessJob")

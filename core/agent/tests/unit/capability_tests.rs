@@ -268,10 +268,11 @@ fn readfile_synopsis_is_rendered_in_the_active_response_protocol() {
     let markdown = registry.render_tool_catalog_markdown_for_protocol("Markdown");
     let xml = registry.render_tool_catalog_markdown_for_protocol("XML");
 
-    let json_action = r#"{"readfile":{"path":"src/main.rs","starter":{"line_nr":20},"ender":{"line_nr":80},"max_bytes":32768}}"#;
+    let json_action =
+        r#"{"readfile":{"path":"src/main.rs","starter":{"line_nr":20},"ender":{"line_nr":80}}}"#;
     assert!(json.contains(json_action), "{json}");
     assert!(markdown.contains(json_action), "{markdown}");
-    assert!(xml.contains("<readfile><path>src/main.rs</path><starter><line_nr>20</line_nr></starter><ender><line_nr>80</line_nr></ender><max_bytes>32768</max_bytes></readfile>"), "{xml}");
+    assert!(xml.contains("<readfile><path>src/main.rs</path><starter><line_nr>20</line_nr></starter><ender><line_nr>80</line_nr></ender></readfile>"), "{xml}");
     assert!(
         !json.contains("It is supported on macOS and Linux."),
         "{json}"
@@ -291,6 +292,10 @@ fn readfile_synopsis_is_rendered_in_the_active_response_protocol() {
     );
     assert!(
         readfile_catalog.contains("If args do not match this tool spec"),
+        "{readfile_catalog}"
+    );
+    assert!(
+        !readfile_catalog.contains("max_bytes"),
         "{readfile_catalog}"
     );
     assert!(
@@ -350,6 +355,16 @@ fn registry_validates_required_input_fields_from_manifest() {
         .validate_action_input("readfile", &json_object([]))
         .unwrap_err()
         .contains("input.path_required"));
+    assert!(registry
+        .validate_action_input(
+            "readfile",
+            &json_object([
+                ("path", Value::String("notes.txt".to_string())),
+                ("max_bytes", Value::Number(1.into())),
+            ])
+        )
+        .unwrap_err()
+        .contains("input.max_bytes_unsupported"));
     assert!(registry
         .validate_action_input(
             "self_tool",
@@ -598,6 +613,17 @@ fn registry_derives_validation_rules_from_json_schema_idl() {
     let registry =
         CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
     let catalog = registry.tool_catalog_value();
+    let readfile = catalog
+        .get("readfile")
+        .and_then(Value::as_object)
+        .expect("readfile catalog entry");
+    assert!(
+        readfile["input_schema"]["properties"]
+            .as_object()
+            .is_some_and(|properties| !properties.contains_key("max_bytes")),
+        "{readfile:?}"
+    );
+
     let capmgr = catalog
         .get("capmgr")
         .and_then(Value::as_object)
@@ -733,6 +759,11 @@ fn capmgr_can_list_and_load_skill_content() {
     assert!(loaded.contains("op: load"));
     assert!(loaded.contains("# Release Quality Gate"));
     assert!(loaded.contains("Run the relevant local tests"));
+
+    let loaded_readfile = registry.load_text("tool", "readfile");
+    assert!(loaded_readfile.contains("kind: tool"));
+    assert!(loaded_readfile.contains("#### `readfile`"));
+    assert!(!loaded_readfile.contains("max_bytes"), "{loaded_readfile}");
 
     let loaded_tool = registry.load_text("tool", "run_bash");
     assert!(loaded_tool.contains("kind: tool"));
@@ -1145,9 +1176,17 @@ fn builtin_native_schemas_preserve_runtime_constraints_and_argument_examples() {
     assert_eq!(starter["oneOf"].as_array().unwrap().len(), 3);
     assert_eq!(starter["properties"]["line_nr"]["minimum"], 1);
     assert_eq!(starter["properties"]["byte_nr"]["minimum"], 0);
-    assert_eq!(
-        readfile.input_schema["properties"]["max_bytes"]["maximum"],
-        32768
+    assert!(
+        readfile.input_schema["properties"]
+            .get("max_bytes")
+            .is_none(),
+        "model-visible readfile schema must not expose the internal output budget: {}",
+        readfile.input_schema
+    );
+    assert!(
+        !readfile.description.contains("max_bytes"),
+        "{}",
+        readfile.description
     );
     assert!(readfile.description.contains("Valid argument examples:"));
     assert!(readfile.description.contains(r#""path":"src/main.rs""#));

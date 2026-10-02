@@ -1058,3 +1058,173 @@ fn stream_failure_is_audited_without_response_body() {
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
+
+#[test]
+fn unsupported_reasoning_is_rejected_before_transport_initialization() {
+    let mut config = local_config("127.0.0.1:1".parse().unwrap(), 1);
+    config.api_protocol = ApiProtocol::Anthropic;
+    let mut request = prepare_model_http_request(&config, "hello");
+    request.model_request.body = crate::model_api::build_model_request_with_policy(
+        &config,
+        &[],
+        crate::model_api::StructuredOutputHint::None,
+        &crate::reasoning::EffectiveReasoning::Enabled {
+            intensity: Some("xhigh".into()),
+        },
+    );
+    let mut client = HttpModelClient::default();
+    let audit = test_audit_file("invalid-reasoning");
+    let error = client
+        .execute_prepared_request_with_cache_fallback(&config, request, &audit, &mut || false, None)
+        .unwrap_err();
+    assert!(
+        error.starts_with("unsupported_reasoning_intensity:"),
+        "{error}"
+    );
+    assert!(client.transport.is_none());
+    assert!(!audit.exists());
+}
+
+#[test]
+fn responses_provisional_content_arrives_before_terminal() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+    let first = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"early\"}\n\n";
+    let last = "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"early\"}]}]}}\n\n";
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        read_http_request(&mut socket);
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", first.len() + last.len(), first).unwrap();
+        socket.flush().unwrap();
+        // A causal handshake, not a timing assertion: completion is withheld
+        // until the transport observer has received the first content.
+        observed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        socket.write_all(last.as_bytes()).unwrap();
+    });
+    let mut config = local_config(addr, 10);
+    config.api_protocol = ApiProtocol::OpenAiResponses;
+    config.openai_compatible.stream = true;
+    let request = prepare_model_http_request(&config, "stream test");
+    let mut transport = NativeHttpTransport::new().unwrap();
+    let mut text = String::new();
+    let response = transport
+        .execute(
+            &config,
+            &request,
+            Duration::from_secs(10),
+            &mut || false,
+            Some(&mut |part| {
+                if part["type"] != "response.output_text.delta" {
+                    return;
+                }
+                text.push_str(
+                    part.get("delta")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap(),
+                );
+                observed_tx.send(()).unwrap();
+            }),
+        )
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(text, "early");
+    assert_eq!(
+        interpret_model_http_response(&config, 200, &response.body, "")
+            .result
+            .unwrap()
+            .content,
+        "early"
+    );
+}
+
+#[test]
+fn zhipu_native_stream_tool_roundtrip_over_real_http() {
+    use crate::{
+        ModelClient, NativeExchange, NativeToolChoice, NativeToolResult, ToolCallMode,
+        ToolDefinition,
+    };
+    use serde_json::{json, Value};
+    for suffix in ["5.2", "5.3", "5.3-flash"] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut cfg = local_config(listener.local_addr().unwrap(), 5);
+        cfg.model = format!("glm-{suffix}");
+        cfg.openai_compatible.catalog_id = Some(format!("z-glm{suffix}"));
+        let server = thread::spawn(move || {
+            for round in 0..2 {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let raw = read_http_request(&mut socket);
+                assert!(raw.starts_with("POST /v1/chat/completions "));
+                let request: Value =
+                    serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+                assert_eq!(
+                    request["thinking"],
+                    json!({"type":"enabled","clear_thinking":true})
+                );
+                assert_eq!(request["reasoning_effort"], "max");
+                assert_eq!(request["stream"], true);
+                assert!(request.get("enable_thinking").is_none());
+                assert!(request.get("stream_options").is_none());
+                if round == 1 {
+                    let messages = request["messages"].as_array().unwrap();
+                    let index = messages
+                        .iter()
+                        .position(|m| m["role"] == "assistant")
+                        .unwrap();
+                    assert_eq!(messages[index]["reasoning_content"], "opaque-continuation");
+                    assert_eq!(messages[index + 1]["tool_call_id"], "call_1");
+                    assert_eq!(messages[index + 1]["content"], "fixture-result");
+                }
+                let event = if round == 0 {
+                    json!({"choices":[{"delta":{"reasoning_content":"opaque-continuation","content":"working","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"readfile","arguments":"{}"}}]},"finish_reason":"tool_calls"}]})
+                } else {
+                    json!({"choices":[{"delta":{"content":"finished"},"finish_reason":"stop"}]})
+                };
+                let body = format!("data: {event}\n\ndata: [DONE]\n\n");
+                write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+            }
+        });
+        let mut request = ModelInteractionRequest {
+            rendered_prompt: "[BEGIN DELTA delta_id: pd_1, time_ms: 1]\n\n## USER\nread fixture"
+                .into(),
+            images: vec![],
+            static_tool_count: 1,
+            tools: vec![ToolDefinition {
+                name: "readfile".into(),
+                description: "fixture tool".into(),
+                input_schema: json!({"type":"object","properties":{}}),
+            }],
+            native_exchanges: vec![],
+            resolved_mode: ToolCallMode::Native,
+            parallel_tool_calls: false,
+            tool_choice: NativeToolChoice::Auto,
+            critical_reasoning: false,
+        };
+        let audit = test_audit_file("zhipu-roundtrip");
+        let mut client = HttpModelClient::default();
+        let first = client
+            .call_model_interaction_streaming(&cfg, &request, &audit, &mut || false, &mut |_| {})
+            .unwrap();
+        assert_eq!(first.content, "working");
+        request.native_exchanges.push(NativeExchange {
+            delta_id: "pd_1".into(),
+            assistant_text: first.content,
+            calls: first.tool_calls,
+            results: vec![NativeToolResult {
+                call_id: "call_1".into(),
+                name: "readfile".into(),
+                content: "fixture-result".into(),
+                is_error: false,
+            }],
+        });
+        let last = client
+            .call_model_interaction_streaming(&cfg, &request, &audit, &mut || false, &mut |_| {})
+            .unwrap();
+        assert_eq!(last.content, "finished");
+        server.join().unwrap();
+        let _ = std::fs::remove_file(audit);
+    }
+}

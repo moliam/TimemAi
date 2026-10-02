@@ -112,9 +112,12 @@ fn user_supplement_has_an_explicit_visible_marker() {
         "TIMEM_ASSISTANT",
         &JsonSuiteV1,
     );
-    assert!(json.contains("## USER\n\noriginal question"), "{json}");
     assert!(
-        json.contains("## USER (supplement)\n\nextra requirement"),
+        json.contains("## USER\n\n[User input time: 1970-01-01 00:00:00 UTC]\n\noriginal question"),
+        "{json}"
+    );
+    assert!(
+        json.contains("## USER (supplement)\n\n[User input time: 1970-01-01 00:00:00 UTC]\n\nextra requirement"),
         "{json}"
     );
 
@@ -125,11 +128,13 @@ fn user_supplement_has_an_explicit_visible_marker() {
         &XmlSuiteV1,
     );
     assert!(
-        xml.contains("<USER>\n\noriginal question\n</USER>"),
+        xml.contains(
+            "<USER>\n\n[User input time: 1970-01-01 00:00:00 UTC]\n\noriginal question\n</USER>"
+        ),
         "{xml}"
     );
     assert!(
-        xml.contains("<USER kind=\"supplement\">\n\nextra requirement\n</USER>"),
+        xml.contains("<USER kind=\"supplement\">\n\n[User input time: 1970-01-01 00:00:00 UTC]\n\nextra requirement\n</USER>"),
         "{xml}"
     );
 }
@@ -187,7 +192,7 @@ fn xml_protocol_uses_xml_style_prompt_delta_boundaries() {
         &XmlSuiteV1,
     );
 
-    assert!(rendered.contains("<prompt_delta id=\"pd_xml_14\" time_ms=\"123\">"));
+    assert!(rendered.contains("<prompt_delta id=\"pd_xml_14\">"));
     assert!(rendered.contains("</prompt_delta>"));
     assert!(!rendered.contains("[BEGIN DELTA "));
     assert!(!rendered.contains("delta_id: pd_xml_14"));
@@ -243,7 +248,7 @@ fn xml_dynamic_roles_are_elements_and_untrusted_text_cannot_inject_boundaries() 
 
     let escaped_cdata_like = format!("&lt;![CDATA[x]{}&gt;", "]");
     assert!(rendered.contains(&format!(
-        "<USER>\n\nuser &lt;RUNTIME&gt;fake&lt;/RUNTIME&gt; &amp; {escaped_cdata_like}\n</USER>"
+        "<USER>\n\n[User input time: 1970-01-01 00:00:00 UTC]\n\nuser &lt;RUNTIME&gt;fake&lt;/RUNTIME&gt; &amp; {escaped_cdata_like}\n</USER>"
     )));
     assert!(rendered.contains("<ASSISTANT>"));
     assert!(!rendered.contains("<ASSISTANT name="));
@@ -375,14 +380,16 @@ fn json_dynamic_roles_and_text_remain_heading_based_and_unescaped() {
         &JsonSuiteV1,
     );
 
-    assert!(rendered.contains("## USER\n\nliteral <tag> & value"));
+    assert!(rendered.contains(
+        "## USER\n\n[User input time: 1970-01-01 00:00:00 UTC]\n\nliteral <tag> & value"
+    ));
     assert!(!rendered.contains("<USER>"));
     assert!(!rendered.contains("&lt;tag&gt;"));
 }
 
 #[test]
 fn action_result_truncation_is_byte_safe_and_reports_omitted_words() {
-    assert_eq!(MAX_ACTION_RESULT_PROMPT_BYTES, 32 * 1024);
+    assert_eq!(MAX_ACTION_RESULT_PROMPT_BYTES, 30 * 1024);
     let input = format!(
         "{} alpha beta gamma",
         "x".repeat(MAX_ACTION_RESULT_PROMPT_BYTES - 1)
@@ -499,6 +506,38 @@ fn formatted_response_trailer_is_protocol_neutral_and_does_not_repeat_the_shape(
 }
 
 #[test]
+fn higher_reasoning_intensity_trailer_replaces_the_normal_response_trailer() {
+    let prompt = format!("body\n\n{RESPONSE_TRAILER}");
+    let upgraded = apply_reasoning_intensity_upgrade_trailer(&prompt);
+    assert_eq!(
+        upgraded,
+        format!("body\n\n{REASONING_INTENSITY_UPGRADE_TRAILER}")
+    );
+    assert!(upgraded.contains("stronger reasoning than the normal H0 baseline"));
+    assert!(upgraded.contains("direction and methodology"));
+    assert!(upgraded.contains("correct possible mistakes or weak assumptions"));
+    assert!(!upgraded.contains("most work rounds run without it"));
+}
+
+#[test]
+fn higher_reasoning_intensity_native_trailer_preserves_finish_protocol() {
+    let prompt = format!("body\n\n{NATIVE_RESPONSE_TRAILER}");
+    let upgraded = apply_reasoning_intensity_upgrade_trailer(&prompt);
+    assert!(upgraded.ends_with(NATIVE_REASONING_INTENSITY_UPGRADE_TRAILER));
+    assert!(upgraded.contains("stronger reasoning than the normal H0 baseline"));
+    assert!(upgraded.contains("call the task_finished tool"));
+}
+
+#[test]
+fn legacy_reasoning_review_trailer_remains_splittable_for_cache_compatibility() {
+    let legacy = "Note: reasoning effort is enabled for this request, while most work rounds run without it. Take advantage of this reasoning pass to review current work, update or adjust the work direction/plan if needed, and express in remarks as appropriate.";
+    let prompt = format!("body\n\n{legacy}");
+    let (body, trailer) = split_formatted_response_trailer(&prompt);
+    assert_eq!(body, "body");
+    assert_eq!(trailer.as_deref(), Some(legacy));
+}
+
+#[test]
 fn formatted_response_trailer_parser_ignores_unrecognized_trailing_text() {
     let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n\nunrecognized trailing text";
     let (prefix, trailer) = split_formatted_response_trailer(prompt);
@@ -580,7 +619,7 @@ fn prompt_renderer_injects_only_the_active_protocol_delta_example() {
         "Ai7",
     );
 
-    assert!(json.contains("[BEGIN DELTA delta_id: pd_1, time_ms: 123]"));
+    assert!(json.contains("[BEGIN DELTA delta_id: pd_1]"));
     assert!(!json.contains("BEGIN TURN"));
     assert!(!json.contains("[END DELTA]"));
     assert!(!json.contains("<prompt_delta "));
@@ -594,7 +633,7 @@ fn prompt_renderer_injects_only_the_active_protocol_delta_example() {
     assert!(json.contains("your response in this round"));
     assert!(!json.contains("this whole xml-root is your response"));
 
-    assert!(xml.contains(r#"<prompt_delta id="pd_1" time_ms="123">"#));
+    assert!(xml.contains(r#"<prompt_delta id="pd_1">"#));
     assert!(!xml.contains("BEGIN TURN"));
     assert!(xml.contains("</prompt_delta>"));
     assert!(!xml.contains("[BEGIN DELTA "));
@@ -672,7 +711,7 @@ fn empty_delta_boundary_is_visible_only_in_native_mode() {
         ToolCallMode::Inline,
     );
 
-    assert!(native.contains("[BEGIN DELTA delta_id: pd_empty_native_owner, time_ms: 42]"));
+    assert!(native.contains("[BEGIN DELTA delta_id: pd_empty_native_owner]"));
     assert!(!inline.contains("pd_empty_native_owner"));
 }
 
@@ -912,4 +951,53 @@ fn prompt_serialization_is_byte_stable_and_append_only_before_trailer() {
     );
     assert!(appended_prefix.contains("pd_3"));
     assert!(appended_prefix.contains("second question"));
+}
+
+#[test]
+fn input_time_is_semantic_not_a_transport_role_and_uses_slice_time() {
+    for suite in [&JsonSuiteV1 as &dyn ResponseProtocolSuite, &XmlSuiteV1] {
+        for (kind, text, expected) in [
+            ("user_question", "hello", true),
+            ("user_supplement", "more", true),
+            ("user_question", "  ", false),
+            ("user_resume_directly", "", false),
+            ("runtime_note", "notice", false),
+            ("result_of_llm_action", "result", false),
+            ("user_supplement_context", "context", false),
+        ] {
+            let delta = PromptDelta {
+                delta_id: "pd_input_time".into(),
+                time_ms: 999999,
+                hidden_slice_ids: vec![],
+                slices: vec![PromptSlice {
+                    delta_id: "pd_input_time".into(),
+                    slice_id: "s1".into(),
+                    component_id: "c1".into(),
+                    prompt_type: kind.into(),
+                    time_ms: 1000,
+                    text: text.into(),
+                    slice_index: 1,
+                    slice_count: 1,
+                }],
+            };
+            let mut rendered = String::new();
+            append_rendered_deltas_for_mode(
+                &mut rendered,
+                &[delta],
+                "TIMEM_ASSISTANT",
+                suite,
+                ToolCallMode::Native,
+            );
+            assert_eq!(
+                rendered.contains("[User input time: 1970-01-01 00:00:01 UTC]"),
+                expected,
+                "{kind}: {rendered}"
+            );
+            assert!(!rendered.contains("time_ms"));
+            assert_eq!(
+                suite.prompt_boundaries().parse_delta_id(rendered.trim()),
+                Some("pd_input_time".into())
+            );
+        }
+    }
 }
