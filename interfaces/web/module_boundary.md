@@ -104,7 +104,15 @@ action summary. A recognized structured summary replaces raw parameters only in
 the primary chat row: the expandable disclosure retains the complete redacted
 argument detail supplied by the Host projection. These are Interface affordances
 only and must not reinterpret action status, success, persistence or capability
-semantics. Ordinary and stream presentations share the same identity and summary. Rows
-show status, tool identity and command/argument preview in that order; rows
-with details are the disclosure target themselves, with hover/focus feedback,
+semantics. Ordinary and stream presentations share the same identity and summary. Tool
+surfaces use the locally bundled IBM Plex Mono face, are 90% of the prose width
+on wider viewports (full width on narrow screens), and keep elapsed metadata at
+the right edge. Running rows alone show a muted leading execution dot; successful
+rows omit both the marker and its layout slot so tool identity shifts left and
+returns to the stronger settled color, while failures retain an explicit status.
+Rows with details are the disclosure target themselves, with hover/focus feedback,
 keyboard activation and selection protection rather than a persistent arrow.
+Local-work state uses a reduced-motion-aware swaying wrench; model waiting keeps
+its existing star identity. System notices use their own half-pixel-larger type
+contract, and context-compaction notices are labeled “Conversation compression” /
+“对话压缩”.

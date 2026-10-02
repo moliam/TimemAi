@@ -869,7 +869,6 @@ button:disabled { cursor: not-allowed; }
 .tool-activity summary:hover b,
 .tool-activity summary:focus-visible b { color: #ddd; }
 .tool-activity b { color: #b8b8b8; font-size: 12px; font-weight: 550; }
-.tool-activity-meta { min-width: 0; display: inline-flex; align-items: center; gap: 6px; min-height: 17px; line-height: 17px; white-space: nowrap; }
 .tool-activity-status { color: #747474; font-size: 10px; }
 .tool-activity-countdown { color: #b9a06f; font-size: 10px; font-variant-numeric: tabular-nums; }
 .tool-activity.running .tool-activity-status { color: #a89878; }
@@ -5240,21 +5239,13 @@ body.workspace-modal-open .app-shell { user-select: none; }
   line-height: 1.68;
 }
 .stream-working-trailer { padding: 10px 0; width: 100%; }
-/* Keep the dot's 9x9 box a stable hover/pointer target: the grow animation
-   runs on the ::after pseudo-element so transform scaling never shrinks the
-   hit area (it would drop to ~3.6px at scale(.4), making the tooltip nearly
-   impossible to hover). */
-.stream-working-dot { position: relative; display: block; width: 9px; height: 9px; transition: color .5s ease; }
-.stream-working-dot::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: currentColor; animation: stream-working-grow 1.2s ease-in-out infinite; }
-/* Working dot color follows the work phase: tool-running amber matches the
-   stream tool dot, model-waiting blue matches the frame working pulse. The
-   background-color transition above softens phase switches. */
+/* Local work and model waiting retain distinct colors as well as distinct
+   wrench/star shapes. */
 .stream-working-trailer.tool-active { color: #f1c56f; }
 .stream-working-trailer.model-waiting { color: #3485dc; }
 .stream-working-calls { color: #7794a8; font-size: 11px; font-variant-numeric: tabular-nums; font-weight: 600; }
 :root[data-theme="light"] .stream-working-calls { color: #668397; }
 @keyframes stream-working-grow { 0%, 100% { transform: scale(.4); opacity: .45; } 65% { transform: scale(1); opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { .stream-working-dot::after { animation: none; } }
 .stream-working-star { display: block; width: 9px; text-align: center; font-size: 12px; line-height: 1; color: currentColor; animation: stream-working-grow 1.2s ease-in-out infinite; }
 /* Reduced-motion users get the static star glyph; shape alone still distinguishes model waiting from the amber tool dot. */
 @media (prefers-reduced-motion: reduce) { .stream-working-star { animation: none; } }
@@ -5367,10 +5358,10 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .stream-tool-row.running .stream-tool-status-slot > .stream-tool-status { display: none; }
 .stream-tool-background { color: #98afbc; opacity: .65; }
 
-/* 性能约束：运行提示只保留少量同源动画。侧栏仅在会话可见运行时显示一个与聊天区
-   stream-working-dot 同源的呼吸点（stream-working-grow，仅 transform/opacity，
-   走合成器，不触发布局/重绘），数量以正在运行的会话行数为上限；Worker、工具等
-   随轮内活动增长的重复标记保持静态。浮动/吸顶导航不可重新模糊背后滚动的正文，
+/* 性能约束：运行提示只保留少量合成器动画。侧栏仅在会话可见运行时显示呼吸点
+   （stream-working-grow，仅 transform/opacity），聊天区本地工作只摆动一个 wrench；
+   数量均不随轮内活动增长。Worker、工具等重复标记保持静态。浮动/吸顶导航不可
+   重新模糊背后滚动的正文，
    避免滚动和文字渐显期间重复背景采样。保留正常滚动交互。这是减少无效工作的
    设计约束，不是 WindowServer 或温度降幅承诺；浏览器测试验证侧栏呼吸点与聊天区
    同节拍、重复标记静态和导航无背景模糊。 */
@@ -5824,4 +5815,127 @@ body.workspace-modal-open .app-shell { user-select: none; }
 :root[data-theme="light"] .system-subsection-heading strong { color: #33473f; }
 @media (max-width: 620px) {
   .system-tool-result-options { grid-template-columns: repeat(5, minmax(42px, 1fr)) !important; overflow-x: auto; }
+}
+
+/* Tool rows are deliberately narrower than answer prose. Keep the left edge
+   aligned with the reading column and pull only the right edge inward. */
+.stream-tool-run,
+.tool-activity-group,
+.turn-work-content > .tool-activity {
+  width: 90%;
+  max-width: 90%;
+  margin-right: auto;
+}
+.tool-activity-group-body .tool-activity { width: 100%; max-width: 100%; }
+
+/* Tools use one locally bundled mono face. The half-pixel increase is explicit
+   so changing the global reading-size preference does not erase the hierarchy. */
+.stream-tool-run,
+.tool-activity-group,
+.tool-activity {
+  font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+}
+.stream-tool-head,
+.stream-tool-run-toggle,
+.tool-activity,
+.tool-activity b { font-size: 12.5px; }
+.tool-activity-group,
+.tool-activity-group-status { font-size: 10.5px; }
+.stream-tool-status,
+.stream-tool-elapsed,
+.stream-tool-background,
+.tool-activity-status,
+.tool-activity-background,
+.tool-activity-countdown,
+.tool-activity-duration,
+.tool-activity-command,
+.tool-invocation-preview,
+.file-tool-preview,
+.bash-edit-preview { font-size: 11.5px !important; }
+.stream-tool-command { font: 12px/1.55 "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; }
+.stream-tool-detail,
+.tool-activity-body { font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; font-size: 12.5px; }
+.memory-search-preview code,
+.self-tool-preview code { font-family: inherit; }
+
+/* Running rows alone own a leading execution dot. Completed rows omit the
+   marker/status grid item entirely, so identity shifts all the way left. */
+.tool-activity summary,
+.tool-activity-static { grid-template-columns: max-content minmax(0, 1fr) max-content; }
+.tool-activity.running summary,
+.tool-activity.running.tool-activity-static,
+.tool-activity.terminal-status summary,
+.tool-activity.terminal-status.tool-activity-static { grid-template-columns: 14px max-content minmax(0, 1fr) max-content; }
+.tool-activity-running-marker { width: 14px; height: 17px; display: inline-flex; align-items: center; justify-content: center; }
+.tool-activity-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: #f1c56f; }
+.tool-activity-timing { min-width: 0; display: inline-flex; align-items: center; justify-self: end; gap: 6px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.tool-activity.completed .tool-activity-timing { grid-column: 3; }
+.tool-activity.running .tool-activity-timing,
+.tool-activity.terminal-status .tool-activity-timing { grid-column: 4; }
+.tool-activity.completed .tool-activity-command,
+.tool-activity.completed :is(.file-tool-preview, .bash-edit-preview, .memory-search-preview, .self-tool-preview) { grid-column: 2; }
+.tool-activity.running .tool-activity-command,
+.tool-activity.terminal-status .tool-activity-command,
+.tool-activity.running :is(.file-tool-preview, .bash-edit-preview, .memory-search-preview, .self-tool-preview),
+.tool-activity.terminal-status :is(.file-tool-preview, .bash-edit-preview, .memory-search-preview, .self-tool-preview) { grid-column: 3; }
+.tool-activity.poll-activity .tool-activity-command { grid-column: 1 / -1; }
+
+/* Running metadata is intentionally quiet; settled content returns to the
+   stronger reading color. Failure status keeps its semantic warning color. */
+.stream-tool-row.running .stream-tool-head,
+.stream-tool-row.running .stream-tool-head b,
+.tool-activity.running,
+.tool-activity.running b,
+.tool-activity.running .tool-activity-timing { color: #98afbc; }
+.stream-tool-row:not(.running) .stream-tool-head,
+.stream-tool-row:not(.running) .stream-tool-head b,
+.tool-activity.settled,
+.tool-activity.settled b,
+.tool-activity.settled .tool-activity-timing { color: #d6dee4; }
+.stream-tool-row.running .tool-invocation-preview,
+.tool-activity.running .tool-invocation-preview { opacity: .68; color: inherit; }
+.stream-tool-row:not(.running) .tool-invocation-preview,
+.tool-activity.settled .tool-invocation-preview { opacity: .9; color: inherit; }
+.tool-activity.terminal-status .tool-activity-status { color: #d08181; }
+:root[data-theme="light"] .tool-activity-dot { background: #b07f2e; }
+:root[data-theme="light"] .stream-tool-row.running .stream-tool-head,
+:root[data-theme="light"] .stream-tool-row.running .stream-tool-head b,
+:root[data-theme="light"] .tool-activity.running,
+:root[data-theme="light"] .tool-activity.running b,
+:root[data-theme="light"] .tool-activity.running .tool-activity-timing { color: #687b86; }
+:root[data-theme="light"] .stream-tool-row:not(.running) .stream-tool-head,
+:root[data-theme="light"] .stream-tool-row:not(.running) .stream-tool-head b,
+:root[data-theme="light"] .tool-activity.settled,
+:root[data-theme="light"] .tool-activity.settled b,
+:root[data-theme="light"] .tool-activity.settled .tool-activity-timing { color: #293b43; }
+:root[data-theme="light"] .tool-activity.terminal-status .tool-activity-status { color: #a64f4f; }
+
+/* System-owned notices are a half pixel larger without changing answer prose. */
+.system-notice,
+.turn-work-item.system-notice,
+.toolgen-notice.system-notice { font-size: 10.5px; }
+.toolgen-notice.system-notice > div { font-size: 11.5px; }
+
+/* Local work uses a small side-to-side wrench; model waiting keeps its star. */
+.stream-working-wrench { display: block; flex: none; color: currentColor; transform-origin: 50% 55%; animation: stream-working-wrench-sway 1s ease-in-out infinite; }
+@keyframes stream-working-wrench-sway {
+  0%, 100% { transform: rotate(-18deg); }
+  50% { transform: rotate(18deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stream-working-wrench { animation: none; transform: rotate(-10deg); }
+}
+
+@media (max-width: 720px) {
+  .stream-tool-run,
+  .tool-activity-group,
+  .turn-work-content > .tool-activity { width: 100%; max-width: 100%; }
+}
+
+/* Child summaries and expanded payloads had older, more specific font rules.
+   Keep the whole tool surface on the same face rather than only its container. */
+.stream-tool-run :where(button, span, b, code, pre, div),
+.tool-activity-group :where(summary, span, b, code, pre, div),
+.tool-activity :where(summary, span, b, code, pre, div) {
+  font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace !important;
 }

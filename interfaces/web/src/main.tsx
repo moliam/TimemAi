@@ -10716,11 +10716,17 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
           if (event.key !== "Enter" && event.key !== " ") return;
           event.preventDefault(); toggle();
         } : undefined}>
-        {/* One fixed leading slot keeps execution and result markers in place. */}
-        <span className="stream-tool-status-slot" aria-label={running ? (status === "background_running" ? t("tools.runningBg") : t("tools.running")) : undefined}>
-          {running && <span className="stream-tool-dot" aria-hidden="true" />}
-          <ActionStatus status={status} label={running ? "" : humanizeToolStatus(status)} className="stream-tool-status" />
-        </span>
+        {running ? (
+          <span className="stream-tool-status-slot" aria-label={status === "background_running" ? t("tools.runningBg") : t("tools.running")}>
+            <span className="stream-tool-dot" aria-hidden="true" />
+          </span>
+        ) : status !== "completed" ? (
+          <ActionStatus
+            status={status}
+            label={humanizeToolStatus(status)}
+            className="stream-tool-status"
+          />
+        ) : null}
         <b>{activity.run_bash_edit ? <RunBashEditIcon /> : activity.readfile ? <ReadFileIcon /> : activity.memory_search ? <MemorySearchIcon /> : activity.self_tool ? <SelfToolIcon /> : activity.tool_name === "memmgr" ? <MemoryIcon /> : (activity.tool_name || activity.title) === "run_bash" ? <span className="bash-tool-icon" title={toolName}><SquareTerminal size={14} aria-hidden="true" /><span className="sr-only">{toolName}</span></span> : toolName}</b>
         {status === "background_running" && <span className="stream-tool-background">(bg)</span>}
         {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : command && <span className="stream-tool-command-preview tool-invocation-preview" title={command}>{command.replace(/\s+/g, " ")}</span>}
@@ -10839,7 +10845,7 @@ function TurnAnswerDelivery({
             {modelPhase ? (
               <span className="stream-working-star" aria-hidden="true">✦</span>
             ) : (
-              <span className="stream-working-dot" aria-hidden="true" />
+              <Wrench className="stream-working-wrench" size={13} strokeWidth={1.65} aria-hidden="true" />
             )}
             <WorkingElapsed
               key={phaseTimerKey}
@@ -11702,8 +11708,8 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
 }
 
 function toolActivityGroupStatusLabel(summary: ToolActivitySummary, showResults: boolean) {
+  if (summary.status === "completed") return "";
   if (!showResults && summary.status !== "running") return t("tools.done");
-  if (summary.status === "completed") return "✓";
   if (summary.status === "failed") return `✗(${summary.failedCount})`;
 
   const activeParts: string[] = [];
@@ -11752,7 +11758,7 @@ function ToolActivityGroup({ summary, enterPulse = false }: { summary: ToolActiv
           size={14}
           aria-hidden="true"
         />
-        <span className="tool-activity-group-status">{groupStatusLabel}</span>
+        {groupStatusLabel && <span className="tool-activity-group-status">{groupStatusLabel}</span>}
         <span className="tool-activity-group-counts" aria-hidden="true">
           {summary.counts.map(({ name, count }, index) => (
             <span className="tool-activity-group-count" key={name}>
@@ -11822,33 +11828,48 @@ function ToolActivity({ activity }: { activity: Activity }) {
   });
   const summaryContent = (
     <>
-      <span className="tool-activity-meta">
-        <ActionStatus status={status} label={statusLabel} className="tool-activity-status" />
-        {remainingWaitMs !== undefined && (
-          <span className="tool-activity-countdown">
-            {t("tools.remaining", { time: formatRemainingDuration(remainingWaitMs) })}
-          </span>
-        )}
-        {displayedElapsedMs !== undefined && (
-          <span className="tool-activity-duration">
-            {running
-              ? t("tools.elapsed", { time: formatLiveElapsed(displayedElapsedMs) })
-              : formatDuration(displayedElapsedMs)}
-          </span>
-        )}
-      </span>
+      {running ? (
+        <span className="tool-activity-running-marker" aria-label={status === "background_running" ? t("tools.runningBg") : t("tools.running")}>
+          <span className="tool-activity-dot" aria-hidden="true" />
+        </span>
+      ) : status !== "completed" ? (
+        <ActionStatus
+          status={status}
+          label={statusLabel}
+          className="tool-activity-status"
+        />
+      ) : null}
       <b>{activity.run_bash_edit ? <RunBashEditIcon /> : activity.readfile ? <ReadFileIcon /> : activity.memory_search ? <MemorySearchIcon /> : activity.self_tool ? <SelfToolIcon /> : activity.tool_name === "memmgr" ? <MemoryIcon /> : (activity.tool_name || activity.title) === "run_bash" ? <span className="bash-tool-icon" title={toolName}><SquareTerminal size={14} aria-hidden="true" /><span className="sr-only">{toolName}</span></span> : toolName}</b>
       {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : invocationPreview && (
         <code className="tool-activity-command tool-invocation-preview" title={invocationPreview}>
           {invocationPreview}
         </code>
       )}
+      {(remainingWaitMs !== undefined || displayedElapsedMs !== undefined) && (
+        <span className="tool-activity-timing">
+          {status === "background_running" && (
+            <span className="tool-activity-background">{t("tools.statusBg")}</span>
+          )}
+          {remainingWaitMs !== undefined && (
+            <span className="tool-activity-countdown">
+              {t("tools.remaining", { time: formatRemainingDuration(remainingWaitMs) })}
+            </span>
+          )}
+          {displayedElapsedMs !== undefined && (
+            <span className="tool-activity-duration">
+              {running
+                ? t("tools.elapsed", { time: formatLiveElapsed(displayedElapsedMs) })
+                : formatDuration(displayedElapsedMs)}
+            </span>
+          )}
+        </span>
+      )}
     </>
   );
   if (!hasExpandableDetail)
     return (
       <div
-        className={`tool-activity tool-activity-static ${bashActivity ? "bash-activity" : ""}${pollingActivity ? " poll-activity" : ""} ${running ? "running" : "settled"}`}
+        className={`tool-activity tool-activity-static ${bashActivity ? "bash-activity" : ""}${pollingActivity ? " poll-activity" : ""} ${running ? "running" : status === "completed" ? "settled completed" : "settled terminal-status"}`}
         aria-busy={running || undefined}
       >
         {summaryContent}
@@ -11856,7 +11877,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
     );
   return (
     <details
-      className={`tool-activity ${bashActivity ? "bash-activity" : ""}${pollingActivity ? " poll-activity" : ""} ${running ? "running" : "settled"}`}
+      className={`tool-activity ${bashActivity ? "bash-activity" : ""}${pollingActivity ? " poll-activity" : ""} ${running ? "running" : status === "completed" ? "settled completed" : "settled terminal-status"}`}
       aria-busy={running || undefined}
       open={open}
       onToggle={(event) => setOpen(event.currentTarget.open)}
