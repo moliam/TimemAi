@@ -512,12 +512,11 @@ export function applyEndpointTemplate(draft: ModelEndpointDraft, model?: Catalog
   const next = { ...draft, catalog_id: model.id, requirements };
   const effectiveProtocol = requirements.field_sources.api_protocol === "user" ? draft.api_protocol : protocol.protocol;
   const base_url = templateBaseUrl(model, effectiveProtocol);
-  const output = Math.min(draft.max_llm_output_tokens, model.max_output);
   const suggestions: Partial<ModelEndpointDraft> = {
     name: model.label, model: model.model, ...(base_url === undefined ? {} : { base_url }), api_protocol: protocol.protocol,
     stream: true, reasoning_effort: protocol.fixed_effort ?? model.default_effort,
-    max_llm_input_tokens: Math.min(Math.max(draft.max_llm_input_tokens, model.min_input), model.max_input, model.context_window - output),
-    max_llm_output_tokens: output,
+    max_llm_input_tokens: Math.min(256_000, model.max_input),
+    max_llm_output_tokens: Math.min(10_000, model.max_output),
   };
   for (const [key, value] of Object.entries(suggestions)) {
     if (requirements.field_sources[key] !== "user") {
