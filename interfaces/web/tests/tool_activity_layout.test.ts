@@ -170,3 +170,28 @@ it("renders an Infinity reasoning notice only from Core upgrade projections", ()
   expect(source).toContain('<InfinityIcon size={13} />');
   expect(source).toContain('t("context.reasoningUpgrade", { from: event.payload.from, to: event.payload.to })');
 });
+
+
+it("uses one typography contract for system-level notices", () => {
+  const activityView = source.slice(source.indexOf("function ActivityView("), source.indexOf("function ToolGenNotice("));
+  const memo = source.slice(source.indexOf("function MemoNotice("), source.indexOf("function toolInvocationPreview("));
+  const compact = source.slice(source.indexOf("function ContextCompactNotice("), source.indexOf("function DecisionModal("));
+  expect(activityView).toContain('system-notice reasoning-notice');
+  expect(activityView).toContain('className="system-notice-title"');
+  expect(memo).toContain('system-notice memo-notice');
+  expect(memo).toContain('className="system-notice-detail system-notice-long-detail"');
+  expect(compact.match(/system-notice context-compact-notice/g)).toHaveLength(2);
+  expect(source).toContain('className={`system-notice system-notice-row toolgen-notice');
+  expect(source).toContain('className="system-notice-icon" aria-hidden="true"><Wrench size={13} />');
+  expect(source).toContain('className="system-notice-row"');
+  expect(styles).toContain('.system-notice .system-notice-row { grid-template-columns: 16px minmax(0, 1fr) max-content; align-items: center; column-gap: 6px; padding: 6px; }');
+  expect(styles).toContain('.turn-work-item.system-notice { font-family: inherit; font-size: 10px; font-weight: 500; line-height: 1.5; }');
+  expect(styles).toContain('.system-notice .system-notice-icon { width: 16px; height: 20px; align-self: center;');
+  expect(styles).toContain('.toolgen-notice.system-notice summary::after { grid-column: 3; margin: 0;');
+  expect(styles).toContain('.toolgen-notice.system-notice.published summary::before { display: none; }');
+  expect(styles).toContain('.system-notice .system-notice-title { min-width: 0; color: var(--system-notice-accent); font: inherit; font-weight: 650; }');
+  expect(styles).toContain('.system-notice .system-notice-detail { color: var(--system-notice-text); font: inherit; font-weight: 500; font-variant-numeric: tabular-nums; }');
+  expect(styles).toMatch(/@media \(max-width: 720px\) \{[\s\S]*\.system-notice \.system-notice-line \{ flex-wrap: wrap; white-space: normal; \}/);
+  expect(styles).not.toContain('.memo-notice .memo-notice-line');
+  expect(styles).not.toContain('.compact-notice .compact-notice-line');
+});

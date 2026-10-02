@@ -9699,7 +9699,7 @@ function TimemThread({
                   </svg>
                   {activeSession.active_memo ? (
                     <span className="thread-working-pin" aria-hidden="true">
-                      <MemoIcon size={12} />
+                      <MemoIcon size={14} />
                     </span>
                   ) : (
                     <span className="thread-working-core" />
@@ -11590,9 +11590,9 @@ function LiveTurnUsage({ turn }: { turn: WebTurn }) {
 
 function ActivityView({ activity, enterPulse = false }: { activity: Activity; enterPulse?: boolean }) {
   if (activity.kind === "reasoning_notice")
-    return <div className="turn-work-item notice compact-notice reasoning-notice" role="status">
+    return <div className="turn-work-item notice system-notice reasoning-notice" role="status">
       <span className="activity-mark" aria-hidden="true"><InfinityIcon size={13} /></span>
-      <div className="compact-notice-line"><span>{activity.title}</span></div>
+      <div className="system-notice-line"><span className="system-notice-title">{activity.title}</span></div>
     </div>;
   if (activity.kind === "context_compact")
     return <ContextCompactNotice activity={activity} />;
@@ -11648,8 +11648,9 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
   const hasDetail = !!activity.detail?.trim();
   if (!hasDetail)
     return (
-      <blockquote className={`toolgen-notice ${activity.toolgen_phase ?? ""}`}>
-        <span>{activity.title}</span>
+      <blockquote className={`system-notice system-notice-row toolgen-notice ${activity.toolgen_phase ?? ""}`}>
+        <span className="system-notice-icon" aria-hidden="true"><Wrench size={13} /></span>
+        <span className="system-notice-title">{activity.title}</span>
       </blockquote>
     );
   const collapse = () => setOpen(false);
@@ -11661,18 +11662,19 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
     : toolgenBaseLabel;
   return (
     <details
-      className={`toolgen-notice ${activity.toolgen_phase ?? ""}`}
+      className={`system-notice toolgen-notice ${activity.toolgen_phase ?? ""}`}
       open={open}
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
       <summary
+        className="system-notice-row"
         title={open ? t("tools.toolgenCollapse") : t("tools.toolgenExpand")}
         aria-label={summaryLabel}
         data-expanded-label={t("common.collapse")}
         data-collapsed-label={t("common.expand")}
       >
-        <ChevronRight size={13} />
-        <span>{activity.title}</span>
+        <span className="system-notice-icon" aria-hidden="true"><ChevronRight size={13} /></span>
+        <span className="system-notice-title">{activity.title}</span>
       </summary>
       <div>
         <button
@@ -11905,13 +11907,13 @@ function MemoNotice({ activity }: { activity: Activity }) {
   // runtime finish guard and the working-state indicator.
   const icon = <MemoIcon size={13} />;
   return (
-    <div className="turn-work-item notice memo-notice">
+    <div className="turn-work-item notice system-notice memo-notice">
       <span className="activity-mark" aria-hidden="true">
         {icon}
       </span>
-      <div className="memo-notice-line">
-        <strong>{t(op)}</strong>
-        {activity.detail && <span className="memo-notice-text">{activity.detail}</span>}
+      <div className="system-notice-line">
+        <strong className="system-notice-title">{t(op)}</strong>
+        {activity.detail && <span className="system-notice-detail system-notice-long-detail">{activity.detail}</span>}
       </div>
     </div>
   );
@@ -12008,16 +12010,16 @@ function ContextCompactNotice({ activity }: { activity: Activity }) {
     });
     return (
       <div
-        className="turn-work-item notice compact-notice"
+        className="turn-work-item notice system-notice context-compact-notice"
         role="status"
         aria-label={label}
       >
         <span className="activity-mark" aria-hidden="true">
           <Gauge size={13} />
         </span>
-        <div className="compact-notice-line">
-          <strong>{t("context.dynamic")}</strong>
-          <span>{t("context.compacting")}</span>
+        <div className="system-notice-line">
+          <strong className="system-notice-title">{t("context.dynamic")}</strong>
+          <span className="system-notice-detail">{t("context.compacting")}</span>
         </div>
       </div>
     );
@@ -12036,19 +12038,19 @@ function ContextCompactNotice({ activity }: { activity: Activity }) {
     suffix: breakdown ? t("context.compactedSuffix", { breakdown }) : "",
   });
   return (
-    <div className="turn-work-item notice compact-notice" aria-label={label} title={breakdown}>
+    <div className="turn-work-item notice system-notice context-compact-notice" aria-label={label} title={breakdown}>
       <span className="activity-mark" aria-hidden="true">
         <Gauge size={13} />
       </span>
-      <div className="compact-notice-line">
-        <strong>{t("context.dynamic")}</strong>
-        <span className="compact-notice-metric">
+      <div className="system-notice-line">
+        <strong className="system-notice-title">{t("context.dynamic")}</strong>
+        <span className="system-notice-metric">
           {formatTokens(before) ?? "?"} → {formatTokens(after) ?? "?"}
           {before && after !== undefined && before > 0
             ? ` (${Math.max(0, Math.round((1 - after / before) * 100))}% off)`
             : ""}
         </span>
-        {breakdown && <span className="compact-notice-text">{breakdown}</span>}
+        {breakdown && <span className="system-notice-detail system-notice-long-detail">{breakdown}</span>}
       </div>
     </div>
   );

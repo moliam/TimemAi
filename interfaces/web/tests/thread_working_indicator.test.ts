@@ -49,10 +49,21 @@ describe("thread working indicator", () => {
     );
   });
 
-  it("uses one clipboard-check identity for every memo surface", () => {
+  it("keeps the active memo icon larger and above the subdued rotating arc", () => {
+    const mark = rule(".thread-working-mark");
+    const arc = rule(".thread-working-arc");
+    const memoArc = rule(".thread-working-mark:has(.thread-working-pin) .thread-working-arc");
+    const pin = rule(".thread-working-pin");
+
     expect(source).toContain("ClipboardCheck,");
     expect(source).toContain("return <ClipboardCheck size={size} />;");
-    expect(source.match(/<MemoIcon size=\{(?:12|13)\} \/>/g)).toHaveLength(3);
+    expect(source).toContain('<MemoIcon size={14} />');
+    expect(source.match(/<MemoIcon size=\{13\} \/>/g)).toHaveLength(2);
+    expect(mark).toContain("isolation: isolate");
+    expect(arc).toContain("z-index: 0");
+    expect(memoArc).toContain("opacity: .62");
+    expect(pin).toContain("z-index: 1");
+    expect(pin).toContain("opacity: 1");
     expect(source).not.toContain("<StickyNote");
     expect(source).not.toContain("<Pin size={13}");
   });

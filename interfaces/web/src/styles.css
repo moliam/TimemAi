@@ -500,13 +500,7 @@ button:disabled { cursor: not-allowed; }
 .session-runtime-reset { min-height: 31px; border: 1px solid #344753; border-radius: 5px; padding: 0 8px; background: #17242b; color: #91a7b1; font-size: 11px; font-weight: 650; }
 .session-runtime-reset:hover { border-color: #55717e; color: #d0dce1; }
 
-/* Runtime context maintenance is rendered separately from conversational messages. */
-.compact-notice .compact-notice-line { display: flex; align-items: center; gap: 8px; min-width: 0; white-space: nowrap; }
-.compact-notice .compact-notice-line strong { color: #78d2be; font-size: 10px; font-weight: 700; }
-.compact-notice .compact-notice-line span { color: #9db2c1; font-size: 10px; font-variant-numeric: tabular-nums; }
-.compact-notice .compact-notice-metric { color: #78d2be; font-weight: 700; }
-.compact-notice .compact-notice-text { color: #708892; overflow: hidden; text-overflow: ellipsis; max-width: 60%; }
-.compact-notice .activity-mark { font-size: 13px; background: transparent; display: inline-flex; align-items: center; justify-content: center; align-self: center; line-height: 1; color: #78d2be; }
+/* System-level notices share one typography contract; semantic color stays per notice. */
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes session-working-glow { 50% { background: #28332f; box-shadow: inset 2px 0 #d3a75f, 0 0 0 1px #d3a75f22; } }
 @keyframes work-row-enter { from { opacity: 0; transform: translateY(3px); } }
@@ -514,7 +508,7 @@ button:disabled { cursor: not-allowed; }
 @media (max-width: 720px) { .user-message-navigation { left: 6px; }.user-message-navigation button { width: 30px; height: 30px; border-radius: 8px; } }
 @media (prefers-reduced-motion: reduce) { .chat-scroll { scroll-behavior: auto; }.live-turn-usage, .pulse, .connection.offline, .session-row.working, .session-working-icon, .load-history.loading svg, .send-button.sending svg, .stop-button.sending svg, .decision-actions .primary.sending svg, .completion-toolgen.sending svg, .turn-assistant-frame.working, .working-chip.toolgen-working svg, .turn-work-item, .toolrepo-header-button.count-pulse .toolrepo-header-count, .attach-button.uploading:disabled, .attach-button.uploading svg, .toolrepo-search-pending, .toolrepo-empty.searching svg, .upload-dot { animation: none; }.mcp-session-toggle-thumb { transition: none; }.user-message-navigation, .user-message-navigation button, .session-row .session, .session-expand { transition: none; } }
 @media (max-width: 1050px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 214px minmax(0, 1fr); }.side-panel-backdrop { display: block; position: fixed; z-index: 3; inset: 0; width: 100%; border: 0; background: #02060973; }.toolrepo-side-panel { position: fixed; z-index: 4; right: 0; top: 0; bottom: 0; width: min(360px, 88vw); } }
-@media (max-width: 720px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 1fr; }.compact-notice .compact-notice-line { flex-wrap: wrap; white-space: normal; }.compact-notice .compact-notice-text { max-width: 100%; } }
+@media (max-width: 720px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 1fr; } }
 @media (max-width: 720px) { .session-runtime-grid { grid-template-columns: 1fr; } }
 @media (max-width: 720px) { .live-turn-usage { padding-left: 10px; } }
 
@@ -728,11 +722,6 @@ button:disabled { cursor: not-allowed; }
   .code-block figcaption button span { display: none; }
 }
 :root[data-theme="light"] .live-turn-usage { border-color: #d9e3e6; color: #286a9b; }
-:root[data-theme="light"] .compact-notice .compact-notice-line span { color: #506873; }
-:root[data-theme="light"] .compact-notice .compact-notice-line strong,
-:root[data-theme="light"] .compact-notice .compact-notice-metric,
-:root[data-theme="light"] .compact-notice .activity-mark { color: #237c70; }
-:root[data-theme="light"] .compact-notice .compact-notice-text { color: #6a8391; }
 @media (prefers-reduced-motion: no-preference) {
 }
 @keyframes session-working-glow-light { 50% { background: #e8eee9; box-shadow: inset 2px 0 #b58535, 0 0 0 1px #b5853522; } }
@@ -3671,6 +3660,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 }
 .thread-working-mark {
   position: relative;
+  isolation: isolate;
   width: 24px;
   height: 24px;
   display: grid;
@@ -3679,6 +3669,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .thread-idle-bottom-icon { display: block; margin: 0; overflow: visible; color: currentColor; filter: none; }
 .thread-working-arc {
   position: absolute;
+  z-index: 0;
   inset: 0;
   width: 24px;
   height: 24px;
@@ -3694,7 +3685,10 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 }
 /* With a memo pinned, the orbit grows to full size so the sticky-note glyph
    fits inside; without one it settles into a tighter inner circle. */
-.thread-working-mark:has(.thread-working-pin) .thread-working-arc { scale: 1; }
+.thread-working-mark:has(.thread-working-pin) .thread-working-arc {
+  scale: 1;
+  opacity: .62;
+}
 @keyframes thread-working-memo-pop {
   from { opacity: 0; scale: .4; }
   to { opacity: 1; scale: 1; }
@@ -3711,21 +3705,21 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
      states (0.7 inner circle vs full-size ring). */
   vector-effect: non-scaling-stroke;
 }
-/* When a memo is active, the working dot core is replaced by a small pin
-   glyph. Keep it inside the arc radius (arc r=11 in a 24px viewBox) and nudge
-   the arc outward so the pin never collides with the spinning ring. */
+/* When a memo is active, the working dot core is replaced by a larger memo
+   glyph. The rotating arc remains visible as a subdued background layer while
+   the glyph stays crisp in the foreground. */
 .thread-working-pin {
   position: relative;
   z-index: 1;
   display: inline-flex;
   align-items: center;
   color: #a9c9dd;
-  opacity: .95;
+  opacity: 1;
   animation: thread-working-memo-pop .3s cubic-bezier(.2,.8,.2,1) both;
 }
 /* Do NOT set a static transform here: the arc's spin keyframes animate
    `transform: rotate()` on the same element, and a mismatched base transform
-   (e.g. scale) breaks the rotation interpolation. The 9px pin already sits
+   (e.g. scale) breaks the rotation interpolation. The 14px memo icon remains
    inside the arc's inner radius; only adjust spacing, never transform. */
 .thread-working-mark:has(.thread-working-pin) .thread-working-pin {
   margin-top: -1px;
@@ -5578,9 +5572,47 @@ body.workspace-modal-open .app-shell { user-select: none; }
 }
 .stream-working-total > svg { flex: none; }
 
-.memo-notice .memo-notice-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-.memo-notice .memo-notice-text { color: #9db2c1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
-.memo-notice .activity-mark { font-size: 13px; background: transparent; }
+.system-notice {
+  --system-notice-accent: #78d2be;
+  --system-notice-text: #9db2c1;
+  --system-notice-muted: #708892;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.5;
+  letter-spacing: 0;
+}
+.turn-work-item.system-notice,
+.system-notice.system-notice-row,
+.system-notice .system-notice-row { grid-template-columns: 16px minmax(0, 1fr) max-content; align-items: center; column-gap: 6px; padding: 6px; }
+.turn-work-item.system-notice { font-family: inherit; font-size: 10px; font-weight: 500; line-height: 1.5; }
+.system-notice.system-notice-row,
+.system-notice .system-notice-row { min-width: 0; display: grid; margin: 0; }
+.system-notice .system-notice-line { min-width: 0; display: flex; align-items: center; gap: 8px; color: var(--system-notice-text); font: inherit; white-space: nowrap; }
+.system-notice .system-notice-title { min-width: 0; color: var(--system-notice-accent); font: inherit; font-weight: 650; }
+.system-notice .system-notice-detail { color: var(--system-notice-text); font: inherit; font-weight: 500; font-variant-numeric: tabular-nums; }
+.system-notice .system-notice-metric { color: var(--system-notice-accent); font: inherit; font-weight: 650; font-variant-numeric: tabular-nums; }
+.system-notice .system-notice-long-detail { max-width: 60%; overflow: hidden; color: var(--system-notice-muted); text-overflow: ellipsis; white-space: nowrap; }
+.turn-work-item.system-notice .activity-mark,
+.system-notice .system-notice-icon { width: 16px; height: 20px; align-self: center; display: inline-flex; align-items: center; justify-content: center; padding: 0; background: transparent; color: var(--system-notice-accent); font-size: 13px; line-height: 1; }
+.turn-work-item.system-notice .activity-mark svg,
+.system-notice .system-notice-icon svg { width: 13px; height: 13px; flex: none; }
+.memo-notice { --system-notice-accent: #9db2c1; }
+.toolgen-notice.system-notice { --system-notice-accent: #9eabb7; --system-notice-text: #8996a2; --system-notice-muted: #667581; border: 0; font-size: 10px; line-height: 1.5; }
+.toolgen-notice.system-notice summary { width: 100%; cursor: pointer; font: inherit; font-weight: 500; }
+.toolgen-notice.system-notice summary::after { grid-column: 3; margin: 0; color: var(--system-notice-muted); font: inherit; font-weight: 600; }
+.toolgen-notice.system-notice > div { margin: 5px 0 0 22px; font-size: 11px; line-height: 1.55; }
+.toolgen-notice.system-notice.published { --system-notice-accent: #bfe8d1; --system-notice-text: #9ccdb3; border: 0; }
+.toolgen-notice.system-notice.published summary::before { display: none; }
+.toolgen-notice.system-notice.failed { --system-notice-accent: #c99a74; }
+:root[data-theme="light"] .system-notice { --system-notice-accent: #237c70; --system-notice-text: #506873; --system-notice-muted: #6a8391; }
+:root[data-theme="light"] .memo-notice { --system-notice-accent: #506f80; }
+:root[data-theme="light"] .toolgen-notice.system-notice { --system-notice-accent: #61717a; --system-notice-text: #6f818b; --system-notice-muted: #7d8b93; }
+:root[data-theme="light"] .toolgen-notice.system-notice.published { --system-notice-accent: #286348; --system-notice-text: #4e765f; }
+@media (max-width: 720px) {
+  .system-notice .system-notice-line { flex-wrap: wrap; white-space: normal; }
+  .system-notice .system-notice-long-detail { max-width: 100%; }
+}
 
 /* Lucide default 2 reduced by 25%; explicit per-icon weights remain authoritative. */
 :where(svg.lucide[stroke-width="2"]) { stroke-width: 1.5; }
