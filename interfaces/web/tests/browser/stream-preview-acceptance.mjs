@@ -524,27 +524,27 @@ async function main() {
       host.send({ type: "hello", snapshot: makeSnapshot(updated) });
       if (status === "running") {
         await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-dot') && !document.querySelector('.stream-tool-status')?.textContent`), "running must use dot without redundant text");
+      } else if (status === "background_running") {
+        await waitFor(() => contains(".stream-tool-background", "(bg)"), `${status}: status not delivered`);
       } else {
-        await waitFor(() => contains(status === "background_running" ? ".stream-tool-background" : ".stream-tool-status", status === "background_running" ? "(bg)" : status === "completed" ? "✓" : status), `${status}: status not delivered`);
+        await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-status-slot') && !document.querySelector('.stream-tool-status')?.textContent && document.querySelector('.stream-tool-head > b') === document.querySelector('.stream-tool-head')?.firstElementChild`), "completed tool must remove its visible marker and shift left");
       }
       assert(await browser.evaluate(`window.actionRow === document.querySelector('.stream-tool-row') && window.actionCommand === document.querySelector('.stream-tool-command') && window.actionHead === document.querySelector('.stream-tool-head')`), `${status}: action DOM remounted`);
       assert(await browser.evaluate(`document.querySelectorAll('.stream-tool-row').length === 1`), "status update duplicated action");
       assert(await browser.evaluate(`!!document.querySelector('.stream-tool-dot') === ${status === "running" || status === "background_running"}`), `${status}: tool dot visibility incorrect`);
-      assert(await browser.evaluate(`(() => {
-        const slot = document.querySelector('.stream-tool-status-slot');
-        const marker = slot.querySelector('.stream-tool-dot') || slot.querySelector('.stream-tool-status');
-        const name = slot.nextElementSibling;
-        const a = slot.getBoundingClientRect(), b = marker.getBoundingClientRect();
-        return name.tagName === 'B' && a.right <= name.getBoundingClientRect().left && Math.abs((a.left + a.right - b.left - b.right) / 2) < 1;
-      })()`), `${status}: status must stay centered before the tool name`);
-
-      if (status === "completed") {
-        await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-status[role="status"] .action-status-changed')`), "status-only highlight missing");
+      if (status === "running" || status === "background_running") {
+        assert(await browser.evaluate(`(() => {
+          const slot = document.querySelector('.stream-tool-status-slot');
+          const marker = slot.querySelector('.stream-tool-dot');
+          const name = slot.nextElementSibling;
+          const a = slot.getBoundingClientRect(), b = marker.getBoundingClientRect();
+          return name.tagName === 'B' && a.right <= name.getBoundingClientRect().left && Math.abs((a.left + a.right - b.left - b.right) / 2) < 1;
+        })()`), `${status}: running dot must stay centered before the tool name`);
       }
     }
-    await waitFor(() => contains(".stream-tool-status", "✓"), "terminal status missing");
+    await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-status-slot') && !document.querySelector('.stream-tool-head')?.textContent.includes('✓')`), "completed marker remained visible");
     await sleep(700);
-    const completionGeometry = await browser.evaluate(`({expanded:!!document.querySelector('.stream-tool-fold.expanded'),height:document.querySelector('.stream-tool-row').getBoundingClientRect().height,before:window.toolHeight,merged:!!document.querySelector('.stream-tool-merged-item.merged'),head:document.querySelector('.stream-tool-head').getBoundingClientRect().height,status:document.querySelector('.stream-tool-status-slot').getBoundingClientRect().height,beforeGeometry:window.toolGeometry})`);
+    const completionGeometry = await browser.evaluate(`({expanded:!!document.querySelector('.stream-tool-fold.expanded'),height:document.querySelector('.stream-tool-row').getBoundingClientRect().height,before:window.toolHeight,merged:!!document.querySelector('.stream-tool-merged-item.merged'),head:document.querySelector('.stream-tool-head').getBoundingClientRect().height,status:document.querySelector('.stream-tool-status-slot')?.getBoundingClientRect().height ?? 0,beforeGeometry:window.toolGeometry})`);
     assert(completionGeometry.expanded && Math.abs(completionGeometry.height - completionGeometry.before) < 1 && !completionGeometry.merged, "completion changed user expansion or geometry before AI reply: "+JSON.stringify(completionGeometry));
     // Same-round serial execution advances logical order without any AI text.
     const serialStart = lifecycle("serial-start", "execution_start", "running", 6);
@@ -621,18 +621,17 @@ async function main() {
       const sessionAnim = sessionIcon ? getComputedStyle(sessionIcon) : null;
       const sessionDot = sessionIcon ? sessionIcon.getBoundingClientRect() : null;
       const workerStatic = [...document.querySelectorAll('.worker-working-icon')].every(node => getComputedStyle(node).animationName === 'none');
-      const pulse = document.querySelector('.turn-assistant-frame.working .working-chip .pulse, .stream-working-dot');
-      // The stream working dot carries its animation on ::after, not the host span.
-      const pulseAnim = pulse ? getComputedStyle(pulse, pulse.matches('.stream-working-dot') ? '::after' : null) : null;
+      const localWrench = document.querySelector('.stream-working-wrench');
+      const wrenchAnim = localWrench ? getComputedStyle(localWrench) : null;
       return !!sessionAnim && sessionAnim.animationName === 'stream-working-grow' &&
         parseFloat(sessionAnim.animationDuration) === 1.2 &&
-        !!sessionDot &&
-        workerStatic && !!pulseAnim && pulseAnim.animationName === sessionAnim.animationName &&
-        pulseAnim.animationDuration === sessionAnim.animationDuration;
-    })()`), "sidebar session cue must breathe in sync with the chat pulse while workers stay static");
+        !!sessionDot && workerStatic && !!wrenchAnim &&
+        wrenchAnim.animationName === 'stream-working-wrench-sway' &&
+        parseFloat(wrenchAnim.animationDuration) === 1;
+    })()`), "sidebar session cue must keep breathing, local work must sway a wrench, and workers must stay static");
     assert(await browser.evaluate(`['.user-message-navigation button', '.session-group-heading', '.final-answer-outline-toggle'].every(selector => [...document.querySelectorAll(selector)].every(node => getComputedStyle(node).backdropFilter === 'none'))`), "scroll overlays must not sample blurred backdrops");
     await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
-    assert(await browser.evaluate(`['.stream-tool-head', '.stream-tool-command', '.stream-tool-dot'].every(selector => { const node = document.querySelector(selector); return !node || getComputedStyle(node).animationName === 'none'; })`), "reduced motion must disable tool entrance");
+    assert(await browser.evaluate(`['.stream-tool-head', '.stream-tool-command', '.stream-tool-dot', '.stream-working-wrench'].every(selector => { const node = document.querySelector(selector); return !node || getComputedStyle(node).animationName === 'none'; })`), "reduced motion must disable tool entrance");
     await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] } );
     await waitFor(() => contains(".turn-stream-tools .user-supplement", "Chronological supplement"), "live supplement missing");
     assert(await browser.evaluate(`(() => {
@@ -738,7 +737,10 @@ async function main() {
     host.setSession(next);
     await browser.call("Page.reload", { ignoreCache: true });
     await waitFor(() => contains(".stream-thought-text", "Next thought focus"), "active fixture not restored");
-    assert(await browser.evaluate(`!getComputedStyle(document.querySelector('.stream-tool-command')).fontFamily.match(/monospace|Consolas|SFMono/i)`), "command still uses console font");
+    assert(await browser.evaluate(`(() => {
+      const style = getComputedStyle(document.querySelector('.stream-tool-command'));
+      return style.fontFamily.includes('IBM Plex Mono') && Math.abs(parseFloat(style.fontSize) - 12) < .01;
+    })()`), "stream command must use IBM Plex Mono at the half-pixel-increased size");
     for (const size of ["12px", "16px"]) {
       assert(await browser.evaluate(`(() => {
         document.documentElement.style.setProperty('--content-size', ${JSON.stringify(size)});

@@ -5,20 +5,25 @@ const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
 const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 
 describe("tool activity row layout", () => {
-  it("keeps status and duration in one grid cell", () => {
-    expect(source).toContain('className="tool-activity-meta"');
-    expect(source).toMatch(
-      /className="tool-activity-meta"[\s\S]*className="tool-activity-status"[\s\S]*className="tool-activity-duration"/,
-    );
+  it("shows a leading dot only while running and keeps timing at the right edge", () => {
+    const activity = source.slice(source.indexOf("function ToolActivity("), source.indexOf("function MemoIcon("));
+    expect(activity).toContain('className="tool-activity-running-marker"');
+    expect(activity).toContain('className="tool-activity-dot"');
+    expect(activity).toContain('className="tool-activity-timing"');
+    expect(activity).toContain('className="tool-activity-background">{t("tools.statusBg")}');
+    expect(activity).toContain(') : status !== "completed" ? (');
+    expect(activity).toContain('className="tool-activity-status"');
+    expect(activity).toMatch(/tool-activity-running-marker[\s\S]*<b>[\s\S]*tool-activity-command[\s\S]*tool-activity-timing/);
   });
 
   it("uses the whole row as disclosure without a persistent expand glyph", () => {
     const activity = source.slice(source.indexOf("function ToolActivity("), source.indexOf("function MemoIcon("));
     expect(activity).not.toContain('tool-activity-icon tool-activity-chevron');
     expect(source).toContain('className="tool-activity-group-icon tool-activity-chevron"');
-    expect(styles).toContain(".tool-activity-command { min-width: 0; grid-column: 3; justify-self: start;");
-    expect(styles).toContain("grid-template-columns: max-content max-content minmax(0, 1fr);");
-    expect(activity).toMatch(/className="tool-activity-meta"[\s\S]*<b>[\s\S]*tool-activity-command/);
+    expect(styles).toContain(".tool-activity.completed .tool-activity-command,");
+    expect(styles).toContain("grid-template-columns: max-content minmax(0, 1fr) max-content;");
+    expect(styles).toContain("grid-template-columns: 14px max-content minmax(0, 1fr) max-content;");
+    expect(activity).toMatch(/tool-activity-running-marker[\s\S]*<b>[\s\S]*tool-activity-command/);
     expect(activity).toContain("event.currentTarget.contains(selection.anchorNode)");
   });
   it("keeps the top-level background status before the shrinkable tool counts", () => {
@@ -35,8 +40,9 @@ describe("tool activity row layout", () => {
     );
   });
 
-  it("uses compact aligned terminal labels and always includes the failure count", () => {
-    expect(source).toContain('summary.status === "completed") return "✓"');
+  it("removes completed group checks while retaining explicit failure counts", () => {
+    expect(source).toContain('summary.status === "completed") return ""');
+    expect(source).toContain('groupStatusLabel && <span className="tool-activity-group-status">');
     expect(source).toContain('return `✗(${summary.failedCount})`');
     expect(source).not.toContain('summary.failedCount > 1');
   });
@@ -52,12 +58,13 @@ describe("tool activity row layout", () => {
 describe("stream tool status continuity", () => {
   it("keeps status, tool identity and command in order on a row-wide disclosure", () => {
     const row = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
-    expect(row).toMatch(/className="stream-tool-status-slot"[\s\S]*className="stream-tool-dot"[\s\S]*<ActionStatus[\s\S]*<b>[\s\S]*stream-tool-command-preview/);
+    expect(row).toMatch(/running \? \([\s\S]*className="stream-tool-status-slot"[\s\S]*className="stream-tool-dot"[\s\S]*status !== "completed" \? \([\s\S]*<ActionStatus[\s\S]*className="stream-tool-status"[\s\S]*<b>[\s\S]*stream-tool-command-preview/);
     expect(row).not.toContain("<ChevronRight");
     expect(row).toContain('role={hasExpandableDetail ? "button" : undefined}');
     expect(row).toContain('event.key !== "Enter" && event.key !== " "');
     expect(styles).toContain(".stream-tool-head.stream-tool-toggle:hover");
     expect(styles).toContain("min-width: 14px; height: 17px; line-height: 17px; align-self: center;");
+    expect(row).toContain(') : status !== "completed" ? (');
     expect(styles).toContain(".stream-tool-head { display: flex; align-items: center;");
     expect(row).toContain('className="stream-tool-background">(bg)');
     expect(styles).toContain(".stream-tool-background { color: #98afbc; opacity: .65; }");
@@ -113,9 +120,11 @@ it("keeps live text/tool spacing compact without shrinking touch targets", () =>
   expect(styles).toContain(".stream-tool-head.stream-tool-toggle, .stream-tool-run-toggle { min-height: 44px; }");
 });
 
-it("bundles IBM Plex Mono locally and scopes it to stream tool counts", () => {
+it("bundles IBM Plex Mono locally and scopes it to all tool rendering", () => {
   expect(styles).toContain('src: url("/fonts/IBMPlexMono-Latin-300.woff2") format("woff2")');
   expect(styles).toMatch(/\.stream-tool-count \{[^}]*font-family: "IBM Plex Mono"/);
+  expect(styles).toMatch(/\.stream-tool-run,[\s\S]*\.tool-activity \{[\s\S]*font-family: "IBM Plex Mono"/);
+  expect(styles).toContain('.stream-tool-head,\n.stream-tool-run-toggle,\n.tool-activity,\n.tool-activity b { font-size: 12.5px; }');
   expect(styles).toMatch(/\.stream-tool-count \{[^}]*font-size: calc\(var\(--content-size\) \* \.888889\); font-weight: 300;/);
   const font = readFileSync(new URL("../public/fonts/IBMPlexMono-Latin-300.woff2", import.meta.url));
   expect(font.readUInt32BE(0)).toBe(0x774f4632);
@@ -137,8 +146,9 @@ it("uses the structured run_bash edit summary in ordinary and stream rows", () =
 });
 
 
-it("uses one 11px size for readable tool invocation summaries", () => {
+it("increases readable tool invocation summaries by half a pixel", () => {
   expect(styles).toContain('.tool-invocation-preview { font-size: 11px !important; line-height: 1.5; }');
+  expect(styles).toContain('.bash-edit-preview { font-size: 11.5px !important; }');
   expect(source).toContain('className="stream-tool-command-preview tool-invocation-preview"');
   expect(source).toContain('className="tool-activity-command tool-invocation-preview"');
   expect(styles).toMatch(/\.file-tool-preview \{[^}]*font-size: 11px;/);
@@ -186,6 +196,7 @@ it("uses one typography contract for system-level notices", () => {
   expect(source).toContain('className="system-notice-row"');
   expect(styles).toContain('.system-notice .system-notice-row { grid-template-columns: 16px minmax(0, 1fr) max-content; align-items: center; column-gap: 6px; padding: 6px; }');
   expect(styles).toContain('.turn-work-item.system-notice { font-family: inherit; font-size: 10px; font-weight: 500; line-height: 1.5; }');
+  expect(styles).toContain('.turn-work-item.system-notice,\n.toolgen-notice.system-notice { font-size: 10.5px; }');
   expect(styles).toContain('.system-notice .system-notice-icon { width: 16px; height: 20px; align-self: center;');
   expect(styles).toContain('.toolgen-notice.system-notice summary::after { grid-column: 3; margin: 0;');
   expect(styles).toContain('.toolgen-notice.system-notice.published summary::before { display: none; }');
@@ -194,4 +205,10 @@ it("uses one typography contract for system-level notices", () => {
   expect(styles).toMatch(/@media \(max-width: 720px\) \{[\s\S]*\.system-notice \.system-notice-line \{ flex-wrap: wrap; white-space: normal; \}/);
   expect(styles).not.toContain('.memo-notice .memo-notice-line');
   expect(styles).not.toContain('.compact-notice .compact-notice-line');
+});
+
+
+it("narrows tool rendering from the right edge while preserving mobile width", () => {
+  expect(styles).toContain("width: 90%;\n  max-width: 90%;\n  margin-right: auto;");
+  expect(styles).toMatch(/@media \(max-width: 720px\) \{[\s\S]*\.stream-tool-run,[\s\S]*width: 100%; max-width: 100%;/);
 });

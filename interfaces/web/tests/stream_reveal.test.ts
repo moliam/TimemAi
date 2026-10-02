@@ -150,9 +150,9 @@ describe("splitMarkdownBlocks incremental stability", () => {
    const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
    expect(css).not.toContain("stream-caret-pulse");
    expect(mainSource).toContain('<StreamProcess closing={turn.state !== "working"}');
-   expect(mainSource).toContain('className="stream-working-dot"');
-    // Model waiting/streaming swaps the dot for a breathing star glyph so the
-    // phase differs by shape AND color; tool-running keeps the amber dot.
+   expect(mainSource).toContain('className="stream-working-wrench"');
+    // Model waiting/streaming keeps the breathing star; local work uses a
+    // side-to-side wrench so the phases differ by shape AND color.
     expect(mainSource).toContain('className="stream-working-star"');
     expect(mainSource).toContain('>✦</span>');
     expect(mainSource).toContain('const phaseBoundary = turnWorkPhaseBoundary(turn, phase)');
@@ -171,11 +171,9 @@ describe("splitMarkdownBlocks incremental stability", () => {
     expect(css).toContain(':root[data-theme="light"] .stream-working-trailer.model-waiting { color: #286a9b; }');
     expect(css).toMatch(/\.stream-working-trailer \{[^}]*justify-content: space-between/);
     expect(css).toContain('.stream-working-total { gap: 6px; margin-left: auto; color: #77857e; }');
-    // The dot keeps a fixed 9x9 hover target; the grow animation lives on
-    // ::after so transform scaling never shrinks the tooltip hit area.
-    expect(css).toMatch(/\.stream-working-dot \{[^}]*width: 9px; height: 9px/);
-    expect(css).toMatch(/\.stream-working-dot::after \{[^}]*animation: stream-working-grow/);
-    expect(css).toMatch(/\.stream-working-dot \{[^}]*transition: color \.5s ease/);
+    expect(css).toMatch(/\.stream-working-wrench \{[^}]*animation: stream-working-wrench-sway/);
+    expect(css).toContain("@keyframes stream-working-wrench-sway");
+    expect(css).toMatch(/prefers-reduced-motion: reduce[\s\S]*\.stream-working-wrench \{ animation: none/);
  });
 
  it("bounds repeated stream rendering and interaction listeners", () => {

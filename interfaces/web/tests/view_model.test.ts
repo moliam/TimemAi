@@ -3234,7 +3234,7 @@ describe("web topic view model", () => {
     expect(activity).toMatchObject({
       kind: "context_compact",
       tone: "notice",
-      title: "Dynamic context compacted",
+      title: "Conversation compressed",
       before_tokens: 82_000,
       after_tokens: 14_000,
       text_before_tokens: 12_000,

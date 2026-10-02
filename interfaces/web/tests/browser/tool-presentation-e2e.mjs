@@ -394,13 +394,14 @@ async function main() {
     await browser.call('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:false});
     for(const theme of ['dark','light']) {
      await browser.evaluate(`document.documentElement.dataset.theme=${JSON.stringify(theme)}`);
-     const info=await browser.evaluate(`(()=>{const p=document.querySelector('.file-tool-preview');p.scrollIntoView({block:'center'});const r=p.getBoundingClientRect();const n=p.querySelector('.file-tool-name').getBoundingClientRect();const range=p.querySelector('.file-tool-range');return {width:r.width,inside:n.left>=r.left&&n.right<=r.right+1,overflow:p.scrollWidth>p.clientWidth+1,range:range.textContent,name:p.querySelector('.file-tool-name').textContent,title:p.title,icon:!!document.querySelector('.file-tool-icon .lucide-file-text')};})()`);
-     assert(info.width>0 && info.inside && !info.overflow && info.icon,'geometry '+stream+' '+width+' '+theme+' '+JSON.stringify(info));
+     const info=await browser.evaluate(`(()=>{const p=document.querySelector('.file-tool-preview');p.scrollIntoView({block:'center'});const r=p.getBoundingClientRect();const n=p.querySelector('.file-tool-name').getBoundingClientRect();const range=p.querySelector('.file-tool-range');const row=p.closest('.stream-tool-run,.tool-activity-group');const parent=row?.parentElement;const rowWidth=row?.getBoundingClientRect().width??0;const parentWidth=parent?.getBoundingClientRect().width??0;const style=getComputedStyle(p);return {width:r.width,inside:n.left>=r.left&&n.right<=r.right+1,overflow:p.scrollWidth>p.clientWidth+1,range:range.textContent,name:p.querySelector('.file-tool-name').textContent,title:p.title,icon:!!document.querySelector('.file-tool-icon .lucide-square-text'),font:style.fontFamily,fontSize:style.fontSize,rowRatio:parentWidth?rowWidth/parentWidth:0};})()`);
+     const expectedRatio=width<=720?1:.9;
+     assert(info.width>0 && info.inside && !info.overflow && info.icon && info.font.includes('IBM Plex Mono') && info.fontSize==='11.5px' && Math.abs(info.rowRatio-expectedRatio)<.015,'geometry/font/width '+stream+' '+width+' '+theme+' '+JSON.stringify(info));
      assert(info.range.includes('15190–15244') && info.name==='web_host_tests.rs' && info.title.includes(path),'semantic content');
     }
    }
    const selector=stream?'.stream-tool-toggle':'.tool-activity > summary';
-   assert(await browser.evaluate(`(() => {const row=document.querySelector(${JSON.stringify(selector)});const children=[...row.children];const status=children.findIndex(e=>e.matches('.stream-tool-status-slot,.tool-activity-meta'));const tool=children.findIndex(e=>e.tagName==='B');const preview=children.findIndex(e=>e.matches('.file-tool-preview,.stream-tool-command-preview,.tool-activity-command'));return status>=0&&tool>status&&preview>tool;})()`),'status, tool, preview order');
+   assert(await browser.evaluate(`(() => {const row=document.querySelector(${JSON.stringify(selector)});const children=[...row.children];const tool=children.findIndex(e=>e.tagName==='B');const preview=children.findIndex(e=>e.matches('.file-tool-preview,.stream-tool-command-preview,.tool-activity-command'));const visibleStatus=children.find(e=>e.matches('.stream-tool-status-slot,.tool-activity-running-marker,.stream-tool-status,.tool-activity-status'));return !visibleStatus&&tool===0&&preview>tool&&!row.textContent.includes('✓');})()`),'completed tool removes status marker and shifts left');
    await browser.evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'center'})`);
    await browser.evaluate(`document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new MouseEvent('mouseover',{bubbles:true}))`);
    assert(await browser.evaluate(`getComputedStyle(document.querySelector(${JSON.stringify(selector)})).cursor==='pointer'`),'whole row has pointer affordance');
@@ -412,7 +413,7 @@ async function main() {
    for(const type of ['keyDown','keyUp']) await browser.call('Input.dispatchKeyEvent',{type,key:' ',code:'Space',windowsVirtualKeyCode:32});
    await waitFor(()=>browser.evaluate(stream?`document.querySelector('.stream-tool-toggle').getAttribute('aria-expanded')==='false'`:`!document.querySelector('.tool-activity').open`),'keyboard collapses details');
   }
-  console.log('PASS readfile semantic summaries: ordinary/stream, FileText, path+ascending range, raw detail, pointer/keyboard, light/dark, 390px');
+  console.log('PASS readfile semantic summaries: ordinary/stream, SquareText, path+ascending range, raw detail, pointer/keyboard, light/dark, 390px');
  } finally {await browser.close();await host.close();}
 }
 await main();
