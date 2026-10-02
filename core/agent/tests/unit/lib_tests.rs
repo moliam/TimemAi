@@ -405,7 +405,7 @@ fn threshold_compaction_quality_warning_tracks_only_consecutive_poor_forced_resu
 
     assert!(core
         .threshold_compaction_quality_note(true, 3_601, 1_001)
-        .is_none());
+        .is_some());
     assert_eq!(core.consecutive_poor_threshold_compactions, 3);
 
     assert!(core
@@ -429,7 +429,7 @@ fn threshold_compaction_quality_warning_tracks_only_consecutive_poor_forced_resu
 }
 
 #[test]
-fn second_poor_threshold_compaction_injects_one_quality_warning() {
+fn repeated_poor_threshold_compactions_keep_injecting_quality_warnings() {
     let mut core = test_core("threshold_compaction_quality_warning_in_prompt");
     core.set_response_protocol(ResponseProtocolKind::Json);
     core.append_delta(vec![(
@@ -442,7 +442,7 @@ fn second_poor_threshold_compaction_injects_one_quality_warning() {
         ("first threshold", false, 0),
         ("manual", true, 0),
         ("second threshold", false, 1),
-        ("third threshold", false, 1),
+        ("third threshold", false, 2),
     ];
 
     for (label, manual, expected_warning_count) in attempts {

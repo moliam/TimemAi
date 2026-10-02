@@ -6047,9 +6047,10 @@ Runtime tool_call ids:",
             return None;
         }
 
-        let previous = self.consecutive_poor_threshold_compactions;
-        self.consecutive_poor_threshold_compactions = previous.saturating_add(1);
-        if previous != 1 {
+        self.consecutive_poor_threshold_compactions = self
+            .consecutive_poor_threshold_compactions
+            .saturating_add(1);
+        if self.consecutive_poor_threshold_compactions < 2 {
             return None;
         }
 
