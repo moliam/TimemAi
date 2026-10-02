@@ -505,6 +505,25 @@ async function main() {
     const actionEvents = [thoughtEvent("stable-thought", "Stable thought", 1), lifecycle("start", "start", "running", 2)];
     await setRound(actionEvents, "Stable thought");
     await waitFor(() => contains(".stream-tool-row", "Bash"), "initial action missing");
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-elapsed .time-flip-digit')`), "live elapsed flip cells missing");
+    await waitFor(() => browser.evaluate(`(() => {
+      const outgoing = document.querySelector('.stream-tool-elapsed .time-flip-digit-out');
+      const incoming = document.querySelector('.stream-tool-elapsed .time-flip-digit-in');
+      return !!outgoing && !!incoming &&
+        getComputedStyle(outgoing).animationName === 'time-digit-flip-out' &&
+        getComputedStyle(incoming).animationName === 'time-digit-flip-in';
+    })()`), "live elapsed digit did not perform a flip transition", 3000);
+    const elapsedBeforeReducedMotion = await browser.evaluate(`document.querySelector('.stream-tool-elapsed').getAttribute('aria-label')`);
+    await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+    await waitFor(() => browser.evaluate(`document.querySelector('.stream-tool-elapsed').getAttribute('aria-label') !== ${JSON.stringify(elapsedBeforeReducedMotion)}`), "reduced-motion elapsed value did not advance", 3000);
+    assert(await browser.evaluate(`(() => {
+      const outgoing = document.querySelector('.stream-tool-elapsed .time-flip-digit-out');
+      const incoming = document.querySelector('.stream-tool-elapsed .time-flip-digit-in');
+      return !!outgoing && !!incoming &&
+        getComputedStyle(outgoing).animationName === 'none' &&
+        getComputedStyle(incoming).animationName === 'none';
+    })()`), "reduced motion must disable live elapsed digit animation");
+    await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
     assert(await browser.evaluate(`(() => {
       const icon = document.querySelector('.stream-tool-row .bash-tool-icon svg.lucide-square-terminal');
       return !!icon && getComputedStyle(icon).strokeWidth === '1.5px'

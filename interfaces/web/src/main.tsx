@@ -5,6 +5,7 @@ import type { CatalogModel } from "./model_endpoints";
 import { applyBetaDebugDefault } from "./beta_preferences";
 import { StreamUiModeSetting, useStreamUiMode, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
 import { StreamText } from "./stream_reveal";
+import { FlippingTime } from "./flipping_time";
 import { UserText } from "./user_text";
 import {
   AssistantRuntimeProvider,
@@ -9819,9 +9820,12 @@ const WorkingElapsed = memo(function WorkingElapsed({
     return () => window.clearTimeout(timer);
   }, [elapsedAt, endedAtMs]);
   if (elapsedMs < hideBeforeMs) return null;
+  const formattedElapsed = liveFormat
+    ? formatLiveElapsed(elapsedMs)
+    : formatDuration(elapsedMs)!;
   return (
     <span className={className} aria-hidden="true">
-      {liveFormat ? formatLiveElapsed(elapsedMs) : formatDuration(elapsedMs)}
+      <FlippingTime value={formattedElapsed} />
     </span>
   );
 });
@@ -10732,13 +10736,16 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
         {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : command && <span className="stream-tool-command-preview tool-invocation-preview" title={command}>{command.replace(/\s+/g, " ")}</span>}
         {(running
           ? liveElapsedMs
-          : activity.elapsed_ms) !== undefined && (
-          <span className="stream-tool-elapsed">
-            {running
-              ? formatLiveElapsed(liveElapsedMs)
-              : formatToolElapsed(activity.elapsed_ms!)}
-          </span>
-        )}
+          : activity.elapsed_ms) !== undefined && (() => {
+          const elapsed = running
+            ? formatLiveElapsed(liveElapsedMs)
+            : formatToolElapsed(activity.elapsed_ms!);
+          return (
+            <span className="stream-tool-elapsed" aria-label={elapsed}>
+              {running ? <FlippingTime value={elapsed} /> : elapsed}
+            </span>
+          );
+        })()}
       </div>
       <div className={`stream-tool-fold${open ? " expanded" : ""}`} inert={!open}>
         <div>
@@ -11778,6 +11785,26 @@ function ToolActivityGroup({ summary, enterPulse = false }: { summary: ToolActiv
   );
 }
 
+function LocalizedFlippingTime({
+  message,
+  time,
+}: {
+  message: "tools.remaining" | "tools.elapsed";
+  time: string;
+}) {
+  const marker = "\uE000";
+  const localized = t(message, { time: marker });
+  const markerIndex = localized.indexOf(marker);
+  if (markerIndex < 0) return <FlippingTime value={time} />;
+  return (
+    <>
+      {localized.slice(0, markerIndex)}
+      <FlippingTime value={time} />
+      {localized.slice(markerIndex + marker.length)}
+    </>
+  );
+}
+
 function ToolActivity({ activity }: { activity: Activity }) {
   const status = activity.tool_status || TOOL_STATUS_RUNNING;
   const running = isToolActivityRunning(status);
@@ -11850,18 +11877,28 @@ function ToolActivity({ activity }: { activity: Activity }) {
           {status === "background_running" && (
             <span className="tool-activity-background">{t("tools.statusBg")}</span>
           )}
-          {remainingWaitMs !== undefined && (
-            <span className="tool-activity-countdown">
-              {t("tools.remaining", { time: formatRemainingDuration(remainingWaitMs) })}
-            </span>
-          )}
-          {displayedElapsedMs !== undefined && (
-            <span className="tool-activity-duration">
-              {running
-                ? t("tools.elapsed", { time: formatLiveElapsed(displayedElapsedMs) })
-                : formatDuration(displayedElapsedMs)}
-            </span>
-          )}
+          {remainingWaitMs !== undefined && (() => {
+            const time = formatRemainingDuration(remainingWaitMs);
+            const label = t("tools.remaining", { time });
+            return (
+              <span className="tool-activity-countdown" aria-label={label}>
+                <LocalizedFlippingTime message="tools.remaining" time={time} />
+              </span>
+            );
+          })()}
+          {displayedElapsedMs !== undefined && (() => {
+            const time = running
+              ? formatLiveElapsed(displayedElapsedMs)
+              : formatDuration(displayedElapsedMs)!;
+            const label = running ? t("tools.elapsed", { time }) : time;
+            return (
+              <span className="tool-activity-duration" aria-label={label}>
+                {running
+                  ? <LocalizedFlippingTime message="tools.elapsed" time={time} />
+                  : time}
+              </span>
+            );
+          })()}
         </span>
       )}
     </>
