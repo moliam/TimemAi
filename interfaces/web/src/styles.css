@@ -5939,3 +5939,44 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .tool-activity :where(summary, span, b, code, pre, div) {
   font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace !important;
 }
+
+/* Live time values use fixed-width digit cells: only changed digits perform a
+   short 3D page turn, while units and localized labels stay still. */
+.time-flip,
+.time-flip-number { display: inline-flex; align-items: baseline; white-space: nowrap; }
+.time-flip-static { display: inline-block; }
+.time-flip-digit {
+  position: relative;
+  display: inline-grid;
+  width: 1ch;
+  height: 1.15em;
+  line-height: 1.15em;
+  overflow: hidden;
+  perspective: 4em;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  vertical-align: -.08em;
+}
+.time-flip-digit-placeholder { grid-area: 1 / 1; visibility: hidden; }
+.time-flip-digit-transition,
+.time-flip-digit-face { position: absolute; inset: 0; }
+.time-flip-digit-face {
+  display: grid;
+  place-items: center;
+  backface-visibility: hidden;
+  transform-origin: 50% 50%;
+}
+.time-flip-digit-out { animation: time-digit-flip-out .32s cubic-bezier(.4, 0, .7, .2) both; }
+.time-flip-digit-in { animation: time-digit-flip-in .32s cubic-bezier(.2, .75, .25, 1) both; }
+@keyframes time-digit-flip-out {
+  from { opacity: 1; transform: rotateX(0deg); }
+  to { opacity: 0; transform: rotateX(-90deg); }
+}
+@keyframes time-digit-flip-in {
+  from { opacity: 0; transform: rotateX(90deg); }
+  to { opacity: 1; transform: rotateX(0deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .time-flip-digit-out { display: none; animation: none; }
+  .time-flip-digit-in { animation: none; transform: none; opacity: 1; }
+}

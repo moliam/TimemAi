@@ -112,7 +112,10 @@ rows omit both the marker and its layout slot so tool identity shifts left and
 returns to the stronger settled color, while failures retain an explicit status.
 Rows with details are the disclosure target themselves, with hover/focus feedback,
 keyboard activation and selection protection rather than a persistent arrow.
-Local-work state uses a reduced-motion-aware swaying wrench; model waiting keeps
-its existing star identity. System notices use their own half-pixel-larger type
+Live elapsed and countdown values use fixed-width, tabular digit cells: only
+changed digits perform a short 3D page turn, labels and units remain stationary,
+and reduced-motion presentation updates without animation. Settled duration
+facts remain static. Local-work state uses a reduced-motion-aware swaying wrench;
+model waiting keeps its existing star identity. System notices use their own half-pixel-larger type
 contract, and context-compaction notices are labeled “Conversation compression” /
 “对话压缩”.
