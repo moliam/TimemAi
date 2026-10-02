@@ -95,7 +95,7 @@ than exposing internal codes or paths.
 Built-in tool activity rows may derive visual summaries only from structured
 Host `core.action.input`: `src/tool_presentation.ts` validates known shapes and
 falls back to the generic redacted argument string for malformed, unknown or
-third-party inputs. `readfile` uses `FileText` with path and selector-aware
+third-party inputs. `readfile` uses `SquareText` with path and selector-aware
 line/byte/match summaries; historical `max_bytes` is validated only as a legacy
 input field and omitted from the primary summary while remaining in expanded
 redacted details. `memmgr` search/SQL uses `DatabaseSearch`, while its

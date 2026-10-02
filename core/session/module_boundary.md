@@ -7,6 +7,8 @@ semantics out of `core/agent`.
 ## Current layout
 
 - `src/lib.rs`: per-context worker runtime, handles, events, and multi-worker manager.
+  It forwards Core capability-probe persistence records as typed worker events without classifying,
+  keying, or storing them itself.
 - `tests/unit/session_worker_tests.rs`: private white-box behavioral coverage for the worker runtime.
 
 ## Dependency direction

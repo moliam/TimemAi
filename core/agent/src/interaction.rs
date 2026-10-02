@@ -83,11 +83,44 @@ pub fn parse_parallel_tool_calls(value: &str) -> Result<ParallelToolCalls, Strin
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityProbeIdentity {
+    /// Stable, host-owned endpoint identity. It scopes otherwise identical
+    /// endpoint definitions without exposing credentials to Core or topics.
+    pub endpoint_id: String,
+    pub api_protocol: String,
+    pub gateway: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_thinking: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedCapabilityProbe {
+    pub identity: CapabilityProbeIdentity,
+    pub native_supported: bool,
+    pub parallel_supported: bool,
+    pub observed_tool_calls: usize,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InteractionConfig {
     pub tool_call_mode: ToolCallMode,
     pub parallel_tool_calls: ParallelToolCalls,
     pub max_tool_calls_per_response: usize,
+    /// Catalog/host knowledge for native function calling. `Some(true)` means
+    /// supported, `Some(false)` means explicitly unsupported, and `None` means
+    /// an ordinary chat endpoint whose capability must be probed.
+    pub native_tools_supported: Option<bool>,
+    /// Host-projected stable endpoint identity used only for strict capability
+    /// cache matching. API keys and other secrets must never be placed here.
+    pub capability_probe_endpoint_id: Option<String>,
+    /// Host-loaded durable probe result. Core validates the complete identity
+    /// before use and ignores stale or mismatched records.
+    pub persisted_capability_probe: Option<PersistedCapabilityProbe>,
 }
 
 impl Default for InteractionConfig {
@@ -99,6 +132,9 @@ impl Default for InteractionConfig {
             tool_call_mode: ToolCallMode::Inline,
             parallel_tool_calls: ParallelToolCalls::Auto,
             max_tool_calls_per_response: DEFAULT_MAX_TOOL_CALLS_PER_RESPONSE,
+            native_tools_supported: Some(true),
+            capability_probe_endpoint_id: None,
+            persisted_capability_probe: None,
         }
     }
 }

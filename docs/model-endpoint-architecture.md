@@ -21,6 +21,14 @@ Core 是唯一语义权威。链路：接入点配置 → 能力与配置校验 
 
 协议下拉框按当前供应商/模型的 Core 能力投影筛选，不能把通用协议列表当作所有模型的能力。仅无能力声明的自定义服务保留通用列表；已有不兼容的显式协议保留为禁用项并标注不支持，阻止保存，不静默替换。OpenAI 供应商不提供 Anthropic Messages；网关协议转换不能推定为官方模型能力。
 
+## Function calling 与能力探测
+
+普通协议接入点公开 Function calling 开关；自定义接入点默认开启。目录中 `supported`/`conditional` 模板默认开启，`unsupported` 默认关闭，`unknown` 默认开启并进入探测。用户关闭后固定 Inline 且不探测；用户开启且模板的 catalog ID、供应商、模型、协议与解析后 Base URL 均精确匹配已知 `supported`/`conditional` 声明时直接 Native。自定义、任一身份字段偏离、目录为 `unknown`，或用户覆盖 `unsupported` 声明时均由 Core 探测。OpenAI Responses 不显示开关并强制开启，直接 Native。
+
+Core 以 Host 稳定 endpoint ID、API 协议、去除凭据/查询/片段并规范化后的网关地址、模型和相关推理选项组成严格、无密钥身份。持久结果仅能被完全相同身份复用；Host 只负责按当前绑定注入和原子保存 Core 记录，不解释探测响应。只有供应商错误明确拒绝 native/function tools 时才形成持久负结果并切换 Inline；网络、取消、认证、限流、5xx、普通 4xx、随机错误，以及未按要求返回工具调用的成功响应都不确定，继续 Native 且不持久化。正式模型请求错误直接按原错误结束，不作为能力证据，也不触发回退。
+
+持久负结果在当前 Turn 第 1 个正式轮次及之后每 10 轮（1、11、21……）前强制重探。再次明确不支持时更新负记录；不确定结果恢复 Native 并清除旧负记录。协商阶段通过 `core.model.capability_negotiation` 结构化 topic 暴露，界面不得从自然语言错误或请求时序重建策略。
+
 ## 配置扩展
 
 新模型只需新增版本化 JSON 描述，引用已实现适配器；不修改 Rust/TS 或编译。目录通过 `TIMEM_MODEL_CATALOG_DIR` 显式指定，在启动时读取；当前运行实例不热替换。限制文件大小、文件数与模型数，重复 ID、未知版本、未实现适配器或无效约束拒绝加载，不能声称支持。新增 wire 行为必须实现并测试适配器，禁止配置执行脚本或任意 JSON path 程序。

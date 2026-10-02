@@ -129,9 +129,10 @@ pub use data_layout::{
     workspace_config_file, RuntimeDataLayout,
 };
 pub use host::{
-    context_compact_requested_topic_event, context_compact_topic_event,
-    core_initialized_topic_event, core_initialized_topic_event_with_worker,
-    normalize_user_supplements, normalize_user_supplements_with_context, resolve_topic_reply,
+    capability_negotiation_topic_event, context_compact_requested_topic_event,
+    context_compact_topic_event, core_initialized_topic_event,
+    core_initialized_topic_event_with_worker, normalize_user_supplements,
+    normalize_user_supplements_with_context, resolve_topic_reply,
     running_shell_job_exit_topic_event, runtime_root_repair_help_topic_event,
     session_worker_default_display_name, toolgen_topic_event, topic_event_status_hint,
     work_instruction_load_topic_event, CoreActionTopic, CoreContextCompactTopic,
@@ -144,16 +145,17 @@ pub use host::{
     RoundLimitResolution, StoppedTurn, TopicReply, TopicReplyError, TurnInput, TurnOutcome,
     TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi, UserSupplement, CORE_TOPIC_ACTION,
     CORE_TOPIC_CONTEXT_COMPACT, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST,
-    CORE_TOPIC_MEMO, CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE,
-    CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
+    CORE_TOPIC_MEMO, CORE_TOPIC_MODEL_CAPABILITY_NEGOTIATION, CORE_TOPIC_MODEL_REPAIR,
+    CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
     CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TOOLGEN,
     CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
     DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT, USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT,
 };
 pub use interaction::{
-    parse_parallel_tool_calls, parse_tool_call_mode, CapabilityProbeSource, InteractionConfig,
-    InteractionProfile, ModelImagePart, ModelInteractionRequest, NativeExchange, NativeToolCall,
-    NativeToolChoice, NativeToolResult, ParallelToolCalls, ToolCallMode, ToolDefinition,
+    parse_parallel_tool_calls, parse_tool_call_mode, CapabilityProbeIdentity,
+    CapabilityProbeSource, InteractionConfig, InteractionProfile, ModelImagePart,
+    ModelInteractionRequest, NativeExchange, NativeToolCall, NativeToolChoice, NativeToolResult,
+    ParallelToolCalls, PersistedCapabilityProbe, ToolCallMode, ToolDefinition,
     DEFAULT_MAX_TOOL_CALLS_PER_RESPONSE,
 };
 pub use model_api::{
@@ -177,7 +179,10 @@ pub use model_service_config::{
 pub use model_transport::{
     call_model, call_model_with_cancel, validate_model_private_ca_pem, HttpModelClient,
 };
-pub use negotiation::negotiate_interaction;
+pub use negotiation::{
+    capability_probe_identity, force_reprobe_interaction, negotiate_interaction,
+    negotiate_interaction_outcome, NegotiationOutcome,
+};
 use notification::CoreNotification;
 pub use notification::{CoreActionKind, CoreMemoryActivity};
 pub use profiler::{
@@ -202,9 +207,10 @@ use response_protocol::{
     ActionGroupOrder, ParsedAction, ParsedActionGroup, ParsedContextCompact, ParsedEnvelope,
 };
 pub use retry_policy::{
-    is_model_input_too_large_error, is_retryable_model_system_error, model_retry_decision,
-    ModelCallOutcome, ModelRetryDecision, ModelSystemRetryPolicy,
-    DEFAULT_MODEL_SYSTEM_ERROR_RETRIES, DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY,
+    is_explicit_native_tools_unsupported, is_model_input_too_large_error,
+    is_retryable_model_system_error, model_retry_decision, ModelCallOutcome, ModelRetryDecision,
+    ModelSystemRetryPolicy, DEFAULT_MODEL_SYSTEM_ERROR_RETRIES,
+    DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY,
 };
 pub use runtime_context::{
     local_datetime_label, local_time_label, runtime_time_context, LocalTimeParts,

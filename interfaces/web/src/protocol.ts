@@ -385,6 +385,7 @@ export type ModelEndpoint = {
   max_llm_input_tokens: number;
   max_llm_output_tokens: number;
   stream: boolean;
+  function_calling: boolean;
   api_key_configured: boolean;
   http_headers: Record<string, string>;
   request_fields: Record<string, unknown>;
@@ -857,6 +858,7 @@ export type ClientCommand =
         max_llm_input_tokens: number;
         max_llm_output_tokens: number;
         stream: boolean;
+        function_calling: boolean;
         api_key?: string;
         http_headers: Record<string, string>;
         request_fields: Record<string, unknown>;

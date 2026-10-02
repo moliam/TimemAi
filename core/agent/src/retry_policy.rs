@@ -93,6 +93,52 @@ fn is_legacy_response_header_transport_error(lower_error: &str) -> bool {
         && lower_error.contains("stage=response_headers")
 }
 
+/// Returns true only when a non-transient 4xx response explicitly rejects
+/// native tool-request fields. This is intentionally narrower than generic
+/// request validation so authentication, routing, quota, cancellation, and
+/// transport failures never invalidate a capability result.
+pub fn is_explicit_native_tools_unsupported(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    let Some(status_text) = lower.strip_prefix("model_http_") else {
+        return false;
+    };
+    let status: u16 = status_text
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0);
+    if !(400..500).contains(&status) || matches!(status, 401 | 403 | 408 | 409 | 413 | 425 | 429) {
+        return false;
+    }
+    let names_native_field = [
+        "parallel_tool_calls",
+        "tool_choice",
+        "tool_calls",
+        "tools",
+        "function_call",
+        "functions",
+    ]
+    .iter()
+    .any(|field| lower.contains(field));
+    let explicitly_rejects_field = [
+        "unsupported",
+        "not supported",
+        "does not support",
+        "unknown field",
+        "unknown parameter",
+        "unrecognized",
+        "unexpected field",
+        "unexpected parameter",
+        "not allowed",
+        "not permitted",
+        "extra inputs are not permitted",
+    ]
+    .iter()
+    .any(|signal| lower.contains(signal));
+    names_native_field && explicitly_rejects_field
+}
+
 pub fn is_model_input_too_large_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     let input_subject =

@@ -241,6 +241,8 @@ export const en: Strings = {
   },
   tools: {
     memorySearch: "Memory search",
+    searchConversationHistory: "Search conversation history for “{query}”",
+    searchAllConversationHistory: "Search all conversation history",
     searchMemory: "Search",
     searchAllMemory: "Search all",
     inMemory: "in",
@@ -413,6 +415,9 @@ export const en: Strings = {
     empty: "No endpoints yet. Add one in Settings first.",
     workingNote: "The current request keeps its existing configuration; the selected endpoint applies to the next request.",
     apiProtocol: "API protocol",
+    functionCallingLabel: "Function calling",
+    functionCallingHint: "Enable native function calls. Unknown custom or modified endpoints are probed before use.",
+    functionCallingResponsesHint: "Responses is agent-native and always uses function calling.",
     maxOutput: "Max output",
     redirectLabel: "Allow cross-origin / cross-protocol redirects",
     saveEndpoint: "Save endpoint",

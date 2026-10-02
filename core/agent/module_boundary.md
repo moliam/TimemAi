@@ -45,6 +45,15 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   Model service I/O belongs behind the core/model service boundary. Hosts may surface
   waiting/cancellation UX, but should not redefine retryability or retry
   metadata.
+- Native function-call capability negotiation. Core owns the strict endpoint/model identity,
+  process cache, persisted-result validation, probe request and result classification, periodic
+  re-probe of durable negative results, and `core.model.capability_negotiation` topics. Only an
+  explicit provider rejection of native/function tools may become a durable unsupported result;
+  authentication, rate limiting, cancellation, transport/5xx/generic errors, and successful
+  responses without the requested probe calls remain inconclusive and keep the Native path.
+  Formal model-request failures are not capability evidence and must not trigger an Inline
+  fallback. Hosts may supply catalog knowledge and persist/clear exact Core records, but must not
+  reinterpret these semantics.
 - Capability and tool registries, including validation data loaded from
   resources.
 - MCP client transport, server discovery, namespaced dynamic tool registration,

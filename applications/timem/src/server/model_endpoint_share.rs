@@ -32,6 +32,8 @@ struct Basic {
     stream: bool,
     requirements: agent_core::model_requirements::EndpointRequirements,
     reasoning_effort: Option<String>,
+    #[serde(default = "default_true")]
+    function_calling: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -73,6 +75,7 @@ pub(super) fn export(
             stream: endpoint.stream,
             requirements: endpoint.requirements.clone(),
             reasoning_effort: endpoint.reasoning_effort.clone(),
+            function_calling: endpoint.function_calling,
         }),
         advanced: advanced.then(|| Advanced {
             request_fields: endpoint.request_fields.clone(),
@@ -125,6 +128,7 @@ fn decode(data: &str) -> Result<ModelEndpointInput, String> {
         stream: basic.stream,
         requirements: basic.requirements,
         reasoning_effort: basic.reasoning_effort,
+        function_calling: basic.function_calling,
         request_fields: advanced
             .as_ref()
             .map(|v| v.request_fields.clone())
