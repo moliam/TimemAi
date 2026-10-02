@@ -3154,6 +3154,30 @@ fn browser_commands_are_strictly_tagged_and_do_not_accept_unknown_variants() {
         ClientCommand::AttachmentRemove { .. }
     ));
 
+    let endpoint_upsert = serde_json::from_value::<ClientCommand>(json!({
+        "type": "model_endpoint_upsert",
+        "endpoint": {
+            "id": "endpoint-json",
+            "name": "JSON endpoint",
+            "model": "test-model",
+            "api_protocol": "openai-compatible",
+            "response_protocol": "json",
+            "base_url": "https://example.test/v1",
+            "max_llm_input_tokens": 100000,
+            "max_llm_output_tokens": 4096,
+            "stream": true,
+            "function_calling": true
+        }
+    }))
+    .unwrap();
+    assert!(matches!(
+        endpoint_upsert,
+        ClientCommand::ModelEndpointUpsert { endpoint }
+            if endpoint.id.as_deref() == Some("endpoint-json")
+                && endpoint.model == "test-model"
+                && endpoint.function_calling
+    ));
+
     let mem_switch =
         serde_json::from_str::<ClientCommand>(r#"{"type":"mem_switch","path":"/tmp/.test_mem"}"#)
             .unwrap();
@@ -15422,7 +15446,9 @@ fn endpoint_edits_and_switches_apply_at_the_next_new_request_boundary() {
         handle_command(
             &state,
             TEST_PORT,
-            ClientCommand::ModelEndpointUpsert { endpoint },
+            ClientCommand::ModelEndpointUpsert {
+                endpoint: Box::new(endpoint),
+            },
         )
         .unwrap();
     }
@@ -15453,7 +15479,7 @@ fn endpoint_edits_and_switches_apply_at_the_next_new_request_boundary() {
         &state,
         TEST_PORT,
         ClientCommand::ModelEndpointUpsert {
-            endpoint: endpoint_boundary_input("endpoint-boundary-a", "high"),
+            endpoint: Box::new(endpoint_boundary_input("endpoint-boundary-a", "high")),
         },
     )
     .unwrap();
@@ -15857,7 +15883,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
         &state,
         TEST_PORT,
         ClientCommand::ModelEndpointUpsert {
-            endpoint: ModelEndpointInput {
+            endpoint: Box::new(ModelEndpointInput {
                 requirements: Default::default(),
                 catalog_id: None,
                 id: Some("endpoint-one".to_string()),
@@ -15885,7 +15911,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 ]),
                 reasoning_effort: None,
                 function_calling: true,
-            },
+            }),
         },
     )
     .unwrap()
@@ -15980,7 +16006,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
         &state,
         TEST_PORT,
         ClientCommand::ModelEndpointUpsert {
-            endpoint: ModelEndpointInput {
+            endpoint: Box::new(ModelEndpointInput {
                 requirements: Default::default(),
                 catalog_id: None,
                 id: Some("endpoint-one".to_string()),
@@ -15999,7 +16025,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 request_fields: Default::default(),
                 reasoning_effort: None,
                 function_calling: true,
-            },
+            }),
         },
     )
     .unwrap();
@@ -16032,7 +16058,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
         &state,
         TEST_PORT,
         ClientCommand::ModelEndpointUpsert {
-            endpoint: ModelEndpointInput {
+            endpoint: Box::new(ModelEndpointInput {
                 requirements: Default::default(),
                 catalog_id: None,
                 id: Some("endpoint-one".to_string()),
@@ -16051,7 +16077,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 request_fields: Default::default(),
                 reasoning_effort: None,
                 function_calling: true,
-            },
+            }),
         },
     )
     .unwrap();
@@ -16901,6 +16927,34 @@ fn context_handoff_fixture(id: &str) -> agent_core::DynamicContextSnapshot {
         "native_exchanges": [], "last_observed_prompt_tokens": 213371
     }))
     .unwrap()
+}
+
+#[test]
+fn context_handoff_persists_runtime_state_without_text_deltas() {
+    let state = routing_test_state();
+    let id = "handoff-runtime-state-only";
+    let snapshot = agent_core::DynamicContextSnapshot {
+        deltas: Vec::new(),
+        native_exchanges: Vec::new(),
+        last_observed_prompt_tokens: 0,
+        active_memo: Some("resume the long task".to_string()),
+        pending_forcible_memo_note: Some("memo was closed by runtime".to_string()),
+        pending_interrupted_memo_note: None,
+    };
+
+    write_prompt_context_snapshot(&state, id, &snapshot).unwrap();
+    let path = current_session_store(&state)
+        .unwrap()
+        .prompt_context_path_for_session(id);
+    assert!(
+        path.exists(),
+        "Core-owned runtime context state must not be discarded because text deltas are empty"
+    );
+    let saved: agent_core::DynamicContextSnapshot =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved, snapshot);
+
+    std::fs::remove_dir_all(&state.template.data_dir).unwrap();
 }
 
 #[test]
@@ -17758,6 +17812,88 @@ fn model_endpoint_import_persistence_failure_is_atomic_and_retryable() {
     );
     drop(mem);
 
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn stale_capability_probe_event_cannot_overwrite_an_edited_endpoint() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("stale_capability_probe"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+
+    let old_endpoint = ModelEndpointConfig {
+        catalog_id: None,
+        requirements: Default::default(),
+        id: "capability-race-endpoint".to_string(),
+        name: "Capability race".to_string(),
+        model: "old-model".to_string(),
+        api_protocol: "openai-compatible".to_string(),
+        response_protocol: "xml".to_string(),
+        base_url: "https://old.example.test/v1".to_string(),
+        max_llm_input_tokens: 100_000,
+        max_llm_output_tokens: 4_096,
+        stream: true,
+        api_key: "secret".to_string(),
+        http_headers: Default::default(),
+        request_fields: Default::default(),
+        allow_cross_origin_redirects: false,
+        private_ca_pem: String::new(),
+        reasoning_effort: None,
+        function_calling: true,
+        capability_probe: None,
+    };
+    let old_session = {
+        let session = state.sessions.lock().unwrap()["session_a"].clone();
+        model_endpoint_session_candidate(&session, &old_endpoint).unwrap()
+    };
+    let old_identity =
+        agent_core::capability_probe_identity(&old_session.runtime.settings.config).unwrap();
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert("session_a".to_string(), old_session);
+
+    let mut edited_endpoint = ModelEndpointConfig {
+        model: "new-model".to_string(),
+        base_url: "https://new.example.test/v1".to_string(),
+        ..old_endpoint
+    };
+    let edited_identity = {
+        let session = state.sessions.lock().unwrap()["session_a"].clone();
+        let candidate = model_endpoint_session_candidate(&session, &edited_endpoint).unwrap();
+        agent_core::capability_probe_identity(&candidate.runtime.settings.config).unwrap()
+    };
+    edited_endpoint.capability_probe = Some(agent_core::PersistedCapabilityProbe {
+        identity: edited_identity,
+        native_supported: true,
+        parallel_supported: true,
+        observed_tool_calls: 2,
+        reason: "new endpoint capability".to_string(),
+    });
+    {
+        let mut mem = state.mem.lock().unwrap();
+        mem.model_endpoints = vec![edited_endpoint.clone()];
+        save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints).unwrap();
+    }
+    let stale_record = agent_core::PersistedCapabilityProbe {
+        identity: old_identity.clone(),
+        native_supported: false,
+        parallel_supported: false,
+        observed_tool_calls: 0,
+        reason: "explicit native tools unsupported".to_string(),
+    };
+
+    persist_capability_probe_event(&state, "session_a", &old_identity, Some(stale_record)).unwrap();
+    persist_capability_probe_event(&state, "session_a", &old_identity, None).unwrap();
+
+    let mem = state.mem.lock().unwrap();
+    assert_eq!(mem.model_endpoints, vec![edited_endpoint]);
+    assert_eq!(
+        load_model_endpoints_resilient(&mem.layout.memory_dir()).unwrap(),
+        mem.model_endpoints
+    );
+    drop(mem);
     std::fs::remove_dir_all(root).unwrap();
 }
 

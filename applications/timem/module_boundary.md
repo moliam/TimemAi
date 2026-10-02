@@ -93,6 +93,11 @@ The product Web host is split by internal responsibility under `src/server/`:
   accepted work from executing in the new space.
 - Per-session browser upload storage and attachment metadata. Uploaded bytes
   remain host-local; the host only contributes their paths as session context.
+- Atomic, single-use persistence of Core-owned dynamic prompt-context snapshots
+  during graceful runtime handoff. The Host stores/restores the opaque compound
+  snapshot and consumes it before import so a crash cannot replay an old
+  generation. Core defines whether a snapshot is empty; the Host must not drop
+  Native exchanges, memo state, or pending notices by inspecting text deltas.
 - Memory-space-scoped Worker Role library ownership. Roles and Role groups are
   shared by every Session in the active memory space, persisted atomically
   outside individual Session directories, and projected into snapshots and
@@ -227,7 +232,10 @@ closed. Legacy migration requires a unique full configuration match, including
 secrets and reasoning policy. The Host also persists the endpoint's Function calling preference
 and any Core-produced negative capability probe. A probe record is injected, replaced, or cleared
 only when its complete secret-free Core identity matches the currently bound endpoint, protocol,
-normalized base URL, model, and relevant reasoning options. The Host may project exact catalog
+normalized base URL, model, and relevant reasoning options. Persistence must validate both the
+Session runtime snapshot that emitted the event and, while holding the MEM lock, an identity rebuilt
+from the current durable endpoint. A late event is discarded if either identity has drifted, so an
+endpoint edit cannot be overwritten by an older probe result. The Host may project exact catalog
 knowledge or an unknown value into Core, but it must not classify provider failures or invent a
 capability result.
 

@@ -377,7 +377,7 @@ enum CoreSessionWorkerCommand {
         options: agent_core::ModelHttpTransportOptions,
     },
     ReplaceModelServiceConfig {
-        config: ModelServiceConfig,
+        config: Box<ModelServiceConfig>,
         result_tx: Sender<Result<(), String>>,
     },
     UpdateMcp {
@@ -1152,7 +1152,10 @@ impl CoreSessionWorkerHandle {
         }
         let (result_tx, result_rx) = mpsc::channel();
         self.command_tx
-            .send(CoreSessionWorkerCommand::ReplaceModelServiceConfig { config, result_tx })
+            .send(CoreSessionWorkerCommand::ReplaceModelServiceConfig {
+                config: Box::new(config),
+                result_tx,
+            })
             .map_err(|_| "core_session_worker_stopped".to_string())?;
         result_rx
             .recv()
@@ -2088,7 +2091,7 @@ impl CoreSessionWorker {
                         config: replacement,
                         result_tx,
                     } => {
-                        replace_worker_model_service_config(&mut core, &mut config, replacement);
+                        replace_worker_model_service_config(&mut core, &mut config, *replacement);
                         let _ = result_tx.send(Ok(()));
                     }
                     CoreSessionWorkerCommand::UpdateMcp {

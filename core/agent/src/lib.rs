@@ -537,6 +537,19 @@ pub struct DynamicContextSnapshot {
     pub pending_interrupted_memo_note: Option<String>,
 }
 
+impl DynamicContextSnapshot {
+    /// Whether the snapshot carries no model-visible history or runtime state
+    /// that must survive a restart. Token observations are metadata about the
+    /// carried context and do not make an otherwise empty snapshot restorable.
+    pub fn is_empty(&self) -> bool {
+        self.deltas.is_empty()
+            && self.native_exchanges.is_empty()
+            && self.active_memo.is_none()
+            && self.pending_forcible_memo_note.is_none()
+            && self.pending_interrupted_memo_note.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryRecord {
     pub id: String,
@@ -3345,13 +3358,14 @@ impl AgentCore {
     }
 
     pub fn import_dynamic_context(&mut self, snapshot: DynamicContextSnapshot) {
+        // Import is a wholesale replacement, including an empty snapshot. A
+        // reused worker must not retain text, native tool exchanges, pending
+        // components, or one-shot notices from the context being replaced.
+        self.clear_dynamic_context();
         // The memo is intentionally NOT reactivated: after a restart the
         // reminder must go inactive and the model is told to recreate it if
         // still necessary. The snapshot value is consumed by the Host for
         // the resume notice instead.
-        if snapshot.deltas.is_empty() {
-            return;
-        }
         self.deltas = snapshot.deltas;
         self.native_exchanges = snapshot.native_exchanges;
         self.recount_context_message_elements();
@@ -3374,6 +3388,15 @@ impl AgentCore {
 
     pub fn clear_dynamic_context(&mut self) {
         self.deltas.clear();
+        self.native_exchanges.clear();
+        self.pending_native_exchange = None;
+        self.pending_prompt_components.clear();
+        self.pending_user_interruption_note = false;
+        self.pending_forcible_memo_note = None;
+        self.pending_interrupted_memo_note = None;
+        self.memo_deleted_this_turn = None;
+        self.memo_deleted_trailer_shown = false;
+        self.touched_paths.clear();
         self.context_message_elements = 0;
         self.last_observed_prompt_tokens = 0;
         self.context_compact_required = false;
@@ -4157,6 +4180,10 @@ impl AgentCore {
             );
         }
         if compacted_successfully {
+            // Only the latest runtime confirmation is operationally useful.
+            // Keep every assistant-authored compaction summary, but retire the
+            // prior CWD/memo confirmation before appending its replacement.
+            self.hide_prompt_slices_by_type("context_compacted");
             // The runtime-held memo survives compaction; restate it so the
             // next submission still carries the long-task reminder.
             let memo_line = self
@@ -6066,7 +6093,7 @@ Runtime tool_call ids:",
 
         let occupancy_percent = |tokens: u32| {
             let numerator = u64::from(tokens) * 100;
-            ((numerator + u64::from(window_tokens) - 1) / u64::from(window_tokens)) as u32
+            numerator.div_ceil(u64::from(window_tokens)) as u32
         };
         Some(format!(
             "NOTE: context compaction ratio is not very good, {}% -> {}%, try to compress more by retaining only necessary part and discard bulky along-side info if possible.",
@@ -7465,6 +7492,20 @@ Runtime tool_call ids:",
             delta_ids: matched_delta_ids,
             slice_ids: matched_slice_ids,
         })
+    }
+
+    /// Hide every visible slice with the exact structured prompt type. Used
+    /// when lifecycle cleanup must not reinterpret or match user/model text.
+    fn hide_prompt_slices_by_type(&mut self, prompt_type: &str) {
+        for delta in &mut self.deltas {
+            for slice in prompt_render::render_delta_slices(delta) {
+                if slice.prompt_type == prompt_type
+                    && !delta.hidden_slice_ids.contains(&slice.slice_id)
+                {
+                    delta.hidden_slice_ids.push(slice.slice_id.clone());
+                }
+            }
+        }
     }
 
     /// Hide every visible slice whose text contains `needle`. Used to retire

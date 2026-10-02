@@ -135,7 +135,16 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   include missing ids and current live refs so the model can repair its call.
   A successful compact re-injects one bounded RUNTIME snapshot of currently
   applied MCP actions when any are active; pending host configuration and MCP
-  secrets are never included.
+  secrets are never included. Across successive successful compactions, every
+  assistant-authored replacement summary remains authoritative, while only the
+  latest runtime CWD/memo success confirmation stays model-visible.
+- Dynamic prompt-context snapshots and reset semantics. Core owns the complete
+  consistency unit: rendered deltas, Native exchanges, prompt-token baseline,
+  active memo, and pending runtime-authority memo notices. Import replaces the
+  entire prior unit, including when the imported snapshot is empty; clear drops
+  every model-visible and one-shot pending component so the next turn is fresh.
+  Core also owns whether this compound snapshot is empty. Hosts may atomically
+  persist, consume, and restore it, but must not infer emptiness from one field.
 - Cross-host Session persistence schemas. Core owns `StoredSession`,
   `ChatHistoryRecord`, history paging, and resume-notice format so Shell, Web,
   iOS, and future hosts share one JSONL history contract. The first resume
