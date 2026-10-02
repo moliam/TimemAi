@@ -96,6 +96,56 @@ import { endpointProtocolOptions, canRestoreEndpointTemplateUrl, changeEndpointP
 const template: CatalogModel = { id:"fixture/model", revision:1, provider:"openai", model:"fixture-model", label:"Fixture", base_url:"https://example.test/v1", efforts:["none","low","high","max"], default_effort:"low", middle_default:false, min_input:3000, max_input:200000, min_output:512, max_output:30000, context_window:230000, protocols:[{protocol:"openai-responses",disabled_reason:null,fixed_effort:null,fixed_reason:null}] };
 const blank = (): ModelEndpointDraft => ({ ...endpoint, http_headers:{}, request_fields:{}, allow_cross_origin_redirects:false, requirements:initialEndpointRequirements() });
 describe("editable endpoint templates", () => {
+  it("defaults token budgets from the selected model limits", () => {
+    const standard = applyEndpointTemplate(blank(), template);
+    expect(standard.max_llm_input_tokens).toBe(200_000);
+    expect(standard.max_llm_output_tokens).toBe(10_000);
+    expect(standard.requirements?.field_sources.max_llm_input_tokens).toBe("template");
+    expect(standard.requirements?.field_sources.max_llm_output_tokens).toBe("template");
+
+    const large = applyEndpointTemplate(blank(), {
+      ...template,
+      id: "fixture/large",
+      max_input: 922_000,
+      max_output: 128_000,
+      context_window: 1_050_000,
+    });
+    expect(large.max_llm_input_tokens).toBe(256_000);
+    expect(large.max_llm_output_tokens).toBe(10_000);
+
+    const small = applyEndpointTemplate(blank(), {
+      ...template,
+      id: "fixture/small",
+      max_input: 64_000,
+      max_output: 8_000,
+      context_window: 72_000,
+    });
+    expect(small.max_llm_input_tokens).toBe(64_000);
+    expect(small.max_llm_output_tokens).toBe(8_000);
+  });
+
+  it("recomputes template-owned budgets but preserves user overrides", () => {
+    const first = applyEndpointTemplate(blank(), template);
+    const nextModel = {
+      ...template,
+      id: "fixture/next",
+      max_input: 400_000,
+      max_output: 6_000,
+      context_window: 500_000,
+    };
+    const switched = applyEndpointTemplate(first, nextModel);
+    expect(switched.max_llm_input_tokens).toBe(256_000);
+    expect(switched.max_llm_output_tokens).toBe(6_000);
+
+    const manual = editEndpoint(first, {
+      max_llm_input_tokens: 123_000,
+      max_llm_output_tokens: 5_000,
+    });
+    const preserved = applyEndpointTemplate(manual, nextModel);
+    expect(preserved.max_llm_input_tokens).toBe(123_000);
+    expect(preserved.max_llm_output_tokens).toBe(5_000);
+  });
+
   it("suggests fields, preserves user overrides across template switches and removal", () => {
     let draft = applyEndpointTemplate(blank(), template);
     expect(draft.model).toBe(template.model);
