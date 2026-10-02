@@ -208,6 +208,41 @@ await click("document.querySelectorAll('.endpoint-share-options label')[1]");
 const fragment=await generate();
 await close();
 await click("[...document.querySelectorAll('.endpoint-settings-toolbar button')].find(b=>/导入分享|import shared endpoint/i.test(b.textContent))");
+// A share string is opaque Base64. Wrapping 256 KiB into tens of thousands of
+// visual lines makes Chromium layout and vertical scrolling pathologically
+// expensive. Keep it one logical line and verify the real textarea geometry.
+const largeShareMetrics=await evaluate(`new Promise(resolve=>{
+ const e=document.querySelector('.endpoint-share-data textarea');
+ const setter=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set;
+ const started=performance.now();
+ setter.call(e,'A'.repeat(262144));e.dispatchEvent(new Event('input',{bubbles:true}));
+ requestAnimationFrame(()=>requestAnimationFrame(()=>{
+  const layoutMs=performance.now()-started;
+  const scrollStarted=performance.now();
+  for(let i=0;i<200;i++)e.scrollLeft=i%2?e.scrollWidth:0;
+  resolve({wrap:e.wrap,whiteSpace:getComputedStyle(e).whiteSpace,clientHeight:e.clientHeight,scrollHeight:e.scrollHeight,clientWidth:e.clientWidth,scrollWidth:e.scrollWidth,layoutMs,scrollMs:performance.now()-scrollStarted});
+ }));
+})`);
+assert(largeShareMetrics.wrap==='off' && largeShareMetrics.whiteSpace==='pre','large share textarea must disable wrapping: '+JSON.stringify(largeShareMetrics));
+assert(largeShareMetrics.scrollHeight<=largeShareMetrics.clientHeight+4 && largeShareMetrics.scrollWidth>largeShareMetrics.clientWidth,'256 KiB share must use horizontal, not giant vertical, scrolling: '+JSON.stringify(largeShareMetrics));
+assert(largeShareMetrics.layoutMs<1500 && largeShareMetrics.scrollMs<500,'256 KiB share interaction regressed: '+JSON.stringify(largeShareMetrics));
+// Controlled comparison: keep the same textarea, content, dimensions, and
+// browser process, and change only its wrapping treatment. This demonstrates
+// the geometry difference without treating two runs' ordering as causality.
+const wrappedComparator=await evaluate(`(() => {
+ const e=document.querySelector('.endpoint-share-data textarea');
+ const previous={wrap:e.getAttribute('wrap'),whiteSpace:e.style.whiteSpace,overflowWrap:e.style.overflowWrap,wordBreak:e.style.wordBreak};
+ e.wrap='soft';e.style.whiteSpace='pre-wrap';e.style.overflowWrap='anywhere';e.style.wordBreak='break-word';
+ const wrapped={scrollHeight:e.scrollHeight,scrollWidth:e.scrollWidth};
+ if(previous.wrap===null)e.removeAttribute('wrap');else e.setAttribute('wrap',previous.wrap);
+ e.style.whiteSpace=previous.whiteSpace;e.style.overflowWrap=previous.overflowWrap;e.style.wordBreak=previous.wordBreak;
+ const restored={scrollHeight:e.scrollHeight,scrollWidth:e.scrollWidth};
+ return {wrapped,restored};
+})()`);
+assert(wrappedComparator.wrapped.scrollHeight>largeShareMetrics.scrollHeight+1000,'controlled wrapped treatment must reproduce tall layout: '+JSON.stringify(wrappedComparator));
+assert(wrappedComparator.restored.scrollHeight<=largeShareMetrics.clientHeight+4,'restoring no-wrap treatment must restore compact height: '+JSON.stringify(wrappedComparator));
+console.log('METRIC endpoint share 256 KiB '+JSON.stringify({noWrap:largeShareMetrics,wrappedTreatment:wrappedComparator.wrapped,restored:wrappedComparator.restored}));
+await setData('');
 for(const invalid of ['invalid!!!',fragment]) {
  await setData(invalid);await click("document.querySelector('.endpoint-share-actions .primary')");
  await waitFor(()=>evaluate(`!!document.querySelector('.endpoint-share-panel [role=alert]')`),'invalid import shows error');
@@ -232,7 +267,7 @@ await click("document.querySelectorAll('.endpoint-share-options label')[2]");
 const roundtrip=decode(await generate());
 assert(roundtrip.name==='mygpt2' && roundtrip.personal.api_key==='e2e-private-key' && roundtrip.advanced.request_fields.vendor_options.custom==='中文','full import roundtrip after reload');
 await close();
-console.log('PASS endpoint sharing modal: insecure-context IDs, single progress state, fast settlement, polished responsive layout, defaults, export categories, Unicode, secret isolation, cleanup, invalid import, collisions, reload roundtrip');
+console.log('PASS endpoint sharing modal: insecure-context IDs, single progress state, fast settlement, 256 KiB no-wrap scrolling, polished responsive layout, defaults, export categories, Unicode, secret isolation, cleanup, invalid import, collisions, reload roundtrip');
 } finally {
   ws?.close();
   if (chrome && chrome.exitCode === null) {

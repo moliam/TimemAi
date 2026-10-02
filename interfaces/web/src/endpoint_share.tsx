@@ -144,7 +144,7 @@ export function EndpointSharePanel({ endpoint, transport, onClose }: {
           <p className="endpoint-share-warning" id={warningId}><TriangleAlert size={16} aria-hidden="true" /><span>{t("endpoints.shareWarning")}</span></p>
           {(!endpoint || data) && <label className="endpoint-share-data">
             <span>{t("endpoints.shareString")}</span>
-            <textarea aria-label={t("endpoints.shareString")} rows={5} maxLength={262144} spellCheck={false} autoComplete="off" readOnly={!!endpoint || busy} value={data} onChange={event => { setData(event.target.value); setFailed(false); setMessage(""); }} />
+            <textarea aria-label={t("endpoints.shareString")} rows={5} wrap="off" maxLength={262144} spellCheck={false} autoComplete="off" readOnly={!!endpoint || busy} value={data} onChange={event => { setData(event.target.value); setFailed(false); setMessage(""); }} />
           </label>}
           {message && <p className="endpoint-share-message" role={failed ? "alert" : "status"}>{message}</p>}
           <div className="endpoint-share-actions">

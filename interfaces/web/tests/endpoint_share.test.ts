@@ -51,6 +51,12 @@ describe("endpoint share dialog", () => {
     expect(component).toContain("completedSynchronously ? () => {} : stop");
   });
 
+  it("keeps opaque share strings on one scrollable line", () => {
+    expect(component).toContain('rows={5} wrap="off" maxLength={262144}');
+    expect(styles).toMatch(/\.endpoint-share-data textarea \{[^}]*white-space: pre;[^}]*overflow: auto;[^}]*overflow-wrap: normal;[^}]*word-break: normal;/);
+    expect(styles).not.toMatch(/\.endpoint-share-data textarea \{[^}]*overflow-wrap: anywhere;/);
+  });
+
   it("keeps the dialog above Settings and responsive on narrow screens", () => {
     expect(styles).toMatch(/\.settings-center-backdrop \{ position: fixed; z-index: 45;/);
     expect(styles).toMatch(/\.endpoint-share-backdrop \{ position: fixed; z-index: 70;/);
