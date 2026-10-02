@@ -57,7 +57,7 @@ describe("thread working indicator", () => {
 
     expect(source).toContain("ClipboardCheck,");
     expect(source).toContain("return <ClipboardCheck size={size} />;");
-    expect(source).toContain('<MemoIcon size={14} />');
+    expect(source).toContain('<MemoIcon size={16.8} />');
     expect(source.match(/<MemoIcon size=\{13\} \/>/g)).toHaveLength(2);
     expect(mark).toContain("isolation: isolate");
     expect(arc).toContain("z-index: 0");

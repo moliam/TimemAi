@@ -9699,7 +9699,7 @@ function TimemThread({
                   </svg>
                   {activeSession.active_memo ? (
                     <span className="thread-working-pin" aria-hidden="true">
-                      <MemoIcon size={14} />
+                      <MemoIcon size={16.8} />
                     </span>
                   ) : (
                     <span className="thread-working-core" />
@@ -11552,11 +11552,11 @@ function HeaderContextUsage({
         {cacheHitPercent !== undefined && (
           <>
             <span className="header-cache-token header-cache-input">
-              <ArrowBigUp size={10} strokeWidth={1.8} />
+              <ArrowBigUp size={12} strokeWidth={1.8} />
               {cacheInputLabel}
             </span>
             <span className="header-cache-token header-cache-output">
-              <ArrowBigDown size={10} strokeWidth={1.8} />
+              <ArrowBigDown size={12} strokeWidth={1.8} />
               {cacheOutputLabel}
             </span>
           </>

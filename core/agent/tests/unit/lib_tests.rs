@@ -196,7 +196,15 @@ fn native_final_keeps_structured_tool_history_before_final_replay() {
         truncated: false,
     });
 
-    assert!(matches!(step, CoreStep::Final(_)));
+    let final_turn = match step {
+        CoreStep::Final(final_turn) => final_turn,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        final_turn.final_answer,
+        "Final answer based on PROJECT-EVIDENCE-42"
+    );
+    assert_eq!(final_turn.stats.tool_calls, 0);
     assert_eq!(core.native_exchanges.len(), 2);
     assert_eq!(core.native_exchanges[0].delta_id, "pd_1");
     let prompt = core.build_next_prompt();
@@ -230,6 +238,55 @@ fn native_final_keeps_structured_tool_history_before_final_replay() {
             .unwrap()
             < next_prompt.rfind("what did you find?").unwrap()
     );
+}
+
+#[test]
+fn task_finished_does_not_add_to_an_ordinary_tool_call_count() {
+    let mut core = test_core("task_finished_tool_call_count");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "inspect runtime then finish".to_string(),
+    )]);
+
+    let arguments = serde_json::json!({"type": "cwd"});
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
+            id: "call_cwd".to_string(),
+            name: "self_tool".to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+    assert_eq!(core.current_stats.tool_calls, 1);
+
+    let arguments = serde_json::json!({"summary": "Runtime inspected."});
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
+            id: "call_finish".to_string(),
+            name: "task_finished".to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let final_turn = match step {
+        CoreStep::Final(final_turn) => final_turn,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(final_turn.final_answer, "Runtime inspected.");
+    assert_eq!(final_turn.stats.tool_calls, 1);
+    assert_eq!(core.native_exchanges.len(), 2);
 }
 
 #[test]

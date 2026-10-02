@@ -18,8 +18,8 @@ describe("header endpoint selector", () => {
   });
 
   it("uses Lucide direction icons instead of in/out text in the cache readout", () => {
-    expect(source).toContain("ArrowBigUp");
-    expect(source).toContain("ArrowBigDown");
+    expect(source).toContain('<ArrowBigUp size={12} strokeWidth={1.8} />');
+    expect(source).toContain('<ArrowBigDown size={12} strokeWidth={1.8} />');
     expect(source).toContain('className="header-cache-token header-cache-input"');
     expect(source).toContain('className="header-cache-token header-cache-output"');
     expect(source).not.toContain('`cache: ${cacheHitPercent.toFixed(1)}%, in:');
