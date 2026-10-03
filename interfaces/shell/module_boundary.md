@@ -150,7 +150,11 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   remains Ordinary and `--once-json` is always Ordinary. Attach performs this
   selection only after the Host and Session are selected. Ordinary preserves
   the existing integrated Thought / Action bytes and cancellation behavior.
-  Stream may replace revisioned `core.model.preview` content in place and render
+  A Host-provided restored-session `restart_cwd_decision` replaces the normal
+  attach prompt until resolved: Shell renders only the authoritative available
+  directory choices, sends `session_restart_cwd_resolve`, blocks supplements and
+  unrelated commands locally, and restores normal input only after Host
+  confirmation. Stream may replace revisioned `core.model.preview` content in place and render
   structured `core.action` lifecycle as live rows; terminal tool outcomes fold
   into compact success/failure counts while running/background work stays
   visible. Snapshot and live events share one reducer, are filtered to the

@@ -794,6 +794,7 @@ struct AttachStreamRegion {
     tools: StreamToolFoldState,
     rendered_rows: usize,
     prompt_visible: bool,
+    restart_cwd_decision: Option<Value>,
 }
 
 impl AttachStreamRegion {
@@ -805,6 +806,7 @@ impl AttachStreamRegion {
             tools: StreamToolFoldState::default(),
             rendered_rows: 0,
             prompt_visible: false,
+            restart_cwd_decision: None,
         }
     }
 
@@ -824,10 +826,21 @@ impl AttachStreamRegion {
                 output.push('\n');
             }
         }
-        if self.prompt_visible {
-            output.push_str(&attach_prompt_text());
+        if self.restart_cwd_decision.is_some() || self.prompt_visible {
+            output.push_str(&self.visible_prompt_text());
         }
         output
+    }
+
+    fn set_restart_cwd_decision(&mut self, decision: Option<Value>) {
+        self.restart_cwd_decision = decision;
+    }
+
+    fn visible_prompt_text(&self) -> String {
+        self.restart_cwd_decision
+            .as_ref()
+            .and_then(restart_cwd_prompt)
+            .unwrap_or_else(attach_prompt_text)
     }
 
     fn set_active_turn(&mut self, turn_id: Option<String>) {
@@ -939,7 +952,7 @@ impl AttachStreamRegion {
         use crossterm::queue;
         use crossterm::terminal::{Clear, ClearType};
 
-        let prompt = attach_prompt_text();
+        let prompt = self.visible_prompt_text();
         let mut rows_up =
             attach_input_clear_rows(self.rendered_rows, &prompt, input, terminal_width);
         queue!(output, MoveToColumn(0))?;
@@ -975,10 +988,15 @@ impl AttachStreamRegion {
     }
 
     fn show_prompt(&mut self) {
+        self.prompt_visible = true;
         if self.mode == ShellUiMode::Ordinary {
-            print_attach_prompt();
-        } else {
-            self.prompt_visible = true;
+            if self.restart_cwd_decision.is_some() {
+                close_dots();
+                print!("{}", self.visible_prompt_text());
+                let _ = std::io::stdout().flush();
+            } else {
+                print_attach_prompt();
+            }
         }
     }
 }
@@ -990,19 +1008,35 @@ fn print_attach_prompt() {
     let _ = std::io::stdout().flush();
 }
 
-fn restart_cwd_numeric_decision(
-    text: &str,
-    gate_pending: bool,
-) -> Option<Result<&'static str, ()>> {
-    if !gate_pending {
-        return None;
-    }
+#[derive(Debug, PartialEq, Eq)]
+enum RestartCwdInput {
+    Resolve(&'static str),
+    Invalid,
+    NotPending,
+}
+
+fn restart_cwd_input(text: &str, decision: Option<&Value>) -> RestartCwdInput {
+    let Some(decision) = decision else {
+        return RestartCwdInput::NotPending;
+    };
+    let session_cwd_available = decision
+        .get("session_cwd_available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     match text {
-        "1" => Some(Ok("keep_session")),
-        "2" => Some(Ok("use_runtime")),
-        "3" => Some(Err(())),
-        _ => None,
+        "1" | "!k" if session_cwd_available => RestartCwdInput::Resolve("keep_session"),
+        "2" | "!r" => RestartCwdInput::Resolve("use_runtime"),
+        _ => RestartCwdInput::Invalid,
     }
+}
+
+fn set_restart_cwd_decision(
+    decision: &mut Option<Value>,
+    stream_region: &mut AttachStreamRegion,
+    next: Option<Value>,
+) {
+    *decision = next.clone();
+    stream_region.set_restart_cwd_decision(next);
 }
 
 /// Connects to the Host WebSocket and runs the attach loop: stream-render
@@ -1062,9 +1096,10 @@ fn attach_session(
 
     let mut turn_views = AttachTurnViews::default();
     let mut pending_decisions: Vec<PendingDecision> = Vec::new();
-    let mut restart_cwd_decision: Option<Value> = initial_restart_decision;
+    let mut restart_cwd_decision: Option<Value> = initial_restart_decision.clone();
     let session_id = session.session_id.clone();
     let mut stream_region = AttachStreamRegion::new(ui_mode, session.active_turn_id.clone());
+    stream_region.set_restart_cwd_decision(initial_restart_decision);
     let mut command_sequence: u64 = 0;
 
     loop {
@@ -1085,6 +1120,41 @@ fn attach_session(
                     .map_err(|error| AttachError::Protocol(error.to_string()))?;
                 continue;
             }
+            match restart_cwd_input(&text, restart_cwd_decision.as_ref()) {
+                RestartCwdInput::Resolve(decision) => {
+                    command_sequence += 1;
+                    let command_id = format!("attach_{}_{}", std::process::id(), command_sequence);
+                    let message = json!({
+                        "command_id": command_id,
+                        "type": "session_restart_cwd_resolve",
+                        "session_id": session_id,
+                        "decision": decision,
+                    });
+                    let send_result = match ws.write(Message::Text(message.to_string())) {
+                        Ok(()) => ws.flush(),
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = send_result {
+                        return Err(AttachError::HostUnreachable(error.to_string()));
+                    }
+                    println!("{}", format_user_echo(&text));
+                    stream_region.show_prompt();
+                    stream_region
+                        .render_into(&mut std::io::stdout(), attach_terminal_width())
+                        .map_err(|error| AttachError::Protocol(error.to_string()))?;
+                    continue;
+                }
+                RestartCwdInput::Invalid => {
+                    close_dots();
+                    println!("{}", invalid_restart_choice_card(&text));
+                    stream_region.show_prompt();
+                    stream_region
+                        .render_into(&mut std::io::stdout(), attach_terminal_width())
+                        .map_err(|error| AttachError::Protocol(error.to_string()))?;
+                    continue;
+                }
+                RestartCwdInput::NotPending => {}
+            }
             command_sequence += 1;
             let command_id = format!("attach_{}_{}", std::process::id(), command_sequence);
             // Numbered choices: render options when a prompt appears and let
@@ -1093,39 +1163,6 @@ fn attach_session(
                 "1" | "2" | "3" => Some(text.as_str()),
                 _ => None,
             };
-            if let Some(decision) =
-                restart_cwd_numeric_decision(&text, restart_cwd_decision.is_some())
-            {
-                let Ok(decision) = decision else {
-                    close_dots();
-                    println!("{}", invalid_restart_choice_card(&text));
-                    stream_region.show_prompt();
-                    stream_region
-                        .render_into(&mut std::io::stdout(), attach_terminal_width())
-                        .map_err(|error| AttachError::Protocol(error.to_string()))?;
-                    continue;
-                };
-                let message = json!({
-                    "command_id": command_id,
-                    "type": "session_restart_cwd_resolve",
-                    "session_id": session_id,
-                    "decision": decision,
-                });
-                restart_cwd_decision = None;
-                let send_result = match ws.write(Message::Text(message.to_string())) {
-                    Ok(()) => ws.flush(),
-                    Err(error) => Err(error),
-                };
-                if let Err(error) = send_result {
-                    return Err(AttachError::HostUnreachable(error.to_string()));
-                }
-                println!("{}", format_user_echo(&text));
-                stream_region.show_prompt();
-                stream_region
-                    .render_into(&mut std::io::stdout(), attach_terminal_width())
-                    .map_err(|error| AttachError::Protocol(error.to_string()))?;
-                continue;
-            }
             let numeric_decision = match numeric_choice {
                 Some("1") => Some("accept"),
                 Some("2") => Some("decline"),
@@ -1140,72 +1177,54 @@ fn attach_session(
                 "!a" => Some("always_allow"),
                 _ => numeric_decision,
             };
-            // Restart-cwd gate: mirrors the Web RestartCwdGate modal.
-            let restart_choice = match text.as_str() {
-                "!r" => Some("use_runtime"),
-                "!k" => Some("keep_session"),
-                _ => None,
-            };
-            // Send restart-cwd replies even without a locally known pending
-            // gate: the Host is authoritative and the local snapshot can be
-            // stale (e.g. rejection arrived before any gate payload). An
-            // unprompted reply is rejected harmlessly instead of trapping
-            // the user with no escape hatch.
-            let message = if let Some(choice) = &restart_choice {
-                restart_cwd_decision = None;
-                json!({
-                    "command_id": command_id,
-                    "type": "session_restart_cwd_resolve",
-                    "session_id": session_id,
-                    "decision": choice,
-                })
-            } else if let (Some(decision), Some(pending)) = (decision, pending_decisions.last()) {
-                let mut reply = json!({
-                    "command_id": command_id,
-                    "type": "topic_reply",
-                    "session_id": session_id,
-                    "topic_name": pending.topic_name,
-                    "decision": decision,
-                });
-                if let Some(request_id) = pending.request_id.as_deref() {
-                    reply["request_id"] = json!(request_id);
-                }
-                if let Some(worker_id) = pending.worker_id.as_deref() {
-                    reply["worker_id"] = json!(worker_id);
-                }
-                pending_decisions.pop();
-                reply
-            } else if text == "!c" {
-                json!({
-                    "command_id": command_id,
-                    "type": "turn_cancel",
-                    "session_id": session_id,
-                })
-            } else if text == "!s" {
-                // Full stop: shuts down all workers of the session and blocks
-                // queue continuation (mirrors the Web "stop session" action).
-                json!({
-                    "command_id": command_id,
-                    "type": "session_stop",
-                    "session_id": session_id,
-                })
-            } else {
-                if text.starts_with('!') {
-                    close_dots();
-                    println!("{}", invalid_command_card(&text));
-                    stream_region.show_prompt();
-                    stream_region
-                        .render_into(&mut std::io::stdout(), attach_terminal_width())
-                        .map_err(|error| AttachError::Protocol(error.to_string()))?;
-                    continue;
-                }
-                json!({
-                    "command_id": command_id,
-                    "type": "turn_supplement",
-                    "session_id": session_id,
-                    "text": text,
-                })
-            };
+            let message =
+                if let (Some(decision), Some(pending)) = (decision, pending_decisions.last()) {
+                    let mut reply = json!({
+                        "command_id": command_id,
+                        "type": "topic_reply",
+                        "session_id": session_id,
+                        "topic_name": pending.topic_name,
+                        "decision": decision,
+                    });
+                    if let Some(request_id) = pending.request_id.as_deref() {
+                        reply["request_id"] = json!(request_id);
+                    }
+                    if let Some(worker_id) = pending.worker_id.as_deref() {
+                        reply["worker_id"] = json!(worker_id);
+                    }
+                    pending_decisions.pop();
+                    reply
+                } else if text == "!c" {
+                    json!({
+                        "command_id": command_id,
+                        "type": "turn_cancel",
+                        "session_id": session_id,
+                    })
+                } else if text == "!s" {
+                    // Full stop: shuts down all workers of the session and blocks
+                    // queue continuation (mirrors the Web "stop session" action).
+                    json!({
+                        "command_id": command_id,
+                        "type": "session_stop",
+                        "session_id": session_id,
+                    })
+                } else {
+                    if text.starts_with('!') {
+                        close_dots();
+                        println!("{}", invalid_command_card(&text));
+                        stream_region.show_prompt();
+                        stream_region
+                            .render_into(&mut std::io::stdout(), attach_terminal_width())
+                            .map_err(|error| AttachError::Protocol(error.to_string()))?;
+                        continue;
+                    }
+                    json!({
+                        "command_id": command_id,
+                        "type": "turn_supplement",
+                        "session_id": session_id,
+                        "text": text,
+                    })
+                };
             // The Host falls back to submitting a fresh turn when the session
             // is idle, so every entered line produces visible work.
             // `write` only buffers the frame locally; flush it to the socket so
@@ -1284,6 +1303,31 @@ fn attach_session(
             }
         }
     }
+}
+
+fn fetch_restart_cwd_decision(host: &HostEndpoint, session_id: &str) -> Option<Value> {
+    http_get_json(host.port, ATTACH_PATH, host.token.as_deref(), 256 * 1024)
+        .ok()?
+        .get("sessions")?
+        .as_array()?
+        .iter()
+        .find(|entry| entry.get("session_id").and_then(Value::as_str) == Some(session_id))?
+        .get("restart_cwd_decision")
+        .filter(|decision| !decision.is_null())
+        .cloned()
+}
+
+fn restore_restart_cwd_gate(
+    host: &HostEndpoint,
+    session_id: &str,
+    restart_cwd_decision: &mut Option<Value>,
+    stream_region: &mut AttachStreamRegion,
+) -> bool {
+    let Some(decision) = fetch_restart_cwd_decision(host, session_id) else {
+        return false;
+    };
+    set_restart_cwd_decision(restart_cwd_decision, stream_region, Some(decision));
+    true
 }
 
 #[allow(clippy::type_complexity)]
@@ -1388,42 +1432,24 @@ fn handle_wire_event(
                 println!("{}", rejected_command_card(error));
                 if error == "session_restart_cwd_decision_required"
                     && restart_cwd_decision.is_none()
+                    && !restore_restart_cwd_gate(
+                        host,
+                        session_id,
+                        restart_cwd_decision,
+                        stream_region,
+                    )
                 {
-                    // The hello snapshot may predate the gate (e.g. the
-                    // mismatch appeared after attach). Recover the
-                    // authoritative gate from the read-only attach API.
-                    let host_port = host.port;
-                    let token = host.token.clone();
-                    let fetched =
-                        http_get_json(host_port, ATTACH_PATH, token.as_deref(), 256 * 1024)
-                            .ok()
-                            .and_then(|payload| {
-                                payload
-                                    .get("sessions")?
-                                    .as_array()?
-                                    .iter()
-                                    .find_map(|entry| {
-                                        (entry.get("session_id").and_then(Value::as_str)
-                                            == Some(session_id))
-                                        .then(|| entry.get("restart_cwd_decision").cloned())
-                                        .flatten()
-                                    })
-                            });
-                    if let Some(decision) = fetched {
-                        if let Some(prompt) = restart_cwd_prompt(&decision) {
-                            println!("{prompt}");
-                        }
-                        *restart_cwd_decision = Some(decision);
-                    } else {
-                        println!(
-                            "{}",
-                            guidance_card(
-                                "Working-directory choice required",
-                                "The authoritative choice could not be reloaded.",
-                                "Reply `!r` to use the Host directory or `!k` to keep the session directory.",
-                            )
-                        );
-                    }
+                    println!(
+                        "{}",
+                        guidance_card(
+                            "Working-directory choice required",
+                            "The authoritative choice could not be reloaded.",
+                            "Reconnect after checking the session in Timem Web.",
+                        )
+                    );
+                }
+                if restart_cwd_decision.is_some() {
+                    stream_region.show_prompt();
                 }
             }
             true
@@ -1438,17 +1464,21 @@ fn handle_wire_event(
             if !error.is_empty() {
                 println!("{}", host_error_card(error));
             }
-            if error == "session_restart_cwd_decision_required" && restart_cwd_decision.is_none() {
-                // The gate state lives in the authoritative snapshot; refetch
-                // is not available here, so tell the user the valid replies.
+            if error == "session_restart_cwd_decision_required"
+                && restart_cwd_decision.is_none()
+                && !restore_restart_cwd_gate(host, session_id, restart_cwd_decision, stream_region)
+            {
                 println!(
                     "{}",
                     guidance_card(
                         "Working-directory choice required",
-                        "The Host is waiting for a restored-session directory choice.",
-                        "Reply `!r` to use the Host directory or `!k` to keep the session directory.",
+                        "The authoritative choice could not be reloaded.",
+                        "Reconnect after checking the session in Timem Web.",
                     )
                 );
+            }
+            if restart_cwd_decision.is_some() {
+                stream_region.show_prompt();
             }
             true
         }
@@ -1537,15 +1567,11 @@ fn handle_wire_event_inner(
             stream_region.set_active_turn(active_turn_id.map(str::to_string));
             close_dots();
             println!("{}", connected_intro(session, working));
-            if let Some(decision) = target.get("restart_cwd_decision") {
-                let decision = decision.clone();
-                if let Some(prompt) = restart_cwd_prompt(&decision) {
-                    println!("{prompt}");
-                }
-                *restart_cwd_decision = Some(decision);
-            } else {
-                *restart_cwd_decision = None;
-            }
+            let decision = target
+                .get("restart_cwd_decision")
+                .filter(|decision| !decision.is_null())
+                .cloned();
+            set_restart_cwd_decision(restart_cwd_decision, stream_region, decision);
             if let Some(turns) = target.get("turns").and_then(Value::as_array) {
                 if let Some(orientation_turn) =
                     attach_snapshot_orientation_turn(turns, active_turn_id)
@@ -1571,9 +1597,11 @@ fn handle_wire_event_inner(
                 .and_then(|s| s.get("session_id"))
                 .and_then(Value::as_str)
                 == Some(session_id)
-                && restart_cwd_decision.take().is_some()
+                && restart_cwd_decision.is_some()
             {
+                set_restart_cwd_decision(restart_cwd_decision, stream_region, None);
                 println!("{}", dim_line("Working directory updated."));
+                stream_region.show_prompt();
             }
             true
         }
@@ -2238,18 +2266,152 @@ mod tests {
         assert!(region.prompt_visible);
     }
 
+    fn restart_cwd_fixture(available: bool) -> Value {
+        json!({
+            "runtime_cwd": "/host/work",
+            "session_cwd": "/session/work",
+            "session_cwd_available": available,
+        })
+    }
+
     #[test]
-    fn restart_cwd_gate_accepts_only_its_two_numbered_choices() {
+    fn restart_cwd_gate_replaces_stream_prompt_until_host_resolution() {
+        let mut region = AttachStreamRegion::new(ShellUiMode::Stream, None);
+        region.show_prompt();
+        assert!(region.content().contains("attach"));
+
+        region.set_restart_cwd_decision(Some(restart_cwd_fixture(false)));
+        region.show_prompt();
+        let gated = region.content();
+        assert!(gated.contains("Choose the working directory"));
+        assert!(gated.contains("/session/work"));
+        assert!(gated.contains("/host/work"));
+        assert!(gated.contains("(unavailable)"));
+        assert!(gated.contains("choice ❯❯"));
+        assert!(!gated.contains("attach ❯❯"));
+
+        region.set_restart_cwd_decision(None);
+        region.show_prompt();
+        assert!(region.content().contains("attach"));
+        assert!(!region.content().contains("Choose the working directory"));
+    }
+
+    #[test]
+    fn restart_cwd_gate_clear_rows_use_the_rendered_choice_card() {
+        let mut region = AttachStreamRegion::new(ShellUiMode::Stream, None);
+        region.set_restart_cwd_decision(Some(restart_cwd_fixture(true)));
+        region.show_prompt();
+        let prompt = region.visible_prompt_text();
+        let expected_rows = region.rendered_row_count(24);
+        let mut output = Vec::new();
+        region.render_into(&mut output, 24).unwrap();
+        let rendered_len = output.len();
+        region.clear_for_input_into(&mut output, "2", 24).unwrap();
+        let expected_up = attach_input_clear_rows(expected_rows, &prompt, "2", 24);
         assert_eq!(
-            restart_cwd_numeric_decision("1", true),
-            Some(Ok("keep_session"))
+            &output[rendered_len..],
+            format!("\x1b[1G\x1b[{expected_up}A\x1b[J").as_bytes()
+        );
+    }
+
+    #[test]
+    fn hello_gate_persists_and_resolved_event_restores_stream_prompt() {
+        let session = AttachSession {
+            session_id: "session-1".to_string(),
+            display_name: "Session".to_string(),
+            ordinal: 1,
+            state: "ready".to_string(),
+            working: false,
+            active_turn_id: None,
+            current_dir: "/session/work".to_string(),
+            restart_cwd_decision: None,
+            worker_count: 0,
+        };
+        let mut views = AttachTurnViews::default();
+        let mut pending = Vec::new();
+        let mut gate = None;
+        let mut region = AttachStreamRegion::new(ShellUiMode::Stream, None);
+        let hello = json!({
+            "type": "hello",
+            "snapshot": {"sessions": [{
+                "session_id": "session-1",
+                "state": "ready",
+                "active_turn_id": null,
+                "restart_cwd_decision": restart_cwd_fixture(true),
+                "turns": [],
+            }]},
+        });
+        assert!(handle_wire_event_inner(
+            &hello,
+            &session,
+            &mut views,
+            &mut pending,
+            &mut gate,
+            &mut region,
+        ));
+        assert!(gate.is_some());
+        assert!(region.content().contains("choice ❯❯"));
+        assert!(!region.content().contains("attach ❯❯"));
+
+        let resolved = json!({
+            "type": "session_restart_cwd_resolved",
+            "session": {"session_id": "session-1"},
+        });
+        assert!(handle_wire_event_inner(
+            &resolved,
+            &session,
+            &mut views,
+            &mut pending,
+            &mut gate,
+            &mut region,
+        ));
+        assert!(gate.is_none());
+        assert!(region.content().contains("attach"));
+        assert!(!region.content().contains("choice ❯❯"));
+    }
+
+    #[test]
+    fn restart_cwd_gate_accepts_only_available_authoritative_choices() {
+        let available = json!({"session_cwd_available": true});
+        assert_eq!(
+            restart_cwd_input("1", Some(&available)),
+            RestartCwdInput::Resolve("keep_session")
         );
         assert_eq!(
-            restart_cwd_numeric_decision("2", true),
-            Some(Ok("use_runtime"))
+            restart_cwd_input("!k", Some(&available)),
+            RestartCwdInput::Resolve("keep_session")
         );
-        assert_eq!(restart_cwd_numeric_decision("3", true), Some(Err(())));
-        assert_eq!(restart_cwd_numeric_decision("3", false), None);
+        assert_eq!(
+            restart_cwd_input("2", Some(&available)),
+            RestartCwdInput::Resolve("use_runtime")
+        );
+        assert_eq!(
+            restart_cwd_input("!r", Some(&available)),
+            RestartCwdInput::Resolve("use_runtime")
+        );
+        assert_eq!(
+            restart_cwd_input("send this", Some(&available)),
+            RestartCwdInput::Invalid
+        );
+        assert_eq!(
+            restart_cwd_input("3", Some(&available)),
+            RestartCwdInput::Invalid
+        );
+        assert_eq!(restart_cwd_input("1", None), RestartCwdInput::NotPending);
+
+        let unavailable = json!({"session_cwd_available": false});
+        assert_eq!(
+            restart_cwd_input("1", Some(&unavailable)),
+            RestartCwdInput::Invalid
+        );
+        assert_eq!(
+            restart_cwd_input("!k", Some(&unavailable)),
+            RestartCwdInput::Invalid
+        );
+        assert_eq!(
+            restart_cwd_input("2", Some(&unavailable)),
+            RestartCwdInput::Resolve("use_runtime")
+        );
     }
 
     #[test]

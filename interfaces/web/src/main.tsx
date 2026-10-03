@@ -12114,8 +12114,7 @@ function ContextCompressNotice({ activity }: { activity: Activity }) {
           <Gauge size={13} />
         </span>
         <div className="system-notice-line">
-          <strong className="system-notice-title">{t("context.dynamic")}</strong>
-          <span className="system-notice-detail">{t("context.compressing")}</span>
+          <strong className="system-notice-title">{t("context.compressing")}</strong>
         </div>
       </div>
     );

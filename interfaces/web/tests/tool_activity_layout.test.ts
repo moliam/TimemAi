@@ -191,6 +191,10 @@ it("uses one typography contract for system-level notices", () => {
   expect(memo).toContain('system-notice memo-notice');
   expect(memo).toContain('className="system-notice-detail system-notice-long-detail"');
   expect(compact.match(/system-notice context-compress-notice/g)).toHaveLength(2);
+  const requestedCompact = compact.slice(compact.indexOf('compact_phase === "requested"'), compact.indexOf("const breakdown"));
+  expect(requestedCompact).toContain('<strong className="system-notice-title">{t("context.compressing")}</strong>');
+  expect(requestedCompact).not.toContain('t("context.dynamic")');
+  expect(requestedCompact).not.toContain('className="system-notice-detail"');
   expect(source).toContain('className={`system-notice system-notice-row toolgen-notice');
   expect(source).toContain('className="system-notice-icon" aria-hidden="true"><Wrench size={13} />');
   expect(source).toContain('className="system-notice-row"');
