@@ -573,6 +573,229 @@ fn successful_threshold_compression_schedules_only_one_forced_followup() {
 }
 
 #[test]
+fn successful_threshold_compression_arms_provider_usage_verification() {
+    let mut core = test_core("threshold_compaction_provider_verification_arm");
+    core.set_interaction_profile(&native_test_profile());
+    core.set_max_llm_input_tokens(4_000);
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "discard this old context ".repeat(700),
+    )]);
+    let discard_id = core.deltas[0].delta_id.clone();
+    let arguments = serde_json::json!({
+        "discard": [discard_id],
+        "summary": "retain only the active task"
+    });
+    core.context_compress_required = true;
+    core.threshold_compaction_reasoning_required = true;
+
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
+            id: "call_compact_for_verification".to_string(),
+            name: "context_compress".to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+    assert!(!core.context_compress_required);
+    assert_eq!(
+        core.post_compaction_verification,
+        Some(PostCompactionVerification::Initial)
+    );
+}
+
+#[test]
+fn provider_usage_verification_schedules_followup_without_dropping_response() {
+    let mut core = test_core("provider_verification_keeps_response");
+    core.set_interaction_profile(&native_test_profile());
+    core.set_max_llm_input_tokens(4_000);
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "continue after compression".to_string(),
+    )]);
+    core.post_compaction_verification = Some(PostCompactionVerification::Initial);
+    let arguments = serde_json::json!({"type": "cwd"});
+
+    let step = core.apply_model_response(LlmResponse {
+        content: "checking the current directory".to_string(),
+        tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
+            id: "call_after_verified_compact".to_string(),
+            name: "self_tool".to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats {
+            llm_calls: 1,
+            prompt_tokens: 1_200,
+            total_tokens: 1_200,
+            ..UsageStats::zero()
+        },
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("the accepted post-compaction tool response must continue")
+    };
+
+    assert_eq!(core.native_exchanges.len(), 1, "tool response was dropped");
+    assert_eq!(
+        core.native_exchanges[0].calls[0].id,
+        "call_after_verified_compact"
+    );
+    assert!(core.context_compress_required);
+    assert!(core.threshold_compaction_reasoning_required);
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::FollowupPending
+    );
+    assert_eq!(
+        core.take_pending_compact_request_notice(),
+        Some((1_200, 3_600, Some(1_000)))
+    );
+    let request_prompt = core.build_model_request_prompt(&prompt);
+    assert!(request_prompt.ends_with(crate::prompt_render::CONTEXT_COMPRESS_REQUIRED_TRAILER));
+}
+
+#[test]
+fn provider_usage_after_forced_followup_warns_and_does_not_loop() {
+    let mut core = test_core("provider_verification_followup_exhausted");
+    core.set_interaction_profile(&native_test_profile());
+    core.set_max_llm_input_tokens(4_000);
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "continue after the forced followup".to_string(),
+    )]);
+    core.threshold_compaction_followup_state = ThresholdCompactionFollowupState::FollowupPending;
+    core.post_compaction_verification = Some(PostCompactionVerification::Followup);
+    let arguments = serde_json::json!({"type": "params"});
+
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
+            id: "call_after_forced_followup".to_string(),
+            name: "self_tool".to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats {
+            llm_calls: 1,
+            prompt_tokens: 3_700,
+            total_tokens: 3_700,
+            ..UsageStats::zero()
+        },
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("the accepted verification response must continue")
+    };
+
+    assert_eq!(core.native_exchanges.len(), 1, "tool response was dropped");
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::Exhausted
+    );
+    assert!(!core.context_compress_required);
+    assert!(core.take_pending_compact_request_notice().is_none());
+    assert!(prompt.contains("provider-reported prompt usage remains at 93%"));
+    assert!(!core
+        .build_model_request_prompt(&prompt)
+        .contains(crate::prompt_render::CONTEXT_COMPRESS_REQUIRED_TRAILER));
+}
+
+#[test]
+fn new_explicit_compaction_supersedes_pending_provider_verification() {
+    let mut core = test_core("new_compact_supersedes_provider_verification");
+    core.set_interaction_profile(&native_test_profile());
+    core.set_max_llm_input_tokens(4_000);
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "old context".repeat(200),
+    )]);
+    let discard_id = core.deltas[0].delta_id.clone();
+    core.post_compaction_verification = Some(PostCompactionVerification::Initial);
+    core.request_manual_context_compress();
+    let arguments = serde_json::json!({
+        "discard": [discard_id],
+        "summary": "manual replacement summary"
+    });
+
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
+            id: "call_manual_compact_supersedes".to_string(),
+            name: "context_compress".to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats {
+            llm_calls: 1,
+            prompt_tokens: 3_700,
+            total_tokens: 3_700,
+            ..UsageStats::zero()
+        },
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("manual compaction should continue")
+    };
+
+    assert!(prompt.contains("manual replacement summary"));
+    assert!(core.post_compaction_verification.is_none());
+    assert!(!core.context_compress_required);
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::Available
+    );
+    assert!(core.take_pending_compact_request_notice().is_none());
+}
+
+#[test]
+fn missing_provider_usage_keeps_post_compaction_verification_pending() {
+    let mut core = test_core("provider_verification_usage_unavailable");
+    core.set_max_llm_input_tokens(4_000);
+    core.post_compaction_verification = Some(PostCompactionVerification::Initial);
+
+    assert_eq!(core.verify_post_compaction_provider_usage(0), None);
+    assert_eq!(
+        core.post_compaction_verification,
+        Some(PostCompactionVerification::Initial)
+    );
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::Available
+    );
+    assert!(!core.context_compress_required);
+}
+
+#[test]
+fn provider_usage_at_target_completes_verification_without_followup() {
+    let mut core = test_core("provider_verification_target_met");
+    core.set_max_llm_input_tokens(4_000);
+    core.threshold_compaction_followup_state = ThresholdCompactionFollowupState::FollowupPending;
+    core.post_compaction_verification = Some(PostCompactionVerification::Followup);
+
+    assert_eq!(core.verify_post_compaction_provider_usage(1_000), None);
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::Available
+    );
+    assert!(core.post_compaction_verification.is_none());
+    assert!(!core.context_compress_required);
+}
+
+#[test]
 fn clear_dynamic_context_removes_native_history_and_pending_context_notices() {
     let mut core = test_core("clear_native_dynamic_context");
     core.set_interaction_profile(&native_test_profile());

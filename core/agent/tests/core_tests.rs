@@ -2092,9 +2092,10 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
     assert!(prompt.ends_with(
         "[Context threshold WARN] Context is too long. Compress context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
     ));
-    let (_, threshold) = core
+    let (_, threshold, quality_target) = core
         .take_pending_compact_request_notice()
         .expect("threshold crossing notice");
+    assert_eq!(quality_target, None);
     assert_eq!(threshold, 2_700);
 
     let report = core
@@ -2163,9 +2164,10 @@ fn runtime_host_configuration_sync_is_core_owned() {
         "[Context threshold WARN] Context is too long. Compress context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
     ));
     assert!(!prompt.contains("Long-context maintenance:"));
-    let (estimated, threshold) = core
+    let (estimated, threshold, quality_target) = core
         .take_pending_compact_request_notice()
         .expect("threshold crossing notice");
+    assert_eq!(quality_target, None);
     assert!(estimated >= threshold);
     assert_eq!(threshold, 2_700);
 
@@ -3151,9 +3153,10 @@ fn long_context_uses_observed_model_prompt_tokens_plus_new_delta_estimate() {
         "[Context threshold WARN] Context is too long. Compress context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
     ));
     assert!(!prompt.contains("Long-context maintenance:"));
-    let (estimated, threshold) = core
+    let (estimated, threshold, quality_target) = core
         .take_pending_compact_request_notice()
         .expect("threshold crossing notice");
+    assert_eq!(quality_target, None);
     assert!(estimated >= threshold);
     assert_eq!(threshold, 2_700);
 }

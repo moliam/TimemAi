@@ -420,15 +420,17 @@ fn run_session_turn_with_model_client_and_reminder_override(
         if take_cancel_request(ui, &mut turn_projection) {
             break cancelled_turn_parts();
         }
-        // Forced-compaction request notices ride the earliest loop iteration
-        // after the threshold crossing so live UI can show "compacting...".
-        if let Some((estimated_prompt_tokens, force_threshold)) =
+        // Forced-compaction notices ride the earliest loop iteration after a
+        // threshold crossing or provider-usage quality follow-up so live UI can
+        // show "compacting..." without conflating the two diagnostic reasons.
+        if let Some((estimated_prompt_tokens, force_threshold, quality_target)) =
             core.take_pending_compact_request_notice()
         {
             ui.on_core_topic_events(&[crate::host::context_compress_requested_topic_event(
                 request.session,
                 estimated_prompt_tokens,
                 force_threshold,
+                quality_target,
             )]);
         }
         if matches!(step, CoreStep::NeedModel { .. }) && ui.take_manual_context_compress_request() {

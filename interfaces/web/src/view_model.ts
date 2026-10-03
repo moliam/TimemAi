@@ -1568,8 +1568,69 @@ export function sessionCacheTokenTotals(session: Session): {
   };
 }
 
+function sessionCacheRateUsage(
+  session: Session,
+): import("./protocol").UsageStats | undefined {
+  const runtimeRestartAtMs = sessionRuntimeRestartAtMs(session);
+  // Without an explicit restart boundary there is no cold-start request to
+  // exclude. Preserve the established aggregate, including completion-only
+  // snapshots that have no per-request events.
+  if (runtimeRestartAtMs === undefined) return sessionRuntimeUsage(session);
+
+  const usages: Array<{
+    createdAtMs: number;
+    eventId: string;
+    usage: import("./protocol").UsageStats;
+  }> = [];
+  for (const turn of session.turns) {
+    if (turn.state === "restored") continue;
+    for (const event of turn.events) {
+      if (
+        runtimeRestartAtMs !== undefined &&
+        event.created_at_ms < runtimeRestartAtMs
+      )
+        continue;
+      if (
+        event.source !== "worker_activity" ||
+        event.payload.kind !== "model_response"
+      )
+        continue;
+      const usage = event.payload.usage;
+      if (usage && typeof usage === "object")
+        usages.push({
+          createdAtMs: event.created_at_ms,
+          eventId: event.event_id,
+          usage: usage as import("./protocol").UsageStats,
+        });
+    }
+  }
+
+  // The first request after a runtime restart is a cold-cache bootstrap. It is
+  // useful for input/output accounting, but including it in the cache ratio
+  // permanently depresses the displayed rate even after every warm request is
+  // healthy. Exclude exactly that one request; keep all later requests and keep
+  // sessionRuntimeUsage() unchanged for token totals.
+  usages.sort(
+    (left, right) =>
+      left.createdAtMs - right.createdAtMs || left.eventId.localeCompare(right.eventId),
+  );
+  if (runtimeRestartAtMs !== undefined && usages.length > 0) usages.shift();
+  if (usages.length === 0) return undefined;
+
+  const total: import("./protocol").UsageStats = {};
+  for (const entry of usages) {
+    const usage = entry.usage;
+    for (const field of USAGE_FIELDS) {
+      const value = usage[field];
+      if (typeof value === "number" && Number.isFinite(value))
+        total[field] = (total[field] ?? 0) + value;
+    }
+  }
+  return total;
+}
+
 export function sessionCacheHitPercent(session: Session): number | undefined {
-  const usage = sessionRuntimeUsage(session);
+  const usage = sessionCacheRateUsage(session);
   const promptTokens = usage?.prompt_tokens ?? 0;
   if (promptTokens <= 0) return undefined;
   return Math.min(

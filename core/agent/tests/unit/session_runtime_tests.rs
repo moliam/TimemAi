@@ -5303,7 +5303,7 @@ impl ModelClient for StoryReplayModel {
                 assert!(prompt.contains("context compressed successfully."));
                 Ok(llm(
                     r#"{"free_talk":"","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试项目代号%"],"limit":5}}]}"#,
-                    2_500,
+                    1_900,
                     false,
                 ))
             }

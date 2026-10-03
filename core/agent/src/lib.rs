@@ -1833,6 +1833,12 @@ enum ThresholdCompactionFollowupState {
     Exhausted,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PostCompactionVerification {
+    Initial,
+    Followup,
+}
+
 #[derive(Debug)]
 pub struct AgentCore {
     memory_dir: PathBuf,
@@ -1875,14 +1881,21 @@ pub struct AgentCore {
     /// Set for a user-initiated compaction request: the next request carries
     /// the manual-compaction trailer wording instead of the forced-shrink one.
     manual_compact_trailer_pending: bool,
-    /// Set when the runtime first crosses the forced-shrink threshold and
-    /// injects the compaction request. The turn loop drains it into a
-    /// `core.context.compress` phase="requested" topic event for live UI.
-    pending_compact_request_notice: Option<(u32, u32)>,
+    /// Set when the runtime first crosses the forced-shrink threshold or a
+    /// provider-usage quality check schedules the bounded follow-up. The turn
+    /// loop drains it into a `core.context.compress` phase="requested" topic.
+    /// Tuple fields are observed prompt tokens, the configured force threshold,
+    /// and an optional post-compression quality target.
+    pending_compact_request_notice: Option<(u32, u32, Option<u32>)>,
     /// Bounded automatic compression cycle: one initial threshold compression,
     /// at most one forced follow-up, then an exhausted latch until occupancy
     /// drops below the configured trigger threshold.
     threshold_compaction_followup_state: ThresholdCompactionFollowupState,
+    /// When the local post-compaction estimate reaches the quality target,
+    /// verify it against the provider's prompt-token usage on the next valid
+    /// response. This catches estimator undercounts without rejecting or
+    /// discarding that response.
+    post_compaction_verification: Option<PostCompactionVerification>,
     configured_round_budget: u32,
     round_budget: u32,
     reminder_tips_config: ReminderTipsConfig,
@@ -2016,6 +2029,7 @@ impl AgentCore {
             manual_compact_trailer_pending: false,
             pending_compact_request_notice: None,
             threshold_compaction_followup_state: ThresholdCompactionFollowupState::Available,
+            post_compaction_verification: None,
             configured_round_budget,
             round_budget: configured_round_budget,
             reminder_tips_config: ReminderTipsConfig::default(),
@@ -3387,6 +3401,7 @@ impl AgentCore {
         self.manual_compact_trailer_pending = false;
         self.pending_compact_request_notice = None;
         self.threshold_compaction_followup_state = ThresholdCompactionFollowupState::Available;
+        self.post_compaction_verification = None;
         self.current_round = 0;
         self.current_stats = UsageStats::zero();
         self.repair_attempted = false;
@@ -3959,6 +3974,18 @@ impl AgentCore {
                 stop_summary: None,
             });
         }
+        if parsed.context_compresses.is_empty() {
+            if let Some(note) =
+                self.verify_post_compaction_provider_usage(response.usage.prompt_tokens)
+            {
+                slices.push(("runtime_note".to_string(), note));
+            }
+        } else {
+            // A new explicit compaction supersedes verification of the previous
+            // one. Do not let the old measurement reclassify or constrain the
+            // compaction currently being processed.
+            self.post_compaction_verification = None;
+        }
         self.last_notifications = notification::notifications_from_envelope(&parsed);
         if !self.last_notifications.is_empty() {
             let events = host::notification_topic_events(
@@ -4096,11 +4123,32 @@ impl AgentCore {
                     self.current_session_id(),
                     &compact_report,
                 )]);
+                let verification = if threshold_compaction_requested {
+                    Some(
+                        if self.threshold_compaction_followup_state
+                            == ThresholdCompactionFollowupState::FollowupPending
+                        {
+                            PostCompactionVerification::Followup
+                        } else {
+                            PostCompactionVerification::Initial
+                        },
+                    )
+                } else {
+                    None
+                };
                 let (force_followup, quality_note) = self.threshold_compaction_quality_note(
                     threshold_compaction_requested,
                     estimated_before_tokens,
                     estimated_after_tokens,
                 );
+                if threshold_compaction_requested && !force_followup && quality_note.is_none() {
+                    self.post_compaction_verification = verification;
+                } else if threshold_compaction_requested {
+                    // A locally poor result already takes the existing bounded
+                    // follow-up/warning path; there is no normal post-compact
+                    // response to verify before that maintenance request.
+                    self.post_compaction_verification = None;
+                }
                 threshold_followup_required |= force_followup;
                 if let Some(note) = quality_note {
                     slices.push(("runtime_note".to_string(), note));
@@ -6049,16 +6097,17 @@ Runtime tool_call ids:",
             }
             if !self.manual_compact_trailer_pending && !self.context_compress_required {
                 self.pending_compact_request_notice =
-                    Some((estimated_prompt_tokens, force_threshold));
+                    Some((estimated_prompt_tokens, force_threshold, None));
             }
             self.threshold_compaction_reasoning_required = true;
         }
         self.context_compress_required = true;
     }
 
-    /// Drains the pending forced-compaction request notice (estimated prompt
-    /// tokens, force threshold). Called by the turn loop each iteration.
-    pub fn take_pending_compact_request_notice(&mut self) -> Option<(u32, u32)> {
+    /// Drains the pending forced-compaction request notice (observed/estimated
+    /// prompt tokens, configured force threshold, optional quality target).
+    /// Called by the turn loop each iteration.
+    pub fn take_pending_compact_request_notice(&mut self) -> Option<(u32, u32, Option<u32>)> {
         self.pending_compact_request_notice.take()
     }
 
@@ -6073,6 +6122,49 @@ Runtime tool_call ids:",
         // immediately by the Host when the user clicks, so Core must not
         // schedule a second requested notice here; only the forced-shrink
         // threshold path still emits its own notice.
+    }
+
+    fn verify_post_compaction_provider_usage(&mut self, prompt_tokens: u32) -> Option<String> {
+        let verification = self.post_compaction_verification.take()?;
+        if prompt_tokens == 0 {
+            // Some compatible services omit usage. Zero is "not observed", not
+            // evidence that compression reached the provider-measured target.
+            self.post_compaction_verification = Some(verification);
+            return None;
+        }
+        let target_tokens = self.max_llm_input_tokens.saturating_mul(25) / 100;
+        let force_threshold_tokens = self
+            .max_llm_input_tokens
+            .saturating_mul(u32::from(self.context_compress_threshold_percent))
+            / 100;
+        let remains_above_target =
+            u64::from(prompt_tokens) * 100 > u64::from(self.max_llm_input_tokens) * 25;
+        if !remains_above_target {
+            self.threshold_compaction_followup_state = ThresholdCompactionFollowupState::Available;
+            return None;
+        }
+
+        match verification {
+            PostCompactionVerification::Initial => {
+                self.threshold_compaction_followup_state =
+                    ThresholdCompactionFollowupState::FollowupPending;
+                self.context_compress_required = true;
+                self.threshold_compaction_reasoning_required = true;
+                self.pending_compact_request_notice =
+                    Some((prompt_tokens, force_threshold_tokens, Some(target_tokens)));
+                None
+            }
+            PostCompactionVerification::Followup => {
+                self.threshold_compaction_followup_state =
+                    ThresholdCompactionFollowupState::Exhausted;
+                let occupancy_percent = (u64::from(prompt_tokens) * 100)
+                    .div_ceil(u64::from(self.max_llm_input_tokens))
+                    as u32;
+                Some(format!(
+                    "**WARN**: provider-reported prompt usage remains at {occupancy_percent}% of the model window after one forced compression follow-up; automatic compression will not loop. Retain only necessary state and discard bulky side information during later work."
+                ))
+            }
+        }
     }
 
     fn threshold_compaction_quality_note(

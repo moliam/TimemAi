@@ -7798,6 +7798,7 @@ fn request_session_context_compress(
         session_id,
         estimated_prompt_tokens,
         force_threshold,
+        None,
     );
     let wire_payload = notice.wire_payload();
     let turn_ref = append_active_turn_event(state, session_id, "core_topic", wire_payload.clone());
