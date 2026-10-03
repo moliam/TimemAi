@@ -62,6 +62,13 @@ pub(super) fn rejected_command_card(error: &str) -> String {
 }
 
 pub(super) fn host_error_card(error: &str) -> String {
+    if error == "session_restart_cwd_decision_required" {
+        return guidance_card(
+            "Working-directory choice required",
+            "The Host needs a directory choice before this session can continue.",
+            "Use the interactive recovery menu below to reload the available choices.",
+        );
+    }
     guidance_card(
         "Host reported a problem",
         error,
@@ -77,11 +84,30 @@ pub(super) fn invalid_command_card(command: &str) -> String {
     )
 }
 
-pub(super) fn invalid_restart_choice_card(choice: &str) -> String {
+pub(super) fn invalid_restart_choice_card(choice: &str, session_cwd_available: bool) -> String {
+    let choices = if session_cwd_available {
+        "Choose `1` to keep the session directory or `2` to use the Host directory."
+    } else {
+        "The session directory is unavailable; choose `2` to use the Host directory."
+    };
     guidance_card(
-        "Invalid working-directory choice",
-        &format!("`{choice}` is not available for this prompt."),
-        "Choose `1` to keep the session directory or `2` to use the Host directory.",
+        "Choose one of the displayed directories",
+        &format!("`{choice}` was not sent to the Host."),
+        choices,
+    )
+}
+
+pub(super) fn invalid_restart_recovery_input_card(input: &str) -> String {
+    guidance_card(
+        "Choose a recovery action",
+        &format!("`{input}` was not sent to the Host."),
+        "Press Enter or choose `1` to retry loading directory choices; choose `2` to detach safely.",
+    )
+}
+
+pub(super) fn restart_cwd_recovery_prompt() -> String {
+    format!(
+        "\n{ANSI_WARN}{ANSI_BOLD}Directory choices unavailable{ANSI_RESET}\n  Timem could not reload the Host's current directory choices.\n  No message or directory choice will be sent until they are reloaded.\n\n  {ANSI_BOLD}1{ANSI_RESET}  Retry loading choices  {ANSI_DIM}(Enter){ANSI_RESET}\n  {ANSI_BOLD}2{ANSI_RESET}  Detach for now       {ANSI_DIM}(session keeps running){ANSI_RESET}\n  {ANSI_DIM}Aliases: !retry / !q{ANSI_RESET}\n\n{ANSI_BRIGHT_TIMEM}{ANSI_BOLD}recovery ❯❯{ANSI_RESET} "
     )
 }
 
@@ -780,6 +806,22 @@ mod tests {
     }
 
     #[test]
+    fn restart_recovery_prompt_offers_retry_and_safe_detach() {
+        let recovery = strip_ansi(&restart_cwd_recovery_prompt());
+        assert!(recovery.contains("Directory choices unavailable"));
+        assert!(recovery.contains("No message or directory choice will be sent"));
+        assert!(recovery.contains("1  Retry loading choices  (Enter)"));
+        assert!(recovery.contains("2  Detach for now       (session keeps running)"));
+        assert!(recovery.contains("Aliases: !retry / !q"));
+        assert!(recovery.contains("recovery ❯❯"));
+
+        let unavailable = strip_ansi(&invalid_restart_choice_card("1", false));
+        assert!(unavailable.contains("`1` was not sent to the Host"));
+        assert!(unavailable.contains("choose `2` to use the Host directory"));
+        assert!(!unavailable.contains("Choose `1`"));
+    }
+
+    #[test]
     fn guidance_cards_always_include_a_next_step() {
         for card in [
             no_sessions_card(),
@@ -787,7 +829,8 @@ mod tests {
             rejected_command_card("unknown"),
             host_error_card("boom"),
             invalid_command_card("!wat"),
-            invalid_restart_choice_card("3"),
+            invalid_restart_choice_card("3", true),
+            invalid_restart_recovery_input_card("later"),
         ] {
             assert!(strip_ansi(&card).contains("Next:"));
         }
