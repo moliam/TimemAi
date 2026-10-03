@@ -117,9 +117,10 @@ returns to the stronger settled color, while failures retain an explicit status.
 Rows with details are the disclosure target themselves, with hover/focus feedback,
 keyboard activation and selection protection rather than a persistent arrow.
 Live elapsed and countdown values use fixed-width, tabular digit cells: only
-changed digits perform a short 3D page turn, labels and units remain stationary,
-and reduced-motion presentation updates without animation. Settled duration
-facts remain static. Local-work state uses a reduced-motion-aware swaying wrench;
+changed digits perform a short clipped vertical roll, labels and units remain
+stationary, and outgoing/incoming glyphs never cross-fade in the same pixels.
+Reduced-motion presentation updates without animation. Settled duration facts
+remain static. Local-work state uses a reduced-motion-aware swaying wrench;
 model waiting keeps its existing star identity. System notices use their own half-pixel-larger type
 contract. An in-progress context-compression notice is one concise status line
 (“Conversation compressing...” / “对话压缩中...”), without a duplicate category

@@ -5946,8 +5946,9 @@ body.workspace-modal-open .app-shell { user-select: none; }
   font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace !important;
 }
 
-/* Live time values use fixed-width digit cells: only changed digits perform a
-   short 3D page turn, while units and localized labels stay still. */
+/* Live time values use fixed-width digit cells. Changed digits roll through a
+   paint-contained viewport: the old and new glyphs stay edge-to-edge instead
+   of cross-fading in the same pixels, which avoids small-type ghosting. */
 .time-flip,
 .time-flip-number { display: inline-flex; align-items: baseline; white-space: nowrap; }
 .time-flip-static { display: inline-block; }
@@ -5958,7 +5959,8 @@ body.workspace-modal-open .app-shell { user-select: none; }
   height: 1.15em;
   line-height: 1.15em;
   overflow: hidden;
-  perspective: 4em;
+  contain: paint;
+  isolation: isolate;
   font-variant-numeric: tabular-nums;
   text-align: center;
   vertical-align: -.08em;
@@ -5969,22 +5971,22 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .time-flip-digit-face {
   display: grid;
   place-items: center;
-  backface-visibility: hidden;
-  transform-origin: 50% 50%;
+  transform: translateZ(0);
+  will-change: transform;
 }
-.time-flip-digit-out { animation: time-digit-flip-out .32s cubic-bezier(.4, 0, .7, .2) both; }
-.time-flip-digit-in { animation: time-digit-flip-in .32s cubic-bezier(.2, .75, .25, 1) both; }
-@keyframes time-digit-flip-out {
-  from { opacity: 1; transform: rotateX(0deg); }
-  to { opacity: 0; transform: rotateX(-90deg); }
+.time-flip-digit-out { animation: time-digit-roll-out .24s cubic-bezier(.22, .61, .36, 1) both; }
+.time-flip-digit-in { animation: time-digit-roll-in .24s cubic-bezier(.22, .61, .36, 1) both; }
+@keyframes time-digit-roll-out {
+  from { transform: translate3d(0, 0, 0); }
+  to { transform: translate3d(0, 100%, 0); }
 }
-@keyframes time-digit-flip-in {
-  from { opacity: 0; transform: rotateX(90deg); }
-  to { opacity: 1; transform: rotateX(0deg); }
+@keyframes time-digit-roll-in {
+  from { transform: translate3d(0, -100%, 0); }
+  to { transform: translate3d(0, 0, 0); }
 }
 @media (prefers-reduced-motion: reduce) {
   .time-flip-digit-out { display: none; animation: none; }
-  .time-flip-digit-in { animation: none; transform: none; opacity: 1; }
+  .time-flip-digit-in { animation: none; transform: none; }
 }
 
 .model-service-diagnostic { margin-top: 6px; color: #7f909a; font-size: 11px; }
