@@ -509,10 +509,18 @@ async function main() {
     await waitFor(() => browser.evaluate(`(() => {
       const outgoing = document.querySelector('.stream-tool-elapsed .time-flip-digit-out');
       const incoming = document.querySelector('.stream-tool-elapsed .time-flip-digit-in');
-      return !!outgoing && !!incoming &&
-        getComputedStyle(outgoing).animationName === 'time-digit-flip-out' &&
-        getComputedStyle(incoming).animationName === 'time-digit-flip-in';
-    })()`), "live elapsed digit did not perform a flip transition", 3000);
+      if (!outgoing || !incoming) return false;
+      const oldStyle = getComputedStyle(outgoing);
+      const newStyle = getComputedStyle(incoming);
+      const cellStyle = getComputedStyle(outgoing.closest('.time-flip-digit'));
+      const oldRect = outgoing.getBoundingClientRect();
+      const newRect = incoming.getBoundingClientRect();
+      return oldStyle.animationName === 'time-digit-roll-out' &&
+        newStyle.animationName === 'time-digit-roll-in' &&
+        oldStyle.opacity === '1' && newStyle.opacity === '1' &&
+        cellStyle.overflow === 'hidden' && cellStyle.contain.includes('paint') &&
+        Math.abs(newRect.bottom - oldRect.top) < .75;
+    })()`), "live elapsed digits must roll edge-to-edge without cross-fade or overlap", 3000);
     const elapsedBeforeReducedMotion = await browser.evaluate(`document.querySelector('.stream-tool-elapsed').getAttribute('aria-label')`);
     await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
     await waitFor(() => browser.evaluate(`document.querySelector('.stream-tool-elapsed').getAttribute('aria-label') !== ${JSON.stringify(elapsedBeforeReducedMotion)}`), "reduced-motion elapsed value did not advance", 3000);

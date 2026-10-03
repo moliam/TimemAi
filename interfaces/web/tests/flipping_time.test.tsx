@@ -38,8 +38,11 @@ describe("flipping live time", () => {
     expect(main).toContain('<LocalizedFlippingTime message="tools.remaining" time={time} />');
     expect(main).toContain('<LocalizedFlippingTime message="tools.elapsed" time={time} />');
     expect(styles).toContain("width: 1ch;");
-    expect(styles).toContain("animation: time-digit-flip-out .32s");
-    expect(styles).toContain("animation: time-digit-flip-in .32s");
+    expect(styles).toContain("animation: time-digit-roll-out .24s");
+    expect(styles).toContain("animation: time-digit-roll-in .24s");
+    expect(styles).toContain("contain: paint;");
+    expect(styles).toContain("isolation: isolate;");
+    expect(styles).not.toMatch(/time-digit-roll-(?:in|out)[^}]*opacity/);
     expect(styles).toMatch(/prefers-reduced-motion: reduce[\s\S]*\.time-flip-digit-out \{ display: none; animation: none;/);
   });
 });
