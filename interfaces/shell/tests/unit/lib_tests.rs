@@ -104,6 +104,8 @@ fn parse_cli_args_reads_model_service_and_limits() {
     let args = [
         "--space",
         ".x",
+        "--ui-mode",
+        "stream",
         "--api-protocol",
         "openai-compatible",
         "--response-protocol",
@@ -140,6 +142,7 @@ fn parse_cli_args_reads_model_service_and_limits() {
     .collect::<Vec<_>>();
     let options = parse_cli_args(&args);
     assert_eq!(options.space.as_deref(), Some(".x"));
+    assert_eq!(options.ui_mode.as_deref(), Some("stream"));
     assert_eq!(options.api_protocol.as_deref(), Some("openai-compatible"));
     assert_eq!(options.response_protocol.as_deref(), Some("xml"));
     assert_eq!(options.tool_call_mode.as_deref(), Some("native"));
@@ -161,6 +164,40 @@ fn parse_cli_args_reads_model_service_and_limits() {
     );
     assert_eq!(options.bash_approval.as_deref(), Some("approve"));
     assert_eq!(options.work_instructions.as_deref(), Some("ask"));
+}
+
+#[test]
+fn cli_value_options_reject_missing_empty_or_option_values() {
+    for option in CLI_VALUE_OPTIONS {
+        let missing = vec![(*option).to_string()];
+        assert_eq!(
+            validate_cli_value_args(&missing),
+            Err(format!("missing_value:{option}")),
+            "missing value was accepted for {option}"
+        );
+
+        let empty = vec![(*option).to_string(), String::new()];
+        assert_eq!(
+            validate_cli_value_args(&empty),
+            Err(format!("missing_value:{option}")),
+            "empty value was accepted for {option}"
+        );
+
+        let next_option = vec![(*option).to_string(), "--help".to_string()];
+        assert_eq!(
+            validate_cli_value_args(&next_option),
+            Err(format!("missing_value:{option}")),
+            "following option was consumed as the value for {option}"
+        );
+    }
+}
+
+#[test]
+fn cli_value_validation_accepts_complete_ui_mode() {
+    assert_eq!(
+        validate_cli_value_args(&["--ui-mode".to_string(), "stream".to_string()]),
+        Ok(())
+    );
 }
 
 #[test]
