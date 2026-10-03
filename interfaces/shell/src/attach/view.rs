@@ -275,8 +275,9 @@ pub(super) fn restart_cwd_prompt(decision: &Value) -> Option<String> {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let keep_note = if available { "" } else { "  (unavailable)" };
+    let aliases = if available { "!k / !r" } else { "!r" };
     Some(format!(
-        "\n{ANSI_WARN}{ANSI_BOLD}Action required{ANSI_RESET}\n  Choose the working directory for this restored session.\n\n  Session: {session_cwd}\n  Host:    {runtime_cwd}\n\n  {ANSI_BOLD}1{ANSI_RESET}  Keep session directory{keep_note}\n  {ANSI_BOLD}2{ANSI_RESET}  Use host directory\n  {ANSI_DIM}Aliases: !k / !r{ANSI_RESET}"
+        "\n{ANSI_WARN}{ANSI_BOLD}Action required{ANSI_RESET}\n  Choose the working directory for this restored session.\n\n  Session: {session_cwd}\n  Host:    {runtime_cwd}\n\n  {ANSI_BOLD}1{ANSI_RESET}  Keep session directory{keep_note}\n  {ANSI_BOLD}2{ANSI_RESET}  Use host directory\n  {ANSI_DIM}Aliases: {aliases}{ANSI_RESET}\n\n{ANSI_BRIGHT_TIMEM}{ANSI_BOLD}choice ❯❯{ANSI_RESET} "
     ))
 }
 
@@ -774,7 +775,8 @@ mod tests {
         );
         assert!(restart.contains("1  Keep session directory  (unavailable)"));
         assert!(restart.contains("2  Use host directory"));
-        assert!(restart.contains("Aliases: !k / !r"));
+        assert!(restart.contains("Aliases: !r"));
+        assert!(!restart.contains("!k / !r"));
     }
 
     #[test]
