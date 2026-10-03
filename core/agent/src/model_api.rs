@@ -534,7 +534,9 @@ fn apply_native_interaction(
                     .collect(),
             );
             body["tool_choice"] = json!(native_tool_choice_label(interaction.tool_choice));
-            body["parallel_tool_calls"] = json!(interaction.parallel_tool_calls);
+            if interaction.send_parallel_tool_calls {
+                body["parallel_tool_calls"] = json!(interaction.parallel_tool_calls);
+            }
             if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
                 append_openai_chat_exchanges(config, messages, interaction);
             }
@@ -554,7 +556,9 @@ fn apply_native_interaction(
                     .collect(),
             );
             body["tool_choice"] = json!(native_tool_choice_label(interaction.tool_choice));
-            body["parallel_tool_calls"] = json!(interaction.parallel_tool_calls);
+            if interaction.send_parallel_tool_calls {
+                body["parallel_tool_calls"] = json!(interaction.parallel_tool_calls);
+            }
             let mut input = match body.get("input") {
                 Some(Value::Array(items)) => items.clone(),
                 Some(Value::String(text)) => vec![json!({
@@ -577,10 +581,16 @@ fn apply_native_interaction(
                 .collect::<Vec<_>>();
             mark_anthropic_static_tool_prefix(&mut tools, interaction.static_tool_count);
             body["tools"] = Value::Array(tools);
-            body["tool_choice"] = json!({
-                "type": anthropic_tool_choice_label(interaction.tool_choice),
-                "disable_parallel_tool_use": !interaction.parallel_tool_calls,
-            });
+            body["tool_choice"] = if interaction.send_parallel_tool_calls {
+                json!({
+                    "type": anthropic_tool_choice_label(interaction.tool_choice),
+                    "disable_parallel_tool_use": !interaction.parallel_tool_calls,
+                })
+            } else {
+                json!({
+                    "type": anthropic_tool_choice_label(interaction.tool_choice),
+                })
+            };
             if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
                 append_anthropic_exchanges(messages, interaction);
             }

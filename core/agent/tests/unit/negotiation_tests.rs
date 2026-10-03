@@ -570,7 +570,7 @@ fn disabled_native_tools_skip_probe_and_use_inline() {
 }
 
 #[test]
-fn responses_protocol_is_agent_native_and_never_probed() {
+fn responses_protocol_is_agent_native_and_enables_parallel_auto_without_probe() {
     let mut config = auto_config("responses-native-support");
     config.api_protocol = ApiProtocol::OpenAiResponses;
     config.interaction.native_tools_supported = None;
@@ -581,7 +581,140 @@ fn responses_protocol_is_agent_native_and_never_probed() {
 
     assert_eq!(outcome.profile.resolved_mode, ToolCallMode::Native);
     assert_eq!(outcome.profile.source, CapabilityProbeSource::Explicit);
+    assert!(outcome.profile.parallel_supported);
+    assert!(outcome.profile.parallel_enabled);
     assert!(!outcome.probe_performed);
     assert!(outcome.persisted_probe.is_none());
+    assert_eq!(client.calls, 0);
+}
+
+#[test]
+fn responses_protocol_respects_explicitly_disabled_parallel_calls() {
+    let mut config = auto_config("responses-parallel-disabled");
+    config.api_protocol = ApiProtocol::OpenAiResponses;
+    config.interaction.parallel_tool_calls = ParallelToolCalls::Disabled;
+    let audit = std::env::temp_dir().join("timem-negotiation-responses-parallel-disabled.json");
+    let mut client = ProbeClient { calls: 0 };
+
+    let outcome = negotiate_interaction_outcome(&mut client, &config, &audit, &mut || false, false);
+
+    assert_eq!(outcome.profile.resolved_mode, ToolCallMode::Native);
+    assert!(!outcome.profile.parallel_supported);
+    assert!(!outcome.profile.parallel_enabled);
+    assert!(!outcome.probe_performed);
+    assert_eq!(client.calls, 0);
+}
+
+#[test]
+fn known_native_protocols_enable_parallel_auto_without_probing() {
+    for protocol in [ApiProtocol::OpenAiCompatible, ApiProtocol::Anthropic] {
+        let mut config = auto_config(&format!("known-native-auto-{protocol:?}"));
+        config.api_protocol = protocol;
+        config.interaction.native_tools_supported = Some(true);
+        let audit = std::env::temp_dir().join(format!(
+            "timem-negotiation-known-native-auto-{protocol:?}.json"
+        ));
+        let mut client = ProbeClient { calls: 0 };
+
+        let outcome =
+            negotiate_interaction_outcome(&mut client, &config, &audit, &mut || false, false);
+
+        assert_eq!(outcome.profile.resolved_mode, ToolCallMode::Native);
+        assert!(outcome.profile.parallel_supported, "{protocol:?}");
+        assert!(outcome.profile.parallel_enabled, "{protocol:?}");
+        assert!(!outcome.probe_performed);
+        assert_eq!(client.calls, 0);
+    }
+}
+
+#[test]
+fn known_native_parallel_modes_respect_explicit_enabled_and_disabled() {
+    for mode in [ParallelToolCalls::Enabled, ParallelToolCalls::Disabled] {
+        for protocol in [
+            ApiProtocol::OpenAiCompatible,
+            ApiProtocol::OpenAiResponses,
+            ApiProtocol::Anthropic,
+        ] {
+            let mut config = auto_config(&format!("known-native-{mode:?}-{protocol:?}"));
+            config.api_protocol = protocol;
+            config.interaction.native_tools_supported = Some(true);
+            config.interaction.parallel_tool_calls = mode;
+            let audit = std::env::temp_dir().join(format!(
+                "timem-negotiation-known-native-{mode:?}-{protocol:?}.json"
+            ));
+            let mut client = ProbeClient { calls: 0 };
+
+            let outcome =
+                negotiate_interaction_outcome(&mut client, &config, &audit, &mut || false, false);
+            let expected = mode == ParallelToolCalls::Enabled;
+            assert_eq!(outcome.profile.parallel_enabled, expected, "{protocol:?}");
+            assert_eq!(outcome.profile.parallel_supported, expected, "{protocol:?}");
+            assert!(!outcome.probe_performed);
+            assert_eq!(client.calls, 0);
+        }
+    }
+}
+
+#[test]
+fn known_native_auto_reuses_exact_parallel_control_fallback_record() {
+    for protocol in [
+        ApiProtocol::OpenAiCompatible,
+        ApiProtocol::OpenAiResponses,
+        ApiProtocol::Anthropic,
+    ] {
+        let mut config = auto_config(&format!("parallel-fallback-cache-{protocol:?}"));
+        config.api_protocol = protocol;
+        config.interaction.native_tools_supported = Some(true);
+        config.interaction.capability_probe_endpoint_id =
+            Some(format!("parallel-fallback-cache-{protocol:?}"));
+        config.interaction.persisted_capability_probe = Some(PersistedCapabilityProbe {
+            identity: capability_probe_identity(&config).unwrap(),
+            native_supported: true,
+            parallel_supported: false,
+            observed_tool_calls: 2,
+            reason: PARALLEL_CONTROL_UNSUPPORTED_REASON.to_string(),
+        });
+        let audit = std::env::temp_dir().join(format!(
+            "timem-negotiation-parallel-fallback-cache-{protocol:?}.json"
+        ));
+        let mut client = ProbeClient { calls: 0 };
+
+        let outcome =
+            negotiate_interaction_outcome(&mut client, &config, &audit, &mut || false, false);
+
+        assert_eq!(outcome.profile.source, CapabilityProbeSource::Cache);
+        assert_eq!(outcome.profile.resolved_mode, ToolCallMode::Native);
+        assert!(!outcome.profile.parallel_supported);
+        assert!(!outcome.profile.parallel_enabled);
+        assert_eq!(outcome.profile.reason, PARALLEL_CONTROL_UNSUPPORTED_REASON);
+        assert!(!outcome.probe_performed);
+        assert_eq!(client.calls, 0);
+    }
+}
+
+#[test]
+fn explicit_parallel_enabled_ignores_auto_fallback_record() {
+    let mut config = auto_config("parallel-fallback-explicit-enabled");
+    config.api_protocol = ApiProtocol::OpenAiResponses;
+    config.interaction.native_tools_supported = Some(true);
+    config.interaction.parallel_tool_calls = ParallelToolCalls::Enabled;
+    config.interaction.capability_probe_endpoint_id =
+        Some("parallel-fallback-explicit-enabled".to_string());
+    config.interaction.persisted_capability_probe = Some(PersistedCapabilityProbe {
+        identity: capability_probe_identity(&config).unwrap(),
+        native_supported: true,
+        parallel_supported: false,
+        observed_tool_calls: 2,
+        reason: PARALLEL_CONTROL_UNSUPPORTED_REASON.to_string(),
+    });
+    let audit =
+        std::env::temp_dir().join("timem-negotiation-parallel-fallback-explicit-enabled.json");
+    let mut client = ProbeClient { calls: 0 };
+
+    let outcome = negotiate_interaction_outcome(&mut client, &config, &audit, &mut || false, false);
+
+    assert_eq!(outcome.profile.source, CapabilityProbeSource::Explicit);
+    assert!(outcome.profile.parallel_enabled);
+    assert!(outcome.profile.parallel_supported);
     assert_eq!(client.calls, 0);
 }

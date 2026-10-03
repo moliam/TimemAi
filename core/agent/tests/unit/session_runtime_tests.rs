@@ -87,9 +87,6 @@ fn higher_than_h0_trailer_is_injected_only_for_a_real_reasoning_upgrade() {
     assert!(upgraded_request
         .rendered_prompt
         .ends_with(crate::prompt_render::REASONING_INTENSITY_UPGRADE_TRAILER));
-    assert!(!upgraded_request
-        .rendered_prompt
-        .contains("most work rounds run without it"));
 
     config.openai_compatible.requirements.adaptive_reasoning = Some(false);
     let mut non_upgraded_critical = crate::ModelInteractionRequest::inline(base.clone());
@@ -128,11 +125,13 @@ fn higher_than_h0_trailer_preserves_context_compression_protocol() {
         let mut request = crate::ModelInteractionRequest::inline(format!("body\n\n{source}"));
         request.critical_reasoning = true;
         assert!(apply_higher_than_h0_trailer(&config, &mut request).is_some());
-        assert!(request.rendered_prompt.ends_with(expected));
+        let (body, trailer) =
+            crate::prompt_render::split_formatted_response_trailer(&request.rendered_prompt);
+        assert_eq!(body, "body");
+        assert_eq!(trailer.as_deref(), Some(expected));
         assert!(request
             .rendered_prompt
             .ends_with("Your tool calls must start with context_compress:"));
-        assert_eq!(request.rendered_prompt.matches(source).count(), 0);
     }
 }
 
@@ -1454,9 +1453,9 @@ fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
     assert_eq!(model.prompts.len(), 3);
     assert!(model.prompts[1].contains("Your action's output is too large:"));
     assert!(model.prompts[1]
-        .ends_with("Context is too long. Compact context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"));
+        .ends_with("[Context threshold WARN] Context is too long. Compress context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"));
     assert!(model.prompts[2].contains("context compressed successfully."));
-    assert!(model.prompts[1].contains("optimize your action or compact context"));
+    assert!(model.prompts[1].contains("optimize your action or compress context"));
     assert!(!model.prompts[1].contains(&"0".repeat(1_000)));
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -3802,7 +3801,7 @@ impl ModelClient for ShrinkReplayModel {
     ) -> Result<LlmResponse, String> {
         self.prompts.push(prompt.to_string());
         if self.prompts.len() == 1 {
-            assert!(prompt.contains("Compact context as the tool context_compress desc suggests"));
+            assert!(prompt.contains("Compress context as the tool context_compress desc suggests"));
             assert!(!prompt.contains("Long-context maintenance:"));
             let mut delta_ids = prompt_field_values(prompt, "delta_id");
             delta_ids.sort();
@@ -3824,7 +3823,7 @@ impl ModelClient for ShrinkReplayModel {
                 .count(),
             1
         );
-        assert!(!prompt.contains("Compact context as the tool context_compress desc suggests"));
+        assert!(!prompt.contains("Compress context as the tool context_compress desc suggests"));
         assert!(!prompt.contains("Long-context maintenance:"));
         Ok(llm(
             r#"{"status":"ALL_FINISHED","final_answer":"压缩已完成，可以继续对话。"}"#,
@@ -4492,7 +4491,7 @@ fn session_turn_forced_shrink_runs_to_final_without_repeated_shrink() {
             .prompts
             .iter()
             .filter(|prompt| prompt
-                .contains("Compact context as the tool context_compress desc suggests"))
+                .contains("Compress context as the tool context_compress desc suggests"))
             .count(),
         1
     );
@@ -5087,7 +5086,10 @@ impl ModelClient for ScratchOffloadReplayModel {
         assert!(prompt.contains("context compressed successfully."));
         assert!(prompt.contains("CWD: "));
         assert!(!prompt.contains("Action result: context_compress"));
-        assert!(!prompt.contains("scratch_id:"));
+        assert!(prompt.contains("Context offload saved."), "{prompt}");
+        assert!(prompt.contains("scratch_id:"), "{prompt}");
+        assert!(!prompt.contains("tool_call_id"), "{prompt}");
+        assert!(!prompt.contains(r#""action_result""#), "{prompt}");
         Ok(llm(
             r#"{"status":"ALL_FINISHED","final_answer":"scratch 已记录，可以继续。"}"#,
             4_100,
@@ -5285,7 +5287,7 @@ impl ModelClient for StoryReplayModel {
             }
             6 => {
                 assert!(
-                    prompt.contains("Compact context as the tool context_compress desc suggests")
+                    prompt.contains("Compress context as the tool context_compress desc suggests")
                 );
                 assert!(!prompt.contains("Long-context maintenance:"));
                 let mut delta_ids = prompt_field_values(prompt, "delta_id");
@@ -5317,7 +5319,7 @@ impl ModelClient for StoryReplayModel {
             }
             9 => {
                 assert!(
-                    prompt.contains("Compact context as the tool context_compress desc suggests")
+                    prompt.contains("Compress context as the tool context_compress desc suggests")
                 );
                 assert!(!prompt.contains("Long-context maintenance:"));
                 let mut delta_ids = prompt_field_values(prompt, "delta_id");
@@ -5332,7 +5334,7 @@ impl ModelClient for StoryReplayModel {
             10 => {
                 assert!(prompt.contains("context compressed successfully."));
                 assert!(
-                    !prompt.contains("Compact context as the tool context_compress desc suggests")
+                    !prompt.contains("Compress context as the tool context_compress desc suggests")
                 );
                 Ok(llm(
                     r#"{"status":"ALL_FINISHED","final_answer":"上下文已转存并压缩，可以继续。"}"#,
@@ -5408,7 +5410,7 @@ fn session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rend
             .prompts
             .iter()
             .filter(|prompt| prompt
-                .contains("Compact context as the tool context_compress desc suggests"))
+                .contains("Compress context as the tool context_compress desc suggests"))
             .count()
             >= 1,
         "story should force shrink through context compress"
@@ -6702,4 +6704,308 @@ fn negative_capability_reprobe_uses_first_and_every_tenth_formal_round_only() {
 
     profile.resolved_mode = crate::ToolCallMode::Native;
     assert!(!should_reprobe_negative_capability(&config, &profile, 1));
+}
+
+#[cfg(unix)]
+struct ParallelControlFallbackModel {
+    marker: std::path::PathBuf,
+    calls: Vec<(bool, bool)>,
+    saw_sequential_results: bool,
+}
+
+#[cfg(unix)]
+impl ModelClient for ParallelControlFallbackModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        Err("unexpected_inline_model_call".to_string())
+    }
+
+    fn call_model_interaction(
+        &mut self,
+        config: &ModelServiceConfig,
+        request: &ModelInteractionRequest,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.calls.push((
+            request.send_parallel_tool_calls,
+            request.parallel_tool_calls,
+        ));
+        match self.calls.len() {
+            1 => Err("model_http_400: unknown parameter: parallel_tool_calls".to_string()),
+            2 => {
+                assert!(!request.send_parallel_tool_calls);
+                assert!(!request.parallel_tool_calls);
+                let marker = self.marker.display().to_string();
+                Ok(LlmResponse {
+                    tool_calls: vec![
+                        crate::NativeToolCall {
+                            assistant_continuation: None,
+                            id: "call_create_marker".to_string(),
+                            name: "run_bash".to_string(),
+                            arguments: serde_json::json!({
+                                "cmd": format!("sleep 1; printf ready > '{}'", marker),
+                                "edit": marker,
+                                "timeout_ms": 3000
+                            }),
+                            raw_arguments: String::new(),
+                        },
+                        crate::NativeToolCall {
+                            assistant_continuation: None,
+                            id: "call_observe_marker".to_string(),
+                            name: "run_bash".to_string(),
+                            arguments: serde_json::json!({
+                                "cmd": format!("test -f '{}' && printf observed", self.marker.display()),
+                                "timeout_ms": 3000
+                            }),
+                            raw_arguments: String::new(),
+                        },
+                    ],
+                    content: String::new(),
+                    model_name: config.model.clone(),
+                    usage: usage(100, 10),
+                    truncated: false,
+                })
+            }
+            3 => {
+                assert!(!request.send_parallel_tool_calls);
+                assert!(!request.parallel_tool_calls);
+                self.saw_sequential_results = request.native_exchanges.iter().any(|exchange| {
+                    let created = exchange
+                        .results
+                        .iter()
+                        .any(|result| result.call_id == "call_create_marker" && !result.is_error);
+                    let observed = exchange.results.iter().any(|result| {
+                        result.call_id == "call_observe_marker"
+                            && !result.is_error
+                            && result.content.contains("observed")
+                    });
+                    created && observed
+                });
+                if !self.saw_sequential_results {
+                    return Err("missing_sequential_tool_results".to_string());
+                }
+                Ok(LlmResponse {
+                    tool_calls: vec![crate::NativeToolCall {
+                        assistant_continuation: None,
+                        id: "call_finish_fallback".to_string(),
+                        name: "task_finished".to_string(),
+                        arguments: serde_json::json!({
+                            "summary": "并行控制降级后按顺序执行成功。"
+                        }),
+                        raw_arguments: String::new(),
+                    }],
+                    content: String::new(),
+                    model_name: config.model.clone(),
+                    usage: usage(120, 10),
+                    truncated: false,
+                })
+            }
+            4 => {
+                // The next user turn must reuse the exact persisted fallback and
+                // must not pay another rejected request.
+                assert!(!request.send_parallel_tool_calls);
+                assert!(!request.parallel_tool_calls);
+                Ok(LlmResponse {
+                    tool_calls: vec![crate::NativeToolCall {
+                        assistant_continuation: None,
+                        id: "call_finish_cached_fallback".to_string(),
+                        name: "task_finished".to_string(),
+                        arguments: serde_json::json!({
+                            "summary": "下一轮直接复用降级结论。"
+                        }),
+                        raw_arguments: String::new(),
+                    }],
+                    content: String::new(),
+                    model_name: config.model.clone(),
+                    usage: usage(130, 10),
+                    truncated: false,
+                })
+            }
+            _ => Err("unexpected_extra_model_call".to_string()),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ParallelControlFallbackUi {
+    profiles: Vec<crate::InteractionProfile>,
+    persisted: Vec<crate::PersistedCapabilityProbe>,
+}
+
+impl TurnUi for ParallelControlFallbackUi {
+    fn on_interaction_profile(&mut self, profile: &crate::InteractionProfile) {
+        self.profiles.push(profile.clone());
+    }
+
+    fn on_persisted_capability_probe(
+        &mut self,
+        _identity: &crate::CapabilityProbeIdentity,
+        record: Option<&crate::PersistedCapabilityProbe>,
+    ) {
+        if let Some(record) = record {
+            self.persisted.push(record.clone());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn auto_parallel_control_rejection_retries_once_schedules_sequentially_and_is_reused() {
+    let dir = tmp_dir("parallel_control_fallback");
+    let audit = dir.join("audit.json");
+    let marker = dir.join("ordered.marker");
+    let mut core = test_core(
+        include_str!("../../../../resources/system_prompt/system_prompt.md"),
+        test_profile(),
+        &dir,
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let mut config = test_config();
+    config.api_protocol = crate::ApiProtocol::OpenAiResponses;
+    config.model = format!("parallel-control-fallback-{}", epoch_millis());
+    config.interaction.tool_call_mode = crate::ToolCallMode::Auto;
+    config.interaction.parallel_tool_calls = crate::ParallelToolCalls::Auto;
+    config.interaction.native_tools_supported = Some(true);
+    config.interaction.capability_probe_endpoint_id =
+        Some(format!("parallel-control-fallback-{}", epoch_millis()));
+    let mut model = ParallelControlFallbackModel {
+        marker,
+        calls: Vec::new(),
+        saw_sequential_results: false,
+    };
+    let mut ui = ParallelControlFallbackUi::default();
+
+    let first = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "执行两个有先后依赖的工具",
+            session: "parallel_control_fallback_session",
+            audit_file: &audit,
+            runtime: "test",
+            run_bash_target: "test_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(first.text, "并行控制降级后按顺序执行成功。");
+    assert!(model.saw_sequential_results);
+    assert_eq!(
+        model.calls,
+        vec![(true, true), (false, false), (false, false)]
+    );
+    let persisted = config
+        .interaction
+        .persisted_capability_probe
+        .as_ref()
+        .expect("fallback must be persisted");
+    assert!(persisted.native_supported);
+    assert!(!persisted.parallel_supported);
+    assert_eq!(
+        persisted.reason,
+        crate::negotiation::PARALLEL_CONTROL_UNSUPPORTED_REASON
+    );
+    assert_eq!(ui.persisted.as_slice(), std::slice::from_ref(persisted));
+    assert!(ui.profiles.iter().any(|profile| {
+        profile.reason == crate::negotiation::PARALLEL_CONTROL_UNSUPPORTED_REASON
+            && profile.resolved_mode == crate::ToolCallMode::Native
+            && !profile.parallel_enabled
+    }));
+
+    let second = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "确认下一轮不重复失败",
+            session: "parallel_control_fallback_session",
+            audit_file: &audit,
+            runtime: "test",
+            run_bash_target: "test_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(second.text, "下一轮直接复用降级结论。");
+    assert_eq!(model.calls.len(), 4);
+    assert_eq!(model.calls[3], (false, false));
+    let _ = fs::remove_dir_all(dir);
+}
+
+struct ParallelControlNoFallbackModel {
+    calls: Vec<(bool, bool)>,
+}
+
+impl ModelClient for ParallelControlNoFallbackModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        Err("unexpected_inline_model_call".to_string())
+    }
+
+    fn call_model_interaction(
+        &mut self,
+        _config: &ModelServiceConfig,
+        request: &ModelInteractionRequest,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.calls.push((
+            request.send_parallel_tool_calls,
+            request.parallel_tool_calls,
+        ));
+        Err("model_http_400: unknown parameter: parallel_tool_calls".to_string())
+    }
+}
+
+#[test]
+fn explicit_parallel_enabled_does_not_silently_downgrade() {
+    let dir = tmp_dir("parallel_control_explicit_enabled");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    config.api_protocol = crate::ApiProtocol::OpenAiResponses;
+    config.interaction.tool_call_mode = crate::ToolCallMode::Auto;
+    config.interaction.parallel_tool_calls = crate::ParallelToolCalls::Enabled;
+    config.interaction.native_tools_supported = Some(true);
+    let mut model = ParallelControlNoFallbackModel { calls: Vec::new() };
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "不要静默降级",
+            session: "parallel_control_explicit_enabled_session",
+            audit_file: &audit,
+            runtime: "test",
+            run_bash_target: "test_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(model.calls, vec![(true, true)]);
+    assert_eq!(outcome.stop_reason, Some(crate::TurnStopReason::ModelError));
+    assert!(config.interaction.persisted_capability_probe.is_none());
+    let _ = fs::remove_dir_all(dir);
 }

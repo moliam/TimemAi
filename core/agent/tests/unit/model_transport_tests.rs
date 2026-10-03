@@ -1274,6 +1274,7 @@ fn zhipu_native_stream_tool_roundtrip_over_real_http() {
             native_exchanges: vec![],
             resolved_mode: ToolCallMode::Native,
             parallel_tool_calls: false,
+            send_parallel_tool_calls: true,
             tool_choice: NativeToolChoice::Auto,
             critical_reasoning: false,
         };

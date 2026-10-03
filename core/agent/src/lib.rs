@@ -685,10 +685,17 @@ impl PendingApprovedAction {
 const PROMPT_SLICE_TEXT_LIMIT: usize = 12_000;
 const MAX_MCP_SERVER_INSTRUCTIONS_CHARS: usize = 32_000;
 pub const UNLIMITED_ROUND_BUDGET: u32 = u32::MAX;
-const PERIODIC_REASONING_REVIEW_ROUND_INTERVAL: u32 = 35;
-const PERIODIC_REASONING_REVIEW_MIN_MESSAGES: usize = 30;
+pub const CONTEXT_COMPRESS_THRESHOLD_PERCENT_OPTIONS: [u8; 5] = [80, 85, 90, 95, 100];
+pub const DEFAULT_CONTEXT_COMPRESS_THRESHOLD_PERCENT: u8 = 90;
 const DEFAULT_ROUND_BUDGET: u32 = UNLIMITED_ROUND_BUDGET;
 const MAX_CONFIGURED_ROUND_BUDGET: u32 = 10_000;
+
+pub fn validate_context_compress_threshold_percent(percent: u8) -> Result<u8, String> {
+    CONTEXT_COMPRESS_THRESHOLD_PERCENT_OPTIONS
+        .contains(&percent)
+        .then_some(percent)
+        .ok_or_else(|| "context_compress_threshold_percent_invalid".to_string())
+}
 pub const MAX_PROTOCOL_REPAIR_ATTEMPTS: u32 = 20;
 const RUNTIME_CONFIG_CHANGED_NOTICE: &str =
     "User changes some runtime config, retrieve again when you need it.";
@@ -1819,6 +1826,13 @@ fn default_self_tool_process() -> SelfToolProcess {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThresholdCompactionFollowupState {
+    Available,
+    FollowupPending,
+    Exhausted,
+}
+
 #[derive(Debug)]
 pub struct AgentCore {
     memory_dir: PathBuf,
@@ -1851,8 +1865,13 @@ pub struct AgentCore {
     deltas: Vec<PromptDelta>,
     max_llm_input_tokens: u32,
     model_tool_result_bytes: usize,
+    context_compress_threshold_percent: u8,
     last_observed_prompt_tokens: u32,
     context_compress_required: bool,
+    /// True only when automatic context sizing crossed the forced-compaction
+    /// threshold. This is the sole Core scheduling signal for an H1 request;
+    /// manual compaction remains at the normal H0 baseline.
+    threshold_compaction_reasoning_required: bool,
     /// Set for a user-initiated compaction request: the next request carries
     /// the manual-compaction trailer wording instead of the forced-shrink one.
     manual_compact_trailer_pending: bool,
@@ -1860,16 +1879,10 @@ pub struct AgentCore {
     /// injects the compaction request. The turn loop drains it into a
     /// `core.context.compress` phase="requested" topic event for live UI.
     pending_compact_request_notice: Option<(u32, u32)>,
-    /// Consecutive successful threshold-triggered compactions whose resulting
-    /// dynamic context still occupies more than 25% of the model input window.
-    /// Manual and spontaneous compactions are excluded from this sequence.
-    consecutive_poor_threshold_compactions: u8,
-    rounds_since_reasoning: u32,
-    reasoning_review_due: bool,
-    /// Incrementally maintained count of user/assistant/summary message
-    /// elements in the dynamic context (deltas + native exchanges). Counted at
-    /// write time; never derived by scanning after the fact.
-    context_message_elements: usize,
+    /// Bounded automatic compression cycle: one initial threshold compression,
+    /// at most one forced follow-up, then an exhausted latch until occupancy
+    /// drops below the configured trigger threshold.
+    threshold_compaction_followup_state: ThresholdCompactionFollowupState,
     configured_round_budget: u32,
     round_budget: u32,
     reminder_tips_config: ReminderTipsConfig,
@@ -1903,6 +1916,7 @@ pub struct AgentCore {
     tool_repo_session_id: String,
     resolved_tool_call_mode: ToolCallMode,
     native_parallel_tool_calls: bool,
+    send_native_parallel_tool_control: bool,
     native_exchanges: Vec<NativeExchange>,
     turn_finished_summary: Option<String>,
     active_memo: Option<String>,
@@ -1995,14 +2009,13 @@ impl AgentCore {
             deltas: Vec::new(),
             max_llm_input_tokens: 100_000,
             model_tool_result_bytes,
+            context_compress_threshold_percent: DEFAULT_CONTEXT_COMPRESS_THRESHOLD_PERCENT,
             last_observed_prompt_tokens: 0,
             context_compress_required: false,
+            threshold_compaction_reasoning_required: false,
             manual_compact_trailer_pending: false,
             pending_compact_request_notice: None,
-            consecutive_poor_threshold_compactions: 0,
-            rounds_since_reasoning: 0,
-            reasoning_review_due: false,
-            context_message_elements: 0,
+            threshold_compaction_followup_state: ThresholdCompactionFollowupState::Available,
             configured_round_budget,
             round_budget: configured_round_budget,
             reminder_tips_config: ReminderTipsConfig::default(),
@@ -2034,6 +2047,7 @@ impl AgentCore {
             tool_repo_session_id: "default".to_string(),
             resolved_tool_call_mode: ToolCallMode::Inline,
             native_parallel_tool_calls: false,
+            send_native_parallel_tool_control: false,
             native_exchanges: Vec::new(),
             turn_finished_summary: None,
             active_memo: None,
@@ -2075,6 +2089,8 @@ impl AgentCore {
             self.configured_inline_response_protocol
         };
         self.native_parallel_tool_calls = profile.parallel_enabled;
+        self.send_native_parallel_tool_control =
+            profile.reason != negotiation::PARALLEL_CONTROL_UNSUPPORTED_REASON;
         self.refresh_rendered_static_prompt();
     }
 
@@ -2100,6 +2116,7 @@ impl AgentCore {
             native_exchanges: self.native_exchanges.clone(),
             resolved_mode: ToolCallMode::Native,
             parallel_tool_calls: self.native_parallel_tool_calls,
+            send_parallel_tool_calls: self.send_native_parallel_tool_control,
             tool_choice: if self.context_compress_required {
                 NativeToolChoice::Required
             } else {
@@ -2109,70 +2126,12 @@ impl AgentCore {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn context_message_elements_for_test(&self) -> usize {
-        self.context_message_elements
-    }
-
-    #[cfg(test)]
-    pub(crate) fn recount_context_message_elements_for_test(&mut self) {
-        self.recount_context_message_elements();
-    }
-
-    fn is_context_message_prompt_type(prompt_type: &str) -> bool {
-        matches!(
-            prompt_type,
-            "user_question"
-                | "user_supplement"
-                | "user_resume_directly"
-                | "llm_response"
-                | "llm_response_raw_xml"
-                | "llm_free_talk"
-                | "context_compression_summary"
-        )
-    }
-
-    /// Full recomputation from authoritative state; used only at wholesale
-    /// replacement points (snapshot import, compaction shrink) where an
-    /// incremental delta is not expressible.
-    fn recount_context_message_elements(&mut self) {
-        let mut count = 0usize;
-        for delta in &self.deltas {
-            for slice in &delta.slices {
-                if Self::is_context_message_prompt_type(&slice.prompt_type) {
-                    count += 1;
-                }
-            }
-        }
-        for exchange in &self.native_exchanges {
-            count += 1;
-            count += exchange.calls.len().max(exchange.results.len());
-        }
-        self.context_message_elements = count;
+    pub fn reasoning_critical(&self) -> bool {
+        self.context_compress_required && self.threshold_compaction_reasoning_required
     }
 
     fn register_native_exchange(&mut self, exchange: NativeExchange) {
-        self.context_message_elements += 1 + exchange.calls.len().max(exchange.results.len());
         self.native_exchanges.push(exchange);
-    }
-
-    pub fn reasoning_critical(&self) -> bool {
-        self.context_compress_required || self.reasoning_review_due
-    }
-
-    fn evaluate_periodic_reasoning_review(&mut self) {
-        if self.context_compress_required {
-            self.rounds_since_reasoning = 0;
-            self.reasoning_review_due = false;
-            return;
-        }
-        self.rounds_since_reasoning = self.rounds_since_reasoning.saturating_add(1);
-        self.reasoning_review_due = self.rounds_since_reasoning
-            >= PERIODIC_REASONING_REVIEW_ROUND_INTERVAL
-            && self.context_message_elements > PERIODIC_REASONING_REVIEW_MIN_MESSAGES;
-        if self.reasoning_review_due {
-            self.rounds_since_reasoning = 0;
-        }
     }
 
     fn attach_mcp_instructions_to_native_tools(&self, tools: &mut [ToolDefinition]) {
@@ -2223,6 +2182,7 @@ impl AgentCore {
         fork.response_protocol = self.response_protocol;
         fork.max_llm_input_tokens = self.max_llm_input_tokens;
         fork.model_tool_result_bytes = self.model_tool_result_bytes;
+        fork.context_compress_threshold_percent = self.context_compress_threshold_percent;
         fork.configured_round_budget = self.configured_round_budget;
         fork.round_budget = self.configured_round_budget;
         fork.bash_approval_mode = self.bash_approval_mode;
@@ -2655,7 +2615,6 @@ impl AgentCore {
     where
         F: FnOnce() -> (Vec<RunningShellJob>, Vec<ShellJobExitUpdate>),
     {
-        self.evaluate_periodic_reasoning_review();
         let (body, trailer) = prompt_render::split_formatted_response_trailer(current_prompt);
         let mut prompt = body.trim_end().to_string();
 
@@ -2813,6 +2772,31 @@ impl AgentCore {
 
     pub fn set_max_llm_input_tokens(&mut self, max_llm_input_tokens: u32) {
         self.max_llm_input_tokens = max_llm_input_tokens.max(3_000);
+    }
+
+    pub fn context_compress_threshold_percent(&self) -> u8 {
+        self.context_compress_threshold_percent
+    }
+
+    pub fn set_context_compress_threshold_percent(&mut self, percent: u8) -> Result<(), String> {
+        self.context_compress_threshold_percent =
+            validate_context_compress_threshold_percent(percent)?;
+        // Runtime updates take effect before the next model request. Re-evaluate
+        // already accumulated context immediately instead of waiting for new
+        // user/tool text to happen to trigger another shrink review. Preserve a
+        // user-requested compact and the single already-scheduled quality
+        // follow-up: those are explicit/in-flight maintenance, not threshold
+        // admission decisions.
+        if !self.manual_compact_trailer_pending
+            && self.threshold_compaction_followup_state
+                != ThresholdCompactionFollowupState::FollowupPending
+        {
+            self.context_compress_required = false;
+            self.threshold_compaction_reasoning_required = false;
+            self.pending_compact_request_notice = None;
+            self.require_context_compress_if_needed(0);
+        }
+        Ok(())
     }
     pub fn configure_runtime_from_host(
         &mut self,
@@ -3369,7 +3353,6 @@ impl AgentCore {
         // the resume notice instead.
         self.deltas = snapshot.deltas;
         self.native_exchanges = snapshot.native_exchanges;
-        self.recount_context_message_elements();
         self.last_observed_prompt_tokens = snapshot.last_observed_prompt_tokens;
         // Pending runtime-authority memo notices are runtime state for the
         // next turn; they must survive a restart with the context they
@@ -3398,12 +3381,12 @@ impl AgentCore {
         self.memo_deleted_this_turn = None;
         self.memo_deleted_trailer_shown = false;
         self.touched_paths.clear();
-        self.context_message_elements = 0;
         self.last_observed_prompt_tokens = 0;
         self.context_compress_required = false;
+        self.threshold_compaction_reasoning_required = false;
         self.manual_compact_trailer_pending = false;
         self.pending_compact_request_notice = None;
-        self.consecutive_poor_threshold_compactions = 0;
+        self.threshold_compaction_followup_state = ThresholdCompactionFollowupState::Available;
         self.current_round = 0;
         self.current_stats = UsageStats::zero();
         self.repair_attempted = false;
@@ -3870,11 +3853,11 @@ impl AgentCore {
             let (body, response_trailer) = prompt_render::split_formatted_response_trailer(&prompt);
             prompt = body.trim_end().to_string();
             prompt.push_str("\n\n");
-            prompt.push_str(if self.manual_compact_trailer_pending {
-                prompt_render::MANUAL_CONTEXT_COMPRESS_TRAILER
+            if self.manual_compact_trailer_pending {
+                prompt.push_str(prompt_render::MANUAL_CONTEXT_COMPRESS_TRAILER);
             } else {
-                prompt_render::CONTEXT_COMPRESS_REQUIRED_TRAILER
-            });
+                prompt.push_str(prompt_render::CONTEXT_COMPRESS_REQUIRED_TRAILER);
+            }
             if let Some(response_trailer) = response_trailer {
                 prompt.push_str("\n\n");
                 prompt.push_str(&response_trailer);
@@ -4003,8 +3986,8 @@ impl AgentCore {
         let compact_result_slice_start = slices.len();
         let mut compacted_successfully = false;
         let mut successful_compact_summaries = Vec::new();
-        let threshold_compaction_requested =
-            self.context_compress_required && !self.manual_compact_trailer_pending;
+        let threshold_compaction_requested = self.threshold_compaction_reasoning_required;
+        let mut threshold_followup_required = false;
         for compact in &parsed.context_compresses {
             // Idempotent refs: a delta id that no longer exists has already
             // reached the compaction target state (an earlier compact
@@ -4078,15 +4061,18 @@ impl AgentCore {
                 };
                 // The detailed shrink report and selected ids are internal accounting.
                 // Re-injecting them would immediately spend the context that compaction
-                // just recovered. A completed action status is enough for the model;
-                // only an offload scratch id remains actionable afterward.
+                // just recovered. A minimal runtime confirmation is enough for the
+                // model; only an offload scratch id remains actionable afterward.
                 let _shrink_report = self.apply_prompt_shrink(&live_delta_ids, &compact.slice_ids);
-                let mut outcome = ActionOutcome::completed(String::new());
                 if let Some(record) = offload_record.as_ref() {
-                    outcome = outcome.with_runtime_metadata("scratch_id", record.id.clone());
+                    slices.push((
+                        "runtime_note".to_string(),
+                        format!(
+                            "Context offload saved. Retrieve it with memmgr scratch read using scratch_id: {}",
+                            record.id
+                        ),
+                    ));
                 }
-                let result = self.format_context_compress_outcome(compact, &outcome, runtime);
-                slices.push(("result_of_llm_action".to_string(), result));
                 let estimated_after = self.dynamic_context_token_estimate();
                 let summary_tokens = estimate_prompt_tokens(&compact.summary);
                 let estimated_before_tokens = estimated_before.total_tokens();
@@ -4110,11 +4096,13 @@ impl AgentCore {
                     self.current_session_id(),
                     &compact_report,
                 )]);
-                if let Some(note) = self.threshold_compaction_quality_note(
+                let (force_followup, quality_note) = self.threshold_compaction_quality_note(
                     threshold_compaction_requested,
                     estimated_before_tokens,
                     estimated_after_tokens,
-                ) {
+                );
+                threshold_followup_required |= force_followup;
+                if let Some(note) = quality_note {
                     slices.push(("runtime_note".to_string(), note));
                 }
                 successful_compact_summaries.push(compact.summary.trim().to_string());
@@ -4143,7 +4131,8 @@ impl AgentCore {
             // be quantified reliably by the model, so depth guidance lives in
             // the compact trailers (discard stale deltas/tool noise, extract
             // a valuable short summary) rather than a numeric gate.
-            self.context_compress_required = false;
+            self.context_compress_required = threshold_followup_required;
+            self.threshold_compaction_reasoning_required = threshold_followup_required;
             self.manual_compact_trailer_pending = false;
             self.process_scope_prompted_session = None;
             if let Some(note) = self.take_process_aggregate_scopes_if_needed() {
@@ -6014,10 +6003,6 @@ Runtime tool_call ids:",
                 }
             })
             .collect::<Vec<_>>();
-        self.context_message_elements += slices
-            .iter()
-            .filter(|slice| Self::is_context_message_prompt_type(&slice.prompt_type))
-            .count();
         self.deltas.push(PromptDelta {
             delta_id,
             time_ms: timestamp,
@@ -6037,15 +6022,36 @@ Runtime tool_call ids:",
 
     fn require_context_compress_if_needed(&mut self, incoming_prompt_tokens: u32) {
         let estimated_prompt_tokens = self.estimate_rendered_prompt_tokens(incoming_prompt_tokens);
-        let force_threshold = self.max_llm_input_tokens.saturating_mul(90) / 100;
-        if !self.context_compress_required && estimated_prompt_tokens < force_threshold {
+        let force_threshold = self
+            .max_llm_input_tokens
+            .saturating_mul(u32::from(self.context_compress_threshold_percent))
+            / 100;
+        let threshold_crossed = estimated_prompt_tokens >= force_threshold;
+        if !threshold_crossed && !self.context_compress_required {
+            self.threshold_compaction_followup_state = ThresholdCompactionFollowupState::Available;
             return;
         }
         if self.render_prompt_slices().is_empty() {
             return;
         }
-        if !self.context_compress_required {
-            self.pending_compact_request_notice = Some((estimated_prompt_tokens, force_threshold));
+        if threshold_crossed {
+            // A manual request keeps its user-facing wording, but crossing the
+            // automatic threshold still upgrades the model request to critical
+            // reasoning and subjects the result to the bounded quality
+            // follow-up. The exhausted latch blocks only a new automatic cycle;
+            // it must never block an explicit user request.
+            if !self.manual_compact_trailer_pending
+                && !self.context_compress_required
+                && self.threshold_compaction_followup_state
+                    == ThresholdCompactionFollowupState::Exhausted
+            {
+                return;
+            }
+            if !self.manual_compact_trailer_pending && !self.context_compress_required {
+                self.pending_compact_request_notice =
+                    Some((estimated_prompt_tokens, force_threshold));
+            }
+            self.threshold_compaction_reasoning_required = true;
         }
         self.context_compress_required = true;
     }
@@ -6074,34 +6080,37 @@ Runtime tool_call ids:",
         threshold_triggered: bool,
         estimated_before_tokens: u32,
         estimated_after_tokens: u32,
-    ) -> Option<String> {
+    ) -> (bool, Option<String>) {
         if !threshold_triggered {
-            return None;
+            return (false, None);
         }
         let window_tokens = self.max_llm_input_tokens;
         let remains_above_target =
             u64::from(estimated_after_tokens) * 100 > u64::from(window_tokens) * 25;
         if !remains_above_target {
-            self.consecutive_poor_threshold_compactions = 0;
-            return None;
+            self.threshold_compaction_followup_state = ThresholdCompactionFollowupState::Available;
+            return (false, None);
         }
 
-        self.consecutive_poor_threshold_compactions = self
-            .consecutive_poor_threshold_compactions
-            .saturating_add(1);
-        if self.consecutive_poor_threshold_compactions < 2 {
-            return None;
+        if self.threshold_compaction_followup_state == ThresholdCompactionFollowupState::Available {
+            self.threshold_compaction_followup_state =
+                ThresholdCompactionFollowupState::FollowupPending;
+            return (true, None);
         }
+        self.threshold_compaction_followup_state = ThresholdCompactionFollowupState::Exhausted;
 
         let occupancy_percent = |tokens: u32| {
             let numerator = u64::from(tokens) * 100;
             numerator.div_ceil(u64::from(window_tokens)) as u32
         };
-        Some(format!(
-            "NOTE: context compression ratio is not very good, {}% -> {}%, try to compress more by retaining only necessary part and discard bulky along-side info if possible.",
-            occupancy_percent(estimated_before_tokens),
-            occupancy_percent(estimated_after_tokens)
-        ))
+        (
+            false,
+            Some(format!(
+                "**WARN**: context compression ratio is not very good, {}% -> {}%; one forced follow-up was already attempted, so automatic compression will not loop. Retain only necessary state and discard bulky side information during later work.",
+                occupancy_percent(estimated_before_tokens),
+                occupancy_percent(estimated_after_tokens)
+            )),
+        )
     }
 
     fn estimate_rendered_prompt_tokens(&self, incoming_prompt_tokens: u32) -> u32 {
@@ -7530,7 +7539,6 @@ Runtime tool_call ids:",
         slice_ids: &[String],
     ) -> String {
         // Wholesale removal invalidates the incremental counter; recount.
-        self.recount_context_message_elements();
         let delta_id_set = delta_ids
             .iter()
             .map(|id| id.trim().to_string())
@@ -7608,14 +7616,12 @@ Runtime tool_call ids:",
         )
     }
 
-    /// Current authoritative delta ids with their text+native token hints,
-    /// so compaction retries always see fresh refs instead of the stale
-    /// lists that linger in historical prompt text.
+    /// Current authoritative delta ids with their text+native token hints for
+    /// invalid-reference repair. Native exchanges share the visible id of their
+    /// owning delta, including owners with no visible text slices.
     fn live_delta_refs_hint(&self) -> String {
         self.deltas
             .iter()
-            // Text slices already carry their [BEGIN DELTA] markers inline;
-            // only native-exchange deltas lack inline refs and need a hint.
             .filter(|delta| {
                 self.native_exchanges
                     .iter()
@@ -8749,7 +8755,7 @@ fn action_output_too_large_note(output_bytes: usize, remaining_tokens: u32) -> S
     let output_kb = output_bytes.div_ceil(1024);
     let remaining_kb = (remaining_tokens as usize).saturating_mul(4).div_ceil(1024);
     format!(
-        "Your action's output is too large: {output_kb} KB, while the context window has only {remaining_kb} KB left. You need to optimize your action or compact context."
+        "Your action's output is too large: {output_kb} KB, while the context window has only {remaining_kb} KB left. You need to optimize your action or compress context."
     )
 }
 

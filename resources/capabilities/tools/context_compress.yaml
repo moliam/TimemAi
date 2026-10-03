@@ -2,13 +2,13 @@ kind: tool
 id: context_compress
 binding_type: builtin
 binding_name: context_compress
-summary: Compact selected dynamic prompt deltas while preserving an essential summary.
+summary: Compress selected dynamic prompt deltas while preserving an essential summary.
 prompt_synopsis: |
   {"context_compress":{"discard":["pd_1"],"offload":["pd_2"],"summary":"Essential active state..."}}
 description: |
   Compress current context to free context space. Well-designed context compression not only frees up context space, but also boosts work quality.
-  !!! By default, when context threshold warn is triggered, You MUST extract only useful info from them including previous compact summary and discard along-side content. You can also actively and promptly compact during work.
-  You can also offload big deltas into scratch memory if it is highly valuable. Compaction should be ultra-dense, low-loss, and adhere strictly to the dimensions below (keep titles), based on old compaction(if any) and current context:
+  !!! When a context threshold warning is triggered, target at most 25% of the model input window. Preserve only useful state (including any previous compressed summary) and discard superseded context by its visible delta id; provider-native tool exchanges share the id of their owning delta. The runtime may force at most one immediate follow-up compression when the first result remains above target. You can also proactively compress context during work.
+  You can also offload big deltas into scratch memory if it is highly valuable. Compression should be ultra-dense, low-loss, and adhere strictly to the dimensions below (keep titles), based on previous compression (if any) and current context:
   * **Design Blueprint**: Authoritative design or root-doc and settled interface contracts; important design rule corrected by user.
   * **Roadmap Coordinates**: High level work plan, active milestone and the current task item
   * **User Corrections**: user-clarified misconceptions, misguided approaches, prioritization, useful methodology, and working criteria, user mandated always-keep memory.
@@ -19,13 +19,14 @@ description: |
   * **Next work**:  next planned action
 
   When combined with other capability calls, `context_compress` must be the first
-  call. Later calls run only after compaction succeeds.
+  call. Later calls run only after compression succeeds.
 prompt_input: |
   Use only runtime-provided dynamic delta ids. Provide at least one id in
   discard or offload, plus a non-empty summary.
 prompt_result: |
-  Returns whether compaction succeeded and, when offloading, the scratch record
-  that can be retrieved later through memmgr.
+  On success, ordinary compression does not reinsert a verbose action result.
+  A successful offload exposes only the actionable scratch_id for later memmgr
+  scratch read. Validation or persistence failures retain a standard result.
 input_schema: |
   {
     "type": "object",
@@ -33,7 +34,7 @@ input_schema: |
     "properties": {
       "discard": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1, "pattern": "\\S"}, "description": "Non-empty stale delta ids to remove."},
       "offload": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1, "pattern": "\\S"}, "description": "Non-empty important bulky delta ids to save to scratch before removal."},
-      "summary": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Non-empty compact retained state for subsequent work."}
+      "summary": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Non-empty compressed retained state for subsequent work."}
     },
     "required": ["summary"],
     "x-required-any": [["discard", "offload"]]

@@ -13,6 +13,8 @@ use std::time::Instant;
 const PROBE_TOOL_NAME: &str = "timem_capability_probe";
 const SINGLE_PROBE_PROMPT: &str =
     "Call the provided capability probe exactly once with slot=1. Do not answer in text.";
+pub(crate) const PARALLEL_CONTROL_UNSUPPORTED_REASON: &str =
+    "formal_request_parallel_control_unsupported";
 const PARALLEL_PROBE_PROMPT: &str = "Call the provided capability probe twice in the same response, once with slot=1 and once with slot=2. Do not answer in text.";
 
 #[derive(Clone, Eq)]
@@ -141,6 +143,36 @@ pub(crate) fn negotiate_interaction_outcome_with_observer(
         || config.api_protocol == crate::ApiProtocol::OpenAiResponses
         || config.interaction.native_tools_supported == Some(true)
     {
+        // Known-native paths intentionally skip proactive probes. Reuse only the
+        // exact durable Auto fallback that says native tools work but the optional
+        // parallel-control field does not. Explicit Enabled must still surface a
+        // provider rejection instead of being silently downgraded.
+        if config.interaction.parallel_tool_calls == ParallelToolCalls::Auto {
+            if let (Some(expected), Some(persisted)) = (
+                capability_probe_identity(config).as_ref(),
+                config.interaction.persisted_capability_probe.as_ref(),
+            ) {
+                if &persisted.identity == expected
+                    && persisted.native_supported
+                    && !persisted.parallel_supported
+                    && persisted.reason == PARALLEL_CONTROL_UNSUPPORTED_REASON
+                {
+                    return NegotiationOutcome {
+                        profile: profile_from_capabilities(
+                            config,
+                            true,
+                            false,
+                            persisted.observed_tool_calls,
+                            CapabilityProbeSource::Cache,
+                            persisted.reason.clone(),
+                            None,
+                        ),
+                        persisted_probe: None,
+                        probe_performed: false,
+                    };
+                }
+            }
+        }
         return NegotiationOutcome {
             profile: assumed_native_profile(config),
             persisted_probe: None,
@@ -436,6 +468,7 @@ fn probe_request(prompt: &str, parallel: bool) -> ModelInteractionRequest {
         native_exchanges: Vec::new(),
         resolved_mode: ToolCallMode::Native,
         parallel_tool_calls: parallel,
+        send_parallel_tool_calls: true,
         tool_choice: NativeToolChoice::Required,
         critical_reasoning: false,
     }
@@ -479,7 +512,11 @@ fn profile_from_capabilities(
 }
 
 fn assumed_native_profile(config: &ModelServiceConfig) -> InteractionProfile {
-    let parallel_enabled = config.interaction.parallel_tool_calls == ParallelToolCalls::Enabled;
+    // Native-capable endpoints are assumed to implement the standard provider
+    // parallel-control field unless the user explicitly disables parallelism.
+    // Auto must not silently become serial merely because this path skips the
+    // capability probe (Responses and catalog-known native endpoints do).
+    let parallel_enabled = config.interaction.parallel_tool_calls != ParallelToolCalls::Disabled;
     InteractionProfile {
         api_protocol: config.api_protocol.label().to_string(),
         model: config.model.clone(),

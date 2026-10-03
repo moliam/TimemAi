@@ -201,9 +201,14 @@ pub struct ModelInteractionRequest {
     pub native_exchanges: Vec<NativeExchange>,
     pub resolved_mode: ToolCallMode,
     pub parallel_tool_calls: bool,
+    /// Whether the provider request should carry its parallel-tool control field.
+    /// Auto fallback may omit that field for older compatible gateways while
+    /// keeping native tool calling enabled.
+    pub send_parallel_tool_calls: bool,
     pub tool_choice: NativeToolChoice,
-    /// Core scheduling signal (compaction or periodic review). Requirements v1
-    /// applies H0 daily and may boost this call; v0 retains legacy behavior.
+    /// Core scheduling signal for an automatic threshold-triggered context
+    /// compaction. Requirements v1 applies H0 normally and may boost this call;
+    /// manual compaction remains at H0. v0 retains legacy behavior.
     pub critical_reasoning: bool,
 }
 
@@ -217,6 +222,7 @@ impl ModelInteractionRequest {
             native_exchanges: Vec::new(),
             resolved_mode: ToolCallMode::Inline,
             parallel_tool_calls: false,
+            send_parallel_tool_calls: false,
             tool_choice: NativeToolChoice::Auto,
             critical_reasoning: false,
         }

@@ -637,7 +637,7 @@ fn manual_context_compress_request_carries_manual_trailer_and_clears_after_compa
     );
     assert!(
         first.contains(
-            "Compact context as the tool context_compress desc suggests, before further work"
+            "Compress context as the tool context_compress desc suggests, before further work"
         ),
         "{first}"
     );
@@ -743,7 +743,7 @@ fn manual_compact_succeeds_on_any_successful_compaction() {
     );
     assert!(
         prompt.contains(
-            "Compact context as the tool context_compress desc suggests, before further work"
+            "Compress context as the tool context_compress desc suggests, before further work"
         ),
         "manual trailer must point at the context_compress tool desc: {prompt}"
     );
@@ -2090,7 +2090,7 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.ends_with(
-        "Context is too long. Compact context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
+        "[Context threshold WARN] Context is too long. Compress context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
     ));
     let (_, threshold) = core
         .take_pending_compact_request_notice()
@@ -2160,7 +2160,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.ends_with(
-        "Context is too long. Compact context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
+        "[Context threshold WARN] Context is too long. Compress context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
     ));
     assert!(!prompt.contains("Long-context maintenance:"));
     let (estimated, threshold) = core
@@ -2701,7 +2701,6 @@ fn prompt_discard_can_remove_whole_delta_by_delta_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(has_action_status(&prompt, "completed"), "{prompt}");
     assert!(!has_tool_output_containing(
         &prompt,
         "content",
@@ -2889,7 +2888,6 @@ fn response_context_compress_hides_refs_and_appends_summary_slice() {
     assert!(prompt.contains("旧任务已经完成，只保留 compact 后的测试摘要"));
     assert!(prompt.contains("context compressed successfully."));
     assert!(prompt.contains("CWD: "));
-    assert!(has_action_status(&prompt, "completed"), "{prompt}");
     assert!(!has_tool_output_containing(
         &prompt,
         "content",
@@ -2985,7 +2983,6 @@ fn prompt_discard_can_remove_visible_delta_by_delta_id() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("context compressed successfully."));
-    assert!(has_action_status(&prompt, "completed"), "{prompt}");
     assert!(!has_tool_output_containing(
         &prompt,
         "content",
@@ -3151,7 +3148,7 @@ fn long_context_uses_observed_model_prompt_tokens_plus_new_delta_estimate() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.ends_with(
-        "Context is too long. Compact context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
+        "[Context threshold WARN] Context is too long. Compress context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
     ));
     assert!(!prompt.contains("Long-context maintenance:"));
     let (estimated, threshold) = core
@@ -3180,7 +3177,7 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.ends_with(
-        "Context is too long. Compact context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
+        "[Context threshold WARN] Context is too long. Compress context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
     ));
     for redundant in [
         "Long-context maintenance:",
@@ -3220,7 +3217,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(shrink_prompt.contains("Compact context as the tool context_compress desc suggests"));
+    assert!(shrink_prompt.contains("Compress context as the tool context_compress desc suggests"));
     assert!(!shrink_prompt.contains("Long-context maintenance:"));
     let mut delta_ids = field_values(&shrink_prompt, "delta_id");
     delta_ids.sort();
@@ -3244,10 +3241,6 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
     };
 
     assert!(next_prompt.contains("context compressed successfully."));
-    assert!(
-        has_action_status(&next_prompt, "completed"),
-        "{next_prompt}"
-    );
     assert!(!has_tool_output_containing(
         &next_prompt,
         "content",
@@ -3258,7 +3251,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
         "content",
         "Action result: context_compress"
     ));
-    assert!(!next_prompt.contains("Compact context as the tool context_compress desc suggests"));
+    assert!(!next_prompt.contains("Compress context as the tool context_compress desc suggests"));
 
     let final_step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -3287,7 +3280,7 @@ fn forced_shrink_is_not_reissued_when_dynamic_context_cannot_reduce_enough() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(!prompt.contains("Compact context as the tool context_compress desc suggests"));
+    assert!(!prompt.contains("Compress context as the tool context_compress desc suggests"));
 }
 
 #[test]
@@ -3735,7 +3728,6 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     };
     assert!(prompt.contains("context compressed successfully."));
     assert!(prompt.contains("CWD: "));
-    assert!(has_action_status(&prompt, "completed"), "{prompt}");
     assert!(!has_tool_output_containing(
         &prompt,
         "content",
@@ -5361,21 +5353,15 @@ fn context_compress_offload_stores_runtime_prompt_delta_by_id() {
     };
     assert!(prompt.contains("context compressed successfully."));
     assert!(prompt.contains("CWD: "));
-    assert!(has_action_status(&prompt, "completed"), "{prompt}");
     assert!(!has_tool_output_containing(
         &prompt,
         "content",
         "Action result: context_compress"
     ));
-    assert!(!prompt.contains("scratch_id:"));
-    let results = action_results(&prompt);
-    assert_eq!(results.len(), 1, "{prompt}");
-    let metadata = &results[0]["action_result"]["runtime_metadata"];
-    assert!(metadata["scratch_id"]
-        .as_str()
-        .is_some_and(|id| id.starts_with("scratch_")));
-    assert!(metadata.get("discarded_delta_ids").is_none(), "{prompt}");
-    assert!(metadata.get("offloaded_delta_ids").is_none(), "{prompt}");
+    assert!(prompt.contains("Context offload saved."), "{prompt}");
+    assert!(prompt.contains("scratch_id: scratch_"), "{prompt}");
+    assert!(!prompt.contains("tool_call_id"), "{prompt}");
+    assert!(action_results(&prompt).is_empty(), "{prompt}");
     assert!(!prompt.contains("removed_delta_count:"), "{prompt}");
     assert!(!prompt.contains("current_live_delta_refs:"), "{prompt}");
 
@@ -5387,6 +5373,10 @@ fn context_compress_offload_stores_runtime_prompt_delta_by_id() {
         .unwrap_or_default()
         .to_string();
     assert!(scratch_id.starts_with("scratch_"));
+    assert!(
+        prompt.contains(&format!("scratch_id: {scratch_id}")),
+        "{prompt}"
+    );
 
     assert!(stored.contains("\"scratch_type\":\"context_offload\""));
     assert!(stored.contains("\"label\":\"context compress offload\""));
@@ -6953,7 +6943,6 @@ fn still_running_table_survives_discard_of_the_original_action_delta() {
         prompt.contains("context compressed successfully."),
         "{prompt}"
     );
-    assert!(has_action_status(&prompt, "completed"), "{prompt}");
     assert!(!has_tool_output_containing(
         &prompt,
         "content",
@@ -7033,7 +7022,6 @@ fn still_running_table_is_universal_even_when_compaction_targets_an_unrelated_de
         prompt.contains("context compressed successfully."),
         "{prompt}"
     );
-    assert!(has_action_status(&prompt, "completed"), "{prompt}");
     assert!(!has_tool_output_containing(
         &prompt,
         "content",
@@ -7098,7 +7086,9 @@ fn still_running_table_survives_offload_of_the_original_action_delta() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(!prompt.contains("scratch_id:"), "{prompt}");
+    assert!(prompt.contains("Context offload saved."), "{prompt}");
+    assert!(prompt.contains("scratch_id: scratch_"), "{prompt}");
+    assert!(!prompt.contains("tool_call_id"), "{prompt}");
     let prompt = core.build_model_request_prompt(&prompt);
     assert!(
         prompt.contains("context compressed successfully."),
@@ -7178,7 +7168,6 @@ fn still_running_table_survives_xml_style_compaction_of_the_original_action_delt
         prompt.contains("context compressed successfully."),
         "{prompt}"
     );
-    assert!(has_action_status(&prompt, "completed"), "{prompt}");
     assert!(!has_tool_output_containing(
         &prompt,
         "content",
@@ -7899,7 +7888,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(long_prompt.starts_with("[BEGIN SYSTEM PROMPT]\nSTATIC_GLOBAL_RULES"));
-    assert!(long_prompt.contains("Compact context as the tool context_compress desc suggests"));
+    assert!(long_prompt.contains("Compress context as the tool context_compress desc suggests"));
     assert!(!long_prompt.contains("Long-context maintenance:"));
     assert!(!long_prompt.contains("target_dynamic_context_ratio"));
 }
