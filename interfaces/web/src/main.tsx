@@ -11554,9 +11554,11 @@ function HeaderContextUsage({
   const cacheLabel = cacheHitPercent === undefined
     ? cachePercentLabel
     : `${cachePercentLabel}, input: ${cacheInputLabel}, output: ${cacheOutputLabel}`;
+  const cacheRateBasis =
+    "Cache rate excludes the first model request after a detected runtime restart; input/output totals still include it.";
   const contextUsageLabel = limit
-    ? `Context usage ${ratio}% · ${formatTokens(usage?.prompt_tokens ?? 0)} / ${formatTokens(limit)} input tokens · ${cacheLabel}`
-    : `Context usage waiting for runtime usage · ${cacheLabel}`;
+    ? `Context usage ${ratio}% · ${formatTokens(usage?.prompt_tokens ?? 0)} / ${formatTokens(limit)} input tokens · ${cacheLabel}. ${cacheRateBasis}`
+    : `Context usage waiting for runtime usage · ${cacheLabel}. ${cacheRateBasis}`;
   return (
     <span
       className={`header-context ${level}`}

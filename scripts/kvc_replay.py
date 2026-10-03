@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
-"""Replay local api_audit data against prompt-cache strategies.
+"""Inspect observed cache usage and replay prompt-cache strategies.
 
-The simulator models Claude/Anthropic-style prompt caching as a prefix cache:
-a cache mark writes the prompt prefix ending at that block, and later requests
-can look backward from each marked block to find a recently written prefix.
-It reports character counts as a stable local proxy for tokens.
+Provider-observed input/cached token counts are paired directly from audit
+request/response records. Separately, the tool measures canonical prompt-item
+prefix continuity and simulates Claude/Anthropic-style explicit cache marks.
+The structural replay uses character counts as a stable local proxy for tokens;
+it is diagnostic evidence, not a claim about a provider's internal KV cache.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
+import statistics
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -54,12 +57,22 @@ def content_texts(content: Any) -> list[str]:
     return out
 
 
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def tagged_provider_item(item: dict[str, Any]) -> str:
+    item_type = str(item.get("type") or "message")
+    role = str(item.get("role") or item_type)
+    return f"<provider_item kind={role}>\n{canonical_json(item)}\n</provider_item>"
+
+
 def extract_prompt(body: Any) -> tuple[str, str] | None:
     if not isinstance(body, dict):
         return None
 
     system_parts: list[str] = []
-    user_parts: list[str] = []
+    dynamic_parts: list[str] = []
 
     system = body.get("system")
     if isinstance(system, str):
@@ -76,9 +89,39 @@ def extract_prompt(body: Any) -> tuple[str, str] | None:
     if isinstance(instructions, str):
         system_parts.append(instructions)
 
-    input_text = body.get("input")
-    if isinstance(input_text, str):
-        user_parts.append(input_text)
+    # Tool definitions are part of the cacheable Responses/Chat request prefix.
+    # Keep their canonical structure in the static side of the replay instead
+    # of silently omitting thousands of real request tokens.
+    tools = body.get("tools")
+    if isinstance(tools, list) and tools:
+        system_parts.append(f"<provider_tools>\n{canonical_json(tools)}\n</provider_tools>")
+
+    input_value = body.get("input")
+    if isinstance(input_value, str):
+        dynamic_parts.append(input_value)
+    elif isinstance(input_value, list):
+        for item in input_value:
+            if not isinstance(item, dict):
+                dynamic_parts.append(canonical_json(item))
+                continue
+            role = item.get("role")
+            item_type = item.get("type")
+            text = "\n".join(content_texts(item.get("content")))
+            if role == "system" and text:
+                system_parts.append(text)
+            elif role == "user" and text:
+                dynamic_parts.append(text)
+            elif role == "assistant" and text:
+                # Native assistant messages do not contain prompt-delta markers,
+                # but they are still exact provider input and must participate in
+                # prefix continuity.
+                dynamic_parts.append(tagged_provider_item(item))
+            elif item_type in {"function_call", "function_call_output"}:
+                dynamic_parts.append(tagged_provider_item(item))
+            elif text:
+                dynamic_parts.append(tagged_provider_item(item))
+            else:
+                dynamic_parts.append(tagged_provider_item(item))
 
     for message in body.get("messages") or []:
         if not isinstance(message, dict):
@@ -89,33 +132,30 @@ def extract_prompt(body: Any) -> tuple[str, str] | None:
         if message.get("role") == "system":
             system_parts.append(text)
         elif message.get("role") == "user":
-            user_parts.append(text)
+            dynamic_parts.append(text)
+        else:
+            dynamic_parts.append(tagged_provider_item(message))
 
-    if not system_parts and not user_parts:
+    if not system_parts and not dynamic_parts:
         return None
-    return "\n".join(system_parts).strip(), "\n".join(user_parts).strip()
+    return "\n".join(system_parts).strip(), "\n".join(dynamic_parts).strip()
+
+
+PROMPT_SEGMENT_START_RE = re.compile(
+    r"(?m)^(?:\[BEGIN DELTA(?:\]|[ \t])|\[BEGIN SEGMENT[ \t]|<prompt_delta[ \t])"
+)
+INLINE_DELTA_ID_RE = re.compile(r"^\[BEGIN DELTA[ \t]+delta_id:[ \t]*([^]\s]+)")
 
 
 def prompt_segment_starts(text: str) -> list[int]:
-    starts: list[int] = []
-    if (
-        text.startswith("[BEGIN DELTA]")
-        or text.startswith("[BEGIN SEGMENT ")
-        or text.startswith("<prompt_delta ")
-    ):
-        starts.append(0)
-    for marker in ("\n[BEGIN DELTA]", "\n[BEGIN SEGMENT ", "\n<prompt_delta "):
-        offset = 0
-        while True:
-            idx = text.find(marker, offset)
-            if idx < 0:
-                break
-            start = idx + 1
-            if start not in starts:
-                starts.append(start)
-            offset = idx + 2
-    starts.sort()
-    return starts
+    return [match.start() for match in PROMPT_SEGMENT_START_RE.finditer(text)]
+
+
+def segment_delta_id(segment: str) -> str | None:
+    inline = INLINE_DELTA_ID_RE.match(segment)
+    if inline:
+        return inline.group(1)
+    return segment_field(segment, "delta_id")
 
 
 def segment_field(segment: str, name: str) -> str | None:
@@ -174,7 +214,7 @@ def split_segments(dynamic_prompt: str) -> list[dict[str, str | None]]:
         segments.append(
             {
                 "text": text,
-                "delta_id": segment_field(text, "delta_id"),
+                "delta_id": segment_delta_id(text),
                 "prompt_type": segment_prompt_type(text),
             }
         )
@@ -336,6 +376,9 @@ def simulate(
 ):
     stores: dict[tuple[str, str], set[str]] = defaultdict(set)
     request_count = 0
+    prompt_extracted_count = 0
+    skipped_no_prompt = 0
+    skipped_no_delta_boundary = 0
     total_chars = 0
     read_chars = 0
     created_chars = 0
@@ -344,13 +387,12 @@ def simulate(
     for event in events:
         prompt = extract_prompt(event.get("body"))
         if not prompt:
+            skipped_no_prompt += 1
             continue
+        prompt_extracted_count += 1
         static_prompt, dynamic_prompt = prompt
-        if (
-            "[BEGIN DELTA]" not in dynamic_prompt
-            and "[BEGIN SEGMENT " not in dynamic_prompt
-            and "<prompt_delta " not in dynamic_prompt
-        ):
+        if not prompt_segment_starts(dynamic_prompt):
+            skipped_no_delta_boundary += 1
             continue
 
         if strategy == "static":
@@ -398,6 +440,10 @@ def simulate(
     avg_cache_marks = cache_marks / request_count if request_count else 0.0
     return {
         "requests": request_count,
+        "input_requests": len(events),
+        "prompt_extracted_requests": prompt_extracted_count,
+        "skipped_no_prompt": skipped_no_prompt,
+        "skipped_no_delta_boundary": skipped_no_delta_boundary,
         "total_chars": total_chars,
         "read_chars": read_chars,
         "created_chars": created_chars,
@@ -410,22 +456,219 @@ def simulate(
 
 def load_events(paths: list[Path]):
     events = []
+    seen: set[tuple[Any, ...]] = set()
     for path in paths:
         for event in iter_events(path):
-            if event.get("type") == "llm_request" and isinstance(event.get("body"), dict):
-                events.append(event)
+            event_type = event.get("type")
+            if event_type not in {"llm_request", "llm_response"}:
+                continue
+            request_id = event.get("audit_request_id")
+            time_ms = event.get("time_ms")
+            key = (
+                (event_type, request_id, time_ms)
+                if request_id is not None or time_ms is not None
+                else (event_type, canonical_json(event))
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            events.append(event)
+    events.sort(key=lambda event: (event.get("time_ms") or 0, event.get("type") or ""))
     return events
 
 
+def segment_files(directory: Path, recent_segments: int | None) -> list[Path]:
+    files: list[Path] = []
+    manifest = directory / "manifest.json"
+    if manifest.is_file():
+        try:
+            doc = json.loads(manifest.read_text(errors="replace"))
+            for entry in doc.get("segments") or []:
+                name = entry.get("file_name") if isinstance(entry, dict) else None
+                if isinstance(name, str):
+                    candidate = directory / name
+                    if candidate.is_file():
+                        files.append(candidate)
+        except Exception:
+            files = []
+    if not files:
+        files = sorted(directory.glob("segment-*.jsonl"))
+    if recent_segments is not None:
+        files = files[-max(0, recent_segments) :]
+    return files
+
+
+def expand_audit_path(path: Path, recent_segments: int | None) -> list[Path]:
+    if path.is_dir():
+        if path.name.endswith(".segments"):
+            return segment_files(path, recent_segments)
+        out: list[Path] = []
+        for candidate in sorted(path.rglob("api_audit.json")) + sorted(
+            path.rglob("api_audit.jsonl")
+        ):
+            out.extend(expand_audit_path(candidate, recent_segments))
+        for directory in sorted(path.rglob("api_audit.jsonl.segments")):
+            out.extend(segment_files(directory, recent_segments))
+        return out
+    if not path.is_file():
+        # A logical rolling stream can have no physical base file while its
+        # sibling segment directory contains the complete stream.
+        segment_dir = Path(str(path) + ".segments")
+        return segment_files(segment_dir, recent_segments) if segment_dir.is_dir() else []
+
+    out = [path]
+    segment_dir = Path(str(path) + ".segments")
+    if segment_dir.is_dir():
+        out.extend(segment_files(segment_dir, recent_segments))
+    elif path.name == "api_audit.json":
+        rolling_dir = path.with_name("api_audit.jsonl.segments")
+        if rolling_dir.is_dir():
+            out.extend(segment_files(rolling_dir, recent_segments))
+    return out
+
+
 def audit_paths(args) -> list[Path]:
-    paths: list[Path] = []
+    candidates: list[Path] = []
     if args.audit:
-        paths.extend(Path(item).expanduser() for item in args.audit)
+        candidates.extend(Path(item).expanduser() for item in args.audit)
     for data_dir in args.data_dir:
-        root = Path(data_dir).expanduser()
-        if root.exists():
-            paths.extend(root.rglob("*api_audit*"))
-    return sorted({path for path in paths if path.is_file()})
+        candidates.append(Path(data_dir).expanduser())
+
+    paths: list[Path] = []
+    for candidate in candidates:
+        paths.extend(expand_audit_path(candidate, args.recent_segments))
+    # Preserve manifest/segment order while removing duplicate physical files.
+    return list(dict.fromkeys(path.resolve() for path in paths if path.is_file()))
+
+
+def request_sequence(body: Any) -> list[str]:
+    if not isinstance(body, dict):
+        return []
+    sequence: list[str] = []
+    for field in ("instructions", "system", "tools"):
+        value = body.get(field)
+        if value not in (None, "", []):
+            sequence.append(f"{field}:{canonical_json(value)}")
+    input_value = body.get("input")
+    if isinstance(input_value, list):
+        sequence.extend(f"input:{canonical_json(item)}" for item in input_value)
+    elif input_value not in (None, ""):
+        sequence.append(f"input:{canonical_json(input_value)}")
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        sequence.extend(f"message:{canonical_json(item)}" for item in messages)
+    return sequence
+
+
+IDENTITY_PATTERNS = {
+    "session": re.compile(r"Current session_id:\s*([^\s<]+)"),
+    "context": re.compile(r"Current context_id:\s*([^\s<]+)"),
+    "worker": re.compile(r"Current worker_id:\s*([^\s<]+)"),
+}
+
+
+def request_stream_key(event: dict[str, Any], sequence: list[str]) -> tuple[str, ...]:
+    searchable = "\n".join(sequence)
+    identity = []
+    for name, pattern in IDENTITY_PATTERNS.items():
+        match = pattern.search(searchable)
+        identity.append(f"{name}={match.group(1) if match else '?'}")
+    return (
+        str(event.get("endpoint") or "?"),
+        str(event.get("model") or event.get("body", {}).get("model") or "?"),
+        *identity,
+    )
+
+
+def common_prefix_items(left: list[str], right: list[str]) -> tuple[int, int]:
+    count = 0
+    chars = 0
+    for previous, current in zip(left, right):
+        if previous != current:
+            break
+        count += 1
+        chars += len(current)
+    return count, chars
+
+
+def usage_from_response(event: dict[str, Any]) -> tuple[int, int] | None:
+    body = event.get("body")
+    if not isinstance(body, dict):
+        return None
+    usage = body.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    input_tokens = usage.get("input_tokens")
+    details = usage.get("input_tokens_details")
+    cached_tokens = details.get("cached_tokens") if isinstance(details, dict) else None
+    if not isinstance(input_tokens, int) or not isinstance(cached_tokens, int):
+        return None
+    return input_tokens, cached_tokens
+
+
+def observed_report(events: list[dict[str, Any]]) -> dict[str, Any]:
+    requests: dict[str, dict[str, Any]] = {}
+    previous_by_stream: dict[tuple[str, ...], list[str]] = {}
+    transitions: list[float] = []
+
+    for event in events:
+        if event.get("type") != "llm_request" or not isinstance(event.get("body"), dict):
+            continue
+        request_id = event.get("audit_request_id")
+        if not isinstance(request_id, str):
+            continue
+        sequence = request_sequence(event["body"])
+        stream = request_stream_key(event, sequence)
+        previous = previous_by_stream.get(stream)
+        prefix_items = prefix_chars = 0
+        if previous is not None:
+            prefix_items, prefix_chars = common_prefix_items(previous, sequence)
+            total_chars = sum(len(item) for item in sequence)
+            transitions.append(prefix_chars / total_chars if total_chars else 0.0)
+        previous_by_stream[stream] = sequence
+        row = {
+            "id": request_id,
+            "time_ms": event.get("time_ms") or 0,
+            "sequence_items": len(sequence),
+            "prefix_items": prefix_items,
+            "prefix_chars": prefix_chars,
+        }
+        requests[request_id] = row
+
+    paired = []
+    for event in events:
+        if event.get("type") != "llm_response":
+            continue
+        request_id = event.get("audit_request_id")
+        row = requests.get(request_id)
+        usage = usage_from_response(event)
+        if row is None or usage is None:
+            continue
+        input_tokens, cached_tokens = usage
+        paired.append(
+            {
+                **row,
+                "input_tokens": input_tokens,
+                "cached_tokens": cached_tokens,
+                "hit_rate": cached_tokens / input_tokens if input_tokens else 0.0,
+            }
+        )
+
+    total_input = sum(row["input_tokens"] for row in paired)
+    total_cached = sum(row["cached_tokens"] for row in paired)
+    rates = [row["hit_rate"] for row in paired if row["input_tokens"] > 0]
+    low = [row for row in paired if row["input_tokens"] > 0 and row["hit_rate"] < 0.90]
+    return {
+        "pairs": len(paired),
+        "total_input": total_input,
+        "total_cached": total_cached,
+        "aggregate_rate": total_cached / total_input if total_input else 0.0,
+        "median_rate": statistics.median(rates) if rates else 0.0,
+        "below_90": len(low),
+        "transitions": len(transitions),
+        "median_prefix_rate": statistics.median(transitions) if transitions else 0.0,
+        "low_examples": sorted(low, key=lambda row: (row["hit_rate"], -row["input_tokens"]))[:8],
+    }
 
 
 def pct(value: float) -> str:
@@ -449,6 +692,12 @@ def main() -> int:
         help="Data directory to scan recursively. Default: data",
     )
     parser.add_argument("--audit", action="append", help="Specific api_audit file")
+    parser.add_argument(
+        "--recent-segments",
+        type=int,
+        help="For rolling audit directories, read only the newest N segments.",
+    )
+    parser.add_argument("--observed-only", action="store_true")
     parser.add_argument("--max-threshold", type=int, default=12)
     parser.add_argument("--max-checkpoints", type=int, default=3)
     parser.add_argument("--max-tail-blocks", type=int, default=4)
@@ -459,15 +708,54 @@ def main() -> int:
 
     paths = audit_paths(args)
     events = load_events(paths)
+    requests = [
+        event
+        for event in events
+        if event.get("type") == "llm_request" and isinstance(event.get("body"), dict)
+    ]
+    observed = observed_report(events)
     print(f"audit_files: {len(paths)}")
-    print(f"llm_requests: {len(events)}")
+    print(f"llm_requests: {len(requests)}")
+    print(f"observed_usage_pairs: {observed['pairs']}")
+    print(
+        "observed_cache: "
+        f"aggregate={pct(observed['aggregate_rate'])} "
+        f"median_request={pct(observed['median_rate'])} "
+        f"below_90={observed['below_90']}"
+    )
+    print(
+        "canonical_prompt_prefix: "
+        f"transitions={observed['transitions']} "
+        f"median_shared_chars={pct(observed['median_prefix_rate'])}"
+    )
+    if observed["low_examples"]:
+        print("observed_low_examples:")
+        for row in observed["low_examples"]:
+            print(
+                f"  time_ms={row['time_ms']} input={row['input_tokens']} "
+                f"cached={row['cached_tokens']} hit={pct(row['hit_rate'])} "
+                f"canonical_prefix_items={row['prefix_items']}/{row['sequence_items']}"
+            )
+    if args.observed_only:
+        return 0
     print()
+    print(
+        "simulation_note: local character-prefix model; not provider-observed KV-cache usage"
+    )
     print("strategy        threshold  ckpt  requests  hit_rate  create_rate  avg_marks")
     print("--------------  ---------  ----  --------  --------  -----------  ---------")
 
     results = []
+    coverage = simulate(requests, "static")
+    print(
+        "simulation_coverage: "
+        f"supported={coverage['requests']}/{coverage['input_requests']} "
+        f"prompt_extracted={coverage['prompt_extracted_requests']} "
+        f"skipped_no_prompt={coverage['skipped_no_prompt']} "
+        f"skipped_no_delta_boundary={coverage['skipped_no_delta_boundary']}"
+    )
     for strategy in ("static", "legacy"):
-        result = simulate(events, strategy)
+        result = coverage if strategy == "static" else simulate(requests, strategy)
         results.append((result["score"], strategy, "-", "-", result))
         print_row(strategy, "-", "-", result)
 
@@ -475,7 +763,7 @@ def main() -> int:
     for checkpoints in range(1, args.max_checkpoints + 1):
         for threshold in range(1, args.max_threshold + 1):
             result = simulate(
-                events,
+                requests,
                 "checkpoint",
                 threshold=threshold,
                 dynamic_checkpoints=checkpoints,
@@ -488,7 +776,7 @@ def main() -> int:
 
     for strategy in ("tail", "tail_no_static", "user_tail", "action_tail"):
         for tail_blocks in range(1, args.max_tail_blocks + 1):
-            result = simulate(events, strategy, tail_blocks=tail_blocks)
+            result = simulate(requests, strategy, tail_blocks=tail_blocks)
             score = result["score"]
             results.append((score, strategy, f"tail={tail_blocks}", "-", result))
             print_row(strategy, f"tail={tail_blocks}", "-", result)

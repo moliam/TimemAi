@@ -828,12 +828,15 @@ pub fn model_repair_topic_event(
     )
 }
 
-/// The runtime crossed the forced-shrink threshold and injected the
-/// compaction request into the prompt. UI renders this as "compacting...".
+/// The runtime injected a forced compaction request after either crossing the
+/// configured threshold or failing post-compaction provider-usage validation.
+/// UI renders both reasons as "compacting..."; payload fields preserve the
+/// distinction for diagnostics.
 pub fn context_compress_requested_topic_event(
     session_id: impl Into<String>,
     estimated_prompt_tokens: u32,
     force_threshold_tokens: u32,
+    quality_target_tokens: Option<u32>,
 ) -> CoreTopicEvent {
     CoreTopicEvent::new(
         session_id,
@@ -846,8 +849,14 @@ pub fn context_compress_requested_topic_event(
         CoreSessionState::Running,
         json!({
             "phase": "requested",
+            "trigger": if quality_target_tokens.is_some() {
+                "provider_post_compaction_quality"
+            } else {
+                "threshold_crossed"
+            },
             "estimated_prompt_tokens": estimated_prompt_tokens,
             "force_shrink_threshold_tokens": force_threshold_tokens,
+            "quality_target_tokens": quality_target_tokens,
         }),
     )
 }

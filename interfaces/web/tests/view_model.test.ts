@@ -54,6 +54,7 @@ import {
   resolveActiveSessionId,
   runtimeConnectionLabel,
   sessionCacheHitPercent,
+  sessionCacheTokenTotals,
   sessionContextUsage,
   sessionContextCompressPending,
   sessionCreateDecision,
@@ -2856,7 +2857,7 @@ describe("web topic view model", () => {
     expect(sessionCacheHitPercent(session("other_session"))).toBeUndefined();
   });
 
-  it("resets session cache hit rate at the latest runtime restart boundary", () => {
+  it("excludes exactly the first cold model request after the latest runtime restart", () => {
     const restarted = session("session_cache_restarted");
     restarted.messages = [
       {
@@ -2880,36 +2881,51 @@ describe("web topic view model", () => {
         },
       },
     ];
-    oldTurn.completion = {
-      stats: { prompt_tokens: 10_000, cached_tokens: 9_000 },
-    };
     restarted.turns = [oldTurn];
     expect(sessionCacheHitPercent(restarted)).toBeUndefined();
 
     const resumed = turn("resumed", "working");
     resumed.created_at_ms = 150;
+    // Deliberately store events out of order: "first" is chronological,
+    // not whichever array element happens to arrive first in a snapshot.
     resumed.events = [
       {
-        event_id: "restored_usage",
+        event_id: "warm_usage_2",
         source: "worker_activity",
-        created_at_ms: 180,
+        created_at_ms: 240,
         payload: {
           kind: "model_response",
-          usage: { prompt_tokens: 20_000, cached_tokens: 18_000 },
+          usage: { prompt_tokens: 5_000, cached_tokens: 4_500 },
         },
       },
       {
-        event_id: "runtime_usage",
+        event_id: "cold_usage",
         source: "worker_activity",
         created_at_ms: 220,
         payload: {
           kind: "model_response",
-          usage: { prompt_tokens: 5_000, cached_tokens: 2_000 },
+          usage: { prompt_tokens: 20_000, cached_tokens: 0 },
+        },
+      },
+      {
+        event_id: "warm_usage_1",
+        source: "worker_activity",
+        created_at_ms: 230,
+        payload: {
+          kind: "model_response",
+          usage: { prompt_tokens: 10_000, cached_tokens: 9_000 },
         },
       },
     ];
     restarted.turns.push(resumed);
-    expect(sessionCacheHitPercent(restarted)).toBeCloseTo(40, 8);
+
+    expect(sessionCacheHitPercent(restarted)).toBeCloseTo(90, 8);
+    // Cold-start exclusion affects only the percentage. Token totals still
+    // include every request in the live runtime instance.
+    expect(sessionCacheTokenTotals(restarted)).toEqual({
+      prompt_tokens: 35_000,
+      completion_tokens: 0,
+    });
   });
 
   it("resets session context usage at the latest runtime restart boundary", () => {

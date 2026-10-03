@@ -155,6 +155,24 @@ fn turn_ui_request_topic_requires_matching_topic_reply_before_resuming() {
 }
 
 #[test]
+fn context_compress_requested_topic_distinguishes_threshold_and_quality_followup() {
+    let threshold = context_compress_requested_topic_event("session_a", 95_000, 90_000, None);
+    assert_eq!(threshold.payload["phase"], "requested");
+    assert_eq!(threshold.payload["trigger"], "threshold_crossed");
+    assert_eq!(threshold.payload["estimated_prompt_tokens"], 95_000);
+    assert_eq!(threshold.payload["force_shrink_threshold_tokens"], 90_000);
+    assert!(threshold.payload["quality_target_tokens"].is_null());
+
+    let quality = context_compress_requested_topic_event("session_a", 31_000, 90_000, Some(25_000));
+    assert_eq!(
+        quality.payload["trigger"],
+        "provider_post_compaction_quality"
+    );
+    assert_eq!(quality.payload["force_shrink_threshold_tokens"], 90_000);
+    assert_eq!(quality.payload["quality_target_tokens"], 25_000);
+}
+
+#[test]
 fn context_compress_topic_round_trips_structured_payload() {
     let report = CoreContextCompressTopic {
         estimated_before_tokens: 82_000,
