@@ -457,6 +457,7 @@ enum PendingRuntimeUpdate {
     MaxRounds(u32),
     ClaudeCodexToolDiscovery(bool),
     ModelToolResultBytes(usize),
+    ContextCompressThresholdPercent(u8),
 }
 
 const CORE_COMMAND_ID_CAPACITY: usize = 1_024;
@@ -1068,6 +1069,17 @@ impl CoreSessionWorkerHandle {
         self.enqueue_runtime_update(
             PendingRuntimeUpdate::ModelToolResultBytes(max_bytes),
             CoreSessionWorkerCommand::ModelToolResultBytesUpdated,
+        )
+    }
+
+    pub fn update_context_compress_threshold_percent(&self, percent: u8) -> Result<(), String> {
+        agent_core::validate_context_compress_threshold_percent(percent)?;
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        self.enqueue_runtime_update(
+            PendingRuntimeUpdate::ContextCompressThresholdPercent(percent),
+            CoreSessionWorkerCommand::RuntimeConfigUpdated,
         )
     }
 
@@ -2536,6 +2548,9 @@ fn apply_worker_runtime_update(
         }
         PendingRuntimeUpdate::ModelToolResultBytes(max_bytes) => {
             let _ = core.set_model_tool_result_bytes(max_bytes);
+        }
+        PendingRuntimeUpdate::ContextCompressThresholdPercent(percent) => {
+            let _ = core.set_context_compress_threshold_percent(percent);
         }
     }
     core.notify_runtime_config_changed();

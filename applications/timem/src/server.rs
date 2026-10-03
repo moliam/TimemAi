@@ -282,6 +282,7 @@ impl WebMemState {
             conversation_capacity_bytes: self.settings.conversation_capacity_bytes,
             claude_codex_tool_discovery: self.settings.claude_codex_tool_discovery,
             model_tool_result_bytes: self.settings.model_tool_result_bytes,
+            context_compress_threshold_percent: self.settings.context_compress_threshold_percent,
         }
     }
 }
@@ -939,6 +940,7 @@ enum WireEvent {
         conversation_capacity_bytes: Option<u64>,
         claude_codex_tool_discovery: bool,
         model_tool_result_bytes: usize,
+        context_compress_threshold_percent: u8,
     },
     MemTemporaryItems {
         items: Vec<MemTemporaryItem>,
@@ -1058,6 +1060,7 @@ struct WebMemInfo {
     conversation_capacity_bytes: Option<u64>,
     claude_codex_tool_discovery: bool,
     model_tool_result_bytes: usize,
+    context_compress_threshold_percent: u8,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1469,6 +1472,9 @@ enum ClientCommand {
     SystemModelToolResultBytesUpdate {
         max_bytes: usize,
     },
+    SystemContextCompressThresholdUpdate {
+        percent: u8,
+    },
     MemTemporaryItemsList,
     MemTemporaryItemsDelete {
         ids: Vec<String>,
@@ -1495,6 +1501,7 @@ impl ClientCommand {
             | Self::MemConversationCapacityUpdate { .. }
             | Self::BetaClaudeCodexToolDiscoveryUpdate { .. }
             | Self::SystemModelToolResultBytesUpdate { .. }
+            | Self::SystemContextCompressThresholdUpdate { .. }
             | Self::MemTemporaryItemsDelete { .. }
             | Self::McpServerDelete { .. }
             | Self::ModelEndpointUpsert { .. }
@@ -1560,6 +1567,7 @@ impl ClientCommand {
                 | Self::MemConversationCapacityUpdate { .. }
                 | Self::BetaClaudeCodexToolDiscoveryUpdate { .. }
                 | Self::SystemModelToolResultBytesUpdate { .. }
+                | Self::SystemContextCompressThresholdUpdate { .. }
                 | Self::MemTemporaryItemsDelete { .. }
                 | Self::McpServerDelete { .. }
                 | Self::ModelEndpointUpsert { .. }
@@ -4630,6 +4638,7 @@ fn handle_command_with_id(
                 conversation_capacity_bytes: settings.conversation_capacity_bytes,
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
+                context_compress_threshold_percent: settings.context_compress_threshold_percent,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -4658,6 +4667,7 @@ fn handle_command_with_id(
                 conversation_capacity_bytes: max_bytes,
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
+                context_compress_threshold_percent: settings.context_compress_threshold_percent,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -4685,6 +4695,7 @@ fn handle_command_with_id(
                 conversation_capacity_bytes: settings.conversation_capacity_bytes,
                 claude_codex_tool_discovery: enabled,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
+                context_compress_threshold_percent: settings.context_compress_threshold_percent,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -4713,6 +4724,36 @@ fn handle_command_with_id(
                 conversation_capacity_bytes: settings.conversation_capacity_bytes,
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: max_bytes,
+                context_compress_threshold_percent: settings.context_compress_threshold_percent,
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
+        }
+        ClientCommand::SystemContextCompressThresholdUpdate { percent } => {
+            validate_context_compress_threshold_percent(percent)?;
+            let (memory_dir, settings) = {
+                let mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                let mut settings = mem.settings.clone();
+                settings.context_compress_threshold_percent = percent;
+                (mem.layout.memory_dir(), settings)
+            };
+            save_web_mem_settings(&memory_dir, &settings)?;
+            state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .settings = settings.clone();
+            update_all_worker_context_compress_threshold_percent(state, percent)?;
+            let event = WireEvent::MemSettingsUpdated {
+                temporary_retention_days: settings.temporary_retention_days,
+                temporary_capacity_bytes: settings.temporary_capacity_bytes,
+                conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
+                model_tool_result_bytes: settings.model_tool_result_bytes,
+                context_compress_threshold_percent: percent,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -8325,6 +8366,38 @@ fn resolve_work_instruction_decision(
         )?;
     }
     Ok(true)
+}
+
+fn update_all_worker_context_compress_threshold_percent(
+    state: &AppState,
+    percent: u8,
+) -> Result<(), String> {
+    let worker_ids = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?
+        .values()
+        .flat_map(|session| {
+            session
+                .workers
+                .iter()
+                .map(|worker| worker.worker_id.clone())
+        })
+        .collect::<Vec<_>>();
+    let manager = state
+        .manager
+        .lock()
+        .map_err(|_| "worker_manager_poisoned".to_string())?;
+    for worker_id in worker_ids {
+        if let Some(handle) = manager.handle(&worker_id) {
+            match handle.update_context_compress_threshold_percent(percent) {
+                Ok(()) => {}
+                Err(error) if error == "core_session_worker_stopped" => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn update_all_worker_model_tool_result_bytes(
@@ -12582,6 +12655,7 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
             conversation_capacity_bytes: Some(MEM_CAPACITY_128_MB),
             claude_codex_tool_discovery: false,
             model_tool_result_bytes: default_model_tool_result_bytes(),
+            context_compress_threshold_percent: default_context_compress_threshold_percent(),
         });
     let (role_library, session_groups) = current_mem_state(state)
         .map(|mem| (mem.role_library, mem.session_groups))
@@ -12821,6 +12895,9 @@ impl WorkerTemplate {
         core.change_prompt_cwd(current_dir.display().to_string())?;
         core.set_response_protocol(settings.config.response_protocol);
         core.set_model_tool_result_bytes(mem.settings.model_tool_result_bytes)?;
+        core.set_context_compress_threshold_percent(
+            mem.settings.context_compress_threshold_percent,
+        )?;
         core.configure_runtime_from_host(&settings.config, settings.bash_approval_mode);
         core.set_max_rounds(settings.max_rounds);
         core.set_reminder_tips_config(self.reminder_tips_config.clone());

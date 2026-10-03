@@ -109,6 +109,8 @@ pub(super) struct WebMemSettings {
     pub(super) claude_codex_tool_discovery: bool,
     #[serde(default = "default_model_tool_result_bytes")]
     pub(super) model_tool_result_bytes: usize,
+    #[serde(default = "default_context_compress_threshold_percent")]
+    pub(super) context_compress_threshold_percent: u8,
 }
 
 impl Default for WebMemSettings {
@@ -129,6 +131,7 @@ impl WebMemSettings {
             conversation_capacity_bytes: Some(MEM_CAPACITY_128_MB),
             claude_codex_tool_discovery: default_claude_codex_tool_discovery(),
             model_tool_result_bytes: default_model_tool_result_bytes(),
+            context_compress_threshold_percent: default_context_compress_threshold_percent(),
         }
     }
 }
@@ -143,6 +146,14 @@ pub(super) const fn default_model_tool_result_bytes() -> usize {
 
 pub(super) fn validate_model_tool_result_bytes(max_bytes: usize) -> Result<(), String> {
     agent_core::validate_model_tool_result_bytes(max_bytes)
+}
+
+pub(super) const fn default_context_compress_threshold_percent() -> u8 {
+    agent_core::DEFAULT_CONTEXT_COMPRESS_THRESHOLD_PERCENT
+}
+
+pub(super) fn validate_context_compress_threshold_percent(percent: u8) -> Result<(), String> {
+    agent_core::validate_context_compress_threshold_percent(percent).map(|_| ())
 }
 
 pub(super) fn default_mem_temporary_retention_days() -> Option<u16> {
@@ -195,7 +206,8 @@ fn validate_web_mem_settings(settings: &WebMemSettings) -> Result<(), String> {
     validate_mem_temporary_retention_days(settings.temporary_retention_days)?;
     validate_mem_temporary_capacity_bytes(settings.temporary_capacity_bytes)?;
     validate_mem_conversation_capacity_bytes(settings.conversation_capacity_bytes)?;
-    validate_model_tool_result_bytes(settings.model_tool_result_bytes)
+    validate_model_tool_result_bytes(settings.model_tool_result_bytes)?;
+    validate_context_compress_threshold_percent(settings.context_compress_threshold_percent)
 }
 
 pub(super) fn web_mem_settings_path(memory_dir: &Path) -> PathBuf {
