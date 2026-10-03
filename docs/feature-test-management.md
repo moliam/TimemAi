@@ -649,13 +649,13 @@ Reasoning notices use a 13px Lucide Infinity glyph with the same 1.5 stroke, dri
 
 Prompt timestamps: semantic non-empty `user_question` and `user_supplement` slices render their original input timestamp as readable UTC seconds. Delta separators, tool results, runtime notes, supporting context and empty direct resumes have no input timestamp. Internal millisecond timestamps remain unchanged; old delta headers remain parseable. Covered by `input_time_is_semantic_not_a_transport_role_and_uses_slice_time`.
 
-Reasoning scheduling counts actual model-request preparation, not prompt rendering. `reasoning_counts_actual_request_preparation_not_prompt_rebuilds` covers repeated rebuilds, direct-render tool continuations, requests 35/70, and manual compaction. The existing >30 context-message guard remains; compact requests bypass that guard.
+Reasoning scheduling uses H1 only for automatic context compression after the 90% input-window threshold is crossed. Ordinary requests remain H0 even across 35/70 rounds, and user-requested manual compression also remains H0 unless automatic sizing independently crosses the threshold. `ordinary_rounds_and_manual_compression_stay_h0_until_threshold_crossing`, `compression_prompts_use_h1_only_for_threshold_triggered_requests`, and `only_threshold_compression_reasoning_reaches_http_payload` cover the Core signal, prompt guidance, and outgoing wire payload.
 
 ### OpenAI Chat Completions 推理级别映射
 
-配置了 reasoning effort 时，普通请求发送 `reasoning_effort=none`；需要推理的请求发送用户选择的级别，用户选择 `disabled` 则始终发送 `none`。不再使用 Claude 风格的 `thinking.type=disabled` 代替该字段。未配置 effort 时保持不发送的兼容行为；其他协议及周期计数逻辑不变。
+配置了 reasoning effort 时，普通请求和纯手动压缩请求发送 `reasoning_effort=none`；只有自动越过上下文压缩阈值的请求发送用户选择的级别。用户选择 `disabled` 时始终发送 `none`。不再使用 Claude 风格的 `thinking.type=disabled` 代替该字段。未配置 effort 时保持不发送的兼容行为。
 
-回归覆盖：`chat_reasoning_wire_effort_respects_user_selection_and_disable` 验证各级别、普通/推理请求、禁用优先及未配置情况；`periodic_and_compact_reasoning_reach_http_payload` 验证周期与压缩触发到 HTTP 请求体的映射。
+回归覆盖：`chat_reasoning_wire_effort_respects_user_selection_and_disable` 验证各级别、普通/推理请求、禁用优先及未配置情况；`only_threshold_compression_reasoning_reaches_http_payload` 验证普通 70 轮、纯手动压缩和阈值压缩到 HTTP 请求体的映射。
 
 ### 统一推理语义与协议适配
 

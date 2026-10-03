@@ -18,6 +18,10 @@ pub struct ModelCallOutcome<T> {
     pub response: T,
     pub model_wait: Duration,
     pub retry_wait: Duration,
+    /// The formal request succeeded only after omitting the optional provider
+    /// parallel-tool control field. The caller must keep native tools enabled
+    /// but schedule returned sibling calls sequentially.
+    pub parallel_tool_control_omitted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,6 +155,44 @@ pub fn is_explicit_native_tools_unsupported(error: &str) -> bool {
     .iter()
     .any(|signal| lower.contains(signal));
     names_native_field && explicitly_rejects_field
+}
+
+/// Returns true only when a non-transient 4xx response explicitly rejects the
+/// provider's parallel-tool control field. This is narrower than native-tool
+/// rejection: callers may retry with only that optional control omitted while
+/// retaining native tools.
+pub fn is_explicit_parallel_tool_control_unsupported(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    let Some(status_text) = lower.strip_prefix("model_http_") else {
+        return false;
+    };
+    let status: u16 = status_text
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0);
+    if !(400..500).contains(&status) || matches!(status, 401 | 403 | 408 | 409 | 413 | 425 | 429) {
+        return false;
+    }
+    let names_parallel_field =
+        lower.contains("parallel_tool_calls") || lower.contains("disable_parallel_tool_use");
+    let explicitly_rejects_field = [
+        "unsupported",
+        "not supported",
+        "does not support",
+        "unknown field",
+        "unknown parameter",
+        "unrecognized",
+        "unexpected field",
+        "unexpected parameter",
+        "not allowed",
+        "not permitted",
+        "extra inputs are not permitted",
+    ]
+    .iter()
+    .any(|signal| lower.contains(signal));
+    names_parallel_field && explicitly_rejects_field
 }
 
 pub fn is_model_input_too_large_error(error: &str) -> bool {

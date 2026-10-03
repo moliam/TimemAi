@@ -1081,6 +1081,7 @@ fn native_request() -> ModelInteractionRequest {
         native_exchanges: Vec::new(),
         resolved_mode: ToolCallMode::Native,
         parallel_tool_calls: true,
+        send_parallel_tool_calls: true,
         tool_choice: NativeToolChoice::Auto,
         critical_reasoning: false,
     }
@@ -1099,6 +1100,7 @@ What is in this screenshot?"
         native_exchanges: Vec::new(),
         resolved_mode,
         parallel_tool_calls: false,
+        send_parallel_tool_calls: true,
         tool_choice: NativeToolChoice::Auto,
         critical_reasoning: false,
     }
@@ -1294,6 +1296,37 @@ fn native_tool_wires_are_provider_specific_and_parallel_is_explicit() {
 }
 
 #[test]
+fn native_parallel_control_can_be_omitted_without_disabling_tools() {
+    let mut request = native_request();
+    request.parallel_tool_calls = false;
+    request.send_parallel_tool_calls = false;
+
+    for protocol in [ApiProtocol::OpenAiCompatible, ApiProtocol::OpenAiResponses] {
+        let body = prepare_model_interaction_http_request(&config(protocol), &request)
+            .model_request
+            .body;
+        assert!(
+            body.get("parallel_tool_calls").is_none(),
+            "{protocol:?}: {body}"
+        );
+        assert!(body["tools"].is_array(), "{protocol:?}: {body}");
+        assert!(!body["tools"].as_array().unwrap().is_empty());
+    }
+
+    let body = prepare_model_interaction_http_request(&config(ApiProtocol::Anthropic), &request)
+        .model_request
+        .body;
+    assert!(
+        body["tool_choice"]
+            .get("disable_parallel_tool_use")
+            .is_none(),
+        "{body}"
+    );
+    assert!(body["tools"].is_array());
+    assert!(!body["tools"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn builtin_tool_schemas_render_per_protocol_without_weakening_registry_validation() {
     let registry = crate::capability::CapabilityRegistry::builtin_for_host(
         crate::capability::CapabilityHostProfile::with_local_command_execution(),
@@ -1314,6 +1347,7 @@ fn builtin_tool_schemas_render_per_protocol_without_weakening_registry_validatio
         native_exchanges: Vec::new(),
         resolved_mode: ToolCallMode::Native,
         parallel_tool_calls: true,
+        send_parallel_tool_calls: true,
         tool_choice: NativeToolChoice::Auto,
         critical_reasoning: false,
     };
@@ -1597,6 +1631,7 @@ fn native_exchange_can_be_owned_by_a_visible_delta_without_text_slices() {
         ],
         resolved_mode: ToolCallMode::Native,
         parallel_tool_calls: false,
+        send_parallel_tool_calls: true,
         tool_choice: NativeToolChoice::Auto,
         critical_reasoning: false,
     };
@@ -1667,6 +1702,7 @@ fn native_exchanges_follow_owning_delta_order_for_all_providers() {
         ],
         resolved_mode: ToolCallMode::Native,
         parallel_tool_calls: false,
+        send_parallel_tool_calls: true,
         tool_choice: NativeToolChoice::Auto,
         critical_reasoning: false,
     };
@@ -1722,7 +1758,7 @@ fn reasoning_indicator_follows_explicit_outgoing_request_fields() {
 }
 
 #[test]
-fn periodic_and_compact_reasoning_reach_http_payload() {
+fn only_threshold_compression_reasoning_reaches_http_payload() {
     let root = std::env::temp_dir().join(crate::unique_id("reasoning_payload"));
     let mut core = crate::AgentCore::new(
         "static",
@@ -1733,40 +1769,45 @@ fn periodic_and_compact_reasoning_reach_http_payload() {
     );
     let mut cfg = config(ApiProtocol::OpenAiCompatible);
     cfg.openai_compatible.reasoning_effort = Some("medium".into());
-    for i in 0..31 {
-        core.submit_prompt_component(
-            crate::PromptComponentRole::User,
-            "user_question",
-            format!("message {i}"),
-            "user_input",
-        );
-    }
-    core.build_next_prompt();
-    for n in 1..=70 {
+
+    for request_number in 1..=70 {
         let base = core.render_prompt();
         let prompt = core.build_model_request_prompt(&base);
         let request = core.model_interaction_request(prompt);
         let body = crate::prepare_model_interaction_http_request(&cfg, &request)
             .model_request
             .body;
-        if n % 35 == 0 {
-            assert_eq!(body["reasoning_effort"], "medium", "request {n}");
-            assert!(body.get("thinking").is_none());
-        } else {
-            assert_eq!(body["reasoning_effort"], "none");
-            assert!(body.get("thinking").is_none());
-        }
+        assert_eq!(body["reasoning_effort"], "none", "request {request_number}");
+        assert!(body.get("thinking").is_none());
     }
+
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "small active context".to_string(),
+    )]);
     core.request_manual_context_compress();
-    let base = core.build_next_prompt();
-    let prompt = core.build_model_request_prompt(&base);
-    let body = crate::prepare_model_interaction_http_request(
-        &cfg,
-        &core.model_interaction_request(prompt),
-    )
-    .model_request
-    .body;
+    let prompt = core.build_next_prompt();
+    let request = core.model_interaction_request(prompt);
+    let body = crate::prepare_model_interaction_http_request(&cfg, &request)
+        .model_request
+        .body;
+    assert_eq!(body["reasoning_effort"], "none");
+
+    core.clear_dynamic_context();
+    core.set_max_llm_input_tokens(3_000);
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "threshold context ".repeat(1_000),
+    )]);
+    core.append_in_turn_shrink_review_if_needed();
+    let prompt = core.build_next_prompt();
+    let request = core.model_interaction_request(prompt);
+    let body = crate::prepare_model_interaction_http_request(&cfg, &request)
+        .model_request
+        .body;
     assert_eq!(body["reasoning_effort"], "medium");
+    assert!(body.get("thinking").is_none());
+
     drop(core);
     std::fs::remove_dir_all(root).unwrap();
 }

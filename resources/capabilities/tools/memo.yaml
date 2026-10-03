@@ -2,7 +2,7 @@ kind: tool
 id: memo
 binding_type: builtin
 binding_name: memo
-summary: Let the runtime hold one persistent reminder memo for long-running work so it can remind you after interruption or compaction.
+summary: Let the runtime hold one persistent reminder memo for long-running work so it can remind you after interruption or compression.
 prompt_synopsis: |
   {"memo":{"op":"create","text":"refined long-task reminder"}}
 description: |

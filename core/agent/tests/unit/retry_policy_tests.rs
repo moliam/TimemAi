@@ -95,6 +95,40 @@ fn explicit_native_tool_rejection_requires_status_field_and_rejection_signal() {
 }
 
 #[test]
+fn parallel_control_rejection_requires_exact_field_non_transient_4xx_and_rejection_signal() {
+    for error in [
+        "model_http_400: unknown parameter: parallel_tool_calls",
+        "model_http_404: disable_parallel_tool_use is not supported by this endpoint",
+        "model_http_422: extra inputs are not permitted: parallel_tool_calls",
+    ] {
+        assert!(
+            is_explicit_parallel_tool_control_unsupported(error),
+            "{error}"
+        );
+    }
+    for error in [
+        "cancelled_by_user",
+        "model_network_error: parallel_tool_calls connection reset",
+        "model_http_500: parallel_tool_calls unsupported upstream",
+        "model_http_401: parallel_tool_calls not permitted without authentication",
+        "model_http_403: disable_parallel_tool_use is not allowed for this account",
+        "model_http_408: unknown parameter parallel_tool_calls",
+        "model_http_409: parallel_tool_calls not supported while deployment starts",
+        "model_http_413: parallel_tool_calls payload too large",
+        "model_http_425: parallel_tool_calls unsupported before deployment is ready",
+        "model_http_429: parallel_tool_calls not allowed over quota",
+        "model_http_400: invalid model",
+        "model_http_400: invalid parameter: parallel_tool_calls",
+        "model_http_400: tools are not supported",
+    ] {
+        assert!(
+            !is_explicit_parallel_tool_control_unsupported(error),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn input_too_large_errors_are_detected_without_matching_unrelated_failures() {
     for error in [
         "Argument list too long (os error 7)",

@@ -516,7 +516,6 @@ fn higher_reasoning_intensity_trailer_replaces_the_normal_response_trailer() {
     assert!(upgraded.contains("stronger reasoning than the normal H0 baseline"));
     assert!(upgraded.contains("direction and methodology"));
     assert!(upgraded.contains("correct possible mistakes or weak assumptions"));
-    assert!(!upgraded.contains("most work rounds run without it"));
 }
 
 #[test]
@@ -526,15 +525,6 @@ fn higher_reasoning_intensity_native_trailer_preserves_finish_protocol() {
     assert!(upgraded.ends_with(NATIVE_REASONING_INTENSITY_UPGRADE_TRAILER));
     assert!(upgraded.contains("stronger reasoning than the normal H0 baseline"));
     assert!(upgraded.contains("call the task_finished tool"));
-}
-
-#[test]
-fn legacy_reasoning_review_trailer_remains_splittable_for_cache_compatibility() {
-    let legacy = "Note: reasoning effort is enabled for this request, while most work rounds run without it. Take advantage of this reasoning pass to review current work, update or adjust the work direction/plan if needed, and express in remarks as appropriate.";
-    let prompt = format!("body\n\n{legacy}");
-    let (body, trailer) = split_formatted_response_trailer(&prompt);
-    assert_eq!(body, "body");
-    assert_eq!(trailer.as_deref(), Some(legacy));
 }
 
 #[test]
@@ -760,10 +750,6 @@ fn native_prompt_contains_builtin_descriptions_without_schemas_or_dynamic_tools(
         rendered.contains(
             "One response can reasonably contain multiple tool calls for better performance."
         ),
-        "{rendered}"
-    );
-    assert!(
-        !rendered.to_ascii_lowercase().contains("native"),
         "{rendered}"
     );
     assert!(

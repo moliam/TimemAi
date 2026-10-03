@@ -281,9 +281,16 @@ export TIMEM_MODEL=...
 - `anthropic`
 
 `TIMEM_TOOL_CALL_MODE` chooses `auto`, `native`, or `inline` (default `auto`).
-Auto mode probes the configured gateway/model and falls back to inline when
-native tool calls are unsupported. `TIMEM_PARALLEL_TOOL_CALLS` accepts `auto`,
-`true`, or `false`; Timem sends the resolved parallel flag explicitly to the API.
+Auto mode probes an unknown compatible gateway/model and falls back to inline when
+native tool calls are unsupported. Endpoints already known to support native tools,
+including the OpenAI Responses protocol, skip that probe. `TIMEM_PARALLEL_TOOL_CALLS`
+accepts `auto`, `true`, or `false`. For known-native endpoints, `auto` optimistically
+enables provider-native parallel calls without an extra capability request; explicit
+`false` disables them. If an Auto request receives a non-transient 4xx that explicitly
+rejects only the provider's parallel-control field, Timem retries that formal request
+once with the field omitted, keeps native tools enabled, schedules sibling calls
+sequentially, and reuses that endpoint-specific result. Explicit `true` never silently
+downgrades.
 
 `TIMEM_RESPONSE_PROTOCOL` chooses the inline response format parsed by the local
 runtime. Supported values are `xml` and `json`; default is `xml`. Native mode

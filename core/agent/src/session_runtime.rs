@@ -595,6 +595,28 @@ fn run_session_turn_with_model_client_and_reminder_override(
                         if take_cancel_request(ui, &mut turn_projection) {
                             break cancelled_turn_parts();
                         }
+                        if response.parallel_tool_control_omitted {
+                            profile.parallel_supported = false;
+                            profile.parallel_enabled = false;
+                            profile.source = crate::CapabilityProbeSource::Fallback;
+                            profile.reason =
+                                crate::negotiation::PARALLEL_CONTROL_UNSUPPORTED_REASON.to_string();
+                            profile.observed_tool_calls = response.response.tool_calls.len();
+                            core.set_interaction_profile(&profile);
+                            ui.on_interaction_profile(&profile);
+                            if let Some(identity) = crate::capability_probe_identity(config) {
+                                let record = crate::PersistedCapabilityProbe {
+                                    identity: identity.clone(),
+                                    native_supported: true,
+                                    parallel_supported: false,
+                                    observed_tool_calls: profile.observed_tool_calls,
+                                    reason: profile.reason.clone(),
+                                };
+                                config.interaction.persisted_capability_probe =
+                                    Some(record.clone());
+                                ui.on_persisted_capability_probe(&identity, Some(&record));
+                            }
+                        }
                         latest_usage = Some(response.response.usage.clone());
                         if !core.should_suppress_model_response(&response.response) {
                             ui.on_model_interaction_response(rounds, &response.response);
@@ -1021,6 +1043,8 @@ fn call_model_with_system_retries(
     let retry_policy = model_system_retry_policy();
     let mut total_model_wait = Duration::ZERO;
     let mut total_retry_wait = Duration::ZERO;
+    let mut effective_request = request.clone();
+    let mut parallel_tool_control_omitted = false;
     for attempt in 0..=retry_policy.max_attempts {
         let model_wait_start = Instant::now();
         preview.begin();
@@ -1030,7 +1054,7 @@ fn call_model_with_system_retries(
         let mut preview_error = false;
         let result = model_client.call_model_interaction_streaming(
             config,
-            request,
+            &effective_request,
             audit_file,
             &mut || shared_ui.borrow_mut().is_cancel_requested(),
             &mut |event| {
@@ -1050,7 +1074,7 @@ fn call_model_with_system_retries(
                     })
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("");
-                let parsed = if request.is_native() {
+                let parsed = if effective_request.is_native() {
                     emit(PublicTextTarget::Response, content);
                     Ok(())
                 } else if config.response_protocol
@@ -1109,9 +1133,23 @@ fn call_model_with_system_retries(
                     response,
                     model_wait: total_model_wait,
                     retry_wait: total_retry_wait,
+                    parallel_tool_control_omitted,
                 });
             }
             Err(err) => {
+                if !parallel_tool_control_omitted
+                    && effective_request.is_native()
+                    && effective_request.send_parallel_tool_calls
+                    && config.interaction.parallel_tool_calls == crate::ParallelToolCalls::Auto
+                    && crate::retry_policy::is_explicit_parallel_tool_control_unsupported(&err)
+                {
+                    // Retry the same formal round once with only the optional
+                    // provider control field omitted. Native tools remain on.
+                    effective_request.send_parallel_tool_calls = false;
+                    effective_request.parallel_tool_calls = false;
+                    parallel_tool_control_omitted = true;
+                    continue;
+                }
                 if let Some(profiler) = profiler.as_deref_mut() {
                     profiler.record_model_wait(&config.model, &UsageStats::zero(), model_wait);
                 }

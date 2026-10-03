@@ -121,9 +121,9 @@ fn forced_compaction_preserves_native_history_and_restricts_model_request() {
     assert!(!prompt.contains("Long-context maintenance:"));
     let request_prompt = core.build_model_request_prompt(&prompt);
     assert!(!request_prompt.contains("Long-context maintenance:"));
-    assert!(!request_prompt.contains("target_dynamic_context_ratio"));
+    assert!(!request_prompt.contains("[BEGIN THRESHOLD COMPRESSION GUIDANCE]"));
     assert!(request_prompt
-        .ends_with("Context is too long. Compact context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"));
+        .ends_with("[Context threshold WARN] Context is too long. Compress context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"));
     let request = core.model_interaction_request(request_prompt);
     assert_eq!(request.tool_choice, NativeToolChoice::Required);
     assert!(request
@@ -335,6 +335,7 @@ fn dynamic_context_estimate_and_shrink_stats_include_native_exchanges() {
 #[test]
 fn native_exchange_is_discarded_with_its_owning_delta() {
     let mut core = test_core("native_delta_discard");
+    core.set_interaction_profile(&native_test_profile());
     core.append_delta(vec![("user_question".to_string(), "Q1".to_string())]);
     core.append_delta(vec![("user_question".to_string(), "Q2".to_string())]);
     for (delta_id, call_id) in [("pd_1", "call_1"), ("pd_2", "call_2")] {
@@ -356,8 +357,15 @@ fn native_exchange_is_discarded_with_its_owning_delta() {
             }],
         });
     }
+    // A native-only owner remains visible and addressable even when it has no
+    // text slices; discarding that id removes the complete structured exchange.
+    core.deltas[0].slices.clear();
+    let prompt = core.render_prompt();
+    assert!(prompt.contains("[BEGIN DELTA delta_id: pd_1]"), "{prompt}");
+
     let result = core.apply_prompt_shrink(&["pd_1".to_string()], &[]);
     assert!(result.contains("removed_delta_count: 1"));
+    assert!(!core.render_prompt().contains("delta_id: pd_1"));
     assert_eq!(core.native_exchanges.len(), 1);
     assert_eq!(core.native_exchanges[0].delta_id, "pd_2");
     assert_eq!(core.native_exchanges[0].calls[0].id, "call_2");
@@ -440,81 +448,93 @@ fn forced_compaction_ignores_non_compact_output_then_unlocks_after_success() {
 }
 
 #[test]
-fn threshold_compaction_quality_warning_tracks_only_consecutive_poor_forced_results() {
-    let mut core = test_core("threshold_compaction_quality_warning");
-    core.set_max_llm_input_tokens(4_000);
-
-    assert!(core
-        .threshold_compaction_quality_note(false, 3_601, 1_001)
-        .is_none());
-    assert_eq!(core.consecutive_poor_threshold_compactions, 0);
-
-    assert!(core
-        .threshold_compaction_quality_note(true, 3_601, 1_001)
-        .is_none());
-    assert_eq!(core.consecutive_poor_threshold_compactions, 1);
-
+fn context_compress_threshold_percent_accepts_only_authoritative_options() {
+    let mut core = test_core("context_compress_threshold_options");
+    assert_eq!(core.context_compress_threshold_percent(), 90);
+    for percent in CONTEXT_COMPRESS_THRESHOLD_PERCENT_OPTIONS {
+        core.set_context_compress_threshold_percent(percent)
+            .unwrap();
+        assert_eq!(core.context_compress_threshold_percent(), percent);
+    }
     assert_eq!(
-        core.threshold_compaction_quality_note(true, 3_601, 1_001),
-        Some("NOTE: context compression ratio is not very good, 91% -> 26%, try to compress more by retaining only necessary part and discard bulky along-side info if possible.".to_string())
+        core.set_context_compress_threshold_percent(89),
+        Err("context_compress_threshold_percent_invalid".to_string())
     );
-    assert_eq!(core.consecutive_poor_threshold_compactions, 2);
-
-    assert!(core
-        .threshold_compaction_quality_note(true, 3_601, 1_001)
-        .is_some());
-    assert_eq!(core.consecutive_poor_threshold_compactions, 3);
-
-    assert!(core
-        .threshold_compaction_quality_note(true, 3_601, 1_000)
-        .is_none());
-    assert_eq!(core.consecutive_poor_threshold_compactions, 0);
-
-    assert!(core
-        .threshold_compaction_quality_note(true, 3_601, 1_001)
-        .is_none());
-    assert!(core
-        .threshold_compaction_quality_note(false, 3_601, 500)
-        .is_none());
-    assert_eq!(core.consecutive_poor_threshold_compactions, 1);
-    assert!(core
-        .threshold_compaction_quality_note(true, 3_601, 1_001)
-        .is_some());
-
-    core.clear_dynamic_context();
-    assert_eq!(core.consecutive_poor_threshold_compactions, 0);
+    assert_eq!(core.context_compress_threshold_percent(), 100);
 }
 
 #[test]
-fn repeated_poor_threshold_compactions_keep_injecting_quality_warnings() {
-    let mut core = test_core("threshold_compaction_quality_warning_in_prompt");
+fn poor_threshold_compression_forces_one_followup_then_latches_exhausted() {
+    let mut core = test_core("threshold_compaction_bounded_followup");
+    core.set_max_llm_input_tokens(4_000);
+
+    assert_eq!(
+        core.threshold_compaction_quality_note(false, 3_601, 1_001),
+        (false, None)
+    );
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::Available
+    );
+
+    assert_eq!(
+        core.threshold_compaction_quality_note(true, 3_601, 1_001),
+        (true, None)
+    );
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::FollowupPending
+    );
+
+    let (force_followup, warning) = core.threshold_compaction_quality_note(true, 3_601, 1_001);
+    assert!(!force_followup);
+    let warning = warning.expect("second poor result must explain bounded give-up");
+    assert!(warning.starts_with("**WARN**:"), "{warning}");
+    assert!(warning.contains("91% -> 26%"), "{warning}");
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::Exhausted
+    );
+
+    core.context_compress_required = false;
+    core.threshold_compaction_reasoning_required = false;
+    core.last_observed_prompt_tokens = 3_700;
+    core.append_delta(vec![("user_question".to_string(), "active".to_string())]);
+    core.append_in_turn_shrink_review_if_needed();
+    assert!(
+        !core.context_compress_required,
+        "an exhausted above-threshold cycle must not restart itself"
+    );
+
+    core.last_observed_prompt_tokens = 0;
+    core.clear_dynamic_context();
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::Available
+    );
+}
+
+#[test]
+fn successful_threshold_compression_schedules_only_one_forced_followup() {
+    let mut core = test_core("threshold_compaction_followup_in_prompt");
     core.set_response_protocol(ResponseProtocolKind::Json);
+    core.set_max_llm_input_tokens(4_000);
     core.append_delta(vec![(
         "user_question".to_string(),
-        "retained active context ".repeat(4_400),
+        "retained active context ".repeat(700),
     )]);
     assert!(core.dynamic_context_estimated_tokens() > core.max_llm_input_tokens / 4);
-    let warning = "NOTE: context compression ratio is not very good,";
-    let attempts = [
-        ("first threshold", false, 0),
-        ("manual", true, 0),
-        ("second threshold", false, 1),
-        ("third threshold", false, 2),
-    ];
 
-    for (label, manual, expected_warning_count) in attempts {
+    let run_poor_compact = |core: &mut AgentCore, label: &str| {
         core.append_delta(vec![(
             "runtime_note".to_string(),
             format!("discardable context for {label}"),
         )]);
         let discard_id = core.deltas.last().unwrap().delta_id.clone();
-        if manual {
-            core.request_manual_context_compress();
-        } else {
-            core.context_compress_required = true;
-            core.manual_compact_trailer_pending = false;
-        }
-        let step = core.apply_model_response(LlmResponse {
+        core.context_compress_required = true;
+        core.threshold_compaction_reasoning_required = true;
+        core.manual_compact_trailer_pending = false;
+        core.apply_model_response(LlmResponse {
             content: serde_json::json!({
                 "context_compress": {
                     "discard": [discard_id],
@@ -526,16 +546,30 @@ fn repeated_poor_threshold_compactions_keep_injecting_quality_warnings() {
             model_name: "test".to_string(),
             usage: UsageStats::zero(),
             truncated: false,
-        });
-        let CoreStep::NeedModel { prompt, .. } = step else {
-            panic!("successful compaction must continue")
-        };
-        assert_eq!(
-            prompt.matches(warning).count(),
-            expected_warning_count,
-            "{label}: {prompt}"
-        );
-    }
+        })
+    };
+
+    let first = run_poor_compact(&mut core, "first threshold");
+    assert!(matches!(first, CoreStep::NeedModel { .. }));
+    assert!(core.context_compress_required);
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::FollowupPending
+    );
+
+    let second = run_poor_compact(&mut core, "forced followup");
+    let CoreStep::NeedModel { prompt, .. } = second else {
+        panic!("second compact must continue")
+    };
+    assert!(!core.context_compress_required);
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::Exhausted
+    );
+    assert_eq!(prompt.matches("**WARN**:").count(), 1, "{prompt}");
+
+    core.append_in_turn_shrink_review_if_needed();
+    assert!(!core.context_compress_required);
 }
 
 #[test]
@@ -2003,7 +2037,7 @@ fn sudden_large_action_output_is_replaced_before_crossing_safety_limit() {
     assert!(rejected);
     assert!(!prompt.contains(oversized_marker));
     assert!(prompt.contains("Your action's output is too large:"));
-    assert!(prompt.contains("You need to optimize your action or compact context."));
+    assert!(prompt.contains("You need to optimize your action or compress context."));
     assert!(!prompt.contains("I inspected the output."));
 }
 
@@ -2472,28 +2506,12 @@ fn multiple_successful_compacts_emit_one_minimal_runtime_confirmation() {
         1
     );
     assert!(!prompt.contains("Active MCP capabilities after context compression"));
-    assert_eq!(prompt.matches(r#""action_result":"#).count(), 2);
-    assert_eq!(prompt.matches(r#""status":"completed""#).count(), 2);
+    assert!(!prompt.contains(r#""action_result":"#), "{prompt}");
+    assert!(!prompt.contains(r#""status":"completed""#), "{prompt}");
     assert!(!prompt.contains(r#""discarded_delta_ids""#));
     assert!(!prompt.contains("removed_delta_count:"));
     assert!(!prompt.contains("current_live_delta_refs:"));
-    for envelope in prompt
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|value| value.get("action_result").is_some())
-    {
-        assert_eq!(
-            envelope["action_result"]["runtime_metadata"]["status"],
-            "completed"
-        );
-        assert!(envelope["action_result"]["runtime_metadata"]
-            .get("discarded_delta_ids")
-            .is_none());
-        assert!(envelope["action_result"]["runtime_metadata"]
-            .get("offloaded_delta_ids")
-            .is_none());
-    }
-    assert!(!prompt.contains(r#""scratch_id":"#));
+    assert!(!prompt.contains("scratch_id:"));
     assert_eq!(
         prompt
             .matches("MCP update: the following MCP capabilities are enabled")
@@ -2667,7 +2685,8 @@ fn successful_compact_does_not_reinject_large_discard_id_lists() {
         prompt.contains("context compressed successfully."),
         "{prompt}"
     );
-    assert!(prompt.contains(r#""status":"completed""#), "{prompt}");
+    assert!(!prompt.contains(r#""action_result":"#), "{prompt}");
+    assert!(!prompt.contains(r#""status":"completed""#), "{prompt}");
     assert!(!prompt.contains(r#""discarded_delta_ids""#), "{prompt}");
     assert!(!prompt.contains(r#""offloaded_delta_ids""#), "{prompt}");
     assert!(!prompt.contains("removed_delta_count:"), "{prompt}");
@@ -3414,85 +3433,6 @@ fn only_structured_resume_accepts_an_empty_user_component() {
 }
 
 #[test]
-fn periodic_reasoning_review_triggers_after_round_interval_with_enough_messages() {
-    let mut core = test_core("periodic_reasoning_review");
-    for i in 0..31 {
-        core.submit_prompt_component(
-            PromptComponentRole::User,
-            "user_question",
-            format!("message {i}"),
-            "user_input",
-        );
-    }
-    for _ in 0..34 {
-        let base = core.build_next_prompt();
-        let prompt = core.build_model_request_prompt(&base);
-        assert!(!prompt.contains(prompt_render::REASONING_INTENSITY_UPGRADE_TRAILER));
-        assert!(!core.reasoning_critical());
-    }
-    let base = core.build_next_prompt();
-    let prompt = core.build_model_request_prompt(&base);
-    assert!(!prompt.contains(prompt_render::REASONING_INTENSITY_UPGRADE_TRAILER));
-    assert!(core.reasoning_critical());
-    let base = core.build_next_prompt();
-    let prompt = core.build_model_request_prompt(&base);
-    assert!(!prompt.contains(prompt_render::REASONING_INTENSITY_UPGRADE_TRAILER));
-    assert!(!core.reasoning_critical());
-}
-
-#[test]
-fn periodic_reasoning_review_requires_enough_messages() {
-    let mut core = test_core("periodic_reasoning_few_messages");
-    for i in 0..10 {
-        core.submit_prompt_component(
-            PromptComponentRole::User,
-            "user_question",
-            format!("message {i}"),
-            "user_input",
-        );
-    }
-    for _ in 0..40 {
-        let base = core.build_next_prompt();
-        let prompt = core.build_model_request_prompt(&base);
-        assert!(!prompt.contains(prompt_render::REASONING_INTENSITY_UPGRADE_TRAILER));
-    }
-    assert!(!core.reasoning_critical());
-}
-
-#[test]
-fn incremental_message_count_matches_full_recomputation() {
-    let mut core = test_core("incremental_message_count");
-    for i in 0..6 {
-        core.submit_prompt_component(
-            PromptComponentRole::User,
-            "user_question",
-            format!("u{i}"),
-            "user_input",
-        );
-        core.submit_prompt_component(
-            PromptComponentRole::system(),
-            "result_of_llm_action",
-            format!("action {i}"),
-            "previous_model_response",
-        );
-    }
-    core.flush_pending_prompt_components();
-    core.recount_context_message_elements_for_test();
-    let incremental = core.context_message_elements_for_test();
-    assert_eq!(incremental, 6, "non-message slices must not be counted");
-    // A second recount after more message writes stays consistent.
-    core.submit_prompt_component(
-        PromptComponentRole::assistant("Timem"),
-        "llm_response",
-        "assistant reply",
-        "previous_model_response",
-    );
-    core.flush_pending_prompt_components();
-    core.recount_context_message_elements_for_test();
-    assert_eq!(core.context_message_elements_for_test(), incremental + 1);
-}
-
-#[test]
 fn format_time_elapsed_hms_renders_human_readable_durations() {
     assert_eq!(crate::format_time_elapsed_hms(0), "0.0s");
     assert_eq!(crate::format_time_elapsed_hms(250), "0.3s");
@@ -4109,61 +4049,92 @@ fn process_decision_reports_preserve_observation_paths() {
 }
 
 #[test]
-fn compaction_prompts_include_reasoning_guidance_on_repeated_builds() {
-    for manual in [false, true] {
-        let mut core = test_core("compact_reasoning_guidance");
-        if manual {
-            core.request_manual_context_compress();
-        } else {
-            core.context_compress_required = true;
-        }
-        for _ in 0..2 {
-            let prompt = core.build_next_prompt();
-            assert!(core.reasoning_critical());
-            assert_eq!(prompt.matches("Use this reasoning pass").count(), 1);
-            assert!(prompt.contains("Your tool calls must start with context_compress:"));
-            assert_eq!(
-                prompt.contains("User manually requests context compression"),
-                manual
-            );
-            let (body, trailer) = prompt_render::split_formatted_response_trailer(&prompt);
-            assert!(!body.contains("Use this reasoning pass"));
-            assert!(trailer.unwrap().contains("Use this reasoning pass"));
-        }
+fn compression_prompts_use_h1_only_for_threshold_triggered_requests() {
+    let mut threshold = test_core("threshold_compression_reasoning_guidance");
+    threshold.set_max_llm_input_tokens(3_000);
+    threshold.append_delta(vec![(
+        "user_question".to_string(),
+        "threshold context ".repeat(1_000),
+    )]);
+    threshold.append_in_turn_shrink_review_if_needed();
+    for _ in 0..2 {
+        let prompt = threshold.build_next_prompt();
+        assert!(threshold.reasoning_critical());
+        assert_eq!(prompt.matches("Use this reasoning pass").count(), 1);
+        assert!(prompt.contains("Compress context as the tool context_compress desc suggests"));
+        assert!(prompt.contains("Your tool calls must start with context_compress:"));
+        assert!(!prompt.contains("User manually requests context compression"));
+    }
+
+    let mut manual = test_core("manual_compression_h0_guidance");
+    manual.append_delta(vec![(
+        "user_question".to_string(),
+        "small active context".to_string(),
+    )]);
+    manual.request_manual_context_compress();
+    for _ in 0..2 {
+        let prompt = manual.build_next_prompt();
+        assert!(!manual.reasoning_critical());
+        assert!(!prompt.contains("Use this reasoning pass"));
+        assert!(prompt.contains("User manually requests context compression"));
+        assert!(prompt.contains("Compress context as the tool context_compress desc suggests"));
+        assert!(prompt.contains("Your tool calls must start with context_compress:"));
     }
 }
 
 #[test]
-fn reasoning_counts_actual_request_preparation_not_prompt_rebuilds() {
-    let mut core = test_core("reasoning_dispatch");
-    for i in 0..31 {
-        core.submit_prompt_component(
-            PromptComponentRole::User,
-            "user_question",
-            format!("message {i}"),
-            "user_input",
-        );
-    }
-    for _ in 0..80 {
-        core.build_next_prompt();
-    }
-    assert!(!core.reasoning_critical());
+fn ordinary_rounds_and_manual_compression_stay_h0_until_threshold_crossing() {
+    let mut ordinary = test_core("ordinary_reasoning_dispatch");
     for request in 1..=70 {
-        // Tool continuation paths render directly, without build_next_prompt.
-        let base = core.render_prompt();
-        let prompt = core.build_model_request_prompt(&base);
-        let interaction = core.model_interaction_request(prompt.clone());
-        assert_eq!(
-            interaction.critical_reasoning,
-            request % 35 == 0,
-            "request {request}"
-        );
-        assert!(!prompt.contains(prompt_render::REASONING_INTENSITY_UPGRADE_TRAILER));
+        let base = ordinary.render_prompt();
+        let prompt = ordinary.build_model_request_prompt(&base);
+        let interaction = ordinary.model_interaction_request(prompt);
+        assert!(!interaction.critical_reasoning, "request {request}");
     }
-    core.request_manual_context_compress();
-    let base = core.build_next_prompt();
-    let prompt = core.build_model_request_prompt(&base);
-    assert!(core.model_interaction_request(prompt).critical_reasoning);
+
+    let mut manual = test_core("manual_reasoning_dispatch");
+    manual.append_delta(vec![(
+        "user_question".to_string(),
+        "small active context".to_string(),
+    )]);
+    manual.request_manual_context_compress();
+    let prompt = manual.build_next_prompt();
+    assert!(!manual.model_interaction_request(prompt).critical_reasoning);
+
+    let mut manual_then_threshold = test_core("manual_then_threshold_reasoning_dispatch");
+    manual_then_threshold.set_max_llm_input_tokens(3_000);
+    manual_then_threshold.append_delta(vec![(
+        "user_question".to_string(),
+        "small active context".to_string(),
+    )]);
+    manual_then_threshold.request_manual_context_compress();
+    assert!(!manual_then_threshold.reasoning_critical());
+    manual_then_threshold.append_delta(vec![(
+        "user_supplement".to_string(),
+        "threshold context ".repeat(1_000),
+    )]);
+    manual_then_threshold.append_in_turn_shrink_review_if_needed();
+    let prompt = manual_then_threshold.build_next_prompt();
+    assert!(prompt.contains("User manually requests context compression"));
+    assert!(
+        manual_then_threshold
+            .model_interaction_request(prompt)
+            .critical_reasoning
+    );
+
+    let mut threshold = test_core("threshold_reasoning_dispatch");
+    threshold.set_max_llm_input_tokens(3_000);
+    threshold.append_delta(vec![(
+        "user_question".to_string(),
+        "threshold context ".repeat(1_000),
+    )]);
+    threshold.append_in_turn_shrink_review_if_needed();
+    let prompt = threshold.build_next_prompt();
+    assert!(
+        threshold
+            .model_interaction_request(prompt)
+            .critical_reasoning
+    );
 }
 
 #[test]
