@@ -454,6 +454,7 @@ export type ChatFavorite = {
 };
 
 export type ModelToolResultBytes = 8192 | 10240 | 16384 | 20480 | 30720;
+export type ContextCompressThresholdPercent = 80 | 85 | 90 | 95 | 100;
 
 export type Snapshot = {
   server: {
@@ -475,6 +476,7 @@ export type Snapshot = {
       conversation_capacity_bytes: number | null;
       claude_codex_tool_discovery: boolean;
       model_tool_result_bytes: ModelToolResultBytes;
+      context_compress_threshold_percent: ContextCompressThresholdPercent;
     };
     runtime_options: Array<{
       key: string;
@@ -645,6 +647,7 @@ export type WireEvent =
       conversation_capacity_bytes: number | null;
       claude_codex_tool_discovery: boolean;
       model_tool_result_bytes: ModelToolResultBytes;
+      context_compress_threshold_percent: ContextCompressThresholdPercent;
     }
   | { type: "mem_temporary_items"; items: MemTemporaryItem[]; error?: string }
   | { type: "file_uploaded"; session_id: string; file: Attachment }
@@ -905,6 +908,10 @@ export type ClientCommand =
   | { type: "mem_conversation_capacity_update"; max_bytes: number | null }
   | { type: "beta_claude_codex_tool_discovery_update"; enabled: boolean }
   | { type: "system_model_tool_result_bytes_update"; max_bytes: ModelToolResultBytes }
+  | {
+      type: "system_context_compress_threshold_update";
+      percent: ContextCompressThresholdPercent;
+    }
   | { type: "mem_temporary_items_list" }
   | { type: "mem_temporary_items_delete"; ids: string[] }
   | {

@@ -48,6 +48,7 @@ import {
   ChevronRight,
   ChevronUp,
   CircleStop,
+  CircleX,
   ClipboardCheck,
   Clock3,
   Clock8,
@@ -127,6 +128,7 @@ import {
   ClientCommand,
   clientId,
   CommandWithId,
+  ContextCompressThresholdPercent,
   Decision,
   McpServerConfig,
   McpServerReport,
@@ -297,8 +299,8 @@ import {
 import { clipboardImageFiles } from "./clipboard_images";
 import {
   formatToolElapsed,
-  humanizeToolStatus,
   toolResultCountsLabel,
+  isToolActivityFailed,
   isToolActivityRunning,
   TOOL_STATUS_RUNNING,
   formatLiveElapsed,
@@ -721,6 +723,8 @@ function TimemApp() {
     useState(false);
   const [pendingModelToolResultBytes, setPendingModelToolResultBytes] =
     useState(false);
+  const [pendingContextCompressThreshold, setPendingContextCompressThreshold] =
+    useState(false);
   const [rejectedSubmitCommandIds, setRejectedSubmitCommandIds] = useState<
     Set<string>
   >(() => new Set());
@@ -1063,6 +1067,7 @@ function TimemApp() {
       !pendingMemConversationCapacity &&
       !pendingClaudeCodexToolDiscovery &&
       !pendingModelToolResultBytes &&
+      !pendingContextCompressThreshold &&
       !favoriteCapacityUpdating &&
       !pendingMemSwitch &&
       !memTemporaryItemsDeleting
@@ -1073,6 +1078,7 @@ function TimemApp() {
     favoriteCapacityUpdating,
     memTemporaryItemsDeleting,
     pendingClaudeCodexToolDiscovery,
+    pendingContextCompressThreshold,
     pendingModelToolResultBytes,
     pendingMemConversationCapacity,
     pendingMemRetention,
@@ -1258,6 +1264,25 @@ function TimemApp() {
         reportUiError(
           "System setting failed",
           "Reconnect to Timem Web before changing the tool result retention length.",
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand],
+  );
+  const saveContextCompressThreshold = useCallback(
+    (percent: ContextCompressThresholdPercent) => {
+      setPendingContextCompressThreshold(true);
+      if (
+        !sendCommand({
+          type: "system_context_compress_threshold_update",
+          percent,
+        })
+      ) {
+        setPendingContextCompressThreshold(false);
+        reportUiError(
+          "System setting failed",
+          "Reconnect to Timem Web before changing the context compression threshold.",
           "system",
         );
       }
@@ -1483,6 +1508,8 @@ function TimemApp() {
     setPendingToolgenRequests(new Set());
     setPendingMemSwitch(false);
     setPendingClaudeCodexToolDiscovery(false);
+    setPendingModelToolResultBytes(false);
+    setPendingContextCompressThreshold(false);
     setMemSwitchCandidate(null);
   }, [interruptEndpointShare]);
 
@@ -1776,6 +1803,8 @@ function TimemApp() {
             setPendingClaudeCodexToolDiscovery(false);
           if (completed?.type === "system_model_tool_result_bytes_update")
             setPendingModelToolResultBytes(false);
+          if (completed?.type === "system_context_compress_threshold_update")
+            setPendingContextCompressThreshold(false);
           const memSwitchNeedsConfirmation =
             completed?.type === "mem_switch" &&
             !completed.stop_running &&
@@ -1887,6 +1916,7 @@ function TimemApp() {
         setPendingMemConversationCapacity(false);
         setPendingClaudeCodexToolDiscovery(false);
         setPendingModelToolResultBytes(false);
+        setPendingContextCompressThreshold(false);
         setServer((current) =>
           current
             ? {
@@ -1900,6 +1930,8 @@ function TimemApp() {
                   claude_codex_tool_discovery:
                     event.claude_codex_tool_discovery,
                   model_tool_result_bytes: event.model_tool_result_bytes,
+                  context_compress_threshold_percent:
+                    event.context_compress_threshold_percent,
                 },
               }
             : current,
@@ -4771,6 +4803,11 @@ function TimemApp() {
               }
               modelToolResultBytesPending={pendingModelToolResultBytes}
               onModelToolResultBytesChange={saveModelToolResultBytes}
+              contextCompressThresholdPercent={
+                server?.mem?.context_compress_threshold_percent ?? 90
+              }
+              contextCompressThresholdPending={pendingContextCompressThreshold}
+              onContextCompressThresholdChange={saveContextCompressThreshold}
               claudeCodexToolDiscoveryEnabled={
                 server?.mem?.claude_codex_tool_discovery ?? false
               }
@@ -10659,20 +10696,35 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
 
 }
 
-/** Only the status field announces and highlights lifecycle updates. */
-function ActionStatus({ status, label, className }: { status: string; label: string; className: string }) {
-  const showResults = useToolResultStatus();
-  const previous = useRef(status);
-  const [revision, setRevision] = useState(0);
-  useEffect(() => {
-    if (previous.current !== status) {
-      previous.current = status;
-      setRevision(value => value + 1);
-    }
-  }, [status]);
-  return <span className={className} role="status" aria-live="polite" aria-atomic="true" aria-label={!showResults && !isToolActivityRunning(status) ? t("tools.done") : status === "completed" ? t("tools.succeeded") : status === "failed" ? t("tools.failed") : undefined}>
-    <span key={revision} className={revision ? "action-status-changed" : undefined}>{!showResults && !isToolActivityRunning(status) ? t("tools.done") : label}</span>
-  </span>;
+function ToolActivityIcon({
+  activity,
+  toolName,
+  failed,
+}: {
+  activity: Activity;
+  toolName: string;
+  failed: boolean;
+}) {
+  if (failed)
+    return (
+      <span className="tool-failure-icon" title={t("tools.failed")}>
+        <CircleX size={14} aria-hidden="true" />
+        <span className="sr-only">{t("tools.failed")}</span>
+      </span>
+    );
+  if (activity.run_bash_edit) return <RunBashEditIcon />;
+  if (activity.readfile) return <ReadFileIcon />;
+  if (activity.memory_search) return <MemorySearchIcon />;
+  if (activity.self_tool) return <SelfToolIcon />;
+  if (activity.tool_name === "memmgr") return <MemoryIcon />;
+  if ((activity.tool_name || activity.title) === "run_bash")
+    return (
+      <span className="bash-tool-icon" title={toolName}>
+        <SquareTerminal size={14} aria-hidden="true" />
+        <span className="sr-only">{toolName}</span>
+      </span>
+    );
+  return toolName;
 }
 
 const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Activity }) {
@@ -10730,18 +10782,12 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
           if (event.key !== "Enter" && event.key !== " ") return;
           event.preventDefault(); toggle();
         } : undefined}>
-        {running ? (
+        {running && (
           <span className="stream-tool-status-slot" aria-label={status === "background_running" ? t("tools.runningBg") : t("tools.running")}>
             <span className="stream-tool-dot" aria-hidden="true" />
           </span>
-        ) : status !== "completed" ? (
-          <ActionStatus
-            status={status}
-            label={humanizeToolStatus(status)}
-            className="stream-tool-status"
-          />
-        ) : null}
-        <b>{activity.run_bash_edit ? <RunBashEditIcon /> : activity.readfile ? <ReadFileIcon /> : activity.memory_search ? <MemorySearchIcon /> : activity.self_tool ? <SelfToolIcon /> : activity.tool_name === "memmgr" ? <MemoryIcon /> : (activity.tool_name || activity.title) === "run_bash" ? <span className="bash-tool-icon" title={toolName}><SquareTerminal size={14} aria-hidden="true" /><span className="sr-only">{toolName}</span></span> : toolName}</b>
+        )}
+        <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
         {status === "background_running" && <span className="stream-tool-background">(bg)</span>}
         {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : command && <span className="stream-tool-command-preview tool-invocation-preview" title={command}>{command.replace(/\s+/g, " ")}</span>}
         {(running
@@ -11879,30 +11925,18 @@ function ToolActivity({ activity }: { activity: Activity }) {
     running && activity.execution_started && waitBudgetMs !== undefined
       ? Math.max(0, waitBudgetMs - liveElapsedMs)
       : undefined;
-  const statusLabel =
-    status === "timeout" && bashActivity
-      ? activity.pid !== undefined
-        ? t("tools.waitEndedRunning", { pid: activity.pid })
-        : t("tools.waitEndedMaybe")
-      : humanizeToolStatus(status);
   const summaryLabel = t("tools.detailSummary", {
     action: open ? t("tools.detailCollapse") : t("tools.detailExpand"),
     name: toolName,
   });
   const summaryContent = (
     <>
-      {running ? (
+      {running && (
         <span className="tool-activity-running-marker" aria-label={status === "background_running" ? t("tools.runningBg") : t("tools.running")}>
           <span className="tool-activity-dot" aria-hidden="true" />
         </span>
-      ) : status !== "completed" ? (
-        <ActionStatus
-          status={status}
-          label={statusLabel}
-          className="tool-activity-status"
-        />
-      ) : null}
-      <b>{activity.run_bash_edit ? <RunBashEditIcon /> : activity.readfile ? <ReadFileIcon /> : activity.memory_search ? <MemorySearchIcon /> : activity.self_tool ? <SelfToolIcon /> : activity.tool_name === "memmgr" ? <MemoryIcon /> : (activity.tool_name || activity.title) === "run_bash" ? <span className="bash-tool-icon" title={toolName}><SquareTerminal size={14} aria-hidden="true" /><span className="sr-only">{toolName}</span></span> : toolName}</b>
+      )}
+      <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
       {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : invocationPreview && (
         <code className="tool-activity-command tool-invocation-preview" title={invocationPreview}>
           {invocationPreview}
@@ -12991,6 +13025,11 @@ type SettingsCenterProps = {
   modelToolResultBytes: ModelToolResultBytes;
   modelToolResultBytesPending: boolean;
   onModelToolResultBytesChange: (maxBytes: ModelToolResultBytes) => void;
+  contextCompressThresholdPercent: ContextCompressThresholdPercent;
+  contextCompressThresholdPending: boolean;
+  onContextCompressThresholdChange: (
+    percent: ContextCompressThresholdPercent,
+  ) => void;
   claudeCodexToolDiscoveryEnabled: boolean;
   claudeCodexToolDiscoveryPending: boolean;
   onClaudeCodexToolDiscoveryChange: (enabled: boolean) => void;
@@ -13054,6 +13093,9 @@ const SettingsCenter = memo(function SettingsCenter(
     modelToolResultBytes,
     modelToolResultBytesPending,
     onModelToolResultBytesChange,
+    contextCompressThresholdPercent,
+    contextCompressThresholdPending,
+    onContextCompressThresholdChange,
     claudeCodexToolDiscoveryEnabled,
     claudeCodexToolDiscoveryPending,
     onClaudeCodexToolDiscoveryChange,
@@ -13119,6 +13161,7 @@ const SettingsCenter = memo(function SettingsCenter(
     retentionPending ||
     conversationCapacityPending ||
     modelToolResultBytesPending ||
+    contextCompressThresholdPending ||
     claudeCodexToolDiscoveryPending ||
     favoriteCapacityPending ||
     switchPending ||
@@ -13525,6 +13568,38 @@ const SettingsCenter = memo(function SettingsCenter(
                     )}
                   </div>
                   {modelToolResultBytesPending && (
+                    <small className="system-setting-status" role="status" aria-live="polite">
+                      {t("system.saving")}
+                    </small>
+                  )}
+                </section>
+                <section className="settings-group system-context-compress-threshold">
+                  <div className="settings-group-heading">
+                    <div>
+                      <strong>{t("system.contextCompressThresholdTitle")}</strong>
+                      <p>{t("system.contextCompressThresholdDesc")}</p>
+                    </div>
+                  </div>
+                  <div
+                    className="segmented-control system-context-compress-options"
+                    aria-label={t("system.contextCompressThresholdAria")}
+                  >
+                    {([80, 85, 90, 95, 100] as const).map((percent) => (
+                      <button
+                        type="button"
+                        key={percent}
+                        className={
+                          contextCompressThresholdPercent === percent ? "active" : ""
+                        }
+                        aria-pressed={contextCompressThresholdPercent === percent}
+                        disabled={contextCompressThresholdPending || !connected}
+                        onClick={() => onContextCompressThresholdChange(percent)}
+                      >
+                        {percent}%
+                      </button>
+                    ))}
+                  </div>
+                  {contextCompressThresholdPending && (
                     <small className="system-setting-status" role="status" aria-live="polite">
                       {t("system.saving")}
                     </small>
@@ -14621,7 +14696,7 @@ function CompletionCard({
     ["Tools", stats.tool_calls],
     ["Repair", stats.repair_calls],
     ["Memory", formatMemoryOps(stats.mem_reads, stats.mem_writes)],
-    ["Compact", formatOptionalTokens(stats.shrunk_tokens)],
+    ["Compress", formatOptionalTokens(stats.shrunk_tokens)],
   ].filter(
     ([label, value]) =>
       label === "Completed" ||
@@ -14695,10 +14770,10 @@ function completionFactTitle(
     return stats.cache_created_tokens === undefined
       ? undefined
       : `${stats.cache_created_tokens} cache-created input tokens`;
-  if (label === "Compact")
+  if (label === "Compress")
     return stats.shrunk_tokens === undefined
       ? undefined
-      : `${stats.shrunk_tokens} compacted tokens`;
+      : `${stats.shrunk_tokens} compressed tokens`;
   if (label === "Memory")
     return `${stats.mem_reads ?? 0} memory reads / ${stats.mem_writes ?? 0} memory writes`;
   return undefined;
@@ -15078,12 +15153,6 @@ function ModelEndpointEditor({
           />
         </label>
         {canRestoreEndpointTemplateUrl(draft, selectedTemplate) && <div className="wide endpoint-base-reset"><button type="button" onClick={() => setDraft(current => restoreEndpointTemplateUrl(current, selectedTemplate))}>{t("endpoints.restoreBaseUrl")}</button><small>{t("endpoints.baseOverrideHint")}</small></div>}
-        <label>{t("endpoints.provider")}
-          <select value={draft.requirements?.provider ?? ""} onChange={e => editRequirements({ provider: e.target.value || null })}>
-            <option value="">{t("endpoints.genericProvider")}</option>
-            <option value="openai">OpenAI</option><option value="zhipu">{t("endpoints.zhipu")}</option>
-          </select>
-        </label>
         <label className="wide">
           API Key
           <div className="endpoint-api-key">
@@ -15126,6 +15195,12 @@ function ModelEndpointEditor({
               </button>
             </div>
           </div>
+        </label>
+        <label>{t("endpoints.provider")}
+          <select value={draft.requirements?.provider ?? ""} onChange={e => editRequirements({ provider: e.target.value || null })}>
+            <option value="">{t("endpoints.genericProvider")}</option>
+            <option value="openai">OpenAI</option><option value="zhipu">{t("endpoints.zhipu")}</option>
+          </select>
         </label>
         <h4 className="wide endpoint-section-title">{t("endpoints.parametersSection")}</h4>
         <div className="endpoint-api-protocol">

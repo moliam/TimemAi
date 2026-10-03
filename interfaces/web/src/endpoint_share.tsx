@@ -11,6 +11,7 @@ import {
   TriangleAlert,
   X,
 } from "lucide-react";
+import { copyTextToClipboard } from "./clipboard_copy";
 import { t, useT } from "./i18n";
 import { clientId, type ClientCommand } from "./protocol";
 
@@ -204,7 +205,7 @@ export const EndpointSharePanel = memo(function EndpointSharePanel({ endpoint, t
               {busy ? workingLabel : t(endpoint ? "endpoints.shareGenerate" : "endpoints.shareImport")}
             </button>
             {endpoint && exportData && <button type="button" className="secondary compact" onClick={async () => {
-              try { await navigator.clipboard.writeText(exportData); setFailed(false); setMessage(t("endpoints.shareCopied")); }
+              try { await copyTextToClipboard(exportData); setFailed(false); setMessage(t("endpoints.shareCopied")); }
               catch { setFailed(true); setMessage(t("endpoints.shareCopyFailed")); }
             }}><Copy size={14} />{t("endpoints.shareCopy")}</button>}
             {!endpoint && <button type="button" className="secondary compact" disabled={busy} onClick={pasteImport}><ClipboardPaste size={14} />{t("endpoints.sharePaste")}</button>}

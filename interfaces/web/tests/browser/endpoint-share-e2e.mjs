@@ -207,6 +207,30 @@ assert(await evaluate(`(() => {
    code.scrollWidth<=code.clientWidth+2 && code.scrollHeight>code.clientHeight &&
    actions.some(label=>/复制|copy/i.test(label)) && !actions.some(label=>/编辑|edit/i.test(label));
 })()`),'export must be a focusable, wrapped, copy-only output');
+// Public LAN HTTP does not expose the modern Clipboard API. Disable it and
+// verify that a real click uses the legacy textarea fallback with the exact
+// opaque share content instead of reporting a false copy failure.
+assert(await evaluate(`(() => {
+ const nativeExecCommand=document.execCommand.bind(document);
+ window.shareCopyFallback={calls:0,command:null,value:null,result:null};
+ document.execCommand=(command)=>{
+  const active=document.activeElement;
+  const result=nativeExecCommand(command);
+  window.shareCopyFallback={
+   calls:window.shareCopyFallback.calls+1,
+   command,
+   value:active && 'value' in active ? active.value : null,
+   result,
+  };
+  return result;
+ };
+ Object.defineProperty(navigator,'clipboard',{configurable:true,value:undefined});
+ return typeof navigator.clipboard==='undefined';
+})()`),'Clipboard API disabled for public HTTP copy regression');
+await click("[...document.querySelectorAll('.endpoint-share-actions button')].find(b=>/复制|copy/i.test(b.textContent))");
+await waitFor(()=>evaluate(`document.querySelector('.endpoint-share-panel [role=status]')?.textContent.match(/已复制|copied/i)`),'public HTTP fallback copy feedback');
+const fallbackCopy=await evaluate(`window.shareCopyFallback`);
+assert(fallbackCopy.calls===1 && fallbackCopy.command==='copy' && fallbackCopy.value===full && fallbackCopy.result===true,'public HTTP fallback did not copy the exact share content: '+JSON.stringify(fallbackCopy));
 await close();
 assert(await evaluate(`!document.querySelector('.endpoint-share-backdrop') && !!document.querySelector('.settings-center')`),'closing share keeps settings open');
 await openExport();
@@ -284,7 +308,7 @@ await click("document.querySelectorAll('.endpoint-share-options label')[2]");
 const roundtrip=decode(await generate());
 assert(roundtrip.name==='mygpt2' && roundtrip.personal.api_key==='e2e-private-key' && roundtrip.advanced.request_fields.vendor_options.custom==='中文','full import roundtrip after reload');
 await close();
-console.log('PASS endpoint sharing modal: insecure-context IDs, single progress state, wrapped copy-only export, uncontrolled 256 KiB import, clipboard paste, polished responsive layout, defaults, export categories, Unicode, secret isolation, cleanup, invalid import, collisions, reload roundtrip');
+console.log('PASS endpoint sharing modal: insecure-context IDs and export copy fallback, single progress state, wrapped copy-only export, uncontrolled 256 KiB import, clipboard paste, polished responsive layout, defaults, export categories, Unicode, secret isolation, cleanup, invalid import, collisions, reload roundtrip');
 } finally {
   ws?.close();
   if (chrome && chrome.exitCode === null) {

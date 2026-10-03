@@ -1,5 +1,5 @@
 import { DatabaseSearch } from "./database_search_icon";
-import { createLucideIcon, Database, Info, PenLine } from "lucide-react";
+import { createLucideIcon, Database, Eye, PenLine } from "lucide-react";
 import { t } from "./i18n";
 import type { FileSelector, MemorySearchPresentation, ReadFilePresentation, RunBashEditPresentation, SelfToolPresentation } from "./tool_presentation";
 
@@ -80,7 +80,7 @@ export function MemorySearchInvocation({ search }: { search: MemorySearchPresent
 }
 
 export function SelfToolIcon() {
-  return <span className="self-tool-icon" title="self_tool"><Info size={14} aria-hidden="true" /><span className="sr-only">self_tool</span></span>;
+  return <span className="self-tool-icon" title="self_tool"><Eye size={14} aria-hidden="true" /><span className="sr-only">self_tool</span></span>;
 }
 
 export function SelfToolInvocation({ operation }: { operation: SelfToolPresentation }) {

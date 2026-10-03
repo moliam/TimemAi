@@ -383,11 +383,26 @@ async function main() {
   for(const stream of [false,true]) {
    await browser.evaluate(`localStorage.setItem('timem-web-stream-ui-mode-v1',${JSON.stringify(String(stream))})`);
    const action={event_id:'file-read',source:'core_topic',created_at_ms:Date.now(),payload:{session_id:'session-1',state:{name:'running'},topic:{name:'core.action',attributes:{}},payload:{action:'readfile',action_id:'file-read',status:'completed',input:{ender:{line_nr:15244},path,starter:{line_nr:15190}}}}};
-   host.setSession(makeSession({turns:[{...turn('turn-1'),events:[action,{...action,event_id:'memory-search',payload:{...action.payload,payload:{action:'memmgr',action_id:'memory-search',status:'completed',input:{type:'raw_chat',op:'search',search_text:'project'}}}},{...action,event_id:'memory-delete',payload:{...action.payload,payload:{action:'memmgr',action_id:'memory-delete',status:'completed',input:{type:'scratch',op:'delete',id:'scratch-id'}}}}]}]}));
+   host.setSession(makeSession({turns:[{...turn('turn-1'),events:[action,{...action,event_id:'memory-search',payload:{...action.payload,payload:{action:'memmgr',action_id:'memory-search',status:'completed',input:{type:'raw_chat',op:'search',search_text:'project'}}}},{...action,event_id:'memory-delete',payload:{...action.payload,payload:{action:'memmgr',action_id:'memory-delete',status:'completed',input:{type:'scratch',op:'delete',id:'scratch-id'}}}},{...action,event_id:'self-inspect',payload:{...action.payload,payload:{action:'self_tool',action_id:'self-inspect',status:'completed',input:{type:'params'}}}},{...action,event_id:'file-failed',payload:{...action.payload,payload:{action:'readfile',action_id:'file-failed',status:'failed',input:{path:'missing.txt'}}}}]}]}));
    await browser.call('Page.reload');
    try { await waitFor(()=>browser.evaluate(`!!document.querySelector('.file-tool-preview')`),'file preview mode '+stream); } catch(error) { console.log(await browser.evaluate(`document.body.innerText`)); throw error; }
    assert(await browser.evaluate(`document.querySelectorAll('.memory-search-icon .lucide-database-search').length===1`),'memory search icon only for search');
    assert(await browser.evaluate(`document.querySelectorAll('.memory-tool-icon .lucide-database').length===1`),'other memory operations use Database');
+   assert(await browser.evaluate(`document.querySelectorAll('.self-tool-icon .lucide-eye').length===1 && !document.querySelector('.self-tool-icon .lucide-info')`),'self_tool uses Eye');
+   assert(await browser.evaluate(`document.querySelectorAll('.tool-failure-icon .lucide-circle-x').length===1 && !document.querySelector('.stream-tool-status,.tool-activity-status')`),'failed tool replaces its native icon with one CircleX and no extra verdict');
+   assert(await browser.evaluate(`(() => {
+     const rows=[...document.querySelectorAll(${stream ? "'.stream-tool-head'" : "'.tool-activity > summary, .tool-activity-static'"})];
+     const success=rows.find(row=>row.querySelector('.file-tool-icon'));
+     const failure=rows.find(row=>row.querySelector('.tool-failure-icon'));
+     if(!success||!failure) return false;
+     const successIcon=success.querySelector(':scope > b')?.getBoundingClientRect();
+     const failureIcon=failure.querySelector(':scope > b')?.getBoundingClientRect();
+     const successContent=success.querySelector('.file-tool-preview')?.getBoundingClientRect();
+     const failureContent=failure.querySelector('.file-tool-preview')?.getBoundingClientRect();
+     return success.firstElementChild?.tagName==='B' && failure.firstElementChild?.tagName==='B' &&
+       !!successIcon && !!failureIcon && !!successContent && !!failureContent &&
+       Math.abs(successIcon.left-failureIcon.left)<1 && Math.abs(successContent.left-failureContent.left)<1;
+   })()`),'successful and failed tools share the same icon/content columns');
    assert(await browser.evaluate(`!document.querySelector('.stream-tool-toggle > svg, .tool-activity > summary > .tool-activity-chevron')`),'no persistent disclosure glyph');
    if(!stream) await browser.evaluate(`document.querySelectorAll('.tool-activity-group').forEach(e=>e.open=true)`);
    for(const width of [1280,390]) {
@@ -413,7 +428,7 @@ async function main() {
    for(const type of ['keyDown','keyUp']) await browser.call('Input.dispatchKeyEvent',{type,key:' ',code:'Space',windowsVirtualKeyCode:32});
    await waitFor(()=>browser.evaluate(stream?`document.querySelector('.stream-tool-toggle').getAttribute('aria-expanded')==='false'`:`!document.querySelector('.tool-activity').open`),'keyboard collapses details');
   }
-  console.log('PASS readfile semantic summaries: ordinary/stream, SquareText, path+ascending range, raw detail, pointer/keyboard, light/dark, 390px');
+  console.log('PASS tool presentation: ordinary/stream alignment, Eye self_tool, single CircleX failure icon, semantic summaries, pointer/keyboard, light/dark, 390px');
  } finally {await browser.close();await host.close();}
 }
 await main();
