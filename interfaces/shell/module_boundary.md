@@ -154,7 +154,10 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   attach prompt until resolved: Shell renders only the authoritative available
   directory choices, sends `session_restart_cwd_resolve`, blocks supplements and
   unrelated commands locally, and restores normal input only after Host
-  confirmation. Stream may replace revisioned `core.model.preview` content in place and render
+  confirmation. If the choices cannot be reloaded, Shell keeps an interactive
+  recovery prompt that can retry the authoritative read or detach safely; it
+  never guesses a directory or leaves the user at a non-interactive error card.
+  Stream may replace revisioned `core.model.preview` content in place and render
   structured `core.action` lifecycle as live rows; terminal tool outcomes fold
   into compact success/failure counts while running/background work stays
   visible. Snapshot and live events share one reducer, are filtered to the

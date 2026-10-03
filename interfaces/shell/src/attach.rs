@@ -30,8 +30,9 @@ mod view;
 use view::{
     activity_summary, attach_error_card, connected_intro, decision_request_prompt,
     disconnected_card, format_user_echo, guidance_card, host_error_card, instance_selector,
-    invalid_command_card, invalid_restart_choice_card, no_sessions_card, rejected_command_card,
-    restart_cwd_prompt, session_selector, topic_summary, worker_event_summary,
+    invalid_command_card, invalid_restart_choice_card, invalid_restart_recovery_input_card,
+    no_sessions_card, rejected_command_card, restart_cwd_prompt, restart_cwd_recovery_prompt,
+    session_selector, topic_summary, worker_event_summary,
 };
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -787,6 +788,12 @@ fn attach_snapshot_orientation_turn<'a>(
     }
 }
 
+#[derive(Clone, Debug)]
+enum RestartCwdGate {
+    Decision(Value),
+    ReloadRequired,
+}
+
 struct AttachStreamRegion {
     mode: ShellUiMode,
     active_turn_id: Option<String>,
@@ -794,7 +801,7 @@ struct AttachStreamRegion {
     tools: StreamToolFoldState,
     rendered_rows: usize,
     prompt_visible: bool,
-    restart_cwd_decision: Option<Value>,
+    restart_cwd_gate: Option<RestartCwdGate>,
 }
 
 impl AttachStreamRegion {
@@ -806,7 +813,7 @@ impl AttachStreamRegion {
             tools: StreamToolFoldState::default(),
             rendered_rows: 0,
             prompt_visible: false,
-            restart_cwd_decision: None,
+            restart_cwd_gate: None,
         }
     }
 
@@ -826,21 +833,24 @@ impl AttachStreamRegion {
                 output.push('\n');
             }
         }
-        if self.restart_cwd_decision.is_some() || self.prompt_visible {
+        if self.restart_cwd_gate.is_some() || self.prompt_visible {
             output.push_str(&self.visible_prompt_text());
         }
         output
     }
 
-    fn set_restart_cwd_decision(&mut self, decision: Option<Value>) {
-        self.restart_cwd_decision = decision;
+    fn set_restart_cwd_gate(&mut self, gate: Option<RestartCwdGate>) {
+        self.restart_cwd_gate = gate;
     }
 
     fn visible_prompt_text(&self) -> String {
-        self.restart_cwd_decision
-            .as_ref()
-            .and_then(restart_cwd_prompt)
-            .unwrap_or_else(attach_prompt_text)
+        match self.restart_cwd_gate.as_ref() {
+            Some(RestartCwdGate::Decision(decision)) => {
+                restart_cwd_prompt(decision).unwrap_or_else(attach_prompt_text)
+            }
+            Some(RestartCwdGate::ReloadRequired) => restart_cwd_recovery_prompt(),
+            None => attach_prompt_text(),
+        }
     }
 
     fn set_active_turn(&mut self, turn_id: Option<String>) {
@@ -990,7 +1000,7 @@ impl AttachStreamRegion {
     fn show_prompt(&mut self) {
         self.prompt_visible = true;
         if self.mode == ShellUiMode::Ordinary {
-            if self.restart_cwd_decision.is_some() {
+            if self.restart_cwd_gate.is_some() {
                 close_dots();
                 print!("{}", self.visible_prompt_text());
                 let _ = std::io::stdout().flush();
@@ -1011,32 +1021,43 @@ fn print_attach_prompt() {
 #[derive(Debug, PartialEq, Eq)]
 enum RestartCwdInput {
     Resolve(&'static str),
+    Retry,
+    Detach,
     Invalid,
     NotPending,
 }
 
-fn restart_cwd_input(text: &str, decision: Option<&Value>) -> RestartCwdInput {
-    let Some(decision) = decision else {
+fn restart_cwd_input(text: &str, gate: Option<&RestartCwdGate>) -> RestartCwdInput {
+    let Some(gate) = gate else {
         return RestartCwdInput::NotPending;
     };
-    let session_cwd_available = decision
-        .get("session_cwd_available")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    match text {
-        "1" | "!k" if session_cwd_available => RestartCwdInput::Resolve("keep_session"),
-        "2" | "!r" => RestartCwdInput::Resolve("use_runtime"),
-        _ => RestartCwdInput::Invalid,
+    match gate {
+        RestartCwdGate::Decision(decision) => {
+            let session_cwd_available = decision
+                .get("session_cwd_available")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            match text {
+                "1" | "!k" if session_cwd_available => RestartCwdInput::Resolve("keep_session"),
+                "2" | "!r" => RestartCwdInput::Resolve("use_runtime"),
+                _ => RestartCwdInput::Invalid,
+            }
+        }
+        RestartCwdGate::ReloadRequired => match text {
+            "" | "1" | "!retry" => RestartCwdInput::Retry,
+            "2" | "!q" => RestartCwdInput::Detach,
+            _ => RestartCwdInput::Invalid,
+        },
     }
 }
 
-fn set_restart_cwd_decision(
-    decision: &mut Option<Value>,
+fn set_restart_cwd_gate(
+    gate: &mut Option<RestartCwdGate>,
     stream_region: &mut AttachStreamRegion,
-    next: Option<Value>,
+    next: Option<RestartCwdGate>,
 ) {
-    *decision = next.clone();
-    stream_region.set_restart_cwd_decision(next);
+    *gate = next.clone();
+    stream_region.set_restart_cwd_gate(next);
 }
 
 /// Connects to the Host WebSocket and runs the attach loop: stream-render
@@ -1047,7 +1068,10 @@ fn attach_session(
     session: &AttachSession,
     ui_mode: ShellUiMode,
 ) -> Result<(), AttachError> {
-    let initial_restart_decision = session.restart_cwd_decision.clone();
+    let initial_restart_gate = session
+        .restart_cwd_decision
+        .clone()
+        .map(RestartCwdGate::Decision);
     let token_query = host
         .token
         .as_deref()
@@ -1096,10 +1120,10 @@ fn attach_session(
 
     let mut turn_views = AttachTurnViews::default();
     let mut pending_decisions: Vec<PendingDecision> = Vec::new();
-    let mut restart_cwd_decision: Option<Value> = initial_restart_decision.clone();
+    let mut restart_cwd_gate = initial_restart_gate.clone();
     let session_id = session.session_id.clone();
     let mut stream_region = AttachStreamRegion::new(ui_mode, session.active_turn_id.clone());
-    stream_region.set_restart_cwd_decision(initial_restart_decision);
+    stream_region.set_restart_cwd_gate(initial_restart_gate);
     let mut command_sequence: u64 = 0;
 
     loop {
@@ -1113,14 +1137,19 @@ fn attach_session(
             ) {
                 return Err(AttachError::Protocol(error.to_string()));
             }
-            if text.is_empty() {
+            if text.is_empty()
+                && !matches!(
+                    restart_cwd_gate.as_ref(),
+                    Some(RestartCwdGate::ReloadRequired)
+                )
+            {
                 stream_region.show_prompt();
                 stream_region
                     .render_into(&mut std::io::stdout(), attach_terminal_width())
                     .map_err(|error| AttachError::Protocol(error.to_string()))?;
                 continue;
             }
-            match restart_cwd_input(&text, restart_cwd_decision.as_ref()) {
+            match restart_cwd_input(&text, restart_cwd_gate.as_ref()) {
                 RestartCwdInput::Resolve(decision) => {
                     command_sequence += 1;
                     let command_id = format!("attach_{}_{}", std::process::id(), command_sequence);
@@ -1144,9 +1173,68 @@ fn attach_session(
                         .map_err(|error| AttachError::Protocol(error.to_string()))?;
                     continue;
                 }
+                RestartCwdInput::Retry => {
+                    close_dots();
+                    match restore_restart_cwd_gate(
+                        host,
+                        &session_id,
+                        &mut restart_cwd_gate,
+                        &mut stream_region,
+                    ) {
+                        RestartCwdReload::ChoicesLoaded => {
+                            println!("{}", dim_line("Directory choices reloaded."));
+                        }
+                        RestartCwdReload::NoLongerPending => {
+                            println!(
+                                "{}",
+                                dim_line("The working-directory choice is no longer pending.")
+                            );
+                        }
+                        RestartCwdReload::Unavailable => {
+                            println!(
+                                "{}",
+                                guidance_card(
+                                    "Directory choices still unavailable",
+                                    "Nothing was sent. The Host's current choices could not be loaded yet.",
+                                    "Press Enter to retry, choose `1` to retry, or choose `2` to detach safely.",
+                                )
+                            );
+                        }
+                    }
+                    stream_region.show_prompt();
+                    stream_region
+                        .render_into(&mut std::io::stdout(), attach_terminal_width())
+                        .map_err(|error| AttachError::Protocol(error.to_string()))?;
+                    continue;
+                }
+                RestartCwdInput::Detach => {
+                    close_dots();
+                    println!(
+                        "{}",
+                        guidance_card(
+                            "Detached safely",
+                            "No directory choice or message was sent. The session remains owned by the Host.",
+                            "Run `timem attach` whenever you are ready to load the choices again.",
+                        )
+                    );
+                    return Ok(());
+                }
                 RestartCwdInput::Invalid => {
                     close_dots();
-                    println!("{}", invalid_restart_choice_card(&text));
+                    let card = match restart_cwd_gate.as_ref() {
+                        Some(RestartCwdGate::Decision(decision)) => {
+                            let available = decision
+                                .get("session_cwd_available")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                            invalid_restart_choice_card(&text, available)
+                        }
+                        Some(RestartCwdGate::ReloadRequired) => {
+                            invalid_restart_recovery_input_card(&text)
+                        }
+                        None => unreachable!("restart input cannot be invalid without a gate"),
+                    };
+                    println!("{card}");
                     stream_region.show_prompt();
                     stream_region
                         .render_into(&mut std::io::stdout(), attach_terminal_width())
@@ -1253,7 +1341,7 @@ fn attach_session(
                     session,
                     &mut turn_views,
                     &mut pending_decisions,
-                    &mut restart_cwd_decision,
+                    &mut restart_cwd_gate,
                     &mut stream_region,
                 ) {
                     return Ok(());
@@ -1305,29 +1393,59 @@ fn attach_session(
     }
 }
 
-fn fetch_restart_cwd_decision(host: &HostEndpoint, session_id: &str) -> Option<Value> {
-    http_get_json(host.port, ATTACH_PATH, host.token.as_deref(), 256 * 1024)
-        .ok()?
-        .get("sessions")?
-        .as_array()?
-        .iter()
-        .find(|entry| entry.get("session_id").and_then(Value::as_str) == Some(session_id))?
+fn fetch_restart_cwd_decision(host: &HostEndpoint, session_id: &str) -> Result<Option<Value>, ()> {
+    let payload =
+        http_get_json(host.port, ATTACH_PATH, host.token.as_deref(), 256 * 1024).map_err(|_| ())?;
+    let session = payload
+        .get("sessions")
+        .and_then(Value::as_array)
+        .and_then(|sessions| {
+            sessions
+                .iter()
+                .find(|entry| entry.get("session_id").and_then(Value::as_str) == Some(session_id))
+        })
+        .ok_or(())?;
+    Ok(session
         .get("restart_cwd_decision")
         .filter(|decision| !decision.is_null())
-        .cloned()
+        .cloned())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RestartCwdReload {
+    ChoicesLoaded,
+    NoLongerPending,
+    Unavailable,
 }
 
 fn restore_restart_cwd_gate(
     host: &HostEndpoint,
     session_id: &str,
-    restart_cwd_decision: &mut Option<Value>,
+    restart_cwd_gate: &mut Option<RestartCwdGate>,
     stream_region: &mut AttachStreamRegion,
-) -> bool {
-    let Some(decision) = fetch_restart_cwd_decision(host, session_id) else {
-        return false;
-    };
-    set_restart_cwd_decision(restart_cwd_decision, stream_region, Some(decision));
-    true
+) -> RestartCwdReload {
+    match fetch_restart_cwd_decision(host, session_id) {
+        Ok(Some(decision)) => {
+            set_restart_cwd_gate(
+                restart_cwd_gate,
+                stream_region,
+                Some(RestartCwdGate::Decision(decision)),
+            );
+            RestartCwdReload::ChoicesLoaded
+        }
+        Ok(None) => {
+            set_restart_cwd_gate(restart_cwd_gate, stream_region, None);
+            RestartCwdReload::NoLongerPending
+        }
+        Err(()) => {
+            set_restart_cwd_gate(
+                restart_cwd_gate,
+                stream_region,
+                Some(RestartCwdGate::ReloadRequired),
+            );
+            RestartCwdReload::Unavailable
+        }
+    }
 }
 
 #[allow(clippy::type_complexity)]
@@ -1337,7 +1455,7 @@ fn handle_wire_event(
     session: &AttachSession,
     turn_views: &mut AttachTurnViews,
     pending_decisions: &mut Vec<PendingDecision>,
-    restart_cwd_decision: &mut Option<Value>,
+    restart_cwd_gate: &mut Option<RestartCwdGate>,
     stream_region: &mut AttachStreamRegion,
 ) -> bool {
     let session_id = session.session_id.as_str();
@@ -1357,7 +1475,7 @@ fn handle_wire_event(
                 session,
                 turn_views,
                 pending_decisions,
-                restart_cwd_decision,
+                restart_cwd_gate,
                 stream_region,
             )
         }
@@ -1430,25 +1548,11 @@ fn handle_wire_event(
                     .and_then(Value::as_str)
                     .unwrap_or("unknown");
                 println!("{}", rejected_command_card(error));
-                if error == "session_restart_cwd_decision_required"
-                    && restart_cwd_decision.is_none()
-                    && !restore_restart_cwd_gate(
-                        host,
-                        session_id,
-                        restart_cwd_decision,
-                        stream_region,
-                    )
-                {
-                    println!(
-                        "{}",
-                        guidance_card(
-                            "Working-directory choice required",
-                            "The authoritative choice could not be reloaded.",
-                            "Reconnect after checking the session in Timem Web.",
-                        )
-                    );
+                if error == "session_restart_cwd_decision_required" && restart_cwd_gate.is_none() {
+                    let _ =
+                        restore_restart_cwd_gate(host, session_id, restart_cwd_gate, stream_region);
                 }
-                if restart_cwd_decision.is_some() {
+                if restart_cwd_gate.is_some() {
                     stream_region.show_prompt();
                 }
             }
@@ -1464,20 +1568,10 @@ fn handle_wire_event(
             if !error.is_empty() {
                 println!("{}", host_error_card(error));
             }
-            if error == "session_restart_cwd_decision_required"
-                && restart_cwd_decision.is_none()
-                && !restore_restart_cwd_gate(host, session_id, restart_cwd_decision, stream_region)
-            {
-                println!(
-                    "{}",
-                    guidance_card(
-                        "Working-directory choice required",
-                        "The authoritative choice could not be reloaded.",
-                        "Reconnect after checking the session in Timem Web.",
-                    )
-                );
+            if error == "session_restart_cwd_decision_required" && restart_cwd_gate.is_none() {
+                let _ = restore_restart_cwd_gate(host, session_id, restart_cwd_gate, stream_region);
             }
-            if restart_cwd_decision.is_some() {
+            if restart_cwd_gate.is_some() {
                 stream_region.show_prompt();
             }
             true
@@ -1542,7 +1636,7 @@ fn handle_wire_event_inner(
     session: &AttachSession,
     turn_views: &mut AttachTurnViews,
     pending_decisions: &mut Vec<PendingDecision>,
-    restart_cwd_decision: &mut Option<Value>,
+    restart_cwd_gate: &mut Option<RestartCwdGate>,
     stream_region: &mut AttachStreamRegion,
 ) -> bool {
     let session_id = session.session_id.as_str();
@@ -1567,11 +1661,12 @@ fn handle_wire_event_inner(
             stream_region.set_active_turn(active_turn_id.map(str::to_string));
             close_dots();
             println!("{}", connected_intro(session, working));
-            let decision = target
+            let gate = target
                 .get("restart_cwd_decision")
                 .filter(|decision| !decision.is_null())
-                .cloned();
-            set_restart_cwd_decision(restart_cwd_decision, stream_region, decision);
+                .cloned()
+                .map(RestartCwdGate::Decision);
+            set_restart_cwd_gate(restart_cwd_gate, stream_region, gate);
             if let Some(turns) = target.get("turns").and_then(Value::as_array) {
                 if let Some(orientation_turn) =
                     attach_snapshot_orientation_turn(turns, active_turn_id)
@@ -1597,9 +1692,9 @@ fn handle_wire_event_inner(
                 .and_then(|s| s.get("session_id"))
                 .and_then(Value::as_str)
                 == Some(session_id)
-                && restart_cwd_decision.is_some()
+                && restart_cwd_gate.is_some()
             {
-                set_restart_cwd_decision(restart_cwd_decision, stream_region, None);
+                set_restart_cwd_gate(restart_cwd_gate, stream_region, None);
                 println!("{}", dim_line("Working directory updated."));
                 stream_region.show_prompt();
             }
@@ -2280,7 +2375,7 @@ mod tests {
         region.show_prompt();
         assert!(region.content().contains("attach"));
 
-        region.set_restart_cwd_decision(Some(restart_cwd_fixture(false)));
+        region.set_restart_cwd_gate(Some(RestartCwdGate::Decision(restart_cwd_fixture(false))));
         region.show_prompt();
         let gated = region.content();
         assert!(gated.contains("Choose the working directory"));
@@ -2290,7 +2385,7 @@ mod tests {
         assert!(gated.contains("choice ❯❯"));
         assert!(!gated.contains("attach ❯❯"));
 
-        region.set_restart_cwd_decision(None);
+        region.set_restart_cwd_gate(None);
         region.show_prompt();
         assert!(region.content().contains("attach"));
         assert!(!region.content().contains("Choose the working directory"));
@@ -2299,7 +2394,7 @@ mod tests {
     #[test]
     fn restart_cwd_gate_clear_rows_use_the_rendered_choice_card() {
         let mut region = AttachStreamRegion::new(ShellUiMode::Stream, None);
-        region.set_restart_cwd_decision(Some(restart_cwd_fixture(true)));
+        region.set_restart_cwd_gate(Some(RestartCwdGate::Decision(restart_cwd_fixture(true))));
         region.show_prompt();
         let prompt = region.visible_prompt_text();
         let expected_rows = region.rendered_row_count(24);
@@ -2371,45 +2466,103 @@ mod tests {
     }
 
     #[test]
-    fn restart_cwd_gate_accepts_only_available_authoritative_choices() {
-        let available = json!({"session_cwd_available": true});
+    fn restart_cwd_recovery_gate_is_actionable_and_blocks_unrelated_input() {
+        let recovery = RestartCwdGate::ReloadRequired;
         assert_eq!(
-            restart_cwd_input("1", Some(&available)),
-            RestartCwdInput::Resolve("keep_session")
+            restart_cwd_input("", Some(&recovery)),
+            RestartCwdInput::Retry
         );
         assert_eq!(
-            restart_cwd_input("!k", Some(&available)),
-            RestartCwdInput::Resolve("keep_session")
+            restart_cwd_input("1", Some(&recovery)),
+            RestartCwdInput::Retry
         );
         assert_eq!(
-            restart_cwd_input("2", Some(&available)),
-            RestartCwdInput::Resolve("use_runtime")
+            restart_cwd_input("!retry", Some(&recovery)),
+            RestartCwdInput::Retry
         );
         assert_eq!(
-            restart_cwd_input("!r", Some(&available)),
-            RestartCwdInput::Resolve("use_runtime")
+            restart_cwd_input("2", Some(&recovery)),
+            RestartCwdInput::Detach
         );
         assert_eq!(
-            restart_cwd_input("send this", Some(&available)),
+            restart_cwd_input("!q", Some(&recovery)),
+            RestartCwdInput::Detach
+        );
+        assert_eq!(
+            restart_cwd_input("send this message", Some(&recovery)),
             RestartCwdInput::Invalid
         );
         assert_eq!(
-            restart_cwd_input("3", Some(&available)),
+            restart_cwd_input("!c", Some(&recovery)),
+            RestartCwdInput::Invalid
+        );
+    }
+
+    #[test]
+    fn restart_cwd_recovery_prompt_switches_back_to_authoritative_choices() {
+        let mut region = AttachStreamRegion::new(ShellUiMode::Stream, None);
+        region.set_restart_cwd_gate(Some(RestartCwdGate::ReloadRequired));
+        region.show_prompt();
+        let recovery = region.content();
+        let recovery_plain = attach_strip_ansi(&recovery);
+        assert!(recovery_plain.contains("Directory choices unavailable"));
+        assert!(recovery_plain.contains("1  Retry loading choices"));
+        assert!(recovery_plain.contains("2  Detach for now"));
+        assert!(recovery_plain.contains("recovery ❯❯"));
+        assert!(!recovery_plain.contains("attach ❯❯"));
+
+        region.set_restart_cwd_gate(Some(RestartCwdGate::Decision(restart_cwd_fixture(true))));
+        let choices = region.content();
+        let choices_plain = attach_strip_ansi(&choices);
+        assert!(choices_plain.contains("Choose the working directory"));
+        assert!(choices_plain.contains("choice ❯❯"));
+        assert!(!choices_plain.contains("Directory choices unavailable"));
+        assert!(!choices_plain.contains("attach ❯❯"));
+    }
+
+    #[test]
+    fn restart_cwd_gate_accepts_only_available_authoritative_choices() {
+        let available = json!({"session_cwd_available": true});
+        assert_eq!(
+            restart_cwd_input("1", Some(&RestartCwdGate::Decision(available.clone()))),
+            RestartCwdInput::Resolve("keep_session")
+        );
+        assert_eq!(
+            restart_cwd_input("!k", Some(&RestartCwdGate::Decision(available.clone()))),
+            RestartCwdInput::Resolve("keep_session")
+        );
+        assert_eq!(
+            restart_cwd_input("2", Some(&RestartCwdGate::Decision(available.clone()))),
+            RestartCwdInput::Resolve("use_runtime")
+        );
+        assert_eq!(
+            restart_cwd_input("!r", Some(&RestartCwdGate::Decision(available.clone()))),
+            RestartCwdInput::Resolve("use_runtime")
+        );
+        assert_eq!(
+            restart_cwd_input(
+                "send this",
+                Some(&RestartCwdGate::Decision(available.clone()))
+            ),
+            RestartCwdInput::Invalid
+        );
+        assert_eq!(
+            restart_cwd_input("3", Some(&RestartCwdGate::Decision(available.clone()))),
             RestartCwdInput::Invalid
         );
         assert_eq!(restart_cwd_input("1", None), RestartCwdInput::NotPending);
 
         let unavailable = json!({"session_cwd_available": false});
         assert_eq!(
-            restart_cwd_input("1", Some(&unavailable)),
+            restart_cwd_input("1", Some(&RestartCwdGate::Decision(unavailable.clone()))),
             RestartCwdInput::Invalid
         );
         assert_eq!(
-            restart_cwd_input("!k", Some(&unavailable)),
+            restart_cwd_input("!k", Some(&RestartCwdGate::Decision(unavailable.clone()))),
             RestartCwdInput::Invalid
         );
         assert_eq!(
-            restart_cwd_input("2", Some(&unavailable)),
+            restart_cwd_input("2", Some(&RestartCwdGate::Decision(unavailable.clone()))),
             RestartCwdInput::Resolve("use_runtime")
         );
     }
