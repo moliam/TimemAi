@@ -550,11 +550,11 @@ async function main() {
       host.setSession(updated);
       host.send({ type: "hello", snapshot: makeSnapshot(updated) });
       if (status === "running") {
-        await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-dot') && !document.querySelector('.stream-tool-status')?.textContent`), "running must use dot without redundant text");
+        await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-dot') && !document.querySelector('.tool-failure-icon')`), "running must use dot without a terminal icon");
       } else if (status === "background_running") {
         await waitFor(() => contains(".stream-tool-background", "(bg)"), `${status}: status not delivered`);
       } else {
-        await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-status-slot') && !document.querySelector('.stream-tool-status')?.textContent && document.querySelector('.stream-tool-head > b') === document.querySelector('.stream-tool-head')?.firstElementChild`), "completed tool must remove its visible marker and shift left");
+        await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-status-slot') && !document.querySelector('.tool-failure-icon') && document.querySelector('.stream-tool-head > b') === document.querySelector('.stream-tool-head')?.firstElementChild`), "completed tool must remove its running marker and keep the native tool icon first");
       }
       assert(await browser.evaluate(`window.actionRow === document.querySelector('.stream-tool-row') && window.actionCommand === document.querySelector('.stream-tool-command') && window.actionHead === document.querySelector('.stream-tool-head')`), `${status}: action DOM remounted`);
       assert(await browser.evaluate(`document.querySelectorAll('.stream-tool-row').length === 1`), "status update duplicated action");
@@ -569,7 +569,7 @@ async function main() {
         })()`), `${status}: running dot must stay centered before the tool name`);
       }
     }
-    await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-status-slot') && !document.querySelector('.stream-tool-head')?.textContent.includes('✓')`), "completed marker remained visible");
+    await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-status-slot') && !document.querySelector('.tool-failure-icon') && !document.querySelector('.stream-tool-head')?.textContent.includes('✓')`), "completed tool did not settle to its native icon");
     await sleep(700);
     const completionGeometry = await browser.evaluate(`({expanded:!!document.querySelector('.stream-tool-fold.expanded'),height:document.querySelector('.stream-tool-row').getBoundingClientRect().height,before:window.toolHeight,merged:!!document.querySelector('.stream-tool-merged-item.merged'),head:document.querySelector('.stream-tool-head').getBoundingClientRect().height,status:document.querySelector('.stream-tool-status-slot')?.getBoundingClientRect().height ?? 0,beforeGeometry:window.toolGeometry})`);
     assert(completionGeometry.expanded && Math.abs(completionGeometry.height - completionGeometry.before) < 1 && !completionGeometry.merged, "completion changed user expansion or geometry before AI reply: "+JSON.stringify(completionGeometry));
@@ -610,7 +610,7 @@ async function main() {
     serialFinish.payload.payload.action_id = "serial-b";
     const serialDone = { ...serial, turns: serial.turns.map(t => ({ ...t, events: [...actionEvents, serialStart, serialFinish] })) };
     host.setSession(serialDone); host.send({ type: "hello", snapshot: makeSnapshot(serialDone) });
-    await waitFor(() => contains(".stream-tool-status", "✗"), "serial B finish missing");
+    await waitFor(() => browser.evaluate(`document.querySelectorAll('.stream-tool-row .tool-failure-icon .lucide-circle-x').length===1 && !document.querySelector('.stream-tool-status')`), "serial B must use one CircleX without an extra verdict");
     assert(await browser.evaluate(`document.querySelectorAll('.stream-tool-merged-item.merged').length === 1`), "B completion must not fold B");
     await setRound(actionEvents, "Stable thought");
     await browser.evaluate(`document.querySelector('.stream-tool-toggle').click()`);
@@ -748,7 +748,7 @@ async function main() {
           assert(await browser.evaluate(`document.querySelector('.stream-tool-dot').getAnimations().length === 0`), `${name}/${status}: running dot must stay static without pulsing`);
         }
         if (status === "running" || status === "background_running") {
-          assert(await browser.evaluate(`![...document.querySelectorAll('.stream-tool-status')].some(node => /running/i.test(node.textContent)) && !!document.querySelector('.stream-tool-status-slot[aria-label]')`), "running text must be omitted visually but retained accessibly");
+          assert(await browser.evaluate(`!document.querySelector('.tool-failure-icon') && !!document.querySelector('.stream-tool-status-slot[aria-label]')`), "running state must be represented only by the accessible dot slot");
         }
       }
     }
@@ -1012,12 +1012,12 @@ async function main() {
     await browser.evaluate(`localStorage.setItem("timem-web-tool-result-status-v1", "false"); window.dispatchEvent(new StorageEvent("storage", {key:"timem-web-tool-result-status-v1"}));`);
     // Collapsed groups now show a bare xN count (no result verdicts).
     await waitFor(() => contains(".stream-tool-run-toggle", "x2"), "neutral folded count missing");
-    assert(await browser.evaluate(`[...document.querySelectorAll('.stream-tool-status')].every(n => n.textContent === '已完成' && n.getAttribute('aria-label') === '已完成')`), "neutral rows leaked success/failure visually or accessibly");
+    assert(await browser.evaluate(`document.querySelectorAll('.stream-tool-status').length===0 && document.querySelectorAll('.tool-failure-icon .lucide-circle-x').length===1`), "row identity icons changed when aggregate result labels were hidden");
     await browser.evaluate(`localStorage.setItem("timem-web-tool-result-status-v1", "true"); window.dispatchEvent(new StorageEvent("storage", {key:"timem-web-tool-result-status-v1"}));`);
     // Result preference updates mounted row status; the collapsed toggle
     // stays a bare xN count under the new collapsed-state contract.
     await waitFor(() => contains(".stream-tool-run-toggle", "x2"), "result preference did not update mounted rows");
-    assert(await browser.evaluate(`[...document.querySelectorAll(".stream-tool-status")].some(n => n.textContent === "✓" || n.textContent === "✗")`), "result preference did not restore row verdicts");
+    assert(await browser.evaluate(`document.querySelectorAll('.stream-tool-status').length===0 && document.querySelectorAll('.tool-failure-icon .lucide-circle-x').length===1`), "result preference introduced a redundant row verdict");
     console.log("PASS Chrome visual interaction: stable completed groups, selection protection, failure toggle, 390/768px overflow");
     console.log("PASS Chrome continuous stream: multi-round DOM stability, completed adjacency merge/reopen, terminal animation and interruption archive");
     console.log("PASS Chrome interim continuity: deduplicated deliveries, earlier thought/answers retained, reload and typography");

@@ -208,11 +208,11 @@ describe("readable memory and self-tool summaries", () => {
     [{ type: "params" }, { kind: "params" }, "tools.inspectRuntimeSettings"],
     [{ type: "cwd" }, { kind: "cwd" }, "tools.inspectCurrentDirectory"],
     [{ type: "cwd", new_path: "/work/project" }, { kind: "change_cwd", path: "/work/project" }, "tools.changeDirectoryTo"],
-  ] as const)("renders self_tool %j as a readable Info action", (input, expected, copyKey) => {
+  ] as const)("renders self_tool %j as a readable Eye action", (input, expected, copyKey) => {
     const operation = selfToolPresentation("self_tool", input)!;
     expect(operation).toEqual(expected);
     const html = renderToStaticMarkup(<><SelfToolIcon /><SelfToolInvocation operation={operation} /></>);
-    expect(html).toContain("lucide-info");
+    expect(html).toContain("lucide-eye");
     expect(html).toContain(t(copyKey));
     if (operation.kind === "change_cwd") expect(html).toContain("<code>/work/project</code>");
     expect(html).not.toContain('type=&quot;');

@@ -49,6 +49,33 @@ describe("System settings UI contract", () => {
     expect(mainSource).not.toContain('t("beta.instructionPresent")');
   });
 
+  it("offers the exact Host-backed context compression thresholds with a 90% default", () => {
+    expect(mainSource).toContain("([80, 85, 90, 95, 100] as const)");
+    expect(mainSource).toContain(
+      'type: "system_context_compress_threshold_update"',
+    );
+    expect(mainSource).toContain(
+      "server?.mem?.context_compress_threshold_percent ?? 90",
+    );
+    expect(protocolSource).toContain(
+      "export type ContextCompressThresholdPercent = 80 | 85 | 90 | 95 | 100",
+    );
+    expect(protocolSource).toContain(
+      'type: "system_context_compress_threshold_update";',
+    );
+    expect(protocolSource).toContain(
+      "context_compress_threshold_percent: ContextCompressThresholdPercent",
+    );
+    expect(zh.system.contextCompressThresholdTitle).toBe("上下文压缩阈值");
+    expect(zh.system.contextCompressThresholdDesc).toContain("当前 MEM 保存");
+    expect(zh.system.contextCompressThresholdDesc).toContain("下一次模型请求");
+    expect(en.system.contextCompressThresholdTitle).toBe(
+      "Context compression threshold",
+    );
+    expect(en.system.contextCompressThresholdDesc).toContain("current MEM");
+    expect(en.system.contextCompressThresholdDesc).toContain("next model request");
+  });
+
   it("places answer streaming in formal System settings before the Beta subsection", () => {
     expect(zh.system.streamUiTitle).toBe("即时显示回答");
     expect(zh.system.streamUiDesc).toBe("回答生成过程中即可查看内容。");

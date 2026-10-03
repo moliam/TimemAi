@@ -391,7 +391,7 @@ fn stream_tool_action_name(action: &str) -> String {
         "memmgr" => "Memory".to_string(),
         "memo" => "Work memo".to_string(),
         "self_tool" => "Runtime info".to_string(),
-        "context_compress" => "Compact context".to_string(),
+        "context_compress" => "Compress context".to_string(),
         other => other
             .split(['_', '.'])
             .filter(|part| !part.is_empty())

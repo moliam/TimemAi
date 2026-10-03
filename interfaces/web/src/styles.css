@@ -5782,7 +5782,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
 
 
 /* Structured readfile previews share one compact presentation in both modes. */
-.file-tool-icon, .bash-edit-icon, .memory-search-icon, .memory-tool-icon, .self-tool-icon { display: inline-flex; align-items: center; vertical-align: middle; }
+.file-tool-icon, .bash-edit-icon, .memory-search-icon, .memory-tool-icon, .self-tool-icon, .tool-failure-icon { display: inline-flex; align-items: center; vertical-align: middle; }
 .file-tool-preview { min-width: 0; display: flex; align-items: center; gap: 10px; color: var(--text-secondary, #a3a3a3); font-family: var(--agent-other-font), var(--agent-chinese-font), sans-serif; font-size: 11px; line-height: 1.5; }
 .tool-activity .file-tool-preview { grid-column: 3; width: 100%; }
 .stream-tool-head > .file-tool-preview { flex: 1; }
@@ -5809,7 +5809,8 @@ body.workspace-modal-open .app-shell { user-select: none; }
 }
 
 /* System settings: formal controls first, followed by a distinct Beta subsection. */
-.system-tool-result-options { grid-template-columns: repeat(5, minmax(0, 1fr)) !important; margin-top: 14px; }
+.system-tool-result-options,
+.system-context-compress-options { grid-template-columns: repeat(5, minmax(0, 1fr)) !important; margin-top: 14px; }
 .system-feature-card { background: #1b201e; }
 :root[data-theme="light"] .system-feature-card { background: #fff; }
 .system-setting-status { display: block; margin-top: 10px; color: #75847e; font-size: 10px; }
@@ -5820,7 +5821,8 @@ body.workspace-modal-open .app-shell { user-select: none; }
 :root[data-theme="light"] .system-subsection-heading p { color: #65766f; }
 :root[data-theme="light"] .system-subsection-heading strong { color: #33473f; }
 @media (max-width: 620px) {
-  .system-tool-result-options { grid-template-columns: repeat(5, minmax(42px, 1fr)) !important; overflow-x: auto; }
+  .system-tool-result-options,
+  .system-context-compress-options { grid-template-columns: repeat(5, minmax(42px, 1fr)) !important; overflow-x: auto; }
 }
 
 /* Tool rows are deliberately narrower than answer prose. Keep the left edge
@@ -5864,26 +5866,22 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .memory-search-preview code,
 .self-tool-preview code { font-family: inherit; }
 
-/* Running rows alone own a leading execution dot. Completed rows omit the
-   marker/status grid item entirely, so identity shifts all the way left. */
+/* Running rows alone own a leading execution dot. Every settled row uses one
+   identity cell: its native tool icon on success, or CircleX on failure. */
 .tool-activity summary,
 .tool-activity-static { grid-template-columns: max-content minmax(0, 1fr) max-content; }
 .tool-activity.running summary,
-.tool-activity.running.tool-activity-static,
-.tool-activity.terminal-status summary,
-.tool-activity.terminal-status.tool-activity-static { grid-template-columns: 14px max-content minmax(0, 1fr) max-content; }
+.tool-activity.running.tool-activity-static { grid-template-columns: 14px max-content minmax(0, 1fr) max-content; }
 .tool-activity-running-marker { width: 14px; height: 17px; display: inline-flex; align-items: center; justify-content: center; }
 .tool-activity-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: #f1c56f; }
+.tool-failure-icon { color: #d08181; }
 .tool-activity-timing { min-width: 0; display: inline-flex; align-items: center; justify-self: end; gap: 6px; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.tool-activity.completed .tool-activity-timing { grid-column: 3; }
-.tool-activity.running .tool-activity-timing,
-.tool-activity.terminal-status .tool-activity-timing { grid-column: 4; }
-.tool-activity.completed .tool-activity-command,
-.tool-activity.completed :is(.file-tool-preview, .bash-edit-preview, .memory-search-preview, .self-tool-preview) { grid-column: 2; }
+.tool-activity.settled .tool-activity-timing { grid-column: 3; }
+.tool-activity.running .tool-activity-timing { grid-column: 4; }
+.tool-activity.settled .tool-activity-command,
+.tool-activity.settled :is(.file-tool-preview, .bash-edit-preview, .memory-search-preview, .self-tool-preview) { grid-column: 2; }
 .tool-activity.running .tool-activity-command,
-.tool-activity.terminal-status .tool-activity-command,
-.tool-activity.running :is(.file-tool-preview, .bash-edit-preview, .memory-search-preview, .self-tool-preview),
-.tool-activity.terminal-status :is(.file-tool-preview, .bash-edit-preview, .memory-search-preview, .self-tool-preview) { grid-column: 3; }
+.tool-activity.running :is(.file-tool-preview, .bash-edit-preview, .memory-search-preview, .self-tool-preview) { grid-column: 3; }
 .tool-activity.poll-activity .tool-activity-command { grid-column: 1 / -1; }
 
 /* Running metadata is intentionally quiet; settled content returns to the
@@ -5902,7 +5900,6 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .tool-activity.running .tool-invocation-preview { opacity: .68; color: inherit; }
 .stream-tool-row:not(.running) .tool-invocation-preview,
 .tool-activity.settled .tool-invocation-preview { opacity: .9; color: inherit; }
-.tool-activity.terminal-status .tool-activity-status { color: #d08181; }
 :root[data-theme="light"] .tool-activity-dot { background: #b07f2e; }
 :root[data-theme="light"] .stream-tool-row.running .stream-tool-head,
 :root[data-theme="light"] .stream-tool-row.running .stream-tool-head b,
@@ -5914,7 +5911,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
 :root[data-theme="light"] .tool-activity.settled,
 :root[data-theme="light"] .tool-activity.settled b,
 :root[data-theme="light"] .tool-activity.settled .tool-activity-timing { color: #293b43; }
-:root[data-theme="light"] .tool-activity.terminal-status .tool-activity-status { color: #a64f4f; }
+:root[data-theme="light"] .tool-failure-icon { color: #a64f4f; }
 
 /* System-owned notices are a half pixel larger without changing answer prose. */
 .system-notice,

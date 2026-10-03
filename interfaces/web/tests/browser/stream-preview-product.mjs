@@ -389,9 +389,9 @@ async function main() {
         write("HTTP early response");
         await new Promise(resolve => { release = resolve; });
         output = [{type:"message",content:[{type:"output_text",text:fullText}]},
-          {type:"function_call",id:"fc_read",call_id:"call_read",name:"readfile",arguments:JSON.stringify({path:"Cargo.toml",max_bytes:200})}];
+          {type:"function_call",id:"fc_read",call_id:"call_read",name:"readfile",arguments:JSON.stringify({path:"Cargo.toml",ender:{byte_nr:199}})}];
         res.write(`data: ${JSON.stringify({type:"response.function_call_arguments.delta",item_id:"fc_read",output_index:1,delta:'{"path":'})}\n\n`);
-        res.write(`data: ${JSON.stringify({type:"response.function_call_arguments.delta",item_id:"fc_read",output_index:1,delta:'"Cargo.toml","max_bytes":200}'})}\n\n`);
+        res.write(`data: ${JSON.stringify({type:"response.function_call_arguments.delta",item_id:"fc_read",output_index:1,delta:'"Cargo.toml","ender":{"byte_nr":199}}'})}\n\n`);
       } else {
         assert(body.includes("function_call_output") && body.includes("stream readfile acceptance fixture"), "tool result not returned to Responses input");
         await new Promise(resolve => { releaseFinal = resolve; });
@@ -417,12 +417,12 @@ async function main() {
       // streaming text stays previewable (only free_talk/final_answer text is
       // forwarded by the XML preview stream).
       const interactionXml = protocol === "xml" && scenario === "interaction";
-      write(protocol === "json" ? '{"status":"working","free_talk":"HTTP early response","working_still_action":[{"readfile":{"path":"Cargo.toml","max_bytes":200}}' : interactionXml ? '<ASSISTANT><free_talk>HTTP early response' : '<ASSISTANT><free_talk>HTTP early response</free_talk><actions><readfile><path>Cargo.toml</path><max_bytes>200</max_bytes>');
+      write(protocol === "json" ? '{"status":"working","free_talk":"HTTP early response","working_still_action":[{"readfile":{"path":"Cargo.toml","ender":{"byte_nr":199}}}' : interactionXml ? '<ASSISTANT><free_talk>HTTP early response' : '<ASSISTANT><free_talk>HTTP early response</free_talk><actions><readfile><path>Cargo.toml</path><ender><byte_nr>199</byte_nr></ender>');
       await new Promise(resolve => { release = resolve; });
       if (scenario === 'network') { res.destroy(); return; }
       if (scenario === 'invalid') write('</readfile></actions><invalid></ASSISTANT>');
-      else if (interactionXml) write('</free_talk><actions><readfile><path>Cargo.toml</path><max_bytes>200</max_bytes></readfile></actions></ASSISTANT>');
-      else if (scenario === "tools") write('</readfile><readfile><path>Cargo.toml</path><max_bytes>200</max_bytes></readfile><readfile><path>Cargo.toml</path><max_bytes>100</max_bytes></readfile></actions></ASSISTANT>');
+      else if (interactionXml) write('</free_talk><actions><readfile><path>Cargo.toml</path><ender><byte_nr>199</byte_nr></ender></readfile></actions></ASSISTANT>');
+      else if (scenario === "tools") write('</readfile><readfile><path>Cargo.toml</path><ender><byte_nr>199</byte_nr></ender></readfile><readfile><path>Cargo.toml</path><ender><byte_nr>99</byte_nr></ender></readfile></actions></ASSISTANT>');
       else write(protocol === "json" ? ']}' : '</readfile></actions></ASSISTANT>');
     } else {
       if (scenario === "normal" || scenario === "tools") await new Promise(resolve => { releaseFinal = resolve; });
@@ -551,6 +551,12 @@ async function main() {
       return;
     }
     await waitFor(()=>browser.evaluate(`document.querySelector('.turn-final-delivery')?.textContent.includes('HTTP final')`),"final answer absent",20000);
+    if (scenario === "normal") {
+      assert(!received.some(raw => {
+        const event = raw.type === "semantic_event" ? raw.event : raw;
+        return event.type === "core_topic" && event.event?.topic?.name === "core.model.repair";
+      }), "normal streaming fixture unexpectedly triggered protocol repair");
+    }
     if (scenario === "tools") {
       await waitFor(() => browser.evaluate(`!document.querySelector('button[aria-label="Cancel current turn"]')`), "terminal projection missing");
       assert(await browser.evaluate(`Array.from(document.querySelectorAll('.turn-assistant-heading')).some(e=>e.textContent.includes('Thought/Action'))`), "Thought/Action disappeared after final delivery");

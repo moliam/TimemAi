@@ -428,11 +428,11 @@ async function main() {
         const entry = document.querySelector('.turn-user-entry');
         const range = document.createRange();
         if (${JSON.stringify(mode)} === 'boundary') {
-          range.setStart(entry.querySelector('p').firstChild, 0);
+          range.setStart(entry.querySelector('.user-plain-text').firstChild, 0);
           range.setEnd(document.querySelector('.turn-assistant-frame'), 0);
         } else if (${JSON.stringify(mode)} === 'node') range.selectNode(entry);
         else if (${JSON.stringify(mode)} === 'text') {
-          const text = entry.querySelector('p').firstChild;
+          const text = entry.querySelector('.user-plain-text').firstChild;
           range.setStart(text, 0); range.setEnd(text, 4);
         } else range.selectNodeContents(entry);
         const selection = window.getSelection();

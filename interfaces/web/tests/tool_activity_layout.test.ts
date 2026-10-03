@@ -11,18 +11,35 @@ describe("tool activity row layout", () => {
     expect(activity).toContain('className="tool-activity-dot"');
     expect(activity).toContain('className="tool-activity-timing"');
     expect(activity).toContain('className="tool-activity-background">{t("tools.statusBg")}');
-    expect(activity).toContain(') : status !== "completed" ? (');
-    expect(activity).toContain('className="tool-activity-status"');
+    expect(activity).toContain('failed={isToolActivityFailed(status)}');
+    expect(activity).not.toContain('<ActionStatus');
     expect(activity).toMatch(/tool-activity-running-marker[\s\S]*<b>[\s\S]*tool-activity-command[\s\S]*tool-activity-timing/);
+  });
+
+
+  it("uses one identity icon cell for success and failure in ordinary and stream rows", () => {
+    const stream = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
+    const ordinary = source.slice(source.indexOf("function ToolActivity("), source.indexOf("function MemoIcon("));
+    const icon = source.slice(source.indexOf("function ToolActivityIcon("), source.indexOf("const StreamToolRow ="));
+    expect(icon).toContain('<CircleX size={14} aria-hidden="true" />');
+    expect(icon).toContain('className="tool-failure-icon"');
+    for (const section of [stream, ordinary]) {
+      expect(section).toContain('<ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} />');
+      expect(section).not.toContain('<ActionStatus');
+    }
+    expect(styles).toContain('.tool-activity.settled .tool-activity-timing { grid-column: 3; }');
+    expect(styles).toContain('.tool-activity.settled :is(.file-tool-preview, .bash-edit-preview, .memory-search-preview, .self-tool-preview) { grid-column: 2; }');
+    expect(styles).toContain('.tool-failure-icon { color: #d08181; }');
   });
 
   it("uses the whole row as disclosure without a persistent expand glyph", () => {
     const activity = source.slice(source.indexOf("function ToolActivity("), source.indexOf("function MemoIcon("));
     expect(activity).not.toContain('tool-activity-icon tool-activity-chevron');
     expect(source).toContain('className="tool-activity-group-icon tool-activity-chevron"');
-    expect(styles).toContain(".tool-activity.completed .tool-activity-command,");
+    expect(styles).toContain(".tool-activity.settled .tool-activity-command,");
     expect(styles).toContain("grid-template-columns: max-content minmax(0, 1fr) max-content;");
-    expect(styles).toContain("grid-template-columns: 14px max-content minmax(0, 1fr) max-content;");
+    expect(styles).toContain(".tool-activity.running.tool-activity-static { grid-template-columns: 14px max-content minmax(0, 1fr) max-content; }");
+    expect(styles).not.toContain(".tool-activity.terminal-status.tool-activity-static { grid-template-columns: 14px");
     expect(activity).toMatch(/tool-activity-running-marker[\s\S]*<b>[\s\S]*tool-activity-command/);
     expect(activity).toContain("event.currentTarget.contains(selection.anchorNode)");
   });
@@ -47,10 +64,10 @@ describe("tool activity row layout", () => {
     expect(source).not.toContain('summary.failedCount > 1');
   });
 
-  it("renders live wait-budget countdowns and clarifies timeout handoff", () => {
+  it("renders live wait-budget countdowns without a second terminal status label", () => {
     expect(source).toContain('className="tool-activity-countdown"');
     expect(source).toContain("formatRemainingDuration(remainingWaitMs)");
-    expect(source).toContain('t("tools.waitEndedRunning", { pid: activity.pid })');
+    expect(source).not.toContain('className="tool-activity-status"');
   });
 
 });
@@ -58,13 +75,15 @@ describe("tool activity row layout", () => {
 describe("stream tool status continuity", () => {
   it("keeps status, tool identity and command in order on a row-wide disclosure", () => {
     const row = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
-    expect(row).toMatch(/running \? \([\s\S]*className="stream-tool-status-slot"[\s\S]*className="stream-tool-dot"[\s\S]*status !== "completed" \? \([\s\S]*<ActionStatus[\s\S]*className="stream-tool-status"[\s\S]*<b>[\s\S]*stream-tool-command-preview/);
+    expect(row).toMatch(/running && \([\s\S]*className="stream-tool-status-slot"[\s\S]*className="stream-tool-dot"[\s\S]*<b><ToolActivityIcon[\s\S]*stream-tool-command-preview/);
+    expect(row).toContain('failed={isToolActivityFailed(status)}');
+    expect(row).not.toContain('<ActionStatus');
     expect(row).not.toContain("<ChevronRight");
     expect(row).toContain('role={hasExpandableDetail ? "button" : undefined}');
     expect(row).toContain('event.key !== "Enter" && event.key !== " "');
     expect(styles).toContain(".stream-tool-head.stream-tool-toggle:hover");
     expect(styles).toContain("min-width: 14px; height: 17px; line-height: 17px; align-self: center;");
-    expect(row).toContain(') : status !== "completed" ? (');
+    expect(row).not.toContain('status !== "completed"');
     expect(styles).toContain(".stream-tool-head { display: flex; align-items: center;");
     expect(row).toContain('className="stream-tool-background">(bg)');
     expect(styles).toContain(".stream-tool-background { color: #98afbc; opacity: .65; }");
@@ -132,15 +151,17 @@ it("bundles IBM Plex Mono locally and scopes it to all tool rendering", () => {
 });
 
 it("uses the structured run_bash edit summary in ordinary and stream rows", () => {
+  const icon = source.slice(source.indexOf("function ToolActivityIcon("), source.indexOf("const StreamToolRow ="));
   const stream = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
   const ordinary = source.slice(source.indexOf("function ToolActivity("), source.indexOf("function MemoIcon("));
   expect(source).toContain('MemorySearchInvocation');
   expect(source).toContain('SelfToolIcon');
   expect(source).toContain('SelfToolInvocation');
-  expect(stream).toContain('activity.run_bash_edit ? <RunBashEditIcon />');
+  expect(icon).toContain('if (activity.run_bash_edit) return <RunBashEditIcon />');
   expect(stream).toContain('<RunBashEditInvocation edit={activity.run_bash_edit} />');
-  expect(ordinary).toContain('activity.run_bash_edit ? <RunBashEditIcon />');
   expect(ordinary).toContain('<RunBashEditInvocation edit={activity.run_bash_edit} />');
+  for (const section of [stream, ordinary])
+    expect(section).toContain('<ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} />');
   expect(styles).toContain('.tool-activity .bash-edit-preview { grid-column: 3; width: 100%; }');
   expect(styles).toContain('.stream-tool-head > .bash-edit-preview { flex: 1; }');
 });
@@ -156,12 +177,15 @@ it("increases readable tool invocation summaries by half a pixel", () => {
 });
 
 it("uses structured memory and self-tool summaries in ordinary and stream rows", () => {
+  const icon = source.slice(source.indexOf("function ToolActivityIcon("), source.indexOf("const StreamToolRow ="));
   const stream = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
   const ordinary = source.slice(source.indexOf("function ToolActivity("), source.indexOf("function MemoIcon("));
+  expect(icon).toContain('if (activity.memory_search) return <MemorySearchIcon />');
+  expect(icon).toContain('if (activity.self_tool) return <SelfToolIcon />');
   for (const section of [stream, ordinary]) {
     expect(section).toContain('<MemorySearchInvocation search={activity.memory_search} />');
-    expect(section).toContain('<SelfToolIcon />');
     expect(section).toContain('<SelfToolInvocation operation={activity.self_tool} />');
+    expect(section).toContain('<ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} />');
   }
   expect(stream).toContain('!structuredInvocation ? toolInvocationPreview(activity) : ""');
   expect(ordinary).toContain('activity.tool_name === "sub_answer" || structuredInvocation ? undefined');

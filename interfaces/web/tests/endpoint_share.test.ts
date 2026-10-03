@@ -51,6 +51,12 @@ describe("endpoint share dialog", () => {
     expect(component).toContain("completedSynchronously ? () => {} : stop");
   });
 
+  it("uses the insecure-context-safe clipboard fallback for exported share content", () => {
+    expect(component).toContain('import { copyTextToClipboard } from "./clipboard_copy";');
+    expect(component).toContain("await copyTextToClipboard(exportData)");
+    expect(component).not.toContain("navigator.clipboard.writeText(exportData)");
+  });
+
   it("renders export content as copy-only wrapped output and keeps import uncontrolled", () => {
     expect(component).toContain('<output className="endpoint-share-code"');
     expect(component).toContain('<code>{exportData}</code>');
