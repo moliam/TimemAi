@@ -1,22 +1,22 @@
-use crate::response_protocol::{ParsedAction, ParsedContextCompact};
+use crate::response_protocol::{ParsedAction, ParsedContextCompress};
 use serde_json::Value;
 
-pub(crate) fn from_action(action: &ParsedAction) -> Result<ParsedContextCompact, String> {
+pub(crate) fn from_action(action: &ParsedAction) -> Result<ParsedContextCompress, String> {
     let input = action
         .raw_input
         .as_object()
-        .ok_or_else(|| "context_compact.input_must_be_object".to_string())?;
+        .ok_or_else(|| "context_compress.input_must_be_object".to_string())?;
     let discard_delta_ids = string_ids(input.get("discard"), "discard")?;
     let offload_delta_ids = string_ids(input.get("offload"), "offload")?;
     if discard_delta_ids.is_empty() && offload_delta_ids.is_empty() {
-        return Err("context_compact.discard_or_offload_required".to_string());
+        return Err("context_compress.discard_or_offload_required".to_string());
     }
     let summary = input
         .get("summary")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "context_compact.summary_required".to_string())?
+        .ok_or_else(|| "context_compress.summary_required".to_string())?
         .to_string();
     let mut delta_ids = discard_delta_ids.clone();
     for id in &offload_delta_ids {
@@ -24,7 +24,7 @@ pub(crate) fn from_action(action: &ParsedAction) -> Result<ParsedContextCompact,
             delta_ids.push(id.clone());
         }
     }
-    Ok(ParsedContextCompact {
+    Ok(ParsedContextCompress {
         call_id: action.call_id.clone(),
         discard_delta_ids,
         offload_delta_ids,
@@ -40,14 +40,14 @@ fn string_ids(value: Option<&Value>, field: &str) -> Result<Vec<String>, String>
     };
     let items = value
         .as_array()
-        .ok_or_else(|| format!("context_compact.{field}_must_be_array"))?;
+        .ok_or_else(|| format!("context_compress.{field}_must_be_array"))?;
     let mut ids = Vec::new();
     for (index, item) in items.iter().enumerate() {
         let id = item
             .as_str()
             .map(str::trim)
             .filter(|id| !id.is_empty())
-            .ok_or_else(|| format!("context_compact.{field}[{index}]_must_be_string"))?;
+            .ok_or_else(|| format!("context_compress.{field}[{index}]_must_be_string"))?;
         if !ids.iter().any(|known| known == id) {
             ids.push(id.to_string());
         }

@@ -30,7 +30,7 @@ use crate::session_groups::{
     load_session_groups, normalize_session_group_name, save_session_groups, SessionGroup,
     MAX_SESSION_GROUPS,
 };
-use crate::web_instance::{WebInstanceInfo, WebInstanceLease};
+use crate::web_instance::{WebInstanceInfo, WebInstanceLease, WebInstanceRegistration};
 use crate::worker_roles::{
     load_role_library, load_roles, normalize_group_name, normalize_role_fields,
     recover_role_library, role_library_path, roles_path_for_history, save_role_library, WorkerRole,
@@ -51,17 +51,17 @@ use agent_core::session_store::{
     SessionResumeNotice, SessionStore, StoredSession, StoredSessionProfile, StoredSessionState,
 };
 use agent_core::{
-    apply_runtime_config_value, combine_additional_contexts, context_compact_requested_topic_event,
-    create_memory_dir, default_memory_dir, load_workspace_dirs_from_path,
-    model_service_config_from_sources_allow_missing_api_key, resolve_memory_dir,
-    runtime_config_menu_report, validate_api_key, work_instruction_load_report,
+    apply_runtime_config_value, combine_additional_contexts,
+    context_compress_requested_topic_event, create_memory_dir, default_memory_dir,
+    load_workspace_dirs_from_path, model_service_config_from_sources_allow_missing_api_key,
+    resolve_memory_dir, runtime_config_menu_report, validate_api_key, work_instruction_load_report,
     work_instruction_load_request, work_instruction_mode_from_sources, AgentCore, BashApprovalMode,
     CoreSessionWorkerWorkspace, HostDecision, HostDecisionRequest, InterfacePreferences,
     ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind, RuntimeDataLayout,
     SessionToolRepo, ToolDetail, ToolSummary, TopicReply, TurnProjection, WorkInstructionLoadMode,
-    CORE_TOPIC_ACTION, CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE,
-    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST,
-    CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    CORE_TOPIC_ACTION, CORE_TOPIC_CONTEXT_COMPRESS, CORE_TOPIC_MODEL_REPAIR,
+    CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_TOOLGEN,
+    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use agent_core::{
     capability::CapabilityRegistry, rolling_file_store::RollingCapacity, self_tool::SelfToolPaths,
@@ -179,6 +179,7 @@ struct AppState {
     command_dedup: Arc<Mutex<CommandDedupCache>>,
     semantic_delivery: Arc<SemanticEventDelivery>,
     web_instance: Arc<Mutex<WebInstanceLease>>,
+    web_instance_registration: Arc<Mutex<Option<WebInstanceRegistration>>>,
     command_lanes: Arc<Mutex<HashMap<String, Arc<TicketCommandLane>>>>,
     command_global_barrier: Arc<RwLock<()>>,
     mem_epoch: Arc<RwLock<u64>>,
@@ -1230,7 +1231,7 @@ enum ClientCommand {
     SessionClearContext {
         session_id: String,
     },
-    SessionRequestContextCompact {
+    SessionRequestContextCompress {
         session_id: String,
     },
     SessionDelete {
@@ -1528,7 +1529,7 @@ impl ClientCommand {
             | Self::SessionApiKeyUpdate { session_id, .. }
             | Self::SessionStop { session_id }
             | Self::SessionClearContext { session_id }
-            | Self::SessionRequestContextCompact { session_id }
+            | Self::SessionRequestContextCompress { session_id }
             | Self::SessionDelete { session_id }
             | Self::ChatMessageDelete { session_id, .. }
             | Self::TurnSubmit { session_id, .. }
@@ -1739,6 +1740,7 @@ pub async fn run(
         command_dedup: Arc::new(Mutex::new(CommandDedupCache::default())),
         semantic_delivery: Arc::new(SemanticEventDelivery::new(events.clone())),
         web_instance: Arc::new(Mutex::new(web_instance)),
+        web_instance_registration: Arc::new(Mutex::new(None)),
         command_lanes: Arc::new(Mutex::new(HashMap::new())),
         command_global_barrier: Arc::new(RwLock::new(())),
         mem_epoch: Arc::new(RwLock::new(1)),
@@ -1789,6 +1791,9 @@ pub async fn run(
         launch.public_access,
         launch_parent,
     )?;
+    if let Err(error) = publish_web_instance_registration(&state) {
+        eprintln!("[timem_web_instance_registry_warning] {error}");
+    }
     if launch.public_access {
         if public_url.is_none() {
             println!(
@@ -2005,6 +2010,14 @@ fn write_prompt_context_snapshot(
 
 fn shutdown_web_runtime(state: &AppState) -> Result<(), String> {
     let mut first_error = None;
+    match state.web_instance_registration.lock() {
+        Ok(mut registration) => {
+            registration.take();
+        }
+        Err(_) => {
+            first_error.get_or_insert_with(|| "web_instance_registry_poisoned".to_string());
+        }
+    }
 
     match state.manager.lock() {
         Ok(mut manager) => {
@@ -2821,6 +2834,37 @@ fn publish_running_instance_info(
     })
 }
 
+fn publish_web_instance_registration(state: &AppState) -> Result<(), String> {
+    let memory_dir = current_mem_state(state)?.layout.memory_dir();
+    let info = state
+        .web_instance
+        .lock()
+        .map_err(|_| "web_instance_poisoned".to_string())?
+        .info()
+        .clone();
+    let registry_dir = agent_core::web_instance_registry_dir()?;
+    let registration = WebInstanceRegistration::publish(&registry_dir, &memory_dir, &info)?;
+    *state
+        .web_instance_registration
+        .lock()
+        .map_err(|_| "web_instance_registry_poisoned".to_string())? = Some(registration);
+    Ok(())
+}
+
+fn update_web_instance_registration(state: &AppState, memory_dir: &Path) {
+    let result = state
+        .web_instance_registration
+        .lock()
+        .map_err(|_| "web_instance_registry_poisoned".to_string())
+        .and_then(|mut registration| match registration.as_mut() {
+            Some(registration) => registration.update_memory_dir(memory_dir),
+            None => Ok(()),
+        });
+    if let Err(error) = result {
+        eprintln!("[timem_web_instance_registry_warning] {error}");
+    }
+}
+
 enum WebInstanceOpenOutcome {
     Owned(WebInstanceLease),
     Existing(WebInstanceInfo),
@@ -3463,8 +3507,8 @@ fn handle_command_with_id(
         ClientCommand::SessionClearContext { session_id } => {
             clear_session_prompt_context(state, &session_id)?;
         }
-        ClientCommand::SessionRequestContextCompact { session_id } => {
-            request_session_context_compact(state, &session_id)?;
+        ClientCommand::SessionRequestContextCompress { session_id } => {
+            request_session_context_compress(state, &session_id)?;
         }
         ClientCommand::SessionDelete { session_id } => {
             let worker_ids = session_worker_ids(state, &session_id)?;
@@ -3769,7 +3813,7 @@ fn handle_command_with_id(
                 };
                 let worker_roles =
                     resolve_worker_roles(state, &session_id, &role_ids, role_id.as_deref())?;
-                let must_queue = {
+                let (turn_in_progress, queue_nonempty) = {
                     let sessions = state
                         .sessions
                         .lock()
@@ -3777,9 +3821,12 @@ fn handle_command_with_id(
                     let session = sessions
                         .get(&session_id)
                         .ok_or_else(|| "session_not_found".to_string())?;
-                    current_turn_id(session).is_some() || !session.message_queue.is_empty()
+                    (
+                        current_turn_id(session).is_some(),
+                        !session.message_queue.is_empty(),
+                    )
                 };
-                if must_queue {
+                if turn_in_progress || (queue_nonempty && !resume_directly) {
                     if resume_directly {
                         return Err("resume_directly_requires_idle_session".to_string());
                     }
@@ -4919,6 +4966,8 @@ fn switch_mem_space(
             .map_err(|_| "web_instance_poisoned".to_string())?;
         *lease = next_web_instance;
     }
+    let switched_memory_dir = current_mem_state(state)?.layout.memory_dir();
+    update_web_instance_registration(state, &switched_memory_dir);
     if restore_stored_sessions(state)? == 0 {
         let _ = create_session(state, None, None, BTreeMap::new())?;
     }
@@ -7652,7 +7701,7 @@ fn restore_prompt_context_snapshot(state: &AppState, session_id: &str) -> Result
 /// Authoritative context reset: drops the worker's dynamic prompt context and
 /// the persisted snapshot so the next turn starts from the tool-owned system
 /// prompt only, exactly like a fresh runtime restart.
-fn request_session_context_compact(
+fn request_session_context_compress(
     state: &AppState,
     session_id: &str,
 ) -> Result<Option<WireEvent>, String> {
@@ -7686,11 +7735,11 @@ fn request_session_context_compact(
     };
     let mut idle_turn = None;
     if busy {
-        if !handle.queue_manual_context_compact()? {
+        if !handle.queue_manual_context_compress()? {
             return Err("manual_compact_queue_closed".to_string());
         }
     } else {
-        handle.request_manual_context_compact()?;
+        handle.request_manual_context_compress()?;
         idle_turn = Some(submit_turn_with_selected_attachments_and_kind(
             state,
             session_id,
@@ -7704,8 +7753,11 @@ fn request_session_context_compact(
     // Publish the "compacting..." notice only after its host turn exists so
     // the chat has a turn to attach the activity to; the completion notice
     // later supersedes it.
-    let notice =
-        context_compact_requested_topic_event(session_id, estimated_prompt_tokens, force_threshold);
+    let notice = context_compress_requested_topic_event(
+        session_id,
+        estimated_prompt_tokens,
+        force_threshold,
+    );
     let wire_payload = notice.wire_payload();
     let turn_ref = append_active_turn_event(state, session_id, "core_topic", wire_payload.clone());
     publish_core_semantic(
@@ -10516,8 +10568,8 @@ fn chat_history_kind_for_source(source: &str, payload: &Value) -> ChatHistoryEve
         if topic_name == CORE_TOPIC_MODEL_REPAIR {
             return ChatHistoryEventKind::Repair;
         }
-        if topic_name == "core.context_compact" {
-            return ChatHistoryEventKind::ContextCompact;
+        if topic_name == CORE_TOPIC_CONTEXT_COMPRESS {
+            return ChatHistoryEventKind::ContextCompress;
         }
         if topic_name == CORE_TOPIC_MODEL_RESPONSE {
             return ChatHistoryEventKind::Progress;
@@ -12214,10 +12266,10 @@ fn submit_unconsumed_supplement_handoff(
     session_id: &str,
     supplements: &[timem_session::UnconsumedSupplement],
 ) -> Result<WebTurn, String> {
-    let compact = supplements.iter().any(|item| item.manual_context_compact);
+    let compact = supplements.iter().any(|item| item.manual_context_compress);
     if compact {
-        primary_worker_handle(state, session_id)?.request_manual_context_compact()?;
-        if supplements.iter().all(|item| item.manual_context_compact) {
+        primary_worker_handle(state, session_id)?.request_manual_context_compress()?;
+        if supplements.iter().all(|item| item.manual_context_compress) {
             return submit_turn_with_selected_attachments_and_kind(
                 state,
                 session_id,
@@ -12231,7 +12283,7 @@ fn submit_unconsumed_supplement_handoff(
     }
     let text_supplements = supplements
         .iter()
-        .filter(|item| !item.manual_context_compact)
+        .filter(|item| !item.manual_context_compress)
         .cloned()
         .collect::<Vec<_>>();
     let supplements = text_supplements.as_slice();

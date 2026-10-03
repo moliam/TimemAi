@@ -106,7 +106,7 @@ Normal/background execution is part of the capability interface:
   stream is continuously drained into a bounded 1 MiB head-or-tail buffer.
   Core emits natural-language action evidence when a job starts or times out,
   one-time `RUNNING_JOB_UPDATE` prompt components when a tracked job exits, and
-  a `RUNNING JOB LIST` snapshot after large context compaction. A runtime
+  a `RUNNING JOB LIST` snapshot after large context compression. A runtime
   restart invalidates this tracking state: historical jobs are never recovered,
   adopted, or signalled from disk. The model can inspect or stop current jobs
   with ordinary `run_bash` commands such as `ps -p <pid>` or `kill <pid>`. The

@@ -116,7 +116,8 @@ pub enum ChatHistoryEventKind {
     Progress,
     Action,
     ActionResult,
-    ContextCompact,
+    #[serde(alias = "context_compact")]
+    ContextCompress,
     Repair,
     /// Legacy `core.sub_answer` records from before the tool was removed.
     /// Kept so existing raw history keeps deserializing; no new records.
@@ -133,7 +134,7 @@ fn temporary_event_time(record: &ChatHistoryRecord) -> Option<i64> {
             kind:
                 ChatHistoryEventKind::Action
                 | ChatHistoryEventKind::ActionResult
-                | ChatHistoryEventKind::ContextCompact
+                | ChatHistoryEventKind::ContextCompress
                 | ChatHistoryEventKind::Repair,
             ..
         } => Some(*created_at_ms),

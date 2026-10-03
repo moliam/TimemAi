@@ -1,13 +1,14 @@
 kind: tool
-id: context_compact
+id: context_compress
 binding_type: builtin
-binding_name: context_compact
+binding_name: context_compress
 summary: Compact selected dynamic prompt deltas while preserving an essential summary.
 prompt_synopsis: |
-  {"context_compact":{"discard":["pd_1"],"offload":["pd_2"],"summary":"Essential active state..."}}
+  {"context_compress":{"discard":["pd_1"],"offload":["pd_2"],"summary":"Essential active state..."}}
 description: |
-  Compaction can save prompt windows.
-  !!! By default, You MUST discard most deltas from context, and extract only useful info from them. You can also offload big deltas into scratch memory. Compaction should be ultra-dense, low-loss, and adhere strictly to the dimensions below (keep titles), based on old compaction(if any) and current context:
+  Compress current context to free context space. Well-designed context compression not only frees up context space, but also boosts work quality.
+  !!! By default, when context threshold warn is triggered, You MUST extract only useful info from them including previous compact summary and discard along-side content. You can also actively and promptly compact during work.
+  You can also offload big deltas into scratch memory if it is highly valuable. Compaction should be ultra-dense, low-loss, and adhere strictly to the dimensions below (keep titles), based on old compaction(if any) and current context:
   * **Design Blueprint**: Authoritative design or root-doc and settled interface contracts; important design rule corrected by user.
   * **Roadmap Coordinates**: High level work plan, active milestone and the current task item
   * **User Corrections**: user-clarified misconceptions, misguided approaches, prioritization, useful methodology, and working criteria, user mandated always-keep memory.
@@ -17,7 +18,7 @@ description: |
   * **Curr state**: curr work status, progress, artifacts, etc. Important: still running jobs, to-be cleaned temp target
   * **Next work**:  next planned action
 
-  When combined with other capability calls, `context_compact` must be the first
+  When combined with other capability calls, `context_compress` must be the first
   call. Later calls run only after compaction succeeds.
 prompt_input: |
   Use only runtime-provided dynamic delta ids. Provide at least one id in
@@ -39,7 +40,7 @@ input_schema: |
   }
 example_json: |
   {
-    "context_compact": {
+    "context_compress": {
       "discard": ["pd_1", "pd_3"],
       "offload": ["pd_2"],
       "summary": "The active task is ... Current progress ... Next steps ..."

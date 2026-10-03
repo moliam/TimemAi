@@ -162,7 +162,7 @@ directory on every supported platform.
   model, base URL, auth token/API key, thinking budget and custom headers are
   mapped to an Anthropic endpoint.
 Reasoning effort semantics: the configured reasoning effort applies only to
-critical model requests (currently the forced context-compaction round); ordinary
+critical model requests (currently the forced context-compression round); ordinary
 requests send thinking disabled (`thinking: disabled` / `enable_thinking=false`
 / `reasoning.effort=none` per protocol) to save latency and cost.
 
@@ -388,7 +388,7 @@ A direct setting change applies the new limit before reporting success. This kee
 large audit/history work off the listener-startup and chat-append paths. Temporary-data
 age cleanup covers:
 
-- raw-chat event kinds `action`, `action_result`, `context_compact`, and `repair`;
+- raw-chat event kinds `action`, `action_result`, `context_compress`, and `repair`;
 - finished shell-job records and their stdout/stderr/status files;
 - API audit events in `audit/api_audit.json` and its JSONL sidecar.
 

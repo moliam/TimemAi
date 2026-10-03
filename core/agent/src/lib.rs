@@ -37,8 +37,8 @@ use capability::CapabilityRegistry;
 pub mod config_edit;
 pub mod config_report;
 pub mod context;
-#[path = "../../../resources/capabilities/tools/context_compact.rs"]
-pub mod context_compact;
+#[path = "../../../resources/capabilities/tools/context_compress.rs"]
+pub mod context_compress;
 pub mod context_policy;
 pub mod data_layout;
 pub mod executor;
@@ -126,16 +126,17 @@ pub use context_policy::{
 };
 pub use data_layout::{
     create_memory_dir, default_data_root, default_memory_dir, layout_for_space, resolve_memory_dir,
-    workspace_config_file, RuntimeDataLayout,
+    web_instance_registry_dir, web_instance_registry_dir_from_default_memory,
+    workspace_config_file, RuntimeDataLayout, WebInstanceRegistryRecord,
 };
 pub use host::{
-    capability_negotiation_topic_event, context_compact_requested_topic_event,
-    context_compact_topic_event, core_initialized_topic_event,
+    capability_negotiation_topic_event, context_compress_requested_topic_event,
+    context_compress_topic_event, core_initialized_topic_event,
     core_initialized_topic_event_with_worker, normalize_user_supplements,
     normalize_user_supplements_with_context, resolve_topic_reply,
     running_shell_job_exit_topic_event, runtime_root_repair_help_topic_event,
     session_worker_default_display_name, toolgen_topic_event, topic_event_status_hint,
-    work_instruction_load_topic_event, CoreActionTopic, CoreContextCompactTopic,
+    work_instruction_load_topic_event, CoreActionTopic, CoreContextCompressTopic,
     CoreDynamicContextSummary, CoreGlobalWorkerStatus, CoreHostDecisionRequestTopic,
     CoreLifecycleEvent, CoreLifecycleTopic, CoreModelRepairTopic, CoreModelResponseTopic,
     CoreSessionState, CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopic,
@@ -144,7 +145,7 @@ pub use host::{
     NoopTurnUi, OutputExpansionRequest, OutputExpansionResolution, RoundLimitDecisionRequest,
     RoundLimitResolution, StoppedTurn, TopicReply, TopicReplyError, TurnInput, TurnOutcome,
     TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi, UserSupplement, CORE_TOPIC_ACTION,
-    CORE_TOPIC_CONTEXT_COMPACT, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST,
+    CORE_TOPIC_CONTEXT_COMPRESS, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST,
     CORE_TOPIC_MEMO, CORE_TOPIC_MODEL_CAPABILITY_NEGOTIATION, CORE_TOPIC_MODEL_REPAIR,
     CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
     CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TOOLGEN,
@@ -204,7 +205,7 @@ pub use reminder_config::{
 };
 pub use response_protocol::ResponseProtocolKind;
 use response_protocol::{
-    ActionGroupOrder, ParsedAction, ParsedActionGroup, ParsedContextCompact, ParsedEnvelope,
+    ActionGroupOrder, ParsedAction, ParsedActionGroup, ParsedContextCompress, ParsedEnvelope,
 };
 pub use retry_policy::{
     is_explicit_native_tools_unsupported, is_model_input_too_large_error,
@@ -377,7 +378,7 @@ fn role_for_prompt_type(prompt_type: &str, assistant_speaker_name: &str) -> Prom
         "llm_response"
         | "llm_response_raw_xml"
         | "llm_free_talk"
-        | "context_compaction_summary" => {
+        | "context_compression_summary" => {
             PromptComponentRole::assistant(assistant_speaker_name.to_string())
         }
         _ => PromptComponentRole::system(),
@@ -1851,13 +1852,13 @@ pub struct AgentCore {
     max_llm_input_tokens: u32,
     model_tool_result_bytes: usize,
     last_observed_prompt_tokens: u32,
-    context_compact_required: bool,
+    context_compress_required: bool,
     /// Set for a user-initiated compaction request: the next request carries
     /// the manual-compaction trailer wording instead of the forced-shrink one.
     manual_compact_trailer_pending: bool,
     /// Set when the runtime first crosses the forced-shrink threshold and
     /// injects the compaction request. The turn loop drains it into a
-    /// `core.context.compact` phase="requested" topic event for live UI.
+    /// `core.context.compress` phase="requested" topic event for live UI.
     pending_compact_request_notice: Option<(u32, u32)>,
     /// Consecutive successful threshold-triggered compactions whose resulting
     /// dynamic context still occupies more than 25% of the model input window.
@@ -1995,7 +1996,7 @@ impl AgentCore {
             max_llm_input_tokens: 100_000,
             model_tool_result_bytes,
             last_observed_prompt_tokens: 0,
-            context_compact_required: false,
+            context_compress_required: false,
             manual_compact_trailer_pending: false,
             pending_compact_request_notice: None,
             consecutive_poor_threshold_compactions: 0,
@@ -2099,7 +2100,7 @@ impl AgentCore {
             native_exchanges: self.native_exchanges.clone(),
             resolved_mode: ToolCallMode::Native,
             parallel_tool_calls: self.native_parallel_tool_calls,
-            tool_choice: if self.context_compact_required {
+            tool_choice: if self.context_compress_required {
                 NativeToolChoice::Required
             } else {
                 NativeToolChoice::Auto
@@ -2127,7 +2128,7 @@ impl AgentCore {
                 | "llm_response"
                 | "llm_response_raw_xml"
                 | "llm_free_talk"
-                | "context_compaction_summary"
+                | "context_compression_summary"
         )
     }
 
@@ -2156,11 +2157,11 @@ impl AgentCore {
     }
 
     pub fn reasoning_critical(&self) -> bool {
-        self.context_compact_required || self.reasoning_review_due
+        self.context_compress_required || self.reasoning_review_due
     }
 
     fn evaluate_periodic_reasoning_review(&mut self) {
-        if self.context_compact_required {
+        if self.context_compress_required {
             self.rounds_since_reasoning = 0;
             self.reasoning_review_due = false;
             return;
@@ -2761,7 +2762,7 @@ impl AgentCore {
         if !has_still_running
             && updates.is_empty()
             && runtime_info.is_none()
-            && !self.context_compact_required
+            && !self.context_compress_required
         {
             if let Some(trailer) = self.take_memo_deleted_trailer() {
                 let (body, response_trailer) =
@@ -2783,11 +2784,11 @@ impl AgentCore {
         // The manual wording persists across retries (like the threshold
         // wording) until the compaction succeeds: the context may not be over
         // the limit, so retries must not fall back to "Context is too long".
-        if self.context_compact_required {
+        if self.context_compress_required {
             if self.manual_compact_trailer_pending {
-                prompt.push_str(prompt_render::MANUAL_CONTEXT_COMPACT_TRAILER);
+                prompt.push_str(prompt_render::MANUAL_CONTEXT_COMPRESS_TRAILER);
             } else {
-                prompt.push_str(prompt_render::CONTEXT_COMPACT_REQUIRED_TRAILER);
+                prompt.push_str(prompt_render::CONTEXT_COMPRESS_REQUIRED_TRAILER);
             }
         } else if let Some(trailer) = trailer {
             prompt.push_str(&trailer);
@@ -2796,7 +2797,7 @@ impl AgentCore {
     }
 
     pub fn should_suppress_model_response(&self, response: &LlmResponse) -> bool {
-        if !self.context_compact_required {
+        if !self.context_compress_required {
             return false;
         }
         let mut parsed = if self.resolved_tool_call_mode == ToolCallMode::Native {
@@ -2807,7 +2808,7 @@ impl AgentCore {
                 .parse(&response.content, &self.capabilities)
         };
         self.normalize_intrinsic_actions(&mut parsed);
-        parsed.context_compacts.len() != 1 || parsed.repair_issue.is_some()
+        parsed.context_compresses.len() != 1 || parsed.repair_issue.is_some()
     }
 
     pub fn set_max_llm_input_tokens(&mut self, max_llm_input_tokens: u32) {
@@ -3399,7 +3400,7 @@ impl AgentCore {
         self.touched_paths.clear();
         self.context_message_elements = 0;
         self.last_observed_prompt_tokens = 0;
-        self.context_compact_required = false;
+        self.context_compress_required = false;
         self.manual_compact_trailer_pending = false;
         self.pending_compact_request_notice = None;
         self.consecutive_poor_threshold_compactions = 0;
@@ -3693,7 +3694,7 @@ impl AgentCore {
             token_estimate_text.push_str(system_text);
         }
         let incoming_prompt_tokens = estimate_prompt_tokens(&token_estimate_text);
-        self.require_context_compact_if_needed(incoming_prompt_tokens);
+        self.require_context_compress_if_needed(incoming_prompt_tokens);
         for system_text in system_texts {
             self.submit_prompt_component(
                 PromptComponentRole::system(),
@@ -3858,11 +3859,11 @@ impl AgentCore {
         self.normalize_intrinsic_actions(&mut parsed);
         let preview_accepted = parsed.repair_issue.is_none()
             && !response.truncated
-            && (!self.context_compact_required || parsed.context_compacts.len() == 1);
+            && (!self.context_compress_required || parsed.context_compresses.len() == 1);
         runtime.on_model_response_validated(preview_accepted, !parsed.continue_work);
 
-        if self.context_compact_required
-            && (parsed.context_compacts.len() != 1 || parsed.repair_issue.is_some())
+        if self.context_compress_required
+            && (parsed.context_compresses.len() != 1 || parsed.repair_issue.is_some())
         {
             self.current_round = self.current_round.saturating_sub(1);
             let mut prompt = self.render_prompt();
@@ -3870,9 +3871,9 @@ impl AgentCore {
             prompt = body.trim_end().to_string();
             prompt.push_str("\n\n");
             prompt.push_str(if self.manual_compact_trailer_pending {
-                prompt_render::MANUAL_CONTEXT_COMPACT_TRAILER
+                prompt_render::MANUAL_CONTEXT_COMPRESS_TRAILER
             } else {
-                prompt_render::CONTEXT_COMPACT_REQUIRED_TRAILER
+                prompt_render::CONTEXT_COMPRESS_REQUIRED_TRAILER
             });
             if let Some(response_trailer) = response_trailer {
                 prompt.push_str("\n\n");
@@ -3903,7 +3904,7 @@ impl AgentCore {
             runtime.on_model_response_parsed(
                 tool_count,
                 !parsed.thought.trim().is_empty(),
-                tool_count > 0 || !parsed.context_compacts.is_empty() || !native_calls.is_empty(),
+                tool_count > 0 || !parsed.context_compresses.is_empty() || !native_calls.is_empty(),
             );
             if parsed.recovered_issue.as_deref() == Some("runtime_root_repair_help") {
                 runtime.on_core_topic_events(&[host::runtime_root_repair_help_topic_event(
@@ -3985,14 +3986,14 @@ impl AgentCore {
         }
         let deferred_compact_replay = parsed.continue_work
             && self.resolved_tool_call_mode != ToolCallMode::Native
-            && !parsed.context_compacts.is_empty();
+            && !parsed.context_compresses.is_empty();
         if parsed.continue_work
             && self.resolved_tool_call_mode != ToolCallMode::Native
             && !deferred_compact_replay
         {
             slices.extend(self.assistant_replay_slices(&raw_model_output, Some(&parsed), None));
         }
-        let compact_refs_mcp_catalog = parsed.context_compacts.iter().any(|compact| {
+        let compact_refs_mcp_catalog = parsed.context_compresses.iter().any(|compact| {
             self.prompt_refs_include_type(
                 &compact.delta_ids,
                 &compact.slice_ids,
@@ -4003,8 +4004,8 @@ impl AgentCore {
         let mut compacted_successfully = false;
         let mut successful_compact_summaries = Vec::new();
         let threshold_compaction_requested =
-            self.context_compact_required && !self.manual_compact_trailer_pending;
-        for compact in &parsed.context_compacts {
+            self.context_compress_required && !self.manual_compact_trailer_pending;
+        for compact in &parsed.context_compresses {
             // Idempotent refs: a delta id that no longer exists has already
             // reached the compaction target state (an earlier compact
             // discarded it) but stale refs linger in old prompt text, so a
@@ -4045,7 +4046,7 @@ impl AgentCore {
                         Ok(offload) => {
                             match self.scratch.write_record(
                                 "context_offload",
-                                "context compact offload",
+                                "context compress offload",
                                 &offload.content,
                                 &offload.delta_ids,
                                 &offload.slice_ids,
@@ -4056,8 +4057,9 @@ impl AgentCore {
                                         "scratch_offload_failed: {err}"
                                     ))
                                     .with_runtime_metadata("error_type", "ScratchOffloadFailed");
-                                    let result = self
-                                        .format_context_compact_outcome(compact, &outcome, runtime);
+                                    let result = self.format_context_compress_outcome(
+                                        compact, &outcome, runtime,
+                                    );
                                     slices.push(("result_of_llm_action".to_string(), result));
                                     continue;
                                 }
@@ -4068,7 +4070,7 @@ impl AgentCore {
                                 ActionOutcome::failed(format!("scratch_offload_failed: {err}"))
                                     .with_runtime_metadata("error_type", "ScratchOffloadFailed");
                             let result =
-                                self.format_context_compact_outcome(compact, &outcome, runtime);
+                                self.format_context_compress_outcome(compact, &outcome, runtime);
                             slices.push(("result_of_llm_action".to_string(), result));
                             continue;
                         }
@@ -4083,7 +4085,7 @@ impl AgentCore {
                 if let Some(record) = offload_record.as_ref() {
                     outcome = outcome.with_runtime_metadata("scratch_id", record.id.clone());
                 }
-                let result = self.format_context_compact_outcome(compact, &outcome, runtime);
+                let result = self.format_context_compress_outcome(compact, &outcome, runtime);
                 slices.push(("result_of_llm_action".to_string(), result));
                 let estimated_after = self.dynamic_context_token_estimate();
                 let summary_tokens = estimate_prompt_tokens(&compact.summary);
@@ -4091,7 +4093,7 @@ impl AgentCore {
                 let estimated_after_tokens = estimated_after
                     .total_tokens()
                     .saturating_add(summary_tokens);
-                let compact_report = host::CoreContextCompactTopic {
+                let compact_report = host::CoreContextCompressTopic {
                     estimated_before_tokens,
                     estimated_after_tokens,
                     estimated_text_before_tokens: estimated_before.text_tokens,
@@ -4104,7 +4106,7 @@ impl AgentCore {
                     offloaded_delta_ids: compact.offload_delta_ids.clone(),
                     scratch_id: offload_record.as_ref().map(|record| record.id.clone()),
                 };
-                runtime.on_core_topic_events(&[host::context_compact_topic_event(
+                runtime.on_core_topic_events(&[host::context_compress_topic_event(
                     self.current_session_id(),
                     &compact_report,
                 )]);
@@ -4125,7 +4127,7 @@ impl AgentCore {
                 ))
                 .with_runtime_metadata("error_type", "InvalidPromptRefs")
                 .with_runtime_metadata("missing_ids", json!(missing));
-                let result = self.format_context_compact_outcome(compact, &outcome, runtime);
+                let result = self.format_context_compress_outcome(compact, &outcome, runtime);
                 slices.push(("result_of_llm_action".to_string(), result));
             }
         }
@@ -4141,7 +4143,7 @@ impl AgentCore {
             // be quantified reliably by the model, so depth guidance lives in
             // the compact trailers (discard stale deltas/tool noise, extract
             // a valuable short summary) rather than a numeric gate.
-            self.context_compact_required = false;
+            self.context_compress_required = false;
             self.manual_compact_trailer_pending = false;
             self.process_scope_prompted_session = None;
             if let Some(note) = self.take_process_aggregate_scopes_if_needed() {
@@ -4163,7 +4165,7 @@ impl AgentCore {
             assistant_slices.extend(
                 successful_compact_summaries
                     .into_iter()
-                    .map(|summary| ("context_compaction_summary".to_string(), summary)),
+                    .map(|summary| ("context_compression_summary".to_string(), summary)),
             );
             slices.splice(
                 compact_result_slice_start..compact_result_slice_start,
@@ -4183,7 +4185,7 @@ impl AgentCore {
             // Only the latest runtime confirmation is operationally useful.
             // Keep every assistant-authored compaction summary, but retire the
             // prior CWD/memo confirmation before appending its replacement.
-            self.hide_prompt_slices_by_type("context_compacted");
+            self.hide_prompt_slices_by_type("context_compressed");
             // The runtime-held memo survives compaction; restate it so the
             // next submission still carries the long-task reminder.
             let memo_line = self
@@ -4192,9 +4194,9 @@ impl AgentCore {
                 .map(|memo| format!("\nmemo active: {memo}"))
                 .unwrap_or_default();
             slices.push((
-                "context_compacted".to_string(),
+                "context_compressed".to_string(),
                 format!(
-                    "context compacted successfully.\nCWD: {}{memo_line}",
+                    "context compressed successfully.\nCWD: {}{memo_line}",
                     self.current_prompt_cwd.display()
                 ),
             ));
@@ -4204,8 +4206,8 @@ impl AgentCore {
                 slices.push(("mcp_capability_catalog".to_string(), catalog));
             }
         }
-        if !parsed.context_compacts.is_empty() && !compacted_successfully {
-            // context_compact is a barrier: later actions were authored against the
+        if !parsed.context_compresses.is_empty() && !compacted_successfully {
+            // context_compress is a barrier: later actions were authored against the
             // pre-compaction response but must not run unless the state rewrite succeeds.
             self.submit_running_job_updates_for_session(&self.current_session_id(), runtime);
             self.append_delta_with_action_output_budget(slices);
@@ -4224,7 +4226,7 @@ impl AgentCore {
             // The compact call rewrites its own context and is represented by the
             // independently persisted summary. Keep only later native calls for
             // provider replay and tool-result correlation.
-            native_calls.retain(|call| call.name != "context_compact");
+            native_calls.retain(|call| call.name != "context_compress");
         }
         if !parsed.continue_work {
             for candidate in &parsed.memory_candidates {
@@ -4456,8 +4458,8 @@ impl AgentCore {
                 rounds_remaining: self.remaining_rounds(),
             };
         }
-        if !parsed.context_compacts.is_empty() {
-            // context_compact is an intrinsic state rewrite. In native mode, do not
+        if !parsed.context_compresses.is_empty() {
+            // context_compress is an intrinsic state rewrite. In native mode, do not
             // retain its tool exchange: its owning delta may be removed by the same
             // operation. The independently persisted summary and runtime confirmation
             // below are the canonical continuation context.
@@ -4567,7 +4569,7 @@ impl AgentCore {
             thought_keep_in_context: !response.content.trim().is_empty(),
             next_actions: Vec::new(),
             action_groups,
-            context_compacts: Vec::new(),
+            context_compresses: Vec::new(),
             memory_candidates: Vec::new(),
             accepted_response: None,
             runtime_note: None,
@@ -4587,7 +4589,7 @@ impl AgentCore {
         // One native model interaction is one transport batch. When the batch has
         // no textual components, retain an empty PromptDelta so its visible delta
         // boundary can own the structured assistant/tool exchange and remain
-        // independently addressable by context compaction.
+        // independently addressable by context compression.
         let delta_count_before = self.deltas.len();
         self.append_delta_with_action_output_budget(slices);
         if self.deltas.len() == delta_count_before {
@@ -4690,29 +4692,29 @@ impl AgentCore {
                     .actions
                     .iter()
                     .enumerate()
-                    .filter(|(_, action)| action.action == "context_compact")
+                    .filter(|(_, action)| action.action == "context_compress")
                     .map(move |(action_index, _)| (group_index, action_index))
             })
             .collect::<Vec<_>>();
         if compact_positions.is_empty() {
             return;
         }
-        if compact_positions.len() != 1 || !parsed.context_compacts.is_empty() {
-            parsed.repair_issue = Some("context_compact_only_once".to_string());
+        if compact_positions.len() != 1 || !parsed.context_compresses.is_empty() {
+            parsed.repair_issue = Some("context_compress_only_once".to_string());
             return;
         }
         let (group_index, action_index) = compact_positions[0];
         if group_index != 0 || action_index != 0 {
-            parsed.repair_issue = Some("context_compact_must_be_first".to_string());
+            parsed.repair_issue = Some("context_compress_must_be_first".to_string());
             return;
         }
         let action = parsed.action_groups[0].actions.remove(0);
         if parsed.action_groups[0].actions.is_empty() {
             parsed.action_groups.remove(0);
         }
-        match context_compact::from_action(&action) {
+        match context_compress::from_action(&action) {
             Ok(compact) => {
-                parsed.context_compacts.push(compact);
+                parsed.context_compresses.push(compact);
                 parsed.continue_work = true;
             }
             Err(issue) => parsed.repair_issue = Some(issue),
@@ -5468,16 +5470,16 @@ impl AgentCore {
                 prompt.push_str(&response_trailer);
             }
         }
-        if self.context_compact_required {
+        if self.context_compress_required {
             let (body, response_trailer) = prompt_render::split_formatted_response_trailer(&prompt);
             // The manual wording persists across retries (like the
             // threshold wording) until the compaction succeeds: the context
             // may not actually be over the limit, so the retry must not fall
             // back to "Context is too long".
             let compact_trailer = if self.manual_compact_trailer_pending {
-                prompt_render::MANUAL_CONTEXT_COMPACT_TRAILER
+                prompt_render::MANUAL_CONTEXT_COMPRESS_TRAILER
             } else {
-                prompt_render::CONTEXT_COMPACT_REQUIRED_TRAILER
+                prompt_render::CONTEXT_COMPRESS_REQUIRED_TRAILER
             };
             prompt = body.trim_end().to_string();
             prompt.push_str("\n\n");
@@ -5646,7 +5648,7 @@ impl AgentCore {
     }
 
     fn append_in_turn_shrink_review_if_needed(&mut self) {
-        self.require_context_compact_if_needed(0);
+        self.require_context_compress_if_needed(0);
     }
 
     fn inline_tool_call_labels(&self, parsed: &ParsedEnvelope) -> Vec<(String, String)> {
@@ -5728,7 +5730,7 @@ Runtime tool_call ids:",
                     if !parsed.thought.is_empty() {
                         slices.push(("llm_free_talk".to_string(), parsed.thought.to_string()));
                     }
-                    for compact in &parsed.context_compacts {
+                    for compact in &parsed.context_compresses {
                         if !compact.summary.trim().is_empty() {
                             slices.push((
                                 "llm_response".to_string(),
@@ -6033,19 +6035,19 @@ Runtime tool_call ids:",
         );
     }
 
-    fn require_context_compact_if_needed(&mut self, incoming_prompt_tokens: u32) {
+    fn require_context_compress_if_needed(&mut self, incoming_prompt_tokens: u32) {
         let estimated_prompt_tokens = self.estimate_rendered_prompt_tokens(incoming_prompt_tokens);
         let force_threshold = self.max_llm_input_tokens.saturating_mul(90) / 100;
-        if !self.context_compact_required && estimated_prompt_tokens < force_threshold {
+        if !self.context_compress_required && estimated_prompt_tokens < force_threshold {
             return;
         }
         if self.render_prompt_slices().is_empty() {
             return;
         }
-        if !self.context_compact_required {
+        if !self.context_compress_required {
             self.pending_compact_request_notice = Some((estimated_prompt_tokens, force_threshold));
         }
-        self.context_compact_required = true;
+        self.context_compress_required = true;
     }
 
     /// Drains the pending forced-compaction request notice (estimated prompt
@@ -6055,12 +6057,12 @@ Runtime tool_call ids:",
     }
 
     /// User-initiated compaction request: the next model request must lead
-    /// with context_compact, announced with the manual-request wording. The
+    /// with context_compress, announced with the manual-request wording. The
     /// forced-shrink machinery (response suppression, tool-call gating) is
     /// reused so the compaction actually happens.
-    pub fn request_manual_context_compact(&mut self) {
+    pub fn request_manual_context_compress(&mut self) {
         self.manual_compact_trailer_pending = true;
-        self.context_compact_required = true;
+        self.context_compress_required = true;
         // The "compacting..." UI notice for a manual request is published
         // immediately by the Host when the user clicks, so Core must not
         // schedule a second requested notice here; only the forced-shrink
@@ -6096,7 +6098,7 @@ Runtime tool_call ids:",
             numerator.div_ceil(u64::from(window_tokens)) as u32
         };
         Some(format!(
-            "NOTE: context compaction ratio is not very good, {}% -> {}%, try to compress more by retaining only necessary part and discard bulky along-side info if possible.",
+            "NOTE: context compression ratio is not very good, {}% -> {}%, try to compress more by retaining only necessary part and discard bulky along-side info if possible.",
             occupancy_percent(estimated_before_tokens),
             occupancy_percent(estimated_after_tokens)
         ))
@@ -6619,14 +6621,14 @@ Runtime tool_call ids:",
         best
     }
 
-    fn format_context_compact_outcome(
+    fn format_context_compress_outcome(
         &mut self,
-        compact: &ParsedContextCompact,
+        compact: &ParsedContextCompress,
         outcome: &ActionOutcome,
         runtime: &mut dyn ActionRuntime,
     ) -> String {
         let action = ParsedAction {
-            action: "context_compact".to_string(),
+            action: "context_compress".to_string(),
             name: None,
             call_id: compact.call_id.clone(),
             raw_input: json!({}),
@@ -8899,7 +8901,7 @@ fn prompt_type_role_for_scratch(
         "llm_response"
         | "llm_response_raw_xml"
         | "llm_free_talk"
-        | "context_compaction_summary" => spec.assistant_role,
+        | "context_compression_summary" => spec.assistant_role,
         "result_of_llm_action" => spec.runtime_role,
         _ => spec.runtime_role,
     }

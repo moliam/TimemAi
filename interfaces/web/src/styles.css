@@ -5986,3 +5986,10 @@ body.workspace-modal-open .app-shell { user-select: none; }
   .time-flip-digit-out { display: none; animation: none; }
   .time-flip-digit-in { animation: none; transform: none; opacity: 1; }
 }
+
+.model-service-diagnostic { margin-top: 6px; color: #7f909a; font-size: 11px; }
+.model-service-diagnostic summary { width: fit-content; cursor: pointer; color: #8fa1ac; user-select: none; }
+.model-service-diagnostic > :not(summary) { margin-top: 5px; padding-left: 10px; border-left: 2px solid #37434b; overflow-wrap: anywhere; }
+:root[data-theme="light"] .model-service-diagnostic { color: #687983; }
+:root[data-theme="light"] .model-service-diagnostic summary { color: #586b75; }
+:root[data-theme="light"] .model-service-diagnostic > :not(summary) { border-left-color: #ccd5da; }

@@ -12,8 +12,10 @@ use crate::{
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -24,9 +26,9 @@ mod view;
 
 use view::{
     activity_summary, attach_error_card, connected_intro, decision_request_prompt,
-    disconnected_card, format_user_echo, guidance_card, host_error_card, invalid_command_card,
-    invalid_restart_choice_card, no_sessions_card, rejected_command_card, restart_cwd_prompt,
-    session_selector, topic_summary, worker_event_summary,
+    disconnected_card, format_user_echo, guidance_card, host_error_card, instance_selector,
+    invalid_command_card, invalid_restart_choice_card, no_sessions_card, rejected_command_card,
+    restart_cwd_prompt, session_selector, topic_summary, worker_event_summary,
 };
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -49,6 +51,8 @@ struct WebInstanceFile {
     pid: u32,
     port: Option<u16>,
     token: Option<String>,
+    #[serde(default)]
+    started_at_ms: Option<u128>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -64,6 +68,7 @@ pub struct AttachSession {
     pub worker_count: usize,
 }
 
+#[derive(Debug)]
 enum AttachError {
     NoHost,
     HostUnreachable(String),
@@ -94,26 +99,14 @@ impl AttachError {
     }
 }
 
-/// Entry point for `timem attach`. `space` selects the workspace whose Host
-/// lease should be discovered.
+/// Entry point for `timem attach`. An explicit `--space` keeps the
+/// directed single-MEM contract. Without it, the user-level registry is only
+/// an index: every candidate is revalidated against its authoritative lease
+/// and health endpoint before any token is used.
 pub fn run_attach(space: Option<&str>) {
-    let memory_dir = match crate::resolve_memory_dir(space) {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!(
-                "{}",
-                guidance_card(
-                    "Unable to attach",
-                    &error.to_string(),
-                    "Check the workspace path and try again."
-                )
-            );
-            std::process::exit(2);
-        }
-    };
-    let instance_path = memory_dir.join("web_instance.json");
-    let host = match discover_host(&instance_path) {
-        Ok(host) => host,
+    let host = match resolve_attach_host(space) {
+        Ok(Some(host)) => host,
+        Ok(None) => return,
         Err(error) => {
             eprintln!("{}", attach_error_card(&error));
             std::process::exit(2);
@@ -140,26 +133,230 @@ pub fn run_attach(space: Option<&str>) {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct HostEndpoint {
     port: u16,
     token: Option<String>,
 }
 
-fn discover_host(instance_path: &std::path::Path) -> Result<HostEndpoint, AttachError> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AttachHostCandidate {
+    pub memory_dir: PathBuf,
+    pub pid: u32,
+    pub started_at_ms: u128,
+    host: HostEndpoint,
+}
+
+fn resolve_attach_host(space: Option<&str>) -> Result<Option<HostEndpoint>, AttachError> {
+    if let Some(space) = space {
+        let memory_dir = crate::resolve_memory_dir(Some(space)).map_err(AttachError::Protocol)?;
+        return discover_host(&memory_dir.join("web_instance.json")).map(Some);
+    }
+
+    let candidates = timem_in_process::agent_api::web_instance_registry_dir()
+        .ok()
+        .map(|registry_dir| discover_registered_hosts(&registry_dir))
+        .unwrap_or_default();
+    match registered_host_route(candidates) {
+        RegisteredHostRoute::DefaultMemory => {
+            let memory_dir = crate::resolve_memory_dir(None).map_err(AttachError::Protocol)?;
+            discover_host(&memory_dir.join("web_instance.json")).map(Some)
+        }
+        RegisteredHostRoute::Direct(host) => Ok(Some(host)),
+        RegisteredHostRoute::Select(candidates) => {
+            Ok(select_host_instance(&candidates).map(|candidate| candidate.host))
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RegisteredHostRoute {
+    DefaultMemory,
+    Direct(HostEndpoint),
+    Select(Vec<AttachHostCandidate>),
+}
+
+fn registered_host_route(candidates: Vec<AttachHostCandidate>) -> RegisteredHostRoute {
+    match candidates.len() {
+        0 => RegisteredHostRoute::DefaultMemory,
+        1 => RegisteredHostRoute::Direct(
+            candidates
+                .into_iter()
+                .next()
+                .expect("single candidate must exist")
+                .host,
+        ),
+        _ => RegisteredHostRoute::Select(candidates),
+    }
+}
+
+fn discover_host(instance_path: &Path) -> Result<HostEndpoint, AttachError> {
+    discover_host_with(instance_path, |host| {
+        host_responds(host.port, host.token.as_deref())
+    })
+}
+
+fn discover_host_with(
+    instance_path: &Path,
+    mut healthy: impl FnMut(&HostEndpoint) -> bool,
+) -> Result<HostEndpoint, AttachError> {
     let raw = std::fs::read(instance_path).map_err(|_| AttachError::NoHost)?;
     let info: WebInstanceFile = serde_json::from_slice(&raw).map_err(|_| AttachError::NoHost)?;
     let port = info.port.ok_or(AttachError::NoHost)?;
-    // A stale lease for a dead process must not pass as a live Host.
-    let alive = std::path::Path::new("/proc")
-        .join(info.pid.to_string())
-        .exists();
-    if !alive && !host_responds(port, info.token.as_deref()) {
-        return Err(AttachError::NoHost);
-    }
-    Ok(HostEndpoint {
+    let host = HostEndpoint {
         port,
         token: info.token,
+    };
+    if !healthy(&host) {
+        return Err(AttachError::NoHost);
+    }
+    Ok(host)
+}
+
+fn discover_registered_hosts(registry_dir: &Path) -> Vec<AttachHostCandidate> {
+    discover_registered_hosts_with(registry_dir, |host| {
+        host_responds(host.port, host.token.as_deref())
     })
+}
+
+fn discover_registered_hosts_with(
+    registry_dir: &Path,
+    mut healthy: impl FnMut(&HostEndpoint) -> bool,
+) -> Vec<AttachHostCandidate> {
+    let Ok(entries) = std::fs::read_dir(registry_dir) else {
+        return Vec::new();
+    };
+    let mut by_memory = BTreeMap::<PathBuf, AttachHostCandidate>::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(raw) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(record) =
+            serde_json::from_slice::<timem_in_process::agent_api::WebInstanceRegistryRecord>(&raw)
+        else {
+            continue;
+        };
+        if path.file_name().and_then(|name| name.to_str())
+            != Some(format!("{}.json", record.registration_id).as_str())
+            || !record.memory_dir.is_absolute()
+        {
+            continue;
+        }
+        let Ok(lease_raw) = std::fs::read(record.memory_dir.join("web_instance.json")) else {
+            continue;
+        };
+        let Ok(lease) = serde_json::from_slice::<WebInstanceFile>(&lease_raw) else {
+            continue;
+        };
+        if lease.pid != record.pid || lease.started_at_ms != Some(record.started_at_ms) {
+            continue;
+        }
+        let Some(port) = lease.port else {
+            continue;
+        };
+        let host = HostEndpoint {
+            port,
+            token: lease.token,
+        };
+        if !healthy(&host) {
+            continue;
+        }
+        let normalized_memory = normalize_memory_path(&record.memory_dir);
+        let candidate = AttachHostCandidate {
+            memory_dir: normalized_memory.clone(),
+            pid: record.pid,
+            started_at_ms: record.started_at_ms,
+            host,
+        };
+        match by_memory.get(&normalized_memory) {
+            Some(current)
+                if (current.started_at_ms, current.pid, current.host.port)
+                    >= (candidate.started_at_ms, candidate.pid, candidate.host.port) => {}
+            _ => {
+                by_memory.insert(normalized_memory, candidate);
+            }
+        }
+    }
+    let mut candidates = by_memory.into_values().collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.memory_dir
+            .to_string_lossy()
+            .cmp(&right.memory_dir.to_string_lossy())
+            .then_with(|| left.pid.cmp(&right.pid))
+            .then_with(|| left.started_at_ms.cmp(&right.started_at_ms))
+            .then_with(|| left.host.port.cmp(&right.host.port))
+    });
+    candidates
+}
+
+fn normalize_memory_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
+}
+
+fn select_host_instance(candidates: &[AttachHostCandidate]) -> Option<AttachHostCandidate> {
+    use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+    println!("{ANSI_BRIGHT_TIMEM}{TIMEM_LOGO}{ANSI_RESET} {ANSI_DIM}attach{ANSI_RESET}");
+    let mut selected = 0usize;
+    let _ = enable_raw_mode();
+    let line_count = candidates.len() + 1;
+    let mut rendered_once = false;
+    let render = |selected: usize, rendered_once: bool| {
+        use crossterm::cursor::MoveUp;
+        use crossterm::queue;
+        use crossterm::terminal::{Clear, ClearType};
+        let mut stdout = std::io::stdout();
+        if rendered_once {
+            let _ = queue!(
+                stdout,
+                MoveUp(line_count as u16),
+                Clear(ClearType::FromCursorDown)
+            );
+        }
+        print!("{}", instance_selector(candidates, selected));
+        let _ = stdout.flush();
+    };
+    render(selected, rendered_once);
+    rendered_once = true;
+    let result = loop {
+        match crossterm::event::read() {
+            Ok(Event::Key(KeyEvent {
+                code, modifiers, ..
+            })) => match (code, modifiers) {
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Esc, _) => break None,
+                (KeyCode::Up, _) if selected > 0 => {
+                    selected -= 1;
+                    render(selected, rendered_once);
+                }
+                (KeyCode::Down, _) if selected + 1 < candidates.len() => {
+                    selected += 1;
+                    render(selected, rendered_once);
+                }
+                (KeyCode::Enter, _) => break Some(candidates[selected].clone()),
+                _ => {}
+            },
+            Ok(_) => {}
+            Err(_) => break None,
+        }
+    };
+    let _ = disable_raw_mode();
+    println!();
+    result
 }
 
 fn host_responds(port: u16, token: Option<&str>) -> bool {
@@ -1056,6 +1253,61 @@ fn handle_wire_event_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static ATTACH_TEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+    fn attach_test_root(label: &str) -> PathBuf {
+        let sequence = ATTACH_TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "timem-attach-{label}-{}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn write_json(path: &Path, value: &impl serde::Serialize) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
+    }
+
+    fn registry_record(
+        registration_id: &str,
+        memory_dir: &Path,
+        pid: u32,
+        started_at_ms: u128,
+    ) -> timem_in_process::agent_api::WebInstanceRegistryRecord {
+        timem_in_process::agent_api::WebInstanceRegistryRecord {
+            registration_id: registration_id.to_string(),
+            memory_dir: memory_dir.to_path_buf(),
+            pid,
+            started_at_ms,
+        }
+    }
+
+    fn lease(pid: u32, port: Option<u16>, token: &str, started_at_ms: u128) -> Value {
+        json!({
+            "pid": pid,
+            "port": port,
+            "token": token,
+            "started_at_ms": started_at_ms,
+        })
+    }
+
+    fn candidate(memory: &str, pid: u32, port: u16) -> AttachHostCandidate {
+        AttachHostCandidate {
+            memory_dir: PathBuf::from(memory),
+            pid,
+            started_at_ms: u128::from(pid),
+            host: HostEndpoint {
+                port,
+                token: Some(format!("token-{pid}")),
+            },
+        }
+    }
 
     fn decision_payload(topic: &str, request: Value) -> Value {
         json!({
@@ -1069,6 +1321,151 @@ mod tests {
                 "request": request,
             },
         })
+    }
+
+    #[test]
+    fn registered_host_route_falls_back_directly_or_selects_by_candidate_count() {
+        assert_eq!(
+            registered_host_route(Vec::new()),
+            RegisteredHostRoute::DefaultMemory
+        );
+        assert_eq!(
+            registered_host_route(vec![candidate("/mem/one", 1, 4101)]),
+            RegisteredHostRoute::Direct(HostEndpoint {
+                port: 4101,
+                token: Some("token-1".to_string()),
+            })
+        );
+        let multiple = vec![candidate("/mem/a", 2, 4102), candidate("/mem/b", 3, 4103)];
+        assert_eq!(
+            registered_host_route(multiple.clone()),
+            RegisteredHostRoute::Select(multiple)
+        );
+    }
+
+    #[test]
+    fn directed_host_discovery_requires_health_even_when_pid_is_live() {
+        let root = attach_test_root("directed-health");
+        let instance = root.join("web_instance.json");
+        write_json(
+            &instance,
+            &lease(std::process::id(), Some(4201), "lease-token", 10),
+        );
+
+        assert!(matches!(
+            discover_host_with(&instance, |_| false),
+            Err(AttachError::NoHost)
+        ));
+        let host = discover_host_with(&instance, |host| host.port == 4201).unwrap();
+        assert_eq!(host.token.as_deref(), Some("lease-token"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn registry_discovery_revalidates_lease_health_identity_and_deduplicates_memories() {
+        let root = attach_test_root("registry");
+        let registry = root.join("registry");
+        std::fs::create_dir_all(&registry).unwrap();
+
+        let memory_a = root.join("内存-a");
+        let memory_b = root.join("memory-b");
+        let memory_stale = root.join("memory-stale");
+        let memory_no_port = root.join("memory-no-port");
+        let memory_unhealthy = root.join("memory-unhealthy");
+        for memory in [
+            &memory_a,
+            &memory_b,
+            &memory_stale,
+            &memory_no_port,
+            &memory_unhealthy,
+        ] {
+            std::fs::create_dir_all(memory).unwrap();
+        }
+        write_json(
+            &memory_a.join("web_instance.json"),
+            &lease(101, Some(4301), "lease-a", 1001),
+        );
+        write_json(
+            &memory_b.join("web_instance.json"),
+            &lease(202, Some(4302), "lease-b", 2002),
+        );
+        write_json(
+            &memory_stale.join("web_instance.json"),
+            &lease(303, Some(4303), "stale", 3004),
+        );
+        write_json(
+            &memory_no_port.join("web_instance.json"),
+            &lease(404, None, "no-port", 4004),
+        );
+        write_json(
+            &memory_unhealthy.join("web_instance.json"),
+            &lease(505, Some(4305), "unhealthy", 5005),
+        );
+
+        write_json(
+            &registry.join("a.json"),
+            &registry_record("a", &memory_a, 101, 1001),
+        );
+        write_json(
+            &registry.join("b.json"),
+            &registry_record("b", &memory_b, 202, 2002),
+        );
+        write_json(
+            &registry.join("a-alias.json"),
+            &registry_record("a-alias", &memory_a.join("."), 101, 1001),
+        );
+        write_json(
+            &registry.join("stale.json"),
+            &registry_record("stale", &memory_stale, 303, 3003),
+        );
+        write_json(
+            &registry.join("no-port.json"),
+            &registry_record("no-port", &memory_no_port, 404, 4004),
+        );
+        write_json(
+            &registry.join("unhealthy.json"),
+            &registry_record("unhealthy", &memory_unhealthy, 505, 5005),
+        );
+        write_json(
+            &registry.join("wrong-name.json"),
+            &registry_record("different-id", &memory_a, 101, 1001),
+        );
+        write_json(
+            &registry.join("relative.json"),
+            &registry_record("relative", Path::new("relative/mem"), 606, 6006),
+        );
+        std::fs::write(registry.join("malformed.json"), b"not-json").unwrap();
+
+        let candidates = discover_registered_hosts_with(&registry, |host| host.port != 4305);
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.windows(2).all(|pair| {
+            pair[0].memory_dir.to_string_lossy() <= pair[1].memory_dir.to_string_lossy()
+        }));
+        let candidate_a = candidates
+            .iter()
+            .find(|candidate| candidate.host.port == 4301)
+            .expect("healthy memory A candidate");
+        assert_eq!(candidate_a.memory_dir, memory_a.canonicalize().unwrap());
+        assert_eq!(candidate_a.host.token.as_deref(), Some("lease-a"));
+        let candidate_b = candidates
+            .iter()
+            .find(|candidate| candidate.host.port == 4302)
+            .expect("healthy memory B candidate");
+        assert_eq!(candidate_b.memory_dir, memory_b.canonicalize().unwrap());
+        assert_eq!(candidate_b.host.token.as_deref(), Some("lease-b"));
+
+        assert!(registry.join("malformed.json").exists());
+        assert!(registry.join("stale.json").exists());
+        assert!(registry.join("unhealthy.json").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_registry_is_an_empty_candidate_set() {
+        let root = attach_test_root("missing-registry");
+        let missing = root.join("missing");
+        assert!(discover_registered_hosts_with(&missing, |_| true).is_empty());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

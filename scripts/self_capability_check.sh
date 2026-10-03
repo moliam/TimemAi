@@ -53,7 +53,7 @@ run_exact agent_core lib "" capability::tests::host_profile_without_bash_keeps_n
 run_dimension "long work / bounded context and resumable compaction"
 run_exact agent_core test core_tests long_context_forces_shrink_at_ninety_percent_window_with_compaction_instruction
 run_exact agent_core lib "" session_runtime::tests::session_turn_scratch_context_offload_records_id_and_continues
-run_exact agent_core lib "" prompt_component_tests::native_context_compact_persists_summary_after_discarding_all_old_deltas
+run_exact agent_core lib "" prompt_component_tests::native_context_compress_persists_summary_after_discarding_all_old_deltas
 
 run_dimension "runtime completeness / terminal ordering and late input ownership"
 run_exact agent_core lib "" session_runtime::tests::cancelled_turn_projection_has_one_token_and_authoritative_terminal_order

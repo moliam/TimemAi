@@ -131,3 +131,31 @@ fn existing_memory_directory_permissions_are_tightened() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn web_instance_registry_is_a_user_level_sibling_of_default_mem() {
+    let default_mem = PathBuf::from("/tmp/test-home/.timem/mem");
+    assert_eq!(
+        web_instance_registry_dir_from_default_memory(&default_mem).unwrap(),
+        PathBuf::from("/tmp/test-home/.timem/web_instances")
+    );
+    assert_eq!(
+        web_instance_registry_dir_from_default_memory(Path::new("/")).unwrap_err(),
+        "web_instance_registry_root_unavailable"
+    );
+}
+
+#[test]
+fn web_instance_registry_record_round_trips_arbitrary_absolute_mem_path() {
+    let record = WebInstanceRegistryRecord {
+        registration_id: "123-456".to_string(),
+        memory_dir: PathBuf::from("/tmp/custom Timem MEM"),
+        pid: 123,
+        started_at_ms: 456,
+    };
+    let encoded = serde_json::to_vec(&record).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<WebInstanceRegistryRecord>(&encoded).unwrap(),
+        record
+    );
+}

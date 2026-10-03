@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     ApprovalRequest, BashApprovalMode, CapabilityRegistry, CoreActionKind, CoreProfile,
     CoreTopicEvent, FinishedTurnProjection, HostDecision, NoopTurnUi, OutputExpansionRequest,
-    TurnInputAdmission, TurnStopDetail, TurnStopReason, CORE_TOPIC_CONTEXT_COMPACT,
+    TurnInputAdmission, TurnStopDetail, TurnStopReason, CORE_TOPIC_CONTEXT_COMPRESS,
 };
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -102,7 +102,7 @@ fn higher_than_h0_trailer_is_injected_only_for_a_real_reasoning_upgrade() {
 }
 
 #[test]
-fn higher_than_h0_trailer_preserves_context_compaction_protocol() {
+fn higher_than_h0_trailer_preserves_context_compression_protocol() {
     use crate::model_requirements::EndpointRequirements;
 
     let mut config = test_config();
@@ -117,12 +117,12 @@ fn higher_than_h0_trailer_preserves_context_compaction_protocol() {
 
     for (source, expected) in [
         (
-            crate::prompt_render::CONTEXT_COMPACT_REQUIRED_TRAILER,
-            crate::prompt_render::REASONING_UPGRADED_CONTEXT_COMPACT_TRAILER,
+            crate::prompt_render::CONTEXT_COMPRESS_REQUIRED_TRAILER,
+            crate::prompt_render::REASONING_UPGRADED_CONTEXT_COMPRESS_TRAILER,
         ),
         (
-            crate::prompt_render::MANUAL_CONTEXT_COMPACT_TRAILER,
-            crate::prompt_render::REASONING_UPGRADED_MANUAL_CONTEXT_COMPACT_TRAILER,
+            crate::prompt_render::MANUAL_CONTEXT_COMPRESS_TRAILER,
+            crate::prompt_render::REASONING_UPGRADED_MANUAL_CONTEXT_COMPRESS_TRAILER,
         ),
     ] {
         let mut request = crate::ModelInteractionRequest::inline(format!("body\n\n{source}"));
@@ -131,7 +131,7 @@ fn higher_than_h0_trailer_preserves_context_compaction_protocol() {
         assert!(request.rendered_prompt.ends_with(expected));
         assert!(request
             .rendered_prompt
-            .ends_with("Your tool calls must start with context_compact:"));
+            .ends_with("Your tool calls must start with context_compress:"));
         assert_eq!(request.rendered_prompt.matches(source).count(), 0);
     }
 }
@@ -577,7 +577,7 @@ impl TurnUi for SupplementAndExpansionUi {
 
 #[cfg(unix)]
 /// Simulates a restart followed by the user immediately clicking manual
-/// context compaction: the direct-resume turn starts while the Host has
+/// context compression: the direct-resume turn starts while the Host has
 /// already set the manual-compact flag.
 struct ManualCompactOnceUi {
     requested: bool,
@@ -594,7 +594,7 @@ impl ManualCompactOnceUi {
 }
 
 impl TurnUi for ManualCompactOnceUi {
-    fn take_manual_context_compact_request(&mut self) -> bool {
+    fn take_manual_context_compress_request(&mut self) -> bool {
         std::mem::replace(&mut self.requested, false)
     }
     fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
@@ -1196,7 +1196,7 @@ fn session_turn_retries_transient_model_api_errors_and_reports_status() {
     let mut config = test_config();
     let mut ui = RetryRecordingUi::default();
     let mut model = ReplayModel::new([
-        Err("model_http_500: upstream overloaded".to_string()),
+        Err("model_responses_stream_failed: event_type=error code=server_is_overloaded type=error message=Our servers are currently overloaded. Please try again later.".to_string()),
         Err("model_request_error: stage=response_headers error sending request for url (https://example.invalid/v1/chat/completions): connection error: unexpected end of file".to_string()),
         Ok(llm(
             r#"{"status":"ALL_FINISHED","final_answer":"重试后成功。"}"#,
@@ -1228,7 +1228,7 @@ fn session_turn_retries_transient_model_api_errors_and_reports_status() {
     assert_eq!(ui.retries[0].0, 1);
     assert_eq!(ui.retries[0].1, crate::DEFAULT_MODEL_SYSTEM_ERROR_RETRIES);
     assert_eq!(ui.retries[0].2, Duration::ZERO);
-    assert!(ui.retries[0].3.contains("model_http_500"));
+    assert!(ui.retries[0].3.contains("server_is_overloaded"));
     assert!(ui.retries[1].3.contains("unexpected end of file"));
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "model_retry"), 2);
@@ -1422,7 +1422,7 @@ fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
             false,
         )),
         Ok(llm(
-            r#"{"context_compact":{"discard":["pd_1","pd_2","pd_3"],"summary":"保留用户要求和大输出已被预算保护的信息。"}}"#,
+            r#"{"context_compress":{"discard":["pd_1","pd_2","pd_3"],"summary":"保留用户要求和大输出已被预算保护的信息。"}}"#,
             2_800,
             false,
         )),
@@ -1454,8 +1454,8 @@ fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
     assert_eq!(model.prompts.len(), 3);
     assert!(model.prompts[1].contains("Your action's output is too large:"));
     assert!(model.prompts[1]
-        .ends_with("Context is too long. Compact context as the tool context_compact desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compact:"));
-    assert!(model.prompts[2].contains("context compacted successfully."));
+        .ends_with("Context is too long. Compact context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"));
+    assert!(model.prompts[2].contains("context compressed successfully."));
     assert!(model.prompts[1].contains("optimize your action or compact context"));
     assert!(!model.prompts[1].contains(&"0".repeat(1_000)));
     let _ = std::fs::remove_dir_all(dir);
@@ -3802,29 +3802,29 @@ impl ModelClient for ShrinkReplayModel {
     ) -> Result<LlmResponse, String> {
         self.prompts.push(prompt.to_string());
         if self.prompts.len() == 1 {
-            assert!(prompt.contains("Compact context as the tool context_compact desc suggests"));
+            assert!(prompt.contains("Compact context as the tool context_compress desc suggests"));
             assert!(!prompt.contains("Long-context maintenance:"));
             let mut delta_ids = prompt_field_values(prompt, "delta_id");
             delta_ids.sort();
             delta_ids.dedup();
             assert!(!delta_ids.is_empty());
             let content = format!(
-                r#"{{"free_talk":"","context_compact":{{"discard":{},"summary":"discard stale context and keep current task state"}}}}"#,
+                r#"{{"free_talk":"","context_compress":{{"discard":{},"summary":"discard stale context and keep current task state"}}}}"#,
                 serde_json::to_string(&delta_ids).unwrap()
             );
             return Ok(llm(content, 13_253, false));
         }
         assert_eq!(self.prompts.len(), 2);
-        assert!(prompt.contains("context compacted successfully."));
+        assert!(prompt.contains("context compressed successfully."));
         assert!(prompt.contains("CWD: "));
-        assert!(!prompt.contains("Action result: context_compact"));
+        assert!(!prompt.contains("Action result: context_compress"));
         assert_eq!(
             prompt
                 .matches("discard stale context and keep current task state")
                 .count(),
             1
         );
-        assert!(!prompt.contains("Compact context as the tool context_compact desc suggests"));
+        assert!(!prompt.contains("Compact context as the tool context_compress desc suggests"));
         assert!(!prompt.contains("Long-context maintenance:"));
         Ok(llm(
             r#"{"status":"ALL_FINISHED","final_answer":"压缩已完成，可以继续对话。"}"#,
@@ -4492,7 +4492,7 @@ fn session_turn_forced_shrink_runs_to_final_without_repeated_shrink() {
             .prompts
             .iter()
             .filter(|prompt| prompt
-                .contains("Compact context as the tool context_compact desc suggests"))
+                .contains("Compact context as the tool context_compress desc suggests"))
             .count(),
         1
     );
@@ -5078,15 +5078,15 @@ impl ModelClient for ScratchOffloadReplayModel {
             delta_ids.dedup();
             assert!(!delta_ids.is_empty());
             let content = format!(
-                r#"{{"free_talk":"","context_compact":{{"offload":{},"summary":"offload old context and keep the current task active"}}}}"#,
+                r#"{{"free_talk":"","context_compress":{{"offload":{},"summary":"offload old context and keep the current task active"}}}}"#,
                 serde_json::to_string(&delta_ids).unwrap()
             );
             return Ok(llm(content, 4_000, false));
         }
         assert_eq!(self.prompts.len(), 2);
-        assert!(prompt.contains("context compacted successfully."));
+        assert!(prompt.contains("context compressed successfully."));
         assert!(prompt.contains("CWD: "));
-        assert!(!prompt.contains("Action result: context_compact"));
+        assert!(!prompt.contains("Action result: context_compress"));
         assert!(!prompt.contains("scratch_id:"));
         Ok(llm(
             r#"{"status":"ALL_FINISHED","final_answer":"scratch 已记录，可以继续。"}"#,
@@ -5129,7 +5129,7 @@ fn session_turn_scratch_context_offload_records_id_and_continues() {
     assert_eq!(model.prompts.len(), 2);
     let scratch_text = std::fs::read_to_string(dir.join("scratch_notes.jsonl")).unwrap();
     assert!(scratch_text.contains(r#""scratch_type":"context_offload""#));
-    assert!(scratch_text.contains(r#""label":"context compact offload""#));
+    assert!(scratch_text.contains(r#""label":"context compress offload""#));
     assert!(scratch_text.contains("extra context that should be offloaded"));
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "turn_final"), 1);
@@ -5169,7 +5169,7 @@ impl ModelClient for CompactThenFinishModel {
                 .expect("delta id in first prompt");
             Ok(llm(
                 format!(
-                    r#"{{"free_talk":"整理旧上下文。","context_compact":{{"discard":[{}],"summary":"保留当前任务目标和下一步。"}}}}"#,
+                    r#"{{"free_talk":"整理旧上下文。","context_compress":{{"discard":[{}],"summary":"保留当前任务目标和下一步。"}}}}"#,
                     serde_json::to_string(&delta_id).unwrap()
                 ),
                 3_000,
@@ -5186,8 +5186,8 @@ impl ModelClient for CompactThenFinishModel {
 }
 
 #[test]
-fn session_turn_context_compact_emits_structured_topic() {
-    let dir = tmp_dir("context_compact_topic");
+fn session_turn_context_compress_emits_structured_topic() {
+    let dir = tmp_dir("context_compress_topic");
     let audit = dir.join("audit.json");
     let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
@@ -5219,9 +5219,9 @@ fn session_turn_context_compact_emits_structured_topic() {
     let compact = ui
         .events
         .iter()
-        .find(|event| event.topic.name == CORE_TOPIC_CONTEXT_COMPACT)
-        .and_then(CoreTopicEvent::as_context_compact)
-        .expect("context compact topic");
+        .find(|event| event.topic.name == CORE_TOPIC_CONTEXT_COMPRESS)
+        .and_then(CoreTopicEvent::as_context_compress)
+        .expect("context compress topic");
     assert!(compact.estimated_before_tokens > compact.estimated_after_tokens);
     assert_eq!(compact.discarded_delta_ids.len(), 1);
     assert!(compact.offloaded_delta_ids.is_empty());
@@ -5285,20 +5285,20 @@ impl ModelClient for StoryReplayModel {
             }
             6 => {
                 assert!(
-                    prompt.contains("Compact context as the tool context_compact desc suggests")
+                    prompt.contains("Compact context as the tool context_compress desc suggests")
                 );
                 assert!(!prompt.contains("Long-context maintenance:"));
                 let mut delta_ids = prompt_field_values(prompt, "delta_id");
                 delta_ids.sort();
                 delta_ids.dedup();
                 let content = format!(
-                    r#"{{"context_compact":{{"offload":{},"summary":"offload the long context and retain the memory lookup task"}}}}"#,
+                    r#"{{"context_compress":{{"offload":{},"summary":"offload the long context and retain the memory lookup task"}}}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 Ok(llm(content, 7_500, false))
             }
             7 => {
-                assert!(prompt.contains("context compacted successfully."));
+                assert!(prompt.contains("context compressed successfully."));
                 Ok(llm(
                     r#"{"free_talk":"","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试项目代号%"],"limit":5}}]}"#,
                     2_500,
@@ -5317,22 +5317,22 @@ impl ModelClient for StoryReplayModel {
             }
             9 => {
                 assert!(
-                    prompt.contains("Compact context as the tool context_compact desc suggests")
+                    prompt.contains("Compact context as the tool context_compress desc suggests")
                 );
                 assert!(!prompt.contains("Long-context maintenance:"));
                 let mut delta_ids = prompt_field_values(prompt, "delta_id");
                 delta_ids.sort();
                 delta_ids.dedup();
                 let content = format!(
-                    r#"{{"context_compact":{{"discard":{},"summary":"keep active task state after the memory lookup"}}}}"#,
+                    r#"{{"context_compress":{{"discard":{},"summary":"keep active task state after the memory lookup"}}}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 Ok(llm(content, 7_650, false))
             }
             10 => {
-                assert!(prompt.contains("context compacted successfully."));
+                assert!(prompt.contains("context compressed successfully."));
                 assert!(
-                    !prompt.contains("Compact context as the tool context_compact desc suggests")
+                    !prompt.contains("Compact context as the tool context_compress desc suggests")
                 );
                 Ok(llm(
                     r#"{"status":"ALL_FINISHED","final_answer":"上下文已转存并压缩，可以继续。"}"#,
@@ -5408,17 +5408,17 @@ fn session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rend
             .prompts
             .iter()
             .filter(|prompt| prompt
-                .contains("Compact context as the tool context_compact desc suggests"))
+                .contains("Compact context as the tool context_compress desc suggests"))
             .count()
             >= 1,
-        "story should force shrink through context compact"
+        "story should force shrink through context compress"
     );
 
     let memory_text = std::fs::read_to_string(dir.join("memory.jsonl")).unwrap();
     assert!(memory_text.contains("测试项目代号是 OMEGA-7"));
     let scratch_text = std::fs::read_to_string(dir.join("scratch_notes.jsonl")).unwrap();
     assert!(scratch_text.contains(r#""scratch_type":"context_offload""#));
-    assert!(scratch_text.contains(r#""label":"context compact offload""#));
+    assert!(scratch_text.contains(r#""label":"context compress offload""#));
 
     let action_topics: Vec<_> = ui
         .events
@@ -6264,7 +6264,7 @@ fn memo_finish_guard_recharges_after_working_round() {
 }
 
 #[test]
-fn memo_survives_context_compaction_and_rides_next_prompt() {
+fn memo_survives_context_compression_and_rides_next_prompt() {
     let dir = tmp_dir("memo_compact");
     let audit = dir.join("audit.json");
     let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
@@ -6297,7 +6297,7 @@ fn memo_survives_context_compaction_and_rides_next_prompt() {
                         .expect("delta id in prompt");
                     Ok(llm(
                         format!(
-                            r#"{{"free_talk":"整理上下文。","context_compact":{{"discard":[{}],"summary":"保留任务目标。"}}}}"#,
+                            r#"{{"free_talk":"整理上下文。","context_compress":{{"discard":[{}],"summary":"保留任务目标。"}}}}"#,
                             serde_json::to_string(&delta_id).unwrap()
                         ),
                         3_000,
@@ -6400,7 +6400,7 @@ fn direct_resume_turn_injects_restart_notice_into_first_model_request() {
     );
     assert!(prompt.contains("Current cwd: /work/project"), "{prompt}");
     assert!(prompt.contains(crate::DIRECT_RESUME_USER_INPUT), "{prompt}");
-    assert!(!prompt.contains("context compaction"), "{prompt}");
+    assert!(!prompt.contains("context compression"), "{prompt}");
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -6410,11 +6410,11 @@ fn restart_then_manual_compact_leads_with_notice_and_compact_trailer() {
     let audit = dir.join("audit.json");
     let mut core = test_core("STATIC", test_profile(), &dir);
     let mut config = test_config();
-    // First request must lead with context_compact; the reply performs it,
+    // First request must lead with context_compress; the reply performs it,
     // then a final answer closes the turn.
     let mut model = ReplayModel::new([
         Ok(llm(
-            r#"{"working_still_action":{"context_compact":{"summary":"restart compact summary","discard":["pd_1"]}}}"#,
+            r#"{"working_still_action":{"context_compress":{"summary":"restart compact summary","discard":["pd_1"]}}}"#,
             1_000,
             false,
         )),
@@ -6458,13 +6458,13 @@ fn restart_then_manual_compact_leads_with_notice_and_compact_trailer() {
         "{first}"
     );
     assert!(
-        first.contains("User manually requests context compaction."),
+        first.contains("User manually requests context compression."),
         "{first}"
     );
     // After a successful compaction the manual wording must clear.
     let second = &model.prompts[1];
     assert!(
-        !second.contains("User manually requests context compaction."),
+        !second.contains("User manually requests context compression."),
         "{second}"
     );
     assert!(second.contains("restart compact summary"), "{second}");
@@ -6485,7 +6485,7 @@ fn mailbox_only_manual_compact_is_consumed_before_model_dispatch() {
             }
             Vec::new()
         }
-        fn take_manual_context_compact_request(&mut self) -> bool {
+        fn take_manual_context_compress_request(&mut self) -> bool {
             std::mem::take(&mut self.requested)
         }
     }
@@ -6495,7 +6495,7 @@ fn mailbox_only_manual_compact_is_consumed_before_model_dispatch() {
     let mut config = test_config();
     let mut model = ReplayModel::new([
         Ok(llm(
-            r#"{"working_still_action":{"context_compact":{"summary":"compacted","discard":["pd_1"]}}}"#,
+            r#"{"working_still_action":{"context_compress":{"summary":"compacted","discard":["pd_1"]}}}"#,
             1000,
             false,
         )),
@@ -6526,7 +6526,7 @@ fn mailbox_only_manual_compact_is_consumed_before_model_dispatch() {
         &mut model,
     );
     assert_eq!(outcome.text, "done");
-    assert!(model.prompts[0].contains("User manually requests context compaction."));
+    assert!(model.prompts[0].contains("User manually requests context compression."));
     let _ = fs::remove_dir_all(dir);
 }
 

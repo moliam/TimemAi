@@ -8,11 +8,11 @@ use timem_ui_contract::preferences::{AssistantResponseFormat, InterfacePreferenc
 pub(crate) const RESPONSE_TRAILER: &str =
     "Please continue the work and respond as protocol requires in user's language:";
 pub(crate) const NATIVE_RESPONSE_TRAILER: &str = "Continue the work and express thought in the user's language.  Use tools smartly. When all work is genuinely done, call the task_finished tool with the complete final answer as its summary:";
-pub(crate) const CONTEXT_COMPACT_REQUIRED_TRAILER: &str =
-    "Context is too long. Compact context as the tool context_compact desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compact:";
-pub(crate) const MANUAL_CONTEXT_COMPACT_TRAILER: &str =
-    "User manually requests context compaction. Compact context as the tool context_compact desc suggests, before further work. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compact:";
-const NATIVE_PROTOCOL_SECTION: &str = "## Tool Calling\n\nCapabilities are provided through the model API. Call them through the API tool-call channel. You may request independent calls together. Text accompanying calls is a user-visible progress note. A response without tool calls does not finish the turn; explicitly call the task_finished tool with the final answer to end it. `context_compact` may be followed by other capability calls in the same response, but it must be the first call. Later calls run only after compaction succeeds.";
+pub(crate) const CONTEXT_COMPRESS_REQUIRED_TRAILER: &str =
+    "Context is too long. Compact context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:";
+pub(crate) const MANUAL_CONTEXT_COMPRESS_TRAILER: &str =
+    "User manually requests context compression. Compact context as the tool context_compress desc suggests, before further work. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:";
+const NATIVE_PROTOCOL_SECTION: &str = "## Tool Calling\n\nCapabilities are provided through the model API. Call them through the API tool-call channel. You may request independent calls together. Text accompanying calls is a user-visible progress note. A response without tool calls does not finish the turn; explicitly call the task_finished tool with the final answer to end it. `context_compress` may be followed by other capability calls in the same response, but it must be the first call. Later calls run only after compaction succeeds.";
 const NATIVE_RESPONSE_MODE_INSTRUCTION: &str = "Use the API tool-call channel for runtime capabilities. Ordinary response text is user-visible, you should report to user your progress often, or answer questions while working; text without tool calls keeps the loop running; call task_finished to end it.";
 const INLINE_RESPONSE_MODE_INSTRUCTION: &str =
     "Your response MUST be exactly protocol-compliant in the response protocol below.";
@@ -24,8 +24,8 @@ pub(crate) const MAX_ACTION_RESULT_PROMPT_BYTES: usize =
 pub(crate) const REASONING_INTENSITY_UPGRADE_TRAILER: &str = "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. Please continue the work and respond as protocol requires in user's language:";
 pub(crate) const NATIVE_REASONING_INTENSITY_UPGRADE_TRAILER: &str = "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. Continue the work and express thought in the user's language. Use tools smartly. When all work is genuinely done, call the task_finished tool with the complete final answer as its summary:";
 const LEGACY_REASONING_REVIEW_TRAILER: &str = "Note: reasoning effort is enabled for this request, while most work rounds run without it. Take advantage of this reasoning pass to review current work, update or adjust the work direction/plan if needed, and express in remarks as appropriate.";
-pub(crate) const REASONING_UPGRADED_CONTEXT_COMPACT_TRAILER: &str = "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. Context is too long. Compact context as the tool context_compact desc suggests. Carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compact:";
-pub(crate) const REASONING_UPGRADED_MANUAL_CONTEXT_COMPACT_TRAILER: &str = "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. User manually requests context compaction. Compact context as the tool context_compact desc suggests, before further work. Carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compact:";
+pub(crate) const REASONING_UPGRADED_CONTEXT_COMPRESS_TRAILER: &str = "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. Context is too long. Compact context as the tool context_compress desc suggests. Carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:";
+pub(crate) const REASONING_UPGRADED_MANUAL_CONTEXT_COMPRESS_TRAILER: &str = "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. User manually requests context compression. Compact context as the tool context_compress desc suggests, before further work. Carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:";
 
 pub(crate) fn is_structured_action_result_envelope(text: &str) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text.trim()) else {
@@ -66,8 +66,8 @@ pub(crate) fn formatted_response_trailer(
 pub(crate) fn apply_reasoning_intensity_upgrade_trailer(rendered_prompt: &str) -> String {
     let (body, trailer) = split_formatted_response_trailer(rendered_prompt);
     let upgraded_trailer = match trailer.as_deref() {
-        Some(CONTEXT_COMPACT_REQUIRED_TRAILER) => REASONING_UPGRADED_CONTEXT_COMPACT_TRAILER,
-        Some(MANUAL_CONTEXT_COMPACT_TRAILER) => REASONING_UPGRADED_MANUAL_CONTEXT_COMPACT_TRAILER,
+        Some(CONTEXT_COMPRESS_REQUIRED_TRAILER) => REASONING_UPGRADED_CONTEXT_COMPRESS_TRAILER,
+        Some(MANUAL_CONTEXT_COMPRESS_TRAILER) => REASONING_UPGRADED_MANUAL_CONTEXT_COMPRESS_TRAILER,
         Some(NATIVE_RESPONSE_TRAILER) => NATIVE_REASONING_INTENSITY_UPGRADE_TRAILER,
         _ => REASONING_INTENSITY_UPGRADE_TRAILER,
     };
@@ -79,12 +79,12 @@ pub(crate) fn split_formatted_response_trailer(rendered_prompt: &str) -> (&str, 
     for trailer in [
         RESPONSE_TRAILER,
         NATIVE_RESPONSE_TRAILER,
-        CONTEXT_COMPACT_REQUIRED_TRAILER,
-        MANUAL_CONTEXT_COMPACT_TRAILER,
+        CONTEXT_COMPRESS_REQUIRED_TRAILER,
+        MANUAL_CONTEXT_COMPRESS_TRAILER,
         REASONING_INTENSITY_UPGRADE_TRAILER,
         NATIVE_REASONING_INTENSITY_UPGRADE_TRAILER,
-        REASONING_UPGRADED_CONTEXT_COMPACT_TRAILER,
-        REASONING_UPGRADED_MANUAL_CONTEXT_COMPACT_TRAILER,
+        REASONING_UPGRADED_CONTEXT_COMPRESS_TRAILER,
+        REASONING_UPGRADED_MANUAL_CONTEXT_COMPRESS_TRAILER,
         LEGACY_REASONING_REVIEW_TRAILER,
     ] {
         let marker = format!("\n\n{trailer}");
@@ -102,7 +102,7 @@ enum VisiblePromptRole {
     UserSupplement,
     UserResumeDirectly,
     You,
-    ContextCompactionSummary,
+    ContextCompressionSummary,
     Runtime,
 }
 
@@ -112,7 +112,7 @@ impl VisiblePromptRole {
             VisiblePromptRole::User
             | VisiblePromptRole::UserSupplement
             | VisiblePromptRole::UserResumeDirectly => spec.user_role,
-            VisiblePromptRole::You | VisiblePromptRole::ContextCompactionSummary => {
+            VisiblePromptRole::You | VisiblePromptRole::ContextCompressionSummary => {
                 spec.assistant_role
             }
             VisiblePromptRole::Runtime => spec.runtime_role,
@@ -122,7 +122,7 @@ impl VisiblePromptRole {
     fn assistant_id(self, assistant_heading: &str) -> Option<&str> {
         matches!(
             self,
-            VisiblePromptRole::You | VisiblePromptRole::ContextCompactionSummary
+            VisiblePromptRole::You | VisiblePromptRole::ContextCompressionSummary
         )
         .then_some(assistant_heading)
     }
@@ -140,14 +140,14 @@ impl VisiblePromptRole {
             } else {
                 format!("## {} (supplement)", spec.user_role)
             }
-        } else if self == VisiblePromptRole::ContextCompactionSummary {
+        } else if self == VisiblePromptRole::ContextCompressionSummary {
             if spec.uses_xml_role_elements() {
                 format!(
-                    "<{} kind=\"context_compaction_summary\">",
+                    "<{} kind=\"context_compression_summary\">",
                     spec.assistant_role
                 )
             } else {
-                format!("## {} (context compaction summary)", assistant_heading)
+                format!("## {} (context compression summary)", assistant_heading)
             }
         } else {
             spec.render_role_open(self.label(spec), self.assistant_id(assistant_heading))
@@ -161,8 +161,8 @@ fn visible_role(prompt_type: &str) -> VisiblePromptRole {
         "user_supplement" => VisiblePromptRole::UserSupplement,
         "user_resume_directly" => VisiblePromptRole::UserResumeDirectly,
         "llm_response" | "llm_response_raw_xml" | "llm_free_talk" => VisiblePromptRole::You,
-        "context_compaction_summary" => VisiblePromptRole::ContextCompactionSummary,
-        "result_of_llm_action" | "response_repair" | "context_compacted" => {
+        "context_compression_summary" => VisiblePromptRole::ContextCompressionSummary,
+        "result_of_llm_action" | "response_repair" | "context_compressed" => {
             VisiblePromptRole::Runtime
         }
         _ => VisiblePromptRole::Runtime,

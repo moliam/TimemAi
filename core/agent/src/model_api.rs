@@ -957,12 +957,17 @@ pub fn model_request_audit_event(
 }
 
 pub fn model_response_audit_event(status: u16, raw_body: &Value) -> Value {
-    let error_kind = if !(200..400).contains(&status) {
+    let stream_error = raw_body.get("stream_error");
+    let error_kind = if stream_error.is_some() {
+        "model_stream_error"
+    } else if !(200..400).contains(&status) {
         "http_error"
     } else {
         "http_success"
     };
-    let response = if status >= 400 {
+    let response = if let Some(error) = stream_error {
+        json!({ "error": redact_value(error) })
+    } else if status >= 400 {
         match raw_body.get("error") {
             Some(e) => json!({ "error": redact_value(e) }),
             None => json!({}),
@@ -1443,7 +1448,8 @@ pub fn interpret_model_http_response(
     {
         let mut decoder = crate::model_stream::OpenAiContentStream::default();
         let mut terminal = None;
-        let mut failed = false;
+        let mut protocol_failed = false;
+        let mut upstream_failure = None;
         let decoded = decoder.push_events(body_text.as_bytes(), &mut |event| match event["type"]
             .as_str()
         {
@@ -1458,18 +1464,27 @@ pub fn interpret_model_http_response(
                     || response["status"] != expected
                     || !response["output"].is_array()
                 {
-                    failed = true;
+                    protocol_failed = true;
                 } else {
                     terminal = Some(response.clone());
                 }
             }
-            Some("response.failed" | "error") => failed = true,
+            Some("response.failed" | "error") if upstream_failure.is_none() => {
+                upstream_failure = Some(openai_responses_stream_failure_summary(event));
+            }
             _ => {}
         });
-        let raw_json = terminal.unwrap_or(Value::Null);
+        let raw_json = match (&terminal, &upstream_failure) {
+            (_, Some(failure)) => json!({"stream": true, "stream_error": failure}),
+            (Some(response), None) => response.clone(),
+            (None, None) => Value::Null,
+        };
         let result = match decoded {
             Err(error) => Err(error),
-            _ if failed => Err("model_responses_stream_failed".into()),
+            _ if let Some(failure) = upstream_failure.as_ref() => {
+                Err(openai_responses_stream_failure_message(failure))
+            }
+            _ if protocol_failed => Err("model_responses_stream_failed".into()),
             _ if raw_json.is_null() => Err("model_responses_stream_missing_terminal".into()),
             _ => parse_model_response(config, &raw_json),
         };
@@ -1504,6 +1519,58 @@ pub fn interpret_model_http_response(
         status,
         raw_json,
         result,
+    }
+}
+
+fn openai_responses_stream_failure_summary(event: &Value) -> Value {
+    let event_type = event
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let error = if event_type == "response.failed" {
+        event.pointer("/response/error").unwrap_or(&Value::Null)
+    } else {
+        event.get("error").unwrap_or(event)
+    };
+    let bounded = |value: Option<&str>| {
+        value
+            .map(str::to_string)
+            .map(sanitize_model_error_reason)
+            .filter(|value| !value.is_empty())
+    };
+    let response = event.get("response").unwrap_or(&Value::Null);
+    json!({
+        "event_type": event_type,
+        "response_id": bounded(response.get("id").and_then(Value::as_str)),
+        "response_status": bounded(response.get("status").and_then(Value::as_str)),
+        "code": bounded(error.get("code").and_then(Value::as_str)),
+        "type": bounded(error.get("type").and_then(Value::as_str)),
+        "param": bounded(error.get("param").and_then(Value::as_str)),
+        "message": bounded(error.get("message").and_then(Value::as_str)),
+    })
+}
+
+fn openai_responses_stream_failure_message(failure: &Value) -> String {
+    let mut details = Vec::new();
+    for field in [
+        "event_type",
+        "response_id",
+        "response_status",
+        "code",
+        "type",
+        "param",
+    ] {
+        if let Some(value) = failure.get(field).and_then(Value::as_str) {
+            details.push(format!("{field}={value}"));
+        }
+    }
+    if let Some(message) = failure.get("message").and_then(Value::as_str) {
+        details.push(format!("message={message}"));
+    }
+    if details.is_empty() {
+        "model_responses_stream_failed".into()
+    } else {
+        format!("model_responses_stream_failed: {}", details.join(" "))
     }
 }
 

@@ -328,8 +328,8 @@ pub(crate) fn is_tool_action_object(value: &Value) -> bool {
             | "free_talk"
             | "working_still_action"
             | "next_actions"
-            | "context_compact"
-            | "context_compacts"
+            | "context_compress"
+            | "context_compresses"
             | "memory_candidates"
     ) && input.is_object()
 }
@@ -460,7 +460,7 @@ pub struct ParsedEnvelope {
     pub thought_keep_in_context: bool,
     pub next_actions: Vec<ParsedAction>,
     pub action_groups: Vec<ParsedActionGroup>,
-    pub context_compacts: Vec<ParsedContextCompact>,
+    pub context_compresses: Vec<ParsedContextCompress>,
     pub memory_candidates: Vec<String>,
     /// Exact protocol response accepted by the runtime for assistant replay.
     ///
@@ -483,7 +483,7 @@ impl ParsedEnvelope {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedContextCompact {
+pub struct ParsedContextCompress {
     pub call_id: String,
     pub discard_delta_ids: Vec<String>,
     pub offload_delta_ids: Vec<String>,

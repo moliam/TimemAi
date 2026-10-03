@@ -121,5 +121,5 @@ changed digits perform a short 3D page turn, labels and units remain stationary,
 and reduced-motion presentation updates without animation. Settled duration
 facts remain static. Local-work state uses a reduced-motion-aware swaying wrench;
 model waiting keeps its existing star identity. System notices use their own half-pixel-larger type
-contract, and context-compaction notices are labeled “Conversation compression” /
+contract, and context-compression notices are labeled “Conversation compression” /
 “对话压缩”.

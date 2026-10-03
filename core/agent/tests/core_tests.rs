@@ -434,7 +434,7 @@ fn readfile_first_touch_note_survives_truncated_tool_result() {
 }
 
 #[test]
-fn context_compact_resets_readfile_first_touch_tracking() {
+fn context_compress_resets_readfile_first_touch_tracking() {
     let cwd = tmp_dir("readfile_first_touch_compact");
     fs::create_dir_all(cwd.join("a/b")).unwrap();
     fs::write(cwd.join("a/b/c.txt"), "one\n").unwrap();
@@ -475,7 +475,7 @@ fn context_compact_resets_readfile_first_touch_tracking() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compact":{{"discard":{},"summary":"reset first touch tracking"}}}}"#,
+            r#"{{"context_compress":{{"discard":{},"summary":"reset first touch tracking"}}}}"#,
             serde_json::to_string(&delta_ids).unwrap()
         )),
         model_name: "qwen-plus".to_string(),
@@ -487,7 +487,7 @@ fn context_compact_resets_readfile_first_touch_tracking() {
         other => panic!("expected model continuation, got {other:?}"),
     };
     assert!(
-        prompt.contains("context compacted successfully."),
+        prompt.contains("context compressed successfully."),
         "{prompt}"
     );
     assert!(!prompt.contains(&file_c_note), "{prompt}");
@@ -609,14 +609,14 @@ fn test_core(
 }
 
 #[test]
-fn manual_context_compact_request_carries_manual_trailer_and_clears_after_compact() {
+fn manual_context_compress_request_carries_manual_trailer_and_clears_after_compact() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
         tmp_dir("manual_compact_mem"),
     );
     let _ = core.begin_turn("work", None);
-    core.request_manual_context_compact();
+    core.request_manual_context_compress();
 
     // First follow-up request carries the manual wording.
     let first = match core.apply_model_response(LlmResponse {
@@ -632,12 +632,12 @@ fn manual_context_compact_request_carries_manual_trailer_and_clears_after_compac
         other => panic!("expected model continuation, got {other:?}"),
     };
     assert!(
-        first.contains("User manually requests context compaction."),
+        first.contains("User manually requests context compression."),
         "{first}"
     );
     assert!(
         first.contains(
-            "Compact context as the tool context_compact desc suggests, before further work"
+            "Compact context as the tool context_compress desc suggests, before further work"
         ),
         "{first}"
     );
@@ -662,7 +662,7 @@ fn manual_context_compact_request_carries_manual_trailer_and_clears_after_compac
         other => panic!("expected retry request, got {other:?}"),
     };
     assert!(
-        retry.contains("User manually requests context compaction."),
+        retry.contains("User manually requests context compression."),
         "retry must keep the manual wording: {retry}"
     );
     assert!(
@@ -682,7 +682,7 @@ fn manual_context_compact_request_carries_manual_trailer_and_clears_after_compac
     let after = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"status":"working","free_talk":"压缩完成。","context_compact":{{"discard":[{delta_id:?}],"summary":"保留目标"}}}}"#
+            r#"{{"status":"working","free_talk":"压缩完成。","context_compress":{{"discard":[{delta_id:?}],"summary":"保留目标"}}}}"#
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -692,7 +692,7 @@ fn manual_context_compact_request_carries_manual_trailer_and_clears_after_compac
         other => panic!("expected model continuation after compaction, got {other:?}"),
     };
     assert!(
-        !after.contains("User manually requests context compaction.")
+        !after.contains("User manually requests context compression.")
             && !after.contains("Context is too long."),
         "compaction success must clear the compact trailer: {after}"
     );
@@ -722,7 +722,7 @@ fn manual_compact_succeeds_on_any_successful_compaction() {
             panic!("expected continuation at step {i}")
         };
     }
-    core.request_manual_context_compact();
+    core.request_manual_context_compress();
     let prompt = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(
@@ -738,14 +738,14 @@ fn manual_compact_succeeds_on_any_successful_compaction() {
     // The manual trailer carries qualitative guidance (discard stale deltas,
     // short valuable summary), not a quantified shrink floor.
     assert!(
-        prompt.contains("User manually requests context compaction."),
+        prompt.contains("User manually requests context compression."),
         "{prompt}"
     );
     assert!(
         prompt.contains(
-            "Compact context as the tool context_compact desc suggests, before further work"
+            "Compact context as the tool context_compress desc suggests, before further work"
         ),
-        "manual trailer must point at the context_compact tool desc: {prompt}"
+        "manual trailer must point at the context_compress tool desc: {prompt}"
     );
     let delta_ids: Vec<String> = prompt
         .lines()
@@ -759,7 +759,7 @@ fn manual_compact_succeeds_on_any_successful_compaction() {
     let after = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"status":"working","free_talk":"压缩完成。","context_compact":{{"discard":{partial},"summary":"保留任务状态"}}}}"#
+            r#"{{"status":"working","free_talk":"压缩完成。","context_compress":{{"discard":{partial},"summary":"保留任务状态"}}}}"#
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -769,7 +769,7 @@ fn manual_compact_succeeds_on_any_successful_compaction() {
         other => panic!("expected continuation after compact, got {other:?}"),
     };
     assert!(
-        !after.contains("User manually requests context compaction.")
+        !after.contains("User manually requests context compression.")
             && !after.contains("Context is too long."),
         "any successful compaction must clear the requirement: {after}"
     );
@@ -2090,7 +2090,7 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.ends_with(
-        "Context is too long. Compact context as the tool context_compact desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compact:"
+        "Context is too long. Compact context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
     ));
     let (_, threshold) = core
         .take_pending_compact_request_notice()
@@ -2160,7 +2160,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.ends_with(
-        "Context is too long. Compact context as the tool context_compact desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compact:"
+        "Context is too long. Compact context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
     ));
     assert!(!prompt.contains("Long-context maintenance:"));
     let (estimated, threshold) = core
@@ -2171,7 +2171,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
 
     let compact_ids = field_values(&prompt, "delta_id");
     let compact_response = format!(
-        r#"{{"context_compact":{{"discard":{},"summary":"retain runtime configuration test state"}}}}"#,
+        r#"{{"context_compress":{{"discard":{},"summary":"retain runtime configuration test state"}}}}"#,
         serde_json::to_string(&compact_ids).unwrap()
     );
     let step = core.apply_model_response(LlmResponse {
@@ -2389,7 +2389,7 @@ fn worker_role_is_expanded_again_after_its_delta_is_discarded() {
     let compacted = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compact":{{"discard":["{}"],"summary":"role description was discarded"}}}}"#,
+            r#"{{"context_compress":{{"discard":["{}"],"summary":"role description was discarded"}}}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -2690,7 +2690,7 @@ fn prompt_discard_can_remove_whole_delta_by_delta_id() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compact":{{"discard":["{}"],"summary":"remove stale test delta"}}}}"#,
+            r#"{{"context_compress":{{"discard":["{}"],"summary":"remove stale test delta"}}}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -2710,17 +2710,17 @@ fn prompt_discard_can_remove_whole_delta_by_delta_id() {
     assert!(!has_tool_output_containing(
         &prompt,
         "content",
-        "Action result: context_compact"
+        "Action result: context_compress"
     ));
     assert!(!prompt.contains("REMOVE_THIS_DELTA"));
-    assert!(prompt.contains("context compacted successfully."));
-    assert!(!prompt.contains("Context compact summary replacing"));
+    assert!(prompt.contains("context compressed successfully."));
+    assert!(!prompt.contains("Context compress summary replacing"));
     assert_eq!(prompt.matches("remove stale test delta").count(), 1);
     let assistant = prompt
-        .find("## TIMEM_ASSISTANT (context compaction summary)")
+        .find("## TIMEM_ASSISTANT (context compression summary)")
         .unwrap();
     let compact_request = prompt.find("remove stale test delta").unwrap();
-    let compact_result = prompt.find("context compacted successfully.").unwrap();
+    let compact_result = prompt.find("context compressed successfully.").unwrap();
     let system = prompt[..compact_result].rfind("## RUNTIME").unwrap();
     assert!(assistant < compact_request);
     assert!(compact_request < system);
@@ -2756,7 +2756,7 @@ fn extracted_replay_keeps_compact_summary_once_as_assistant_before_system_result
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compact":{{"discard":["{}"],"summary":"retain extracted compact state"}}}}"#,
+            r#"{{"context_compress":{{"discard":["{}"],"summary":"retain extracted compact state"}}}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -2770,10 +2770,10 @@ fn extracted_replay_keeps_compact_summary_once_as_assistant_before_system_result
 
     assert_eq!(prompt.matches("retain extracted compact state").count(), 1);
     let assistant = prompt
-        .find("## TIMEM_ASSISTANT (context compaction summary)")
+        .find("## TIMEM_ASSISTANT (context compression summary)")
         .unwrap();
     let summary = prompt.find("retain extracted compact state").unwrap();
-    let compact_result = prompt.find("context compacted successfully.").unwrap();
+    let compact_result = prompt.find("context compressed successfully.").unwrap();
     let system = prompt[..compact_result].rfind("## RUNTIME").unwrap();
     assert!(assistant < summary);
     assert!(summary < system);
@@ -2809,7 +2809,9 @@ fn prompt_delta_ids_are_simple_global_sequence_and_not_reused_after_discard() {
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"context_compact":{"discard":["pd_1"],"summary":"drop first delta"}}"#),
+        content: scored(
+            r#"{"context_compress":{"discard":["pd_1"],"summary":"drop first delta"}}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2853,11 +2855,11 @@ fn memmgr_context_discard_is_not_executable() {
 }
 
 #[test]
-fn response_context_compact_hides_refs_and_appends_summary_slice() {
+fn response_context_compress_hides_refs_and_appends_summary_slice() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
-        tmp_dir("response_context_compact"),
+        tmp_dir("response_context_compress"),
     );
     core.set_response_protocol(ResponseProtocolKind::Json);
     let prompt = match core.begin_turn("OLD_DYNAMIC_CONTEXT_TO_COMPACT", None) {
@@ -2870,7 +2872,7 @@ fn response_context_compact_hides_refs_and_appends_summary_slice() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"free_talk":"整理旧上下文。","context_compact":{{"discard":[{}],"summary":"旧任务已经完成，只保留 compact 后的测试摘要。"}}}}"#,
+            r#"{{"free_talk":"整理旧上下文。","context_compress":{{"discard":[{}],"summary":"旧任务已经完成，只保留 compact 后的测试摘要。"}}}}"#,
             serde_json::to_string(&delta_id).unwrap()
         )),
         model_name: "qwen-plus".to_string(),
@@ -2883,9 +2885,9 @@ fn response_context_compact_hides_refs_and_appends_summary_slice() {
     };
 
     assert!(prompt.contains("## RUNTIME"));
-    assert!(prompt.contains("## TIMEM_ASSISTANT (context compaction summary)"));
+    assert!(prompt.contains("## TIMEM_ASSISTANT (context compression summary)"));
     assert!(prompt.contains("旧任务已经完成，只保留 compact 后的测试摘要"));
-    assert!(prompt.contains("context compacted successfully."));
+    assert!(prompt.contains("context compressed successfully."));
     assert!(prompt.contains("CWD: "));
     assert!(has_action_status(&prompt, "completed"), "{prompt}");
     assert!(!has_tool_output_containing(
@@ -2896,18 +2898,18 @@ fn response_context_compact_hides_refs_and_appends_summary_slice() {
     assert!(!has_tool_output_containing(
         &prompt,
         "content",
-        "Action result: context_compact"
+        "Action result: context_compress"
     ));
     assert!(!prompt.contains("OLD_DYNAMIC_CONTEXT_TO_COMPACT"));
-    assert!(!prompt.contains("Active MCP capabilities after context compaction"));
+    assert!(!prompt.contains("Active MCP capabilities after context compression"));
 }
 
 #[test]
-fn response_context_compact_does_not_append_redundant_mcp_summary() {
+fn response_context_compress_does_not_append_redundant_mcp_summary() {
     let mut core = test_core(
         "STATIC\n{{TOOL_CATALOG}}\n",
         profile("qwen-plus"),
-        tmp_dir("response_context_compact_mcp"),
+        tmp_dir("response_context_compress_mcp"),
     );
     core.set_response_protocol(ResponseProtocolKind::Json);
     core.configure_mcp(
@@ -2936,7 +2938,7 @@ fn response_context_compact_does_not_append_redundant_mcp_summary() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"free_talk":"整理旧上下文。","context_compact":{{"discard":[{}],"summary":"保留当前任务状态。"}}}}"#,
+            r#"{{"free_talk":"整理旧上下文。","context_compress":{{"discard":[{}],"summary":"保留当前任务状态。"}}}}"#,
             serde_json::to_string(&delta_id).unwrap()
         )),
         model_name: "qwen-plus".to_string(),
@@ -2949,9 +2951,9 @@ fn response_context_compact_does_not_append_redundant_mcp_summary() {
     };
 
     assert!(prompt.contains("## RUNTIME"));
-    assert!(prompt.contains("context compacted successfully."));
+    assert!(prompt.contains("context compressed successfully."));
     assert!(prompt.contains("CWD: "));
-    assert!(!prompt.contains("Active MCP capabilities after context compaction"));
+    assert!(!prompt.contains("Active MCP capabilities after context compression"));
     assert!(!prompt.contains("MCP_CONTEXT_TO_COMPACT"));
 }
 
@@ -2971,7 +2973,7 @@ fn prompt_discard_can_remove_visible_delta_by_delta_id() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compact":{{"discard":["{}"],"summary":"remove visible test delta"}}}}"#,
+            r#"{{"context_compress":{{"discard":["{}"],"summary":"remove visible test delta"}}}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -2982,7 +2984,7 @@ fn prompt_discard_can_remove_visible_delta_by_delta_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("context compacted successfully."));
+    assert!(prompt.contains("context compressed successfully."));
     assert!(has_action_status(&prompt, "completed"), "{prompt}");
     assert!(!has_tool_output_containing(
         &prompt,
@@ -2992,7 +2994,7 @@ fn prompt_discard_can_remove_visible_delta_by_delta_id() {
     assert!(!has_tool_output_containing(
         &prompt,
         "content",
-        "Action result: context_compact"
+        "Action result: context_compress"
     ));
     assert!(!prompt.contains(&format!("[BEGIN DELTA]\ndelta_id: {}", delta_id)));
     assert!(!prompt.contains("SLICE_ONE_ONLY"));
@@ -3149,7 +3151,7 @@ fn long_context_uses_observed_model_prompt_tokens_plus_new_delta_estimate() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.ends_with(
-        "Context is too long. Compact context as the tool context_compact desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compact:"
+        "Context is too long. Compact context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
     ));
     assert!(!prompt.contains("Long-context maintenance:"));
     let (estimated, threshold) = core
@@ -3178,7 +3180,7 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.ends_with(
-        "Context is too long. Compact context as the tool context_compact desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compact:"
+        "Context is too long. Compact context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
     ));
     for redundant in [
         "Long-context maintenance:",
@@ -3218,7 +3220,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(shrink_prompt.contains("Compact context as the tool context_compact desc suggests"));
+    assert!(shrink_prompt.contains("Compact context as the tool context_compress desc suggests"));
     assert!(!shrink_prompt.contains("Long-context maintenance:"));
     let mut delta_ids = field_values(&shrink_prompt, "delta_id");
     delta_ids.sort();
@@ -3226,7 +3228,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
     assert!(!delta_ids.is_empty());
 
     let shrink_response = format!(
-        r#"{{"context_compact":{{"discard":{},"summary":"compact old prompt context and keep current task state"}}}}"#,
+        r#"{{"context_compress":{{"discard":{},"summary":"compact old prompt context and keep current task state"}}}}"#,
         serde_json::to_string(&delta_ids).unwrap()
     );
     let step = core.apply_model_response(LlmResponse {
@@ -3241,7 +3243,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
         other => panic!("unexpected step: {other:?}"),
     };
 
-    assert!(next_prompt.contains("context compacted successfully."));
+    assert!(next_prompt.contains("context compressed successfully."));
     assert!(
         has_action_status(&next_prompt, "completed"),
         "{next_prompt}"
@@ -3254,9 +3256,9 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
     assert!(!has_tool_output_containing(
         &next_prompt,
         "content",
-        "Action result: context_compact"
+        "Action result: context_compress"
     ));
-    assert!(!next_prompt.contains("Compact context as the tool context_compact desc suggests"));
+    assert!(!next_prompt.contains("Compact context as the tool context_compress desc suggests"));
 
     let final_step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -3285,7 +3287,7 @@ fn forced_shrink_is_not_reissued_when_dynamic_context_cannot_reduce_enough() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(!prompt.contains("Compact context as the tool context_compact desc suggests"));
+    assert!(!prompt.contains("Compact context as the tool context_compress desc suggests"));
 }
 
 #[test]
@@ -3717,7 +3719,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let compact_ids = field_values(&compact_request_prompt, "delta_id");
     assert!(compact_ids.len() >= 2);
     let compact_response = scored(format!(
-        r#"{{"status":"working","free_talk":"将测试 delta ids 移出活跃上下文。","context_compact":{{"discard":[{}],"offload":[{}],"summary":"保留测试状态摘要"}}}}"#,
+        r#"{{"status":"working","free_talk":"将测试 delta ids 移出活跃上下文。","context_compress":{{"discard":[{}],"offload":[{}],"summary":"保留测试状态摘要"}}}}"#,
         serde_json::to_string(&compact_ids[0]).unwrap(),
         serde_json::to_string(&compact_ids[1]).unwrap(),
     ));
@@ -3731,13 +3733,13 @@ fn protocol_examples_cover_normal_and_corner_flows() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected context maintenance action results, got {other:?}"),
     };
-    assert!(prompt.contains("context compacted successfully."));
+    assert!(prompt.contains("context compressed successfully."));
     assert!(prompt.contains("CWD: "));
     assert!(has_action_status(&prompt, "completed"), "{prompt}");
     assert!(!has_tool_output_containing(
         &prompt,
         "content",
-        "Action result: context_compact"
+        "Action result: context_compress"
     ));
 
     let _ = core.begin_turn("读取错误日志", None);
@@ -5241,7 +5243,7 @@ fn scratch_delete_missing_id_is_non_destructive() {
 }
 
 #[test]
-fn json_context_compact_runs_before_later_action_in_same_response() {
+fn json_context_compress_runs_before_later_action_in_same_response() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -5259,7 +5261,7 @@ fn json_context_compact_runs_before_later_action_in_same_response() {
         tool_calls: Vec::new(),
         content: serde_json::json!({
             "free_talk": "compact first, then continue",
-            "context_compact": {
+            "context_compress": {
                 "discard": [old_delta_id],
                 "summary": "KEEP JSON ACTIVE STATE"
             },
@@ -5283,7 +5285,7 @@ fn json_context_compact_runs_before_later_action_in_same_response() {
 }
 
 #[test]
-fn json_failed_context_compact_blocks_later_action() {
+fn json_failed_context_compress_blocks_later_action() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -5295,7 +5297,7 @@ fn json_failed_context_compact_blocks_later_action() {
     let prompt = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: serde_json::json!({
-            "context_compact": {
+            "context_compress": {
                 "discard": ["prompt_0"],
                 "summary": "INVALID JSON COMPACT"
             },
@@ -5327,7 +5329,7 @@ fn json_failed_context_compact_blocks_later_action() {
 }
 
 #[test]
-fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
+fn context_compress_offload_stores_runtime_prompt_delta_by_id() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -5346,7 +5348,7 @@ fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compact":{{"offload":["{}"],"summary":"large investigation context is offloaded; keep the current task active"}}}}"#,
+            r#"{{"context_compress":{{"offload":["{}"],"summary":"large investigation context is offloaded; keep the current task active"}}}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -5357,13 +5359,13 @@ fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("context compacted successfully."));
+    assert!(prompt.contains("context compressed successfully."));
     assert!(prompt.contains("CWD: "));
     assert!(has_action_status(&prompt, "completed"), "{prompt}");
     assert!(!has_tool_output_containing(
         &prompt,
         "content",
-        "Action result: context_compact"
+        "Action result: context_compress"
     ));
     assert!(!prompt.contains("scratch_id:"));
     let results = action_results(&prompt);
@@ -5387,7 +5389,7 @@ fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
     assert!(scratch_id.starts_with("scratch_"));
 
     assert!(stored.contains("\"scratch_type\":\"context_offload\""));
-    assert!(stored.contains("\"label\":\"context compact offload\""));
+    assert!(stored.contains("\"label\":\"context compress offload\""));
     assert!(stored.contains("large investigation context that should move to scratch"));
     assert!(stored.contains(&delta_id));
 
@@ -5411,7 +5413,7 @@ fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
 }
 
 #[test]
-fn context_compact_offload_rejects_invalid_prompt_refs_without_writing() {
+fn context_compress_offload_rejects_invalid_prompt_refs_without_writing() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -5420,7 +5422,7 @@ fn context_compact_offload_rejects_invalid_prompt_refs_without_writing() {
     let _ = core.begin_turn("seed context", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"free_talk":"checking compact refs","context_compact":{"offload":["prompt_0"],"summary":"bad refs should not write scratch"}}"#),
+        content: scored(r#"{"free_talk":"checking compact refs","context_compress":{"offload":["prompt_0"],"summary":"bad refs should not write scratch"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5455,12 +5457,12 @@ fn context_compact_offload_rejects_invalid_prompt_refs_without_writing() {
     let assistant = prompt.find("## TIMEM_ASSISTANT").unwrap();
     let action_result = prompt.find(r#"{"action_result":"#).unwrap();
     assert!(assistant < action_result);
-    assert!(!prompt.contains("## TIMEM_ASSISTANT (context compaction summary)"));
+    assert!(!prompt.contains("## TIMEM_ASSISTANT (context compression summary)"));
     assert!(!core.scratch_file().exists());
 }
 
 #[test]
-fn context_compact_requires_prompt_refs_in_protocol() {
+fn context_compress_requires_prompt_refs_in_protocol() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -5469,7 +5471,7 @@ fn context_compact_requires_prompt_refs_in_protocol() {
     let _ = core.begin_turn("seed context", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"context_compact":{"summary":"missing refs should repair"}}"#),
+        content: scored(r#"{"context_compress":{"summary":"missing refs should repair"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5479,7 +5481,7 @@ fn context_compact_requires_prompt_refs_in_protocol() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("response is not protocol compliant"));
-    assert!(prompt.contains("context_compact[0].ids_required"));
+    assert!(prompt.contains("context_compress[0].ids_required"));
 }
 
 #[test]
@@ -6935,7 +6937,7 @@ fn still_running_table_survives_discard_of_the_original_action_delta() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compact":{{"discard":["{}"],"summary":"hide running job delta but keep job status"}}}}"#,
+            r#"{{"context_compress":{{"discard":["{}"],"summary":"hide running job delta but keep job status"}}}}"#,
             running_delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -6948,14 +6950,14 @@ fn still_running_table_survives_discard_of_the_original_action_delta() {
     };
     let prompt = core.build_model_request_prompt(&prompt);
     assert!(
-        prompt.contains("context compacted successfully."),
+        prompt.contains("context compressed successfully."),
         "{prompt}"
     );
     assert!(has_action_status(&prompt, "completed"), "{prompt}");
     assert!(!has_tool_output_containing(
         &prompt,
         "content",
-        "Action result: context_compact"
+        "Action result: context_compress"
     ));
     assert!(prompt.contains("#### jobmanager"), "{prompt}");
     assert!(prompt.contains("created by tool_call id"), "{prompt}");
@@ -7015,7 +7017,7 @@ fn still_running_table_is_universal_even_when_compaction_targets_an_unrelated_de
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compact":{{"discard":["{}"],"summary":"hide unrelated user delta only"}}}}"#,
+            r#"{{"context_compress":{{"discard":["{}"],"summary":"hide unrelated user delta only"}}}}"#,
             user_delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -7028,14 +7030,14 @@ fn still_running_table_is_universal_even_when_compaction_targets_an_unrelated_de
     };
     let prompt = core.build_model_request_prompt(&prompt);
     assert!(
-        prompt.contains("context compacted successfully."),
+        prompt.contains("context compressed successfully."),
         "{prompt}"
     );
     assert!(has_action_status(&prompt, "completed"), "{prompt}");
     assert!(!has_tool_output_containing(
         &prompt,
         "content",
-        "Action result: context_compact"
+        "Action result: context_compress"
     ));
     assert!(prompt.contains("#### jobmanager"), "{prompt}");
 
@@ -7085,7 +7087,7 @@ fn still_running_table_survives_offload_of_the_original_action_delta() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compact":{{"offload":["{}"],"summary":"running job context is offloaded and its status must remain visible"}}}}"#,
+            r#"{{"context_compress":{{"offload":["{}"],"summary":"running job context is offloaded and its status must remain visible"}}}}"#,
             running_delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -7099,7 +7101,7 @@ fn still_running_table_survives_offload_of_the_original_action_delta() {
     assert!(!prompt.contains("scratch_id:"), "{prompt}");
     let prompt = core.build_model_request_prompt(&prompt);
     assert!(
-        prompt.contains("context compacted successfully."),
+        prompt.contains("context compressed successfully."),
         "{prompt}"
     );
     assert!(prompt.contains("#### jobmanager"), "{prompt}");
@@ -7160,7 +7162,7 @@ fn still_running_table_survives_xml_style_compaction_of_the_original_action_delt
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"free_talk":"压缩旧上下文。","context_compact":{{"discard":[{}],"summary":"后台任务仍在运行，需要保留运行状态。"}}}}"#,
+            r#"{{"free_talk":"压缩旧上下文。","context_compress":{{"discard":[{}],"summary":"后台任务仍在运行，需要保留运行状态。"}}}}"#,
             serde_json::to_string(&running_delta_id).unwrap()
         )),
         model_name: "qwen-plus".to_string(),
@@ -7173,14 +7175,14 @@ fn still_running_table_survives_xml_style_compaction_of_the_original_action_delt
     };
     let prompt = core.build_model_request_prompt(&prompt);
     assert!(
-        prompt.contains("context compacted successfully."),
+        prompt.contains("context compressed successfully."),
         "{prompt}"
     );
     assert!(has_action_status(&prompt, "completed"), "{prompt}");
     assert!(!has_tool_output_containing(
         &prompt,
         "content",
-        "Action result: context_compact"
+        "Action result: context_compress"
     ));
     assert!(prompt.contains("#### jobmanager"), "{prompt}");
     assert!(prompt.contains("created by tool_call id"), "{prompt}");
@@ -7897,7 +7899,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(long_prompt.starts_with("[BEGIN SYSTEM PROMPT]\nSTATIC_GLOBAL_RULES"));
-    assert!(long_prompt.contains("Compact context as the tool context_compact desc suggests"));
+    assert!(long_prompt.contains("Compact context as the tool context_compress desc suggests"));
     assert!(!long_prompt.contains("Long-context maintenance:"));
     assert!(!long_prompt.contains("target_dynamic_context_ratio"));
 }
@@ -8255,8 +8257,8 @@ fn rendered_prompt_response_schema_is_injected_from_resource() {
     assert!(prompt.contains("\"final_answer?\""));
     assert!(prompt.contains("\"free_talk?\""));
     assert!(prompt.contains("\"working_still_action?\""));
-    assert!(prompt.contains("context_compact may be followed by other actions"));
-    assert!(prompt.contains("context_compact"));
+    assert!(prompt.contains("context_compress may be followed by other actions"));
+    assert!(prompt.contains("context_compress"));
     assert!(prompt.contains("ALL_FINISHED"));
 }
 
@@ -8542,7 +8544,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(xml_prompt.contains("<actions>"));
     assert!(xml_prompt.contains("<parallel>"));
     assert!(!xml_prompt.contains("<action_json>"));
-    assert!(xml_prompt.contains("<context_compact>"));
+    assert!(xml_prompt.contains("<context_compress>"));
     assert!(xml_prompt.contains("<discard>"));
     assert!(xml_prompt.contains("<offload>"));
     assert!(xml_prompt.contains("<summary>"));

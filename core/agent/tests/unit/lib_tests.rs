@@ -111,25 +111,25 @@ fn forced_compaction_preserves_native_history_and_restricts_model_request() {
 
     core.append_in_turn_shrink_review_if_needed();
 
-    assert!(core.context_compact_required);
+    assert!(core.context_compress_required);
     assert_eq!(core.native_exchanges.len(), 1);
     assert_eq!(core.native_exchanges[0].delta_id, "pd_1");
     let prompt = core.render_prompt();
     assert!(!prompt.contains("old tool work"));
-    // Compaction policy lives in the context_compact capability description;
+    // Compaction policy lives in the context_compress capability description;
     // Core adds only the short mandatory-call trailer to the request.
     assert!(!prompt.contains("Long-context maintenance:"));
     let request_prompt = core.build_model_request_prompt(&prompt);
     assert!(!request_prompt.contains("Long-context maintenance:"));
     assert!(!request_prompt.contains("target_dynamic_context_ratio"));
     assert!(request_prompt
-        .ends_with("Context is too long. Compact context as the tool context_compact desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compact:"));
+        .ends_with("Context is too long. Compact context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"));
     let request = core.model_interaction_request(request_prompt);
     assert_eq!(request.tool_choice, NativeToolChoice::Required);
     assert!(request
         .tools
         .iter()
-        .any(|tool| tool.name == "context_compact"));
+        .any(|tool| tool.name == "context_compress"));
     assert!(request.tools.iter().any(|tool| tool.name == "readfile"));
 }
 
@@ -397,7 +397,7 @@ fn native_exchange_is_included_when_owning_delta_is_offloaded() {
 fn forced_compaction_ignores_non_compact_output_then_unlocks_after_success() {
     let mut core = test_core("forced_compaction_ignore");
     core.set_response_protocol(ResponseProtocolKind::Json);
-    core.context_compact_required = true;
+    core.context_compress_required = true;
     core.append_delta(vec![(
         "user_question".to_string(),
         "active task".to_string(),
@@ -415,7 +415,7 @@ fn forced_compaction_ignores_non_compact_output_then_unlocks_after_success() {
     assert!(matches!(ignored, CoreStep::NeedModel { .. }));
     assert_eq!(core.current_round, round_before);
     assert_eq!(core.render_prompt(), before);
-    assert!(core.context_compact_required);
+    assert!(core.context_compress_required);
 
     let ids = core
         .deltas
@@ -424,7 +424,7 @@ fn forced_compaction_ignores_non_compact_output_then_unlocks_after_success() {
         .collect::<Vec<_>>();
     let completed = core.apply_model_response(LlmResponse {
         content: serde_json::json!({
-            "context_compact": {
+            "context_compress": {
                 "discard": ids,
                 "summary": "keep active task and continue"
             }
@@ -436,7 +436,7 @@ fn forced_compaction_ignores_non_compact_output_then_unlocks_after_success() {
         truncated: false,
     });
     assert!(matches!(completed, CoreStep::NeedModel { .. }));
-    assert!(!core.context_compact_required);
+    assert!(!core.context_compress_required);
 }
 
 #[test]
@@ -456,7 +456,7 @@ fn threshold_compaction_quality_warning_tracks_only_consecutive_poor_forced_resu
 
     assert_eq!(
         core.threshold_compaction_quality_note(true, 3_601, 1_001),
-        Some("NOTE: context compaction ratio is not very good, 91% -> 26%, try to compress more by retaining only necessary part and discard bulky along-side info if possible.".to_string())
+        Some("NOTE: context compression ratio is not very good, 91% -> 26%, try to compress more by retaining only necessary part and discard bulky along-side info if possible.".to_string())
     );
     assert_eq!(core.consecutive_poor_threshold_compactions, 2);
 
@@ -494,7 +494,7 @@ fn repeated_poor_threshold_compactions_keep_injecting_quality_warnings() {
         "retained active context ".repeat(4_400),
     )]);
     assert!(core.dynamic_context_estimated_tokens() > core.max_llm_input_tokens / 4);
-    let warning = "NOTE: context compaction ratio is not very good,";
+    let warning = "NOTE: context compression ratio is not very good,";
     let attempts = [
         ("first threshold", false, 0),
         ("manual", true, 0),
@@ -509,14 +509,14 @@ fn repeated_poor_threshold_compactions_keep_injecting_quality_warnings() {
         )]);
         let discard_id = core.deltas.last().unwrap().delta_id.clone();
         if manual {
-            core.request_manual_context_compact();
+            core.request_manual_context_compress();
         } else {
-            core.context_compact_required = true;
+            core.context_compress_required = true;
             core.manual_compact_trailer_pending = false;
         }
         let step = core.apply_model_response(LlmResponse {
             content: serde_json::json!({
-                "context_compact": {
+                "context_compress": {
                     "discard": [discard_id],
                     "summary": format!("retain active state after {label}")
                 }
@@ -617,7 +617,7 @@ fn importing_empty_dynamic_context_replaces_existing_state() {
 }
 
 #[test]
-fn native_context_compact_persists_summary_after_discarding_all_old_deltas() {
+fn native_context_compress_persists_summary_after_discarding_all_old_deltas() {
     let mut core = test_core("native_compact_summary_all");
     core.set_response_protocol(ResponseProtocolKind::Json);
     core.set_interaction_profile(&InteractionProfile {
@@ -650,7 +650,7 @@ fn native_context_compact_persists_summary_after_discarding_all_old_deltas() {
         tool_calls: vec![NativeToolCall {
             assistant_continuation: None,
             id: "call_compact_all".to_string(),
-            name: "context_compact".to_string(),
+            name: "context_compress".to_string(),
             raw_arguments: arguments.to_string(),
             arguments,
         }],
@@ -659,13 +659,13 @@ fn native_context_compact_persists_summary_after_discarding_all_old_deltas() {
         truncated: false,
     });
     let CoreStep::NeedModel { prompt, .. } = step else {
-        panic!("native context compact should continue with a model request")
+        panic!("native context compress should continue with a model request")
     };
 
     assert!(!prompt.contains("OLD NATIVE CONTEXT"));
     assert_eq!(prompt.matches(summary).count(), 1);
-    assert!(prompt.contains("## TIMEM_ASSISTANT (context compaction summary)"));
-    assert!(prompt.contains("context compacted successfully."));
+    assert!(prompt.contains("## TIMEM_ASSISTANT (context compression summary)"));
+    assert!(prompt.contains("context compressed successfully."));
     assert_eq!(core.deltas.len(), 1, "summary must live in a fresh delta");
     assert_ne!(core.deltas[0].delta_id, old_delta_id);
     assert!(core.native_exchanges.is_empty());
@@ -676,7 +676,7 @@ fn native_context_compact_persists_summary_after_discarding_all_old_deltas() {
 }
 
 #[test]
-fn native_context_compact_summary_does_not_depend_on_discarded_owning_delta() {
+fn native_context_compress_summary_does_not_depend_on_discarded_owning_delta() {
     let mut core = test_core("native_compact_summary_owner");
     core.set_response_protocol(ResponseProtocolKind::Json);
     core.set_interaction_profile(&InteractionProfile {
@@ -710,7 +710,7 @@ fn native_context_compact_summary_does_not_depend_on_discarded_owning_delta() {
         tool_calls: vec![NativeToolCall {
             assistant_continuation: None,
             id: "call_compact_owner".to_string(),
-            name: "context_compact".to_string(),
+            name: "context_compress".to_string(),
             raw_arguments: arguments.to_string(),
             arguments,
         }],
@@ -719,13 +719,13 @@ fn native_context_compact_summary_does_not_depend_on_discarded_owning_delta() {
         truncated: false,
     });
     let CoreStep::NeedModel { prompt, .. } = step else {
-        panic!("native context compact should continue with a model request")
+        panic!("native context compress should continue with a model request")
     };
 
     assert!(prompt.contains("KEEP ME"));
     assert!(!prompt.contains("DISCARD OWNING DELTA"));
     assert_eq!(prompt.matches(summary).count(), 1);
-    assert!(prompt.contains("## TIMEM_ASSISTANT (context compaction summary)"));
+    assert!(prompt.contains("## TIMEM_ASSISTANT (context compression summary)"));
     assert!(core
         .deltas
         .iter()
@@ -1013,7 +1013,7 @@ fn parallel_native_calls_share_one_model_interaction_delta() {
 }
 
 #[test]
-fn native_context_compact_first_then_executes_later_call_with_correct_id() {
+fn native_context_compress_first_then_executes_later_call_with_correct_id() {
     let mut core = test_core("native_compact_then_call");
     core.set_interaction_profile(&native_test_profile());
     core.append_delta(vec![(
@@ -1033,7 +1033,7 @@ fn native_context_compact_first_then_executes_later_call_with_correct_id() {
             NativeToolCall {
                 assistant_continuation: None,
                 id: "call_compact_first".to_string(),
-                name: "context_compact".to_string(),
+                name: "context_compress".to_string(),
                 raw_arguments: compact_arguments.to_string(),
                 arguments: compact_arguments,
             },
@@ -1066,7 +1066,7 @@ fn native_context_compact_first_then_executes_later_call_with_correct_id() {
 }
 
 #[test]
-fn context_compact_success_hides_ref_details_and_preserves_surviving_exchanges() {
+fn context_compress_success_hides_ref_details_and_preserves_surviving_exchanges() {
     for native in [false, true] {
         for remove_all in [false, true] {
             let mut core = test_core(&format!("compact_live_refs_{native}_{remove_all}"));
@@ -1096,13 +1096,13 @@ fn context_compact_success_hides_ref_details_and_preserves_surviving_exchanges()
                 content: if native {
                     String::new()
                 } else {
-                    serde_json::json!({"context_compact": arguments}).to_string()
+                    serde_json::json!({"context_compress": arguments}).to_string()
                 },
                 tool_calls: if native {
                     vec![NativeToolCall {
                         assistant_continuation: None,
                         id: "call_compact".to_string(),
-                        name: "context_compact".to_string(),
+                        name: "context_compress".to_string(),
                         raw_arguments: arguments.to_string(),
                         arguments,
                     }]
@@ -1117,7 +1117,7 @@ fn context_compact_success_hides_ref_details_and_preserves_surviving_exchanges()
                 panic!("compaction should continue");
             };
             assert!(
-                prompt.contains("context compacted successfully."),
+                prompt.contains("context compressed successfully."),
                 "{prompt}"
             );
             assert!(!prompt.contains("current_live_delta_refs:"), "{prompt}");
@@ -1130,7 +1130,7 @@ fn context_compact_success_hides_ref_details_and_preserves_surviving_exchanges()
 }
 
 #[test]
-fn native_context_compact_after_another_call_is_rejected() {
+fn native_context_compress_after_another_call_is_rejected() {
     let mut core = test_core("native_compact_not_first");
     core.set_interaction_profile(&native_test_profile());
     core.append_delta(vec![(
@@ -1157,7 +1157,7 @@ fn native_context_compact_after_another_call_is_rejected() {
             NativeToolCall {
                 assistant_continuation: None,
                 id: "call_compact_second".to_string(),
-                name: "context_compact".to_string(),
+                name: "context_compress".to_string(),
                 raw_arguments: compact_arguments.to_string(),
                 arguments: compact_arguments,
             },
@@ -1167,10 +1167,10 @@ fn native_context_compact_after_another_call_is_rejected() {
         truncated: false,
     });
     let CoreStep::NeedModel { prompt, .. } = step else {
-        panic!("non-first context_compact should request protocol repair")
+        panic!("non-first context_compress should request protocol repair")
     };
 
-    assert!(prompt.contains("context_compact_must_be_first"));
+    assert!(prompt.contains("context_compress_must_be_first"));
     assert!(prompt.contains("KEEP OLD STATE"));
     assert!(!prompt.contains("SHOULD NOT APPLY"));
     assert!(core.native_exchanges.is_empty());
@@ -1198,7 +1198,7 @@ fn stale_delta_refs_compact_idempotently_succeeds_and_runs_later_calls() {
             NativeToolCall {
                 assistant_continuation: None,
                 id: "call_stale_compact".to_string(),
-                name: "context_compact".to_string(),
+                name: "context_compress".to_string(),
                 raw_arguments: compact_arguments.to_string(),
                 arguments: compact_arguments,
             },
@@ -1219,7 +1219,7 @@ fn stale_delta_refs_compact_idempotently_succeeds_and_runs_later_calls() {
     };
 
     assert!(!prompt.contains("error: invalid_prompt_refs"));
-    assert!(prompt.contains("context compacted successfully."));
+    assert!(prompt.contains("context compressed successfully."));
     assert!(!prompt.contains("pd_missing"));
     assert!(!prompt.contains("current_live_delta_refs:"));
     assert!(!prompt.contains(r#""discarded_delta_ids""#));
@@ -1246,7 +1246,7 @@ fn prompt_zero_compact_still_fails_closed_and_blocks_later_native_calls() {
             NativeToolCall {
                 assistant_continuation: None,
                 id: "call_bad_compact".to_string(),
-                name: "context_compact".to_string(),
+                name: "context_compress".to_string(),
                 raw_arguments: compact_arguments.to_string(),
                 arguments: compact_arguments,
             },
@@ -1263,7 +1263,7 @@ fn prompt_zero_compact_still_fails_closed_and_blocks_later_native_calls() {
         truncated: false,
     });
     let CoreStep::NeedModel { prompt, .. } = step else {
-        panic!("failed context_compact should continue without executing later calls")
+        panic!("failed context_compress should continue without executing later calls")
     };
 
     assert!(prompt.contains(r#""status":"failed""#));
@@ -2448,7 +2448,7 @@ fn multiple_successful_compacts_emit_one_minimal_runtime_confirmation() {
         tool_calls: Vec::new(),
         content: serde_json::json!({
             "free_talk": "compact both",
-            "context_compact": [
+            "context_compress": [
                 { "discard": [first_id], "summary": "first summary" },
                 { "discard": [second_id], "summary": "second summary" }
             ]
@@ -2459,16 +2459,19 @@ fn multiple_successful_compacts_emit_one_minimal_runtime_confirmation() {
         truncated: false,
     });
     let CoreStep::NeedModel { prompt, .. } = step else {
-        panic!("context compact should continue with a model request")
+        panic!("context compress should continue with a model request")
     };
-    assert_eq!(prompt.matches("context compacted successfully.").count(), 1);
+    assert_eq!(
+        prompt.matches("context compressed successfully.").count(),
+        1
+    );
     assert_eq!(
         prompt
-            .matches("context compacted successfully.\nCWD: ")
+            .matches("context compressed successfully.\nCWD: ")
             .count(),
         1
     );
-    assert!(!prompt.contains("Active MCP capabilities after context compaction"));
+    assert!(!prompt.contains("Active MCP capabilities after context compression"));
     assert_eq!(prompt.matches(r#""action_result":"#).count(), 2);
     assert_eq!(prompt.matches(r#""status":"completed""#).count(), 2);
     assert!(!prompt.contains(r#""discarded_delta_ids""#));
@@ -2514,7 +2517,7 @@ fn later_successful_compact_retires_previous_runtime_confirmation() {
     let first = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: serde_json::json!({
-            "context_compact": {
+            "context_compress": {
                 "discard": [first_id],
                 "summary": "FIRST AUTHORITATIVE SUMMARY"
             }
@@ -2527,7 +2530,10 @@ fn later_successful_compact_retires_previous_runtime_confirmation() {
     let CoreStep::NeedModel { prompt, .. } = first else {
         panic!("first compact should continue with a model request")
     };
-    assert_eq!(prompt.matches("context compacted successfully.").count(), 1);
+    assert_eq!(
+        prompt.matches("context compressed successfully.").count(),
+        1
+    );
     assert!(prompt.contains("FIRST AUTHORITATIVE SUMMARY"));
 
     core.append_delta(vec![(
@@ -2538,7 +2544,7 @@ fn later_successful_compact_retires_previous_runtime_confirmation() {
     let second = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: serde_json::json!({
-            "context_compact": {
+            "context_compress": {
                 "discard": [second_id],
                 "summary": "SECOND AUTHORITATIVE SUMMARY"
             }
@@ -2553,7 +2559,7 @@ fn later_successful_compact_retires_previous_runtime_confirmation() {
     };
 
     assert_eq!(
-        prompt.matches("context compacted successfully.").count(),
+        prompt.matches("context compressed successfully.").count(),
         1,
         "only the latest runtime confirmation should remain visible: {prompt}"
     );
@@ -2571,12 +2577,12 @@ fn later_compact_does_not_hide_summary_that_quotes_runtime_confirmation() {
     )]);
     let first_id = core.deltas[0].delta_id.clone();
     let first_summary =
-        "AUTHORITATIVE SUMMARY: the prior runtime said context compacted successfully. KEEP THIS";
+        "AUTHORITATIVE SUMMARY: the prior runtime said context compressed successfully. KEEP THIS";
 
     let first = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: serde_json::json!({
-            "context_compact": {
+            "context_compress": {
                 "discard": [first_id],
                 "summary": first_summary
             }
@@ -2596,7 +2602,7 @@ fn later_compact_does_not_hide_summary_that_quotes_runtime_confirmation() {
     let second = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: serde_json::json!({
-            "context_compact": {
+            "context_compress": {
                 "discard": [second_id],
                 "summary": "SECOND AUTHORITATIVE SUMMARY"
             }
@@ -2616,7 +2622,7 @@ fn later_compact_does_not_hide_summary_that_quotes_runtime_confirmation() {
     );
     assert_eq!(
         prompt
-            .matches("context compacted successfully.\nCWD: ")
+            .matches("context compressed successfully.\nCWD: ")
             .count(),
         1,
         "only one structured runtime confirmation should remain: {prompt}"
@@ -2643,7 +2649,7 @@ fn successful_compact_does_not_reinject_large_discard_id_lists() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: serde_json::json!({
-            "context_compact": {
+            "context_compress": {
                 "discard": discard,
                 "summary": "Only the active compacted state remains."
             }
@@ -2654,11 +2660,11 @@ fn successful_compact_does_not_reinject_large_discard_id_lists() {
         truncated: false,
     });
     let CoreStep::NeedModel { prompt, .. } = step else {
-        panic!("context compact should continue with a model request")
+        panic!("context compress should continue with a model request")
     };
 
     assert!(
-        prompt.contains("context compacted successfully."),
+        prompt.contains("context compressed successfully."),
         "{prompt}"
     );
     assert!(prompt.contains(r#""status":"completed""#), "{prompt}");
@@ -4050,7 +4056,7 @@ fn aggregate_process_scope_is_one_shot_and_rearmed_after_compaction() {
         "summary": "Keep active work",
     });
     let step = core.apply_model_response(LlmResponse {
-        content: serde_json::json!({"context_compact": arguments}).to_string(),
+        content: serde_json::json!({"context_compress": arguments}).to_string(),
         tool_calls: Vec::new(),
         model_name: "test".to_string(),
         usage: UsageStats::zero(),
@@ -4107,17 +4113,17 @@ fn compaction_prompts_include_reasoning_guidance_on_repeated_builds() {
     for manual in [false, true] {
         let mut core = test_core("compact_reasoning_guidance");
         if manual {
-            core.request_manual_context_compact();
+            core.request_manual_context_compress();
         } else {
-            core.context_compact_required = true;
+            core.context_compress_required = true;
         }
         for _ in 0..2 {
             let prompt = core.build_next_prompt();
             assert!(core.reasoning_critical());
             assert_eq!(prompt.matches("Use this reasoning pass").count(), 1);
-            assert!(prompt.contains("Your tool calls must start with context_compact:"));
+            assert!(prompt.contains("Your tool calls must start with context_compress:"));
             assert_eq!(
-                prompt.contains("User manually requests context compaction"),
+                prompt.contains("User manually requests context compression"),
                 manual
             );
             let (body, trailer) = prompt_render::split_formatted_response_trailer(&prompt);
@@ -4154,7 +4160,7 @@ fn reasoning_counts_actual_request_preparation_not_prompt_rebuilds() {
         );
         assert!(!prompt.contains(prompt_render::REASONING_INTENSITY_UPGRADE_TRAILER));
     }
-    core.request_manual_context_compact();
+    core.request_manual_context_compress();
     let base = core.build_next_prompt();
     let prompt = core.build_model_request_prompt(&base);
     assert!(core.model_interaction_request(prompt).critical_reasoning);

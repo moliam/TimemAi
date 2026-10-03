@@ -4,7 +4,7 @@
 //! terminal copy. It does not own connection state, command admission, or Turn
 //! lifecycle decisions.
 
-use super::{AttachError, AttachSession};
+use super::{AttachError, AttachHostCandidate, AttachSession};
 use crate::{local_time_label, ANSI_BOLD, ANSI_BRIGHT_TIMEM, ANSI_DIM, ANSI_RESET, TIMEM_LOGO};
 use serde_json::Value;
 use unicode_width::UnicodeWidthStr;
@@ -88,6 +88,37 @@ pub(super) fn invalid_restart_choice_card(choice: &str) -> String {
 fn pad_display(value: &str, width: usize) -> String {
     let padding = width.saturating_sub(UnicodeWidthStr::width(value));
     format!("{value}{}", " ".repeat(padding))
+}
+
+pub(super) fn instance_selector(candidates: &[AttachHostCandidate], selected: usize) -> String {
+    let pid_width = candidates
+        .iter()
+        .map(|candidate| candidate.pid.to_string().len())
+        .max()
+        .unwrap_or(1);
+    let port_width = candidates
+        .iter()
+        .map(|candidate| candidate.host.port.to_string().len())
+        .max()
+        .unwrap_or(1);
+    let mut out = format!(
+        "{ANSI_BOLD}Select a Timem instance{ANSI_RESET} {ANSI_DIM}(↑/↓ move · Enter continue · Esc exit){ANSI_RESET}\r\n"
+    );
+    for (index, candidate) in candidates.iter().enumerate() {
+        let marker = if index == selected {
+            format!("{ANSI_BRIGHT_TIMEM}❯{ANSI_RESET}")
+        } else {
+            " ".to_string()
+        };
+        out.push_str(&format!(
+            "{marker} {memory}  {ANSI_DIM}PID {pid:>pid_width$}  port {port:>port_width$}  started {started}{ANSI_RESET}\r\n",
+            memory = candidate.memory_dir.display(),
+            pid = candidate.pid,
+            port = candidate.host.port,
+            started = candidate.started_at_ms,
+        ));
+    }
+    out
 }
 
 pub(super) fn session_selector(sessions: &[AttachSession], selected: usize) -> String {
@@ -287,7 +318,7 @@ fn action_name(action: &str) -> String {
         "memmgr" => "Memory".to_string(),
         "memo" => "Work memo".to_string(),
         "self_tool" => "Runtime info".to_string(),
-        "context_compact" => "Compact context".to_string(),
+        "context_compress" => "Compact context".to_string(),
         other => humanize(other),
     }
 }
@@ -408,7 +439,7 @@ pub(super) fn topic_summary(payload: &Value) -> Option<String> {
                 truncate_line(reason, 160)
             ))
         }
-        "core.context.compact" => Some(format!("{ANSI_INFO}Compacting context{ANSI_RESET}")),
+        "core.context.compress" => Some(format!("{ANSI_INFO}Compressing context{ANSI_RESET}")),
         "core.memo" => {
             let op = data.get("op").and_then(Value::as_str).unwrap_or("updated");
             Some(format!(
@@ -513,6 +544,7 @@ pub(super) fn worker_event_summary(payload: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::HostEndpoint;
     use super::*;
     use serde_json::json;
 
@@ -551,6 +583,45 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn instance_selector_shows_identity_without_exposing_tokens() {
+        let candidates = vec![
+            AttachHostCandidate {
+                memory_dir: std::path::PathBuf::from("/tmp/中文-memory"),
+                pid: 7,
+                started_at_ms: 1_700_000_000_000,
+                host: HostEndpoint {
+                    port: 8080,
+                    token: Some("never-render-this-token".to_string()),
+                },
+            },
+            AttachHostCandidate {
+                memory_dir: std::path::PathBuf::from("/tmp/longer-memory"),
+                pid: 12345,
+                started_at_ms: 1_700_000_000_001,
+                host: HostEndpoint {
+                    port: 18080,
+                    token: Some("another-secret".to_string()),
+                },
+            },
+        ];
+        let plain = strip_ansi(&instance_selector(&candidates, 1));
+        let lines = plain.lines().collect::<Vec<_>>();
+        assert_eq!(
+            lines[0],
+            "Select a Timem instance (↑/↓ move · Enter continue · Esc exit)"
+        );
+        assert!(lines[1].contains("/tmp/中文-memory"));
+        assert!(lines[1].contains("PID     7"));
+        assert!(lines[1].contains("port  8080"));
+        assert!(lines[2].contains("❯ /tmp/longer-memory"));
+        assert!(lines[2].contains("PID 12345"));
+        assert!(lines[2].contains("port 18080"));
+        assert!(lines[2].contains("started 1700000000001"));
+        assert!(!plain.contains("never-render-this-token"));
+        assert!(!plain.contains("another-secret"));
     }
 
     #[test]

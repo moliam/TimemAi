@@ -406,7 +406,7 @@ enum CoreSessionWorkerCommand {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UnconsumedSupplement {
     #[serde(default)]
-    pub manual_context_compact: bool,
+    pub manual_context_compress: bool,
     pub text: String,
     pub additional_context: Option<String>,
     pub command_id: Option<String>,
@@ -418,7 +418,7 @@ impl From<QueuedSupplement> for UnconsumedSupplement {
             text: supplement.text,
             additional_context: supplement.additional_context,
             command_id: supplement.command_id,
-            manual_context_compact: supplement.manual_context_compact,
+            manual_context_compress: supplement.manual_context_compress,
         }
     }
 }
@@ -431,18 +431,18 @@ struct SupplementMailbox {
 
 /// A manual compaction request should not wait behind long local work as
 /// long as a normal supplement: 10s is enough for a user-visible hint.
-const MANUAL_CONTEXT_COMPACT_DISPATCH_TIMEOUT: Duration = Duration::from_secs(10);
+const MANUAL_CONTEXT_COMPRESS_DISPATCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct QueuedSupplement {
     text: String,
     additional_context: Option<String>,
     command_id: Option<String>,
     queued_at: Instant,
-    /// Manual context-compaction request normalized onto the supplement
+    /// Manual context-compression request normalized onto the supplement
     /// shuttle: it rides the dispatch timeout to force the next model
     /// dispatch, then flips the manual compact flag instead of becoming
     /// prompt text.
-    manual_context_compact: bool,
+    manual_context_compress: bool,
 }
 
 enum PendingRuntimeUpdate {
@@ -692,7 +692,7 @@ impl CoreSessionWorkerHandle {
                         additional_context: supplement.additional_context,
                         command_id,
                         queued_at: Instant::now(),
-                        manual_context_compact: false,
+                        manual_context_compress: false,
                     })
                     .collect(),
                 direct_resume,
@@ -765,7 +765,7 @@ impl CoreSessionWorkerHandle {
                     additional_context: None,
                     command_id: None,
                     queued_at: Instant::now(),
-                    manual_context_compact: false,
+                    manual_context_compress: false,
                 });
                 true
             })
@@ -796,7 +796,7 @@ impl CoreSessionWorkerHandle {
             additional_context: None,
             command_id: None,
             queued_at: Instant::now(),
-            manual_context_compact: false,
+            manual_context_compress: false,
         });
         Ok(true)
     }
@@ -857,7 +857,7 @@ impl CoreSessionWorkerHandle {
             additional_context,
             command_id,
             queued_at: Instant::now(),
-            manual_context_compact: false,
+            manual_context_compress: false,
         });
         Ok(true)
     }
@@ -866,17 +866,17 @@ impl CoreSessionWorkerHandle {
         let _ = self.try_add_user_supplement(supplement);
     }
 
-    /// User-initiated context compaction; effective even mid-turn because the
+    /// User-initiated context compression; effective even mid-turn because the
     /// turn loop polls this flag between model requests.
-    pub fn request_manual_context_compact(&self) -> Result<(), String> {
+    pub fn request_manual_context_compress(&self) -> Result<(), String> {
         self.manual_compact_requested.store(true, Ordering::SeqCst);
         Ok(())
     }
 
-    /// Queues a manual context-compaction request as a mailbox marker so a
+    /// Queues a manual context-compression request as a mailbox marker so a
     /// busy turn forces the next model dispatch after the compact dispatch
     /// timeout instead of waiting for the current local work to finish.
-    pub fn queue_manual_context_compact(&self) -> Result<bool, String> {
+    pub fn queue_manual_context_compress(&self) -> Result<bool, String> {
         let mut mailbox = self
             .supplement_mailbox
             .lock()
@@ -889,7 +889,7 @@ impl CoreSessionWorkerHandle {
             additional_context: None,
             command_id: None,
             queued_at: Instant::now(),
-            manual_context_compact: true,
+            manual_context_compress: true,
         });
         Ok(true)
     }
@@ -2602,7 +2602,7 @@ impl TurnUi for WorkerTurnUi {
         self.cancel_requested.swap(false, Ordering::SeqCst)
     }
 
-    fn take_manual_context_compact_request(&mut self) -> bool {
+    fn take_manual_context_compress_request(&mut self) -> bool {
         self.manual_compact_requested.swap(false, Ordering::SeqCst)
     }
 
@@ -2628,8 +2628,8 @@ impl TurnUi for WorkerTurnUi {
         let timeout = self.supplement_mailbox.lock().ok().and_then(|mailbox| {
             let oldest = mailbox.queue.first()?;
             let waited = oldest.queued_at.elapsed();
-            let threshold = if oldest.manual_context_compact {
-                MANUAL_CONTEXT_COMPACT_DISPATCH_TIMEOUT
+            let threshold = if oldest.manual_context_compress {
+                MANUAL_CONTEXT_COMPRESS_DISPATCH_TIMEOUT
             } else {
                 self.user_supplement_model_dispatch_timeout
             };
@@ -2826,7 +2826,7 @@ impl WorkerTurnUi {
             if let Some(command_id) = queued.command_id {
                 publish_command_accepted(&self.event_tx, &self.command_ids, command_id);
             }
-            if queued.manual_context_compact {
+            if queued.manual_context_compress {
                 self.manual_compact_requested.store(true, Ordering::SeqCst);
                 continue;
             }
@@ -2868,7 +2868,7 @@ impl WorkerTurnUi {
             if let Some(command_id) = queued.command_id.as_ref() {
                 publish_command_accepted(&self.event_tx, &self.command_ids, command_id.clone());
             }
-            if queued.manual_context_compact {
+            if queued.manual_context_compress {
                 compact = true;
                 continue;
             }
@@ -2879,7 +2879,7 @@ impl WorkerTurnUi {
                 text: String::new(),
                 additional_context: None,
                 command_id: None,
-                manual_context_compact: true,
+                manual_context_compress: true,
             });
         }
         supplements

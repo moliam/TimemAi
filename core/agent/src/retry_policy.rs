@@ -73,6 +73,20 @@ pub fn is_retryable_model_system_error(error: &str) -> bool {
     {
         return true;
     }
+    if let Some(details) = lower.strip_prefix("model_responses_stream_failed:") {
+        return [
+            "server_is_overloaded",
+            "server_error",
+            "internal_error",
+            "service_unavailable",
+            "temporarily_unavailable",
+            "rate_limit_exceeded",
+            "rate_limited",
+            "timeout",
+        ]
+        .iter()
+        .any(|signal| details.contains(signal));
+    }
     if let Some(status_text) = lower.strip_prefix("model_http_") {
         let status: u16 = status_text
             .chars()

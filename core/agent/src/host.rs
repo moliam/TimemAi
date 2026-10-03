@@ -380,7 +380,7 @@ pub const CORE_TOPIC_MODEL_REPAIR: &str = "core.model.repair";
 pub const CORE_TOPIC_MODEL_CAPABILITY_NEGOTIATION: &str = "core.model.capability_negotiation";
 pub const CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP: &str = "core.runtime_root_repair_help";
 pub const CORE_TOPIC_ACTION: &str = "core.action";
-pub const CORE_TOPIC_CONTEXT_COMPACT: &str = "core.context.compact";
+pub const CORE_TOPIC_CONTEXT_COMPRESS: &str = "core.context.compress";
 pub const CORE_TOPIC_TOOLGEN: &str = "core.toolgen";
 pub const CORE_TOPIC_LIFECYCLE: &str = "core.lifecycle";
 pub const CORE_TOPIC_MEMO: &str = "core.memo";
@@ -410,7 +410,7 @@ pub struct CoreModelRepairTopic {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CoreContextCompactTopic {
+pub struct CoreContextCompressTopic {
     pub estimated_before_tokens: u32,
     pub estimated_after_tokens: u32,
     pub estimated_text_before_tokens: u32,
@@ -630,11 +630,11 @@ impl CoreTopicEvent {
         })
     }
 
-    pub fn as_context_compact(&self) -> Option<CoreContextCompactTopic> {
-        if self.topic.name != CORE_TOPIC_CONTEXT_COMPACT {
+    pub fn as_context_compress(&self) -> Option<CoreContextCompressTopic> {
+        if self.topic.name != CORE_TOPIC_CONTEXT_COMPRESS {
             return None;
         }
-        Some(CoreContextCompactTopic {
+        Some(CoreContextCompressTopic {
             estimated_before_tokens: self.payload["estimated_before_tokens"].as_u64()? as u32,
             estimated_after_tokens: self.payload["estimated_after_tokens"].as_u64()? as u32,
             estimated_text_before_tokens: self.payload["estimated_text_before_tokens"]
@@ -830,7 +830,7 @@ pub fn model_repair_topic_event(
 
 /// The runtime crossed the forced-shrink threshold and injected the
 /// compaction request into the prompt. UI renders this as "compacting...".
-pub fn context_compact_requested_topic_event(
+pub fn context_compress_requested_topic_event(
     session_id: impl Into<String>,
     estimated_prompt_tokens: u32,
     force_threshold_tokens: u32,
@@ -838,9 +838,9 @@ pub fn context_compact_requested_topic_event(
     CoreTopicEvent::new(
         session_id,
         CoreTopic::new(
-            CORE_TOPIC_CONTEXT_COMPACT,
+            CORE_TOPIC_CONTEXT_COMPRESS,
             json!({
-                "name": CORE_TOPIC_CONTEXT_COMPACT,
+                "name": CORE_TOPIC_CONTEXT_COMPRESS,
             }),
         ),
         CoreSessionState::Running,
@@ -852,16 +852,16 @@ pub fn context_compact_requested_topic_event(
     )
 }
 
-pub fn context_compact_topic_event(
+pub fn context_compress_topic_event(
     session_id: impl Into<String>,
-    report: &CoreContextCompactTopic,
+    report: &CoreContextCompressTopic,
 ) -> CoreTopicEvent {
     CoreTopicEvent::new(
         session_id,
         CoreTopic::new(
-            CORE_TOPIC_CONTEXT_COMPACT,
+            CORE_TOPIC_CONTEXT_COMPRESS,
             json!({
-                "name": CORE_TOPIC_CONTEXT_COMPACT,
+                "name": CORE_TOPIC_CONTEXT_COMPRESS,
             }),
         ),
         CoreSessionState::Running,
@@ -1785,9 +1785,9 @@ pub trait TurnUi {
         self.is_cancel_requested()
     }
 
-    /// User-initiated manual context compaction request (WebUI action).
+    /// User-initiated manual context compression request (WebUI action).
     /// Consumed by the turn loop each iteration; safe to set mid-turn.
-    fn take_manual_context_compact_request(&mut self) -> bool {
+    fn take_manual_context_compress_request(&mut self) -> bool {
         false
     }
 

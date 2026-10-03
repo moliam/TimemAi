@@ -100,14 +100,14 @@ fn manual_compact_marker_drains_into_flag_not_prompt_text() {
         additional_context: None,
         command_id: None,
         queued_at: Instant::now(),
-        manual_context_compact: false,
+        manual_context_compress: false,
     });
     mailbox.lock().unwrap().queue.push(QueuedSupplement {
         text: String::new(),
         additional_context: None,
         command_id: None,
         queued_at: Instant::now(),
-        manual_context_compact: true,
+        manual_context_compress: true,
     });
     let supplements = ui.drain_user_supplements_with_context();
     // The user text survives as a supplement; the marker becomes the compact
@@ -115,8 +115,8 @@ fn manual_compact_marker_drains_into_flag_not_prompt_text() {
     assert_eq!(supplements.len(), 1);
     assert_eq!(supplements[0].text, "user follow-up");
     assert!(manual_flag.load(std::sync::atomic::Ordering::SeqCst));
-    assert!(ui.take_manual_context_compact_request());
-    assert!(!ui.take_manual_context_compact_request());
+    assert!(ui.take_manual_context_compress_request());
+    assert!(!ui.take_manual_context_compress_request());
 }
 
 #[test]
@@ -128,7 +128,7 @@ fn manual_compact_marker_uses_short_dispatch_timeout() {
         additional_context: None,
         command_id: None,
         queued_at: Instant::now() - Duration::from_secs(11),
-        manual_context_compact: true,
+        manual_context_compress: true,
     });
     // The normal supplement timeout is 120s; the marker must fire at 10s.
     let waited = ui.take_user_supplement_model_dispatch_timeout();
@@ -153,7 +153,7 @@ fn manual_compact_queue_rejects_closed_mailbox() {
         pending_runtime_updates: Arc::new(Mutex::new(Vec::new())),
         background_cancel: Arc::new(|| {}),
     };
-    assert_eq!(handle.queue_manual_context_compact(), Ok(false));
+    assert_eq!(handle.queue_manual_context_compress(), Ok(false));
 }
 
 #[test]
@@ -5843,13 +5843,13 @@ fn manual_compact_at_finish_is_handed_off_without_waiting_for_user_input() {
                 additional_context: None,
                 command_id: None,
                 queued_at: Instant::now(),
-                manual_context_compact: true,
+                manual_context_compress: true,
             });
         }
         let handoff = ui.close_supplements_for_host_handoff();
         assert_eq!(handoff.len(), 1, "compact must schedule a follow-up turn");
         assert!(handoff[0].text.is_empty());
-        assert!(handoff[0].manual_context_compact);
+        assert!(handoff[0].manual_context_compress);
         assert!(!flag.load(Ordering::SeqCst), "handoff owns the request now");
         assert!(ui.close_supplements_for_host_handoff().is_empty());
         assert!(!mailbox.lock().unwrap().accepting);

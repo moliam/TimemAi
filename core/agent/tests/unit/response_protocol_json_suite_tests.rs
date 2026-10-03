@@ -65,7 +65,7 @@ fn documented_json_response_examples_parse_with_runtime_parser() {
         assert!(
             !env.final_answer.trim().is_empty()
                 || !env.next_actions.is_empty()
-                || !env.context_compacts.is_empty(),
+                || !env.context_compresses.is_empty(),
             "documented JSON example #{idx} produced no runtime-visible result:\n{}",
             example
         );
@@ -86,33 +86,46 @@ fn rejects_noncanonical_fields_envelope() {
 }
 
 #[test]
-fn parses_context_compact_field() {
+fn rejects_legacy_context_compact_field() {
     let env = parse_envelope(
-        r#"{"free_talk":"整理上下文","context_compact":{"discard":["pd_a"],"summary":"keep important state"},"working_still_action":{"run_bash":{"cmd":"pwd"}}}"#,
+        r#"{"context_compact":{"discard":["pd_a"],"summary":"must be rejected"}}"#,
         &caps(),
     );
-
-    assert!(env.repair_issue.is_none());
-    assert_eq!(env.context_compacts.len(), 1);
-    assert_eq!(env.context_compacts[0].delta_ids, vec!["pd_a"]);
-    assert_eq!(env.context_compacts[0].discard_delta_ids, vec!["pd_a"]);
-    assert!(env.context_compacts[0].offload_delta_ids.is_empty());
-    assert!(env.context_compacts[0].slice_ids.is_empty());
-    assert_eq!(env.context_compacts[0].summary, "keep important state");
+    assert_eq!(
+        env.repair_issue.as_deref(),
+        Some("unexpected_top_level_field:context_compact")
+    );
+    assert!(env.context_compresses.is_empty());
 }
 
 #[test]
-fn parses_context_compact_discard_and_offload_fields() {
+fn parses_context_compress_field() {
     let env = parse_envelope(
-        r#"{"free_talk":"整理上下文","context_compact":{"discard":["pd_a"],"offload":["pd_b"],"summary":"keep important state"},"working_still_action":{"run_bash":{"cmd":"pwd"}}}"#,
+        r#"{"free_talk":"整理上下文","context_compress":{"discard":["pd_a"],"summary":"keep important state"},"working_still_action":{"run_bash":{"cmd":"pwd"}}}"#,
         &caps(),
     );
 
     assert!(env.repair_issue.is_none());
-    assert_eq!(env.context_compacts.len(), 1);
-    assert_eq!(env.context_compacts[0].discard_delta_ids, vec!["pd_a"]);
-    assert_eq!(env.context_compacts[0].offload_delta_ids, vec!["pd_b"]);
-    assert_eq!(env.context_compacts[0].delta_ids, vec!["pd_a", "pd_b"]);
+    assert_eq!(env.context_compresses.len(), 1);
+    assert_eq!(env.context_compresses[0].delta_ids, vec!["pd_a"]);
+    assert_eq!(env.context_compresses[0].discard_delta_ids, vec!["pd_a"]);
+    assert!(env.context_compresses[0].offload_delta_ids.is_empty());
+    assert!(env.context_compresses[0].slice_ids.is_empty());
+    assert_eq!(env.context_compresses[0].summary, "keep important state");
+}
+
+#[test]
+fn parses_context_compress_discard_and_offload_fields() {
+    let env = parse_envelope(
+        r#"{"free_talk":"整理上下文","context_compress":{"discard":["pd_a"],"offload":["pd_b"],"summary":"keep important state"},"working_still_action":{"run_bash":{"cmd":"pwd"}}}"#,
+        &caps(),
+    );
+
+    assert!(env.repair_issue.is_none());
+    assert_eq!(env.context_compresses.len(), 1);
+    assert_eq!(env.context_compresses[0].discard_delta_ids, vec!["pd_a"]);
+    assert_eq!(env.context_compresses[0].offload_delta_ids, vec!["pd_b"]);
+    assert_eq!(env.context_compresses[0].delta_ids, vec!["pd_a", "pd_b"]);
 }
 
 #[test]
@@ -209,11 +222,11 @@ fn diverse_confusing_json_responses_keep_strict_execution_boundary() {
             vec!["run_bash", "run_bash", "memmgr", "run_bash"],
         ),
         (
-            "context compact plus action",
+            "context compress plus action",
             json!({
                 "free_talk": "compact before continuing",
                 "free_talk": "compacting",
-                "context_compact": {"discard": ["pd_a", "pd_b"], "summary": "keep active task, progress, todo"},
+                "context_compress": {"discard": ["pd_a", "pd_b"], "summary": "keep active task, progress, todo"},
                 "working_still_action": {"run_bash": {"cmd": "pwd"}}
             }),
             vec!["run_bash"],
@@ -342,8 +355,8 @@ fn malformed_response_variants_return_repair_issues_without_panic() {
             "final_answer_must_not_start_with_runtime_progress_marker",
         ),
         (
-            r#"{"status":"working","free_talk":"compact","context_compact":{"discard":["pd_a"]}}"#,
-            "context_compact[0].summary_required",
+            r#"{"status":"working","free_talk":"compact","context_compress":{"discard":["pd_a"]}}"#,
+            "context_compress[0].summary_required",
         ),
     ];
 

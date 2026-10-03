@@ -137,7 +137,7 @@ export type StreamRetention = {
 /**
  * All rounds remain in place until the caller archives the confirmed final answer.
  * The live stream area keeps every dynamic activity (thoughts, tools, memo
- * notices, context compaction, supplements, ...) so users always see runtime
+ * notices, context compression, supplements, ...) so users always see runtime
  * status live; collapse into the Thought/Action frame happens only when the
  * caller archives the stream after the authoritative turn state ends.
  */

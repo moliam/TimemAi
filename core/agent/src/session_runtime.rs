@@ -425,14 +425,14 @@ fn run_session_turn_with_model_client_and_reminder_override(
         if let Some((estimated_prompt_tokens, force_threshold)) =
             core.take_pending_compact_request_notice()
         {
-            ui.on_core_topic_events(&[crate::host::context_compact_requested_topic_event(
+            ui.on_core_topic_events(&[crate::host::context_compress_requested_topic_event(
                 request.session,
                 estimated_prompt_tokens,
                 force_threshold,
             )]);
         }
-        if matches!(step, CoreStep::NeedModel { .. }) && ui.take_manual_context_compact_request() {
-            core.request_manual_context_compact();
+        if matches!(step, CoreStep::NeedModel { .. }) && ui.take_manual_context_compress_request() {
+            core.request_manual_context_compress();
         }
         match step {
             CoreStep::NeedModel { ref prompt, .. } => {
@@ -460,8 +460,8 @@ fn run_session_turn_with_model_client_and_reminder_override(
                 );
                 // Draining the mailbox can turn a compact marker into a request
                 // without returning any user text. Consume it before dispatch.
-                if ui.take_manual_context_compact_request() {
-                    core.request_manual_context_compact();
+                if ui.take_manual_context_compress_request() {
+                    core.request_manual_context_compress();
                 }
                 if !supplements.is_empty() {
                     if let Some(next_step) = core.append_user_supplements_with_context_and_audit(

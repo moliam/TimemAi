@@ -31,7 +31,7 @@ Every feature test must be reviewed against these product-facing axes:
    cancellation prompts, and model free_talk/action semantics. Web tests prove
    session isolation, scoped topics, active-turn supplements, inline decisions,
    cancellation pressure, attachments, history paging, per-session profiles,
-   cwd changes, context compaction display, final-answer telemetry, and bounded
+   cwd changes, context compression display, final-answer telemetry, and bounded
    rendering. Prefer shell render contracts plus real pseudo-TTY smoke/stress,
    and Web host tests, frontend reducer/render tests, production builds, and
    release browser smoke.
@@ -179,7 +179,7 @@ Latency evidence follows the same rule as Web performance tracing: use monotonic
 | Prompt cache planning | `prompt_cache_strategy_*`, prefix-cache simulator tests with bounded lookback, model request cache-control tests, Anthropic cache read/create usage tests, `scripts/kvc_replay_test.sh`, `scripts/kvc_replay.py` local audit replay | `session_turn_preserves_incremental_prompt_cache_plan_across_rounds`, `session_turn_preserves_cache_plan_with_json_response_protocol`, `session_turn_preserves_cache_plan_with_xml_response_protocol`, request audit redaction/hash tests | full CI runs JSON/XML replay fixture coverage; run local audit replay before cache-strategy releases |
 | Prompt delta/slice rendering | prompt segmentation, multi-slice core tests, focused response-repair slice tests | shrink session E2E | edge regression shrink group |
 | Forced shrink | core shrink threshold, stale observed-token invalidation, static-dominant guard | `session_turn_forced_shrink_runs_to_final_without_repeated_shrink` | edge regression shrink + session groups |
-| Scratch notes and context compact offload | scratch write/read/query/delete, context_compact discard/offload refs, invalid refs, missing fields | `session_turn_scratch_context_offload_records_id_and_continues` | session group |
+| Scratch notes and context compress offload | scratch write/read/query/delete, context_compress discard/offload refs, invalid refs, missing fields | `session_turn_scratch_context_offload_records_id_and_continues` | session group |
 | Durable memory | query/update/delete, expected version, SQL read surface | realistic multi-turn memory story | memory concurrency + realistic story groups |
 | Multi-CLI memory conflicts | mem guard cross-process and same-version conflict tests | realistic story exercises shared storage shape | memory concurrency group |
 | Chat history | persisted query, delete, SQL time-window, current prompt fallback | realistic story | full CI |

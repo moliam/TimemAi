@@ -1086,6 +1086,80 @@ fn unsupported_reasoning_is_rejected_before_transport_initialization() {
 }
 
 #[test]
+fn responses_stream_failure_is_returned_and_audited_with_sanitized_details() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        read_http_request(&mut socket);
+        let body = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "type": "response.failed",
+                "response": {
+                    "id": "resp_transport_123",
+                    "status": "failed",
+                    "error": {
+                        "code": "server_error",
+                        "type": "upstream_error",
+                        "message": "provider failed sk-sensitive-token",
+                    },
+                    "metadata": {"private": "must-not-enter-audit"},
+                },
+            })
+        );
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nX-Request-Id: upstream-request-456\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+    let mut config = local_config(addr, 5);
+    config.api_protocol = ApiProtocol::OpenAiResponses;
+    config.openai_compatible.stream = true;
+    let audit_file = test_audit_file("responses-failed-diagnostics");
+
+    let error = call_model(&config, "trigger upstream failure", &audit_file).unwrap_err();
+    assert!(
+        error.starts_with("model_responses_stream_failed:"),
+        "{error}"
+    );
+    assert!(error.contains("response_id=resp_transport_123"), "{error}");
+    assert!(error.contains("code=server_error"), "{error}");
+    assert!(
+        error.contains("message=provider failed ***REDACTED***"),
+        "{error}"
+    );
+    assert!(!error.contains("sk-sensitive-token"));
+    server.join().unwrap();
+
+    let stream_path = api_audit_stream_path(&audit_file);
+    let document = read_api_audit_doc(&stream_path).unwrap();
+    let response = document["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "llm_response")
+        .unwrap();
+    assert_eq!(response["status"], 200);
+    assert_eq!(response["error_kind"], "model_stream_error");
+    assert_eq!(
+        response["response"]["error"]["event_type"],
+        "response.failed"
+    );
+    assert_eq!(response["response"]["error"]["code"], "server_error");
+    assert_eq!(response["transport"]["request_id"], "upstream-request-456");
+    let audit_text = response.to_string();
+    assert!(audit_text.contains("***REDACTED***"));
+    assert!(!audit_text.contains("sk-sensitive-token"));
+    assert!(!audit_text.contains("must-not-enter-audit"));
+    let _ = std::fs::remove_file(audit_file);
+    let _ = std::fs::remove_file(stream_path);
+}
+
+#[test]
 fn responses_provisional_content_arrives_before_terminal() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();

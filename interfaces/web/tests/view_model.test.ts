@@ -55,7 +55,7 @@ import {
   runtimeConnectionLabel,
   sessionCacheHitPercent,
   sessionContextUsage,
-  sessionContextCompactPending,
+  sessionContextCompressPending,
   sessionCreateDecision,
   sessionInteractionLockReason,
   sessionRenameDecision,
@@ -1257,6 +1257,39 @@ describe("web topic view model", () => {
     expect(
       composerSendDecision(working, "", false, false, [], false, true, true),
     ).toEqual({ kind: "skip", reason: "direct_resume_requires_idle" });
+    const queued = {
+      ...idle,
+      state: "ready" as const,
+      message_queue: {
+        ...idle.message_queue,
+        items: [{
+          command_id: "queued-task",
+          enqueue_seq: 1,
+          payload: {
+            turn_id: "queued-turn",
+            created_at_ms: 1,
+            text: "queued task",
+            attachments: [],
+            worker_roles: [],
+          },
+        }],
+      },
+    };
+    expect(
+      composerSendDecision(queued, "", false, false, [], false, true, true),
+    ).toEqual({
+      kind: "send",
+      text: "",
+      clearDraftOnSuccess: true,
+      command: {
+        type: "turn_submit",
+        session_id: "session_1",
+        text: "",
+        input_kind: "resume_directly",
+        attachment_ids: [],
+      },
+    });
+
     expect(
       composerSendDecision(
         idle,
@@ -1791,10 +1824,10 @@ describe("web topic view model", () => {
         role: "system",
         turn_id: "turn_compacted",
         created_at_ms: 20,
-        kind: "context_compact",
+        kind: "context_compress",
         content: "compacted",
         source: "core_topic",
-        payload: topic("core.context.compact", {
+        payload: topic("core.context.compress", {
           estimated_before_tokens: 180000,
           estimated_after_tokens: 20000,
         }),
@@ -1819,7 +1852,7 @@ describe("web topic view model", () => {
       "failed",
     );
     expect((visible[1].payload.topic as Record<string, unknown>).name).toBe(
-      "core.context.compact",
+      "core.context.compress",
     );
   });
 
@@ -2740,7 +2773,7 @@ describe("web topic view model", () => {
         event_id: "compact_done",
         source: "core_topic",
         created_at_ms: 20,
-        payload: topic("core.context.compact", {
+        payload: topic("core.context.compress", {
           phase: "completed",
           estimated_before_tokens: 116_000,
           estimated_after_tokens: 19_000,
@@ -2773,7 +2806,7 @@ describe("web topic view model", () => {
         event_id: "compact_requested",
         source: "core_topic",
         created_at_ms: 20,
-        payload: topic("core.context.compact", {
+        payload: topic("core.context.compress", {
           phase: "requested",
           estimated_after_tokens: 1,
         }),
@@ -3220,9 +3253,25 @@ describe("web topic view model", () => {
     ).toBeNull();
   });
 
-  it("keeps context compaction as a typed system activity with token metrics", () => {
-    const activity = activityFromTopic(
+  it("reads the legacy persisted context topic without making it canonical", () => {
+    const legacy = activityFromTopic(
       topic("core.context.compact", {
+        phase: "completed",
+        estimated_before_tokens: 40_000,
+        estimated_after_tokens: 8_000,
+      }),
+    );
+    expect(legacy).toMatchObject({
+      kind: "context_compress",
+      compact_phase: "completed",
+      before_tokens: 40_000,
+      after_tokens: 8_000,
+    });
+  });
+
+  it("keeps context compression as a typed system activity with token metrics", () => {
+    const activity = activityFromTopic(
+      topic("core.context.compress", {
         estimated_before_tokens: 82_000,
         estimated_after_tokens: 14_000,
         estimated_text_before_tokens: 12_000,
@@ -3232,7 +3281,7 @@ describe("web topic view model", () => {
       }),
     );
     expect(activity).toMatchObject({
-      kind: "context_compact",
+      kind: "context_compress",
       tone: "notice",
       title: "Conversation compressed",
       before_tokens: 82_000,
@@ -3246,31 +3295,31 @@ describe("web topic view model", () => {
 
   it("maps the forced-compaction request into a compacting activity", () => {
     const activity = activityFromTopic(
-      topic("core.context.compact", {
+      topic("core.context.compress", {
         phase: "requested",
         estimated_prompt_tokens: 95_000,
         force_shrink_threshold_tokens: 90_000,
       }),
     );
     expect(activity).toMatchObject({
-      kind: "context_compact",
+      kind: "context_compress",
       tone: "notice",
       compact_phase: "requested",
       estimated_prompt_tokens: 95_000,
-      title: "Context compacting",
+      title: "Context compressing",
     });
   });
 
   it("marks completed compaction with an explicit phase", () => {
     const activity = activityFromTopic(
-      topic("core.context.compact", {
+      topic("core.context.compress", {
         phase: "completed",
         estimated_before_tokens: 82_000,
         estimated_after_tokens: 14_000,
       }),
     );
     expect(activity).toMatchObject({
-      kind: "context_compact",
+      kind: "context_compress",
       compact_phase: "completed",
       before_tokens: 82_000,
       after_tokens: 14_000,
@@ -4574,12 +4623,12 @@ describe("boundSessionHistory message ordering", () => {
   });
 });
 
-describe("sessionContextCompactPending", () => {
+describe("sessionContextCompressPending", () => {
   const compactEvent = (phase: string, atMs: number) => ({
     event_id: `evt_${phase}_${atMs}`,
     source: "core_topic",
     payload: {
-      topic: { name: "core.context.compact" },
+      topic: { name: "core.context.compress" },
       payload: { phase },
     },
     created_at_ms: atMs,
@@ -4588,13 +4637,13 @@ describe("sessionContextCompactPending", () => {
   it("reports pending between requested and completed in the live runtime", () => {
     const t = { ...turn("turn_c"), events: [compactEvent("requested", 100)] };
     const target = { ...session("session_1"), turns: [t] };
-    expect(sessionContextCompactPending(target)).toBe(true);
+    expect(sessionContextCompressPending(target)).toBe(true);
 
     const done = {
       ...turn("turn_c"),
       events: [compactEvent("requested", 100), compactEvent("completed", 200)],
     };
-    expect(sessionContextCompactPending({ ...session("session_1"), turns: [done] })).toBe(false);
+    expect(sessionContextCompressPending({ ...session("session_1"), turns: [done] })).toBe(false);
   });
 
   it("falls back to not pending when the hosting turn finished without completion notice", () => {
@@ -4603,7 +4652,7 @@ describe("sessionContextCompactPending", () => {
       events: [compactEvent("requested", 100)],
       completion: { stop_reason: "CancelledByUser" },
     } as unknown as WebTurn;
-    expect(sessionContextCompactPending({ ...session("session_1"), turns: [t] })).toBe(false);
+    expect(sessionContextCompressPending({ ...session("session_1"), turns: [t] })).toBe(false);
   });
 
   it("ignores stale requested notices from before the latest runtime restart", () => {
@@ -4621,6 +4670,6 @@ describe("sessionContextCompactPending", () => {
       ],
       turns: [stale],
     };
-    expect(sessionContextCompactPending(target)).toBe(false);
+    expect(sessionContextCompressPending(target)).toBe(false);
   });
 });
