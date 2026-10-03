@@ -4999,6 +4999,171 @@ fn model_tool_result_budget_runtime_update_reaches_core_and_rejects_invalid_valu
 }
 
 #[test]
+fn context_compress_threshold_runtime_update_reaches_core_and_rejects_invalid_values() {
+    let dir = tmp_dir("context_compress_threshold_runtime_update");
+    let mut core = AgentCore::new(
+        "static prompt\n{{RESPONSE_PROTOCOL_SECTION}}\n{{TOOL_CATALOG}}\n",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let mut config = test_config();
+    assert_eq!(core.context_compress_threshold_percent(), 90);
+
+    apply_worker_runtime_update(
+        &mut core,
+        &mut config,
+        PendingRuntimeUpdate::ContextCompressThresholdPercent(80),
+    );
+    assert_eq!(core.context_compress_threshold_percent(), 80);
+
+    assert_eq!(
+        agent_core::validate_context_compress_threshold_percent(89).unwrap_err(),
+        "context_compress_threshold_percent_invalid"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn context_compress_threshold_update_rechecks_existing_context_before_next_model_request() {
+    use std::sync::mpsc;
+
+    struct BlockingThresholdModel {
+        prompts: Arc<Mutex<Vec<String>>>,
+        first_call_entered: mpsc::Sender<()>,
+        release_first_call: mpsc::Receiver<()>,
+        calls: usize,
+    }
+
+    impl ModelClient for BlockingThresholdModel {
+        fn call_model(
+            &mut self,
+            config: &ModelServiceConfig,
+            prompt: &str,
+            _audit_file: &std::path::Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.prompts.lock().unwrap().push(prompt.to_string());
+            self.calls += 1;
+            match self.calls {
+                1 => {
+                    self.first_call_entered.send(()).unwrap();
+                    self.release_first_call
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("test should release the first model request");
+                    Ok(LlmResponse {
+                        tool_calls: Vec::new(),
+                        content:
+                            r#"{"status":"working","working_still_action":{"self_tool":{"type":"params"}}}"#
+                                .to_string(),
+                        model_name: config.model.clone(),
+                        usage: UsageStats {
+                            llm_calls: 1,
+                            prompt_tokens: 85_000,
+                            completion_tokens: 10,
+                            total_tokens: 85_010,
+                            ..UsageStats::zero()
+                        },
+                        truncated: false,
+                    })
+                }
+                2 => {
+                    let delta_id = prompt
+                        .split("[BEGIN DELTA delta_id: ")
+                        .nth(1)
+                        .and_then(|tail| tail.split(']').next())
+                        .expect("threshold request should expose a live delta id");
+                    Ok(LlmResponse {
+                        tool_calls: Vec::new(),
+                        content: serde_json::json!({
+                            "context_compress": {
+                                "discard": [delta_id],
+                                "summary": "retain the active threshold-update test state"
+                            }
+                        })
+                        .to_string(),
+                        model_name: config.model.clone(),
+                        usage: UsageStats::zero(),
+                        truncated: false,
+                    })
+                }
+                _ => Ok(LlmResponse {
+                    tool_calls: Vec::new(),
+                    content: r#"{"status":"ALL_FINISHED","final_answer":"Done"}"#.to_string(),
+                    model_name: config.model.clone(),
+                    usage: UsageStats::zero(),
+                    truncated: false,
+                }),
+            }
+        }
+    }
+
+    let dir = tmp_dir("active_turn_context_compress_threshold_update");
+    let mut core = AgentCore::new(
+        "You are Timem. {{ response_protocol }} {{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    core.set_max_llm_input_tokens(100_000);
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let (first_call_entered_tx, first_call_entered_rx) = mpsc::channel();
+    let (release_first_call_tx, release_first_call_rx) = mpsc::channel();
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "active_turn_context_compress_threshold_update", 1),
+        BlockingThresholdModel {
+            prompts: Arc::clone(&prompts),
+            first_call_entered: first_call_entered_tx,
+            release_first_call: release_first_call_rx,
+            calls: 0,
+        },
+    );
+    let handle = worker.handle();
+
+    handle.run_turn("hello", None).expect("turn should start");
+    first_call_entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first model request should start");
+    handle
+        .update_context_compress_threshold_percent(80)
+        .expect("active-turn threshold update should succeed");
+    release_first_call_tx
+        .send(())
+        .expect("first model request should be released");
+
+    loop {
+        match worker.events().recv_timeout(Duration::from_secs(5)) {
+            Ok(CoreSessionWorkerEvent::TurnFinished { .. }) => break,
+            Ok(_) => {}
+            Err(error) => panic!("timed out waiting for turn finish: {error}"),
+        }
+    }
+
+    let prompts = prompts.lock().unwrap();
+    assert!(
+        prompts.len() >= 3,
+        "compression should be followed by completion"
+    );
+    assert!(
+        !prompts[0].contains("[Context threshold WARN]"),
+        "85% usage must remain below the original 90% threshold"
+    );
+    assert!(
+        prompts[1].contains("[Context threshold WARN]")
+            && !prompts[1].contains("[BEGIN THRESHOLD COMPRESSION GUIDANCE]"),
+        "lowering the threshold to 80% must re-evaluate existing 85% context before the next request without injecting a second compression policy: {}",
+        prompts[1]
+    );
+
+    worker.shutdown().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn claude_codex_tool_discovery_updates_before_next_model_request_of_active_turn() {
     use std::sync::mpsc;
 

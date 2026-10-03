@@ -6233,6 +6233,7 @@ fn snapshot_reports_the_active_mem_space_and_paths() {
     );
     assert!(snapshot.server.mem.claude_codex_tool_discovery);
     assert_eq!(snapshot.server.mem.model_tool_result_bytes, 16 * 1024);
+    assert_eq!(snapshot.server.mem.context_compress_threshold_percent, 90);
 }
 
 #[test]
@@ -6249,6 +6250,7 @@ fn web_mem_capacity_defaults_follow_launch_mode_without_overriding_saved_values(
     );
     assert!(normal.claude_codex_tool_discovery);
     assert_eq!(normal.model_tool_result_bytes, 16 * 1024);
+    assert_eq!(normal.context_compress_threshold_percent, 90);
 
     let debug = load_web_mem_settings(&root, true).unwrap();
     assert_eq!(debug.temporary_retention_days, Some(5));
@@ -6266,6 +6268,7 @@ fn web_mem_capacity_defaults_follow_launch_mode_without_overriding_saved_values(
     assert_eq!(saved.conversation_capacity_bytes, Some(MEM_CAPACITY_512_MB));
     assert!(saved.claude_codex_tool_discovery);
     assert_eq!(saved.model_tool_result_bytes, 16 * 1024);
+    assert_eq!(saved.context_compress_threshold_percent, 90);
 
     std::fs::write(
         web_mem_settings_path(&root),
@@ -6283,6 +6286,7 @@ fn web_mem_capacity_defaults_follow_launch_mode_without_overriding_saved_values(
         Some(MEM_CAPACITY_128_MB)
     );
     assert_eq!(migrated_normal.model_tool_result_bytes, 16 * 1024);
+    assert_eq!(migrated_normal.context_compress_threshold_percent, 90);
     let migrated_debug = load_web_mem_settings(&root, true).unwrap();
     assert_eq!(
         migrated_debug.temporary_capacity_bytes,
@@ -6349,6 +6353,63 @@ fn model_tool_result_budget_is_authoritative_mem_persistent_and_validated() {
             .mem
             .model_tool_result_bytes,
         8 * 1024
+    );
+}
+
+#[test]
+fn context_compress_threshold_is_authoritative_mem_persistent_and_validated() {
+    let state = routing_test_state();
+    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+    assert_eq!(
+        snapshot_for(&state, TEST_PORT)
+            .server
+            .mem
+            .context_compress_threshold_percent,
+        90
+    );
+
+    for percent in [80, 85, 90, 95, 100] {
+        let command = ClientCommand::SystemContextCompressThresholdUpdate { percent };
+        assert_eq!(command.mutation_lane().as_deref(), Some("global"));
+        assert!(command.uses_global_mutation_barrier());
+        let event = handle_command(&state, TEST_PORT, command).unwrap().unwrap();
+        let WireEvent::MemSettingsUpdated {
+            context_compress_threshold_percent,
+            ..
+        } = event
+        else {
+            panic!("expected authoritative MEM settings event")
+        };
+        assert_eq!(context_compress_threshold_percent, percent);
+        assert_eq!(
+            load_web_mem_settings(&memory_dir, false)
+                .unwrap()
+                .context_compress_threshold_percent,
+            percent
+        );
+    }
+
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::SystemContextCompressThresholdUpdate { percent: 89 },
+        )
+        .unwrap_err(),
+        "context_compress_threshold_percent_invalid"
+    );
+    assert_eq!(
+        snapshot_for(&state, TEST_PORT)
+            .server
+            .mem
+            .context_compress_threshold_percent,
+        100
+    );
+    assert_eq!(
+        load_web_mem_settings(&memory_dir, false)
+            .unwrap()
+            .context_compress_threshold_percent,
+        100
     );
 }
 
@@ -10391,6 +10452,7 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
                 }],
                 resolved_mode: agent_core::ToolCallMode::Native,
                 parallel_tool_calls: true,
+                send_parallel_tool_calls: true,
                 tool_choice: agent_core::NativeToolChoice::Auto,
                 critical_reasoning: false,
             })),
