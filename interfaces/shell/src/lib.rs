@@ -13,6 +13,8 @@ pub mod attach;
 mod final_answer_renderer;
 mod observation;
 mod profiler;
+pub mod stream_ui;
+pub mod ui_mode;
 
 pub use app::run as run_shell;
 pub use final_answer_renderer::{
@@ -25,6 +27,11 @@ pub use observation::{
     ObservationLineStyle, ObservationPanel,
 };
 pub use profiler::render_prof_report_data;
+pub use stream_ui::{
+    render_stream_preview, render_stream_tool_fold, StreamPreviewSnapshot, StreamPreviewState,
+    StreamPreviewStatus, StreamPreviewUpdate, StreamToolAction, StreamToolFoldState,
+    StreamToolFoldUpdate, CORE_TOPIC_MODEL_PREVIEW,
+};
 pub use timem_in_process::agent_api::cancelled_turn_result;
 pub use timem_in_process::agent_api::{
     append_audit_event as append_audit, apply_runtime_config_value,
@@ -63,6 +70,9 @@ pub use timem_in_process::agent_api::{
 };
 pub use timem_in_process::{
     resume_turn as resume_in_process_turn, run_turn as run_in_process_turn,
+};
+pub use ui_mode::{
+    resolve_ui_mode, select_ui_mode, ui_mode_selector, ShellUiMode, UiModeResolution, UI_MODE_ENV,
 };
 
 pub const TIMEM_LOGO: &str = "𝓣𝓲𝓶𝓮𝓶";
@@ -572,6 +582,7 @@ pub fn memory_activity_marker(activity: CoreMemoryActivity) -> &'static str {
 #[derive(Debug, Clone, Default)]
 pub struct CliOptions {
     pub space: Option<String>,
+    pub ui_mode: Option<String>,
     pub api_protocol: Option<String>,
     pub response_protocol: Option<String>,
     pub tool_call_mode: Option<String>,
@@ -589,6 +600,49 @@ pub struct CliOptions {
     pub work_instructions: Option<String>,
 }
 
+const CLI_VALUE_OPTIONS: &[&str] = &[
+    "--space",
+    "--ui-mode",
+    "--api-protocol",
+    "--response-protocol",
+    "--tool-call-mode",
+    "--parallel-tool-calls",
+    "--api-key",
+    "--model",
+    "--base-url",
+    "--timeout",
+    "--max-llm-output",
+    "--max-llm-input",
+    "--capabilities-dir",
+    "--once-json",
+    "--supporting-context",
+    "--bash-approval",
+    "--work-instructions",
+];
+
+pub fn validate_cli_value_args(args: &[String]) -> Result<(), String> {
+    let mut idx = 0;
+    while idx < args.len() {
+        let key = args[idx].as_str();
+        if CLI_VALUE_OPTIONS.contains(&key) {
+            let value = args
+                .get(idx + 1)
+                .ok_or_else(|| format!("missing_value:{key}"))?;
+            if value.is_empty()
+                || value == "-h"
+                || value == "--help"
+                || CLI_VALUE_OPTIONS.contains(&value.as_str())
+            {
+                return Err(format!("missing_value:{key}"));
+            }
+            idx += 2;
+        } else {
+            idx += 1;
+        }
+    }
+    Ok(())
+}
+
 pub fn parse_cli_args(args: &[String]) -> CliOptions {
     let mut options = CliOptions::default();
     let mut idx = 0;
@@ -598,6 +652,10 @@ pub fn parse_cli_args(args: &[String]) -> CliOptions {
         match (key, value) {
             ("--space", Some(v)) => {
                 options.space = Some(v);
+                idx += 2;
+            }
+            ("--ui-mode", Some(v)) => {
+                options.ui_mode = Some(v);
                 idx += 2;
             }
             ("--api-protocol", Some(v)) => {

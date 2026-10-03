@@ -144,6 +144,19 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   validated instances falls back to the default MEM; one connects directly;
   multiple instances are presented before the Session selector. Discovery is
   read-only and never deletes stale registrations.
+- Session UI selection for both native `timem --shell` and `timem attach`.
+  Explicit `--ui-mode ordinary|stream` overrides non-empty `TIMEM_UI_MODE`;
+  otherwise an interactive terminal prompts, while non-interactive execution
+  remains Ordinary and `--once-json` is always Ordinary. Attach performs this
+  selection only after the Host and Session are selected. Ordinary preserves
+  the existing integrated Thought / Action bytes and cancellation behavior.
+  Stream may replace revisioned `core.model.preview` content in place and render
+  structured `core.action` lifecycle as live rows; terminal tool outcomes fold
+  into compact success/failure counts while running/background work stays
+  visible. Snapshot and live events share one reducer, are filtered to the
+  active Turn, and a terminal Turn flushes its summary once. Shell must not
+  infer tool completion from display text or implement interactive click-based
+  folding semantics.
 - Local host concerns such as where this shell process stores history or audit
   files.
 - Shell participation in core-owned Session persistence. Shell may choose the

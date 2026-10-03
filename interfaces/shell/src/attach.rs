@@ -6,14 +6,16 @@
 //! existing WebSocket command transport. It never owns domain state.
 
 use crate::{
-    dim_line, local_time_label, render_final_answer_markdown, ANSI_BRIGHT_TIMEM, ANSI_DIM,
-    ANSI_RESET, TIMEM_LOGO,
+    dim_line, local_time_label, render_final_answer_markdown, render_stream_preview,
+    render_stream_tool_fold, resolve_ui_mode, select_ui_mode, ShellUiMode, StreamPreviewState,
+    StreamPreviewUpdate, StreamToolFoldState, UiModeResolution, ANSI_BRIGHT_TIMEM, ANSI_DIM,
+    ANSI_RESET, CORE_TOPIC_ACTION, TIMEM_LOGO, UI_MODE_ENV,
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::net::TcpStream;
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
@@ -21,6 +23,7 @@ use std::thread;
 use std::time::Duration;
 use tungstenite::client::IntoClientRequest;
 use tungstenite::Message;
+use unicode_width::UnicodeWidthStr;
 
 mod view;
 
@@ -103,7 +106,7 @@ impl AttachError {
 /// directed single-MEM contract. Without it, the user-level registry is only
 /// an index: every candidate is revalidated against its authoritative lease
 /// and health endpoint before any token is used.
-pub fn run_attach(space: Option<&str>) {
+pub fn run_attach(space: Option<&str>, explicit_ui_mode: Option<&str>) {
     let host = match resolve_attach_host(space) {
         Ok(Some(host)) => host,
         Ok(None) => return,
@@ -127,7 +130,25 @@ pub fn run_attach(space: Option<&str>) {
         Some(session) => session,
         None => return,
     };
-    if let Err(error) = attach_session(&host, &selected) {
+    let env_ui_mode = std::env::var(UI_MODE_ENV).ok();
+    let interactive_tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let ui_mode = match resolve_ui_mode(
+        explicit_ui_mode,
+        env_ui_mode.as_deref(),
+        interactive_tty,
+        false,
+    ) {
+        Ok(UiModeResolution::Resolved(mode)) => mode,
+        Ok(UiModeResolution::Select) => match select_ui_mode() {
+            Some(mode) => mode,
+            None => return,
+        },
+        Err(error) => {
+            eprintln!("[config_error] {error}");
+            std::process::exit(2);
+        }
+    };
+    if let Err(error) = attach_session(&host, &selected, ui_mode) {
         eprintln!("{}", attach_error_card(&error));
         std::process::exit(2);
     }
@@ -632,7 +653,12 @@ impl AttachTurnView {
         }
     }
 
-    fn render_turn(&mut self, turn: &Value, pending: &mut Vec<PendingDecision>) {
+    fn render_turn(
+        &mut self,
+        turn: &Value,
+        pending: &mut Vec<PendingDecision>,
+        stream_region: &mut AttachStreamRegion,
+    ) {
         close_dots();
         if let Some(entries) = turn.get("user_entries").and_then(Value::as_array) {
             while self.printed_user_entries < entries.len() {
@@ -656,7 +682,13 @@ impl AttachTurnView {
                     continue;
                 }
                 register_decision_request(event, pending, &mut self.seen_decision_ids);
-                print_turn_event(event);
+                let turn_id = turn
+                    .get("turn_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if !stream_region.consume_snapshot_tool_event(turn_id, event) {
+                    print_turn_event(event);
+                }
             }
         }
         let final_answer = turn
@@ -684,13 +716,277 @@ fn print_turn_event(event: &Value) {
     }
 }
 
+fn attach_prompt_text() -> String {
+    format!(
+        "\x1b[94;1m[{}] {TIMEM_LOGO} attach ❯❯{ANSI_RESET} ",
+        local_time_label()
+    )
+}
+
+fn attach_strip_ansi(text: &str) -> String {
+    let mut output = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            for code in chars.by_ref() {
+                if code.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+fn attach_terminal_width() -> usize {
+    crossterm::terminal::size()
+        .ok()
+        .map(|(width, _)| usize::from(width))
+        .filter(|width| *width > 0)
+        .unwrap_or(80)
+}
+
+fn attach_wrapped_rows(text: &str, terminal_width: usize) -> usize {
+    let width = terminal_width.max(1);
+    text.split('\n')
+        .map(|line| {
+            UnicodeWidthStr::width(attach_strip_ansi(line).as_str())
+                .max(1)
+                .div_ceil(width)
+        })
+        .sum::<usize>()
+        .max(1)
+}
+
+fn attach_input_clear_rows(
+    rendered_rows: usize,
+    prompt: &str,
+    input: &str,
+    terminal_width: usize,
+) -> usize {
+    let prompt_rows = attach_wrapped_rows(prompt, terminal_width);
+    let input_rows = attach_wrapped_rows(&format!("{prompt}{input}"), terminal_width);
+    // stdin line mode echoes Enter and leaves the cursor one row below the
+    // final wrapped input row. `rendered_rows` already includes the prompt;
+    // add only wrapping introduced by the user's text.
+    rendered_rows.saturating_add(input_rows.saturating_sub(prompt_rows))
+}
+
+fn attach_snapshot_orientation_turn<'a>(
+    turns: &'a [Value],
+    active_turn_id: Option<&str>,
+) -> Option<&'a Value> {
+    match active_turn_id {
+        Some(active_turn_id) => turns
+            .iter()
+            .find(|turn| turn.get("turn_id").and_then(Value::as_str) == Some(active_turn_id)),
+        None => turns.last(),
+    }
+}
+
+struct AttachStreamRegion {
+    mode: ShellUiMode,
+    active_turn_id: Option<String>,
+    preview: StreamPreviewState,
+    tools: StreamToolFoldState,
+    rendered_rows: usize,
+    prompt_visible: bool,
+}
+
+impl AttachStreamRegion {
+    fn new(mode: ShellUiMode, active_turn_id: Option<String>) -> Self {
+        Self {
+            mode,
+            active_turn_id,
+            preview: StreamPreviewState::default(),
+            tools: StreamToolFoldState::default(),
+            rendered_rows: 0,
+            prompt_visible: false,
+        }
+    }
+
+    fn content(&self) -> String {
+        if self.mode != ShellUiMode::Stream {
+            return String::new();
+        }
+        let mut output = render_stream_tool_fold(&self.tools);
+        if let Some(snapshot) = self
+            .preview
+            .snapshot()
+            .filter(|snapshot| self.active_turn_id.as_deref() == Some(snapshot.turn_id.as_str()))
+        {
+            let preview = render_stream_preview(snapshot);
+            if !preview.is_empty() {
+                output.push_str(&preview);
+                output.push('\n');
+            }
+        }
+        if self.prompt_visible {
+            output.push_str(&attach_prompt_text());
+        }
+        output
+    }
+
+    fn set_active_turn(&mut self, turn_id: Option<String>) {
+        if self.mode != ShellUiMode::Stream || self.active_turn_id == turn_id {
+            return;
+        }
+        self.active_turn_id = turn_id;
+        self.preview.clear();
+        self.tools.clear();
+    }
+
+    fn finish_turn(&mut self, turn_id: &str) -> String {
+        if self.mode != ShellUiMode::Stream || self.active_turn_id.as_deref() != Some(turn_id) {
+            return String::new();
+        }
+        self.active_turn_id = None;
+        self.preview.clear();
+        let summary = render_stream_tool_fold(&self.tools);
+        self.tools.clear();
+        summary
+    }
+
+    fn consume_snapshot_tool_event(&mut self, turn_id: &str, event: &Value) -> bool {
+        let payload = event.get("payload").unwrap_or(&Value::Null);
+        self.consume_tool_topic(turn_id, payload)
+    }
+
+    fn consume_tool_topic(&mut self, turn_id: &str, event: &Value) -> bool {
+        if self.mode != ShellUiMode::Stream
+            || self.active_turn_id.as_deref() != Some(turn_id)
+            || event
+                .get("topic")
+                .and_then(|topic| topic.get("name"))
+                .and_then(Value::as_str)
+                != Some(CORE_TOPIC_ACTION)
+        {
+            return false;
+        }
+        let _ = self.tools.apply_json_topic(event);
+        true
+    }
+
+    fn apply_preview_payload(&mut self, payload: &Value) -> StreamPreviewUpdate {
+        if self.mode != ShellUiMode::Stream
+            || payload.get("turn_id").and_then(Value::as_str) != self.active_turn_id.as_deref()
+        {
+            return StreamPreviewUpdate::Ignored;
+        }
+        self.preview.apply_payload(payload)
+    }
+
+    fn apply_preview_topic(&mut self, event: &Value) -> StreamPreviewUpdate {
+        let Some(payload) = event.get("payload") else {
+            return StreamPreviewUpdate::Ignored;
+        };
+        let Some(topic_name) = event
+            .get("topic")
+            .and_then(|topic| topic.get("name"))
+            .and_then(Value::as_str)
+        else {
+            return StreamPreviewUpdate::Ignored;
+        };
+        if topic_name != crate::CORE_TOPIC_MODEL_PREVIEW {
+            return StreamPreviewUpdate::Ignored;
+        }
+        self.apply_preview_payload(payload)
+    }
+
+    #[cfg(test)]
+    fn rendered_row_count(&self, terminal_width: usize) -> usize {
+        let content = self.content();
+        if content.is_empty() {
+            0
+        } else {
+            attach_wrapped_rows(&content, terminal_width)
+        }
+    }
+
+    fn clear_into(&mut self, output: &mut impl Write) -> std::io::Result<()> {
+        if self.mode != ShellUiMode::Stream || self.rendered_rows == 0 {
+            return Ok(());
+        }
+        use crossterm::cursor::{MoveToColumn, MoveUp};
+        use crossterm::queue;
+        use crossterm::terminal::{Clear, ClearType};
+
+        queue!(output, MoveToColumn(0))?;
+        let mut rows_up = self.rendered_rows.saturating_sub(1);
+        while rows_up > 0 {
+            let step = rows_up.min(usize::from(u16::MAX)) as u16;
+            queue!(output, MoveUp(step))?;
+            rows_up -= usize::from(step);
+        }
+        queue!(output, Clear(ClearType::FromCursorDown))?;
+        self.rendered_rows = 0;
+        Ok(())
+    }
+
+    fn clear_for_input_into(
+        &mut self,
+        output: &mut impl Write,
+        input: &str,
+        terminal_width: usize,
+    ) -> std::io::Result<()> {
+        if self.mode != ShellUiMode::Stream || self.rendered_rows == 0 {
+            return Ok(());
+        }
+        use crossterm::cursor::{MoveToColumn, MoveUp};
+        use crossterm::queue;
+        use crossterm::terminal::{Clear, ClearType};
+
+        let prompt = attach_prompt_text();
+        let mut rows_up =
+            attach_input_clear_rows(self.rendered_rows, &prompt, input, terminal_width);
+        queue!(output, MoveToColumn(0))?;
+        while rows_up > 0 {
+            let step = rows_up.min(usize::from(u16::MAX)) as u16;
+            queue!(output, MoveUp(step))?;
+            rows_up -= usize::from(step);
+        }
+        queue!(output, Clear(ClearType::FromCursorDown))?;
+        self.rendered_rows = 0;
+        self.prompt_visible = false;
+        Ok(())
+    }
+
+    fn render_into(
+        &mut self,
+        output: &mut impl Write,
+        terminal_width: usize,
+    ) -> std::io::Result<()> {
+        if self.mode != ShellUiMode::Stream {
+            return Ok(());
+        }
+        self.clear_into(output)?;
+        let content = self.content();
+        if content.is_empty() {
+            output.flush()?;
+            return Ok(());
+        }
+        output.write_all(content.as_bytes())?;
+        output.flush()?;
+        self.rendered_rows = attach_wrapped_rows(&content, terminal_width);
+        Ok(())
+    }
+
+    fn show_prompt(&mut self) {
+        if self.mode == ShellUiMode::Ordinary {
+            print_attach_prompt();
+        } else {
+            self.prompt_visible = true;
+        }
+    }
+}
+
 /// Shell-style attach prompt, shown while the session is idle.
 fn print_attach_prompt() {
     close_dots();
-    print!(
-        "\x1b[94;1m[{}] {TIMEM_LOGO} attach ❯❯{ANSI_RESET} ",
-        local_time_label()
-    );
+    print!("{}", attach_prompt_text());
     let _ = std::io::stdout().flush();
 }
 
@@ -712,7 +1008,11 @@ fn restart_cwd_numeric_decision(
 /// Connects to the Host WebSocket and runs the attach loop: stream-render
 /// authoritative events for the chosen session and submit every entered line
 /// as a forced supplement (no message queueing).
-fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), AttachError> {
+fn attach_session(
+    host: &HostEndpoint,
+    session: &AttachSession,
+    ui_mode: ShellUiMode,
+) -> Result<(), AttachError> {
     let initial_restart_decision = session.restart_cwd_decision.clone();
     let token_query = host
         .token
@@ -764,13 +1064,25 @@ fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), At
     let mut pending_decisions: Vec<PendingDecision> = Vec::new();
     let mut restart_cwd_decision: Option<Value> = initial_restart_decision;
     let session_id = session.session_id.clone();
+    let mut stream_region = AttachStreamRegion::new(ui_mode, session.active_turn_id.clone());
     let mut command_sequence: u64 = 0;
 
     loop {
         // Drain pending user input first so lines are never delayed by
         // streaming traffic.
         while let Ok(text) = input_rx.try_recv() {
+            if let Err(error) = stream_region.clear_for_input_into(
+                &mut std::io::stdout(),
+                &text,
+                attach_terminal_width(),
+            ) {
+                return Err(AttachError::Protocol(error.to_string()));
+            }
             if text.is_empty() {
+                stream_region.show_prompt();
+                stream_region
+                    .render_into(&mut std::io::stdout(), attach_terminal_width())
+                    .map_err(|error| AttachError::Protocol(error.to_string()))?;
                 continue;
             }
             command_sequence += 1;
@@ -787,7 +1099,10 @@ fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), At
                 let Ok(decision) = decision else {
                     close_dots();
                     println!("{}", invalid_restart_choice_card(&text));
-                    print_attach_prompt();
+                    stream_region.show_prompt();
+                    stream_region
+                        .render_into(&mut std::io::stdout(), attach_terminal_width())
+                        .map_err(|error| AttachError::Protocol(error.to_string()))?;
                     continue;
                 };
                 let message = json!({
@@ -805,7 +1120,10 @@ fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), At
                     return Err(AttachError::HostUnreachable(error.to_string()));
                 }
                 println!("{}", format_user_echo(&text));
-                print_attach_prompt();
+                stream_region.show_prompt();
+                stream_region
+                    .render_into(&mut std::io::stdout(), attach_terminal_width())
+                    .map_err(|error| AttachError::Protocol(error.to_string()))?;
                 continue;
             }
             let numeric_decision = match numeric_choice {
@@ -875,6 +1193,10 @@ fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), At
                 if text.starts_with('!') {
                     close_dots();
                     println!("{}", invalid_command_card(&text));
+                    stream_region.show_prompt();
+                    stream_region
+                        .render_into(&mut std::io::stdout(), attach_terminal_width())
+                        .map_err(|error| AttachError::Protocol(error.to_string()))?;
                     continue;
                 }
                 json!({
@@ -896,10 +1218,16 @@ fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), At
                 return Err(AttachError::HostUnreachable(error.to_string()));
             }
             println!("{}", format_user_echo(&text));
-            print_attach_prompt();
+            stream_region.show_prompt();
+            stream_region
+                .render_into(&mut std::io::stdout(), attach_terminal_width())
+                .map_err(|error| AttachError::Protocol(error.to_string()))?;
         }
         match ws.read() {
             Ok(Message::Text(text)) => {
+                stream_region
+                    .clear_into(&mut std::io::stdout())
+                    .map_err(|error| AttachError::Protocol(error.to_string()))?;
                 if !handle_wire_event(
                     host,
                     &text,
@@ -907,11 +1235,16 @@ fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), At
                     &mut turn_views,
                     &mut pending_decisions,
                     &mut restart_cwd_decision,
+                    &mut stream_region,
                 ) {
                     return Ok(());
                 }
+                stream_region
+                    .render_into(&mut std::io::stdout(), attach_terminal_width())
+                    .map_err(|error| AttachError::Protocol(error.to_string()))?;
             }
             Ok(Message::Close(_)) => {
+                let _ = stream_region.clear_into(&mut std::io::stdout());
                 close_dots();
                 println!("{}", disconnected_card(None));
                 return Ok(());
@@ -926,6 +1259,7 @@ fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), At
             Err(other) => {
                 // A quiet socket after detach input ends the loop naturally.
                 if input_rx.try_recv().is_err() && !ws.can_read() {
+                    let _ = stream_region.clear_into(&mut std::io::stdout());
                     close_dots();
                     println!("{}", disconnected_card(None));
                     return Ok(());
@@ -938,6 +1272,7 @@ fn attach_session(host: &HostEndpoint, session: &AttachSession) -> Result<(), At
                         | tungstenite::Error::Protocol(_)
                         | tungstenite::Error::Utf8
                 ) {
+                    let _ = stream_region.clear_into(&mut std::io::stdout());
                     close_dots();
                     println!(
                         "{}",
@@ -959,6 +1294,7 @@ fn handle_wire_event(
     turn_views: &mut AttachTurnViews,
     pending_decisions: &mut Vec<PendingDecision>,
     restart_cwd_decision: &mut Option<Value>,
+    stream_region: &mut AttachStreamRegion,
 ) -> bool {
     let session_id = session.session_id.as_str();
     let Ok(value) = serde_json::from_str::<Value>(text) else {
@@ -978,28 +1314,42 @@ fn handle_wire_event(
                 turn_views,
                 pending_decisions,
                 restart_cwd_decision,
+                stream_region,
             )
         }
         "turn_projection" => {
-            // Streaming projections render as progress hints; the authoritative
-            // turn snapshot arrives via turn_updated.
-            if let Some(status) = value
+            if value.get("session_id").and_then(Value::as_str) != Some(session_id) {
+                return true;
+            }
+            let projection = value
                 .get("projection")
-                .and_then(|p| p.get("projection"))
-                .and_then(|p| p.get("status"))
-                .and_then(Value::as_str)
-            {
-                if status == "active" {
-                    DOTS_OPEN.store(true, std::sync::atomic::Ordering::Relaxed);
-                    print!(".");
-                    let _ = std::io::stdout().flush();
+                .and_then(|versioned| versioned.get("projection"));
+            let state = projection
+                .and_then(|projection| projection.get("state"))
+                .and_then(Value::as_str);
+            let turn_id = projection
+                .and_then(|projection| projection.get("token"))
+                .and_then(|token| token.get("turn_id"))
+                .and_then(Value::as_str);
+            match (state, turn_id) {
+                (Some("active"), Some(turn_id)) => {
+                    stream_region.set_active_turn(Some(turn_id.to_string()));
+                    if stream_region.mode == ShellUiMode::Ordinary {
+                        DOTS_OPEN.store(true, std::sync::atomic::Ordering::Relaxed);
+                        print!(".");
+                        let _ = std::io::stdout().flush();
+                    }
                 }
+                (Some("finished"), Some(turn_id)) => {
+                    print_stream_tool_summary(stream_region.finish_turn(turn_id));
+                }
+                _ => {}
             }
             true
         }
         "turn_finished" => {
             if value.get("session_id").and_then(Value::as_str) == Some(session_id) {
-                handle_turn_finished(&value, turn_views);
+                handle_turn_finished(&value, turn_views, stream_region);
             }
             true
         }
@@ -1010,10 +1360,17 @@ fn handle_wire_event(
             close_dots();
             let payload = value.get("event").cloned().unwrap_or(Value::Null);
             if event_type == "core_topic" {
+                stream_region.apply_preview_topic(&payload);
                 register_live_decision_request(&payload, pending_decisions);
-                if let Some(line) = live_topic_summary(&payload) {
-                    close_dots();
-                    println!("  {line}");
+                let turn_id = value
+                    .get("turn_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if !stream_region.consume_tool_topic(turn_id, &payload) {
+                    if let Some(line) = live_topic_summary(&payload) {
+                        close_dots();
+                        println!("  {line}");
+                    }
                 }
             } else if let Some(line) = worker_event_summary(&payload) {
                 println!("  {line}");
@@ -1114,7 +1471,20 @@ fn live_topic_summary(payload: &Value) -> Option<String> {
 
 /// A finished turn never re-broadcasts a full `turn_updated` snapshot with the
 /// final answer; the authoritative text rides on `turn_finished.outcome`.
-fn handle_turn_finished(value: &Value, turn_views: &mut AttachTurnViews) {
+fn print_stream_tool_summary(summary: String) {
+    if summary.is_empty() {
+        return;
+    }
+    close_dots();
+    print!("{summary}");
+    let _ = std::io::stdout().flush();
+}
+
+fn handle_turn_finished(
+    value: &Value,
+    turn_views: &mut AttachTurnViews,
+    stream_region: &mut AttachStreamRegion,
+) {
     let turn_id = value
         .get("turn_id")
         .and_then(Value::as_str)
@@ -1125,6 +1495,7 @@ fn handle_turn_finished(value: &Value, turn_views: &mut AttachTurnViews) {
         .and_then(|outcome| outcome.get("text"))
         .and_then(Value::as_str)
         .unwrap_or_default();
+    print_stream_tool_summary(stream_region.finish_turn(&turn_id));
     let view = turn_views.view_mut(turn_id);
     view.render_final_answer_once(text);
     close_dots();
@@ -1132,7 +1503,7 @@ fn handle_turn_finished(value: &Value, turn_views: &mut AttachTurnViews) {
         "{}",
         dim_line(&format!("──── turn finished · {} ────", local_time_label()))
     );
-    print_attach_prompt();
+    stream_region.show_prompt();
 }
 
 #[allow(clippy::type_complexity)]
@@ -1142,6 +1513,7 @@ fn handle_wire_event_inner(
     turn_views: &mut AttachTurnViews,
     pending_decisions: &mut Vec<PendingDecision>,
     restart_cwd_decision: &mut Option<Value>,
+    stream_region: &mut AttachStreamRegion,
 ) -> bool {
     let session_id = session.session_id.as_str();
     let event_type = inner.get("type").and_then(Value::as_str).unwrap_or("");
@@ -1161,6 +1533,8 @@ fn handle_wire_event_inner(
                 return true;
             };
             let working = target.get("state").and_then(Value::as_str) == Some("working");
+            let active_turn_id = target.get("active_turn_id").and_then(Value::as_str);
+            stream_region.set_active_turn(active_turn_id.map(str::to_string));
             close_dots();
             println!("{}", connected_intro(session, working));
             if let Some(decision) = target.get("restart_cwd_decision") {
@@ -1173,17 +1547,22 @@ fn handle_wire_event_inner(
                 *restart_cwd_decision = None;
             }
             if let Some(turns) = target.get("turns").and_then(Value::as_array) {
-                if let Some(latest) = turns.last() {
-                    let turn_id = latest
+                if let Some(orientation_turn) =
+                    attach_snapshot_orientation_turn(turns, active_turn_id)
+                {
+                    let turn_id = orientation_turn
                         .get("turn_id")
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
+                    if let Some(preview) = orientation_turn.get("preview") {
+                        stream_region.apply_preview_payload(preview);
+                    }
                     let view = turn_views.view_mut(turn_id);
-                    view.render_turn(latest, pending_decisions);
+                    view.render_turn(orientation_turn, pending_decisions, stream_region);
                 }
             }
-            print_attach_prompt();
+            stream_region.show_prompt();
             true
         }
         "session_restart_cwd_resolved" => {
@@ -1210,13 +1589,25 @@ fn handle_wire_event_inner(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
+            let state = turn
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if matches!(state, "pending" | "working" | "restored") {
+                stream_region.set_active_turn(Some(turn_id.clone()));
+                if let Some(preview) = turn.get("preview") {
+                    stream_region.apply_preview_payload(preview);
+                }
+            } else {
+                print_stream_tool_summary(stream_region.finish_turn(&turn_id));
+            }
             let view = turn_views.view_mut(turn_id);
-            view.render_turn(turn, pending_decisions);
+            view.render_turn(turn, pending_decisions, stream_region);
             true
         }
         "turn_finished" => {
             if inner.get("session_id").and_then(Value::as_str) == Some(session_id) {
-                handle_turn_finished(inner, turn_views);
+                handle_turn_finished(inner, turn_views, stream_region);
             }
             true
         }
@@ -1236,10 +1627,17 @@ fn handle_wire_event_inner(
             close_dots();
             let payload = inner.get("event").cloned().unwrap_or(Value::Null);
             if event_type == "core_topic" {
+                stream_region.apply_preview_topic(&payload);
                 register_live_decision_request(&payload, pending_decisions);
-                if let Some(line) = live_topic_summary(&payload) {
-                    close_dots();
-                    println!("  {line}");
+                let turn_id = inner
+                    .get("turn_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if !stream_region.consume_tool_topic(turn_id, &payload) {
+                    if let Some(line) = live_topic_summary(&payload) {
+                        close_dots();
+                        println!("  {line}");
+                    }
                 }
             } else if let Some(line) = worker_event_summary(&payload) {
                 println!("  {line}");
@@ -1521,6 +1919,323 @@ mod tests {
             Some("req-205"),
             "newest decision remains the reply target"
         );
+    }
+
+    fn preview_payload(turn_id: &str, revision: u64, text: Option<&str>, status: &str) -> Value {
+        json!({
+            "turn_id": turn_id,
+            "attempt": 1,
+            "revision": revision,
+            "interruption": null,
+            "response": text.map(|text| json!({
+                "attempt": 1,
+                "revision": revision,
+                "text": text,
+                "status": status,
+            })),
+        })
+    }
+
+    #[test]
+    fn attach_snapshot_orientation_prefers_the_active_turn_over_array_order() {
+        let turns = vec![
+            json!({"turn_id": "turn-active", "preview": preview_payload("turn-active", 1, Some("active preview"), "streaming")}),
+            json!({"turn_id": "turn-history", "preview": preview_payload("turn-history", 9, Some("history preview"), "final")}),
+        ];
+
+        assert_eq!(
+            attach_snapshot_orientation_turn(&turns, Some("turn-active"))
+                .and_then(|turn| turn.get("turn_id"))
+                .and_then(Value::as_str),
+            Some("turn-active")
+        );
+        assert!(
+            attach_snapshot_orientation_turn(&turns, Some("turn-missing")).is_none(),
+            "a missing active turn must not fall back to unrelated history"
+        );
+        assert_eq!(
+            attach_snapshot_orientation_turn(&turns, None)
+                .and_then(|turn| turn.get("turn_id"))
+                .and_then(Value::as_str),
+            Some("turn-history"),
+            "without an active turn the latest historical turn provides orientation"
+        );
+    }
+
+    #[test]
+    fn attach_input_clear_rows_include_echo_newline_and_only_added_wrapping() {
+        let prompt = "attach> ";
+        assert_eq!(attach_input_clear_rows(3, prompt, "", 80), 3);
+        assert_eq!(attach_input_clear_rows(3, prompt, "x", 80), 3);
+        assert_eq!(attach_input_clear_rows(3, prompt, "123456", 10), 4);
+        assert_eq!(attach_input_clear_rows(3, prompt, "你好你好", 10), 4);
+    }
+
+    #[test]
+    fn attach_stream_region_filters_turns_and_uses_one_snapshot_live_reducer() {
+        let mut region =
+            AttachStreamRegion::new(ShellUiMode::Stream, Some("turn-active".to_string()));
+        region.prompt_visible = true;
+
+        assert_eq!(
+            region.apply_preview_payload(&preview_payload(
+                "turn-old",
+                99,
+                Some("wrong turn"),
+                "streaming",
+            )),
+            StreamPreviewUpdate::Ignored
+        );
+        assert!(!region.content().contains("wrong turn"));
+
+        assert_eq!(
+            region.apply_preview_payload(&preview_payload(
+                "turn-active",
+                2,
+                Some("snapshot text"),
+                "streaming",
+            )),
+            StreamPreviewUpdate::Changed
+        );
+        assert!(region.content().contains("snapshot text"));
+
+        let live = json!({
+            "topic": {"name": "core.model.preview"},
+            "payload": preview_payload("turn-active", 3, Some("live replacement"), "intermediate"),
+        });
+        assert_eq!(
+            region.apply_preview_topic(&live),
+            StreamPreviewUpdate::Changed
+        );
+        assert!(region.content().contains("live replacement"));
+        assert!(!region.content().contains("snapshot text"));
+
+        assert_eq!(
+            region.apply_preview_payload(&preview_payload(
+                "turn-active",
+                2,
+                Some("stale"),
+                "streaming",
+            )),
+            StreamPreviewUpdate::Ignored
+        );
+        assert!(!region.content().contains("stale"));
+
+        assert_eq!(
+            region.apply_preview_payload(&preview_payload("turn-active", 4, None, "streaming",)),
+            StreamPreviewUpdate::Retracted
+        );
+        assert!(!region.content().contains("live replacement"));
+    }
+
+    fn attach_tool_topic(action_id: &str, event: &str, status: &str, active: bool) -> Value {
+        json!({
+            "topic": {"name": "core.action"},
+            "payload": {
+                "action": "readfile",
+                "action_id": action_id,
+                "input": {"path": "src/main.rs"},
+                "event": event,
+                "status": status,
+                "active": active,
+            }
+        })
+    }
+
+    #[test]
+    fn attach_stream_tools_filter_active_turn_and_fold_snapshot_live_lifecycle_once() {
+        let mut region =
+            AttachStreamRegion::new(ShellUiMode::Stream, Some("turn-active".to_string()));
+        let running = attach_tool_topic("tool-1", "execution_start", "running", true);
+        assert!(!region.consume_tool_topic("turn-old", &running));
+        assert!(region.tools.is_empty());
+        assert!(region.consume_tool_topic("turn-active", &running));
+        assert!(region.content().contains("Read file"));
+        assert!(region.content().contains("src/main.rs"));
+
+        let snapshot_duplicate = json!({
+            "event_id": "event-running",
+            "source": "core_topic",
+            "payload": running,
+        });
+        assert!(region.consume_snapshot_tool_event("turn-active", &snapshot_duplicate));
+        assert_eq!(region.tools.active_count(), 1);
+
+        let completed = attach_tool_topic("tool-1", "finish", "completed", false);
+        assert!(region.consume_tool_topic("turn-active", &completed));
+        assert!(region.consume_tool_topic("turn-active", &completed));
+        assert_eq!(region.tools.completed_counts(), (1, 0));
+        assert!(!region.content().contains("Read file"));
+        assert!(region.content().contains("Tools folded"));
+        assert!(region.content().contains("✓ 1"));
+    }
+
+    #[test]
+    fn attach_stream_turn_switch_and_finish_clear_tool_projection_exactly_once() {
+        let mut region = AttachStreamRegion::new(ShellUiMode::Stream, Some("turn-1".to_string()));
+        assert!(region.consume_tool_topic(
+            "turn-1",
+            &attach_tool_topic("tool-1", "finish", "timeout", false),
+        ));
+        let summary = region.finish_turn("turn-1");
+        assert!(summary.contains("Tools folded"));
+        assert!(summary.contains("× 1"));
+        assert!(region.finish_turn("turn-1").is_empty());
+        assert!(region.tools.is_empty());
+
+        region.set_active_turn(Some("turn-2".to_string()));
+        assert!(region.consume_tool_topic(
+            "turn-2",
+            &attach_tool_topic("tool-2", "execution_start", "running", true),
+        ));
+        region.set_active_turn(Some("turn-3".to_string()));
+        assert!(region.tools.is_empty());
+        assert!(!region.content().contains("Read file"));
+    }
+
+    #[test]
+    fn ordinary_attach_never_consumes_structured_tool_topics() {
+        let mut region = AttachStreamRegion::new(ShellUiMode::Ordinary, Some("turn-1".to_string()));
+        assert!(!region.consume_tool_topic(
+            "turn-1",
+            &attach_tool_topic("tool-1", "execution_start", "running", true),
+        ));
+        assert!(region.tools.is_empty());
+        assert!(region.finish_turn("turn-1").is_empty());
+    }
+
+    #[test]
+    fn final_preview_remains_provisional_until_authoritative_turn_finish() {
+        let mut region =
+            AttachStreamRegion::new(ShellUiMode::Stream, Some("turn-active".to_string()));
+        region.apply_preview_payload(&preview_payload(
+            "turn-active",
+            7,
+            Some("provisional final"),
+            "final",
+        ));
+
+        assert_eq!(region.active_turn_id.as_deref(), Some("turn-active"));
+        assert!(region.content().contains("provisional final"));
+
+        region.finish_turn("turn-other");
+        assert!(region.content().contains("provisional final"));
+        region.finish_turn("turn-active");
+        assert!(region.active_turn_id.is_none());
+        assert!(region.preview.snapshot().is_none());
+        assert!(!region.content().contains("provisional final"));
+    }
+
+    #[test]
+    fn changing_active_turn_clears_prior_preview_even_when_revision_was_higher() {
+        let mut region = AttachStreamRegion::new(ShellUiMode::Stream, Some("turn-old".to_string()));
+        region.apply_preview_payload(&preview_payload(
+            "turn-old",
+            90,
+            Some("old preview"),
+            "streaming",
+        ));
+        region.set_active_turn(Some("turn-new".to_string()));
+        assert!(region.preview.snapshot().is_none());
+        assert_eq!(
+            region.apply_preview_payload(&preview_payload(
+                "turn-new",
+                1,
+                Some("new preview"),
+                "streaming",
+            )),
+            StreamPreviewUpdate::Changed
+        );
+        assert!(region.content().contains("new preview"));
+        assert!(!region.content().contains("old preview"));
+    }
+
+    #[test]
+    fn ordinary_attach_stream_region_writes_no_terminal_control_bytes() {
+        let mut region = AttachStreamRegion::new(ShellUiMode::Ordinary, Some("turn-1".to_string()));
+        region.rendered_rows = 4;
+        region.prompt_visible = true;
+        assert_eq!(
+            region.apply_preview_payload(&preview_payload(
+                "turn-1",
+                1,
+                Some("ignored"),
+                "streaming",
+            )),
+            StreamPreviewUpdate::Ignored
+        );
+        let mut output = Vec::new();
+        region.clear_into(&mut output).unwrap();
+        region
+            .clear_for_input_into(&mut output, "wrapped input", 8)
+            .unwrap();
+        region.render_into(&mut output, 8).unwrap();
+        assert!(output.is_empty());
+        assert!(region.content().is_empty());
+    }
+
+    #[test]
+    fn attach_stream_region_counts_ansi_cjk_and_clears_wrapped_input_rows() {
+        assert_eq!(attach_wrapped_rows("\x1b[31m12345\x1b[0m\n你好", 4), 3);
+
+        let mut region = AttachStreamRegion::new(ShellUiMode::Stream, Some("turn-1".to_string()));
+        region.prompt_visible = true;
+        region.apply_preview_payload(&preview_payload(
+            "turn-1",
+            1,
+            Some("第一行 preview\nsecond line"),
+            "streaming",
+        ));
+        let expected_rows = region.rendered_row_count(20);
+        assert!(expected_rows >= 3);
+
+        let mut output = Vec::new();
+        region.render_into(&mut output, 20).unwrap();
+        assert_eq!(region.rendered_rows, expected_rows);
+        let rendered_len = output.len();
+        region
+            .clear_for_input_into(&mut output, "很长的用户输入 wrapped user input", 20)
+            .unwrap();
+        let clear_bytes = &output[rendered_len..];
+        let prompt = attach_prompt_text();
+        let expected_up = attach_input_clear_rows(
+            expected_rows,
+            &prompt,
+            "很长的用户输入 wrapped user input",
+            20,
+        );
+        assert_eq!(
+            clear_bytes,
+            format!("\x1b[1G\x1b[{expected_up}A\x1b[J").as_bytes(),
+            "clear sequence must return from the echoed input line to the first dynamic row"
+        );
+        assert_eq!(region.rendered_rows, 0);
+        assert!(!region.prompt_visible);
+    }
+
+    #[test]
+    fn blank_attach_input_clears_echoed_line_and_restores_stream_prompt() {
+        let mut region = AttachStreamRegion::new(ShellUiMode::Stream, None);
+        region.show_prompt();
+        let mut output = Vec::new();
+        region.render_into(&mut output, 120).unwrap();
+        assert_eq!(region.rendered_rows, 1);
+        let rendered_len = output.len();
+
+        region.clear_for_input_into(&mut output, "", 120).unwrap();
+        assert_eq!(
+            &output[rendered_len..],
+            b"\x1b[1G\x1b[1A\x1b[J",
+            "blank Enter leaves the cursor one row below the prompt"
+        );
+        region.show_prompt();
+        let before_rerender = output.len();
+        region.render_into(&mut output, 120).unwrap();
+        let rerendered = String::from_utf8_lossy(&output[before_rerender..]);
+        assert!(rerendered.contains("attach"));
+        assert!(rerendered.contains("❯❯"));
+        assert_eq!(region.rendered_rows, 1);
+        assert!(region.prompt_visible);
     }
 
     #[test]

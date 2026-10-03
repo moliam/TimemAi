@@ -6,20 +6,23 @@ use crate::{
     local_datetime_label, local_time_label, model_service_config_from_env,
     observation_events_from_core_topic_events, observation_panel_width_for_terminal,
     parse_cli_args, render_final_response_at, render_prof_report_data, render_shell_status_bar,
-    render_thinking_view_at, render_turn_outcome_text, resolve_memory_dir, resume_in_process_turn,
-    run_in_process_turn, runtime_active_elapsed_secs, runtime_profile_report,
+    render_stream_preview, render_stream_tool_fold, render_thinking_view_at,
+    render_turn_outcome_text, resolve_memory_dir, resolve_ui_mode, resume_in_process_turn,
+    run_in_process_turn, runtime_active_elapsed_secs, runtime_profile_report, select_ui_mode,
     shell_status_message_from_core_topic, stale_context_decision_request, topic_event_status_hint,
-    work_instruction_load_report, work_instruction_load_request, work_instruction_load_topic_event,
-    work_instruction_mode_from_sources, workspace_config_file, workspace_reference_context,
-    CoreMemoryActivity, CoreTopicEvent, HostDecision, HostDecisionRequest, HostStatusMessage,
-    ModelDirection, NoopTurnUi, ObservationEvent, ObservationPanel, OutputExpansionRequest,
-    RoundLimitDecisionRequest, RuntimeConfigApplyError, RuntimeConfigApplyMessageKind,
-    RuntimeConfigApplyReport, RuntimeConfigField, RuntimeConfigMenuReport, RuntimeProfiler,
-    RuntimeRetryStatus, ShellStatusSnapshot, StaleContextDecisionRequest, ThinkingViewSnapshot,
-    TurnInput, TurnUi, WorkInstructionLoadMessageKind, WorkInstructionLoadMode,
-    WorkInstructionLoadReport, WorkInstructionLoadRequest, WorkspaceCommand,
-    WorkspaceCommandMessageKind, WorkspaceCommandOutcome, WorkspaceCommandReport,
-    WorkspaceMenuReport, SPINNER_ICONS, TIMEM_LOGO,
+    validate_cli_value_args, work_instruction_load_report, work_instruction_load_request,
+    work_instruction_load_topic_event, work_instruction_mode_from_sources, workspace_config_file,
+    workspace_reference_context, CoreMemoryActivity, CoreTopicEvent, HostDecision,
+    HostDecisionRequest, HostStatusMessage, ModelDirection, NoopTurnUi, ObservationEvent,
+    ObservationPanel, OutputExpansionRequest, RoundLimitDecisionRequest, RuntimeConfigApplyError,
+    RuntimeConfigApplyMessageKind, RuntimeConfigApplyReport, RuntimeConfigField,
+    RuntimeConfigMenuReport, RuntimeProfiler, RuntimeRetryStatus, ShellStatusSnapshot, ShellUiMode,
+    StaleContextDecisionRequest, StreamPreviewState, StreamPreviewUpdate, StreamToolFoldState,
+    StreamToolFoldUpdate, ThinkingViewSnapshot, TurnInput, TurnUi, UiModeResolution,
+    WorkInstructionLoadMessageKind, WorkInstructionLoadMode, WorkInstructionLoadReport,
+    WorkInstructionLoadRequest, WorkspaceCommand, WorkspaceCommandMessageKind,
+    WorkspaceCommandOutcome, WorkspaceCommandReport, WorkspaceMenuReport, ANSI_DIM,
+    CORE_TOPIC_ACTION, SPINNER_ICONS, TIMEM_LOGO,
 };
 use crossterm::event::Event;
 use reedline::{
@@ -31,7 +34,7 @@ use serde_json::json;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::Read;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
@@ -84,6 +87,10 @@ pub fn run(args: Vec<String>) {
         print_help();
         return;
     }
+    if let Err(error) = validate_cli_value_args(&args) {
+        eprintln!("[config_error] {error}");
+        exit_with_process_cleanup(2);
+    }
     // Exact ownership is optional; the guard keeps the process-wide fallback
     // active and removes empty Runtime cgroup scopes on normal shutdown.
     let _process_safety_net = timem_in_process::agent_api::os::ensure_process_safety_net();
@@ -100,6 +107,18 @@ pub fn run(args: Vec<String>) {
         exit_with_process_cleanup(2);
     }
     let env: HashMap<String, String> = std::env::vars().collect();
+    let ui_mode_resolution = match resolve_ui_mode(
+        options.ui_mode.as_deref(),
+        env.get(crate::UI_MODE_ENV).map(String::as_str),
+        std::io::stdin().is_terminal() && std::io::stdout().is_terminal(),
+        options.once_json_input.is_some(),
+    ) {
+        Ok(resolution) => resolution,
+        Err(error) => {
+            eprintln!("[config_error] {error}");
+            exit_with_process_cleanup(2);
+        }
+    };
     let configured_space = options
         .space
         .as_deref()
@@ -290,6 +309,14 @@ pub fn run(args: Vec<String>) {
         );
         return;
     }
+
+    let ui_mode = match ui_mode_resolution {
+        UiModeResolution::Resolved(mode) => mode,
+        UiModeResolution::Select => match select_ui_mode() {
+            Some(mode) => mode,
+            None => return,
+        },
+    };
 
     let _ = append_audit(
         &audit_file,
@@ -482,7 +509,7 @@ pub fn run(args: Vec<String>) {
         } else {
             None
         };
-        let mut status = ThinkingStatus::start(&config.model, config.max_llm_input_tokens);
+        let mut status = ThinkingStatus::start(&config.model, config.max_llm_input_tokens, ui_mode);
         TURN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
         let _sigint_guard = os::install_sigint_guard(&TURN_CANCEL_REQUESTED);
         let mut turn_ui = CliTurnUi {
@@ -1027,7 +1054,19 @@ impl TurnUi for CliTurnUi<'_> {
             if let Some(hint) = topic_event_status_hint(events) {
                 status.set_intent(&hint.action, hint.memory_activity);
             }
-            status.apply_observation_events(observation_events_from_core_topic_events(events));
+            let observation_events = if status.mode == ShellUiMode::Stream {
+                observation_events_from_core_topic_events(
+                    &events
+                        .iter()
+                        .filter(|event| event.topic.name != CORE_TOPIC_ACTION)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                observation_events_from_core_topic_events(events)
+            };
+            status.apply_observation_events(observation_events);
+            status.apply_stream_events(events);
         }
     }
 
@@ -1099,8 +1138,16 @@ impl TurnUi for CliTurnUi<'_> {
     }
 }
 
+#[derive(Debug, Default, Clone)]
+struct StreamPresentationState {
+    preview: StreamPreviewState,
+    tools: StreamToolFoldState,
+}
+
 struct ThinkingStatus {
     state: Arc<Mutex<ThinkingViewSnapshot>>,
+    presentation: Arc<Mutex<StreamPresentationState>>,
+    mode: ShellUiMode,
     running: Arc<AtomicBool>,
     rendered_lines: Arc<Mutex<usize>>,
     handle: Option<JoinHandle<()>>,
@@ -1111,7 +1158,7 @@ struct ThinkingStatus {
 }
 
 impl ThinkingStatus {
-    fn start(model: &str, max_llm_input_tokens: u32) -> Self {
+    fn start(model: &str, max_llm_input_tokens: u32, mode: ShellUiMode) -> Self {
         let started_at = Instant::now();
         let paused_total = Arc::new(Mutex::new(Duration::ZERO));
         let state = Arc::new(Mutex::new(ThinkingViewSnapshot {
@@ -1134,11 +1181,14 @@ impl ThinkingStatus {
                 panel
             },
         }));
+        let presentation = Arc::new(Mutex::new(StreamPresentationState::default()));
         let running = Arc::new(AtomicBool::new(true));
         let rendered_lines = Arc::new(Mutex::new(0));
-        render_thinking(&state.lock().unwrap(), &rendered_lines);
+        render_thinking(&state.lock().unwrap(), &presentation, mode, &rendered_lines);
         let (handle, stop_tx) = spawn_thinking_renderer(
             Arc::clone(&state),
+            Arc::clone(&presentation),
+            mode,
             Arc::clone(&running),
             Arc::clone(&rendered_lines),
             Arc::clone(&paused_total),
@@ -1146,6 +1196,8 @@ impl ThinkingStatus {
         );
         Self {
             state,
+            presentation,
+            mode,
             running,
             rendered_lines,
             handle: Some(handle),
@@ -1161,7 +1213,7 @@ impl ThinkingStatus {
             state.status.model_round = round;
             state.status.direction = direction;
             state.status.retry = None;
-            rerender_thinking(&state, &self.rendered_lines);
+            rerender_thinking(&state, &self.presentation, self.mode, &self.rendered_lines);
         }
     }
 
@@ -1169,7 +1221,7 @@ impl ThinkingStatus {
         if let Ok(mut state) = self.state.lock() {
             state.status.usage.add(&usage);
             state.status.latest_usage = Some(usage);
-            rerender_thinking(&state, &self.rendered_lines);
+            rerender_thinking(&state, &self.presentation, self.mode, &self.rendered_lines);
         }
     }
 
@@ -1179,7 +1231,7 @@ impl ThinkingStatus {
                 prompt_tokens,
                 ..UsageStats::zero()
             });
-            rerender_thinking(&state, &self.rendered_lines);
+            rerender_thinking(&state, &self.presentation, self.mode, &self.rendered_lines);
         }
     }
 
@@ -1191,7 +1243,7 @@ impl ThinkingStatus {
                 .trim()
                 .to_string();
             state.status.memory_activity = memory_activity;
-            rerender_thinking(&state, &self.rendered_lines);
+            rerender_thinking(&state, &self.presentation, self.mode, &self.rendered_lines);
         }
     }
 
@@ -1200,7 +1252,7 @@ impl ThinkingStatus {
             state
                 .observations
                 .apply(ObservationEvent::EnsureTransient(text.to_string()));
-            rerender_thinking(&state, &self.rendered_lines);
+            rerender_thinking(&state, &self.presentation, self.mode, &self.rendered_lines);
         }
     }
 
@@ -1209,7 +1261,7 @@ impl ThinkingStatus {
             state
                 .observations
                 .apply(ObservationEvent::FinishTransient("思考中...".to_string()));
-            rerender_thinking(&state, &self.rendered_lines);
+            rerender_thinking(&state, &self.presentation, self.mode, &self.rendered_lines);
         }
     }
 
@@ -1221,7 +1273,7 @@ impl ThinkingStatus {
         };
         if let Ok(mut state) = self.state.lock() {
             state.observations.apply(ObservationEvent::Persistent(text));
-            rerender_thinking(&state, &self.rendered_lines);
+            rerender_thinking(&state, &self.presentation, self.mode, &self.rendered_lines);
         }
     }
 
@@ -1238,7 +1290,7 @@ impl ThinkingStatus {
                 attempt: Some(attempt),
                 max_attempts: Some(max_attempts),
             });
-            rerender_thinking(&state, &self.rendered_lines);
+            rerender_thinking(&state, &self.presentation, self.mode, &self.rendered_lines);
         }
     }
 
@@ -1248,21 +1300,64 @@ impl ThinkingStatus {
         }
         if let Ok(mut state) = self.state.lock() {
             state.observations.apply_all(events);
-            rerender_thinking(&state, &self.rendered_lines);
+            rerender_thinking(&state, &self.presentation, self.mode, &self.rendered_lines);
         }
     }
 
     fn settle_active_observations(&mut self) {
         if let Ok(mut state) = self.state.lock() {
             state.observations.apply(ObservationEvent::SettleActive);
-            rerender_thinking(&state, &self.rendered_lines);
+            rerender_thinking(&state, &self.presentation, self.mode, &self.rendered_lines);
         }
+    }
+
+    fn apply_stream_events(&mut self, events: &[CoreTopicEvent]) {
+        if self.mode != ShellUiMode::Stream {
+            return;
+        }
+        let changed = self.presentation.lock().is_ok_and(|mut presentation| {
+            let mut changed = false;
+            for event in events {
+                changed |= presentation
+                    .preview
+                    .apply_topic(&event.topic.name, &event.payload)
+                    != StreamPreviewUpdate::Ignored;
+                changed |=
+                    presentation.tools.apply_core_topic(event) != StreamToolFoldUpdate::Ignored;
+            }
+            changed
+        });
+        if changed {
+            if let Ok(state) = self.state.lock() {
+                rerender_thinking(&state, &self.presentation, self.mode, &self.rendered_lines);
+            }
+        }
+    }
+
+    fn take_stream_tool_summary(&mut self) -> String {
+        if self.mode != ShellUiMode::Stream {
+            return String::new();
+        }
+        self.presentation
+            .lock()
+            .map(|mut presentation| {
+                presentation.preview.clear();
+                let rendered = render_stream_tool_fold(&presentation.tools);
+                presentation.tools.clear();
+                rendered
+            })
+            .unwrap_or_default()
     }
 
     fn finish(&mut self) {
         self.running.store(false, Ordering::Relaxed);
         self.stop_renderer_thread();
+        let tools = self.take_stream_tool_summary();
         clear_thinking_block(&self.rendered_lines);
+        if !tools.is_empty() {
+            print!("{tools}");
+            let _ = io::stdout().flush();
+        }
     }
 
     fn finish_cancelled(&mut self) {
@@ -1271,7 +1366,15 @@ impl ThinkingStatus {
         if let Ok(mut state) = self.state.lock() {
             state.status.intent = "已取消".to_string();
             state.status.elapsed_secs = active_elapsed_secs(self.started_at, &self.paused_total);
-            rerender_thinking(&state, &self.rendered_lines);
+            rerender_thinking(&state, &self.presentation, self.mode, &self.rendered_lines);
+        }
+        if self.mode == ShellUiMode::Stream {
+            let tools = self.take_stream_tool_summary();
+            clear_thinking_block(&self.rendered_lines);
+            if !tools.is_empty() {
+                print!("{tools}");
+                let _ = io::stdout().flush();
+            }
         }
     }
 
@@ -1308,10 +1411,12 @@ impl ThinkingStatus {
         self.running.store(true, Ordering::Relaxed);
         if let Ok(mut state) = self.state.lock() {
             state.status.elapsed_secs = active_elapsed_secs(self.started_at, &self.paused_total);
-            render_thinking(&state, &self.rendered_lines);
+            render_thinking(&state, &self.presentation, self.mode, &self.rendered_lines);
         }
         let (handle, stop_tx) = spawn_thinking_renderer(
             Arc::clone(&self.state),
+            Arc::clone(&self.presentation),
+            self.mode,
             Arc::clone(&self.running),
             Arc::clone(&self.rendered_lines),
             Arc::clone(&self.paused_total),
@@ -1333,6 +1438,8 @@ impl ThinkingStatus {
 
 fn spawn_thinking_renderer(
     state: Arc<Mutex<ThinkingViewSnapshot>>,
+    presentation: Arc<Mutex<StreamPresentationState>>,
+    mode: ShellUiMode,
     running: Arc<AtomicBool>,
     rendered_lines: Arc<Mutex<usize>>,
     paused_total: Arc<Mutex<Duration>>,
@@ -1351,7 +1458,7 @@ fn spawn_thinking_renderer(
             if let Ok(mut snapshot) = state.lock() {
                 snapshot.status.tick = snapshot.status.tick.wrapping_add(1);
                 snapshot.status.elapsed_secs = active_elapsed_secs(started_at, &paused_total);
-                rerender_thinking(&snapshot, &rendered_lines);
+                rerender_thinking(&snapshot, &presentation, mode, &rendered_lines);
             }
         }
     });
@@ -3270,13 +3377,34 @@ impl Prompt for TimemReedlinePrompt {
     }
 }
 
-fn render_thinking(snapshot: &ThinkingViewSnapshot, rendered_lines: &Arc<Mutex<usize>>) {
+fn render_thinking(
+    snapshot: &ThinkingViewSnapshot,
+    presentation: &Arc<Mutex<StreamPresentationState>>,
+    mode: ShellUiMode,
+    rendered_lines: &Arc<Mutex<usize>>,
+) {
     let mut snapshot = snapshot.clone();
     snapshot
         .observations
         .set_max_width(observation_panel_width_for_terminal(terminal_width()));
     let width = terminal_width();
-    let rendered = render_thinking_view_at(&snapshot, &time_label());
+    let mut rendered = render_thinking_view_at(&snapshot, &time_label());
+    if mode == ShellUiMode::Stream {
+        if let Ok(presentation) = presentation.lock() {
+            let tools = render_stream_tool_fold(&presentation.tools);
+            if !tools.is_empty() {
+                rendered.push_str(&tools);
+            }
+            if let Some(preview) = presentation.preview.snapshot() {
+                let provisional = render_stream_preview(preview);
+                if !provisional.is_empty() {
+                    rendered.push_str(&format!(
+                        "{ANSI_BOLD}Response preview{ANSI_RESET}  {ANSI_DIM}(provisional){ANSI_RESET}\n{provisional}\n"
+                    ));
+                }
+            }
+        }
+    }
     let line_count = rendered_terminal_rows(&rendered, width);
     print!("{rendered}");
     if let Ok(mut previous) = rendered_lines.lock() {
@@ -3285,9 +3413,14 @@ fn render_thinking(snapshot: &ThinkingViewSnapshot, rendered_lines: &Arc<Mutex<u
     let _ = io::stdout().flush();
 }
 
-fn rerender_thinking(snapshot: &ThinkingViewSnapshot, rendered_lines: &Arc<Mutex<usize>>) {
+fn rerender_thinking(
+    snapshot: &ThinkingViewSnapshot,
+    presentation: &Arc<Mutex<StreamPresentationState>>,
+    mode: ShellUiMode,
+    rendered_lines: &Arc<Mutex<usize>>,
+) {
     clear_thinking_block(rendered_lines);
-    render_thinking(snapshot, rendered_lines);
+    render_thinking(snapshot, presentation, mode, rendered_lines);
 }
 
 fn clear_thinking_block(rendered_lines: &Arc<Mutex<usize>>) {
@@ -3768,7 +3901,7 @@ fn print_help() {
 }
 
 fn cli_help_text() -> &'static str {
-    "Usage:\n  timem                     start Web Host\n  timem --shell [options]   start interactive shell\n  timem attach [--space <absolute-path>]   attach a terminal to a running Web Host session\n\n\x1b[1mPrecedence:\n  command line options override non-empty process env values; non-empty process env values override the restored Session cache.\x1b[0m\n\nConfigure each Session in Timem Web, or set process environment variables for terminal use.\n  macOS/Linux env file: source /path/to/your/env\n  Windows PowerShell: $env:TIMEM_API_KEY = '...'\n\nShell run:\n  timem --shell\n\nUseful env values to put in your env file:\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1\n  TIMEM_SPACE=/absolute/path/to/mem (Windows example: C:\\Users\\you\\timem-mem)\n\nCommand line override example:\n  timem --shell --space /absolute/path/to/mem --model qwen-plus\n\nOptions:\n  --space <absolute-path>        env TIMEM_SPACE; MEM directory, default under the user home\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; model API format: openai-compatible|openai-responses|anthropic\n  --response-protocol <protocol> env TIMEM_RESPONSE_PROTOCOL; inline parser: json|xml, default xml\n  --tool-call-mode <mode>        env TIMEM_TOOL_CALL_MODE; auto|native|inline, default auto\n  --parallel-tool-calls <mode>   env TIMEM_PARALLEL_TOOL_CALLS; auto|true|false, default auto\n  --base-url <url>               env TIMEM_BASE_URL; model API base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --timeout <seconds>            env TIMEM_TIMEOUT; model connect/inactivity timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|20K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 20K\n  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --work-instructions <mode>     env TIMEM_WORK_INSTRUCTIONS; silent|ask|off, default silent\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /help                          show these control commands\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type another question and press Enter to queue a separate next turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  API protocol: openai-compatible\n  Tool calling: auto (native when detected, otherwise inline)\n  Response protocol: xml (inline mode only)\n\nAPI key fallback env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
+    "Usage:\n  timem                     start Web Host\n  timem --shell [options]   start interactive shell\n  timem attach [--space <absolute-path>] [--ui-mode ordinary|stream]   attach a terminal to a running Web Host session\n\n\x1b[1mPrecedence:\n  command line options override non-empty process env values; non-empty process env values override the restored Session cache.\x1b[0m\n\nConfigure each Session in Timem Web, or set process environment variables for terminal use.\n  macOS/Linux env file: source /path/to/your/env\n  Windows PowerShell: $env:TIMEM_API_KEY = '...'\n\nShell run:\n  timem --shell\n\nSession UI:\n  ordinary keeps the integrated Thought / Action presentation; stream shows provisional response and live tools.\n  Attach selects the Host and Session before prompting for the UI mode.\n  Non-interactive terminals default to ordinary; --once-json always uses ordinary.\n\nUseful env values to put in your env file:\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1\n  TIMEM_SPACE=/absolute/path/to/mem (Windows example: C:\\Users\\you\\timem-mem)\n\nCommand line override example:\n  timem --shell --space /absolute/path/to/mem --model qwen-plus\n\nOptions:\n  --space <absolute-path>        env TIMEM_SPACE; MEM directory, default under the user home\n  --ui-mode <mode>               env TIMEM_UI_MODE; ordinary|stream, prompt on interactive TTY\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; model API format: openai-compatible|openai-responses|anthropic\n  --response-protocol <protocol> env TIMEM_RESPONSE_PROTOCOL; inline parser: json|xml, default xml\n  --tool-call-mode <mode>        env TIMEM_TOOL_CALL_MODE; auto|native|inline, default auto\n  --parallel-tool-calls <mode>   env TIMEM_PARALLEL_TOOL_CALLS; auto|true|false, default auto\n  --base-url <url>               env TIMEM_BASE_URL; model API base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --timeout <seconds>            env TIMEM_TIMEOUT; model connect/inactivity timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|20K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 20K\n  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --work-instructions <mode>     env TIMEM_WORK_INSTRUCTIONS; silent|ask|off, default silent\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /help                          show these control commands\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type another question and press Enter to queue a separate next turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  API protocol: openai-compatible\n  Tool calling: auto (native when detected, otherwise inline)\n  Response protocol: xml (inline mode only)\n\nAPI key fallback env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
 }
 
 fn runtime_help_text() -> &'static str {
