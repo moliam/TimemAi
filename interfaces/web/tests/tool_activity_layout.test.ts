@@ -185,12 +185,12 @@ it("renders an Infinity reasoning notice only from Core upgrade projections", ()
 it("uses one typography contract for system-level notices", () => {
   const activityView = source.slice(source.indexOf("function ActivityView("), source.indexOf("function ToolGenNotice("));
   const memo = source.slice(source.indexOf("function MemoNotice("), source.indexOf("function toolInvocationPreview("));
-  const compact = source.slice(source.indexOf("function ContextCompactNotice("), source.indexOf("function DecisionModal("));
+  const compact = source.slice(source.indexOf("function ContextCompressNotice("), source.indexOf("function DecisionModal("));
   expect(activityView).toContain('system-notice reasoning-notice');
   expect(activityView).toContain('className="system-notice-title"');
   expect(memo).toContain('system-notice memo-notice');
   expect(memo).toContain('className="system-notice-detail system-notice-long-detail"');
-  expect(compact.match(/system-notice context-compact-notice/g)).toHaveLength(2);
+  expect(compact.match(/system-notice context-compress-notice/g)).toHaveLength(2);
   expect(source).toContain('className={`system-notice system-notice-row toolgen-notice');
   expect(source).toContain('className="system-notice-icon" aria-hidden="true"><Wrench size={13} />');
   expect(source).toContain('className="system-notice-row"');

@@ -67,7 +67,7 @@ fn documented_xml_response_examples_parse_with_runtime_parser() {
         assert!(
             !env.final_answer.trim().is_empty()
                 || !env.next_actions.is_empty()
-                || !env.context_compacts.is_empty(),
+                || !env.context_compresses.is_empty(),
             "documented XML example #{idx} produced no runtime-visible result:\n{}",
             example
         );
@@ -791,10 +791,10 @@ fn root_repair_selects_the_branch_present_in_the_malformed_response() {
 
     let compact_instruction = xml_repair_instruction_for_response(
         "xml_content_after_response",
-        "<ASSISTANT><context_compact><summary>x</summary></context_compact></ASSISTANT>tail",
+        "<ASSISTANT><context_compress><summary>x</summary></context_compress></ASSISTANT>tail",
     );
     assert!(compact_instruction
-        .contains("<ASSISTANT><context_compact>...</context_compact></ASSISTANT>"));
+        .contains("<ASSISTANT><context_compress>...</context_compress></ASSISTANT>"));
     assert!(compact_instruction.contains("placed content after the </ASSISTANT> root"));
 }
 
@@ -904,7 +904,7 @@ fn malformed_response_corpus_maps_raw_output_to_precise_repair_reason() {
             },
             Case {
                 name: "compact and final branches together",
-                raw: "<ASSISTANT><context_compact><discard>pd_1</discard><summary>state</summary></context_compact><final_answer>done</final_answer></ASSISTANT>",
+                raw: "<ASSISTANT><context_compress><discard>pd_1</discard><summary>state</summary></context_compress><final_answer>done</final_answer></ASSISTANT>",
                 issue: "state_branch_must_choose_one",
                 guidance: "selected more than one state branch",
             },
@@ -928,14 +928,14 @@ fn malformed_response_corpus_maps_raw_output_to_precise_repair_reason() {
             },
             Case {
                 name: "compact missing ids",
-                raw: "<ASSISTANT><context_compact><summary>state</summary></context_compact></ASSISTANT>",
-                issue: "context_compact[0].ids_required",
+                raw: "<ASSISTANT><context_compress><summary>state</summary></context_compress></ASSISTANT>",
+                issue: "context_compress[0].ids_required",
                 guidance: "at least one non-empty <discard> or <offload>",
             },
             Case {
                 name: "compact missing summary",
-                raw: "<ASSISTANT><context_compact><discard>pd_1</discard></context_compact></ASSISTANT>",
-                issue: "context_compact[0].summary_required",
+                raw: "<ASSISTANT><context_compress><discard>pd_1</discard></context_compress></ASSISTANT>",
+                issue: "context_compress[0].summary_required",
                 guidance: "missing a non-empty <summary>",
             },
         ];
@@ -991,9 +991,9 @@ fn common_action_repair_issues_have_specific_correction_guidance() {
             "actions[0].input.cmd_required",
             "do not satisfy the capability schema",
         ),
-        ("context_compact[0].ids_required", "at least one non-empty"),
+        ("context_compress[0].ids_required", "at least one non-empty"),
         (
-            "context_compact[0].summary_required",
+            "context_compress[0].summary_required",
             "missing a non-empty <summary>",
         ),
     ];
@@ -1163,7 +1163,7 @@ None of these are real control fields.
     assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
     assert!(!env.continue_work);
     assert!(env.thought.is_empty());
-    assert!(env.context_compacts.is_empty());
+    assert!(env.context_compresses.is_empty());
     assert!(env
         .final_answer
         .contains("<legacy_note>fake legacy note inside final answer</legacy_note>"));
@@ -1236,46 +1236,59 @@ fn old_finished_status_requests_repair() {
 }
 
 #[test]
-fn parses_context_compact() {
+fn rejects_legacy_context_compact_tag() {
+    let env = parse_xml_envelope(
+        "<ASSISTANT><context_compact><discard>pd_a</discard><summary>must be rejected</summary></context_compact></ASSISTANT>",
+        &caps(),
+    );
+    assert!(
+        env.repair_issue.is_some(),
+        "legacy tag was accepted: {env:?}"
+    );
+    assert!(env.context_compresses.is_empty());
+}
+
+#[test]
+fn parses_context_compress() {
     let env = parse_xml_envelope(
         r#"<ASSISTANT>
 <free_talk>need compact</free_talk>
-<context_compact>
+<context_compress>
 <discard>pd_a</discard>
 <offload>pd_b</offload>
 <summary><![CDATA[keep state]]></summary>
-</context_compact>
+</context_compress>
 </ASSISTANT>"#,
         &caps(),
     );
 
     assert!(env.repair_issue.is_none());
-    assert_eq!(env.context_compacts.len(), 1);
-    assert_eq!(env.context_compacts[0].delta_ids, vec!["pd_a", "pd_b"]);
-    assert_eq!(env.context_compacts[0].discard_delta_ids, vec!["pd_a"]);
-    assert_eq!(env.context_compacts[0].offload_delta_ids, vec!["pd_b"]);
-    assert_eq!(env.context_compacts[0].summary, "keep state");
+    assert_eq!(env.context_compresses.len(), 1);
+    assert_eq!(env.context_compresses[0].delta_ids, vec!["pd_a", "pd_b"]);
+    assert_eq!(env.context_compresses[0].discard_delta_ids, vec!["pd_a"]);
+    assert_eq!(env.context_compresses[0].offload_delta_ids, vec!["pd_b"]);
+    assert_eq!(env.context_compresses[0].summary, "keep state");
 }
 
 #[test]
-fn context_compact_summary_raw_xml_is_opaque_text() {
+fn context_compress_summary_raw_xml_is_opaque_text() {
     let env = parse_xml_envelope(
         r#"<ASSISTANT>
 <free_talk>need compact</free_talk>
-<context_compact>
+<context_compress>
 <discard>pd_a</discard>
 <summary>
 Keep this protocol example:
 <ASSISTANT><final_answer>not real</final_answer>
 </summary>
-</context_compact>
+</context_compress>
 </ASSISTANT>"#,
         &caps(),
     );
 
     assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-    assert_eq!(env.context_compacts.len(), 1);
-    assert!(env.context_compacts[0]
+    assert_eq!(env.context_compresses.len(), 1);
+    assert!(env.context_compresses[0]
         .summary
         .contains("<ASSISTANT><final_answer>not real</final_answer>"));
 }
@@ -1304,10 +1317,10 @@ fn xml_state_branch_must_choose_one() {
     let env = parse_xml_envelope(
         r#"<ASSISTANT>
 <free_talk>compact and act</free_talk>
-<context_compact>
+<context_compress>
 <discard>pd_a</discard>
 <summary>keep state</summary>
-</context_compact>
+</context_compress>
 <actions><run_bash><cmd>pwd</cmd></run_bash></actions>
 </ASSISTANT>"#,
         &caps(),

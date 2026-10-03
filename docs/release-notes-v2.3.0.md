@@ -55,7 +55,7 @@ large batch of model-endpoint management and Web polish.
   module-boundary hints; context compaction resets the tracking.
 - Live supplements that time out during local actions force the next model
   dispatch; endpoint reasoning effort applies only to critical requests.
-- context_compact checklist aligns with the runtime prompt.
+- context_compress checklist aligns with the runtime prompt.
 - Shell resume notices carry a restart timestamp.
 
 ## Upgrade notes

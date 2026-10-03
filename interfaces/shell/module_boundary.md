@@ -135,6 +135,15 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   keep-waiting/stop-waiting menu and returns the user's decision through the
   core host-decision channel; core owns the process lifecycle, action result,
   and any follow-up `user_supplement`.
+- `timem attach` host discovery. An explicit `--space` remains a directed
+  single-MEM lookup. Without it, Shell may read the user-level Web-instance
+  registry exposed through `timem_in_process::agent_api`, but registry records
+  are untrusted, token-free indexes: Shell must re-read the selected MEM's
+  authoritative `web_instance.json`, require exact PID/start identity, require
+  a healthy loopback Host, and obtain the token only from that lease. Zero
+  validated instances falls back to the default MEM; one connects directly;
+  multiple instances are presented before the Session selector. Discovery is
+  read-only and never deletes stale registrations.
 - Local host concerns such as where this shell process stores history or audit
   files.
 - Shell participation in core-owned Session persistence. Shell may choose the

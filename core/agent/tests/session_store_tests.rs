@@ -5,6 +5,22 @@ use agent_core::session_store::{
 };
 
 #[test]
+fn legacy_context_compact_history_kind_reads_but_writes_context_compress() {
+    let legacy = r#"{"type":"event","role":"system","turn_id":"turn_legacy","created_at_ms":1,"kind":"context_compact","content":"legacy"}"#;
+    let decoded: ChatHistoryRecord = serde_json::from_str(legacy).unwrap();
+    assert!(matches!(
+        decoded,
+        ChatHistoryRecord::Event {
+            kind: ChatHistoryEventKind::ContextCompress,
+            ..
+        }
+    ));
+    let encoded = serde_json::to_string(&decoded).unwrap();
+    assert!(encoded.contains(r#""kind":"context_compress""#));
+    assert!(!encoded.contains("context_compact"));
+}
+
+#[test]
 fn chat_history_message_command_id_round_trips_for_exactly_once_recovery() {
     let record = ChatHistoryRecord::Message {
         role: ChatHistoryRole::User,
@@ -177,7 +193,7 @@ fn temporary_retention_prunes_only_selected_old_events() {
             role: ChatHistoryRole::System,
             turn_id: "old_compact".to_string(),
             created_at_ms: 3,
-            kind: ChatHistoryEventKind::ContextCompact,
+            kind: ChatHistoryEventKind::ContextCompress,
             content: "expired compact".to_string(),
             extra: BTreeMap::new(),
         },

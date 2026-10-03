@@ -809,7 +809,7 @@ fn prompt_renderer_keeps_startup_stamp_placeholder_as_plain_text() {
 }
 
 #[test]
-fn context_compaction_summary_has_an_explicit_assistant_heading() {
+fn context_compression_summary_has_an_explicit_assistant_heading() {
     let delta = PromptDelta {
         delta_id: "pd_compact_summary".to_string(),
         time_ms: 123,
@@ -818,7 +818,7 @@ fn context_compaction_summary_has_an_explicit_assistant_heading() {
             delta_id: "pd_compact_summary".to_string(),
             slice_id: "ps_compact_summary_s001".to_string(),
             component_id: "component_compact_summary".to_string(),
-            prompt_type: "context_compaction_summary".to_string(),
+            prompt_type: "context_compression_summary".to_string(),
             time_ms: 123,
             text: "keep active task state".to_string(),
             slice_index: 1,
@@ -841,11 +841,11 @@ fn context_compaction_summary_has_an_explicit_assistant_heading() {
     );
 
     assert!(rendered
-        .contains("## TIMEM_ASSISTANT (context compaction summary)\n\nkeep active task state"));
+        .contains("## TIMEM_ASSISTANT (context compression summary)\n\nkeep active task state"));
 }
 
 #[test]
-fn xml_context_compaction_summary_uses_an_assistant_kind_attribute() {
+fn xml_context_compression_summary_uses_an_assistant_kind_attribute() {
     let delta = PromptDelta {
         delta_id: "pd_xml_compact_summary".to_string(),
         time_ms: 123,
@@ -854,7 +854,7 @@ fn xml_context_compaction_summary_uses_an_assistant_kind_attribute() {
             delta_id: "pd_xml_compact_summary".to_string(),
             slice_id: "ps_xml_compact_summary_s001".to_string(),
             component_id: "component_xml_compact_summary".to_string(),
-            prompt_type: "context_compaction_summary".to_string(),
+            prompt_type: "context_compression_summary".to_string(),
             time_ms: 123,
             text: "keep active task state".to_string(),
             slice_index: 1,
@@ -877,7 +877,7 @@ fn xml_context_compaction_summary_uses_an_assistant_kind_attribute() {
     );
 
     assert!(rendered.contains(
-        "<ASSISTANT kind=\"context_compaction_summary\">\n\nkeep active task state\n</ASSISTANT>"
+        "<ASSISTANT kind=\"context_compression_summary\">\n\nkeep active task state\n</ASSISTANT>"
     ));
 }
 

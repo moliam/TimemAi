@@ -7,6 +7,7 @@ export const unconfiguredModelLabel = () => t("modelService.unconfigured");
 export type ModelServiceIssue = {
   title: string;
   detail: string;
+  diagnostic?: string;
 };
 
 export const noModelEndpointsIssue = (): ModelServiceIssue => ({
@@ -55,11 +56,43 @@ function serviceDetail(reason: string, guidance: string): string {
   return reason ? t("service.responseDetail", { reason, guidance }) : guidance;
 }
 
+function streamFailureMessage(safeError: string): string {
+  const match = safeError.match(/(?:^|\s)message=(.+)$/i);
+  return match?.[1]?.trim() ?? "";
+}
+
 export function modelServiceIssue(rawError: unknown): ModelServiceIssue {
   const raw = typeof rawError === "string" ? rawError : "";
   const safe = sanitizeModelServiceError(raw);
   const lower = safe.toLowerCase();
   const reason = providerReason(safe);
+
+  if (
+    lower.includes("model_responses_stream_failed")
+    && (
+      lower.includes("server_is_overloaded")
+      || lower.includes("currently overloaded")
+      || lower.includes("service_unavailable")
+      || lower.includes("temporarily_unavailable")
+    )
+  ) {
+    return {
+      title: t("service.overloadedTitle"),
+      detail: streamFailureMessage(safe) || t("service.overloadedFallback"),
+      ...(safe ? { diagnostic: safe } : {}),
+    };
+  }
+
+  if (
+    lower.includes("model_responses_stream_failed")
+    || lower.includes("model responses stream error")
+  ) {
+    return {
+      title: t("service.streamFailedTitle"),
+      detail: streamFailureMessage(safe) || t("service.streamFailedFallback"),
+      ...(safe ? { diagnostic: safe } : {}),
+    };
+  }
 
   if (
     lower.includes("session_model_service_config_incomplete")

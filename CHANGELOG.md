@@ -25,7 +25,7 @@
 
 ### Added
 
-- Emit a `core.context.compact` `phase=requested` topic when the forced
+- Emit a `core.context.compress` `phase=requested` topic when the forced
   shrink threshold is crossed; the WebUI shows a live compacting notice with
   an indeterminate meter, and the completed notice includes percent-off.
 
@@ -98,7 +98,7 @@
   a compact clear action at the end of the ctx line.
 - Apply endpoint reasoning effort only to critical model requests; add an Off
   option.
-- Align the context_compact checklist with the runtime prompt.
+- Align the context_compress checklist with the runtime prompt.
 
 ### Fixed
 

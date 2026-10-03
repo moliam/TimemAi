@@ -1757,7 +1757,7 @@ fn periodic_and_compact_reasoning_reach_http_payload() {
             assert!(body.get("thinking").is_none());
         }
     }
-    core.request_manual_context_compact();
+    core.request_manual_context_compress();
     let base = core.build_next_prompt();
     let prompt = core.build_model_request_prompt(&base);
     let body = crate::prepare_model_interaction_http_request(
@@ -2071,6 +2071,87 @@ fn responses_stream_terminal_parses_text_tools_usage_and_incomplete() {
             .result
             .is_err());
     }
+}
+
+#[test]
+fn responses_stream_failure_preserves_bounded_sanitized_diagnostics() {
+    let cfg = config(ApiProtocol::OpenAiResponses);
+    let wire = format!(
+        "data: {}\n\n",
+        json!({
+            "type": "response.failed",
+            "response": {
+                "id": "resp_123",
+                "status": "failed",
+                "error": {
+                    "code": "server_error",
+                    "type": "upstream_error",
+                    "param": "input",
+                    "message": format!("temporary failure sk-sensitive-token {}", "x".repeat(400)),
+                },
+                "metadata": {"private": "must-not-be-retained"},
+            },
+        })
+    );
+
+    let interpreted = interpret_model_http_response(&cfg, 200, &wire, "");
+    let error = interpreted.result.unwrap_err();
+    assert!(
+        error.starts_with("model_responses_stream_failed:"),
+        "{error}"
+    );
+    assert!(error.contains("event_type=response.failed"), "{error}");
+    assert!(error.contains("response_id=resp_123"), "{error}");
+    assert!(error.contains("response_status=failed"), "{error}");
+    assert!(error.contains("code=server_error"), "{error}");
+    assert!(error.contains("type=upstream_error"), "{error}");
+    assert!(
+        error.contains("message=temporary failure ***REDACTED***"),
+        "{error}"
+    );
+    assert!(error.ends_with('…'), "{error}");
+    assert!(!error.contains("sk-sensitive-token"));
+    assert!(error.chars().count() < 600, "{error}");
+
+    assert_eq!(interpreted.raw_json["stream"], true);
+    assert_eq!(
+        interpreted.raw_json["stream_error"]["event_type"],
+        "response.failed"
+    );
+    assert_eq!(interpreted.raw_json["stream_error"]["code"], "server_error");
+    let retained_message = interpreted.raw_json["stream_error"]["message"]
+        .as_str()
+        .unwrap();
+    assert!(retained_message.starts_with("temporary failure ***REDACTED*** "));
+    assert!(retained_message.ends_with('…'));
+    assert_eq!(retained_message.chars().count(), 241);
+    let retained = interpreted.raw_json.to_string();
+    assert!(!retained.contains("must-not-be-retained"));
+    assert!(!retained.contains("sk-sensitive-token"));
+
+    let audit = model_response_audit_event(200, &interpreted.raw_json);
+    assert_eq!(audit["error_kind"], "model_stream_error");
+    assert_eq!(audit["response"]["error"]["code"], "server_error");
+    assert!(!audit.to_string().contains("must-not-be-retained"));
+}
+
+#[test]
+fn responses_stream_top_level_error_event_preserves_code_and_message() {
+    let cfg = config(ApiProtocol::OpenAiResponses);
+    let wire = concat!(
+        "data: {\"type\":\"error\",\"code\":\"rate_limit_exceeded\",",
+        "\"message\":\"try later\",\"param\":null}\n\n"
+    );
+
+    let interpreted = interpret_model_http_response(&cfg, 200, wire, "");
+    let error = interpreted.result.unwrap_err();
+    assert!(error.contains("event_type=error"), "{error}");
+    assert!(error.contains("code=rate_limit_exceeded"), "{error}");
+    assert!(error.contains("message=try later"), "{error}");
+    assert_eq!(
+        interpreted.raw_json["stream_error"]["code"],
+        "rate_limit_exceeded"
+    );
 }
 
 fn zhipu_config(suffix: &str) -> ModelServiceConfig {

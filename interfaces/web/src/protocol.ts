@@ -329,6 +329,7 @@ export type Activity = {
   tone: "thinking" | "action" | "notice" | "warning" | "error";
   title: string;
   detail?: string;
+  diagnostic?: string;
   code?: string;
   code_language?: string;
   tool_name?: string;
@@ -347,12 +348,13 @@ export type Activity = {
   execution_order?: number;
   settled_order?: number;
   kind?:
-    | "context_compact"
+    | "context_compress"
     | "toolgen"
     | "free_talk"
     | "user_supplement"
     | "memo_notice"
-    | "reasoning_notice";
+    | "reasoning_notice"
+    | "model_service_issue";
   toolgen_phase?: string;
   compact_phase?: "requested" | "completed";
   estimated_prompt_tokens?: number;
@@ -721,7 +723,7 @@ export type ClientCommand =
   | { type: "session_api_key_reveal"; session_id: string }
   | { type: "session_stop"; session_id: string }
   | { type: "session_clear_context"; session_id: string }
-  | { type: "session_request_context_compact"; session_id: string }
+  | { type: "session_request_context_compress"; session_id: string }
   | { type: "session_delete"; session_id: string }
   | {
       type: "chat_message_delete";

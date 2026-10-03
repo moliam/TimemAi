@@ -431,5 +431,5 @@ profiles map thinking fields and enforce final-wire consistency before I/O.
 Assistant reasoning continuation is bounded opaque metadata carried on the first
 native call of an exchange, not tool arguments or public assistant text. It is
 replayed only for the same capability descriptor and model (not the editable template source); absent legacy metadata is
-valid. Cross-turn preserved thinking is not promised across context compaction.
+valid. Cross-turn preserved thinking is not promised across context compression.
 See `docs/zhipu-model-catalog.md` for scope, evidence and tests.

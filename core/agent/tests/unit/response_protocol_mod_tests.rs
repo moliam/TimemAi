@@ -65,8 +65,8 @@ fn actions_without_protocol_metadata(actions: &[ParsedAction]) -> Vec<ParsedActi
 }
 
 fn compacts_without_protocol_metadata(
-    compacts: &[ParsedContextCompact],
-) -> Vec<ParsedContextCompact> {
+    compacts: &[ParsedContextCompress],
+) -> Vec<ParsedContextCompress> {
     compacts
         .iter()
         .cloned()
@@ -109,8 +109,8 @@ fn assert_protocols_equivalent(json_raw: &str, xml_raw: &str) {
         groups_without_protocol_metadata(&json.action_groups)
     );
     assert_eq!(
-        compacts_without_protocol_metadata(&xml.context_compacts),
-        compacts_without_protocol_metadata(&json.context_compacts)
+        compacts_without_protocol_metadata(&xml.context_compresses),
+        compacts_without_protocol_metadata(&json.context_compresses)
     );
 }
 
@@ -188,10 +188,10 @@ fn json_xml_protocols_parse_complex_actions_with_protocol_like_string_args() {
 }
 
 #[test]
-fn json_xml_protocols_parse_same_context_compact() {
+fn json_xml_protocols_parse_same_context_compress() {
     assert_protocols_equivalent(
-        r#"{"free_talk":"compact","context_compact":{"discard":["pd_a"],"offload":["pd_b"],"summary":"keep state"}}"#,
-        "\x3cASSISTANT>\x3cfree_talk>compact\x3c/free_talk>\x3ccontext_compact>\x3cdiscard>pd_a\x3c/discard>\x3coffload>pd_b\x3c/offload>\x3csummary>keep state\x3c/summary>\x3c/context_compact>\x3c/ASSISTANT>",
+        r#"{"free_talk":"compact","context_compress":{"discard":["pd_a"],"offload":["pd_b"],"summary":"keep state"}}"#,
+        "\x3cASSISTANT>\x3cfree_talk>compact\x3c/free_talk>\x3ccontext_compress>\x3cdiscard>pd_a\x3c/discard>\x3coffload>pd_b\x3c/offload>\x3csummary>keep state\x3c/summary>\x3c/context_compress>\x3c/ASSISTANT>",
     );
 }
 

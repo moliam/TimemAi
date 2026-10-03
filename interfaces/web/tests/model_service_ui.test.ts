@@ -100,6 +100,30 @@ describe("model service issue presentation", () => {
     expect(issue.detail).toContain(zh.service.unavailableDetail);
   });
 
+  it("shows an overloaded provider message and keeps technical fields separate", () => {
+    const issue = modelServiceIssue(
+      "model_responses_stream_failed: event_type=error code=server_is_overloaded type=error message=Our servers are currently overloaded. Please try again later.",
+    );
+    expect(issue.title).toBe(zh.service.overloadedTitle);
+    expect(issue.detail).toBe("Our servers are currently overloaded. Please try again later.");
+    expect(issue.detail).not.toContain("server_is_overloaded");
+    expect(issue.detail).not.toContain("event_type");
+    expect(issue.diagnostic).toContain("code=server_is_overloaded");
+  });
+
+  it("turns a Responses stream failure into actionable copy with collapsed diagnostics", () => {
+    const issue = modelServiceIssue(
+      "model_responses_stream_failed: event_type=response.failed code=server_error message=upstream reset Authorization: Bearer secret-token",
+    );
+    expect(issue.title).toBe(zh.service.streamFailedTitle);
+    expect(issue.detail).toBe("upstream reset Authorization: Bearer [redacted]");
+    expect(issue.detail).not.toContain("model_responses_stream_failed");
+    expect(issue.diagnostic).toContain("model_responses_stream_failed");
+    expect(issue.diagnostic).toContain("upstream reset");
+    expect(issue.diagnostic).not.toContain("secret-token");
+    expect(issue.diagnostic).toContain("[redacted]");
+  });
+
   it("preserves an unknown useful reason while redacting credentials", () => {
     const issue = modelServiceIssue(
       "provider rejected request; Authorization: Bearer secret-token; api_key=sk-supersecret123",

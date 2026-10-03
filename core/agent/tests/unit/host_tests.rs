@@ -155,8 +155,8 @@ fn turn_ui_request_topic_requires_matching_topic_reply_before_resuming() {
 }
 
 #[test]
-fn context_compact_topic_round_trips_structured_payload() {
-    let report = CoreContextCompactTopic {
+fn context_compress_topic_round_trips_structured_payload() {
+    let report = CoreContextCompressTopic {
         estimated_before_tokens: 82_000,
         estimated_after_tokens: 14_000,
         estimated_text_before_tokens: 12_000,
@@ -167,10 +167,13 @@ fn context_compact_topic_round_trips_structured_payload() {
         offloaded_delta_ids: vec!["pd_2".to_string()],
         scratch_id: Some("scratch_1".to_string()),
     };
-    let event = context_compact_topic_event("session_a", &report);
+    let event = context_compress_topic_event("session_a", &report);
 
-    assert_eq!(event.topic.name, CORE_TOPIC_CONTEXT_COMPACT);
-    let topic = event.as_context_compact().expect("context compact topic");
+    assert_eq!(CORE_TOPIC_CONTEXT_COMPRESS, "core.context.compress");
+    assert_ne!(CORE_TOPIC_CONTEXT_COMPRESS, "core.context.compact");
+    assert_eq!(event.topic.name, "core.context.compress");
+    assert_ne!(event.topic.name, "core.context.compact");
+    let topic = event.as_context_compress().expect("context compress topic");
     assert_eq!(topic.estimated_before_tokens, 82_000);
     assert_eq!(topic.estimated_after_tokens, 14_000);
     assert_eq!(topic.estimated_text_before_tokens, 12_000);

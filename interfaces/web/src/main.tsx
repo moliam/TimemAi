@@ -208,7 +208,7 @@ import {
   sessionCancellationApplies,
   shouldRenderTurnWorkFrame,
   sessionContextUsage,
-  sessionContextCompactPending,
+  sessionContextCompressPending,
   sessionCreateDecision,
   sessionInteractionLockReason as sessionInteractionLockReasonForState,
   sessionRenameDecision,
@@ -800,6 +800,8 @@ function TimemApp() {
       title: string,
       detail: string,
       sessionId = activeSessionIdRef.current || "system",
+      diagnostic?: string,
+      kind?: Activity["kind"],
     ) => {
       pushActivity({
         id: clientId(),
@@ -807,6 +809,8 @@ function TimemApp() {
         tone: "error",
         title,
         detail,
+        ...(diagnostic ? { diagnostic } : {}),
+        ...(kind ? { kind } : {}),
         createdAt: Date.now(),
       });
     },
@@ -1847,7 +1851,13 @@ function TimemApp() {
             const issue = modelServiceIssue(
               event.error || "The runtime rejected this model request.",
             );
-            reportUiError(issue.title, issue.detail, sessionId);
+            reportUiError(
+              issue.title,
+              issue.detail,
+              sessionId,
+              issue.diagnostic,
+              "model_service_issue",
+            );
           } else if (completed?.type === "favorite_capacity_update") {
             setFavoriteCapacityUpdating(false);
             reportUiError(t("errors.favoritesResizeTitle"), t("errors.retryLater"), sessionId);
@@ -4595,7 +4605,7 @@ function TimemApp() {
                   activeSession
                     ? () =>
                         sendCommand({
-                          type: "session_request_context_compact",
+                          type: "session_request_context_compress",
                           session_id: activeSession.session_id,
                         })
                     : null
@@ -9940,7 +9950,7 @@ const TurnInteraction = memo(function TurnInteraction({
     () => new Set(persistentToolGenItems.map(({ key }) => key)),
     [persistentToolGenItems],
   );
-  // A completed context compaction supersedes its earlier "compacting..."
+  // A completed context compression supersedes its earlier "compressing..."
   // notice; without this the requested notice keeps its indeterminate
   // animation forever after the real compaction already finished. A turn
   // reaching a terminal state (e.g. cancelled) without a completion notice
@@ -9953,7 +9963,7 @@ const TurnInteraction = memo(function TurnInteraction({
     let completedAfter = false;
     for (let i = visibleItems.length - 1; i >= 0; i--) {
       const activity = visibleItems[i].activity;
-      if (activity?.kind !== "context_compact") continue;
+      if (activity?.kind !== "context_compress") continue;
       if (activity.compact_phase === "completed") completedAfter = true;
       else if (completedAfter && activity.compact_phase === "requested")
         seen.add(visibleItems[i].key);
@@ -9961,7 +9971,7 @@ const TurnInteraction = memo(function TurnInteraction({
     if (turn.completion) {
       for (const item of visibleItems) {
         if (
-          item.activity?.kind === "context_compact" &&
+          item.activity?.kind === "context_compress" &&
           item.activity.compact_phase === "requested"
         )
           seen.add(item.key);
@@ -11532,15 +11542,15 @@ function HeaderContextUsage({
                   <button
                     type="button"
                     role="menuitem"
-                    disabled={session ? sessionContextCompactPending(session) : false}
+                    disabled={session ? sessionContextCompressPending(session) : false}
                     onClick={() => {
                       setMenuOpen(false);
                       onCompact();
                     }}
                   >
-                    {session && sessionContextCompactPending(session)
-                      ? t("context.compactingAction")
-                      : t("context.compactAction")}
+                    {session && sessionContextCompressPending(session)
+                      ? t("context.compressingAction")
+                      : t("context.compressAction")}
                   </button>
                 )}
                 {onClear && (
@@ -11607,10 +11617,12 @@ function ActivityView({ activity, enterPulse = false }: { activity: Activity; en
       <span className="activity-mark" aria-hidden="true"><InfinityIcon size={13} /></span>
       <div className="system-notice-line"><span className="system-notice-title">{activity.title}</span></div>
     </div>;
-  if (activity.kind === "context_compact")
-    return <ContextCompactNotice activity={activity} />;
+  if (activity.kind === "context_compress")
+    return <ContextCompressNotice activity={activity} />;
   if (activity.kind === "toolgen") return <ToolGenNotice activity={activity} />;
   if (activity.kind === "memo_notice") return <MemoNotice activity={activity} />;
+  if (activity.kind === "model_service_issue")
+    return <ModelServiceIssueNotice activity={activity} />;
   if (activity.kind === "user_supplement")
     return (
       <div className="turn-work-item thinking user-supplement">
@@ -11650,6 +11662,30 @@ function ActivityView({ activity, enterPulse = false }: { activity: Activity; en
           <MarkdownContent
             text={fencedCode(activity.code_language ?? "text", activity.code)}
           />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ModelServiceIssueNotice({ activity }: { activity: Activity }) {
+  return (
+    <div className={`turn-work-item ${activity.tone} model-service-issue`}>
+      <span className="activity-mark" aria-hidden="true">
+        {activity.tone === "error" ? "×" : "i"}
+      </span>
+      <div>
+        <strong>{activity.title}</strong>
+        {activity.detail && (
+          <div className="turn-work-detail">
+            <UserText text={activity.detail} />
+          </div>
+        )}
+        {activity.diagnostic && (
+          <details className="model-service-diagnostic">
+            <summary>{t("service.diagnosticLabel")}</summary>
+            <UserText text={activity.diagnostic} />
+          </details>
         )}
       </div>
     </div>
@@ -12029,6 +12065,8 @@ function activityFromTurnEvent(
       tone: "error",
       title: issue.title,
       detail: issue.detail,
+      diagnostic: issue.diagnostic,
+      kind: "model_service_issue",
       createdAt: event.created_at_ms,
     };
   }
@@ -12056,19 +12094,19 @@ function activityFromTurnEvent(
   };
 }
 
-function ContextCompactNotice({ activity }: { activity: Activity }) {
+function ContextCompressNotice({ activity }: { activity: Activity }) {
   const before = activity.before_tokens;
   const after = activity.after_tokens;
   const hasBreakdown =
     activity.text_before_tokens !== undefined ||
     activity.native_before_tokens !== undefined;
   if (activity.compact_phase === "requested") {
-    const label = t("context.compactingAria", {
+    const label = t("context.compressingAria", {
       tokens: formatTokens(activity.estimated_prompt_tokens) ?? t("context.unknown"),
     });
     return (
       <div
-        className="turn-work-item notice system-notice context-compact-notice"
+        className="turn-work-item notice system-notice context-compress-notice"
         role="status"
         aria-label={label}
       >
@@ -12077,7 +12115,7 @@ function ContextCompactNotice({ activity }: { activity: Activity }) {
         </span>
         <div className="system-notice-line">
           <strong className="system-notice-title">{t("context.dynamic")}</strong>
-          <span className="system-notice-detail">{t("context.compacting")}</span>
+          <span className="system-notice-detail">{t("context.compressing")}</span>
         </div>
       </div>
     );
@@ -12090,13 +12128,13 @@ function ContextCompactNotice({ activity }: { activity: Activity }) {
         toolAfter: formatTokens(activity.native_after_tokens) ?? "?",
       })
     : undefined;
-  const label = t("context.compactedAria", {
+  const label = t("context.compressedAria", {
     before: formatTokens(before) ?? t("context.unknown"),
     after: formatTokens(after) ?? t("context.unknown"),
-    suffix: breakdown ? t("context.compactedSuffix", { breakdown }) : "",
+    suffix: breakdown ? t("context.compressedSuffix", { breakdown }) : "",
   });
   return (
-    <div className="turn-work-item notice system-notice context-compact-notice" aria-label={label} title={breakdown}>
+    <div className="turn-work-item notice system-notice context-compress-notice" aria-label={label} title={breakdown}>
       <span className="activity-mark" aria-hidden="true">
         <Gauge size={13} />
       </span>

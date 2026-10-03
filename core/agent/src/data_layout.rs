@@ -1,4 +1,27 @@
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebInstanceRegistryRecord {
+    pub registration_id: String,
+    pub memory_dir: PathBuf,
+    pub pid: u32,
+    pub started_at_ms: u128,
+}
+
+pub fn web_instance_registry_dir() -> Result<PathBuf, String> {
+    let default_memory = default_memory_dir()?;
+    web_instance_registry_dir_from_default_memory(&default_memory)
+}
+
+pub fn web_instance_registry_dir_from_default_memory(
+    default_memory_dir: &Path,
+) -> Result<PathBuf, String> {
+    let root = default_memory_dir
+        .parent()
+        .ok_or_else(|| "web_instance_registry_root_unavailable".to_string())?;
+    Ok(root.join("web_instances"))
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeDataLayout {

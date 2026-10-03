@@ -12,7 +12,7 @@ The browser owns:
 - Session navigation and presentation;
 - composer behavior, attachments, next-turn queue input, active-turn supplements,
   and inline decisions;
-- rendering of free talk, actions, repairs, context compaction, runtime requests,
+- rendering of free talk, actions, repairs, context compression, runtime requests,
   and final answers;
 - Markdown, syntax highlighting, telemetry presentation, themes, fonts,
   responsive layout, and accessibility;

@@ -10,8 +10,8 @@ use crate::ToolDefinition;
 
 const MEMMGR_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/memmgr.yaml");
 const CAPMGR_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/capmgr.yaml");
-const CONTEXT_COMPACT_MANIFEST: &str =
-    include_str!("../../../resources/capabilities/tools/context_compact.yaml");
+const CONTEXT_COMPRESS_MANIFEST: &str =
+    include_str!("../../../resources/capabilities/tools/context_compress.yaml");
 const READFILE_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/readfile.yaml");
 const RUN_BASH_MANIFEST: &str =
     include_str!("../../../resources/capabilities/tools/platform/unix/run_bash.yaml");
@@ -388,7 +388,7 @@ impl CapabilityRegistry {
             &[
                 MEMMGR_MANIFEST,
                 CAPMGR_MANIFEST,
-                CONTEXT_COMPACT_MANIFEST,
+                CONTEXT_COMPRESS_MANIFEST,
                 READFILE_MANIFEST,
                 RUN_BASH_MANIFEST,
                 RUN_POWERSHELL_MANIFEST,

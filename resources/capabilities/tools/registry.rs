@@ -7,7 +7,7 @@ pub(crate) const BUILTIN_TOOL_BINDINGS: &[&str] = &[
     "memmgr",
     "capmgr",
     "memo",
-    "context_compact",
+    "context_compress",
     "readfile",
     "run_bash",
     "run_powershell",
@@ -45,7 +45,7 @@ fn builtin_tool_callback(binding_name: &str) -> Option<BuiltinToolCallback> {
     match binding_name {
         "capmgr" => Some(execute_capmgr),
         "memo" => Some(execute_memo),
-        "context_compact" => Some(execute_context_compact),
+        "context_compress" => Some(execute_context_compress),
         "memmgr" => Some(execute_memmgr),
         "readfile" => Some(execute_readfile),
         "self_tool" => Some(execute_self_tool),
@@ -58,7 +58,7 @@ fn builtin_tool_callback(binding_name: &str) -> Option<BuiltinToolCallback> {
     }
 }
 
-fn execute_context_compact(
+fn execute_context_compress(
     _core: &mut AgentCore,
     _action: &ParsedAction,
     _runtime: &mut dyn ActionRuntime,
@@ -67,7 +67,7 @@ fn execute_context_compact(
     // can atomically rewrite prompt state. This callback is a defensive guard
     // that also keeps manifest and compiled binding registries paired.
     ActionExecution::Completed(crate::ActionOutcome::failed(
-        "Action result: context_compact\nerror: intrinsic_dispatch_required",
+        "Action result: context_compress\nerror: intrinsic_dispatch_required",
     ))
 }
 

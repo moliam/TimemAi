@@ -3154,6 +3154,20 @@ fn browser_commands_are_strictly_tagged_and_do_not_accept_unknown_variants() {
         ClientCommand::AttachmentRemove { .. }
     ));
 
+    let request_context_compress = serde_json::from_str::<ClientCommand>(
+        r#"{"type":"session_request_context_compress","session_id":"session_1"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        request_context_compress,
+        ClientCommand::SessionRequestContextCompress { ref session_id }
+            if session_id == "session_1"
+    ));
+    assert!(serde_json::from_str::<ClientCommand>(
+        r#"{"type":"session_request_context_compact","session_id":"session_1"}"#,
+    )
+    .is_err());
+
     let endpoint_upsert = serde_json::from_value::<ClientCommand>(json!({
         "type": "model_endpoint_upsert",
         "endpoint": {
@@ -7652,6 +7666,7 @@ fn routing_test_state() -> AppState {
             )
             .unwrap(),
         )),
+        web_instance_registration: Arc::new(Mutex::new(None)),
         command_lanes: Arc::new(Mutex::new(HashMap::new())),
         command_global_barrier: Arc::new(RwLock::new(())),
         mem_epoch: Arc::new(RwLock::new(1)),
@@ -8580,7 +8595,7 @@ fn failed_unconsumed_handoff_preserves_final_answer_and_pending_supplement() {
         &worker_id,
         CoreSessionWorkerEvent::UnconsumedSupplements {
             supplements: vec![timem_session::UnconsumedSupplement {
-                manual_context_compact: false,
+                manual_context_compress: false,
                 text: "Q2".to_string(),
                 additional_context: None,
                 command_id: None,
@@ -8670,7 +8685,7 @@ fn task_finished_handoff_failure_keeps_unconsumed_supplement_in_memory() {
         &worker_id,
         CoreSessionWorkerEvent::UnconsumedSupplements {
             supplements: vec![timem_session::UnconsumedSupplement {
-                manual_context_compact: false,
+                manual_context_compress: false,
                 text: "late follow-up".to_string(),
                 additional_context: None,
                 command_id: None,
@@ -8766,7 +8781,7 @@ fn normal_completion_hands_unconsumed_supplement_off_before_ordinary_queue() {
         &worker_id,
         CoreSessionWorkerEvent::UnconsumedSupplements {
             supplements: vec![timem_session::UnconsumedSupplement {
-                manual_context_compact: false,
+                manual_context_compress: false,
                 text: "S priority".to_string(),
                 additional_context: Some("RETURNED_CONTEXT_MARKER".to_string()),
                 command_id: Some("supplement-command".to_string()),
@@ -8848,13 +8863,13 @@ fn stopped_primary_turn_preserves_unconsumed_supplements_without_resubmitting() 
     let session_id = "session_a";
     let supplements = vec![
         timem_session::UnconsumedSupplement {
-            manual_context_compact: false,
+            manual_context_compress: false,
             text: "follow-up one".to_string(),
             additional_context: None,
             command_id: None,
         },
         timem_session::UnconsumedSupplement {
-            manual_context_compact: false,
+            manual_context_compress: false,
             text: "follow-up two".to_string(),
             additional_context: None,
             command_id: None,
@@ -13038,35 +13053,75 @@ fn direct_resume_host_rejects_invalid_payload_and_non_idle_state() {
         handle_command(&working, TEST_PORT, direct_resume_command("session_a")).unwrap_err(),
         "resume_directly_requires_idle_session"
     );
+}
 
-    let queued = routing_test_state();
-    start_web_turn(&queued, "session_a", "active task").unwrap();
-    handle_command_with_id(
-        &queued,
-        TEST_PORT,
-        Some("queued-task"),
-        ClientCommand::TurnSubmit {
-            session_id: "session_a".to_string(),
-            text: "queued task".to_string(),
-            attachment_ids: None,
-            input_kind: None,
-            source_turn_id: None,
-            role_id: None,
-            role_ids: Vec::new(),
-        },
-    )
-    .unwrap();
+#[test]
+fn direct_resume_bypasses_a_failed_continuation_without_dropping_the_queue() {
+    let state = routing_test_state();
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let session_id = register_direct_resume_capture_worker(&state, Arc::clone(&prompts));
     {
-        let mut sessions = queued.sessions.lock().unwrap();
-        let session = sessions.get_mut("session_a").unwrap();
-        session.active_turn_id = None;
-        session.pending_turn_id = None;
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session
+            .message_queue
+            .enqueue(
+                "queued-after-failure",
+                WebNextTurnPayload {
+                    turn_id: unique_web_id("web_turn"),
+                    created_at_ms: now_ms(),
+                    text: "queued task survives".to_string(),
+                    attachments: Vec::new(),
+                    worker_roles: Vec::new(),
+                    send_after_cancel: false,
+                },
+            )
+            .unwrap();
+        session
+            .message_queue
+            .block_continuation(MessageQueueBlockReason::TurnFailed);
         session.state = "ready".to_string();
     }
-    assert_eq!(
-        handle_command(&queued, TEST_PORT, direct_resume_command("session_a")).unwrap_err(),
-        "resume_directly_requires_idle_session"
-    );
+
+    let event = handle_command(&state, TEST_PORT, direct_resume_command(&session_id))
+        .unwrap()
+        .expect("a queued message alone must not block direct resume");
+    assert!(matches!(event, WireEvent::TurnUpdated { .. }));
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let queue = sessions[&session_id].message_queue.projection();
+        assert_eq!(
+            queue.items.len(),
+            1,
+            "direct resume must retain queued work"
+        );
+        assert_eq!(queue.items[0].command_id, "queued-after-failure");
+    }
+
+    let started = Instant::now();
+    loop {
+        for (event_session_id, context_id, worker_id, event) in drain_worker_events(&state) {
+            handle_scoped_worker_event(&state, &event_session_id, &context_id, &worker_id, event);
+        }
+        let recovered = {
+            let sessions = state.sessions.lock().unwrap();
+            let session = &sessions[&session_id];
+            prompts.lock().unwrap().len() >= 2
+                && session.state == "ready"
+                && session.message_queue.is_empty()
+        };
+        if recovered {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "direct resume did not recover and drain the failed continuation queue"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    let prompts = prompts.lock().unwrap();
+    assert!(prompts[0].contains(agent_core::DIRECT_RESUME_USER_INPUT));
+    assert!(prompts[1].contains("queued task survives"));
 }
 
 #[tokio::test]
@@ -13934,6 +13989,60 @@ fn friendly_web_instance_error_replaces_in_use_with_actionable_message() {
     let passthrough =
         friendly_web_instance_error("other_error".to_string(), &data_dir, ".test_mem");
     assert_eq!(passthrough, "other_error");
+}
+
+#[test]
+fn web_instance_registration_updates_mem_and_removes_only_its_own_record() {
+    let root = std::env::temp_dir().join(unique_web_id("web_instance_registry"));
+    let registry = root.join("registry");
+    let first_mem = root.join("first mem");
+    let second_mem = root.join("second mem");
+    let info = WebInstanceInfo {
+        pid: 4242,
+        launch_parent_pid: None,
+        port: Some(18080),
+        token: Some("must-not-enter-registry".to_string()),
+        browser_url: Some("http://127.0.0.1:18080/".to_string()),
+        public_access: false,
+        started_at_ms: 123,
+    };
+
+    let mut registration = WebInstanceRegistration::publish(&registry, &first_mem, &info).unwrap();
+    let path = registration.path().to_path_buf();
+    let first: agent_core::WebInstanceRegistryRecord =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(first.memory_dir, first_mem);
+    assert_eq!(first.registration_id, "4242-123");
+    assert!(!String::from_utf8(std::fs::read(&path).unwrap())
+        .unwrap()
+        .contains("must-not-enter-registry"));
+
+    registration.update_memory_dir(&second_mem).unwrap();
+    let second: agent_core::WebInstanceRegistryRecord =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(second.memory_dir, second_mem);
+
+    let replacement = agent_core::WebInstanceRegistryRecord {
+        registration_id: "replacement".to_string(),
+        memory_dir: root.join("replacement"),
+        pid: 999,
+        started_at_ms: 999,
+    };
+    agent_core::atomic_write_file(&path, &serde_json::to_vec(&replacement).unwrap()).unwrap();
+    drop(registration);
+    assert_eq!(
+        serde_json::from_slice::<agent_core::WebInstanceRegistryRecord>(
+            &std::fs::read(&path).unwrap()
+        )
+        .unwrap(),
+        replacement
+    );
+
+    let owned = WebInstanceRegistration::publish(&registry, &first_mem, &info).unwrap();
+    let owned_path = owned.path().to_path_buf();
+    drop(owned);
+    assert!(!owned_path.exists());
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -16698,7 +16807,7 @@ fn task_finished_hands_manual_compact_off_to_direct_resume() {
         &worker_id,
         CoreSessionWorkerEvent::UnconsumedSupplements {
             supplements: vec![timem_session::UnconsumedSupplement {
-                manual_context_compact: true,
+                manual_context_compress: true,
                 text: String::new(),
                 additional_context: None,
                 command_id: None,
@@ -17086,7 +17195,7 @@ fn context_handoff_real_compaction_survives_graceful_restart() {
         tool_calls: vec![agent_core::NativeToolCall {
             assistant_continuation: None,
             id: "compact_handoff".into(),
-            name: "context_compact".into(),
+            name: "context_compress".into(),
             raw_arguments: arguments.to_string(),
             arguments,
         }],

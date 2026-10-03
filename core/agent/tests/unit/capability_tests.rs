@@ -1087,7 +1087,11 @@ example_json: |
 fn native_tool_schemas_use_gateway_compatible_single_value_enums() {
     let registry =
         CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
+    assert!(registry.contains_tool("context_compress"));
+    assert!(!registry.contains_tool("context_compact"));
     let tools = registry.native_tool_definitions();
+    assert!(tools.iter().any(|tool| tool.name == "context_compress"));
+    assert!(!tools.iter().any(|tool| tool.name == "context_compact"));
     for tool in &tools {
         let schema = serde_json::to_string(&tool.input_schema).unwrap();
         assert!(
@@ -1145,7 +1149,7 @@ fn native_schema_generation_avoids_redundant_required_any_expansion() {
 
     let compact = tools
         .iter()
-        .find(|tool| tool.name == "context_compact")
+        .find(|tool| tool.name == "context_compress")
         .unwrap();
     assert!(compact.input_schema["allOf"]
         .as_array()
@@ -1201,7 +1205,7 @@ fn builtin_native_schemas_preserve_runtime_constraints_and_argument_examples() {
 
     let compact = tools
         .iter()
-        .find(|tool| tool.name == "context_compact")
+        .find(|tool| tool.name == "context_compress")
         .unwrap();
     assert_eq!(compact.input_schema["properties"]["discard"]["minItems"], 1);
 

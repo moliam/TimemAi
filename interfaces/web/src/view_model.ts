@@ -1420,6 +1420,13 @@ function sessionContextUsageFloorMs(session: Session): number | undefined {
   return Math.max(restart, cleared);
 }
 
+const CORE_CONTEXT_COMPRESS_TOPIC = "core.context.compress";
+const LEGACY_CORE_CONTEXT_COMPACT_TOPIC = "core.context.compact";
+
+function isContextCompressTopic(name: string | undefined): boolean {
+  return name === CORE_CONTEXT_COMPRESS_TOPIC || name === LEGACY_CORE_CONTEXT_COMPACT_TOPIC;
+}
+
 function sessionRuntimeRestartAtMs(session: Session): number | undefined {
   return session.messages.reduce<number | undefined>(
     (latest, message) =>
@@ -1433,11 +1440,11 @@ function sessionRuntimeRestartAtMs(session: Session): number | undefined {
 }
 
 /**
- * True while a manual context-compaction request has been announced but no
- * completion notice has superseded it. Drives the "compacting..." menu item
+ * True while a manual context-compression request has been announced but no
+ * completion notice has superseded it. Drives the "compressing..." menu item
  * so the user cannot double-submit.
  */
-export function sessionContextCompactPending(session: Session): boolean {
+export function sessionContextCompressPending(session: Session): boolean {
   // Stale notices from before the latest runtime restart or context clear
   // do not describe the live compaction state; ignore them.
   const floorMs = sessionContextUsageFloorMs(session);
@@ -1448,7 +1455,7 @@ export function sessionContextCompactPending(session: Session): boolean {
       if (event.source !== "core_topic") continue;
       if (floorMs !== undefined && event.created_at_ms < floorMs) continue;
       const payload = event.payload as { topic?: { name?: string }; payload?: { phase?: string } };
-      if (payload.topic?.name !== "core.context.compact") continue;
+      if (!isContextCompressTopic(payload.topic?.name)) continue;
       const phase = payload.payload?.phase;
       if (event.created_at_ms >= pendingAtMs) {
         pending = phase === "requested";
@@ -1492,7 +1499,7 @@ export function sessionContextUsage(
       };
       const after = topic.payload?.estimated_after_tokens;
       if (
-        topic.topic?.name === "core.context.compact" &&
+        isContextCompressTopic(topic.topic?.name) &&
         topic.payload?.phase === "completed" &&
         typeof after === "number" &&
         Number.isFinite(after) &&
@@ -2126,14 +2133,15 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         createdAt: Date.now(),
       };
     }
-    case "core.context.compact": {
+    case CORE_CONTEXT_COMPRESS_TOPIC:
+    case LEGACY_CORE_CONTEXT_COMPACT_TOPIC: {
       if (payload.phase === "requested") {
         return {
           id: clientId(),
           sessionId: event.session_id,
           tone: "notice",
-          kind: "context_compact",
-          title: "Context compacting",
+          kind: "context_compress",
+          title: "Context compressing",
           compact_phase: "requested",
           estimated_prompt_tokens:
             typeof payload.estimated_prompt_tokens === "number"
@@ -2171,7 +2179,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         id: clientId(),
         sessionId: event.session_id,
         tone: "notice",
-        kind: "context_compact",
+        kind: "context_compress",
         compact_phase: "completed",
         title: "Conversation compressed",
         detail: `Conversation compression ${before ?? "?"} tokens → ${after ?? "?"} tokens`,

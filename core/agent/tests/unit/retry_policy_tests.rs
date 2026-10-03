@@ -31,6 +31,8 @@ fn retryable_model_system_errors_cover_network_and_transient_http() {
         "model_http_429: rate limit",
         "model_http_500: upstream overloaded",
         "model_http_503",
+        "model_responses_stream_failed: event_type=error code=server_is_overloaded type=error message=Our servers are currently overloaded. Please try again later.",
+        "model_responses_stream_failed: event_type=response.failed code=rate_limit_exceeded type=server_error message=retry later",
     ] {
         assert!(is_retryable_model_system_error(error), "{error}");
     }
@@ -53,6 +55,8 @@ fn non_retryable_model_errors_do_not_waste_rounds() {
         "model_internal_error: reentrant model HTTP call",
         "model_request_too_large: request body exceeds limit",
         "model_redirect_blocked: cross-origin redirect",
+        "model_responses_stream_failed: event_type=response.failed code=invalid_request_error type=invalid_request_error message=bad tools",
+        "model_responses_stream_failed",
         "invalid_json",
         "status_required",
         "next_actions[0].args_required",
