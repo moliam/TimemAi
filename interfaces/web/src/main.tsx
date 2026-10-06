@@ -3213,17 +3213,27 @@ function TimemApp() {
   );
 
   const runtimeMessages = useMemo<readonly ThreadMessageLike[]>(
-    () =>
-      activeMessages
+    () => {
+      const seenIds = new Set<string>();
+      return activeMessages
         .filter(
           (message): message is ChatMessage & { role: "user" | "assistant" } =>
             message.role !== "system",
         )
+        // assistant-ui message repositories treat duplicate ids as a fatal
+        // React error (whole-page blank). History ids are unique per record,
+        // but the feed stays defensive against any snapshot regression.
+        .filter((message) => {
+          if (seenIds.has(message.id)) return false;
+          seenIds.add(message.id);
+          return true;
+        })
         .map((message) => ({
           id: message.id,
           role: message.role,
           content: [{ type: "text" as const, text: message.text }],
-        })),
+        }));
+    },
     [activeMessages],
   );
   const runtimeMessageSessionId = activeSession?.session_id ?? "";

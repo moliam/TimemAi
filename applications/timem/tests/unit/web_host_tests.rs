@@ -18185,3 +18185,63 @@ fn model_endpoint_native_tools_knowledge_requires_an_exact_catalog_route() {
         Some(true)
     );
 }
+
+#[test]
+fn restored_history_message_ids_stay_unique_for_same_millisecond_entries() {
+    let record = |kind: Option<&str>, content: &str| ChatHistoryRecord::Message {
+        role: ChatHistoryRole::User,
+        turn_id: "turn_1".to_string(),
+        created_at_ms: 1_791_125_099_126,
+        kind: kind.map(str::to_string),
+        command_id: None,
+        delivery_state: None,
+        content: content.to_string(),
+    };
+    let records = vec![
+        record(Some("task"), "first task"),
+        record(Some("supplement"), "supplement while working"),
+        // An identical duplicated record must collapse instead of producing a
+        // second message with the same id.
+        record(Some("task"), "first task"),
+    ];
+    let messages = restored_messages_from_history_records(&records);
+    assert_eq!(messages.len(), 2, "identical duplicates must collapse");
+    // Locked to the TypeScript mirror in interfaces/web/src/view_model.ts
+    // (historyMessageId + fnv1a32Hex); diverging either side strands restored
+    // ids across restarts. FNV-1a("first task") = fe687892,
+    // FNV-1a("supplement while working") = 8e15f2ec.
+    assert_eq!(
+        messages[0].id,
+        "history_msg_turn_1_1791125099126_user_task_fe687892"
+    );
+    assert_eq!(
+        messages[1].id,
+        "history_msg_turn_1_1791125099126_user_supplement_8e15f2ec"
+    );
+}
+
+#[test]
+fn interrupted_queued_message_id_follows_the_shared_history_formula() {
+    let item = timem_session::message_queue::MessageQueueItem {
+        command_id: "cmd_1".to_string(),
+        enqueue_seq: 0,
+        payload: WebNextTurnPayload {
+            send_after_cancel: false,
+            turn_id: "turn_q".to_string(),
+            created_at_ms: 1_791_125_099_999,
+            text: "queued text".to_string(),
+            attachments: Vec::new(),
+            worker_roles: Vec::new(),
+        },
+    };
+    let (message, turn) = interrupted_turn_from_queued_message(&item, 5000);
+    // FNV-1a("queued text") = eeb4203b; the live queued-interrupt path must
+    // derive the same identity scheme as restored history records, otherwise
+    // a restart turns one message into two (or drops it on id collision).
+    assert_eq!(
+        message.id,
+        "history_msg_turn_q_1791125099999_user_queued_interrupted_eeb4203b"
+    );
+    assert_eq!(turn.turn_id, "turn_q");
+    assert_eq!(turn.state, "interrupted");
+}

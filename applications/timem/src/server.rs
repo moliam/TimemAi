@@ -6034,9 +6034,12 @@ fn interrupted_turn_from_queued_message(
     let payload = &item.payload;
     (
         WebChatMessage {
-            id: format!(
-                "history_msg_{}_{}_user",
-                payload.turn_id, payload.created_at_ms
+            id: history_message_id(
+                &payload.turn_id,
+                payload.created_at_ms as i64,
+                "user",
+                Some(QUEUED_INTERRUPTED_HISTORY_KIND),
+                &payload.text,
             ),
             role: "user".to_string(),
             text: payload.text.clone(),
@@ -6448,10 +6451,14 @@ fn persist_restored_session_runtime_cache(
 }
 
 fn restored_messages_from_history_records(records: &[ChatHistoryRecord]) -> Vec<WebChatMessage> {
+    let mut seen_ids = BTreeSet::new();
     records
         .iter()
         .cloned()
         .filter_map(web_message_from_history_record)
+        // Identical duplicated records must collapse to one message: client
+        // message repositories treat duplicate ids as a fatal error.
+        .filter(|message| seen_ids.insert(message.id.clone()))
         .collect()
 }
 
@@ -6736,6 +6743,43 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
     restored
 }
 
+/// FNV-1a 32-bit digest over UTF-8 bytes, hex encoded. Mirrors the TypeScript
+/// implementation in interfaces/web/src/view_model.ts so both sides derive the
+/// same identity from the same history record.
+fn fnv1a32_hex(text: &str) -> String {
+    const FNV_OFFSET_BASIS: u32 = 0x811c_9dc5;
+    const FNV_PRIME: u32 = 0x0100_0193;
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in text.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:08x}")
+}
+
+/// Deterministic identity for a restored history chat message.
+///
+/// One Core Turn can record the initial task plus same-millisecond supplements
+/// (all role "user"); the legacy `history_msg_{turn}_{ms}_{role}` identity
+/// collided on those and the duplicate ids crashed client message repositories
+/// (whole-page blank). Including kind and a content digest keeps ids
+/// deterministic across restarts while separating every distinct entry.
+/// Identical duplicated records are deduplicated in
+/// `restored_messages_from_history_records`.
+fn history_message_id(
+    turn_id: &str,
+    created_at_ms: i64,
+    role: &str,
+    kind: Option<&str>,
+    content: &str,
+) -> String {
+    format!(
+        "history_msg_{turn_id}_{created_at_ms}_{role}_{}_{}",
+        kind.unwrap_or("none"),
+        fnv1a32_hex(content)
+    )
+}
+
 fn web_message_from_history_record(record: ChatHistoryRecord) -> Option<WebChatMessage> {
     match record {
         ChatHistoryRecord::Message {
@@ -6757,7 +6801,7 @@ fn web_message_from_history_record(record: ChatHistoryRecord) -> Option<WebChatM
                 ChatHistoryRole::System => return None,
             };
             Some(WebChatMessage {
-                id: format!("history_msg_{turn_id}_{created_at_ms}_{role}"),
+                id: history_message_id(&turn_id, created_at_ms, role, kind.as_deref(), &content),
                 role: role.to_string(),
                 text: content,
                 created_at_ms: created_at_ms as u128,

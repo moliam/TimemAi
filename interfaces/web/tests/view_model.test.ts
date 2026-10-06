@@ -40,6 +40,7 @@ import {
   hasOnlyFreeTalkActivity,
   manualToolGenCommand,
   MAX_CLIENT_TURNS,
+  messagesFromHistoryRecords,
   MAX_RENDERED_MESSAGES,
   normalizeCopiedUserMessageText,
   prependHistoryRecords,
@@ -2235,6 +2236,100 @@ describe("web topic view model", () => {
       kind: "runtime_restart",
       created_at_ms: 30,
     });
+  });
+
+
+  it("separates same-millisecond task and supplement history messages into unique ids", () => {
+    const records: ChatHistoryRecord[] = [
+      {
+        type: "message",
+        role: "user",
+        turn_id: "web_turn_1",
+        created_at_ms: 1791125099126,
+        kind: "task",
+        content: "first task",
+      },
+      {
+        type: "message",
+        role: "user",
+        turn_id: "web_turn_1",
+        created_at_ms: 1791125099126,
+        kind: "supplement",
+        content: "supplement while working",
+      },
+    ];
+
+    const restored = prependHistoryRecords(session("session_1"), records);
+    expect(restored.messages.map((message) => message.text)).toEqual([
+      "first task",
+      "supplement while working",
+    ]);
+    const ids = new Set(restored.messages.map((message) => message.id));
+    expect(ids.size).toBe(2);
+    // Duplicate ids crash assistant-ui message repositories with a fatal
+    // React error (whole-page blank); every loaded history page must keep
+    // every id unique even when (turn, millisecond, role) collide.
+    expect(
+      new Set(messagesFromHistoryRecords(records).map((message) => message.id))
+          .size,
+    ).toBe(2);
+  });
+
+  it("derives the same history message id formula as the Rust host", () => {
+    // Locked to the mirrored implementations in
+    // applications/timem/src/server.rs (history_message_id + fnv1a32_hex).
+    // FNV-1a("first task") = fe687892, FNV-1a("supplement while working")
+    // = 8e15f2ec; changing either side silently diverges restored ids.
+    const records: ChatHistoryRecord[] = [
+      {
+        type: "message",
+        role: "user",
+        turn_id: "turn_1",
+        created_at_ms: 1791125099126,
+        kind: "task",
+        content: "first task",
+      },
+      {
+        type: "message",
+        role: "assistant",
+        turn_id: "turn_1",
+        created_at_ms: 1791125099127,
+        content: "answer",
+      },
+    ];
+    expect(
+      messagesFromHistoryRecords(records).map((message) => message.id),
+    ).toEqual([
+      "history_msg_turn_1_1791125099126_user_task_fe687892",
+      "history_msg_turn_1_1791125099127_assistant_none_" +
+        (() => {
+          const FNV_OFFSET_BASIS = 0x811c9dc5;
+          const FNV_PRIME = 0x01000193;
+          let hash = FNV_OFFSET_BASIS;
+          for (const byte of new TextEncoder().encode("answer")) {
+            hash = Math.imul(hash ^ byte, FNV_PRIME) >>> 0;
+          }
+          return hash.toString(16).padStart(8, "0");
+        })(),
+    ]);
+  });
+
+  it("collapses identical duplicated history records into one message", () => {
+    const duplicate = {
+      type: "message",
+      role: "user",
+      turn_id: "turn_dup",
+      created_at_ms: 42,
+      kind: "task",
+      content: "same text",
+    } as const;
+    const records: ChatHistoryRecord[] = [duplicate, duplicate, duplicate];
+
+    const restored = prependHistoryRecords(session("session_1"), records);
+    expect(restored.messages).toHaveLength(1);
+    expect(
+      messagesFromHistoryRecords(records).map((message) => message.id),
+    ).toHaveLength(1);
   });
 
   it("shows only the latest restart marker when repeated restarts contain no work", () => {

@@ -1167,19 +1167,50 @@ function isChatMessageHistoryRecord(
   );
 }
 
-function messagesFromHistoryRecords(
+function fnv1a32Hex(text: string): string {
+  // Mirrors the Rust implementation (fn history_message_id in
+  // applications/timem/src/server.rs) so both sides derive the same identity
+  // from the same history record.
+  const FNV_OFFSET_BASIS = 0x811c9dc5;
+  const FNV_PRIME = 0x01000193;
+  let hash = FNV_OFFSET_BASIS;
+  for (const byte of new TextEncoder().encode(text)) {
+    hash = Math.imul(hash ^ byte, FNV_PRIME) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+function historyMessageId(record: ChatMessageHistoryRecord): string {
+  // One Core Turn can record the initial task plus same-millisecond
+  // supplements (all role "user"); the legacy
+  // `history_msg_{turn}_{ms}_{role}` identity collided on those and duplicate
+  // ids crashed the assistant-ui message repository (whole-page blank).
+  // Including kind and a content digest keeps ids deterministic across
+  // restarts while separating every distinct entry.
+  return `history_msg_${record.turn_id}_${record.created_at_ms}_${record.role}_${record.kind ?? "none"}_${fnv1a32Hex(record.content)}`;
+}
+
+export function messagesFromHistoryRecords(
   records: ChatHistoryRecord[],
 ): ChatMessage[] {
+  const seenIds = new Set<string>();
   return records
     .filter(isChatMessageHistoryRecord)
     .sort((left, right) => left.created_at_ms - right.created_at_ms)
     .map((record) => ({
-      id: `history_msg_${record.turn_id}_${record.created_at_ms}_${record.role}`,
+      id: historyMessageId(record),
       role: record.role,
       text: record.content,
       created_at_ms: record.created_at_ms,
       kind: record.kind,
-    }));
+    }))
+    // Identical duplicated records must collapse to one message: assistant-ui
+    // message repositories treat duplicate ids as a fatal error.
+    .filter((message) => {
+      if (seenIds.has(message.id)) return false;
+      seenIds.add(message.id);
+      return true;
+    });
 }
 
 export function appendActivityToCurrentTurn(
