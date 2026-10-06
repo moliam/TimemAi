@@ -19,6 +19,35 @@ pub enum FunctionCallingSupport {
     Unknown,
 }
 
+/// Provider-level capability declaration: the single admission table for
+/// provider gates. The web projection serializes it so the endpoint editor
+/// stays provider-agnostic (data-driven, no provider literals in UI logic).
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderSpec {
+    pub id: &'static str,
+    pub allowed_protocols: &'static [&'static str],
+    pub requires_catalog: bool,
+}
+
+/// Admission stays closed: a provider appears here only after its adapters
+/// and per-model catalog profiles are validated.
+pub const PROVIDERS: &[ProviderSpec] = &[
+    ProviderSpec {
+        id: "openai",
+        allowed_protocols: &["openai-responses", "openai-compatible"],
+        requires_catalog: false,
+    },
+    ProviderSpec {
+        id: "zhipu",
+        allowed_protocols: &["openai-responses", "openai-compatible"],
+        requires_catalog: true,
+    },
+];
+
+pub fn provider_spec(id: &str) -> Option<&'static ProviderSpec> {
+    PROVIDERS.iter().find(|spec| spec.id == id)
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CatalogProtocol {
     pub protocol: String,
@@ -212,7 +241,12 @@ pub fn parse(text: &str) -> Result<Vec<CatalogModel>, String> {
             }
 
             let reasoning_adapter = match bindings[0]["handler"].as_str() {
-                Some("enum_body_field") if entry["provider_id"] == "openai" => {
+                // Zhipu Responses uses the standard enum body field binding; its
+                // chat protocol keeps the dedicated zhipu_chat_reasoning adapter.
+                Some("enum_body_field")
+                    if entry["provider_id"] == "openai"
+                        || (entry["provider_id"] == "zhipu" && protocol == "openai-responses") =>
+                {
                     ReasoningAdapter::EnumBodyField
                 }
                 Some("zhipu_chat_reasoning")

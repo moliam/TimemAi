@@ -111,10 +111,15 @@ pub fn validate_config(config: &ModelServiceConfig) -> Result<(), String> {
     let settings = &config.openai_compatible.requirements;
     settings.validate()?;
     if let Some(p) = provider(config) {
-        if (p == "zhipu" && config.api_protocol != crate::ApiProtocol::OpenAiCompatible)
-            || (p == "openai" && config.api_protocol == crate::ApiProtocol::Anthropic)
-        {
-            return Err("provider_protocol_adapter_not_implemented".into());
+        // Provider-level admission is table-driven (model_catalog::PROVIDERS);
+        // per-model protocol admission stays closed by the catalog profiles.
+        if let Some(spec) = crate::model_catalog::provider_spec(p) {
+            if !spec
+                .allowed_protocols
+                .contains(&config.api_protocol.label())
+            {
+                return Err("provider_protocol_adapter_not_implemented".into());
+            }
         }
     }
     let selected = if config.openai_compatible.enable_thinking == Some(false) {
@@ -152,8 +157,11 @@ pub fn validate_config(config: &ModelServiceConfig) -> Result<(), String> {
             config.max_llm_input_tokens,
             config.max_llm_output_tokens,
         )?;
-    } else if provider(config) == Some("zhipu") {
-        // Zhipu has model-dependent disable semantics; require a descriptor.
+    } else if provider(config)
+        .and_then(crate::model_catalog::provider_spec)
+        .is_some_and(|spec| spec.requires_catalog)
+    {
+        // Model-dependent disable semantics require a catalog descriptor.
         return Err("model_capabilities_not_declared".into());
     }
     Ok(())
