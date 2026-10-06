@@ -10737,8 +10737,8 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
     activity.tool_mode,
   );
   const structuredInvocation = !!activity.run_bash_edit || !!activity.readfile || !!activity.memory_search || !!activity.self_tool;
-  const command =
-    activity.code?.trim() || (!structuredInvocation ? toolInvocationPreview(activity) : "") || "";
+  const code = activity.code?.trim();
+  const invocationPreview = !structuredInvocation ? toolInvocationPreview(activity) : undefined;
   const detail = activity.detail?.trim();
   const [liveElapsedMs, setLiveElapsedMs] = useState(() =>
     Math.max(0, Date.now() - activity.createdAt),
@@ -10766,7 +10766,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
     return subscribeStreamInteraction(update);
   }, []);
   const open = expanded || interactionHeld;
-  const hasExpandableDetail = !!command || !!detail;
+  const hasExpandableDetail = !!code || !!detail;
   const toggle = () => {
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed && rowRef.current?.contains(selection.anchorNode)) return;
@@ -10790,7 +10790,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
         )}
         <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
         {status === "background_running" && <span className="stream-tool-background">(bg)</span>}
-        {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : command && <span className="stream-tool-command-preview tool-invocation-preview" title={command}>{command.replace(/\s+/g, " ")}</span>}
+        {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && <span className="stream-tool-command-preview tool-invocation-preview" title={invocationPreview}>{invocationPreview.replace(/\s+/g, " ")}</span>}
         {(running
           ? liveElapsedMs
           : activity.elapsed_ms) !== undefined && (() => {
@@ -10806,7 +10806,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
       </div>
       <div className={`stream-tool-fold${open ? " expanded" : ""}`} inert={!open}>
         <div>
-          {command && !activity.readfile && <pre className="stream-tool-command">{command}</pre>}
+          {code && <pre className="stream-tool-command">{code}</pre>}
           {detail && <div className="stream-tool-detail">{detail}</div>}
         </div>
       </div>
@@ -11940,7 +11940,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
         </span>
       )}
       <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
-      {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : invocationPreview && (
+      {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && (
         <code className="tool-activity-command tool-invocation-preview" title={invocationPreview}>
           {invocationPreview}
         </code>

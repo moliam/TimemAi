@@ -85,7 +85,6 @@ describe("structured built-in tool presentation", () => {
   });
 });
 
-
 describe("structured run_bash edit presentation", () => {
   it.each([
     ["src/main.tsx", ["src/main.tsx"]],
@@ -156,7 +155,6 @@ describe("structured run_bash edit presentation", () => {
   });
 });
 
-
 describe("readable memory and self-tool summaries", () => {
   it("renders a memory search summary without implementation parameters", () => {
     const input = {
@@ -226,6 +224,26 @@ describe("readable memory and self-tool summaries", () => {
   });
 });
 
+describe("generic tool argument projection", () => {
+  it("projects memo arguments once as detail without synthesizing code", () => {
+    const text = "修复旧接入点并验证保存重读";
+    const activity = activityFromTopic({
+      session_id: "s",
+      topic: { name: "core.action" },
+      payload: {
+        action: "memo",
+        status: "completed",
+        input: { op: "create", text },
+      },
+    } as CoreTopicEvent)!;
+
+    expect(activity.tool_name).toBe("memo");
+    expect(activity.code).toBeUndefined();
+    expect(activity.detail).toContain('op="create"');
+    expect(activity.detail).toContain(`text="${text}"`);
+    expect(activity.detail?.match(/text=/g)).toHaveLength(1);
+  });
+});
 
 describe("memory search icon", () => {
   it.each([["raw_chat","search"],["scratch","search"],["durable","sql"],["raw_chat","sql"]])("recognizes %s/%s", (type,op) => {
