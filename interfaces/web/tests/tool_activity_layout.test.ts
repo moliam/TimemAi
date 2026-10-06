@@ -101,7 +101,6 @@ describe("stream tool status continuity", () => {
   });
 });
 
-
 describe("collapsed tool summary", () => {
   it("labels prior tools explicitly and aligns the disclosure with live rows", () => {
     // The visible "tools" word became a wrench glyph; the label stays
@@ -166,7 +165,6 @@ it("uses the structured run_bash edit summary in ordinary and stream rows", () =
   expect(styles).toContain('.stream-tool-head > .bash-edit-preview { flex: 1; }');
 });
 
-
 it("increases readable tool invocation summaries by half a pixel", () => {
   expect(styles).toContain('.tool-invocation-preview { font-size: 11px !important; line-height: 1.5; }');
   expect(styles).toContain('.bash-edit-preview { font-size: 11.5px !important; }');
@@ -187,8 +185,27 @@ it("uses structured memory and self-tool summaries in ordinary and stream rows",
     expect(section).toContain('<SelfToolInvocation operation={activity.self_tool} />');
     expect(section).toContain('<ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} />');
   }
-  expect(stream).toContain('!structuredInvocation ? toolInvocationPreview(activity) : ""');
+  expect(stream).toContain('const invocationPreview = !structuredInvocation ? toolInvocationPreview(activity) : undefined;');
   expect(ordinary).toContain('activity.tool_name === "sub_answer" || structuredInvocation ? undefined');
+});
+
+it("shows generic tool arguments as a collapsed preview or expanded detail, never both", () => {
+  const stream = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
+  const ordinary = source.slice(source.indexOf("function ToolActivity("), source.indexOf("function MemoIcon("));
+
+  expect(stream).toContain("const code = activity.code?.trim();");
+  expect(stream).toContain("const invocationPreview = !structuredInvocation ? toolInvocationPreview(activity) : undefined;");
+  expect(stream).toContain("const hasExpandableDetail = !!code || !!detail;");
+  expect(stream).toContain(": !open && invocationPreview && <span");
+  expect(stream).toContain('{code && <pre className="stream-tool-command">{code}</pre>}');
+  expect(stream).toContain('{detail && <div className="stream-tool-detail">{detail}</div>}');
+  expect(stream).not.toContain("const command =");
+  expect(stream).not.toContain("activity.code?.trim() || (!structuredInvocation");
+
+  expect(ordinary).toContain(": !open && invocationPreview && (");
+  expect(ordinary).toContain("{detail && (");
+  expect(ordinary).toContain("{code && (");
+  expect(ordinary).not.toContain(": invocationPreview && (");
 });
 
 it("uses terminal glyphs for Bash and reduces default Lucide stroke weight", () => {
@@ -204,7 +221,6 @@ it("renders an Infinity reasoning notice only from Core upgrade projections", ()
   expect(source).toContain('<InfinityIcon size={13} />');
   expect(source).toContain('t("context.reasoningUpgrade", { from: event.payload.from, to: event.payload.to })');
 });
-
 
 it("uses one typography contract for system-level notices", () => {
   const activityView = source.slice(source.indexOf("function ActivityView("), source.indexOf("function ToolGenNotice("));
@@ -234,7 +250,6 @@ it("uses one typography contract for system-level notices", () => {
   expect(styles).not.toContain('.memo-notice .memo-notice-line');
   expect(styles).not.toContain('.compact-notice .compact-notice-line');
 });
-
 
 it("narrows tool rendering from the right edge while preserving mobile width", () => {
   expect(styles).toContain("width: 90%;\n  max-width: 90%;\n  margin-right: auto;");
