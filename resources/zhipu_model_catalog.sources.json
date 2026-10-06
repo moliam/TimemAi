@@ -45,6 +45,12 @@
       "url": "https://docs.bigmodel.cn/cn/api/introduction.md",
       "sha256": "73ec14fd96160944020bb8538b51f60c1ec1596f7e42d36339f776a81a048d29",
       "excerpt": "```\nAuthorization: Bearer YOUR_API_KEY\n```\n\n<Tip>\n    -H \"Content-Type: application/json\" \\\n    -H \"Authorization: Bearer YOUR_API_KEY\" \\\n    -d '{\n        \"model\": \"glm-5.3\",\n        \"messages\": ["
+    },
+    "responses-api": {
+      "url": "https://docs.bigmodel.cn/cn/guide/develop/responses/introduction.md",
+      "sha256": "086f41abd81487d8323ce13dbd8ed7a28102c00da18364159645f02dfb190f77",
+      "excerpt": "Response API 的基址是 `https://open.bigmodel.cn/api/v1`，不是对话补全使用的 `https://open.bigmodel.cn/api/paas/v4`。请求超时为 7200 秒。\n\ncurl https://open.bigmodel.cn/api/v1/responses \\\n\"model\": \"glm-5.3\",\n\n`effort` 默认 `max`。传入 `none` / `minimal` 会放弃思考；`low` / `medium` 映射为 `high`；`xhigh` 映射为 `max`。\n\n| model | string | 必填 | 模型编码，例如 `glm-5.3` |\n| max\\_output\\_tokens | integer | 65536 | 最大输出 tokens（含思维链），上限 131072 |\n| reasoning.effort | string | max | 思考工作量 |",
+      "retrieved_at": "2026-10-03T15:25:13.772402+00:00"
     }
   }
 }

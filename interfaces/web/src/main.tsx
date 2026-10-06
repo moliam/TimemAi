@@ -1,6 +1,6 @@
 import { MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation } from "./tool_invocation";
 import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
-import { initialEndpointRequirements, applyEndpointTemplate, editEndpoint, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning } from "./model_endpoints";
+import { initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
 import type { CatalogModel } from "./model_endpoints";
 import { applyBetaDebugDefault } from "./beta_preferences";
 import { StreamUiModeSetting, useStreamUiMode, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
@@ -4833,6 +4833,7 @@ function TimemApp() {
               temporaryItemsDeleting={memTemporaryItemsDeleting}
               temporaryItemsError={memTemporaryItemsError}
               catalog={server?.model_catalog ?? []}
+              providers={server?.model_providers ?? []}
               endpoints={server?.model_endpoints ?? []}
               endpointEditor={endpointEditor}
               endpointImportCandidates={endpointImportCandidates}
@@ -13051,6 +13052,7 @@ type SettingsCenterProps = {
   temporaryItemsDeleting: boolean;
   temporaryItemsError: string;
   catalog: CatalogModel[];
+  providers: ProviderSpec[];
   endpoints: ModelEndpoint[];
   endpointEditor: ModelEndpoint | "new" | null;
   endpointImportCandidates: ModelEndpointImportCandidate[];
@@ -13117,6 +13119,7 @@ const SettingsCenter = memo(function SettingsCenter(
     temporaryItemsDeleting,
     temporaryItemsError,
     catalog,
+    providers,
     endpoints,
     endpointEditor,
     endpointImportCandidates,
@@ -13517,6 +13520,7 @@ const SettingsCenter = memo(function SettingsCenter(
                 key={`${connected}:${memPath}`}
                 shareTransport={endpointShareTransport}
                 catalog={catalog}
+                providers={providers}
                 endpoints={endpoints}
                 endpointEditor={endpointEditor}
                 importCandidates={endpointImportCandidates}
@@ -14235,6 +14239,7 @@ const SettingsCenter = memo(function SettingsCenter(
 function EndpointSettingsPane({
   shareTransport,
   catalog,
+  providers,
   endpoints,
   endpointEditor,
   importCandidates,
@@ -14253,6 +14258,7 @@ function EndpointSettingsPane({
 }: {
   shareTransport: ShareTransport;
   catalog: CatalogModel[];
+  providers: ProviderSpec[];
   endpoints: ModelEndpoint[];
   endpointEditor: ModelEndpoint | "new" | null;
   importCandidates: ModelEndpointImportCandidate[];
@@ -14316,6 +14322,7 @@ function EndpointSettingsPane({
       >
         <ModelEndpointEditor
           catalog={catalog}
+          providers={providers}
           endpoint={endpointEditor === "new" ? undefined : endpointEditor}
           revealedApiKey={
             endpointEditor === "new"
@@ -14939,6 +14946,7 @@ function ModelEndpointPanel({
 
 function ModelEndpointEditor({
   catalog,
+  providers,
   endpoint,
   revealedApiKey,
   revealedHeaders,
@@ -14948,6 +14956,7 @@ function ModelEndpointEditor({
   onSave,
 }: {
   catalog: CatalogModel[];
+  providers: ProviderSpec[];
   endpoint?: ModelEndpoint;
   revealedApiKey?: string;
   revealedHeaders?: Record<string, string>;
@@ -15028,7 +15037,7 @@ function ModelEndpointEditor({
     setShowRequestFields(!endpoint);
   }, [endpoint?.id]);
   const selectedTemplate = catalog.find((model) => model.id === draft.catalog_id);
-  const selectedModel = catalog.find((model) => model.provider === draft.requirements?.provider && model.model === draft.model);
+  const selectedModel = capabilityModelForDraft(draft, catalog);
   const selectedProtocol = selectedModel?.protocols.find((p) => p.protocol === draft.api_protocol);
   const selectModel = (id: string) => setDraft(current => applyEndpointTemplate(current, catalog.find(m => m.id === id)));
   const edit = (patch: Partial<ModelEndpointDraft>) => setDraft(current => editEndpoint(current, patch));
@@ -15059,7 +15068,8 @@ function ModelEndpointEditor({
     }
     return updated;
   });
-  const capabilityIssue = endpointCapabilityIssue(draft, selectedModel);
+  const providerLabels: Record<string, string> = { openai: "OpenAI", zhipu: t("endpoints.zhipu") };
+  const capabilityIssue = endpointCapabilityIssue(draft, selectedModel, providers);
   const catalogInvalid = capabilityIssue !== null;
   const dailyReasoningOptions = allowed != null
     ? displayedAllowed
@@ -15118,7 +15128,7 @@ function ModelEndpointEditor({
         <span>{t("endpoints.useTemplate")}</span>
         <select aria-label={t("endpoints.useTemplate")} value={draft.catalog_id ?? ""} onChange={(e) => selectModel(e.target.value)}>
           <option value="">{t("endpoints.noTemplate")}</option>
-          {catalog.map((m) => <option key={m.id} value={m.id}>{m.provider === "openai" ? "OpenAI" : m.provider === "zhipu" ? t("endpoints.zhipu") : m.provider}: {m.label}</option>)}
+          {catalog.map((m) => <option key={m.id} value={m.id}>{providerLabels[m.provider] ?? m.provider}: {m.label}</option>)}
         </select>
       </label>
       <div className="endpoint-editor-grid">
@@ -15201,7 +15211,7 @@ function ModelEndpointEditor({
         <label>{t("endpoints.provider")}
           <select value={draft.requirements?.provider ?? ""} onChange={e => editRequirements({ provider: e.target.value || null })}>
             <option value="">{t("endpoints.genericProvider")}</option>
-            <option value="openai">OpenAI</option><option value="zhipu">{t("endpoints.zhipu")}</option>
+            {providers.map((spec) => <option key={spec.id} value={spec.id}>{providerLabels[spec.id] ?? spec.id}</option>)}
           </select>
         </label>
         <h4 className="wide endpoint-section-title">{t("endpoints.parametersSection")}</h4>
@@ -15215,7 +15225,7 @@ function ModelEndpointEditor({
                 setDraft(current => changeEndpointProtocol(current, api_protocol, selectedTemplate));
               }}
             >
-              {endpointProtocolOptions(draft, selectedModel).map(({ protocol, disabled }) => (
+              {endpointProtocolOptions(draft, selectedModel, providers).map(({ protocol, disabled }) => (
                 <option key={protocol} value={protocol} disabled={disabled}>
                   {({ "openai-compatible": "Chat Completions", "openai-responses": "Responses", anthropic: "Anthropic Messages" } as Record<string, string>)[protocol] ?? protocol}{disabled ? ` (${t("endpoints.protocolUnavailable")})` : ""}
                 </option>

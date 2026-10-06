@@ -487,6 +487,7 @@ export type Snapshot = {
     workspace_dirs: string[];
     mcp_servers: McpServerReport[];
     model_catalog?: import("./model_endpoints").CatalogModel[];
+    model_providers?: import("./model_endpoints").ProviderSpec[];
     model_endpoints: ModelEndpoint[];
   };
   sessions: Session[];

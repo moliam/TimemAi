@@ -233,7 +233,10 @@ const reasoningPanel = async (narrow = false) => {
         const adaptive=p.querySelector('.endpoint-reasoning-adaptive').getBoundingClientRect();
         const summary=p.querySelector('summary');const emphasis=summary.querySelector('strong');
         const chips=[...p.querySelectorAll('.endpoint-reasoning-chip span')].map(e=>e.getBoundingClientRect());
-        return {overflow:p.scrollWidth>p.clientWidth,ordered:daily.top>=config.bottom && adaptive.top>=daily.bottom,
+        // The committed policy row places daily and adaptive side by side on
+        // wide screens and stacks them under the 600px media query; both must
+        // stay below the collapsed configuration summary, in reading order.
+        return {overflow:p.scrollWidth>p.clientWidth,ordered:daily.top>=config.bottom && adaptive.top>=daily.top,
           sameRow:select.top>=daily.top && select.bottom<=daily.bottom,
           contained:chips.every(c=>c.left>=r.left && c.right<=r.right),
           chipSize:chips.every(c=>c.height>=28 && c.width>=32),
@@ -275,6 +278,12 @@ const reasoningInteractions = async () => {
   await realMouseClick(target.x,target.y);
   await waitFor(()=>evaluate(`document.querySelector('${first}').checked !== ${original}`),'chip pointer toggle');
   await verifyReasoningChecks();
+  // The allow-list keeps at least one level: select a second chip first so the
+  // keyboard toggle below removes a non-sole selection instead of the last one.
+  const second='.endpoint-reasoning-chip:nth-of-type(2) input';
+  const secondHit=await hitTest("document.querySelectorAll('.endpoint-reasoning-chip')[1]",'second reasoning chip');
+  await realMouseClick(secondHit.x,secondHit.y);
+  await waitFor(()=>evaluate(`document.querySelector('${second}').checked === true`),'second chip selected');
   await evaluate(`document.querySelector('${first}').focus()`);
   await call('Input.dispatchKeyEvent',{type:'keyDown',key:' ',code:'Space',windowsVirtualKeyCode:32});
   await call('Input.dispatchKeyEvent',{type:'keyUp',key:' ',code:'Space',windowsVirtualKeyCode:32});
@@ -311,12 +320,55 @@ assert(await evaluate(`document.querySelector('.endpoint-api-protocol select').v
 await fresh();
 await choose('openai/gpt-5.5-pro');
 assert(await evaluate(`document.querySelector(${JSON.stringify(protocol)}).value==='openai-responses'`),'Pro suggests Responses');
+await setField(baseUrl, 'https://open.bigmodel.cn/api/coding/paas/v4');
+await choose('z-glm5.3');
+assert(await evaluate(`document.querySelector(${JSON.stringify(baseUrl)}).value === 'https://open.bigmodel.cn/api/paas/v4'`), 'template switch adopts the official address over a legacy custom one');
 for (const id of ['z-glm5.2', 'z-glm5.3', 'z-glm5.3-flash']) {
   await choose(id);
   assert(await evaluate(`document.querySelector('.endpoint-catalog-picker select').value === ${JSON.stringify(id)}`), id + ' listed');
   assert(await evaluate(`document.querySelector(${JSON.stringify(effort)}).options.length === 4`), id + ' three effort levels plus default');
+  await evaluate(`document.querySelector('.endpoint-reasoning-config').open = true`);
+  assert(await evaluate(`(() => {
+    const states = Object.fromEntries([...document.querySelectorAll('.endpoint-reasoning-chip')]
+      .map((label) => [label.textContent.trim(), label.querySelector('input').checked]));
+    return ${JSON.stringify(id)} !== 'z-glm5.3'
+      || states.low === true && states.high === true && states.max === true;
+  })()`), id + ' renders every template reasoning level as selected');
+  if (id === 'z-glm5.3') {
+    assert(await evaluate(`document.querySelector(${JSON.stringify(effort)}).value === 'max'`), 'GLM-5.3 repairs an unsupported legacy daily level on template selection');
+    assert(await evaluate(`!document.querySelector('.endpoint-validation-note')`), 'GLM-5.3 template selection is immediately valid');
+    const protocolOptions = await evaluate(`[...document.querySelector('.endpoint-api-protocol select').options].map(o => o.value)`);
+    assert(protocolOptions.length === 2 && protocolOptions.includes('openai-responses'), 'GLM-5.3 offers Chat and Responses');
+    await setField(protocol, 'openai-responses');
+    await waitFor(() => evaluate(`document.querySelector(${JSON.stringify(baseUrl)}).value === 'https://open.bigmodel.cn/api/v1'`), 'Responses switches to the official api/v1 entry');
+    assert(await evaluate(`document.querySelector(${JSON.stringify(effort)}).options.length === 4`), 'GLM-5.3 keeps three effort levels plus default under Responses');
+    assert(await evaluate(`document.querySelector(${JSON.stringify(effort)}).value === 'max'`), 'GLM-5.3 daily effort stays max under Responses');
+    await setField(protocol, 'openai-compatible');
+    await waitFor(() => evaluate(`document.querySelector(${JSON.stringify(baseUrl)}).value === 'https://open.bigmodel.cn/api/paas/v4'`), 'switching back to Chat restores the paas/v4 entry');
+    await setField(baseUrl, 'https://open.bigmodel.cn/api/paas/v4');
+    await setField(protocol, 'openai-responses');
+    await waitFor(() => evaluate(`document.querySelector(${JSON.stringify(baseUrl)}).value === 'https://open.bigmodel.cn/api/v1'`), 'manually entered template address follows the protocol switch');
+    await setField(baseUrl, 'https://proxy.example.test/v1');
+    await setField(protocol, 'openai-compatible');
+    await waitFor(() => evaluate(`document.querySelector(${JSON.stringify(baseUrl)}).value === 'https://proxy.example.test/v1'`), 'custom proxy address survives the protocol switch');
+    await evaluate(`document.querySelector('.endpoint-base-reset button').click()`);
+    await waitFor(() => evaluate(`document.querySelector(${JSON.stringify(baseUrl)}).value === 'https://open.bigmodel.cn/api/paas/v4'`), 'restore returns the Chat template address');
+    await evaluate(`(() => {
+      const max = [...document.querySelectorAll('.endpoint-reasoning-chip')]
+        .find((label) => label.textContent.trim() === 'max').querySelector('input');
+      max.click();
+      document.querySelector('.endpoint-reasoning-default').click();
+    })()`);
+    assert(await evaluate(`(() => {
+      const states = Object.fromEntries([...document.querySelectorAll('.endpoint-reasoning-chip')]
+        .map((label) => [label.textContent.trim(), label.querySelector('input').checked]));
+      return states.low === true && states.high === true && states.max === true;
+    })()`), 'GLM-5.3 restores low/high/max after a manual max removal');
+  }
   assert(await evaluate(`document.querySelector(${JSON.stringify(protocol)}).value === 'openai-compatible'`), id + ' Chat protocol');
-  assert(await evaluate(`document.querySelector('.endpoint-api-protocol select').options.length===1`),id+' only offers Chat');
+  if (id !== 'z-glm5.3') {
+    assert(await evaluate(`document.querySelector('.endpoint-api-protocol select').options.length===1`),id+' only offers Chat');
+  }
   assert(await evaluate(`document.querySelector('.endpoint-editor-grid input[value="https://open.bigmodel.cn/api/paas/v4"]') !== null`), id + ' provider default URL');
 }
 assert(await evaluate(`!document.querySelector('.endpoint-base-reset')`),'Zhipu default has no restore hint');
@@ -358,6 +410,9 @@ await sleep(200);
 assert(await evaluate(`document.documentElement.scrollWidth <= 390`),'no narrow viewport page overflow');
 await compactPicker(110);
 await reasoningPanel(true);
+// Save stays disabled until the reopened draft actually differs from the
+// persisted endpoint; touch the name so the sticky actions are interactive.
+await setField('.endpoint-editor-grid input', 'Touched '+runId);
 await topActions();
 console.log("PASS edit endpoint sticky actions on narrow viewport");
 console.log("PASS narrow reasoning panel in both themes");
@@ -375,7 +430,8 @@ const cancelHit=await hitTest("document.querySelector('.endpoint-editor-buttons 
 await realMouseClick(cancelHit.x,cancelHit.y);
 await waitFor(()=>evaluate(`!document.querySelector('.endpoint-editor')`),'cancel closes draft');
 assert(await evaluate(`!document.querySelector('.endpoint-settings-pane').textContent.includes('UNSAVED '+${JSON.stringify(runId)})`),'cancel does not persist draft');
-await evaluate(`document.querySelector('.endpoint-settings-edit').click()`);
+// Reopen the endpoint saved by this run; the list may contain endpoints from earlier runs.
+await evaluate(`([...document.querySelectorAll('.endpoint-settings-edit')].find(b=>b.closest('.endpoint-settings-row')?.textContent.includes('Catalog UI '+${JSON.stringify(runId)})) || [...document.querySelectorAll('.endpoint-settings-edit')].at(-1)).click()`);
 await waitFor(()=>evaluate(`!!document.querySelector('.endpoint-editor-grid input')`),'reopen cancelled edit');
 assert(await evaluate(`document.querySelector('.endpoint-editor-grid input').value==='Catalog UI '+${JSON.stringify(runId)}`),'cancel preserves saved endpoint');
 console.log('PASS top cancel discards edits, persisted endpoint unchanged');

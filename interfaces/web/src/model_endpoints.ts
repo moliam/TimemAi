@@ -66,6 +66,7 @@ export const REASONING_EFFORT_OPTIONS = [
   "medium",
   "high",
   "xhigh",
+  "max",
 ] as const;
 
 /// Sentinel value: turn thinking off. Core translates it per API protocol
@@ -298,9 +299,16 @@ export type EndpointCapabilityIssue =
   | { code: "output_budget" }
   | { code: "context_budget" };
 
+export type ProviderSpec = {
+  id: string;
+  allowed_protocols: string[];
+  requires_catalog: boolean;
+};
+
 export function endpointCapabilityIssue(
   draft: ModelEndpointDraft,
   model: CatalogModel | undefined,
+  providers: ProviderSpec[] = [],
 ): EndpointCapabilityIssue | null {
   const allowed = draft.requirements?.allowed_reasoning;
   const daily = draft.reasoning_effort === REASONING_EFFORT_DISABLED
@@ -308,10 +316,11 @@ export function endpointCapabilityIssue(
     : draft.reasoning_effort ?? model?.default_effort;
   if (allowed != null && (!allowed.length || (daily != null && !allowed.includes(daily))))
     return { code: "daily_not_allowed" };
-  const provider = draft.requirements?.provider;
-  if (provider === "zhipu" && !model) return { code: "model_capabilities_missing" };
-  if ((provider === "zhipu" && draft.api_protocol !== "openai-compatible")
-    || (provider === "openai" && draft.api_protocol === "anthropic"))
+  const spec = providers.find((candidate) => candidate.id === draft.requirements?.provider);
+  // Provider admission is table-driven from the catalog projection; per-model
+  // protocol admission is decided by the catalog profiles below.
+  if (spec?.requires_catalog && !model) return { code: "model_capabilities_missing" };
+  if (spec && !spec.allowed_protocols.includes(draft.api_protocol))
     return { code: "provider_protocol_unsupported" };
   if (!model) return null;
   const protocol = model.protocols.find((item) => item.protocol === draft.api_protocol);
@@ -447,7 +456,23 @@ export function endpointSaveErrorMessage(error: string | undefined): string {
 const suggestionFields = ["name", "model", "provider", "api_protocol", "base_url", "stream", "function_calling", "reasoning_effort", "allowed_reasoning", "adaptive_reasoning", "max_llm_input_tokens", "max_llm_output_tokens"];
 export function initialEndpointRequirements(endpoint?: ModelEndpoint, catalog: readonly CatalogModel[] = []): EndpointRequirements {
   if (endpoint?.requirements?.version === 1) return structuredClone(endpoint.requirements);
-  return { version: 1, provider: endpoint?.requirements?.provider ?? catalog.find(m => m.id === endpoint?.catalog_id)?.provider, field_sources: endpoint ? Object.fromEntries(suggestionFields.map(k => [k, "user" as const])) : {} };
+  const legacyRequirements = endpoint?.requirements;
+  const directFields = suggestionFields.filter((field) =>
+    !["provider", "allowed_reasoning", "adaptive_reasoning"].includes(field),
+  );
+  const fieldSources = endpoint
+    ? Object.fromEntries(directFields.map((field) => [field, "user" as const]))
+    : {};
+  for (const field of ["provider", "allowed_reasoning", "adaptive_reasoning"] as const) {
+    if (legacyRequirements?.[field] != null) fieldSources[field] = "user";
+  }
+  return {
+    version: 1,
+    provider: legacyRequirements?.provider ?? catalog.find((model) => model.id === endpoint?.catalog_id)?.provider,
+    allowed_reasoning: legacyRequirements?.allowed_reasoning,
+    adaptive_reasoning: legacyRequirements?.adaptive_reasoning,
+    field_sources: fieldSources,
+  };
 }
 
 export function editEndpoint(draft: ModelEndpointDraft, patch: Partial<ModelEndpointDraft>): ModelEndpointDraft {
@@ -483,20 +508,37 @@ export function restoreEndpointTemplateUrl(draft: ModelEndpointDraft, model?: Ca
     field_sources: { ...requirements.field_sources, base_url: "template" } } };
 }
 
+export function capabilityModelForDraft(
+  draft: ModelEndpointDraft,
+  catalog: readonly CatalogModel[],
+): CatalogModel | undefined {
+  const selectedTemplate = catalog.find((model) => model.id === draft.catalog_id);
+  if (selectedTemplate?.model === draft.model) return selectedTemplate;
+  return catalog.find((model) =>
+    model.provider === draft.requirements?.provider && model.model === draft.model,
+  );
+}
+
 export function restoreEndpointTemplateReasoning(
   draft: ModelEndpointDraft,
   model?: CatalogModel,
 ): ModelEndpointDraft {
   if (!model || draft.catalog_id !== model.id) return draft;
   const requirements = draft.requirements ?? initialEndpointRequirements();
+  const currentDaily = draft.reasoning_effort === REASONING_EFFORT_DISABLED
+    ? "none"
+    : draft.reasoning_effort;
+  const repairsDaily = currentDaily != null && !model.efforts.includes(currentDaily);
   return {
     ...draft,
+    ...(repairsDaily ? { reasoning_effort: model.default_effort } : {}),
     requirements: {
       ...requirements,
       allowed_reasoning: [...model.efforts],
       field_sources: {
         ...requirements.field_sources,
         allowed_reasoning: "template",
+        ...(repairsDaily ? { reasoning_effort: "template" as const } : {}),
       },
     },
   };
@@ -525,8 +567,16 @@ export function changeEndpointProtocol(draft: ModelEndpointDraft, api_protocol: 
       },
     };
   }
-  return draft.requirements?.field_sources.base_url === "template" && draft.catalog_id === model?.id
-    ? restoreEndpointTemplateUrl(next, model) : next;
+  // Value-based, like canRestoreEndpointTemplateUrl: when the current address
+  // equals any template entry of this model, switching protocols follows the
+  // template; a custom proxy address stays untouched.
+  const templateAddresses = model == null
+    ? []
+    : model.protocols.map((profile) => profile.base_url ?? model.base_url);
+  const followsTemplateAddress = model != null
+    && draft.catalog_id === model.id
+    && templateAddresses.includes(draft.base_url.trim());
+  return followsTemplateAddress ? restoreEndpointTemplateUrl(next, model) : next;
 }
 
 export function applyEndpointTemplate(draft: ModelEndpointDraft, model?: CatalogModel): ModelEndpointDraft {
@@ -534,6 +584,12 @@ export function applyEndpointTemplate(draft: ModelEndpointDraft, model?: Catalog
   const protocol = model.protocols.find(p => !p.disabled_reason);
   if (!protocol) return draft;
   const requirements = structuredClone(draft.requirements ?? initialEndpointRequirements());
+  // Selecting a different template is an explicit intent to adopt it: the
+  // address follows the template (migrated legacy values included), while
+  // user-tuned knobs like the protocol choice or function calling keep
+  // their overrides below.
+  if (draft.catalog_id !== model.id && requirements.field_sources.base_url === "user" && templateBaseUrl(model, requirements.field_sources.api_protocol === "user" ? draft.api_protocol : protocol.protocol) !== undefined)
+    requirements.field_sources.base_url = "template";
   const next = { ...draft, catalog_id: model.id, requirements };
   const effectiveProtocol = requirements.field_sources.api_protocol === "user" ? draft.api_protocol : protocol.protocol;
   const base_url = templateBaseUrl(model, effectiveProtocol);
@@ -558,15 +614,23 @@ export function applyEndpointTemplate(draft: ModelEndpointDraft, model?: Catalog
       Object.assign(requirements, { [key]: value }); requirements.field_sources[key] = "template";
     }
   }
+  const currentDaily = next.reasoning_effort === REASONING_EFFORT_DISABLED
+    ? "none"
+    : next.reasoning_effort;
+  const templateDaily = protocol.fixed_effort ?? model.default_effort;
+  if (currentDaily != null && !model.efforts.includes(currentDaily)) {
+    next.reasoning_effort = templateDaily;
+    requirements.field_sources.reasoning_effort = "template";
+  }
   return next;
 }
 
 const endpointProtocols = ["openai-compatible", "openai-responses", "anthropic"];
-export function endpointProtocolOptions(draft: ModelEndpointDraft, model?: CatalogModel): { protocol: string; disabled: boolean }[] {
+export function endpointProtocolOptions(draft: ModelEndpointDraft, model?: CatalogModel, providers: ProviderSpec[] = []): { protocol: string; disabled: boolean }[] {
+  const spec = providers.find((candidate) => candidate.id === draft.requirements?.provider);
   const supported = model
     ? model.protocols.filter(p => !p.disabled_reason).map(p => p.protocol)
-    : endpointProtocols.filter(p => draft.requirements?.provider === "zhipu" ? p === "openai-compatible"
-      : draft.requirements?.provider === "openai" ? p !== "anthropic" : true);
+    : endpointProtocols.filter(p => !spec || spec.allowed_protocols.includes(p));
   const options = supported.map(protocol => ({ protocol, disabled: false }));
   // Preserve an invalid persisted/manual value visibly; never silently repair it.
   if (!supported.includes(draft.api_protocol)) options.push({ protocol: draft.api_protocol, disabled: true });

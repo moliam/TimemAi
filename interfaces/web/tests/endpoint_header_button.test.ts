@@ -119,7 +119,7 @@ it("groups reasoning controls with accessible chips and a compact policy row", (
 });
 
 it("renders localized capability and save feedback instead of internal reason strings", () => {
-  expect(source).toContain("endpointCapabilityIssue(draft, selectedModel)");
+  expect(source).toContain("endpointCapabilityIssue(draft, selectedModel, providers)");
   expect(source).toContain("endpointCapabilityIssueMessage(capabilityIssue)");
   expect(source).toContain("endpointSaveErrorMessage(event.error)");
   expect(source).not.toContain("selectedProtocol?.disabled_reason ?? selectedProtocol?.fixed_reason");
@@ -189,7 +189,7 @@ it("keeps normal and adaptive reasoning controls together on one compact row", (
 
 
 it("prefixes template display names with the provider without changing option identities", () => {
-  expect(source).toContain('<option key={m.id} value={m.id}>{m.provider === "openai" ? "OpenAI" : m.provider === "zhipu" ? t("endpoints.zhipu") : m.provider}: {m.label}</option>');
+  expect(source).toContain('<option key={m.id} value={m.id}>{providerLabels[m.provider] ?? m.provider}: {m.label}</option>');
 });
 
 

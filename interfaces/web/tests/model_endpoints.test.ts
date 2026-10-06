@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointLabelForProfile, endpointDraftValid, endpointMatchesProfile, endpointNameForProfile, endpointSaveErrorMessage, formatContextWindowTokens, isValidMaxLlmInputTokens, MODEL_CONTEXT_WINDOW_OPTIONS, toggleAllowedReasoning } from "../src/model_endpoints";
+import { capabilityModelForDraft, effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointLabelForProfile, endpointDraftValid, endpointMatchesProfile, endpointNameForProfile, endpointSaveErrorMessage, formatContextWindowTokens, isValidMaxLlmInputTokens, MODEL_CONTEXT_WINDOW_OPTIONS, REASONING_EFFORT_OPTIONS, toggleAllowedReasoning } from "../src/model_endpoints";
 import { setLocale } from "../src/i18n";
 
 const endpoint = { id: "one", name: "Production", model: "gpt-4.1", api_protocol: "openai-compatible", response_protocol: "xml", base_url: "https://api.example/v1", max_llm_input_tokens: 100_000, max_llm_output_tokens: 10_000, stream: false, function_calling: true, api_key_configured: true };
@@ -92,9 +92,13 @@ it("does not silently fall back when the bound endpoint is deleted", () => {
   expect(endpointMatchesProfile(endpoint, profile)).toBe(false);
 });
 
-import { endpointProtocolOptions, canRestoreEndpointTemplateUrl, changeEndpointProtocol, restoreEndpointTemplateReasoning, restoreEndpointTemplateUrl, templateBaseUrl, applyEndpointTemplate, editEndpoint, editEndpointRequirements, functionCallingDefault, initialEndpointRequirements, type CatalogModel, type ModelEndpointDraft } from "../src/model_endpoints";
+import { endpointProtocolOptions, canRestoreEndpointTemplateUrl, changeEndpointProtocol, restoreEndpointTemplateReasoning, restoreEndpointTemplateUrl, templateBaseUrl, applyEndpointTemplate, editEndpoint, editEndpointRequirements, functionCallingDefault, initialEndpointRequirements, type CatalogModel, type ModelEndpointDraft, type ProviderSpec } from "../src/model_endpoints";
 const template: CatalogModel = { id:"fixture/model", revision:1, provider:"openai", model:"fixture-model", label:"Fixture", base_url:"https://example.test/v1", efforts:["none","low","high","max"], default_effort:"low", middle_default:false, min_input:3000, max_input:200000, min_output:512, max_output:30000, context_window:230000, protocols:[{protocol:"openai-responses",disabled_reason:null,function_calling:"supported",fixed_effort:null,fixed_reason:null}] };
 const blank = (): ModelEndpointDraft => ({ ...endpoint, http_headers:{}, request_fields:{}, allow_cross_origin_redirects:false, requirements:initialEndpointRequirements() });
+const providerSpecs: ProviderSpec[] = [
+  { id: "openai", allowed_protocols: ["openai-responses", "openai-compatible"], requires_catalog: false },
+  { id: "zhipu", allowed_protocols: ["openai-responses", "openai-compatible"], requires_catalog: true },
+];
 describe("function calling defaults and ownership", () => {
   const modelWith = (support: "supported" | "conditional" | "unsupported" | "unknown"): CatalogModel => ({
     ...template,
@@ -191,7 +195,7 @@ describe("editable endpoint templates", () => {
     expect(preserved.max_llm_output_tokens).toBe(5_000);
   });
 
-  it("suggests fields, preserves user overrides across template switches and removal", () => {
+  it("suggests fields, preserves user overrides while a template switch adopts the address", () => {
     let draft = applyEndpointTemplate(blank(), template);
     expect(draft.model).toBe(template.model);
     expect(draft.requirements?.field_sources.model).toBe("template");
@@ -199,25 +203,152 @@ describe("editable endpoint templates", () => {
     draft = editEndpointRequirements(draft, {allowed_reasoning:["low"],adaptive_reasoning:false});
     draft = applyEndpointTemplate(draft, {...template,id:"other",model:"other-model",default_effort:"high"});
     expect(draft.model).toBe("manual-model");
-    expect(draft.base_url).toBe("https://proxy.test/v1");
+    // Selecting a different template adopts its address; the proxy must be
+    // re-entered afterwards if it should survive future switches.
+    expect(draft.base_url).toBe(template.base_url);
+    expect(draft.requirements?.field_sources.base_url).toBe("template");
     expect(draft.max_llm_output_tokens).toBe(25000);
     expect(draft.requirements?.allowed_reasoning).toEqual(["low"]);
     expect(draft.requirements?.adaptive_reasoning).toBe(false);
     expect(draft.reasoning_effort).toBe("high"); // invalid combination stays visible, not silently repaired
     expect(applyEndpointTemplate(draft)).toEqual({...draft,catalog_id:null});
   });
-  it("migrates legacy values as user-owned and resolves only explicit legacy template identity", () => {
+  it("migrates legacy values as user-owned without treating absent capability fields as overrides", () => {
     const legacy = {...blank(),id:"old",api_key_configured:false,private_ca_configured:false,catalog_id:template.id};
     delete legacy.requirements;
     const requirements = initialEndpointRequirements(legacy,[template]);
     expect(requirements.provider).toBe("openai");
     expect(requirements.field_sources.model).toBe("user");
+    expect(requirements.field_sources.provider).toBeUndefined();
+    expect(requirements.field_sources.allowed_reasoning).toBeUndefined();
+    expect(requirements.field_sources.adaptive_reasoning).toBeUndefined();
     expect(initialEndpointRequirements({...legacy,catalog_id:"unknown"},[template]).provider).toBeUndefined();
     const migrated = {...legacy, requirements};
-    expect(applyEndpointTemplate(migrated,template).model).toBe(legacy.model);
+    const reapplied = applyEndpointTemplate(migrated,template);
+    expect(reapplied.model).toBe(legacy.model);
+    expect(reapplied.requirements?.provider).toBe(template.provider);
+    expect(reapplied.requirements?.allowed_reasoning).toEqual(template.efforts);
+    expect(reapplied.requirements?.adaptive_reasoning).toBe(true);
     const copy = initialEndpointRequirements({...legacy,requirements});
     copy.field_sources.model = "template";
     expect(requirements.field_sources.model).toBe("user");
+  });
+
+  it("repairs an unsupported legacy daily level as soon as a template is selected", () => {
+    const glm53 = {
+      ...template,
+      id: "z-glm5.3",
+      provider: "zhipu",
+      model: "glm-5.3",
+      efforts: ["low", "high", "max"],
+      default_effort: "max",
+      protocols: [{ ...template.protocols[0], protocol: "openai-compatible" }],
+    };
+    const legacy = {
+      ...blank(),
+      model: "glm-5.3",
+      reasoning_effort: "medium",
+      requirements: {
+        version: 1,
+        field_sources: { model: "user" as const, reasoning_effort: "user" as const },
+      },
+    };
+    const applied = applyEndpointTemplate(legacy, glm53);
+    expect(applied.reasoning_effort).toBe("max");
+    expect(applied.requirements?.allowed_reasoning).toEqual(["low", "high", "max"]);
+    expect(applied.requirements?.field_sources.reasoning_effort).toBe("template");
+    expect(endpointCapabilityIssue(applied, glm53)).toBeNull();
+  });
+
+  it("preserves a supported user daily level when selecting a template", () => {
+    const glm53 = {
+      ...template,
+      id: "z-glm5.3",
+      provider: "zhipu",
+      model: "glm-5.3",
+      efforts: ["low", "high", "max"],
+      default_effort: "max",
+      protocols: [{ ...template.protocols[0], protocol: "openai-compatible" }],
+    };
+    const manual = editEndpoint(blank(), { model: "glm-5.3", reasoning_effort: "high" });
+    const applied = applyEndpointTemplate(manual, glm53);
+    expect(applied.reasoning_effort).toBe("high");
+    expect(applied.requirements?.field_sources.reasoning_effort).toBe("user");
+  });
+
+  it("uses the explicitly selected template capability while a legacy endpoint is being migrated", () => {
+    const legacyDraft = {
+      ...blank(),
+      catalog_id: template.id,
+      model: template.model,
+      requirements: { version: 1, field_sources: { model: "user" as const } },
+    };
+    expect(capabilityModelForDraft(legacyDraft, [template])).toBe(template);
+    expect(capabilityModelForDraft({
+      ...legacyDraft,
+      requirements: { ...legacyDraft.requirements, provider: "other" },
+    }, [template])).toBe(template);
+    expect(capabilityModelForDraft({ ...legacyDraft, model: "manual-model" }, [template])).toBeUndefined();
+  });
+
+  it("keeps max available in the generic reasoning fallback", () => {
+    expect(REASONING_EFFORT_OPTIONS).toContain("max");
+  });
+
+  it("admits Zhipu Responses through the provider gate while catalog profiles decide", () => {
+    const dual: CatalogModel = {
+      ...template,
+      id: "z-glm-dual",
+      provider: "zhipu",
+      model: "glm-dual",
+      label: "Dual",
+      base_url: "https://open.bigmodel.cn/api/paas/v4",
+      efforts: ["low", "high", "max"],
+      default_effort: "max",
+      protocols: [
+        { protocol: "openai-compatible", disabled_reason: null, function_calling: "supported", fixed_effort: null, fixed_reason: null },
+        { protocol: "openai-responses", disabled_reason: null, function_calling: "supported", fixed_effort: null, fixed_reason: null, base_url: "https://open.bigmodel.cn/api/v1" },
+      ],
+    };
+    const draft = editEndpointRequirements(editEndpoint(blank(), {
+      catalog_id: dual.id,
+      model: dual.model,
+      api_protocol: "openai-responses",
+      base_url: "https://open.bigmodel.cn/api/v1",
+      reasoning_effort: "max",
+    }), { provider: "zhipu", allowed_reasoning: ["low", "high", "max"] });
+    expect(endpointCapabilityIssue(draft, dual, providerSpecs)).toBeNull();
+    const chatOnly = { ...dual, protocols: [dual.protocols[0]] };
+    expect(endpointCapabilityIssue(draft, chatOnly, providerSpecs)?.code).toBe("protocol_unsupported");
+    expect(endpointCapabilityIssue({ ...draft, api_protocol: "anthropic" }, dual, providerSpecs)?.code).toBe("provider_protocol_unsupported");
+    expect(endpointCapabilityIssue({ ...draft, catalog_id: undefined, model: "glm-air" }, undefined, providerSpecs)?.code).toBe("model_capabilities_missing");
+    expect(endpointCapabilityIssue({ ...draft, requirements: { ...draft.requirements!, provider: undefined } }, dual, providerSpecs)).toBeNull();
+  });
+
+  it("switches the template base URL by value even when the address was entered manually", () => {
+    const dual: CatalogModel = {
+      ...template,
+      id: "z-glm-dual",
+      provider: "zhipu",
+      model: "glm-dual",
+      label: "Dual",
+      base_url: "https://open.bigmodel.cn/api/paas/v4",
+      protocols: [
+        { protocol: "openai-compatible", disabled_reason: null, function_calling: "supported", fixed_effort: null, fixed_reason: null },
+        { protocol: "openai-responses", disabled_reason: null, function_calling: "supported", fixed_effort: null, fixed_reason: null, base_url: "https://open.bigmodel.cn/api/v1" },
+      ],
+    };
+    const manual = editEndpoint(blank(), {
+      catalog_id: dual.id,
+      model: dual.model,
+      api_protocol: "openai-compatible",
+      base_url: "https://open.bigmodel.cn/api/paas/v4",
+    });
+    const switched = changeEndpointProtocol(manual, "openai-responses", dual);
+    expect(switched.base_url).toBe("https://open.bigmodel.cn/api/v1");
+    expect(switched.requirements?.field_sources.base_url).toBe("template");
+    const proxy = editEndpoint(manual, { base_url: "https://proxy.example.test/v1" });
+    expect(changeEndpointProtocol(proxy, "openai-responses", dual).base_url).toBe("https://proxy.example.test/v1");
   });
   it("does not infer provider from a URL or inherit missing capabilities", () => {
     const draft = editEndpoint(blank(),{base_url:"https://open.bigmodel.cn/api/paas/v4",model:"glm-future"});
@@ -240,12 +371,15 @@ describe("protocol-specific template URLs", () => {
     expect(changeEndpointProtocol(chat,"openai-responses",protocolTemplate).base_url).toBe(first.base_url);
     expect(first.api_protocol).toBe("openai-responses");
   });
-  it("preserves manual values even when equal to the previous default", () => {
+  it("follows per-protocol template addresses while preserving custom values", () => {
     const first = applyEndpointTemplate(blank(), protocolTemplate);
-    for (const base_url of ["https://proxy.test/v1", first.base_url, ""]) {
-      const manual = editEndpoint(first,{base_url});
-      expect(changeEndpointProtocol(manual,"openai-compatible",protocolTemplate).base_url).toBe(base_url);
-    }
+    const custom = editEndpoint(first,{base_url:"https://proxy.test/v1"});
+    expect(changeEndpointProtocol(custom,"openai-compatible",protocolTemplate).base_url).toBe("https://proxy.test/v1");
+    const official = editEndpoint(first,{base_url:first.base_url});
+    const switched = changeEndpointProtocol(official,"openai-compatible",protocolTemplate);
+    expect(switched.base_url).toBe(protocolTemplate.protocols[1].base_url);
+    expect(switched.requirements?.field_sources.base_url).toBe("template");
+    expect(changeEndpointProtocol(editEndpoint(first,{base_url:""}),"openai-compatible",protocolTemplate).base_url).toBe("");
   });
   it("restores the current protocol URL and resumes following", () => {
     let draft = editEndpoint(applyEndpointTemplate(blank(),protocolTemplate),{base_url:"https://proxy.test/v1"});
@@ -267,10 +401,65 @@ describe("protocol-specific template URLs", () => {
     expect(changeEndpointProtocol(detached,"openai-compatible",protocolTemplate).base_url).toBe(draft.base_url);
     expect(changeEndpointProtocol(draft,"openai-compatible").base_url).toBe(draft.base_url);
   });
-  it("falls back to model URL and conservatively preserves legacy endpoints", () => {
+  it("adopts the template address when switching to a different template", () => {
+    const legacy = editEndpoint(blank(), { model: "legacy-model", base_url: "https://open.bigmodel.cn/api/coding/paas/v4", api_protocol: "openai-compatible" });
+    const applied = applyEndpointTemplate(legacy, protocolTemplate);
+    expect(applied.base_url).toBe(protocolTemplate.protocols[1].base_url);
+    expect(applied.requirements?.field_sources.base_url).toBe("template");
+    expect(changeEndpointProtocol(applied, "openai-responses", protocolTemplate).base_url).toBe(protocolTemplate.protocols[0].base_url);
+  });
+
+  it("keeps a custom address when re-applying the same template", () => {
+    const first = applyEndpointTemplate(blank(), protocolTemplate);
+    const proxied = editEndpoint(first, { base_url: "https://proxy.test/v1" });
+    const again = applyEndpointTemplate(proxied, protocolTemplate);
+    expect(again.base_url).toBe("https://proxy.test/v1");
+    expect(again.requirements?.field_sources.base_url).toBe("user");
+  });
+
+  it("keeps a shared model address across protocol switches", () => {
+    const shared: CatalogModel = { ...template, protocols: [
+      { protocol: "openai-responses", disabled_reason: null, function_calling: "supported", fixed_effort: null, fixed_reason: null },
+      { protocol: "openai-compatible", disabled_reason: null, function_calling: "supported", fixed_effort: null, fixed_reason: null },
+    ] };
+    const draft = applyEndpointTemplate(blank(), shared);
+    expect(draft.base_url).toBe(template.base_url);
+    const chat = changeEndpointProtocol(draft, "openai-compatible", shared);
+    expect(chat.base_url).toBe(template.base_url);
+    expect(chat.requirements?.field_sources.base_url).toBe("template");
+  });
+
+  it("uses per-protocol entries and falls back to the model address per protocol", () => {
+    const mixed: CatalogModel = { ...template, protocols: [
+      { protocol: "openai-responses", disabled_reason: null, function_calling: "supported", fixed_effort: null, fixed_reason: null, base_url: "https://responses.mixed.test/v1" },
+      { protocol: "openai-compatible", disabled_reason: null, function_calling: "supported", fixed_effort: null, fixed_reason: null },
+    ] };
+    const draft = applyEndpointTemplate(blank(), mixed);
+    expect(draft.base_url).toBe("https://responses.mixed.test/v1");
+    const chat = changeEndpointProtocol(draft, "openai-compatible", mixed);
+    expect(chat.base_url).toBe(template.base_url);
+    expect(changeEndpointProtocol(chat, "openai-responses", mixed).base_url).toBe("https://responses.mixed.test/v1");
+  });
+
+  it("trims whitespace when matching template addresses during a protocol switch", () => {
+    const spaced = editEndpoint(applyEndpointTemplate(blank(), protocolTemplate), { base_url: " https://responses.example.test/v1 " });
+    const switched = changeEndpointProtocol(spaced, "openai-compatible", protocolTemplate);
+    expect(switched.base_url).toBe(protocolTemplate.protocols[1].base_url);
+    expect(switched.requirements?.field_sources.base_url).toBe("template");
+  });
+
+  it("keeps the address when the target template has none for the user protocol", () => {
+    const chatOnly: CatalogModel = { ...template, protocols: [protocolTemplate.protocols[1]] };
+    const legacy = editEndpoint(blank(), { api_protocol: "openai-responses", base_url: "https://proxy.test/v1" });
+    const applied = applyEndpointTemplate(legacy, chatOnly);
+    expect(applied.base_url).toBe("https://proxy.test/v1");
+    expect(applied.requirements?.field_sources.base_url).toBe("user");
+  });
+
+  it("falls back to the model URL and still follows known template values for legacy endpoints", () => {
     expect(templateBaseUrl(template,"openai-responses")).toBe(template.base_url);
     const draft = {...applyEndpointTemplate(blank(),protocolTemplate),requirements:undefined};
-    expect(changeEndpointProtocol(draft,"openai-compatible",protocolTemplate).base_url).toBe(draft.base_url);
+    expect(changeEndpointProtocol(draft,"openai-compatible",protocolTemplate).base_url).toBe(protocolTemplate.protocols[1].base_url);
   });
 });
 
@@ -290,7 +479,9 @@ describe("default URL restore visibility", () => {
     expect(canRestoreEndpointTemplateUrl(draft)).toBe(false);
     expect(canRestoreEndpointTemplateUrl({...draft,api_protocol:"anthropic"},protocolTemplate)).toBe(false);
     const manual = editEndpoint(draft,{base_url:protocolTemplate.protocols[0].base_url!});
-    expect(canRestoreEndpointTemplateUrl(changeEndpointProtocol(manual,"openai-compatible",protocolTemplate),protocolTemplate)).toBe(true);
+    const followed = changeEndpointProtocol(manual,"openai-compatible",protocolTemplate);
+    expect(followed.base_url).toBe(protocolTemplate.protocols[1].base_url);
+    expect(canRestoreEndpointTemplateUrl(followed,protocolTemplate)).toBe(false);
   });
 });
 
@@ -314,9 +505,9 @@ describe("endpoint protocol choices", () => {
   it("keeps generic choices for custom services but respects declared providers", () => {
     expect(endpointProtocolOptions(blank()).filter(p=>!p.disabled)).toHaveLength(3);
     const draft = applyEndpointTemplate(blank(),template);
-    expect(endpointProtocolOptions(draft).some(p=>p.protocol==="anthropic")).toBe(false);
+    expect(endpointProtocolOptions(draft,undefined,providerSpecs).some(p=>p.protocol==="anthropic")).toBe(false);
     const zhipu = {...draft,api_protocol:"openai-compatible",requirements:{...draft.requirements!,provider:"zhipu"}};
-    expect(endpointProtocolOptions(zhipu)).toEqual([{protocol:"openai-compatible",disabled:false}]);
+    expect(endpointProtocolOptions(zhipu,undefined,providerSpecs)).toEqual([{protocol:"openai-compatible",disabled:false},{protocol:"openai-responses",disabled:false}]);
   });
 });
 
@@ -429,7 +620,34 @@ describe("endpoint editor change tracking", () => {
     const restored = restoreEndpointTemplateReasoning(manual, template);
     expect(restored.requirements?.allowed_reasoning).toEqual(template.efforts);
     expect(restored.requirements?.field_sources.allowed_reasoning).toBe("template");
+    expect(restored.reasoning_effort).toBe("low");
     expect(restoreEndpointTemplateReasoning(manual, { ...template, id: "other" })).toBe(manual);
+  });
+
+  it("repairs an unsupported legacy daily level when restoring template reasoning", () => {
+    const glm53 = {
+      ...template,
+      id: "z-glm5.3",
+      model: "glm-5.3",
+      provider: "zhipu",
+      efforts: ["low", "high", "max"],
+      default_effort: "max",
+    };
+    const legacy = {
+      ...blank(),
+      catalog_id: glm53.id,
+      model: glm53.model,
+      reasoning_effort: "medium",
+      requirements: {
+        version: 1,
+        field_sources: { model: "user" as const, reasoning_effort: "user" as const },
+      },
+    };
+    const restored = restoreEndpointTemplateReasoning(legacy, glm53);
+    expect(restored.reasoning_effort).toBe("max");
+    expect(restored.requirements?.allowed_reasoning).toEqual(["low", "high", "max"]);
+    expect(restored.requirements?.field_sources.allowed_reasoning).toBe("template");
+    expect(restored.requirements?.field_sources.reasoning_effort).toBe("template");
   });
 });
 

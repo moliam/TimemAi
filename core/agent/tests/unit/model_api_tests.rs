@@ -2433,7 +2433,11 @@ fn demand_v1_rejects_excluded_default_and_unsupported_provider_protocol() {
         "daily_reasoning_not_in_allowed_set"
     );
     cfg.openai_compatible.requirements.allowed_reasoning = None;
+    // Zhipu Responses is admitted per-model by the catalog profiles; the
+    // provider table only excludes Anthropic adapters.
     cfg.api_protocol = ApiProtocol::OpenAiResponses;
+    crate::model_requirements::validate_config(&cfg).unwrap();
+    cfg.api_protocol = ApiProtocol::Anthropic;
     assert_eq!(
         crate::model_requirements::validate_config(&cfg).unwrap_err(),
         "provider_protocol_adapter_not_implemented"

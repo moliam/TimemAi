@@ -1046,6 +1046,7 @@ struct ServerInfo {
     workspace_dirs: Vec<String>,
     mcp_servers: Vec<McpServerReport>,
     model_catalog: Vec<agent_core::model_catalog::CatalogModel>,
+    model_providers: Vec<agent_core::model_catalog::ProviderSpec>,
     model_endpoints: Vec<ModelEndpointReport>,
 }
 
@@ -12681,6 +12682,7 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
                 .map(|mem| mcp_reports(&mem))
                 .unwrap_or_default(),
             model_catalog: agent_core::model_catalog::models().to_vec(),
+            model_providers: agent_core::model_catalog::PROVIDERS.to_vec(),
             model_endpoints: model_endpoint_reports(state).unwrap_or_default(),
         },
         sessions,

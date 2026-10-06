@@ -17561,9 +17561,17 @@ fn zhipu_catalog_endpoints_roundtrip_and_reject_forbidden_efforts() {
             normalize_model_endpoint_input(None, wrong).is_ok(),
             suffix == "5.2"
         );
-        let mut wrong = input;
-        wrong.api_protocol = "openai-responses".into();
-        assert!(normalize_model_endpoint_input(None, wrong).is_err());
+        let mut switched = input.clone();
+        switched.api_protocol = "openai-responses".into();
+        if suffix == "5.3" {
+            switched.base_url = "https://open.bigmodel.cn/api/v1".into();
+            let admitted = normalize_model_endpoint_input(None, switched.clone()).unwrap();
+            assert_eq!(admitted.api_protocol, "openai-responses");
+            switched.reasoning_effort = Some("medium".into());
+            assert!(normalize_model_endpoint_input(None, switched).is_err());
+        } else {
+            assert!(normalize_model_endpoint_input(None, switched).is_err());
+        }
         endpoints.push(endpoint);
     }
     save_model_endpoints(&root, &endpoints).unwrap();

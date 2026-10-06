@@ -171,7 +171,12 @@ fn external_catalog_json_only_extension_reaches_payload_in_fresh_process() {
                         .unwrap()
                 );
                 if provider == "zhipu" {
-                    assert_eq!(body["thinking"]["clear_thinking"], true);
+                    if profile.protocol == "openai-compatible" {
+                        assert_eq!(body["thinking"]["clear_thinking"], true);
+                    } else {
+                        assert!(body.get("thinking").is_none());
+                        assert!(body.get("reasoning_effort").is_none());
+                    }
                 }
             }
         }
@@ -260,4 +265,15 @@ fn protocol_urls_override_connection_defaults_and_are_projected() {
         fixture["models"][0]["profiles"][0]["default_base_url"] = serde_json::json!(bad);
         assert!(parse(&fixture.to_string()).is_err(), "accepted {bad}");
     }
+}
+
+#[test]
+fn provider_registry_declares_closed_admission() {
+    let zhipu = agent_core::model_catalog::provider_spec("zhipu").expect("zhipu registered");
+    assert!(zhipu.requires_catalog);
+    assert!(!zhipu.allowed_protocols.contains(&"anthropic"));
+    let openai = agent_core::model_catalog::provider_spec("openai").expect("openai registered");
+    assert!(!openai.requires_catalog);
+    assert!(!openai.allowed_protocols.contains(&"anthropic"));
+    assert!(agent_core::model_catalog::provider_spec("unknown-provider").is_none());
 }
