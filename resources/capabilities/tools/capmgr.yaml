@@ -3,10 +3,6 @@ id: capmgr
 binding_type: builtin
 binding_name: capmgr
 summary: Manage capability tools and skills.
-prompt_synopsis: |
-  {"capmgr":{"op":"list","kind":"skill"}}
-  {"capmgr":{"op":"load","kind":"skill","id":"skill_id"}}
-  {"capmgr":{"op":"job_status","job_id":"job_id","timeout_ms":5000}}
 description: |
   Capability manager. Do not list capabilities for ordinary user tasks. Use
   op=list only when the user asks about available capabilities, or when you need
@@ -15,16 +11,13 @@ description: |
   Use op=job_status or op=job_cancel for background jobs started by registered
   command-bound tools. Do not use these for local command jobs; the platform command tool returns
   pid and the runtime injects running job updates.
-prompt_input: |
-  Requires op. For op=list, omit kind to list all or use kind=all|tool|skill.
-  For op=load, provide kind=tool|skill and id.
-  For op=job_status or op=job_cancel, provide job_id. For job_status,
-  timeout_ms is chosen by you; 0 means immediate check, max 15000.
-prompt_result: |
-  `list` returns available capability headers. `load` returns a skill body or tool
-  detail when you need more than the static catalog. `job_status` returns
+  Always provide op. list: optional kind=all|tool|skill. load: provide kind and
+  id. job_status/job_cancel: provide job_id; for job_status choose timeout_ms
+  yourself (0 means immediate check, max 15000).
+  list returns available capability headers; load returns a skill body or tool
+  detail when you need more than the static catalog; job_status returns
   running with partial output, finished with exit code and bounded output, or
-  cancelled. `job_cancel` returns cancelled, already_completed, or job_not_found.
+  cancelled; job_cancel returns cancelled, already_completed, or job_not_found.
 input_schema: |
   {
     "type": "object",

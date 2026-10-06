@@ -17251,7 +17251,7 @@ fn context_handoff_real_compaction_survives_graceful_restart() {
         probe_latency_ms: None,
         observed_tool_calls: 1,
     });
-    let arguments = json!({"discard": ["pd_76"], "summary": "ONLY_COMPACTED_STATE"});
+    let arguments = json!({"summary": "ONLY_COMPACTED_STATE"});
     let step = core.apply_model_response(LlmResponse {
         content: String::new(),
         tool_calls: vec![agent_core::NativeToolCall {

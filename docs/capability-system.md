@@ -26,7 +26,7 @@ optional TIMEM_CAPABILITIES_DIR overlay
         ↓ load at runtime
 CapabilityRegistry
         ↓ render by interaction mode
-inline: builtin/overlay catalog in Static + persistent MCP update deltas
+inline: builtin/overlay catalog in Static + current MCP request section
 native: builtin/overlay descriptions in Static; builtin schemas plus current MCP
         descriptions/schemas in API tools
         ↓ generic parse
@@ -38,19 +38,25 @@ paired builtin tool callback or overlay command
 ```
 
 MCP tools are deliberately excluded from the inline Static catalog: a Session
-can enable, disable, or reconnect an MCP server between requests. Initial
-enablement and definition/instruction changes append canonical JSON catalogs to
-ordinary persistent prompt deltas for inline rendering. In native mode those
-inline-only slices are filtered from messages. Stable builtin descriptions are
-rendered into the static system prompt, while builtin API tool entries retain
-only their names and input schemas. Current MCP definitions form the dynamic
-portion of the provider API tool list, with each MCP description, schema, and
-server instructions kept together there. Disabling MCP removes those definitions from
-the next API tools field without injecting an enable/disable RUNTIME notice.
-Historical inline deltas remain immutable and become visible again if the
-session switches back to inline mode.
-Prompt updates are keyed to the model-visible definitions rather than the raw
-server configuration. Runtime-only changes such as transport, timeout, endpoint,
+can enable, disable, or reconnect an MCP server between requests. In Inline mode,
+each request renders one authoritative current MCP section directly from the
+capability registry, including the active protocol-specific tool definitions and
+server-wide instructions. This section is outside conversation deltas, has no
+delta id, and cannot be removed by context compression. Native mode sends the
+same current registry state through provider API tools instead, with each MCP
+description, schema, and server instruction kept together there. Switching from
+Native to Inline therefore exposes current MCP state even when no historical
+catalog delta exists. Legacy stored `mcp_capability_catalog` slices are hidden in
+all modes to prevent stale duplication.
+
+Stable builtin descriptions remain in the static system prompt, while builtin
+API tool entries retain only names and input schemas. MCP enablement and
+model-visible definition/instruction changes may append concise historical
+change notices, but those notices never duplicate full schemas or instruction
+bodies. Native mode hides those notices because the provider API tools already
+carry current state. Disabling MCP removes definitions from the next request.
+Prompt updates are keyed to model-visible definitions rather than raw server
+configuration. Runtime-only changes such as transport, timeout, endpoint,
 headers, credentials, or display metadata do not consume prompt context when the
 callable names, descriptions, input schemas, and server instructions are unchanged.
 
@@ -147,8 +153,9 @@ safety failures, shell approval, missing files, timeouts, or invalid prompt
 references. A manifest can expose only capabilities with an existing binding.
 The `input_schema` is intentionally data, not Rust code: it drives generic
 model-action validation and is exposed by `capmgr op=load kind=tool`. Tool
-results remain executor-owned evidence described by `prompt_result`; manifests
-do not declare an unused output contract. The static prompt receives a shorter
+results remain executor-owned evidence: result semantics that the result
+text itself cannot convey live in `description`, not a separate manifest
+section; manifests do not declare an unused output contract. The static prompt receives a shorter
 Markdown capability guide derived from the manifests, not a full schema dump.
 
 Built-in tools live as capability packages under
@@ -277,9 +284,13 @@ the example capability root.
 `self_tool` exposes Timem runtime self-information and prompt-context cwd
 control through three classes:
 
-- `type=path`: use for questions about where Timem runtime resources are. The
-  result returns the relevant known file and directory locations; the model may
-  then use normal `run_bash` policy if file contents are actually needed.
+- `type=path`: use for questions about where Timem runtime resources are,
+  including "which MEM/space/executable serves this session" identity
+  questions (space_dir, memory_dir, sessions_dir, executable, process cwd).
+  The result returns the relevant known file and directory locations; the
+  model may then use normal `run_bash` policy if file contents are actually
+  needed. Prefer this over `ps`/`readlink` probing: the tool output is the
+  authoritative in-process answer.
 - `type=cwd`: omit `new_path` to read the current prompt-context directory as
   `CWD: ...` without changing state. Set `new_path` to an absolute path or a
   path relative to the current prompt-context cwd to change it; on success the

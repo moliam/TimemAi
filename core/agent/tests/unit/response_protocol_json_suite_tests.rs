@@ -88,7 +88,7 @@ fn rejects_noncanonical_fields_envelope() {
 #[test]
 fn rejects_legacy_context_compact_field() {
     let env = parse_envelope(
-        r#"{"context_compact":{"discard":["pd_a"],"summary":"must be rejected"}}"#,
+        r#"{"context_compact":{"prune":["pd_a"],"summary":"must be rejected"}}"#,
         &caps(),
     );
     assert_eq!(
@@ -99,33 +99,65 @@ fn rejects_legacy_context_compact_field() {
 }
 
 #[test]
-fn parses_context_compress_field() {
+fn parses_context_compress_summary_only_as_full_replacement() {
     let env = parse_envelope(
-        r#"{"free_talk":"整理上下文","context_compress":{"discard":["pd_a"],"summary":"keep important state"},"working_still_action":{"run_bash":{"cmd":"pwd"}}}"#,
+        r#"{"free_talk":"整理上下文","context_compress":{"summary":"keep important state"},"working_still_action":{"run_bash":{"cmd":"pwd"}}}"#,
         &caps(),
     );
 
     assert!(env.repair_issue.is_none());
     assert_eq!(env.context_compresses.len(), 1);
-    assert_eq!(env.context_compresses[0].delta_ids, vec!["pd_a"]);
-    assert_eq!(env.context_compresses[0].discard_delta_ids, vec!["pd_a"]);
+    assert!(env.context_compresses[0].delta_ids.is_empty());
+    assert!(env.context_compresses[0].keep_delta_ids.is_empty());
     assert!(env.context_compresses[0].offload_delta_ids.is_empty());
     assert!(env.context_compresses[0].slice_ids.is_empty());
     assert_eq!(env.context_compresses[0].summary, "keep important state");
 }
 
 #[test]
-fn parses_context_compress_discard_and_offload_fields() {
+fn parses_context_compress_keep_and_offload_fields() {
     let env = parse_envelope(
-        r#"{"free_talk":"整理上下文","context_compress":{"discard":["pd_a"],"offload":["pd_b"],"summary":"keep important state"},"working_still_action":{"run_bash":{"cmd":"pwd"}}}"#,
+        r#"{"free_talk":"整理上下文","context_compress":{"keep":["pd_a"],"offload":["pd_b"],"summary":"keep important state"},"working_still_action":{"run_bash":{"cmd":"pwd"}}}"#,
         &caps(),
     );
 
     assert!(env.repair_issue.is_none());
     assert_eq!(env.context_compresses.len(), 1);
-    assert_eq!(env.context_compresses[0].discard_delta_ids, vec!["pd_a"]);
+    assert_eq!(env.context_compresses[0].keep_delta_ids, vec!["pd_a"]);
     assert_eq!(env.context_compresses[0].offload_delta_ids, vec!["pd_b"]);
     assert_eq!(env.context_compresses[0].delta_ids, vec!["pd_a", "pd_b"]);
+}
+
+#[test]
+fn rejects_all_unknown_context_compress_fields_uniformly() {
+    for field in ["discard", "throw", "remove"] {
+        let raw = format!(r#"{{"context_compress":{{"{field}":["pd_a"],"summary":"state"}}}}"#);
+        let env = parse_envelope(&raw, &caps());
+        let expected = format!("context_compress[0].input.{field}_unsupported");
+        assert_eq!(
+            env.repair_issue.as_deref(),
+            Some(expected.as_str()),
+            "field={field}"
+        );
+        assert!(env.context_compresses.is_empty(), "field={field}");
+        assert!(
+            protocol_repair_instruction(env.repair_issue.as_deref().unwrap())
+                .contains("当前 tool schema 未定义")
+        );
+    }
+}
+
+#[test]
+fn rejects_context_compress_keep_offload_overlap() {
+    let env = parse_envelope(
+        r#"{"context_compress":{"keep":["pd_a"],"offload":["pd_a"],"summary":"state"}}"#,
+        &caps(),
+    );
+    assert_eq!(
+        env.repair_issue.as_deref(),
+        Some("context_compress[0].keep_offload_overlap:pd_a")
+    );
+    assert!(env.context_compresses.is_empty());
 }
 
 #[test]
@@ -226,7 +258,7 @@ fn diverse_confusing_json_responses_keep_strict_execution_boundary() {
             json!({
                 "free_talk": "compact before continuing",
                 "free_talk": "compacting",
-                "context_compress": {"discard": ["pd_a", "pd_b"], "summary": "keep active task, progress, todo"},
+                "context_compress": {"keep": ["pd_a", "pd_b"], "summary": "keep active task, progress, todo"},
                 "working_still_action": {"run_bash": {"cmd": "pwd"}}
             }),
             vec!["run_bash"],
@@ -355,7 +387,7 @@ fn malformed_response_variants_return_repair_issues_without_panic() {
             "final_answer_must_not_start_with_runtime_progress_marker",
         ),
         (
-            r#"{"status":"working","free_talk":"compact","context_compress":{"discard":["pd_a"]}}"#,
+            r#"{"status":"working","free_talk":"compact","context_compress":{"keep":["pd_a"]}}"#,
             "context_compress[0].summary_required",
         ),
     ];

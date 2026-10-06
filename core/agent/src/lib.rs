@@ -2977,65 +2977,76 @@ impl AgentCore {
             .map(|tool| tool.server_id.as_str())
             .chain(self.mcp_instructions.keys().map(String::as_str))
             .collect::<HashSet<_>>();
-        let mut lines = self
+        let lines = self
             .mcp_servers
             .values()
             .filter(|server| visible_server_ids.contains(server.id.as_str()))
             .map(|server| mcp_server_update_line(server, McpServerUpdate::Enabled))
             .collect::<Vec<_>>();
-        let catalog = self.current_mcp_catalog_text();
-        if let Some(catalog) = catalog.as_ref() {
-            lines.push(catalog.clone());
-        }
         if lines.is_empty() {
             return;
         }
         self.append_delta(vec![(
-            if catalog.is_some() {
-                "mcp_capability_catalog"
-            } else {
-                "mcp_capability_update"
-            }
-            .to_string(),
+            "mcp_capability_update".to_string(),
             lines.join("\n"),
         )]);
     }
 
-    fn current_mcp_catalog_text(&self) -> Option<String> {
-        let tools = self.capabilities.render_native_dynamic_tool_catalog_json();
-        if tools.is_none() && self.mcp_instructions.is_empty() {
+    fn current_inline_mcp_section(&self) -> Option<String> {
+        if self.resolved_tool_call_mode == ToolCallMode::Native {
             return None;
         }
-        let instructions = self
-            .mcp_instructions
-            .iter()
-            .map(|(server_id, instructions)| {
-                let server_name = self
-                    .mcp_servers
-                    .get(server_id)
-                    .map(|server| server.name.as_str())
-                    .unwrap_or(server_id);
-                json!({
-                    "server_id": server_id,
-                    "server_name": server_name,
-                    "instructions": instructions,
-                })
-            })
-            .collect::<Vec<_>>();
-        let tools = tools
-            .as_deref()
-            .map(serde_json::from_str::<Value>)
-            .transpose()
-            .expect("rendered MCP tool definitions must be valid JSON")
-            .unwrap_or_else(|| Value::Array(Vec::new()));
-        let catalog = serde_json::to_string_pretty(&json!({
-            "server_instructions": instructions,
-            "tools": tools,
-        }))
-        .expect("MCP prompt catalog must serialize");
-        Some(format!(
-            "MCP update: the following MCP capabilities are enabled. Server instructions in this catalog are authoritative. This newer catalog overrides earlier entries for the same server or action name.\n\n```json\n{catalog}\n```"
-        ))
+        let tools = self
+            .capabilities
+            .render_mcp_tool_catalog_markdown_for_protocol(self.response_protocol.name());
+        if tools.trim().is_empty() && self.mcp_instructions.is_empty() {
+            return None;
+        }
+
+        let mut sections = vec![
+            "## Current MCP Capabilities".to_string(),
+            "These are the MCP capabilities currently available. Use the current definitions below, and apply each server-wide instruction to that server's tools.".to_string(),
+        ];
+        if !self.mcp_instructions.is_empty() {
+            sections.push("### MCP server-wide instructions".to_string());
+            sections.extend(
+                self.mcp_instructions
+                    .iter()
+                    .map(|(server_id, instructions)| {
+                        let label = self
+                            .mcp_servers
+                            .get(server_id)
+                            .map(mcp_server_label)
+                            .unwrap_or_else(|| server_id.clone());
+                        format!("#### {label}\n\n{instructions}")
+                    }),
+            );
+        }
+        if !tools.trim().is_empty() {
+            sections.push("### Available MCP tools".to_string());
+            sections.push(tools);
+        }
+        Some(sections.join("\n\n"))
+    }
+
+    fn render_prompt_from_deltas(&self, deltas: &[PromptDelta]) -> String {
+        let rendered = prompt_render::render_prompt_with_rendered_static_for_mode(
+            &self.rendered_static_prompt,
+            deltas,
+            &self.assistant_speaker_name,
+            self.response_protocol.suite(),
+            self.resolved_tool_call_mode,
+        );
+        let Some(mcp_section) = self.current_inline_mcp_section() else {
+            return rendered;
+        };
+        let (body, trailer) = prompt_render::split_formatted_response_trailer(&rendered);
+        let mut prompt = format!("{}\n\n{}", body.trim_end(), mcp_section);
+        if let Some(trailer) = trailer {
+            prompt.push_str("\n\n");
+            prompt.push_str(&trailer);
+        }
+        prompt
     }
 
     pub fn apply_mcp_update(
@@ -3188,21 +3199,9 @@ impl AgentCore {
                 "MCP update: instructions for MCP {label} ARE UPDATED."
             ));
         }
-        let includes_catalog =
-            !added.is_empty() || !updated.is_empty() || !changed_instruction_ids.is_empty();
-        if includes_catalog {
-            if let Some(catalog) = self.current_mcp_catalog_text() {
-                lines.push(catalog);
-            }
-        }
         if !lines.is_empty() {
             self.append_delta(vec![(
-                if includes_catalog {
-                    "mcp_capability_catalog"
-                } else {
-                    "mcp_capability_update"
-                }
-                .to_string(),
+                "mcp_capability_update".to_string(),
                 lines.join("\n"),
             )]);
         }
@@ -3314,7 +3313,9 @@ impl AgentCore {
             if self.resolved_tool_call_mode == ToolCallMode::Native {
                 visible_delta_ids.insert(delta.delta_id.clone());
             }
-            for slice in prompt_render::render_delta_slices(delta) {
+            for slice in
+                prompt_render::render_delta_slices_for_mode(delta, self.resolved_tool_call_mode)
+            {
                 visible_delta_ids.insert(delta.delta_id.clone());
                 visible_slice_count += 1;
                 text_tokens = text_tokens.saturating_add(estimate_prompt_tokens(&slice.text));
@@ -4003,50 +4004,34 @@ impl AgentCore {
         {
             slices.extend(self.assistant_replay_slices(&raw_model_output, Some(&parsed), None));
         }
-        let compact_refs_mcp_catalog = parsed.context_compresses.iter().any(|compact| {
-            self.prompt_refs_include_type(
-                &compact.delta_ids,
-                &compact.slice_ids,
-                "mcp_capability_catalog",
-            )
-        });
         let compact_result_slice_start = slices.len();
         let mut compacted_successfully = false;
         let mut successful_compact_summaries = Vec::new();
         let threshold_compaction_requested = self.threshold_compaction_reasoning_required;
         let mut threshold_followup_required = false;
         for compact in &parsed.context_compresses {
-            // Idempotent refs: a delta id that no longer exists has already
-            // reached the compaction target state (an earlier compact
-            // discarded it) but stale refs linger in old prompt text, so a
-            // missing delta id must not fail the whole request — that
-            // dead-looped the force-shrink retry path. Genuinely malformed
-            // refs (prompt_0, unknown slice ids) still fail closed.
-            let mut missing = self.missing_prompt_refs(&[], &compact.slice_ids);
-            if compact.delta_ids.iter().any(|id| id.trim() == "prompt_0") {
-                missing.push("prompt_0".to_string());
-            }
+            // Keep semantics are fail-closed: every explicitly retained or
+            // offloaded id must still be live. Unlike the old discard list, a
+            // missing keep id can silently destroy context, so it is never
+            // treated as idempotent success.
+            let missing = self.missing_prompt_refs(&compact.delta_ids, &compact.slice_ids);
             let existing_delta_ids = self
                 .deltas
                 .iter()
                 .map(|delta| delta.delta_id.clone())
-                .collect::<HashSet<_>>();
-            let mut live_delta_ids = Vec::new();
-            for id in &compact.delta_ids {
-                let id = id.trim();
-                if id.is_empty() {
-                    continue;
-                }
-                if existing_delta_ids.contains(id) {
-                    live_delta_ids.push(id.to_string());
-                }
-            }
-            let live_offload_ids = compact
-                .offload_delta_ids
+                .collect::<Vec<_>>();
+            let keep_delta_ids = compact
+                .keep_delta_ids
                 .iter()
-                .filter(|id| live_delta_ids.contains(&id.trim().to_string()))
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty())
+                .collect::<HashSet<_>>();
+            let discarded_delta_ids = existing_delta_ids
+                .iter()
+                .filter(|id| !keep_delta_ids.contains(id.as_str()))
                 .cloned()
                 .collect::<Vec<_>>();
+            let live_offload_ids = compact.offload_delta_ids.clone();
             if missing.is_empty() {
                 let estimated_before = self.dynamic_context_token_estimate();
                 let offload_record = if live_offload_ids.is_empty() {
@@ -4090,7 +4075,8 @@ impl AgentCore {
                 // Re-injecting them would immediately spend the context that compaction
                 // just recovered. A minimal runtime confirmation is enough for the
                 // model; only an offload scratch id remains actionable afterward.
-                let _shrink_report = self.apply_prompt_shrink(&live_delta_ids, &compact.slice_ids);
+                let _shrink_report =
+                    self.apply_prompt_shrink(&discarded_delta_ids, &compact.slice_ids);
                 if let Some(record) = offload_record.as_ref() {
                     slices.push((
                         "runtime_note".to_string(),
@@ -4115,7 +4101,7 @@ impl AgentCore {
                         .saturating_add(summary_tokens),
                     estimated_native_before_tokens: estimated_before.native_tokens,
                     estimated_native_after_tokens: estimated_after.native_tokens,
-                    discarded_delta_ids: compact.discard_delta_ids.clone(),
+                    discarded_delta_ids: discarded_delta_ids.clone(),
                     offloaded_delta_ids: compact.offload_delta_ids.clone(),
                     scratch_id: offload_record.as_ref().map(|record| record.id.clone()),
                 };
@@ -4237,11 +4223,6 @@ impl AgentCore {
                     self.current_prompt_cwd.display()
                 ),
             ));
-        }
-        if compacted_successfully && compact_refs_mcp_catalog {
-            if let Some(catalog) = self.current_mcp_catalog_text() {
-                slices.push(("mcp_capability_catalog".to_string(), catalog));
-            }
         }
         if !parsed.context_compresses.is_empty() && !compacted_successfully {
             // context_compress is a barrier: later actions were authored against the
@@ -4748,6 +4729,13 @@ impl AgentCore {
         let action = parsed.action_groups[0].actions.remove(0);
         if parsed.action_groups[0].actions.is_empty() {
             parsed.action_groups.remove(0);
+        }
+        if let Err(issue) = self
+            .capabilities
+            .validate_action_input(&action.action, &action.raw_input)
+        {
+            parsed.repair_issue = Some(format!("context_compress.{issue}"));
+            return;
         }
         match context_compress::from_action(&action) {
             Ok(compact) => {
@@ -5393,13 +5381,7 @@ impl AgentCore {
     }
 
     pub fn render_prompt(&self) -> String {
-        prompt_render::render_prompt_with_rendered_static_for_mode(
-            &self.rendered_static_prompt,
-            &self.deltas,
-            &self.assistant_speaker_name,
-            self.response_protocol.suite(),
-            self.resolved_tool_call_mode,
-        )
+        self.render_prompt_from_deltas(&self.deltas)
     }
 
     pub fn submit_prompt_component(
@@ -5675,13 +5657,7 @@ impl AgentCore {
             slices,
             hidden_slice_ids: Vec::new(),
         });
-        prompt_render::render_prompt_with_rendered_static_for_mode(
-            &self.rendered_static_prompt,
-            &deltas,
-            &self.assistant_speaker_name,
-            self.response_protocol.suite(),
-            self.resolved_tool_call_mode,
-        )
+        self.render_prompt_from_deltas(&deltas)
     }
 
     fn append_in_turn_shrink_review_if_needed(&mut self) {
@@ -7774,25 +7750,6 @@ Runtime tool_call ids:",
         missing.sort();
         missing.dedup();
         missing
-    }
-
-    fn prompt_refs_include_type(
-        &self,
-        delta_ids: &[String],
-        slice_ids: &[String],
-        prompt_type: &str,
-    ) -> bool {
-        let delta_ids = delta_ids.iter().map(String::as_str).collect::<HashSet<_>>();
-        let slice_ids = slice_ids.iter().map(String::as_str).collect::<HashSet<_>>();
-        self.deltas.iter().any(|delta| {
-            prompt_render::render_delta_slices(delta)
-                .iter()
-                .any(|slice| {
-                    slice.prompt_type == prompt_type
-                        && (delta_ids.contains(delta.delta_id.as_str())
-                            || slice_ids.contains(slice.slice_id.as_str()))
-                })
-        })
     }
 }
 

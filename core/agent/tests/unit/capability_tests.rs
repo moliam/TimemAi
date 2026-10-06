@@ -49,7 +49,10 @@ fn windows_local_command_catalog_is_powershell_specific() {
         .expect("run_powershell catalog section");
 
     assert!(section.contains("PowerShell"), "{section}");
-    assert!(section.contains("Get-ChildItem -Force"), "{section}");
+    assert!(
+        section.contains("Get-ChildItem -Recurse -File"),
+        "{section}"
+    );
     assert!(section.contains("Test-Path"), "{section}");
     for unix_only_text in [
         "run_bash",
@@ -218,9 +221,10 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
     assert!(rendered.contains("Read a bounded range from a normal text file"));
     assert!(!rendered.contains("Byte numbers address the original"));
     assert!(!rendered.contains("macOS and Linux"));
-    assert!(rendered.contains("Ask for path when you need to know where runtime resources are"));
-    assert!(rendered.contains("Use cwd without"));
-    assert!(rendered.contains("Ask for params when"));
+    assert!(rendered.contains("Prefer it over inferring runtime identity"));
+    assert!(rendered.contains("space_dir, memory_dir, sessions_dir"));
+    assert!(rendered.contains("type=params reports pid, model"));
+    assert!(rendered.contains("Use cwd without new_path"));
     assert!(rendered.contains("Allowed: `path`, `cwd`, `params`"));
     assert!(rendered.contains("`new_path`:"));
     assert!(rendered.contains("type=cwd"));
@@ -233,7 +237,8 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
     assert!(!rendered.contains("type=context"));
     assert!(!rendered.contains("context_offload"));
     assert!(!rendered.contains("when `` is"));
-    assert!(rendered.contains("**Result**"));
+    assert!(!rendered.contains("**Result**"));
+    assert!(rendered.contains("If args do not match this tool spec"));
     assert!(!rendered.contains("```"));
     assert!(!rendered.contains("**Example action**"));
     assert!(!rendered.contains("read_back_command"));
@@ -257,6 +262,28 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
     assert!(!rendered.contains("\"output\": {"));
     assert!(!rendered.contains("\"description\""));
     assert!(!rendered.contains("Background job id when background=true."));
+}
+
+#[test]
+fn description_only_contract_preserves_result_semantics_and_fails_closed() {
+    let registry =
+        CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
+    let rendered = registry.render_tool_catalog_markdown();
+    // Migrated result semantics live in description now.
+    assert!(rendered.contains("does not reinsert a verbose action result"));
+    assert!(rendered.contains("scratch_id for later memmgr scratch read"));
+    assert!(rendered.contains("memory_conflict means the durable row version changed"));
+    assert!(rendered.contains("read the row again with durable sql"));
+    assert!(rendered.contains("won't be killed automatically"));
+    // No tool catalog Usage/Result sections under the new contract.
+    assert!(!rendered.contains("**Usage**"));
+    assert!(!rendered.contains("**Result**"));
+    // Removed manifest prompt fields fail closed instead of being ignored.
+    let err = super::parse_tool_manifest(
+        "kind: tool\nid: legacy_field\nbinding_type: builtin\nbinding_name: readfile\nsummary: s\ndescription: |\n  d\nprompt_synopsis: |\n  {\"legacy_field\":{}}\ninput_properties:\n  path: string\nrequired:\n  - path\nexample_json: |\n  {\"legacy_field\":{\"path\":\"x\"}}\n",
+    )
+    .unwrap_err();
+    assert!(err.contains("removed_prompt_field"), "{err}");
 }
 
 #[test]
@@ -287,7 +314,11 @@ fn readfile_synopsis_is_rendered_in_the_active_response_protocol() {
         .and_then(|tail| tail.split("\n#### `").next())
         .expect("readfile catalog section");
     assert!(
-        readfile_catalog.contains("**Result**"),
+        !readfile_catalog.contains("**Result**"),
+        "{readfile_catalog}"
+    );
+    assert!(
+        readfile_catalog.contains("If args do not match this tool spec"),
         "{readfile_catalog}"
     );
     assert!(
@@ -300,7 +331,7 @@ fn readfile_synopsis_is_rendered_in_the_active_response_protocol() {
     );
     assert!(
         xml.contains(
-            "<run_bash><cmd>git status --short</cmd><timeout_ms>5000</timeout_ms></run_bash>"
+            "<run_bash><cmd>rg --files | wc -l</cmd><timeout_ms>5000</timeout_ms></run_bash>"
         ),
         "{xml}"
     );
@@ -365,6 +396,18 @@ fn registry_validates_required_input_fields_from_manifest() {
         )
         .unwrap_err()
         .contains("input.max_bytes_unsupported"));
+    for field in ["discard", "throw", "remove"] {
+        let error = registry
+            .validate_action_input(
+                "context_compress",
+                &json_object([
+                    ("summary", Value::String("state".to_string())),
+                    (field, Value::Array(Vec::new())),
+                ]),
+            )
+            .unwrap_err();
+        assert_eq!(error, format!("input.{field}_unsupported"));
+    }
     assert!(registry
         .validate_action_input(
             "self_tool",
@@ -735,8 +778,8 @@ fn run_bash_idl_uses_cmd_loop_cmd_without_removed_expect_fields() {
     }));
 
     let prompt = registry.render_tool_catalog_markdown();
-    assert!(prompt.contains(r#"{"run_bash":{"cmd":"git status --short","timeout_ms":5000}}"#));
-    assert!(prompt.contains(r#"{"run_bash":{"loop_cmd":"test -f build/done""#));
+    assert!(prompt.contains(r#"{"run_bash":{"cmd":"rg --files | wc -l","timeout_ms":5000}}"#));
+    assert!(prompt.contains("`loop_cmd`:"));
     assert!(prompt.contains("loop_timeout_ms"));
     assert!(prompt.contains("once_timeout_ms"));
     assert!(!prompt.contains("check_timeout_ms"));
@@ -770,7 +813,7 @@ fn capmgr_can_list_and_load_skill_content() {
     assert!(loaded_tool.contains("manual:"));
     assert!(loaded_tool.contains("#### `run_bash`"));
     assert!(loaded_tool.contains("**Options**"));
-    assert!(loaded_tool.contains(r#"{"run_bash":{"cmd":"git status --short","timeout_ms":5000}}"#));
+    assert!(loaded_tool.contains(r#"{"run_bash":{"cmd":"rg --files | wc -l","timeout_ms":5000}}"#));
     assert!(!loaded_tool.contains("read_back_command"));
     assert!(!loaded_tool.contains("large_readback"));
     assert!(!loaded_tool.contains("expect_timeout_ms"));
@@ -1123,6 +1166,46 @@ fn native_tool_schemas_use_gateway_compatible_single_value_enums() {
 }
 
 #[test]
+fn context_compress_guidance_is_action_oriented_without_runtime_implementation_detail() {
+    let tools =
+        CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution())
+            .native_tool_definitions();
+    let compact = tools
+        .iter()
+        .find(|tool| tool.name == "context_compress")
+        .unwrap();
+
+    for guidance in [
+        "Read the whole live context",
+        "Resolve superseded or contradictory history",
+        "Use `keep` only when",
+        "Use `offload` only for",
+        "Before calling, check",
+        "continue from the checkpoint you created",
+    ] {
+        assert!(
+            compact.description.contains(guidance),
+            "{guidance}: {}",
+            compact.description
+        );
+    }
+    for internal_detail in [
+        "apply_prompt_shrink",
+        "telemetry",
+        "post-shrink live-ref diagnostics",
+        "re-injects one bounded",
+        "every other live delta is removed",
+        "full removed/offloaded id lists",
+    ] {
+        assert!(
+            !compact.description.contains(internal_detail),
+            "model-facing guidance leaked runtime implementation detail {internal_detail}: {}",
+            compact.description
+        );
+    }
+}
+
+#[test]
 fn native_schema_generation_avoids_redundant_required_any_expansion() {
     let tools =
         CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution())
@@ -1151,11 +1234,13 @@ fn native_schema_generation_avoids_redundant_required_any_expansion() {
         .iter()
         .find(|tool| tool.name == "context_compress")
         .unwrap();
-    assert!(compact.input_schema["allOf"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|rule| rule.get("anyOf").is_some()));
+    assert!(compact.input_schema.get("allOf").is_none());
+    assert_eq!(
+        compact.input_schema["required"],
+        serde_json::json!(["summary"])
+    );
+    assert!(compact.input_schema["properties"].get("discard").is_none());
+    assert_eq!(compact.input_schema["properties"]["keep"]["minItems"], 1);
 }
 
 #[test]
@@ -1207,7 +1292,8 @@ fn builtin_native_schemas_preserve_runtime_constraints_and_argument_examples() {
         .iter()
         .find(|tool| tool.name == "context_compress")
         .unwrap();
-    assert_eq!(compact.input_schema["properties"]["discard"]["minItems"], 1);
+    assert_eq!(compact.input_schema["properties"]["keep"]["minItems"], 1);
+    assert!(compact.input_schema["properties"].get("discard").is_none());
 
     let memmgr = tools.iter().find(|tool| tool.name == "memmgr").unwrap();
     assert!(memmgr.input_schema["properties"]["op"]["enum"]

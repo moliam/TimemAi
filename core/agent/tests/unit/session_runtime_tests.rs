@@ -1421,7 +1421,7 @@ fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
             false,
         )),
         Ok(llm(
-            r#"{"context_compress":{"discard":["pd_1","pd_2","pd_3"],"summary":"保留用户要求和大输出已被预算保护的信息。"}}"#,
+            r#"{"context_compress":{"summary":"保留用户要求和大输出已被预算保护的信息。"}}"#,
             2_800,
             false,
         )),
@@ -1453,7 +1453,7 @@ fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
     assert_eq!(model.prompts.len(), 3);
     assert!(model.prompts[1].contains("Your action's output is too large:"));
     assert!(model.prompts[1]
-        .ends_with("[Context threshold WARN] Context is too long. Compress context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"));
+        .ends_with("[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"));
     assert!(model.prompts[2].contains("context compressed successfully."));
     assert!(model.prompts[1].contains("optimize your action or compress context"));
     assert!(!model.prompts[1].contains(&"0".repeat(1_000)));
@@ -3801,17 +3801,14 @@ impl ModelClient for ShrinkReplayModel {
     ) -> Result<LlmResponse, String> {
         self.prompts.push(prompt.to_string());
         if self.prompts.len() == 1 {
-            assert!(prompt.contains("Compress context as the tool context_compress desc suggests"));
+            assert!(prompt
+                .contains("Please compress it now (see the `context_compress` tool description)"));
             assert!(!prompt.contains("Long-context maintenance:"));
-            let mut delta_ids = prompt_field_values(prompt, "delta_id");
-            delta_ids.sort();
-            delta_ids.dedup();
-            assert!(!delta_ids.is_empty());
-            let content = format!(
-                r#"{{"free_talk":"","context_compress":{{"discard":{},"summary":"discard stale context and keep current task state"}}}}"#,
-                serde_json::to_string(&delta_ids).unwrap()
-            );
-            return Ok(llm(content, 13_253, false));
+            return Ok(llm(
+                r#"{"free_talk":"","context_compress":{"summary":"discard stale context and keep current task state"}}"#,
+                13_253,
+                false,
+            ));
         }
         assert_eq!(self.prompts.len(), 2);
         assert!(prompt.contains("context compressed successfully."));
@@ -3823,7 +3820,8 @@ impl ModelClient for ShrinkReplayModel {
                 .count(),
             1
         );
-        assert!(!prompt.contains("Compress context as the tool context_compress desc suggests"));
+        assert!(!prompt
+            .contains("Please compress it now (see the `context_compress` tool description)"));
         assert!(!prompt.contains("Long-context maintenance:"));
         Ok(llm(
             r#"{"status":"ALL_FINISHED","final_answer":"压缩已完成，可以继续对话。"}"#,
@@ -4491,7 +4489,7 @@ fn session_turn_forced_shrink_runs_to_final_without_repeated_shrink() {
             .prompts
             .iter()
             .filter(|prompt| prompt
-                .contains("Compress context as the tool context_compress desc suggests"))
+                .contains("Please compress it now (see the `context_compress` tool description)"))
             .count(),
         1
     );
@@ -5165,15 +5163,8 @@ impl ModelClient for CompactThenFinishModel {
         self.prompts.push(prompt.to_string());
         self.calls += 1;
         if self.calls == 1 {
-            let delta_id = prompt_field_values(prompt, "delta_id")
-                .into_iter()
-                .next()
-                .expect("delta id in first prompt");
             Ok(llm(
-                format!(
-                    r#"{{"free_talk":"整理旧上下文。","context_compress":{{"discard":[{}],"summary":"保留当前任务目标和下一步。"}}}}"#,
-                    serde_json::to_string(&delta_id).unwrap()
-                ),
+                r#"{"free_talk":"整理旧上下文。","context_compress":{"summary":"保留当前任务目标和下一步。"}}"#,
                 3_000,
                 false,
             ))
@@ -5286,9 +5277,9 @@ impl ModelClient for StoryReplayModel {
                 ))
             }
             6 => {
-                assert!(
-                    prompt.contains("Compress context as the tool context_compress desc suggests")
-                );
+                assert!(prompt.contains(
+                    "Please compress it now (see the `context_compress` tool description)"
+                ));
                 assert!(!prompt.contains("Long-context maintenance:"));
                 let mut delta_ids = prompt_field_values(prompt, "delta_id");
                 delta_ids.sort();
@@ -5318,24 +5309,21 @@ impl ModelClient for StoryReplayModel {
                 ))
             }
             9 => {
-                assert!(
-                    prompt.contains("Compress context as the tool context_compress desc suggests")
-                );
+                assert!(prompt.contains(
+                    "Please compress it now (see the `context_compress` tool description)"
+                ));
                 assert!(!prompt.contains("Long-context maintenance:"));
-                let mut delta_ids = prompt_field_values(prompt, "delta_id");
-                delta_ids.sort();
-                delta_ids.dedup();
-                let content = format!(
-                    r#"{{"context_compress":{{"discard":{},"summary":"keep active task state after the memory lookup"}}}}"#,
-                    serde_json::to_string(&delta_ids).unwrap()
-                );
-                Ok(llm(content, 7_650, false))
+                Ok(llm(
+                    r#"{"context_compress":{"summary":"keep active task state after the memory lookup"}}"#,
+                    7_650,
+                    false,
+                ))
             }
             10 => {
                 assert!(prompt.contains("context compressed successfully."));
-                assert!(
-                    !prompt.contains("Compress context as the tool context_compress desc suggests")
-                );
+                assert!(!prompt.contains(
+                    "Please compress it now (see the `context_compress` tool description)"
+                ));
                 Ok(llm(
                     r#"{"status":"ALL_FINISHED","final_answer":"上下文已转存并压缩，可以继续。"}"#,
                     2_000,
@@ -5410,7 +5398,7 @@ fn session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rend
             .prompts
             .iter()
             .filter(|prompt| prompt
-                .contains("Compress context as the tool context_compress desc suggests"))
+                .contains("Please compress it now (see the `context_compress` tool description)"))
             .count()
             >= 1,
         "story should force shrink through context compress"
@@ -6292,20 +6280,11 @@ fn memo_survives_context_compression_and_rides_next_prompt() {
                     1_000,
                     false,
                 )),
-                2 => {
-                    let delta_id = prompt_field_values(prompt, "delta_id")
-                        .into_iter()
-                        .next()
-                        .expect("delta id in prompt");
-                    Ok(llm(
-                        format!(
-                            r#"{{"free_talk":"整理上下文。","context_compress":{{"discard":[{}],"summary":"保留任务目标。"}}}}"#,
-                            serde_json::to_string(&delta_id).unwrap()
-                        ),
-                        3_000,
-                        false,
-                    ))
-                }
+                2 => Ok(llm(
+                    r#"{"free_talk":"整理上下文。","context_compress":{"summary":"保留任务目标。"}}"#,
+                    3_000,
+                    false,
+                )),
                 3 => Ok(llm(
                     r#"{"free_talk":"删除 memo。","working_still_action":[{"memo":{"op":"delete"}}]}"#,
                     1_200,
@@ -6416,7 +6395,7 @@ fn restart_then_manual_compact_leads_with_notice_and_compact_trailer() {
     // then a final answer closes the turn.
     let mut model = ReplayModel::new([
         Ok(llm(
-            r#"{"working_still_action":{"context_compress":{"summary":"restart compact summary","discard":["pd_1"]}}}"#,
+            r#"{"working_still_action":{"context_compress":{"summary":"restart compact summary"}}}"#,
             1_000,
             false,
         )),
@@ -6497,7 +6476,7 @@ fn mailbox_only_manual_compact_is_consumed_before_model_dispatch() {
     let mut config = test_config();
     let mut model = ReplayModel::new([
         Ok(llm(
-            r#"{"working_still_action":{"context_compress":{"summary":"compacted","discard":["pd_1"]}}}"#,
+            r#"{"working_still_action":{"context_compress":{"summary":"compacted"}}}"#,
             1000,
             false,
         )),

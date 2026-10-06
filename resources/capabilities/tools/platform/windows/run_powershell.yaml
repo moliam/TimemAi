@@ -4,10 +4,6 @@ binding_type: builtin
 binding_name: run_powershell
 requires_host: powershell_execution
 summary: Run local PowerShell commands.
-prompt_synopsis: |
-  {"run_powershell":{"cmd":"Get-ChildItem -Force","timeout_ms":5000}}
-  {"run_powershell":{"cmd":"cargo test","timeout_ms":120000,"tail_out":true}}
-  {"run_powershell":{"loop_cmd":"if (Test-Path build\\done) { exit 0 } else { exit 1 }","interval_ms":1000,"loop_timeout_ms":120000,"once_timeout_ms":5000}}
 description: |
   RUNTIME's local command environment is ({{RUN_POWERSHELL_HOST_ENVIRONMENT}}).
   `run_powershell` runs a PowerShell command on the local Windows machine and
@@ -27,18 +23,16 @@ description: |
   `background=true`. Runtime-managed jobs are cleaned up on cancellation or
   shutdown where the host platform permits. Background and timeout jobs return
   a pid; inspect or stop only jobs owned by this runtime.
-prompt_input: |
-  Choose exactly one mode. For a normal/background command, provide cmd and do
-  not provide loop_cmd or interval_ms; timeout_ms, background, and tail_out are
-  optional. For polling, provide loop_cmd with interval_ms, omit cmd, and keep
-  background false or absent. loop_timeout_ms is the total polling wait budget;
-  once_timeout_ms is the per-check command timeout.
-prompt_result: |
+  For the call itself: for a normal or background command provide cmd and do
+  not provide loop_cmd or interval_ms; timeout_ms, background, and tail_out
+  are optional. For polling, provide loop_cmd with interval_ms, omit cmd, and
+  keep background false or absent. loop_timeout_ms is the total polling wait
+  budget; once_timeout_ms is the per-check command timeout.
   Normal and polling execution use the standard structured result with lifecycle
   `status`, `exit_code`, and stdout/stderr. In polling mode, `exit_code` belongs
   to the last `loop_cmd`, not automatically to the task being waited on. Timem's
-  shared result gate bounds only the model-visible evidence according to
-  tail_out. Background returns `pid=..., now keeps running in background`.
+  shared result gate bounds only the model-visible evidence according to tail_out. Background
+  returns `pid=..., now keeps running in background`.
   A timeout does not automatically kill the command. Track, inspect, and clean
   up still-running pids, and confirm ownership before terminating one.
 input_schema: |
