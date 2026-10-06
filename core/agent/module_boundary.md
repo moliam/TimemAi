@@ -61,9 +61,16 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   parses the registered action name and JSON arguments, while the MCP server is
   authoritative for its full JSON Schema validation. MCP failures are bounded
   action evidence, never response-protocol repair; failed transports are evicted
-  so a late response or dead connection cannot contaminate later calls. Applying a host-requested MCP update
-  compares complete tool definitions and submits one `SYSTEM` capability-change
-  component only when the model-visible capability set actually changed.
+  so a late response or dead connection cannot contaminate later calls. Current
+  MCP definitions come from the capability registry on every request: Native
+  mode sends them through provider API tools, while Inline mode renders one
+  request-level current-capabilities section outside prompt deltas. Historical
+  `mcp_capability_catalog` slices are suppressed during restore so stale schemas
+  cannot compete with current registry state. Applying a host-requested MCP
+  update compares complete tool definitions and submits one concise `SYSTEM`
+  capability-change component only when the model-visible capability set
+  actually changed; that notification never copies full schemas or instruction
+  bodies.
 - Built-in action dispatch by registered action/binding name. Core may route a
   manifest-backed builtin action to its callback through
   `resources/capabilities/tools/registry.rs`, but concrete option parsing and
@@ -127,15 +134,27 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   structured turn input. Core consumes these values when assembling model
   context; reusable runtime loops should not hard-code a terminal host identity.
 - Memory, scratch, raw chat, context shrink/compact, and conflict handling.
-  Successful compaction action results stay minimal: the next model prompt gets
+  Model-visible compression guidance must tell the model what to inspect,
+  preserve, summarize, select, and verify. It may state observable consequences
+  needed to make a safe choice, but must not explain Core's deletion algorithm,
+  telemetry, prompt-rewrite sequence, or reinjection implementation; those
+  details belong in this boundary document, code comments, and tests.
+  Context compression is retain-by-exception: only deltas explicitly named in
+  `keep` remain verbatim; every other live delta is removed after useful state
+  is extracted into the authoritative summary. Optional `offload` ids are saved
+  to scratch before removal and may not overlap `keep`; missing keep/offload ids
+  fail closed. Successful compaction action results stay minimal: the next model prompt gets
   completion status and only actionable follow-up data such as an offload
   `scratch_id`, never the full discarded/offloaded delta-id lists, shrink
   counters, or post-shrink live-ref diagnostics. Detailed ids and token
   accounting remain available to structured host topics; failed compaction may
   include missing ids and current live refs so the model can repair its call.
-  A successful compact re-injects one bounded RUNTIME snapshot of currently
-  applied MCP actions when any are active; pending host configuration and MCP
-  secrets are never included. Across successive successful compactions, every
+  Current MCP schemas are request-level capability state rather than prompt
+  history: they have no delta id, are not selectable by `keep`/`offload`, and
+  remain available after compression without reinjection. The full rendered
+  prompt estimator includes the Inline MCP section, while the dynamic-history
+  estimator excludes it because compression cannot remove it. Across successive
+  successful compactions, every
   assistant-authored replacement summary remains authoritative, while only the
   latest runtime CWD/memo success confirmation stays model-visible.
 - Dynamic prompt-context snapshots and reset semantics. Core owns the complete

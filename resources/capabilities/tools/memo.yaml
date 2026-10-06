@@ -3,8 +3,6 @@ id: memo
 binding_type: builtin
 binding_name: memo
 summary: Let the runtime hold one persistent reminder memo for long-running work so it can remind you after interruption or compression.
-prompt_synopsis: |
-  {"memo":{"op":"create","text":"refined long-task reminder"}}
 description: |
   Use this tool to record/update your goals with the help of the runtime, especially when the user's task requires long-running, step-by-step, multi-turn work. Distill
   the user's demands/goals, constraints, methodology as your work anchor into one concise memo
@@ -17,11 +15,6 @@ description: |
 
   IMPORTANT: before all goals are fully done and declaring `task finish`, you MUST
   delete the memo. You cannot finish some planned intermediate steps and declare work is done unless user asks.
-prompt_input: |
-  Provide `op` ("create" | "update" | "delete") and `text` (required for
-  create/update: the refined reminder; ignored for delete).
-prompt_result: |
-  Success reports the current memo state (created/updated/deleted, active or none).
 input_schema: |
   {
     "type": "object",

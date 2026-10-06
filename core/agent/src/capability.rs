@@ -32,14 +32,6 @@ pub struct CapabilityBinding {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CapabilityPrompt {
-    pub description: String,
-    pub synopsis: String,
-    pub input: String,
-    pub result: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityInputSchema {
     pub schema_type: String,
     pub required: Vec<String>,
@@ -69,9 +61,10 @@ pub struct ToolManifest {
     pub binding: CapabilityBinding,
     pub requires_host: Option<String>,
     pub summary: String,
-    pub prompt: CapabilityPrompt,
+    pub description: String,
     pub input_schema: CapabilityInputSchema,
     pub example: Value,
+    pub example_text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,8 +225,8 @@ fn inject_platform_prompt_values(manifest: &mut ToolManifest, profile: Capabilit
             } else {
                 "Unix host with Bash"
             };
-            manifest.prompt.description =
-                replace_run_bash_host_environment(&manifest.prompt.description, environment);
+            manifest.description =
+                replace_run_bash_host_environment(&manifest.description, environment);
         }
         ("run_powershell", "run_powershell") => {
             let environment = if profile.platform == CapabilityPlatform::Windows && cfg!(windows) {
@@ -241,8 +234,7 @@ fn inject_platform_prompt_values(manifest: &mut ToolManifest, profile: Capabilit
             } else {
                 "Windows host with PowerShell"
             };
-            manifest.prompt.description = manifest
-                .prompt
+            manifest.description = manifest
                 .description
                 .replace(RUN_POWERSHELL_HOST_ENVIRONMENT_PLACEHOLDER, environment);
         }
@@ -263,21 +255,19 @@ fn inject_platform_prompt_values(manifest: &mut ToolManifest, profile: Capabilit
             "absolute/path/to/session/toolrepo/.drafts/draft_123",
         ),
     };
-    for field in [
-        &mut manifest.prompt.description,
-        &mut manifest.prompt.synopsis,
-        &mut manifest.prompt.input,
-        &mut manifest.prompt.result,
-    ] {
-        *field = field
-            .replace("{{PLATFORM_ABSOLUTE_DRAFT_PATH_JSON}}", json_path)
-            .replace("{{PLATFORM_ABSOLUTE_DRAFT_PATH}}", path);
-    }
+    manifest.description = manifest
+        .description
+        .replace("{{PLATFORM_ABSOLUTE_DRAFT_PATH_JSON}}", json_path)
+        .replace("{{PLATFORM_ABSOLUTE_DRAFT_PATH}}", path);
     replace_value_string_placeholder(
         &mut manifest.example,
         "{{PLATFORM_ABSOLUTE_DRAFT_PATH}}",
         path,
     );
+    manifest.example_text = manifest
+        .example_text
+        .replace("{{PLATFORM_ABSOLUTE_DRAFT_PATH_JSON}}", json_path)
+        .replace("{{PLATFORM_ABSOLUTE_DRAFT_PATH}}", path);
 }
 
 fn replace_value_string_placeholder(value: &mut Value, placeholder: &str, replacement: &str) {
@@ -302,34 +292,19 @@ fn replace_run_bash_host_environment(description: &str, environment: &str) -> St
 }
 
 fn native_tool_definition(manifest: &ToolManifest) -> ToolDefinition {
-    let examples = manifest
-        .prompt
-        .synopsis
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .filter_map(|line| {
-            serde_json::from_str::<Value>(line)
-                .ok()?
-                .get(&manifest.id)
-                .filter(|arguments| arguments.is_object())
-                .and_then(|arguments| serde_json::to_string(arguments).ok())
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let examples = if examples.is_empty() {
-        String::new()
-    } else {
-        format!("\n\nValid argument examples:\n{examples}")
-    };
+    // The single machine-checked example is the argument-object source; the
+    // schema shape line is the fallback when the wrapper key is absent.
+    let example = manifest
+        .example
+        .get(&manifest.id)
+        .filter(|arguments| arguments.is_object())
+        .and_then(|arguments| serde_json::to_string(arguments).ok())
+        .unwrap_or_else(|| synopsis_from_schema(manifest));
     ToolDefinition {
         name: manifest.id.clone(),
         description: format!(
-            "{}{}\n\nUsage: {}\n\nResult: {}",
-            manifest.prompt.description.trim(),
-            examples,
-            manifest.prompt.input.trim(),
-            manifest.prompt.result.trim()
+            "{}\n\nValid argument examples:\n{example}",
+            manifest.description.trim()
         ),
         input_schema: provider_input_schema_value(&manifest.input_schema),
     }
@@ -463,16 +438,7 @@ impl CapabilityRegistry {
                     },
                     requires_host: None,
                     summary: tool.description.clone(),
-                    prompt: CapabilityPrompt {
-                        description: tool.description.clone(),
-                        synopsis: format!(
-                            "{} <arguments matching the options below>",
-                            tool.action_name
-                        ),
-                        input: "Provide arguments matching this MCP tool's input options."
-                            .to_string(),
-                        result: format!("Returns the result from MCP server {}.", tool.server_name),
-                    },
+                    description: tool.description.clone(),
                     input_schema: CapabilityInputSchema {
                         schema_type,
                         required,
@@ -484,6 +450,7 @@ impl CapabilityRegistry {
                         provider_schema: tool.input_schema.clone(),
                     },
                     example: Value::Object(Map::new()),
+                    example_text: "{}".to_string(),
                 },
             );
         }
@@ -587,6 +554,12 @@ impl CapabilityRegistry {
             .input_schema
             .properties
             .get(property)
+    }
+
+    pub(crate) fn tool_input_property_declared(&self, action: &str, property: &str) -> bool {
+        self.tools.get(action).is_some_and(|manifest| {
+            input_property_declared(&manifest.input_schema.properties, property)
+        })
     }
 
     pub fn tool_count(&self) -> usize {
@@ -789,15 +762,7 @@ impl CapabilityRegistry {
             let mut item = Map::new();
             item.insert(
                 "description".to_string(),
-                Value::String(manifest.prompt.description.clone()),
-            );
-            item.insert(
-                "input".to_string(),
-                Value::String(manifest.prompt.input.clone()),
-            );
-            item.insert(
-                "result".to_string(),
-                Value::String(manifest.prompt.result.clone()),
+                Value::String(manifest.description.clone()),
             );
             item.insert(
                 "input_schema".to_string(),
@@ -886,11 +851,6 @@ impl CapabilityRegistry {
             .collect()
     }
 
-    pub(crate) fn render_native_dynamic_tool_catalog_json(&self) -> Option<String> {
-        let tools = self.native_dynamic_tool_definitions();
-        (!tools.is_empty()).then(|| render_native_tool_definitions_json(&tools))
-    }
-
     pub(crate) fn render_native_builtin_tool_descriptions_markdown(&self) -> String {
         self.native_builtin_tool_definitions()
             .into_iter()
@@ -960,20 +920,6 @@ impl CapabilityRegistry {
     }
 }
 
-fn render_native_tool_definitions_json(tools: &[ToolDefinition]) -> String {
-    let tools = tools
-        .iter()
-        .map(|tool| {
-            serde_json::json!({
-                "name": tool.name,
-                "description": tool.description,
-                "input_schema": tool.input_schema,
-            })
-        })
-        .collect::<Vec<_>>();
-    serde_json::to_string_pretty(&tools).expect("native tool definitions must serialize")
-}
-
 fn render_tool_manifest_markdown(manifest: &ToolManifest, protocol_format: &str) -> String {
     let mut lines = Vec::new();
     lines.push(format!("#### `{}`", manifest.id));
@@ -989,13 +935,8 @@ fn render_tool_manifest_markdown(manifest: &ToolManifest, protocol_format: &str)
     lines.extend(render_synopsis(manifest, protocol_format));
     lines.push(String::new());
     lines.push("**Description**".to_string());
-    lines.push(one_line(&manifest.prompt.description));
+    lines.push(one_line(&manifest.description));
     lines.push(String::new());
-    if !manifest.prompt.input.trim().is_empty() {
-        lines.push("**Usage**".to_string());
-        lines.push(one_line(&manifest.prompt.input));
-        lines.push(String::new());
-    }
     lines.push("**Options**".to_string());
     for (name, property) in &manifest.input_schema.properties {
         lines.push(format!("- `{name}`: {}", property_option_text(property)));
@@ -1036,43 +977,27 @@ fn render_tool_manifest_markdown(manifest: &ToolManifest, protocol_format: &str)
             .join("; ");
         lines.push(format!("- Conditional one of: {rules}"));
     }
-    if !manifest.prompt.result.trim().is_empty() {
-        lines.push(String::new());
-        lines.push("**Result**".to_string());
-        lines.push(one_line(&manifest.prompt.result));
-        if manifest.binding.binding_type == "mcp" {
-            lines.push(
-                "Runtime validates the XML value shape before dispatch; the MCP server validates advanced schema constraints, and any rejection returns as tool evidence for the next correction."
-                    .to_string(),
-            );
-        } else {
-            lines.push(
-                "If args do not match this tool spec, runtime asks you to repair the response before executing the tool."
-                    .to_string(),
-            );
-        }
-    }
+    lines.push(
+        "If args do not match this tool spec, runtime asks you to repair the response before executing the tool."
+            .to_string(),
+    );
     lines.join("\n")
 }
 
 fn render_synopsis(manifest: &ToolManifest, protocol_format: &str) -> Vec<String> {
-    if manifest.prompt.synopsis.trim().is_empty() {
-        return vec![format!("`{}`", synopsis_from_schema(manifest))];
+    // The machine-checked example_json is the synopsis source in the author's
+    // order; the schema shape line is the fallback without a wrapper key.
+    if manifest
+        .example
+        .get(&manifest.id)
+        .is_some_and(Value::is_object)
+    {
+        let source = manifest.example_text.clone();
+        let rendered = render_protocol_action_synopsis(&manifest.example, &source, protocol_format)
+            .unwrap_or(source);
+        return vec![format!("`{rendered}`")];
     }
-    manifest
-        .prompt
-        .synopsis
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(|line| {
-            let rendered = serde_json::from_str::<Value>(line)
-                .ok()
-                .and_then(|action| render_protocol_action_synopsis(&action, line, protocol_format))
-                .unwrap_or_else(|| line.to_string());
-            format!("`{rendered}`")
-        })
-        .collect()
+    vec![format!("`{}`", synopsis_from_schema(manifest))]
 }
 
 fn render_protocol_action_synopsis(
@@ -1349,6 +1274,36 @@ fn inline_code_list(items: &[String]) -> String {
         .join(", ")
 }
 
+/// Compact a raw JSON document to one line, preserving author key order and
+/// string contents verbatim (serde_json Map is order-sensitive to insertion).
+fn compact_json_text(raw: &str) -> String {
+    let mut output = String::with_capacity(raw.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in raw.chars() {
+        if in_string {
+            output.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                in_string = true;
+                output.push(ch);
+            }
+            c if c.is_whitespace() => {}
+            c => output.push(c),
+        }
+    }
+    output
+}
+
 fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
     let mut top = BTreeMap::<String, String>::new();
     let mut input_properties = BTreeMap::<String, Value>::new();
@@ -1358,9 +1313,6 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
     let mut required_any_when = Vec::<CapabilityRequiredWhen>::new();
     let mut enum_fields = BTreeMap::<String, Vec<String>>::new();
     let mut prompt_description = String::new();
-    let mut prompt_synopsis = String::new();
-    let mut prompt_input = String::new();
-    let mut prompt_result = String::new();
     let mut input_schema_json = String::new();
     let mut example_json = String::new();
     let mut section: Option<&str> = None;
@@ -1373,17 +1325,12 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
             section = Some("description");
             continue;
         }
-        if line == "prompt_input: |" {
-            section = Some("prompt_input");
-            continue;
-        }
-        if line == "prompt_synopsis: |" {
-            section = Some("prompt_synopsis");
-            continue;
-        }
-        if line == "prompt_result: |" {
-            section = Some("prompt_result");
-            continue;
+        if line.starts_with("prompt_synopsis:")
+            || line.starts_with("prompt_input:")
+            || line.starts_with("prompt_result:")
+        {
+            // The manifest contract is description + input_schema + example.
+            return Err(format!("removed_prompt_field:{line}"));
         }
         if line == "input_properties:" {
             section = Some("input_properties");
@@ -1423,24 +1370,6 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
                     prompt_description.push('\n');
                 }
                 prompt_description.push_str(line.trim());
-            }
-            Some("prompt_input") if line.starts_with("  ") => {
-                if !prompt_input.is_empty() {
-                    prompt_input.push('\n');
-                }
-                prompt_input.push_str(line.trim());
-            }
-            Some("prompt_synopsis") if line.starts_with("  ") => {
-                if !prompt_synopsis.is_empty() {
-                    prompt_synopsis.push('\n');
-                }
-                prompt_synopsis.push_str(line.trim());
-            }
-            Some("prompt_result") if line.starts_with("  ") => {
-                if !prompt_result.is_empty() {
-                    prompt_result.push('\n');
-                }
-                prompt_result.push_str(line.trim());
             }
             Some("example_json") if line.starts_with("  ") => {
                 example_json.push_str(line.strip_prefix("  ").unwrap_or(line));
@@ -1557,6 +1486,7 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
     let id = required_top(&top, "id")?;
     let example = serde_json::from_str(example_json.trim())
         .map_err(|err| format!("{id}:example_json_invalid:{err}"))?;
+    let example_text = compact_json_text(example_json.trim());
     let input_schema = if input_schema_json.trim().is_empty() {
         let mut schema = CapabilityInputSchema {
             schema_type: "object".to_string(),
@@ -1573,12 +1503,6 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
     } else {
         parse_input_schema_json(&id, input_schema_json.trim())?
     };
-    let prompt_input = if prompt_input.trim().is_empty() {
-        "Use the fields shown in the example; load this tool with capmgr if full details are needed."
-            .to_string()
-    } else {
-        prompt_input
-    };
     Ok(ToolManifest {
         kind: required_top(&top, "kind")?,
         id,
@@ -1589,14 +1513,10 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
         },
         requires_host: optional_top(&top, "requires_host"),
         summary: required_top(&top, "summary")?,
-        prompt: CapabilityPrompt {
-            description: prompt_description,
-            synopsis: prompt_synopsis,
-            input: prompt_input,
-            result: prompt_result,
-        },
+        description: prompt_description,
         input_schema,
         example,
+        example_text,
     })
 }
 
@@ -2256,7 +2176,7 @@ fn validate_manifest(manifest: &ToolManifest) -> Result<(), String> {
         return Err(format!("{}:unsupported_builtin_binding", manifest.id));
     }
     validate_host_requirement(manifest)?;
-    if manifest.prompt.description.trim().is_empty() {
+    if manifest.description.trim().is_empty() {
         return Err(format!("{}:description_required", manifest.id));
     }
     if manifest.input_schema.schema_type != "object" {
@@ -2305,7 +2225,7 @@ fn validate_overlay_manifest(
         }
         _ => return Err(format!("{}:unsupported_binding_type", manifest.id)),
     }
-    if manifest.prompt.description.trim().is_empty() {
+    if manifest.description.trim().is_empty() {
         return Err(format!("{}:description_required", manifest.id));
     }
     if manifest.input_schema.schema_type != "object" {

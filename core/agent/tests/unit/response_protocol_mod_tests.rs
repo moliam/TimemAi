@@ -190,8 +190,8 @@ fn json_xml_protocols_parse_complex_actions_with_protocol_like_string_args() {
 #[test]
 fn json_xml_protocols_parse_same_context_compress() {
     assert_protocols_equivalent(
-        r#"{"free_talk":"compact","context_compress":{"discard":["pd_a"],"offload":["pd_b"],"summary":"keep state"}}"#,
-        "\x3cASSISTANT>\x3cfree_talk>compact\x3c/free_talk>\x3ccontext_compress>\x3cdiscard>pd_a\x3c/discard>\x3coffload>pd_b\x3c/offload>\x3csummary>keep state\x3c/summary>\x3c/context_compress>\x3c/ASSISTANT>",
+        r#"{"free_talk":"compact","context_compress":{"keep":["pd_a"],"offload":["pd_b"],"summary":"keep state"}}"#,
+        "\x3cASSISTANT>\x3cfree_talk>compact\x3c/free_talk>\x3ccontext_compress>\x3ckeep>pd_a\x3c/keep>\x3coffload>pd_b\x3c/offload>\x3csummary>keep state\x3c/summary>\x3c/context_compress>\x3c/ASSISTANT>",
     );
 }
 

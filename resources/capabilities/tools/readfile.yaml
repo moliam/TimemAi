@@ -3,11 +3,6 @@ id: readfile
 binding_type: builtin
 binding_name: readfile
 summary: Read a bounded range from a normal text file.
-prompt_synopsis: |
-  {"readfile":{"path":"src/main.rs","starter":{"line_nr":20},"ender":{"line_nr":80}}}
-  {"readfile":{"path":"logs/app.log","starter":{"byte_nr":0},"ender":{"byte_nr":4095}}}
-  {"readfile":{"path":"logs/app.log","tail_out":true}}
-  {"readfile":{"path":"src/main.rs","starter":{"match":"fn main"},"ender":{"match":"}"}}}
 description: |
   Please use `readfile` instead of shell commands when reading text files; the Runtime can
   better monitor and serve you through this tool. Relative
@@ -16,15 +11,9 @@ description: |
   returned content. Set `tail_out=true` to retain the end of an oversized
   selected range instead of its beginning. Each read has a default execution
   timeout of 10 seconds.
-prompt_input: |
-  Provide path. Omit starter and ender to read from the beginning, or give each
-  selector as an object containing exactly one of line_nr, byte_nr, or match.
-  Never combine selector fields in the same starter or ender object. line_nr is
-  1-based; byte_nr is a 0-based byte offset in the original file.
-prompt_result: |
-  Returns the selected text plus canonical path, encoding, byte and line range,
-  and whether the selected content was limited. Invalid selectors or unsafe,
-  binary, oversized, missing, or undecodable files return structured errors.
+  Returns the selected text plus canonical path, encoding, byte and line
+  range, and whether the selected content was limited; invalid selectors or
+  unsafe, binary, oversized, missing, or undecodable files return structured errors.
 input_schema: |
   {
     "type": "object",

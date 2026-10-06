@@ -26,10 +26,7 @@ CONFIRM_PREFIX: "Now let me think seriously twice before I announce stop. Review
 Two mutually-exclusive state branches:
 - `<actions>`: work should continue, generate actions. Refer to `Actions` for available actions.
   Tool actions may include a short, descriptive `name` attribute of at most 128 characters. If omitted, runtime may use the tool name for display. The runtime—not the model—assigns the tool-call id used to correlate results and still-running reminders. Example: `<run_bash name="check git diff"><cmd>git diff</cmd></run_bash>`.
-- `<context_compress>` maintains/reorganizes dynamic context for future work. When combined with other capabilities inside `<actions>`, it must be the first action. Later actions run only after compression succeeds. Target it with prompt delta ids. Two compression methods are provided:
-  - discard: just throw from the context.
-  - offload: will be saved into scratch memory, the runtime will return a id with which you can retrieve the pd back using `memmgr` `context_compress` should only targets runtime-provided dynamic delta ids.
-prompt.
+- `<context_compress>` creates the checkpoint used for future work. Follow the `context_compress` capability instructions when choosing its non-empty `<summary>` and optional repeated `<keep>`/`<offload>` delta-id elements. Use only runtime-provided ids and never place one id in both lists. When combined with other capabilities inside `<actions>`, put it first; later actions run only after compression succeeds.
 - `<final_answer>`: the work summary for user, by default in raw Markdown(by default). To be valid, it MUST be preceeded with `<finish_confirm>`. Runtime will stop this turn's loop on a valid final_answer, BE RESPONSIBLE.
 
 Note: inside xml label, if strings containing such as `<`, `>`, or `&` special characters/complex content, should use `<![CDATA[...]]>` to wrap it.
@@ -73,10 +70,10 @@ EXAMPLE3: Planned to stop, but "think twice" changes your idea and you continue 
 
 EXAMPLE4: context compress
 <ASSISTANT>
-  <free_talk>There are too many stale things in context. I can compress it for more room. Let me discard some, and offload some stale/redundant contexts.</free_talk>
+  <free_talk>There are too many stale things in context. I will extract their useful state into a compact summary, preserve only one exact delta, and offload one bulky delta.</free_talk>
   <actions>
     <context_compress>
-      <discard>pd_1,pd_3,pd_8,pd_9,pd_10,pd_11</discard>
+      <keep>pd_11</keep>
       <offload>pd_2</offload>
       <summary>
     <![CDATA[

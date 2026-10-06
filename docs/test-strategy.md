@@ -65,7 +65,7 @@ checks. If a dimension is not applicable, record that residual decision in
   real `AgentCore`, real action execution, real audit writes, and UI decisions.
 - Replay story tests: scripted multi-turn user/model conversations that exercise
   normal replies, malformed model recovery, memory retrieve, scratch offload,
-  context discard, audit writes, and observation rendering in one end-to-end
+  context replacement/offload, audit writes, and observation rendering in one end-to-end
   path.
 - Real TTY smoke: compiled release binary driven through a pseudo terminal for
   input/editor/menu behavior.
@@ -179,7 +179,7 @@ Latency evidence follows the same rule as Web performance tracing: use monotonic
 | Prompt cache planning | `prompt_cache_strategy_*`, prefix-cache simulator tests with bounded lookback, model request cache-control tests, Anthropic cache read/create usage tests, `scripts/kvc_replay_test.sh`, `scripts/kvc_replay.py` local audit replay | `session_turn_preserves_incremental_prompt_cache_plan_across_rounds`, `session_turn_preserves_cache_plan_with_json_response_protocol`, `session_turn_preserves_cache_plan_with_xml_response_protocol`, request audit redaction/hash tests | full CI runs JSON/XML and native Responses segmented-audit fixtures; replay reports provider-observed usage separately from structural prefix continuity and simulation; run local audit replay before cache-strategy releases |
 | Prompt delta/slice rendering | prompt segmentation, multi-slice core tests, focused response-repair slice tests | shrink session E2E | edge regression shrink group |
 | Forced shrink | core shrink threshold, stale observed-token invalidation, provider-reported post-compression usage verification, bounded one-follow-up state, static-dominant guard | `session_turn_forced_shrink_runs_to_final_without_repeated_shrink` | edge regression shrink + session groups |
-| Scratch notes and context compress offload | scratch write/read/query/delete, context_compress discard/offload refs, invalid refs, missing fields | `session_turn_scratch_context_offload_records_id_and_continues` | session group |
+| Scratch notes and context compress offload | scratch write/read/query/delete, context_compress keep/offload refs, summary-only full replacement, invalid refs, missing fields, and rejected parameters outside the current tool schema | `session_turn_scratch_context_offload_records_id_and_continues` | session group |
 | Durable memory | query/update/delete, expected version, SQL read surface | realistic multi-turn memory story | memory concurrency + realistic story groups |
 | Multi-CLI memory conflicts | mem guard cross-process and same-version conflict tests | realistic story exercises shared storage shape | memory concurrency group |
 | Chat history | persisted query, delete, SQL time-window, current prompt fallback | realistic story | full CI |

@@ -583,10 +583,9 @@ fn capability_prompt_exposes_the_same_nested_types_that_xml_runtime_accepts() {
     assert!(prompt.contains(
         "Type: array<object {count: integer, enabled: boolean, name: string}>. Rows to submit."
     ));
-    assert!(prompt.contains("Provide arguments matching this MCP tool's input options."));
-    assert!(prompt.contains(
-        "the MCP server validates advanced schema constraints, and any rejection returns as tool evidence"
-    ));
+    assert!(prompt.contains("mcp_typed__submit"));
+    assert!(!prompt.contains("Provide arguments matching this MCP tool's input options."));
+    assert!(!prompt.contains("the MCP server validates advanced schema constraints"));
     assert!(!prompt.contains("Pass a JSON object matching this MCP tool"));
 }
 
@@ -839,6 +838,36 @@ fn malformed_raw_responses_map_to_distinct_issue_and_guidance() {
 }
 
 #[test]
+fn rejects_all_undeclared_context_compress_fields_uniformly() {
+    for field in ["discard", "throw", "remove"] {
+        let raw = format!(
+            "<ASSISTANT><context_compress><{field}>pd_1</{field}><summary>state</summary></context_compress></ASSISTANT>"
+        );
+        let parsed = parse_xml_envelope(&raw, &caps());
+        let expected = format!("context_compress[0].input.{field}_unsupported");
+        assert_eq!(
+            parsed.repair_issue.as_deref(),
+            Some(expected.as_str()),
+            "field={field}"
+        );
+        assert!(parsed.context_compresses.is_empty(), "field={field}");
+        assert!(xml_repair_instruction(&expected).contains("capability schema"));
+    }
+}
+
+#[test]
+fn context_compress_summary_cdata_does_not_create_fields() {
+    let raw = "<ASSISTANT><context_compress><summary><![CDATA[state mentions <throw> and <discard> as text]]></summary></context_compress></ASSISTANT>";
+    let parsed = parse_xml_envelope(raw, &caps());
+    assert!(parsed.repair_issue.is_none(), "{:?}", parsed.repair_issue);
+    assert_eq!(parsed.context_compresses.len(), 1);
+    assert_eq!(
+        parsed.context_compresses[0].summary,
+        "state mentions <throw> and <discard> as text"
+    );
+}
+
+#[test]
 fn malformed_response_corpus_maps_raw_output_to_precise_repair_reason() {
     struct Case {
         name: &'static str,
@@ -904,7 +933,7 @@ fn malformed_response_corpus_maps_raw_output_to_precise_repair_reason() {
             },
             Case {
                 name: "compact and final branches together",
-                raw: "<ASSISTANT><context_compress><discard>pd_1</discard><summary>state</summary></context_compress><final_answer>done</final_answer></ASSISTANT>",
+                raw: "<ASSISTANT><context_compress><summary>state</summary></context_compress><final_answer>done</final_answer></ASSISTANT>",
                 issue: "state_branch_must_choose_one",
                 guidance: "selected more than one state branch",
             },
@@ -927,14 +956,20 @@ fn malformed_response_corpus_maps_raw_output_to_precise_repair_reason() {
                 guidance: "do not satisfy the capability schema",
             },
             Case {
-                name: "compact missing ids",
-                raw: "<ASSISTANT><context_compress><summary>state</summary></context_compress></ASSISTANT>",
-                issue: "context_compress[0].ids_required",
-                guidance: "at least one non-empty <discard> or <offload>",
+                name: "compact undeclared field",
+                raw: "<ASSISTANT><context_compress><throw>pd_1</throw><summary>state</summary></context_compress></ASSISTANT>",
+                issue: "context_compress[0].input.throw_unsupported",
+                guidance: "do not satisfy the capability schema",
+            },
+            Case {
+                name: "compact keep offload overlap",
+                raw: "<ASSISTANT><context_compress><keep>pd_1</keep><offload>pd_1</offload><summary>state</summary></context_compress></ASSISTANT>",
+                issue: "context_compress[0].keep_offload_overlap:pd_1",
+                guidance: "cannot appear in both <keep> and <offload>",
             },
             Case {
                 name: "compact missing summary",
-                raw: "<ASSISTANT><context_compress><discard>pd_1</discard></context_compress></ASSISTANT>",
+                raw: "<ASSISTANT><context_compress><keep>pd_1</keep></context_compress></ASSISTANT>",
                 issue: "context_compress[0].summary_required",
                 guidance: "missing a non-empty <summary>",
             },
@@ -991,7 +1026,14 @@ fn common_action_repair_issues_have_specific_correction_guidance() {
             "actions[0].input.cmd_required",
             "do not satisfy the capability schema",
         ),
-        ("context_compress[0].ids_required", "at least one non-empty"),
+        (
+            "context_compress[0].input.throw_unsupported",
+            "do not satisfy the capability schema",
+        ),
+        (
+            "context_compress[0].keep_offload_overlap:pd_1",
+            "cannot appear in both <keep> and <offload>",
+        ),
         (
             "context_compress[0].summary_required",
             "missing a non-empty <summary>",
@@ -1238,7 +1280,7 @@ fn old_finished_status_requests_repair() {
 #[test]
 fn rejects_legacy_context_compact_tag() {
     let env = parse_xml_envelope(
-        "<ASSISTANT><context_compact><discard>pd_a</discard><summary>must be rejected</summary></context_compact></ASSISTANT>",
+        "<ASSISTANT><context_compact><prune>pd_a</prune><summary>must be rejected</summary></context_compact></ASSISTANT>",
         &caps(),
     );
     assert!(
@@ -1254,7 +1296,7 @@ fn parses_context_compress() {
         r#"<ASSISTANT>
 <free_talk>need compact</free_talk>
 <context_compress>
-<discard>pd_a</discard>
+<keep>pd_a</keep>
 <offload>pd_b</offload>
 <summary><![CDATA[keep state]]></summary>
 </context_compress>
@@ -1265,7 +1307,7 @@ fn parses_context_compress() {
     assert!(env.repair_issue.is_none());
     assert_eq!(env.context_compresses.len(), 1);
     assert_eq!(env.context_compresses[0].delta_ids, vec!["pd_a", "pd_b"]);
-    assert_eq!(env.context_compresses[0].discard_delta_ids, vec!["pd_a"]);
+    assert_eq!(env.context_compresses[0].keep_delta_ids, vec!["pd_a"]);
     assert_eq!(env.context_compresses[0].offload_delta_ids, vec!["pd_b"]);
     assert_eq!(env.context_compresses[0].summary, "keep state");
 }
@@ -1276,7 +1318,7 @@ fn context_compress_summary_raw_xml_is_opaque_text() {
         r#"<ASSISTANT>
 <free_talk>need compact</free_talk>
 <context_compress>
-<discard>pd_a</discard>
+<keep>pd_a</keep>
 <summary>
 Keep this protocol example:
 <ASSISTANT><final_answer>not real</final_answer>
@@ -1318,7 +1360,7 @@ fn xml_state_branch_must_choose_one() {
         r#"<ASSISTANT>
 <free_talk>compact and act</free_talk>
 <context_compress>
-<discard>pd_a</discard>
+<keep>pd_a</keep>
 <summary>keep state</summary>
 </context_compress>
 <actions><run_bash><cmd>pwd</cmd></run_bash></actions>

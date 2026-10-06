@@ -5068,26 +5068,18 @@ fn context_compress_threshold_update_rechecks_existing_context_before_next_model
                         truncated: false,
                     })
                 }
-                2 => {
-                    let delta_id = prompt
-                        .split("[BEGIN DELTA delta_id: ")
-                        .nth(1)
-                        .and_then(|tail| tail.split(']').next())
-                        .expect("threshold request should expose a live delta id");
-                    Ok(LlmResponse {
-                        tool_calls: Vec::new(),
-                        content: serde_json::json!({
-                            "context_compress": {
-                                "discard": [delta_id],
-                                "summary": "retain the active threshold-update test state"
-                            }
-                        })
-                        .to_string(),
-                        model_name: config.model.clone(),
-                        usage: UsageStats::zero(),
-                        truncated: false,
+                2 => Ok(LlmResponse {
+                    tool_calls: Vec::new(),
+                    content: serde_json::json!({
+                        "context_compress": {
+                            "summary": "retain the active threshold-update test state"
+                        }
                     })
-                }
+                    .to_string(),
+                    model_name: config.model.clone(),
+                    usage: UsageStats::zero(),
+                    truncated: false,
+                }),
                 _ => Ok(LlmResponse {
                     tool_calls: Vec::new(),
                     content: r#"{"status":"ALL_FINISHED","final_answer":"Done"}"#.to_string(),
@@ -5149,11 +5141,11 @@ fn context_compress_threshold_update_rechecks_existing_context_before_next_model
         "compression should be followed by completion"
     );
     assert!(
-        !prompts[0].contains("[Context threshold WARN]"),
+        !prompts[0].contains("[Context WARN]"),
         "85% usage must remain below the original 90% threshold"
     );
     assert!(
-        prompts[1].contains("[Context threshold WARN]")
+        prompts[1].contains("[Context WARN]")
             && !prompts[1].contains("[BEGIN THRESHOLD COMPRESSION GUIDANCE]"),
         "lowering the threshold to 80% must re-evaluate existing 85% context before the next request without injecting a second compression policy: {}",
         prompts[1]
@@ -5842,8 +5834,8 @@ fn queued_mcp_update_is_applied_before_the_next_user_turn_prompt() {
     let prompt = captured.lock().unwrap().clone();
     assert!(prompt.contains("mcp_demo__echo"));
     let dynamic_heading = prompt
-        .find("MCP update: the following MCP capabilities are enabled")
-        .expect("MCP catalog should be in a persistent dynamic delta");
+        .find("## Current MCP Capabilities")
+        .expect("current MCP capabilities should be rendered for the request");
     let static_end = prompt
         .find("[END SYSTEM PROMPT]")
         .or_else(|| prompt.find("</Timem System Prompt>"))

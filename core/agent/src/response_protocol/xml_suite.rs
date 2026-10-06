@@ -125,7 +125,7 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
     let continue_work = final_answer.trim().is_empty();
 
     let context_compresses = if repair_issue.is_none() {
-        parse_context_compresses_from_fields(&response, &mut repair_issue)
+        parse_context_compresses_from_fields(&response, capabilities, &mut repair_issue)
     } else {
         Vec::new()
     };
@@ -306,9 +306,10 @@ struct ResponseFields {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ContextCompressFields {
-    discard: String,
+    keep: String,
     offload: String,
     summary: String,
+    field_names: Vec<String>,
 }
 
 fn parse_response_fields(text: &str) -> Option<ResponseFields> {
@@ -497,10 +498,63 @@ fn scan_response_body(body: &str) -> ResponseFields {
 
 fn parse_context_compress_fields(body: &str) -> ContextCompressFields {
     ContextCompressFields {
-        discard: extract_tag_text(body, "discard", false).unwrap_or_default(),
+        keep: extract_tag_text(body, "keep", false).unwrap_or_default(),
         offload: extract_tag_text(body, "offload", false).unwrap_or_default(),
         summary: extract_tag_text(body, "summary", true).unwrap_or_default(),
+        field_names: context_compress_field_names(body),
     }
+}
+
+fn context_compress_field_names(body: &str) -> Vec<String> {
+    let mut field_names = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < body.len() {
+        while body
+            .as_bytes()
+            .get(cursor)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            cursor += 1;
+        }
+        if cursor >= body.len() {
+            break;
+        }
+        if !body[cursor..].starts_with('<') {
+            cursor += body[cursor..].find('<').unwrap_or(body.len() - cursor);
+            continue;
+        }
+        if body[cursor..].starts_with("<![CDATA[") {
+            let Some(end) = body[cursor + "<![CDATA[".len()..].find("]]>") else {
+                break;
+            };
+            cursor += "<![CDATA[".len() + end + "]]>".len();
+            continue;
+        }
+        if body[cursor..].starts_with("</") {
+            break;
+        }
+
+        let open_start = cursor;
+        cursor += 1;
+        let Some(name) = parse_xml_name(body, &mut cursor) else {
+            break;
+        };
+        let Some(open_end) = find_tag_end(body, open_start) else {
+            break;
+        };
+        let self_closing = is_self_closing_start_tag(&body[open_start..=open_end]);
+        let next_cursor = if self_closing {
+            open_end + 1
+        } else {
+            let Some(close_start) = find_close_tag_outside_cdata(body, open_end + 1, &name) else {
+                break;
+            };
+            close_start + close_tag_len(&name)
+        };
+        field_names.push(name);
+        cursor = next_cursor;
+    }
+    field_names
 }
 
 fn extract_tag_text(body: &str, tag: &str, use_last_close: bool) -> Option<String> {
@@ -1335,23 +1389,37 @@ fn expect_xml(body: &str, cursor: &mut usize, expected: &str, issue: &str) -> Re
 
 fn parse_context_compresses_from_fields(
     response: &ResponseFields,
+    capabilities: &CapabilityRegistry,
     repair_issue: &mut Option<String>,
 ) -> Vec<ParsedContextCompress> {
     let mut compacts = Vec::new();
     for (idx, item) in response.context_compresses.iter().enumerate() {
-        let discard_delta_ids = split_id_list(&item.discard);
+        if let Some(field) = item
+            .field_names
+            .iter()
+            .find(|field| !capabilities.tool_input_property_declared("context_compress", field))
+        {
+            if repair_issue.is_none() {
+                *repair_issue = Some(format!("context_compress[{idx}].input.{field}_unsupported"));
+            }
+            break;
+        }
+        let keep_delta_ids = split_id_list(&item.keep);
         let offload_delta_ids = split_id_list(&item.offload);
-        let mut delta_ids = discard_delta_ids.clone();
+        if let Some(id) = keep_delta_ids
+            .iter()
+            .find(|id| offload_delta_ids.contains(id))
+        {
+            if repair_issue.is_none() {
+                *repair_issue = Some(format!("context_compress[{idx}].keep_offload_overlap:{id}"));
+            }
+            break;
+        }
+        let mut delta_ids = keep_delta_ids.clone();
         delta_ids.extend(offload_delta_ids.iter().cloned());
         delta_ids.sort();
         delta_ids.dedup();
         let summary = item.summary.trim().to_string();
-        if delta_ids.is_empty() {
-            if repair_issue.is_none() {
-                *repair_issue = Some(format!("context_compress[{idx}].ids_required"));
-            }
-            break;
-        }
         if summary.is_empty() {
             if repair_issue.is_none() {
                 *repair_issue = Some(format!("context_compress[{idx}].summary_required"));
@@ -1360,7 +1428,7 @@ fn parse_context_compresses_from_fields(
         }
         compacts.push(ParsedContextCompress {
             call_id: super::generated_inline_tool_call_id(),
-            discard_delta_ids,
+            keep_delta_ids,
             offload_delta_ids,
             delta_ids,
             slice_ids: Vec::new(),
@@ -1492,8 +1560,10 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
         issue if issue.contains(".input.") => {
             "The XML tool arguments do not satisfy the capability schema. Correct the named attribute or child element; arrays use <item> children and objects use field-name children."
         }
-        issue if issue.starts_with("context_compress[") && issue.ends_with(".ids_required") => {
-            "The <context_compress> block must contain at least one non-empty <discard> or <offload> delta-id list, followed by <summary>."
+        issue if issue.starts_with("context_compress[")
+            && issue.contains(".keep_offload_overlap:") =>
+        {
+            "The same delta id cannot appear in both <keep> and <offload>. Keep it verbatim or save it to scratch before removal, not both."
         }
         issue if issue.starts_with("context_compress[") && issue.ends_with(".summary_required") => {
             "The <context_compress> block is missing a non-empty <summary> describing the essential retained task state."

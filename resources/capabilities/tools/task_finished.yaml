@@ -3,18 +3,12 @@ id: task_finished
 binding_type: builtin
 binding_name: task_finished
 summary: Explicitly declare that all work for the current user turn is complete and deliver the final answer.
-prompt_synopsis: |
-  {"task_finished":{"summary":"final user-facing answer"}}
 description: |
   Call this tool when all user's valid asked task is finished. Do not call it
   while any work, verification, or pending question remains; keep using other tools
   instead. The `summary` must be a final answer containing complete, polished, summarized knowledge,
   not a placeholder or progress note. Neatly organize the answer with lists/table, etc.
-prompt_input: |
-  Provide a non-empty `summary` containing the complete final user-facing answer
-  in the user's language.
-prompt_result: |
-  Success ends the turn and shows the summary to the user as the final answer.
+  Provide the summary in the user's language.
 input_schema: |
   {
     "type": "object",

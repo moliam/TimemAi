@@ -6,11 +6,8 @@ pub(crate) fn from_action(action: &ParsedAction) -> Result<ParsedContextCompress
         .raw_input
         .as_object()
         .ok_or_else(|| "context_compress.input_must_be_object".to_string())?;
-    let discard_delta_ids = string_ids(input.get("discard"), "discard")?;
+    let keep_delta_ids = string_ids(input.get("keep"), "keep")?;
     let offload_delta_ids = string_ids(input.get("offload"), "offload")?;
-    if discard_delta_ids.is_empty() && offload_delta_ids.is_empty() {
-        return Err("context_compress.discard_or_offload_required".to_string());
-    }
     let summary = input
         .get("summary")
         .and_then(Value::as_str)
@@ -18,7 +15,8 @@ pub(crate) fn from_action(action: &ParsedAction) -> Result<ParsedContextCompress
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "context_compress.summary_required".to_string())?
         .to_string();
-    let mut delta_ids = discard_delta_ids.clone();
+    reject_overlap(&keep_delta_ids, &offload_delta_ids)?;
+    let mut delta_ids = keep_delta_ids.clone();
     for id in &offload_delta_ids {
         if !delta_ids.contains(id) {
             delta_ids.push(id.clone());
@@ -26,7 +24,7 @@ pub(crate) fn from_action(action: &ParsedAction) -> Result<ParsedContextCompress
     }
     Ok(ParsedContextCompress {
         call_id: action.call_id.clone(),
-        discard_delta_ids,
+        keep_delta_ids,
         offload_delta_ids,
         delta_ids,
         slice_ids: Vec::new(),
@@ -56,7 +54,7 @@ fn string_ids(value: Option<&Value>, field: &str) -> Result<Vec<String>, String>
 }
 
 pub(crate) fn is_delta_list_field(name: &str) -> bool {
-    matches!(name, "discard" | "offload")
+    matches!(name, "keep" | "offload")
 }
 
 pub(crate) fn inline_xml_delta_list(text: &str) -> Value {
@@ -67,4 +65,11 @@ pub(crate) fn inline_xml_delta_list(text: &str) -> Value {
             .map(|id| Value::String(id.to_string()))
             .collect(),
     )
+}
+
+fn reject_overlap(keep: &[String], offload: &[String]) -> Result<(), String> {
+    if let Some(id) = keep.iter().find(|id| offload.contains(id)) {
+        return Err(format!("context_compress.keep_offload_overlap:{id}"));
+    }
+    Ok(())
 }

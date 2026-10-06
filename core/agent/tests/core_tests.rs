@@ -470,14 +470,9 @@ fn context_compress_resets_readfile_first_touch_tracking() {
     assert!(first.contains(&dir_note), "{first}");
     assert!(first.contains(&file_c_note), "{first}");
 
-    let delta_ids = field_values(&first, "delta_id");
-    assert!(!delta_ids.is_empty(), "{first}");
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(format!(
-            r#"{{"context_compress":{{"discard":{},"summary":"reset first touch tracking"}}}}"#,
-            serde_json::to_string(&delta_ids).unwrap()
-        )),
+        content: scored(r#"{"context_compress":{"summary":"reset first touch tracking"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -637,7 +632,7 @@ fn manual_context_compress_request_carries_manual_trailer_and_clears_after_compa
     );
     assert!(
         first.contains(
-            "Compress context as the tool context_compress desc suggests, before further work"
+            "Please compress it now (see the `context_compress` tool description), before further work"
         ),
         "{first}"
     );
@@ -671,19 +666,11 @@ fn manual_context_compress_request_carries_manual_trailer_and_clears_after_compa
     );
 
     // Compacting clears the requirement; the next request is a normal one.
-    let delta_id = first
-        .split(
-            "
-",
-        )
-        .find_map(|line| line.strip_prefix("[BEGIN DELTA delta_id: "))
-        .and_then(|rest| rest.split(",").next())
-        .expect("delta id");
     let after = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(format!(
-            r#"{{"status":"working","free_talk":"压缩完成。","context_compress":{{"discard":[{delta_id:?}],"summary":"保留目标"}}}}"#
-        )),
+        content: scored(
+            r#"{"status":"working","free_talk":"压缩完成。","context_compress":{"summary":"保留目标"}}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -735,7 +722,7 @@ fn manual_compact_succeeds_on_any_successful_compaction() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected model continuation, got {other:?}"),
     };
-    // The manual trailer carries qualitative guidance (discard stale deltas,
+    // The manual trailer carries qualitative guidance (replace stale deltas,
     // short valuable summary), not a quantified shrink floor.
     assert!(
         prompt.contains("User manually requests context compression."),
@@ -743,7 +730,7 @@ fn manual_compact_succeeds_on_any_successful_compaction() {
     );
     assert!(
         prompt.contains(
-            "Compress context as the tool context_compress desc suggests, before further work"
+            "Please compress it now (see the `context_compress` tool description), before further work"
         ),
         "manual trailer must point at the context_compress tool desc: {prompt}"
     );
@@ -753,13 +740,13 @@ fn manual_compact_succeeds_on_any_successful_compaction() {
         .map(|rest| rest.split(',').next().unwrap_or("").to_string())
         .collect();
     assert!(delta_ids.len() >= 2, "{prompt}");
-    // Even a compact that discards only part of the deltas is accepted: no
-    // numeric shrink gate, so the requirement clears on success.
-    let partial = serde_json::to_string(&delta_ids[..1]).unwrap();
+    // Even a compact that retains most deltas is accepted: no numeric shrink
+    // gate, so the requirement clears on any successful rewrite.
+    let retained = serde_json::to_string(&delta_ids[1..]).unwrap();
     let after = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"status":"working","free_talk":"压缩完成。","context_compress":{{"discard":{partial},"summary":"保留任务状态"}}}}"#
+            r#"{{"status":"working","free_talk":"压缩完成。","context_compress":{{"keep":{retained},"summary":"保留任务状态"}}}}"#
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -828,8 +815,8 @@ fn mcp_action_runs_through_protocol_registry_and_executor() {
     };
     assert!(prompt.contains("mcp_demo_mcp__echo"), "{prompt}");
     let dynamic_heading = prompt
-        .find("MCP update: the following MCP capabilities are enabled")
-        .expect("MCP catalog must be stored in a prompt delta");
+        .find("## Current MCP Capabilities")
+        .expect("current MCP capabilities must be rendered for this request");
     assert!(
         !prompt[..dynamic_heading].contains("mcp_demo_mcp__echo"),
         "{prompt}"
@@ -2090,7 +2077,7 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.ends_with(
-        "[Context threshold WARN] Context is too long. Compress context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
+        "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
     ));
     let (_, threshold, quality_target) = core
         .take_pending_compact_request_notice()
@@ -2161,7 +2148,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.ends_with(
-        "[Context threshold WARN] Context is too long. Compress context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
+        "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
     ));
     assert!(!prompt.contains("Long-context maintenance:"));
     let (estimated, threshold, quality_target) = core
@@ -2171,11 +2158,8 @@ fn runtime_host_configuration_sync_is_core_owned() {
     assert!(estimated >= threshold);
     assert_eq!(threshold, 2_700);
 
-    let compact_ids = field_values(&prompt, "delta_id");
-    let compact_response = format!(
-        r#"{{"context_compress":{{"discard":{},"summary":"retain runtime configuration test state"}}}}"#,
-        serde_json::to_string(&compact_ids).unwrap()
-    );
+    let compact_response =
+        r#"{"context_compress":{"summary":"retain runtime configuration test state"}}"#;
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(compact_response),
@@ -2374,7 +2358,7 @@ fn shorter_worker_role_description_is_not_mistaken_for_a_repeated_prefix() {
 }
 
 #[test]
-fn worker_role_is_expanded_again_after_its_delta_is_discarded() {
+fn worker_role_is_expanded_again_after_its_delta_is_removed_by_compression() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -2385,15 +2369,11 @@ fn worker_role_is_expanded_again_after_its_delta_is_discarded() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    let delta_id = first_field_value(&first, "delta_id");
     assert!(first.contains("comply this worker's methodology: Inspect evidence."));
 
     let compacted = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(format!(
-            r#"{{"context_compress":{{"discard":["{}"],"summary":"role description was discarded"}}}}"#,
-            delta_id
-        )),
+        content: scored(r#"{"context_compress":{"summary":"role description was removed"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2680,21 +2660,15 @@ fn prompt_rendering_does_not_expose_durable_ctx_score() {
 }
 
 #[test]
-fn prompt_discard_can_remove_whole_delta_by_delta_id() {
+fn context_compress_summary_only_removes_all_existing_deltas() {
     let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("shrink_delta_id"));
-    let prompt = match core.begin_turn("REMOVE_THIS_DELTA", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
+    match core.begin_turn("REMOVE_THIS_DELTA", None) {
+        CoreStep::NeedModel { .. } => {}
         other => panic!("unexpected step: {other:?}"),
-    };
-    let delta_id = first_field_value(&prompt, "delta_id");
-    assert!(!delta_id.is_empty());
-
+    }
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(format!(
-            r#"{{"context_compress":{{"discard":["{}"],"summary":"remove stale test delta"}}}}"#,
-            delta_id
-        )),
+        content: scored(r#"{"context_compress":{"summary":"remove stale test delta"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2748,18 +2722,13 @@ fn extracted_replay_keeps_compact_summary_once_as_assistant_before_system_result
         tmp_dir("shrink_extracted_replay_order"),
     );
     core.set_assistant_replay_mode(AssistantReplayMode::ExtractedFields);
-    let prompt = match core.begin_turn("REMOVE_EXTRACTED_DELTA", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
+    match core.begin_turn("REMOVE_EXTRACTED_DELTA", None) {
+        CoreStep::NeedModel { .. } => {}
         other => panic!("unexpected step: {other:?}"),
-    };
-    let delta_id = first_field_value(&prompt, "delta_id");
-
+    }
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(format!(
-            r#"{{"context_compress":{{"discard":["{}"],"summary":"retain extracted compact state"}}}}"#,
-            delta_id
-        )),
+        content: scored(r#"{"context_compress":{"summary":"retain extracted compact state"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2782,7 +2751,7 @@ fn extracted_replay_keeps_compact_summary_once_as_assistant_before_system_result
 }
 
 #[test]
-fn prompt_delta_ids_are_simple_global_sequence_and_not_reused_after_discard() {
+fn prompt_delta_ids_are_simple_global_sequence_and_not_reused_after_compression() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -2810,9 +2779,7 @@ fn prompt_delta_ids_are_simple_global_sequence_and_not_reused_after_discard() {
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(
-            r#"{"context_compress":{"discard":["pd_1"],"summary":"drop first delta"}}"#,
-        ),
+        content: scored(r#"{"context_compress":{"keep":["pd_2"],"summary":"drop first delta"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2872,10 +2839,7 @@ fn response_context_compress_hides_refs_and_appends_summary_slice() {
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(format!(
-            r#"{{"free_talk":"整理旧上下文。","context_compress":{{"discard":[{}],"summary":"旧任务已经完成，只保留 compact 后的测试摘要。"}}}}"#,
-            serde_json::to_string(&delta_id).unwrap()
-        )),
+        content: scored(r#"{"free_talk":"整理旧上下文。","context_compress":{"summary":"旧任务已经完成，只保留 compact 后的测试摘要。"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2926,21 +2890,15 @@ fn response_context_compress_does_not_append_redundant_mcp_summary() {
         }],
     )
     .unwrap();
-    let prompt = match core.begin_turn("MCP_CONTEXT_TO_COMPACT", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
+    match core.begin_turn("MCP_CONTEXT_TO_COMPACT", None) {
+        CoreStep::NeedModel { .. } => {}
         other => panic!("unexpected step: {other:?}"),
-    };
-    let delta_id = field_values(&prompt, "delta_id")
-        .into_iter()
-        .last()
-        .expect("user input must be the latest persistent delta");
-
+    }
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(format!(
-            r#"{{"free_talk":"整理旧上下文。","context_compress":{{"discard":[{}],"summary":"保留当前任务状态。"}}}}"#,
-            serde_json::to_string(&delta_id).unwrap()
-        )),
+        content: scored(
+            r#"{"free_talk":"整理旧上下文。","context_compress":{"summary":"保留当前任务状态。"}}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2958,7 +2916,7 @@ fn response_context_compress_does_not_append_redundant_mcp_summary() {
 }
 
 #[test]
-fn prompt_discard_can_remove_visible_delta_by_delta_id() {
+fn context_compress_summary_only_removes_visible_delta() {
     let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("shrink_slice_id"));
     core.set_response_protocol(ResponseProtocolKind::Json);
     let long_input = format!("SLICE_ONE_ONLY{}", "a".repeat(13_000));
@@ -2972,10 +2930,7 @@ fn prompt_discard_can_remove_visible_delta_by_delta_id() {
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(format!(
-            r#"{{"context_compress":{{"discard":["{}"],"summary":"remove visible test delta"}}}}"#,
-            delta_id
-        )),
+        content: scored(r#"{"context_compress":{"summary":"remove visible test delta"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2995,7 +2950,7 @@ fn prompt_discard_can_remove_visible_delta_by_delta_id() {
         "content",
         "Action result: context_compress"
     ));
-    assert!(!prompt.contains(&format!("[BEGIN DELTA]\ndelta_id: {}", delta_id)));
+    assert!(!prompt.contains(&format!("[BEGIN DELTA delta_id: {delta_id}]")));
     assert!(!prompt.contains("SLICE_ONE_ONLY"));
 
     let final_step = core.apply_model_response(LlmResponse {
@@ -3150,7 +3105,7 @@ fn long_context_uses_observed_model_prompt_tokens_plus_new_delta_estimate() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.ends_with(
-        "[Context threshold WARN] Context is too long. Compress context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
+        "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
     ));
     assert!(!prompt.contains("Long-context maintenance:"));
     let (estimated, threshold, quality_target) = core
@@ -3180,7 +3135,7 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.ends_with(
-        "[Context threshold WARN] Context is too long. Compress context as the tool context_compress desc suggests. Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
+        "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
     ));
     for redundant in [
         "Long-context maintenance:",
@@ -3220,17 +3175,15 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(shrink_prompt.contains("Compress context as the tool context_compress desc suggests"));
+    assert!(shrink_prompt
+        .contains("Please compress it now (see the `context_compress` tool description)"));
     assert!(!shrink_prompt.contains("Long-context maintenance:"));
     let mut delta_ids = field_values(&shrink_prompt, "delta_id");
     delta_ids.sort();
     delta_ids.dedup();
     assert!(!delta_ids.is_empty());
 
-    let shrink_response = format!(
-        r#"{{"context_compress":{{"discard":{},"summary":"compact old prompt context and keep current task state"}}}}"#,
-        serde_json::to_string(&delta_ids).unwrap()
-    );
+    let shrink_response = r#"{"context_compress":{"summary":"compact old prompt context and keep current task state"}}"#;
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(shrink_response),
@@ -3254,7 +3207,8 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
         "content",
         "Action result: context_compress"
     ));
-    assert!(!next_prompt.contains("Compress context as the tool context_compress desc suggests"));
+    assert!(!next_prompt
+        .contains("Please compress it now (see the `context_compress` tool description)"));
 
     let final_step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -3283,7 +3237,9 @@ fn forced_shrink_is_not_reissued_when_dynamic_context_cannot_reduce_enough() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(!prompt.contains("Compress context as the tool context_compress desc suggests"));
+    assert!(
+        !prompt.contains("Please compress it now (see the `context_compress` tool description)")
+    );
 }
 
 #[test]
@@ -3714,9 +3670,9 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     };
     let compact_ids = field_values(&compact_request_prompt, "delta_id");
     assert!(compact_ids.len() >= 2);
+    let compact_keep = serde_json::to_string(&compact_ids[2..]).unwrap();
     let compact_response = scored(format!(
-        r#"{{"status":"working","free_talk":"将测试 delta ids 移出活跃上下文。","context_compress":{{"discard":[{}],"offload":[{}],"summary":"保留测试状态摘要"}}}}"#,
-        serde_json::to_string(&compact_ids[0]).unwrap(),
+        r#"{{"status":"working","free_talk":"将测试 delta ids 移出活跃上下文。","context_compress":{{"keep":{compact_keep},"offload":[{}],"summary":"保留测试状态摘要"}}}}"#,
         serde_json::to_string(&compact_ids[1]).unwrap(),
     ));
     let prompt = match core.apply_model_response(LlmResponse {
@@ -4085,6 +4041,46 @@ fn protocol_repair_slice_focuses_previous_response_around_error() {
     assert!(prompt.contains("TAIL_NEAR_FOCUS"));
     assert!(!prompt.contains("BEGIN_SHOULD_NOT_APPEAR"));
     assert!(!prompt.contains("END_SHOULD_NOT_APPEAR"));
+}
+
+#[test]
+fn protocol_repair_prompt_includes_current_request_level_mcp_capabilities() {
+    let mut core = test_core(
+        "STATIC\n{{TOOL_CATALOG}}",
+        profile("qwen-plus"),
+        tmp_dir("repair_prompt_current_mcp"),
+    );
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    core.configure_mcp(
+        test_registry(),
+        McpRuntime::default(),
+        Vec::new(),
+        vec![McpTool {
+            server_id: "repair".to_string(),
+            server_name: "Repair MCP".to_string(),
+            name: "lookup".to_string(),
+            action_name: "mcp_repair_mcp__lookup".to_string(),
+            description: "Lookup repair metadata".to_string(),
+            input_schema: json!({"type": "object", "properties": {}}),
+        }],
+    )
+    .unwrap();
+    let _ = core.begin_turn("继续", None);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"final_answer":"缺少完成状态"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel repair, got {other:?}"),
+    };
+
+    assert_eq!(prompt.matches("## Current MCP Capabilities").count(), 1);
+    assert!(prompt.contains("mcp_repair_mcp__lookup"), "{prompt}");
+    assert!(prompt.contains("response is not protocol compliant"));
 }
 
 #[test]
@@ -5257,9 +5253,8 @@ fn json_context_compress_runs_before_later_action_in_same_response() {
         content: serde_json::json!({
             "free_talk": "compact first, then continue",
             "context_compress": {
-                "discard": [old_delta_id],
                 "summary": "KEEP JSON ACTIVE STATE"
-            },
+                },
             "working_still_action": {
                 "self_tool": {"type": "cwd"}
             }
@@ -5293,7 +5288,7 @@ fn json_failed_context_compress_blocks_later_action() {
         tool_calls: Vec::new(),
         content: serde_json::json!({
             "context_compress": {
-                "discard": ["prompt_0"],
+                "keep": ["prompt_0"],
                 "summary": "INVALID JSON COMPACT"
             },
             "working_still_action": {
@@ -5455,7 +5450,7 @@ fn context_compress_offload_rejects_invalid_prompt_refs_without_writing() {
 }
 
 #[test]
-fn context_compress_requires_prompt_refs_in_protocol() {
+fn context_compress_summary_only_replaces_all_live_deltas() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -5464,7 +5459,7 @@ fn context_compress_requires_prompt_refs_in_protocol() {
     let _ = core.begin_turn("seed context", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"context_compress":{"summary":"missing refs should repair"}}"#),
+        content: scored(r#"{"context_compress":{"summary":"summary-only replacement"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5473,8 +5468,12 @@ fn context_compress_requires_prompt_refs_in_protocol() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("response is not protocol compliant"));
-    assert!(prompt.contains("context_compress[0].ids_required"));
+    assert!(
+        prompt.contains("context compressed successfully."),
+        "{prompt}"
+    );
+    assert!(prompt.contains("summary-only replacement"), "{prompt}");
+    assert!(!prompt.contains("seed context"), "{prompt}");
 }
 
 #[test]
@@ -6893,7 +6892,7 @@ fn model_request_refresh_includes_a_just_finished_background_jobs_exit_status() 
 
 #[cfg(unix)]
 #[test]
-fn still_running_table_survives_discard_of_the_original_action_delta() {
+fn still_running_table_survives_removal_of_the_original_action_delta() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -6930,8 +6929,8 @@ fn still_running_table_survives_discard_of_the_original_action_delta() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compress":{{"discard":["{}"],"summary":"hide running job delta but keep job status"}}}}"#,
-            running_delta_id
+            r#"{{"context_compress":{{"keep":["{}"],"summary":"hide running job delta but keep job status"}}}}"#,
+            user_delta_id
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -6978,7 +6977,7 @@ fn still_running_table_survives_discard_of_the_original_action_delta() {
 
 #[cfg(unix)]
 #[test]
-fn still_running_table_is_universal_even_when_compaction_targets_an_unrelated_delta() {
+fn still_running_table_is_universal_when_only_the_action_delta_is_kept() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -7003,14 +7002,19 @@ fn still_running_table_is_universal_even_when_compaction_targets_an_unrelated_de
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(has_action_status(&prompt, "background_running"), "{prompt}");
+    let running_delta_id = field_values(&prompt, "delta_id")
+        .into_iter()
+        .last()
+        .expect("running delta id");
+    assert_ne!(running_delta_id, user_delta_id);
     #[cfg(unix)]
     let pid = action_result_pid(&prompt).expect("pid").to_string();
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compress":{{"discard":["{}"],"summary":"hide unrelated user delta only"}}}}"#,
-            user_delta_id
+            r#"{{"context_compress":{{"keep":["{}"],"summary":"hide unrelated user delta only"}}}}"#,
+            running_delta_id
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -7119,7 +7123,7 @@ fn still_running_table_survives_offload_of_the_original_action_delta() {
 
 #[cfg(unix)]
 #[test]
-fn still_running_table_survives_xml_style_compaction_of_the_original_action_delta() {
+fn still_running_table_survives_summary_only_compaction_of_the_original_action_delta() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -7145,19 +7149,12 @@ fn still_running_table_survives_xml_style_compaction_of_the_original_action_delt
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    let running_delta_id = field_values(&prompt, "delta_id")
-        .into_iter()
-        .last()
-        .expect("running delta id");
     #[cfg(unix)]
     let pid = action_result_pid(&prompt).expect("pid").to_string();
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(format!(
-            r#"{{"free_talk":"压缩旧上下文。","context_compress":{{"discard":[{}],"summary":"后台任务仍在运行，需要保留运行状态。"}}}}"#,
-            serde_json::to_string(&running_delta_id).unwrap()
-        )),
+        content: scored(r#"{"free_talk":"压缩旧上下文。","context_compress":{"summary":"后台任务仍在运行，需要保留运行状态。"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -7891,7 +7888,8 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(long_prompt.starts_with("[BEGIN SYSTEM PROMPT]\nSTATIC_GLOBAL_RULES"));
-    assert!(long_prompt.contains("Compress context as the tool context_compress desc suggests"));
+    assert!(long_prompt
+        .contains("Please compress it now (see the `context_compress` tool description)"));
     assert!(!long_prompt.contains("Long-context maintenance:"));
     assert!(!long_prompt.contains("target_dynamic_context_ratio"));
 }
@@ -8537,10 +8535,13 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(xml_prompt.contains("<parallel>"));
     assert!(!xml_prompt.contains("<action_json>"));
     assert!(xml_prompt.contains("<context_compress>"));
-    assert!(xml_prompt.contains("<discard>"));
+    assert!(xml_prompt.contains("<keep>"));
+    assert!(!xml_prompt.contains("<discard>"));
     assert!(xml_prompt.contains("<offload>"));
     assert!(xml_prompt.contains("<summary>"));
-    assert!(xml_prompt.contains("will be saved into scratch memory"));
+    assert!(xml_prompt.contains("Use `offload` only for important bulky source material"));
+    assert!(xml_prompt.contains("Before calling, check"));
+    assert!(!xml_prompt.contains("save these important bulky deltas to scratch before removal"));
     assert!(xml_prompt.contains("## RESPONSE EXAMPLES"));
     assert!(xml_prompt.contains(r#"<prompt_delta id="pd_1">"#));
     assert!(xml_prompt.contains("</prompt_delta>"));
@@ -8911,8 +8912,6 @@ fn memmgr_tool_catalog_does_not_expose_legacy_query_surface() {
     let memmgr = &prompt[start..end];
 
     assert!(memmgr.contains(r#"{"memmgr":{"type":"durable","op":"sql""#));
-    assert!(memmgr.contains(r#"{"memmgr":{"type":"raw_chat","op":"search""#));
-    assert!(memmgr.contains(r#"{"memmgr":{"type":"scratch","op":"read""#));
     assert!(memmgr.contains("durable: schema|sql|insert|update|upsert|delete"));
     assert!(memmgr.contains("raw_chat: search|delete"));
     assert!(!memmgr.contains("raw_chat: search|sql|delete"));

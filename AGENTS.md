@@ -90,6 +90,7 @@ WebUI、Shell、Desktop App 等 Interface 都只是 Host 的客户端与视图�
 - 行为放入拥有该语义的最内层模块；跨层便利不是越界理由。
 - 模块保持内聚、命名表达语义、依赖显式、公开 API 最小化；优先组合与窄接口。
 - Prompt 和模型响应格式属于协议。修改时必须同步生产端、解析、校验、修复、样例和测试。
+- Runtime 对模型工具输出只接受当前 tool schema 定义的参数；未定义参数一律非法。
 - 内置工具保持 `resources/capabilities/tools/{tool}.yaml` 与 `{tool}.rs` 成对；清单定义接口，
   实现负责解析与执行，顶层 Turn 循环不得吸收工具细节。
 - Core topic 回调在调用期间同步且由 Core 所有；异步保留前必须复制所需数据。

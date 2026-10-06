@@ -16,7 +16,7 @@ pub(crate) fn execute_action(
         return failed("summary_required");
     }
     core.record_turn_finished(summary.to_string());
-    ActionExecution::Completed(ActionOutcome::completed("Turn finished."))
+    ActionExecution::Completed(ActionOutcome::completed("Current task finished."))
 }
 
 fn failed(error: &str) -> ActionExecution {

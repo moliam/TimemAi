@@ -28,8 +28,9 @@ validate_one() {
   local required=(
     '#### `run_bash`'
     '#### `memmgr`'
-    "**Usage**"
-    "**Result**"
+    "**Synopsis**"
+    "**Description**"
+    "**Options**"
   )
   local forbidden=(
     "Runtime info:"

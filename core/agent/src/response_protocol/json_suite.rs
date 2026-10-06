@@ -148,7 +148,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
     }
     let thought_keep_in_context = !thought.is_empty();
     let runtime_note: Option<String> = None;
-    let context_compresses = parse_context_compresses(&value, &mut repair_issue);
+    let context_compresses = parse_context_compresses(&value, capabilities, &mut repair_issue);
 
     let mut next_actions = Vec::new();
     let mut action_groups = Vec::new();
@@ -243,6 +243,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
 
 fn parse_context_compresses(
     value: &Value,
+    capabilities: &CapabilityRegistry,
     repair_issue: &mut Option<String>,
 ) -> Vec<ParsedContextCompress> {
     let Some(raw) = value.get("context_compress") else {
@@ -261,15 +262,33 @@ fn parse_context_compresses(
             }
             break;
         };
-        let discard_delta_ids = object
-            .get("discard")
+        if let Some(field) = object
+            .keys()
+            .find(|field| !capabilities.tool_input_property_declared("context_compress", field))
+        {
+            if repair_issue.is_none() {
+                *repair_issue = Some(format!("context_compress[{idx}].input.{field}_unsupported"));
+            }
+            break;
+        }
+        let keep_delta_ids = object
+            .get("keep")
             .map(super::json_string_list)
             .unwrap_or_default();
         let offload_delta_ids = object
             .get("offload")
             .map(super::json_string_list)
             .unwrap_or_default();
-        let mut delta_ids = discard_delta_ids.clone();
+        if let Some(id) = keep_delta_ids
+            .iter()
+            .find(|id| offload_delta_ids.contains(id))
+        {
+            if repair_issue.is_none() {
+                *repair_issue = Some(format!("context_compress[{idx}].keep_offload_overlap:{id}"));
+            }
+            break;
+        }
+        let mut delta_ids = keep_delta_ids.clone();
         delta_ids.extend(offload_delta_ids.iter().cloned());
         delta_ids.sort();
         delta_ids.dedup();
@@ -279,12 +298,6 @@ fn parse_context_compresses(
             .unwrap_or("")
             .trim()
             .to_string();
-        if delta_ids.is_empty() {
-            if repair_issue.is_none() {
-                *repair_issue = Some(format!("context_compress[{idx}].ids_required"));
-            }
-            break;
-        }
         if summary.is_empty() {
             if repair_issue.is_none() {
                 *repair_issue = Some(format!("context_compress[{idx}].summary_required"));
@@ -293,7 +306,7 @@ fn parse_context_compresses(
         }
         compacts.push(ParsedContextCompress {
             call_id: super::generated_inline_tool_call_id(),
-            discard_delta_ids,
+            keep_delta_ids,
             offload_delta_ids,
             delta_ids,
             slice_ids: Vec::new(),
@@ -353,6 +366,12 @@ pub fn protocol_repair_instruction(issue: &str) -> &'static str {
         }
         "next_actions_required_when_status_working" => {
             "检查到刚刚的输出格式有点问题：status:\"working\" 表示还需要 runtime 继续执行动作，因此必须提供 working_still_action。如果所有用户的 open/pending 请求已经完成，请改用 status:\"ALL_FINISHED\" 和 final_answer。Return exactly one valid JSON object. Do not use markdown fences."
+        }
+        issue if issue.starts_with("context_compress")
+            && issue.contains(".input.")
+            && issue.ends_with("_unsupported") =>
+        {
+            "context_compress 包含当前 tool schema 未定义的参数。请仅使用当前 schema 中定义的参数。Return exactly one valid JSON object. Do not use markdown fences."
         }
         _ => {
             "Return exactly one valid JSON object. Omitted status defaults to working; include working_still_action when working. Use status:\"ALL_FINISHED\" together with final_answer when all user's open and pending requests are complete. Do not use markdown fences."
