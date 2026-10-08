@@ -298,6 +298,7 @@ fn completion_and_timeout_handoff_have_one_state_lock_winner() {
         completion_sequence: 1,
         finished_at_ms: now_ms(),
         status: "0".to_string(),
+        capture_error: None,
         stdout: "done".to_string(),
         stderr: String::new(),
         stdout_truncation: None,
@@ -2619,4 +2620,239 @@ fn exit_listener_not_fired_for_direct_jobs() {
         "direct (non-background) jobs must not publish through the exit listener"
     );
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_cancel_older_term_resistant_job_publishes_one_killed_update() {
+    struct Children(Vec<std::process::Child>);
+    impl Drop for Children {
+        fn drop(&mut self) {
+            for child in &mut self.0 {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+    let dir = tmp_memory_dir("macos_older_cancel");
+    let store = ShellJobManager::new(&dir);
+    let started = store.spawn_background(
+        "trap '' TERM; printf ready > ready; exec /bin/sleep 20",
+        &dir,
+        "older-session",
+        "turn",
+    );
+    assert!(
+        started.contains("now keeps running in background"),
+        "{started}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while fs::read_to_string(dir.join("ready")).ok().as_deref() != Some("ready") {
+        assert!(
+            Instant::now() < deadline,
+            "child did not install TERM disposition"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let pid = store.query_running_for_session("older-session")[0].pid;
+    let mut newer = Children(Vec::new());
+    for _ in 0..100 {
+        newer
+            .0
+            .push(Command::new("/bin/sleep").arg("20").spawn().unwrap());
+    }
+    assert_eq!(
+        store.cancel_unfinished_for_session("older-session").len(),
+        1
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let updates = loop {
+        let (_, updates) = store.consume_completed_for_session("older-session");
+        if !updates.is_empty() {
+            break updates;
+        }
+        assert!(Instant::now() < deadline, "cancel failed to converge");
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].status, "signal:9");
+    assert!(!crate::os::process_running(pid));
+    assert!(store.query_running_for_session("older-session").is_empty());
+    assert!(store
+        .consume_completed_for_session("older-session")
+        .1
+        .is_empty());
+    // Unrelated newer children must not be collateral cancellation targets.
+    assert!(newer
+        .0
+        .iter_mut()
+        .all(|child| child.try_wait().unwrap().is_none()));
+    drop(newer);
+    drop(store);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+struct EscapedPipeFixture(PathBuf);
+
+#[cfg(target_os = "macos")]
+impl EscapedPipeFixture {
+    fn new(name: &str) -> Self {
+        Self(tmp_memory_dir(name))
+    }
+
+    fn command(&self, keep_launcher: bool) -> String {
+        // The child signals readiness only after setsid, making cancellation
+        // independent of the fork/reparent scheduling race. Cleanup is by the
+        // fixture's private release file, never by guessed process ancestry.
+        format!(
+            r#"/usr/bin/python3 -c '
+import os,time
+p=os.fork()
+if p==0:
+ os.setsid()
+ open("ready","w").close()
+ deadline=time.monotonic()+8
+ while not os.path.exists("release") and time.monotonic()<deadline: time.sleep(0.01)
+ open("done","w").close()
+ os._exit(0)
+while not os.path.exists("ready"): time.sleep(0.01)
+print("captured",flush=True)
+{}
+'"#,
+            if keep_launcher { "time.sleep(8)" } else { "" }
+        )
+    }
+
+    fn wait_ready(&self) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !self.0.join("ready").exists() {
+            assert!(Instant::now() < deadline, "fixture did not escape");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for EscapedPipeFixture {
+    fn drop(&mut self) {
+        let _ = fs::write(self.0.join("release"), "");
+        let deadline = Instant::now() + Duration::from_secs(9);
+        while self.0.join("ready").exists()
+            && !self.0.join("done").exists()
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_escaped_pipe_holder_does_not_block_job_completion() {
+    let fixture = EscapedPipeFixture::new("escaped_pipe_completion");
+    let store = ShellJobManager::new(&fixture.0);
+    let started = Instant::now();
+    let result = store.run_with_timeout(
+        &fixture.command(false),
+        &fixture.0,
+        3000,
+        "escaped",
+        "turn",
+        &mut NeverCancelRuntime,
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "pipe holder delayed completion: {result}"
+    );
+    assert!(
+        result.contains("output_capture_incomplete"),
+        "missing explicit capture failure: {result}"
+    );
+    assert!(result.contains("captured"), "lost partial output: {result}");
+    assert!(store.query_running_for_session("escaped").is_empty());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_escaped_pipe_holder_does_not_block_cancel_or_duplicate_update() {
+    let fixture = EscapedPipeFixture::new("escaped_pipe_cancel");
+    let store = ShellJobManager::new(&fixture.0);
+    let started = store.spawn_background(&fixture.command(true), &fixture.0, "escaped", "turn");
+    assert!(started.contains("now keeps running"), "{started}");
+    fixture.wait_ready();
+    let started = Instant::now();
+    assert_eq!(store.cancel_unfinished_for_session("escaped").len(), 1);
+    let update = loop {
+        let (_, updates) = store.consume_completed_for_session("escaped");
+        if let Some(update) = updates.into_iter().next() {
+            break update;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "cancel blocked by escaped pipe"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        update.capture_error.as_deref(),
+        Some("output_capture_incomplete")
+    );
+    assert!(update.status.starts_with("signal:"), "{}", update.status);
+    assert!(store.consume_completed_for_session("escaped").1.is_empty());
+    // Capture failure must not be presented as a successful background action.
+    let event = crate::running_shell_job_exit_topic_event(&update);
+    assert_eq!(event.payload["status"], "failed");
+    assert_eq!(event.payload["capture_error"], "output_capture_incomplete");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_escaped_pipe_holder_does_not_block_manager_drop() {
+    let fixture = EscapedPipeFixture::new("escaped_pipe_drop");
+    let store = ShellJobManager::new(&fixture.0);
+    let started = store.spawn_background(&fixture.command(true), &fixture.0, "escaped", "turn");
+    assert!(started.contains("now keeps running"), "{started}");
+    fixture.wait_ready();
+    let started = Instant::now();
+    drop(store);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "shutdown blocked by escaped pipe"
+    );
+}
+
+#[test]
+fn incomplete_capture_preserves_launcher_exit_without_reporting_success() {
+    let finished = FinishedShellJob {
+        completion_sequence: 1,
+        finished_at_ms: now_ms(),
+        status: "0".to_string(),
+        capture_error: Some("output_capture_incomplete".to_string()),
+        stdout: "partial stdout".to_string(),
+        stderr: "partial stderr".to_string(),
+        stdout_truncation: None,
+        stderr_truncation: None,
+        output: "partial stdout\nstderr: partial stderr".to_string(),
+    };
+    let output = finished_output("echo", false, &finished);
+    assert_eq!(output.status, Some(0));
+    assert_eq!(output.error.as_deref(), Some("output_capture_incomplete"));
+    let outcome = output.to_action_outcome("run_bash");
+    assert_eq!(outcome.status, ActionStatus::Failed);
+    assert_eq!(
+        bash_error_type("output_capture_incomplete"),
+        Some("OutputCaptureIncomplete")
+    );
+    assert!(outcome.text.contains("partial stdout"));
+    let job = synthetic_managed_job(ShellJobDelivery::Background);
+    let update = job.exit_update(&finished);
+    assert_eq!(update.stdout, "partial stdout");
+    assert_eq!(update.stderr, "partial stderr");
+    assert_eq!(update.status, "0");
+    let event = crate::running_shell_job_exit_topic_event(&update);
+    assert_eq!(event.payload["status"], "failed");
+    assert_eq!(event.payload["exit_status"], "0");
+    assert_eq!(event.payload["capture_error"], "output_capture_incomplete");
 }

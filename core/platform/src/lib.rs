@@ -4,6 +4,7 @@
 //! `macos`/`linux`; Unix process primitives shared by both live in `shared`.
 
 mod api;
+mod child_output;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "macos")]
@@ -15,6 +16,7 @@ mod shared;
 mod windows;
 
 pub use api::*;
+pub use child_output::ChildOutputPipe;
 pub use process_job::*;
 
 #[cfg(test)]

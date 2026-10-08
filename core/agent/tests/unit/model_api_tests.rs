@@ -2251,6 +2251,7 @@ fn zhipu_reasoning_defaults_disable_and_final_wire_guards() {
 
 #[test]
 fn zhipu_native_reasoning_roundtrip_json_and_sse_stays_out_of_public_text() {
+    use std::fmt::Write as _;
     for suffix in ["5.2", "5.3", "5.3-flash"] {
         let cfg = zhipu_config(suffix);
         let tool = json!({"id":"call_1","type":"function","function":{"name":"readfile","arguments":"{\"path\":\"fixture\"}"}});
@@ -2260,7 +2261,10 @@ fn zhipu_native_reasoning_roundtrip_json_and_sse_stays_out_of_public_text() {
         let sse = [
             json!({"choices":[{"delta":{"reasoning_content":"opaque 片段\n"}}]}),
             json!({"choices":[{"delta":{"reasoning_content":" unchanged", "content":"可见正文","tool_calls":[chunk]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":20,"completion_tokens":10,"total_tokens":30}}),
-        ].iter().map(|event| format!("data: {event}\n\n")).collect::<String>() + "data: [DONE]\n\n";
+        ].iter().fold(String::new(), |mut stream, event| {
+            write!(stream, "data: {event}\n\n").unwrap();
+            stream
+        }) + "data: [DONE]\n\n";
         for wire in [raw.to_string(), sse] {
             let response = interpret_model_http_response(&cfg, 200, &wire, "")
                 .result

@@ -178,13 +178,11 @@ fn execute_path_action(core: &AgentCore) -> String {
     let session_index_file = sessions_dir.join("index.jsonl");
     let tool_repo_dir = core.tool_repo().root();
     let capabilities_dir = env_path_param(&core.self_tool.env, "TIMEM_CAPABILITIES_DIR");
-    let config_paths = core
-        .self_tool
-        .paths
-        .config_paths
-        .iter()
-        .map(|(label, path)| format!("\n{label}: {path}"))
-        .collect::<String>();
+    use std::fmt::Write as _;
+    let mut config_paths = String::new();
+    for (label, path) in &core.self_tool.paths.config_paths {
+        let _ = write!(config_paths, "\n{label}: {path}");
+    }
     format!(
         "cwd: {}\nprocess_cwd: {}\nexecutable: {}\nconfig_root: {}\nreminder_tips_file: {}\ncapabilities_dir: {}\ndata_root: {}\nworkspace_config_file: {}\nspace_dir: {}\nmemory_dir: {}\nmemory_file: {}\nscratch_file: {}\nsessions_dir: {}\nsession_index_file: {}\ntool_repo_dir: {}\naudit_dir: {}\napi_audit_logical_stream: {}\napi_audit_segments_dir: {}\naction_audit_logical_stream: {}\naction_audit_segments_dir: {}{}\naudit_storage_note: Logical stream paths identify the current audit stores. Records are physically stored in the corresponding segments directories; use the audit aggregation API or search those directories for complete history.",
         core.current_prompt_cwd().display(),

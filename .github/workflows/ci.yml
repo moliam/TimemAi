@@ -40,6 +40,8 @@ jobs:
         os:
           - ubuntu-latest
           - macos-latest
+          - macos-15
+          - macos-15-intel
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -84,7 +86,21 @@ jobs:
 
       - name: Run production CI gate
         shell: bash
-        run: scripts/ci.sh
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            # Delegate only this transient service's subtree. The gate and all
+            # commands still execute as the runner user, never as root.
+            sudo systemd-run --quiet --wait --pipe --collect \
+              --uid="$(id -u)" --gid="$(id -g)" -p Delegate=yes \
+              --working-directory="$PWD" \
+              --setenv="HOME=$HOME" --setenv="PATH=$PATH" \
+              --setenv=CI=true --setenv=CARGO_INCREMENTAL=0 \
+              --setenv="RUSTFLAGS=$RUSTFLAGS" --setenv="RUSTDOCFLAGS=$RUSTDOCFLAGS" \
+              /usr/bin/env bash scripts/ci.sh
+          else
+            scripts/ci.sh
+          fi
 
       - name: Upload Timem runtime I/O report
         if: always()

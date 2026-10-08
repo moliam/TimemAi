@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -437,34 +436,33 @@ fn run_self_test(root: &Path, manifest: &ToolManifest) -> Result<String, String>
         .spawn()
         .map_err(|error| format!("tool_self_test_spawn_failed:{error}"))?;
     let _child_registration = crate::os::register_managed_child(child.id());
-    let stdout_reader = child
-        .stdout
-        .take()
-        .map(|stdout| thread::spawn(move || read_bounded_stream(stdout, 16 * 1024)));
-    let stderr_reader = child
-        .stderr
-        .take()
-        .map(|stderr| thread::spawn(move || read_bounded_stream(stderr, 16 * 1024)));
+    let capture = crate::command_output::CommandOutput::start(&mut child, 16 * 1024);
     let deadline = Instant::now() + Duration::from_millis(manifest.self_test.timeout_ms);
     let status = loop {
-        match child
-            .try_wait()
-            .map_err(|error| format!("tool_self_test_wait_failed:{error}"))?
-        {
-            Some(status) => break status,
-            None if Instant::now() >= deadline => {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Err(error) => {
                 crate::os::kill_process_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = join_bounded_reader(stdout_reader);
-                let _ = join_bounded_reader(stderr_reader);
+                let _ = capture.finish();
+                return Err(format!("tool_self_test_wait_failed:{error}"));
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                crate::os::kill_process_group(child.id());
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = capture.finish();
                 return Err("tool_self_test_timeout".to_string());
             }
-            None => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
         }
     };
-    let mut output = join_bounded_reader(stdout_reader);
-    let stderr = join_bounded_reader(stderr_reader);
+    let (stdout, stderr) = capture
+        .finish()
+        .map_err(|error| format!("tool_self_test_output_failed:{error}"))?;
+    let mut output = String::from_utf8_lossy(&stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&stderr);
     if !stderr.is_empty() {
         if !output.is_empty() {
             output.push('\n');
@@ -479,27 +477,6 @@ fn run_self_test(root: &Path, manifest: &ToolManifest) -> Result<String, String>
         ));
     }
     Ok(compact(&output, 2_000))
-}
-
-fn read_bounded_stream(mut stream: impl Read, max_bytes: usize) -> String {
-    let mut retained = Vec::with_capacity(max_bytes.min(8 * 1024));
-    let mut chunk = [0u8; 8 * 1024];
-    loop {
-        match stream.read(&mut chunk) {
-            Ok(0) | Err(_) => break,
-            Ok(read) => {
-                let keep = max_bytes.saturating_sub(retained.len()).min(read);
-                retained.extend_from_slice(&chunk[..keep]);
-            }
-        }
-    }
-    String::from_utf8_lossy(&retained).into_owned()
-}
-
-fn join_bounded_reader(reader: Option<thread::JoinHandle<String>>) -> String {
-    reader
-        .and_then(|reader| reader.join().ok())
-        .unwrap_or_default()
 }
 
 fn read_manifest(root: &Path) -> Result<ToolManifest, String> {

@@ -64,9 +64,16 @@ proc spawn_timem {} {
     global binary memory_dir spawn_id
     spawn env \
         TIMEM_API_KEY=dummy \
+        TIMEM_UI_MODE= \
         TIMEM_MODEL=qwen-plus \
         $binary --shell --space $memory_dir
     expect {
+        -re "Streaming response" {
+            # No UI-mode override: exercise the real startup selector, then
+            # choose the default ordinary mode used by the assertions below.
+            send "\r"
+            exp_continue
+        }
         -re "\033\\\[\\?2004h" {}
         timeout {
             error "timeout waiting for bracketed paste mode enable"

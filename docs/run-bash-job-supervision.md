@@ -10,7 +10,7 @@ The implementation must provide one authoritative lifecycle per spawned Job:
 - one supervisor owns and reaps the Bash launcher;
 - stdout and stderr are drained concurrently into bounded buffers;
 - on Linux, a delegated cgroup v2 directory provides kernel-backed ownership of every descendant, including `setsid` escapees;
-- descendants remain cancellable after the launcher exits;
+- kernel-owned descendants (or members that remain in the managed process group) remain cancellable after the launcher exits;
 - foreground completion, timeout-to-background, cancellation, session cancellation, and
   runtime shutdown have deterministic ownership and delivery semantics;
 - completed jobs do not accumulate in the manager.
@@ -47,13 +47,50 @@ On Linux the hierarchy is `timem.jobs/runtime-<pid>-<start_ticks>/session-<opaqu
 
 At Agent/Runtime startup, the model receives both the current Runtime aggregate observation path and the current Session aggregate observation path once after those scopes first exist. Ordinary requests do not append duplicate reminders; successful context compression re-arms the reminder because prior model context may have been removed. The Runtime does not pre-read or render `memory.current`, `pids.current`, `cpu.stat`, or similar files—the path is sufficient for an explicit inspection decision. Previous-Runtime scopes with live members remain visible as anomalies for the exact Session, but are never silently adopted or killed. Empty stale leaves and parents are reclaimed with bounded, name-filtered, kernel-confirmed cleanup that does not traverse or delete a populated sibling Session.
 
-Timem may ask the user for the minimum permission needed to create this subtree. A formal systemd service must use `Delegate=yes` (or an equivalently restricted delegated scope). Internal command capabilities fail closed before execution when Linux cgroup ownership is unavailable because their timeout/error contract requires automatic cleanup of all descendants. `run_bash` may continue in an explicitly reported degraded process-group mode when permission is denied; this mode must not be described as exact containment.
+Timem may ask the user for the minimum permission needed to create this subtree. A formal systemd service must use `Delegate=yes` (or an equivalently restricted delegated scope). Internal command capabilities currently fall back to process-group execution when exact ownership is unavailable; this preserves execution compatibility but does not guarantee cleanup of descendants that leave the group. This fallback must not be certified as exact containment. `run_bash` may continue in an explicitly reported degraded process-group mode when permission is denied; this mode must not be described as exact containment.
 
 Synchronous `Command` users must use the platform `command_status` or `command_output` helpers, which preserve the registered owner's exit status.
 
 Linux subreaper supervision remains a runtime-wide fallback for descendants whose normal ownership chain is broken. It uses repeated `(PID, process start time)` observations, bounded state, and exact `waitpid`. Only current actionable fallback state (live or zombie awaiting final reap) is model-visible and is not attributed to the most recently completed Job. Normal adopted-to-reaped history is internal bookkeeping and is not injected into model context. Per-Job code never sweeps all adopted children.
 
 The three layers are intentionally not interchangeable: the Job backend answers membership/control/completion, direct-child registration reserves exit status for the owning supervisor, and the subreaper fallback performs final Unix reaping when no registered owner remains. Job termination does not reap zombies; `waitpid` ownership does not identify or contain a descendant tree.
+
+## macOS process-group limits
+
+macOS currently has no exact per-Job backend and no Linux-style subreaper fallback.
+Kernel start-time identity distinguishes process instances; it does not establish
+ownership of descendants that leave a process group. Cancellation covers members
+that remain in the managed group, with SIGTERM followed by SIGKILL when still live.
+Group enumeration uses `proc_listpgrppids`: its result is a PID count, while its
+buffer argument is bytes. Full buffers require bounded retries; unknown query
+failures must not certify group completion. Unrelated protected system processes
+are not queried. Zombie members do not count as live work.
+
+A descendant that calls `setsid` can escape this mode. If it closes inherited
+pipes, group completion can be reported while it remains alive; if it retains
+pipes, output capture now stops after a 250 ms EOF grace period once the known
+group is empty. Both reader threads are joined and the incomplete capture is
+reported as `output_capture_incomplete`, not successful completion. This deadline
+is an I/O policy, not evidence of descendant identity or termination. There is
+still no all-descendant termination guarantee on macOS. Neither process scanning nor
+launch timing may be used to guess ownership or kill unrelated processes. These
+are capability limits, not repaired by the PID-count correction. Exact containment
+requires a separately verified native ownership backend.
+
+## Comparable disk-pressure samples
+
+Platform owns the filesystem snapshot facade: local mount discovery, working-path
+queries, device deduplication and omission of unavailable samples. Agent supplies
+working paths and owns observation gates, baseline comparison and notices.
+Disk pressure compares aggregate free space only for the same sorted set of
+filesystem device IDs and capacities. Mount/unmount, a missing member, replacement
+with a different device ID, or resize establishes a new baseline without a pressure
+notice. Path aliases and enumeration order do not change the scope. A missing
+whole sample leaves the window due; a later successful comparable sample can alert.
+The existing 10-observation/3-minute gates and min(200 MiB, 8% capacity) threshold
+are unchanged, including accumulation of sub-threshold drops and startup seeding.
+This is sampled device identity, not continuous mount-generation tracking: reuse
+of the same device ID and capacity entirely between samples is not detectable.
 
 ## Lifecycle and delivery state
 
@@ -79,7 +116,10 @@ The supervisor publishes `Finished` only after all of these hold:
 
 1. the Bash launcher has been reaped and its exit status captured;
 2. Linux cgroup v2 reports `populated 0` for that Job (or the process group is empty in explicit degraded mode);
-3. stdout and stderr drain threads reached EOF and were joined.
+3. stdout and stderr drain threads were joined, either at EOF or with an explicit
+   capture failure after the bounded EOF grace period. The launcher exit status
+   is retained separately; capture failure makes the action failed even if the
+   launcher returned zero.
 
 Drain threads run while descendants are alive so pipe backpressure cannot block them. If the launcher dies from a signal or Job-state observation fails, the supervisor terminates that Job before publishing a terminal result.
 
@@ -91,7 +131,7 @@ happens under the index lock; signalling happens after releasing it.
 - action cancellation signals its own job, waits for supervisor convergence, then removes it;
 - session cancellation signals unfinished jobs owned by that session;
 - runtime shutdown signals all unfinished jobs and joins all supervisors;
-- dropping the last manager performs the same bounded ownership cleanup;
+- dropping the last manager performs the same ownership cleanup; the degraded-mode limits below also apply;
 - a newly constructed manager cannot observe or signal another manager's jobs.
 
 Runtime restart does not read historical job metadata or signal historical PIDs. Known
@@ -106,6 +146,11 @@ bounded independently to 1 MiB:
 - `tail_out=true`: retain the last 1 MiB.
 
 The terminal result stores separate stdout/stderr plus normalized combined output.
+Platform owns timed pipe reads (Unix readiness polling, Windows pipe availability);
+Agent owns the 250 ms post-scope EOF grace policy. Finite command bindings and tool-repository self-tests also share a bounded post-exit capture helper (`command_output`); both streams are joined on success, error, timeout, or drop, and missing EOF rejects successful completion/tool publication. Read errors, reader panics and
+missing EOF produce an explicit capture error without fabricating bytes in either
+stream. A continuously writing out-of-scope process cannot extend the deadline.
+The supervisor joins both readers before publication; no blocked reader is detached.
 
 ## Test matrix
 
@@ -119,6 +164,10 @@ Tests must cover:
 - concurrent session cancellation isolation and repeated cancellation idempotence;
 - runtime shutdown/drop with active jobs and no cross-manager signalling;
 - launcher exit while descendants keep pipes open, and descendants that close pipes but live;
+- macOS escaped pipe holders: bounded completion, cancellation and manager drop,
+  explicit partial-output failure and one-shot exit delivery;
+- platform idle-pipe read deadline, buffered-data-before-EOF and empty-buffer rejection;
+- real macOS disk-image mount/unmount discovery, separate from physical USB hotplug;
 - large simultaneous stdout/stderr, UTF-8 split boundaries, head/tail truncation;
 - completed-result removal and sustained many-job runs without index growth;
 - legacy directory cleanup without PID adoption;

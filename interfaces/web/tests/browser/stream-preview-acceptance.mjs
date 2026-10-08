@@ -358,7 +358,7 @@ async function startBrowser(url) {
     await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
     const evaluate = async (expression) => {
       const result = await call("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
-      if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
+      if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text);
       return result.result.value;
     };
     return {
@@ -432,9 +432,9 @@ async function main() {
       event_id: id, source: "core_topic", created_at_ms: time,
       payload: { session_id: "session-1", state: { name: "running" }, topic: { name: "core.model.response", attributes: {} }, payload: { free_talk: text } },
     });
-    const toolEvent = (id, time) => ({
+    const toolEvent = (id, time, action = "run_bash", cmd = `echo ${id}`) => ({
       event_id: id, source: "core_topic", created_at_ms: time,
-      payload: { session_id: "session-1", state: { name: "running" }, topic: { name: "core.action", attributes: {} }, payload: { action: id, status: "completed", input: { cmd: "echo hello" } } },
+      payload: { session_id: "session-1", state: { name: "running" }, topic: { name: "core.action", attributes: {} }, payload: { action, action_id: id, status: "completed", input: { cmd } } },
     });
     const setRound = async (events, text, working = true) => {
       const base = host.getSession();
@@ -498,7 +498,7 @@ async function main() {
     assert(await browser.evaluate(`!document.querySelector('.reasoning-notice')`), 'disabled reasoning must not show an indicator');
     // Lifecycle projections update the same DOM row, not a newly entering command.
     const lifecycle = (id, phase, status, time) => {
-      const event = toolEvent(id, time);
+      const event = toolEvent(id, time, "run_bash", "echo hello");
       Object.assign(event.payload.payload, { action: "run_bash", action_id: "stable-action", event: phase, status });
       return event;
     };
@@ -738,7 +738,7 @@ async function main() {
     await waitFor(() => contains(".turn-stream-tools", "Prior thought archived"), "prior thought disappeared");
     for (const status of ["completed", "failed", "timeout", "cancelled", "cancelled_by_user", "running", "background_running"]) {
       for (const name of ["run_bash", "readfile"]) {
-        const event = toolEvent(name, 6);
+        const event = toolEvent(name, 6, name);
         event.payload.payload.status = status;
         host.setSession({ ...interimSession, turns: [{ ...turn("turn-1"), events: [event] }] });
         await browser.call("Page.reload", { ignoreCache: true });

@@ -934,3 +934,111 @@ fn linux_process_observation_note_points_to_readable_membership() {
     assert!(std::fs::read_to_string(format!("/proc/{pid}/cgroup")).is_ok());
     assert!(note.contains("not task ownership"));
 }
+
+/// Keep a child unreaped until Drop, so cleanup cannot signal a reused PID.
+#[cfg(target_os = "macos")]
+struct MacosTestChild(std::process::Child);
+
+#[cfg(target_os = "macos")]
+impl Drop for MacosTestChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_older_group_remains_visible_and_term_resistant_child_is_killed() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
+    let mut command = Command::new("/bin/sh");
+    // The ready line is emitted only after SIGTERM has been ignored. exec
+    // preserves that disposition without spawning an unowned descendant.
+    command.args(["-c", "trap '' TERM; echo ready; exec /bin/sleep 20"]);
+    command.stdout(Stdio::piped());
+    configure_child_process_group(&mut command);
+    let mut leader = MacosTestChild(command.spawn().expect("spawn group"));
+    let mut ready = String::new();
+    BufReader::new(leader.0.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
+    assert_eq!(ready.trim(), "ready");
+    let pid = leader.0.id();
+    // Darwin lists recent births first. A test of only the newest child
+    // cannot detect a truncated global PID enumeration.
+    let _newer: Vec<_> = (0..100)
+        .map(|_| MacosTestChild(Command::new("/bin/sleep").arg("20").spawn().unwrap()))
+        .collect();
+    assert!(process_group_running(pid), "older live group disappeared");
+    assert!(list_live_process_group_members(pid).contains(&pid));
+    terminate_process_group(pid);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let status = loop {
+        if let Some(status) = leader.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "SIGKILL escalation failed"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert_eq!(exit_signal(&status), Some(libc::SIGKILL));
+    assert!(!process_group_running(pid));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_zombie_only_group_is_not_running_before_reap() {
+    use std::io::{BufRead, BufReader};
+    let mut command = std::process::Command::new("/bin/sh");
+    command.args(["-c", "echo ready; exit 0"]);
+    command.stdout(std::process::Stdio::piped());
+    configure_child_process_group(&mut command);
+    let mut child = MacosTestChild(command.spawn().unwrap());
+    let pid = child.0.id();
+    let mut ready = String::new();
+    BufReader::new(child.0.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while process_group_running(pid) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "zombie counted as live"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // No wait/try_wait occurred above; confirm the owner can still reap its
+    // exit record below. Darwin need not retain a signalable group for zombies.
+    assert!(list_live_process_group_members(pid).is_empty());
+    assert!(child.0.wait().unwrap().success());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_process_identity_and_unsupported_ownership_are_not_conflated() {
+    let current = process_identity(std::process::id()).unwrap();
+    assert!(current.starts_with("macos-start-time:"));
+    assert_eq!(process_identity(std::process::id()), Some(current.clone()));
+    assert_eq!(process_identity(0), None);
+    assert_eq!(process_identity(u32::MAX), None);
+    let mut child = MacosTestChild(
+        std::process::Command::new("/bin/sleep")
+            .arg("20")
+            .spawn()
+            .unwrap(),
+    );
+    let identity = process_identity(child.0.id()).unwrap();
+    assert_ne!(identity, current);
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    assert_eq!(process_identity(child.0.id()), None);
+    assert_eq!(
+        ManagedProcessJob::create().unwrap_err().kind(),
+        std::io::ErrorKind::Unsupported
+    );
+    assert!(!install_process_subreaper());
+    assert!(reparented_detached_child_pids().is_empty());
+}

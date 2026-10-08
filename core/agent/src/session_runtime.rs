@@ -344,6 +344,7 @@ fn negotiate_interaction_for_turn(
 
 // `% == 0` is deliberate: `is_multiple_of` is stable only from Rust 1.87,
 // above the installer-declared MSRV (1.83).
+#[allow(unknown_lints)] // MSRV Clippy predates this lint.
 #[allow(clippy::manual_is_multiple_of)]
 fn should_reprobe_negative_capability(
     config: &ModelServiceConfig,

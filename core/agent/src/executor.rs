@@ -1,7 +1,7 @@
 use crate::capability::CapabilityRegistry;
 use crate::{ActionOutcome, BashResultEvidence};
 use serde_json::Value;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::thread;
@@ -155,14 +155,8 @@ fn execute_command_action_outcome_with_process_job(
         let _ = stdin.write_all(payload.to_string().as_bytes());
         let _ = stdin.write_all(b"\n");
     }
-    let stdout_reader = child
-        .stdout
-        .take()
-        .map(|stdout| spawn_bounded_reader(stdout, COMMAND_OUTPUT_CAPTURE_BYTES));
-    let stderr_reader = child
-        .stderr
-        .take()
-        .map(|stderr| spawn_bounded_reader(stderr, COMMAND_OUTPUT_CAPTURE_BYTES));
+    let output =
+        crate::command_output::CommandOutput::start(&mut child, COMMAND_OUTPUT_CAPTURE_BYTES);
     let started = Instant::now();
     let timeout = Duration::from_millis(timeout_ms.clamp(1000, 15000));
     let status = loop {
@@ -170,15 +164,13 @@ fn execute_command_action_outcome_with_process_job(
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= timeout => {
                 terminate_command_process(&mut child, process_job.as_ref());
-                let _ = join_bounded_reader(stdout_reader);
-                let _ = join_bounded_reader(stderr_reader);
+                let _ = output.finish();
                 return ActionOutcome::timeout(format!("Action result: {action}\nerror: timeout"));
             }
             Ok(None) => thread::sleep(COMMAND_POLL_INTERVAL),
             Err(err) => {
                 terminate_command_process(&mut child, process_job.as_ref());
-                let _ = join_bounded_reader(stdout_reader);
-                let _ = join_bounded_reader(stderr_reader);
+                let _ = output.finish();
                 return ActionOutcome::failed(format!(
                     "Action result: {action}\nerror: command_wait_failed\nreason: {}",
                     compact_text(&err.to_string(), 1000)
@@ -191,55 +183,20 @@ fn execute_command_action_outcome_with_process_job(
     // Kill residual members before joining pipe drains because a descendant may
     // still hold stdout/stderr open.
     terminate_command_descendants(child.id(), process_job.as_ref());
-    let stdout = match join_bounded_reader(stdout_reader) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+    let (stdout, stderr) = match output.finish() {
+        Ok(output) => output,
         Err(error) => {
             return ActionOutcome::failed(format!(
                 "Action result: {action}\nerror: command_output_failed\nreason: {error}"
             ))
         }
     };
-    let stderr = match join_bounded_reader(stderr_reader) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        Err(error) => {
-            return ActionOutcome::failed(format!(
-                "Action result: {action}\nerror: command_output_failed\nreason: {error}"
-            ))
-        }
-    };
-    render_command_output(action, status, &stdout, &stderr)
-}
-
-fn spawn_bounded_reader(
-    mut reader: impl Read + Send + 'static,
-    max_bytes: usize,
-) -> thread::JoinHandle<std::io::Result<Vec<u8>>> {
-    thread::spawn(move || {
-        let mut captured = Vec::with_capacity(max_bytes.min(8192));
-        let mut buffer = [0_u8; 8192];
-        loop {
-            let read = reader.read(&mut buffer)?;
-            if read == 0 {
-                return Ok(captured);
-            }
-            let remaining = max_bytes.saturating_sub(captured.len());
-            if remaining > 0 {
-                captured.extend_from_slice(&buffer[..read.min(remaining)]);
-            }
-        }
-    })
-}
-
-fn join_bounded_reader(
-    reader: Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>,
-) -> Result<Vec<u8>, String> {
-    let Some(reader) = reader else {
-        return Ok(Vec::new());
-    };
-    reader
-        .join()
-        .map_err(|_| "command_output_reader_panicked".to_string())?
-        .map_err(|error| compact_text(&error.to_string(), 1000))
+    render_command_output(
+        action,
+        status,
+        &String::from_utf8_lossy(&stdout),
+        &String::from_utf8_lossy(&stderr),
+    )
 }
 
 fn render_command_output(

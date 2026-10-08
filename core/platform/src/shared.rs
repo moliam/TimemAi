@@ -549,62 +549,87 @@ pub(super) fn terminate_process(pid: u32) {
     }
 }
 
-/// macOS: live (non-zombie) members of a process group via proc_listallpids
-/// + PROC_PIDTBSDINFO (pbi_pgid, pbi_status). Returns None when enumeration
-/// itself fails so callers can fail closed instead of guessing.
+/// libproc returns a PID count, although its buffer size argument is bytes.
+/// A full buffer may be truncated; retry with bounded growth, never certify
+/// an incomplete snapshot as an empty group.
 #[cfg(target_os = "macos")]
-fn macos_live_process_group_member_pids(group_leader_pid: u32) -> Option<Vec<u32>> {
-    let pid_size = std::mem::size_of::<libc::pid_t>();
-    let mut capacity_bytes = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
-    if capacity_bytes <= 0 {
+fn macos_pid_snapshot(mut list: impl FnMut(&mut [libc::pid_t]) -> i32) -> Option<Vec<libc::pid_t>> {
+    const MAX_PIDS: usize = 1_048_576;
+    let estimate = list(&mut []);
+    if estimate <= 0 {
         return None;
     }
-    // Pids can be born between sizing and filling; allow one bounded regrow.
+    let mut capacity = (estimate as usize).checked_add(32)?;
     for _ in 0..3 {
-        let capacity = (capacity_bytes as usize / pid_size) + 32;
-        let mut buffer: Vec<libc::pid_t> = vec![0; capacity];
-        let written = unsafe {
-            libc::proc_listallpids(
-                buffer.as_mut_ptr().cast(),
-                (capacity * pid_size) as libc::c_int,
-            )
-        };
+        if capacity > MAX_PIDS {
+            return None;
+        }
+        let mut buffer = vec![0; capacity];
+        let written = list(&mut buffer);
         if written <= 0 {
-            // Buffer too small again or transient failure; regrow once.
-            capacity_bytes = written.max(capacity_bytes * 2);
-            continue;
+            return None;
         }
-        let count = (written as usize) / pid_size;
-        let info_size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-        let mut members = Vec::new();
-        for &pid in buffer.iter().take(count) {
-            if pid <= 1 {
-                continue;
-            }
-            let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
-            let read = unsafe {
-                libc::proc_pidinfo(
-                    pid,
-                    libc::PROC_PIDTBSDINFO,
-                    0,
-                    info.as_mut_ptr().cast(),
-                    info_size,
-                )
-            };
-            if read != info_size {
-                // Raced with exit between listing and query; treat as dead.
-                continue;
-            }
-            let info = unsafe { info.assume_init() };
-            if info.pbi_pgid == group_leader_pid && info.pbi_status != libc::SZOMB {
-                members.push(pid as u32);
-            }
+        if (written as usize) < capacity {
+            buffer.truncate(written as usize);
+            return Some(buffer);
         }
-        members.sort_unstable();
-        return Some(members);
+        capacity = capacity.checked_mul(2)?;
     }
     None
 }
+
+/// macOS live (non-zombie) group members. Unknown query failures must not
+/// turn a live group into an apparently completed job.
+#[cfg(target_os = "macos")]
+fn macos_live_process_group_member_pids(group_leader_pid: u32) -> Option<Vec<u32>> {
+    // Query only this group: unrelated protected system processes may deny
+    // PROC_PIDTBSDINFO even when every member of our group is queryable.
+    let buffer = macos_pid_snapshot(|buffer| unsafe {
+        libc::proc_listpgrppids(
+            group_leader_pid as libc::pid_t,
+            if buffer.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                buffer.as_mut_ptr().cast()
+            },
+            std::mem::size_of_val(buffer) as libc::c_int,
+        )
+    })?;
+    let info_size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let mut members = Vec::new();
+    for pid in buffer {
+        if pid <= 1 {
+            continue;
+        }
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                info_size,
+            )
+        };
+        if read != info_size {
+            if read <= 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                // Exited between enumeration and query.
+                continue;
+            }
+            return None;
+        }
+        let info = unsafe { info.assume_init() };
+        if info.pbi_pgid == group_leader_pid && info.pbi_status != libc::SZOMB {
+            members.push(pid as u32);
+        }
+    }
+    members.sort_unstable();
+    Some(members)
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "../tests/unit/macos_pid_snapshot_tests.rs"]
+mod macos_pid_snapshot_tests;
 
 #[cfg(target_os = "macos")]
 pub(super) fn list_live_process_group_members(group_leader_pid: u32) -> Vec<u32> {
@@ -686,7 +711,7 @@ pub(super) fn local_filesystem_mount_points() -> Vec<std::path::PathBuf> {
 }
 
 /// Local real filesystem mount points on macOS: APFS/HFS+ volumes from
-/// getmntinfo (covers /, /System/Volumes/* and mounted /Volumes/* disks);
+/// caller-owned getfsstat snapshots (covers / and mounted /Volumes/* disks);
 /// pseudo mount types (devfs, autofs, nullfs, ...) are excluded by the
 /// supported-type list.
 #[cfg(target_os = "macos")]
@@ -701,21 +726,17 @@ pub(super) fn local_filesystem_mount_points() -> Vec<std::path::PathBuf> {
         "apfs", "hfs", "hfsplus", "msdos", "exfat", "ntfs", "udf", "nfs",
     ];
     let mut out = Vec::new();
-    let mut mounts: *mut libc::statfs = std::ptr::null_mut();
-    let count = unsafe { libc::getmntinfo(&mut mounts, libc::MNT_NOWAIT) };
-    if count <= 0 {
-        return out;
-    }
-    for index in 0..count as usize {
-        let entry = unsafe { &*mounts.add(index) };
-        let fstype = unsafe { std::ffi::CStr::from_ptr(entry.f_fstypename.as_ptr().cast()) }
-            .to_string_lossy()
-            .to_string();
-        if !supported.contains(&fstype.as_str()) {
+    // getmntinfo returns process-global mutable storage. Concurrent Session
+    // initialization can invalidate it while another thread reads a mount.
+    // getfsstat writes into this call's owned buffer instead.
+    for entry in macos_mount_snapshot() {
+        let Some(fstype) = macos_mount_field(&entry.f_fstypename) else {
+            continue;
+        };
+        if !supported.contains(&fstype) {
             continue;
         }
-        let mount = unsafe { std::ffi::CStr::from_ptr(entry.f_mntonname.as_ptr().cast()) };
-        let Ok(mount) = mount.to_str() else {
+        let Some(mount) = macos_mount_field(&entry.f_mntonname) else {
             continue;
         };
         if mount == "/" {
@@ -729,6 +750,46 @@ pub(super) fn local_filesystem_mount_points() -> Vec<std::path::PathBuf> {
         }
     }
     out
+}
+
+// A full buffer may mean mounts appeared between sizing and collection.
+// Retry with bounded headroom; never expose a partial topology as a snapshot.
+#[cfg(target_os = "macos")]
+fn macos_mount_snapshot() -> Vec<libc::statfs> {
+    const MAX_MOUNTS: usize = 16_384;
+    let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+    if count <= 0 {
+        return Vec::new();
+    }
+    let mut capacity = (count as usize).saturating_add(16);
+    for _ in 0..3 {
+        if capacity > MAX_MOUNTS {
+            return Vec::new();
+        }
+        let mut mounts = Vec::with_capacity(capacity);
+        mounts.resize_with(capacity, || unsafe { std::mem::zeroed::<libc::statfs>() });
+        let bytes = (capacity * std::mem::size_of::<libc::statfs>()) as libc::c_int;
+        let read = unsafe { libc::getfsstat(mounts.as_mut_ptr(), bytes, libc::MNT_NOWAIT) };
+        if read < 0 {
+            return Vec::new();
+        }
+        if (read as usize) < capacity {
+            mounts.truncate(read as usize);
+            return mounts;
+        }
+        capacity = capacity.saturating_mul(2);
+    }
+    Vec::new()
+}
+
+#[cfg(target_os = "macos")]
+fn macos_mount_field<const N: usize>(field: &[libc::c_char; N]) -> Option<&str> {
+    // Bound the scan by the kernel structure's array, even for malformed data.
+    let bytes = unsafe { std::slice::from_raw_parts(field.as_ptr().cast::<u8>(), N) };
+    std::ffi::CStr::from_bytes_until_nul(bytes)
+        .ok()?
+        .to_str()
+        .ok()
 }
 
 /// Local real filesystem mount points on other Unix systems: the root
@@ -758,6 +819,8 @@ pub(super) fn filesystem_device_id(path: &std::path::Path) -> Option<u64> {
     crate::windows::filesystem_device_id(path)
 }
 
+// statvfs field widths differ across Unix targets.
+#[allow(clippy::unnecessary_cast)]
 pub(super) fn filesystem_usage_bytes(path: &std::path::Path) -> Option<(u64, u64)> {
     use std::ffi::CString;
     let c_path = CString::new(path.as_os_str().as_encoded_bytes()).ok()?;

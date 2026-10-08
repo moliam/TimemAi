@@ -7,6 +7,7 @@
 use super::{AttachError, AttachHostCandidate, AttachSession};
 use crate::{local_time_label, ANSI_BOLD, ANSI_BRIGHT_TIMEM, ANSI_DIM, ANSI_RESET, TIMEM_LOGO};
 use serde_json::Value;
+use std::fmt::Write as _;
 use unicode_width::UnicodeWidthStr;
 
 const ANSI_FAIL: &str = "\x1b[31m";
@@ -18,10 +19,10 @@ pub(super) fn guidance_card(title: &str, detail: &str, next: &str) -> String {
     let detail_line = if detail.is_empty() {
         String::new()
     } else {
-        detail
-            .lines()
-            .map(|line| format!("\n  {line}"))
-            .collect::<String>()
+        detail.lines().fold(String::new(), |mut text, line| {
+            let _ = write!(text, "\n  {line}");
+            text
+        })
     };
     format!("{ANSI_BOLD}{title}{ANSI_RESET}{detail_line}\n  {ANSI_INFO}Next:{ANSI_RESET} {next}")
 }

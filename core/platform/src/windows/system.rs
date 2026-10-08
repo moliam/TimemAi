@@ -120,7 +120,7 @@ pub(crate) fn graphical_session_available() -> bool {
 /// Filesystem usage for the filesystem containing `path`:
 /// (total_bytes, free_bytes) via GetDiskFreeSpaceExW.
 #[cfg(windows)]
-pub(super) fn filesystem_usage_bytes(path: &std::path::Path) -> Option<(u64, u64)> {
+pub(crate) fn filesystem_usage_bytes(path: &std::path::Path) -> Option<(u64, u64)> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
     let mut prefix: Vec<u16> = path.as_os_str().encode_wide().collect();
@@ -142,7 +142,7 @@ pub(super) fn filesystem_usage_bytes(path: &std::path::Path) -> Option<(u64, u64
 /// Stable device identifier of the filesystem containing `path`. Uses the
 /// volume serial number via GetVolumeInformationW on the path's root.
 #[cfg(windows)]
-pub(super) fn filesystem_device_id(path: &std::path::Path) -> Option<u64> {
+pub(crate) fn filesystem_device_id(path: &std::path::Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationW;
     let root = path.ancestors().last()?.to_path_buf();
@@ -171,8 +171,9 @@ pub(super) fn filesystem_device_id(path: &std::path::Path) -> Option<u64> {
 /// 并按实际行为修正。
 /// GetLogicalDrives + GetDriveTypeW (DRIVE_FIXED only).
 #[cfg(windows)]
-pub(super) fn local_filesystem_mount_points() -> Vec<std::path::PathBuf> {
-    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives, DRIVE_FIXED};
+pub(crate) fn local_filesystem_mount_points() -> Vec<std::path::PathBuf> {
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDrives};
+    use windows_sys::Win32::System::WindowsProgramming::DRIVE_FIXED;
     let mut out = Vec::new();
     let mask = unsafe { GetLogicalDrives() };
     if mask == 0 {

@@ -4,6 +4,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+if [[ "$(uname -s)" == "Linux" ]]; then
+  echo "== Linux cgroup delegation preflight =="
+  cgroup_path="$(awk -F: '$1 == "0" { print $3 }' /proc/self/cgroup)"
+  if [[ -z "$cgroup_path" || ! -w "/sys/fs/cgroup$cgroup_path" ]]; then
+    echo "error: Linux production CI requires a writable delegated cgroup-v2 subtree (Delegate=yes)." >&2
+    exit 1
+  fi
+fi
+
 echo "== shell scripts syntax =="
 bash -n install.sh uninstall.sh scripts/bootstrap_assistant_ui.sh scripts/clippy_check.sh scripts/install_logic_test.sh scripts/online_install_logic_test.sh scripts/sensitive_scan.sh scripts/test_contract_check.sh scripts/edge_regression.sh scripts/update_static_prompt_snapshot.sh scripts/kvc_replay_test.sh scripts/performance_guard.sh scripts/module_boundary_check.sh scripts/cross_host_resume_smoke.sh scripts/web_runtime_lifecycle_smoke.sh scripts/web_public_runtime_smoke.sh scripts/linux_web_platform_smoke.sh scripts/macos_web_platform_smoke.sh scripts/web_license_check.sh scripts/version_consistency_check.sh scripts/self_capability_check.sh scripts/turn_concurrency_stress.sh scripts/ci.sh
 python3 -m py_compile scripts/architecture_guard.py scripts/fake_openai_server.py scripts/web_ui_matrix_check.py scripts/runtime_io_guard.py
