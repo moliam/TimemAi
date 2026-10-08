@@ -248,7 +248,12 @@ async function startHost() {
     url: `http://127.0.0.1:${server.address().port}/`, commands,
     send(event) {
       eventSequence += 1;
-      const envelope = { type: "semantic_event", event_seq: eventSequence, event };
+      // Hello is a connection-level snapshot, never a nested semantic event.
+      // Nesting it makes the client correctly reject it and reconnect; tests
+      // would then advance via reloads instead of exercising live updates.
+      const envelope = event.type === "hello"
+        ? { ...event, event_cursor: eventSequence, event_replay_floor: 0 }
+        : { type: "semantic_event", event_seq: eventSequence, event };
       for (const peer of peers) peer.send(envelope);
     },
     getSession() { return authoritativeSession; },
@@ -845,6 +850,12 @@ async function main() {
       const current = host.getSession();
       const finalText = Array.from({length: 8}, (_, i) => `## Final section ${i}\n\n${"Final answer reading text. ".repeat(20)}\n\n`).join("");
       const done = {...current, state:"ready", active_turn_id:null, turns:current.turns.map(t => ({...t, state:"finished", final_answer:finalText}))};
+      // Non-stream work collapse must repair the portaled outline even when
+      // no display frames arrive. Keep the same 300ms geometry deadline.
+      if (!streamMode) await browser.evaluate(`
+        window.acceptanceRequestAnimationFrame = window.requestAnimationFrame;
+        window.requestAnimationFrame = () => 0;
+      `);
       host.setSession(done); host.send({type:"hello", snapshot:makeSnapshot(done)});
       await waitFor(() => browser.evaluate(`!!document.querySelector('.turn-final-delivery') && !document.querySelector('.stream-continuous-process')`), "large process did not archive");
       await sleep(300);
@@ -855,6 +866,10 @@ async function main() {
         return { visible: answer.bottom > view.top && answer.top < view.bottom, trailing: viewport.scrollHeight - (answer.bottom - view.top + viewport.scrollTop), top: viewport.scrollTop };
       })()`);
       assert(geometry.visible && geometry.trailing < 150, `${streamMode}: archive left blank viewport/stale scroll space: ${JSON.stringify(geometry)}`);
+      if (!streamMode) await browser.evaluate(`
+        window.requestAnimationFrame = window.acceptanceRequestAnimationFrame;
+        delete window.acceptanceRequestAnimationFrame;
+      `);
     }
     }
     await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] } );
@@ -922,6 +937,7 @@ async function main() {
     // Real browser hot path: repeated increments, bounded layout/CPU, stable DOM.
     await browser.call("Performance.enable");
     const countMetrics = async () => Object.fromEntries((await browser.call("Performance.getMetrics")).metrics.map(m => [m.name, m.value]));
+    const countConnectionsBefore = host.getConnectionCount();
     const countBefore = await countMetrics();
     const growingEvents = [...longEvents, toolEvent("adjacent-c", 5)];
     for (let i = 4; i <= 23; i++) {
@@ -932,7 +948,9 @@ async function main() {
     }
     await waitForSubtreeIdle(browser, ".stream-tool-count", "count animation did not settle before metrics");
     const countAfter = await countMetrics();
-    const countCost = Object.fromEntries(["TaskDuration", "LayoutCount", "RecalcStyleCount"].map(k => [k, countAfter[k] - countBefore[k]]));
+    assert(host.getConnectionCount() === countConnectionsBefore,
+      `count updates reconnected instead of updating live: ${countConnectionsBefore} -> ${host.getConnectionCount()}`);
+    const countCost = Object.fromEntries(["TaskDuration", "ScriptDuration", "LayoutDuration", "RecalcStyleDuration", "DevToolsCommandDuration", "LayoutCount", "RecalcStyleCount"].map(k => [k, countAfter[k] - countBefore[k]]));
     assert(countCost.TaskDuration < 4, `count main-thread budget exceeded: ${JSON.stringify(countCost)}`);
     assert(countCost.LayoutCount < 500, `count layout budget exceeded: ${JSON.stringify(countCost)}`);
     assert(await browser.evaluate(`window.countToggle === document.querySelector('.stream-tool-run-toggle') && window.countRows.every((row, i) => row === document.querySelectorAll('.stream-tool-row')[i]) && document.querySelectorAll('.stream-tool-count').length === 1 && document.querySelectorAll('.stream-tool-merged-item.merged').length === 23 && document.querySelector('.stream-tool-count').getAnimations().length === 0`), "burst leaked count nodes, remounted rows, or reopened archive");
