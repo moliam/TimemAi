@@ -549,6 +549,90 @@ pub(super) fn terminate_process(pid: u32) {
     }
 }
 
+/// macOS: live (non-zombie) members of a process group via proc_listallpids
+/// + PROC_PIDTBSDINFO (pbi_pgid, pbi_status). Returns None when enumeration
+/// itself fails so callers can fail closed instead of guessing.
+#[cfg(target_os = "macos")]
+fn macos_live_process_group_member_pids(group_leader_pid: u32) -> Option<Vec<u32>> {
+    let pid_size = std::mem::size_of::<libc::pid_t>();
+    let mut capacity_bytes = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if capacity_bytes <= 0 {
+        return None;
+    }
+    // Pids can be born between sizing and filling; allow one bounded regrow.
+    for _ in 0..3 {
+        let capacity = (capacity_bytes as usize / pid_size) + 32;
+        let mut buffer: Vec<libc::pid_t> = vec![0; capacity];
+        let written = unsafe {
+            libc::proc_listallpids(
+                buffer.as_mut_ptr().cast(),
+                (capacity * pid_size) as libc::c_int,
+            )
+        };
+        if written <= 0 {
+            // Buffer too small again or transient failure; regrow once.
+            capacity_bytes = written.max(capacity_bytes * 2);
+            continue;
+        }
+        let count = (written as usize) / pid_size;
+        let info_size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let mut members = Vec::new();
+        for &pid in buffer.iter().take(count) {
+            if pid <= 1 {
+                continue;
+            }
+            let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+            let read = unsafe {
+                libc::proc_pidinfo(
+                    pid,
+                    libc::PROC_PIDTBSDINFO,
+                    0,
+                    info.as_mut_ptr().cast(),
+                    info_size,
+                )
+            };
+            if read != info_size {
+                // Raced with exit between listing and query; treat as dead.
+                continue;
+            }
+            let info = unsafe { info.assume_init() };
+            if info.pbi_pgid == group_leader_pid && info.pbi_status != libc::SZOMB {
+                members.push(pid as u32);
+            }
+        }
+        members.sort_unstable();
+        return Some(members);
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn list_live_process_group_members(group_leader_pid: u32) -> Vec<u32> {
+    if group_leader_pid <= 1 || group_leader_pid as libc::pid_t == unsafe { libc::getpgrp() } {
+        return Vec::new();
+    }
+    macos_live_process_group_member_pids(group_leader_pid).unwrap_or_default()
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn process_group_running(group_leader_pid: u32) -> bool {
+    if group_leader_pid <= 1 || group_leader_pid as libc::pid_t == unsafe { libc::getpgrp() } {
+        return false;
+    }
+    // kill(-pgid, 0) works on Darwin; a group whose only member is a zombie
+    // leader still reports success, so confirm via live-member enumeration.
+    let result = unsafe { libc::kill(-(group_leader_pid as libc::pid_t), 0) };
+    if !(result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)) {
+        return false;
+    }
+    match macos_live_process_group_member_pids(group_leader_pid) {
+        Some(members) => !members.is_empty(),
+        // Enumeration failed but kill() saw a live group: fail closed and
+        // report running so the terminate path escalates to SIGKILL.
+        None => true,
+    }
+}
+
 pub(super) fn terminate_process_group(group_leader_pid: u32) {
     let pgid = group_leader_pid as libc::pid_t;
     if pgid <= 1 || pgid == unsafe { libc::getpgrp() } {
@@ -678,6 +762,7 @@ pub(super) fn filesystem_usage_bytes(path: &std::path::Path) -> Option<(u64, u64
     crate::windows::filesystem_usage_bytes(path)
 }
 
+#[cfg(target_os = "linux")]
 pub(super) fn list_live_process_group_members(group_leader_pid: u32) -> Vec<u32> {
     let mut members = Vec::new();
     if group_leader_pid <= 1 || group_leader_pid as libc::pid_t == unsafe { libc::getpgrp() } {
@@ -709,6 +794,7 @@ pub(super) fn list_live_process_group_members(group_leader_pid: u32) -> Vec<u32>
     members
 }
 
+#[cfg(target_os = "linux")]
 pub(super) fn process_group_running(group_leader_pid: u32) -> bool {
     if group_leader_pid <= 1 || group_leader_pid as libc::pid_t == unsafe { libc::getpgrp() } {
         return false;
