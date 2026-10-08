@@ -142,8 +142,22 @@ fn readfile_runtime_budget_reaches_serial_and_parallel_model_results() {
     }
 }
 
-fn count_occurrences(haystack: &str, needle: &str) -> usize {
-    haystack.match_indices(needle).count()
+fn runtime_notes(prompt: &str) -> String {
+    action_results(prompt)
+        .into_iter()
+        .flat_map(|result| {
+            result["action_result"]["runtime_metadata"]["notes"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|note| note.as_str().map(str::to_string))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn count_runtime_note_occurrences(haystack: &str, needle: &str) -> usize {
+    runtime_notes(haystack).match_indices(needle).count()
 }
 
 fn action_results(prompt: &str) -> Vec<Value> {
@@ -158,6 +172,33 @@ fn action_results(prompt: &str) -> Vec<Value> {
             }
         })
         .collect()
+}
+
+#[test]
+fn structured_result_assertions_decode_paths_without_matching_assistant_echoes() {
+    for path in [
+        r"C:\Users\runner\file.txt",
+        r"\\?\C:\long path\file.txt",
+        "/tmp/quoted\"file.txt",
+    ] {
+        let note = format!("first time to touch file {path}");
+        let result = json!({"action_result": {
+            "runtime_metadata": {"notes": [note], "cwd": path},
+            "tool_output": {"content": format!("CWD: {path}")}
+        }});
+        let prompt = format!("assistant echoed {note}\n{result}\n");
+        assert_eq!(count_runtime_note_occurrences(&prompt, &note), 1);
+        assert!(has_tool_output_containing(
+            &prompt,
+            "content",
+            &format!("CWD: {path}")
+        ));
+        assert!(has_runtime_metadata(&prompt, "cwd", json!(path)));
+        assert_eq!(
+            count_runtime_note_occurrences(&format!("assistant echoed {note}"), &note),
+            0
+        );
+    }
 }
 
 fn has_runtime_metadata(prompt: &str, key: &str, expected: Value) -> bool {
@@ -260,21 +301,37 @@ fn readfile_first_touch_notes_are_injected_once_per_path() {
     );
 
     let first = readfile_first_touch_read(&mut core, "a/b/c.txt");
-    assert!(first.contains(&dir_note), "{first}");
-    assert!(first.contains(&file_c_note), "{first}");
+    assert!(runtime_notes(&first).contains(&dir_note), "{first}");
+    assert!(runtime_notes(&first).contains(&file_c_note), "{first}");
 
     let second = readfile_first_touch_read(&mut core, "a/b/c.txt");
-    assert_eq!(count_occurrences(&second, &dir_note), 1, "{second}");
-    assert_eq!(count_occurrences(&second, &file_c_note), 1, "{second}");
+    assert_eq!(
+        count_runtime_note_occurrences(&second, &dir_note),
+        1,
+        "{second}"
+    );
+    assert_eq!(
+        count_runtime_note_occurrences(&second, &file_c_note),
+        1,
+        "{second}"
+    );
     assert!(
-        count_occurrences(&second, "first time to touch file") == 1,
+        count_runtime_note_occurrences(&second, "first time to touch file") == 1,
         "{second}"
     );
 
     let third = readfile_first_touch_read(&mut core, "a/b/d.txt");
-    assert_eq!(count_occurrences(&third, &dir_note), 1, "{third}");
-    assert_eq!(count_occurrences(&third, &file_c_note), 1, "{third}");
-    assert!(third.contains(&file_d_note), "{third}");
+    assert_eq!(
+        count_runtime_note_occurrences(&third, &dir_note),
+        1,
+        "{third}"
+    );
+    assert_eq!(
+        count_runtime_note_occurrences(&third, &file_c_note),
+        1,
+        "{third}"
+    );
+    assert!(runtime_notes(&third).contains(&file_d_note), "{third}");
 }
 
 fn run_bash_edit_first_touch_read(core: &mut AgentCore, path: &str) -> String {
@@ -334,11 +391,11 @@ fn run_bash_edit_stringified_array_emits_clean_first_touch_paths() {
     let expected_file = cwd.join("a/b/c.txt").to_string_lossy().to_string();
     let expected_dir = format!("{}/", cwd.join("a/b").to_string_lossy());
     assert!(
-        prompt.contains(&format!("first time to touch file {expected_file}")),
+        runtime_notes(&prompt).contains(&format!("first time to touch file {expected_file}")),
         "{prompt}"
     );
     assert!(
-        prompt.contains(&format!("first time to touch dir {expected_dir}")),
+        runtime_notes(&prompt).contains(&format!("first time to touch dir {expected_dir}")),
         "{prompt}"
     );
     // JSON history legitimately contains the original stringified array; only
@@ -383,20 +440,36 @@ fn run_bash_edit_first_touch_notes_are_injected_once_per_path() {
     );
 
     let first = run_bash_edit_first_touch_read(&mut core, "a/b/c.txt");
-    assert!(first.contains(&dir_note), "{first}");
-    assert!(first.contains(&file_c_note), "{first}");
+    assert!(runtime_notes(&first).contains(&dir_note), "{first}");
+    assert!(runtime_notes(&first).contains(&file_c_note), "{first}");
 
     // The prompt keeps history, so the notes stay visible exactly once and are
     // not re-emitted on the second run_bash `edit` of the same path.
     let second = run_bash_edit_first_touch_read(&mut core, "a/b/c.txt");
-    assert_eq!(count_occurrences(&second, &dir_note), 1, "{second}");
-    assert_eq!(count_occurrences(&second, &file_c_note), 1, "{second}");
+    assert_eq!(
+        count_runtime_note_occurrences(&second, &dir_note),
+        1,
+        "{second}"
+    );
+    assert_eq!(
+        count_runtime_note_occurrences(&second, &file_c_note),
+        1,
+        "{second}"
+    );
 
     // readfile of the same file must not re-emit notes already emitted via the
     // run_bash `edit` anchor.
     let third = readfile_first_touch_read(&mut core, "a/b/c.txt");
-    assert_eq!(count_occurrences(&third, &dir_note), 1, "{third}");
-    assert_eq!(count_occurrences(&third, &file_c_note), 1, "{third}");
+    assert_eq!(
+        count_runtime_note_occurrences(&third, &dir_note),
+        1,
+        "{third}"
+    );
+    assert_eq!(
+        count_runtime_note_occurrences(&third, &file_c_note),
+        1,
+        "{third}"
+    );
 }
 
 #[test]
@@ -413,7 +486,7 @@ fn readfile_first_touch_note_survives_truncated_tool_result() {
 
     let prompt = readfile_first_touch_read(&mut core, "big.txt");
     assert!(
-        prompt.contains(&format!(
+        runtime_notes(&prompt).contains(&format!(
             "first time to touch file {}",
             fs::canonicalize(cwd.join("big.txt"))
                 .unwrap()
@@ -470,8 +543,8 @@ fn context_compress_resets_readfile_first_touch_tracking() {
     );
 
     let first = readfile_first_touch_read(&mut core, "a/b/c.txt");
-    assert!(first.contains(&dir_note), "{first}");
-    assert!(first.contains(&file_c_note), "{first}");
+    assert!(runtime_notes(&first).contains(&dir_note), "{first}");
+    assert!(runtime_notes(&first).contains(&file_c_note), "{first}");
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -488,12 +561,16 @@ fn context_compress_resets_readfile_first_touch_tracking() {
         prompt.contains("context compressed successfully."),
         "{prompt}"
     );
-    assert!(!prompt.contains(&file_c_note), "{prompt}");
+    assert!(!runtime_notes(&prompt).contains(&file_c_note), "{prompt}");
 
     let after = readfile_first_touch_read(&mut core, "a/b/d.txt");
-    assert_eq!(count_occurrences(&after, &dir_note), 1, "{after}");
-    assert!(after.contains(&file_d_note), "{after}");
-    assert!(!after.contains(&file_c_note), "{after}");
+    assert_eq!(
+        count_runtime_note_occurrences(&after, &dir_note),
+        1,
+        "{after}"
+    );
+    assert!(runtime_notes(&after).contains(&file_d_note), "{after}");
+    assert!(!runtime_notes(&after).contains(&file_c_note), "{after}");
 }
 
 #[test]
@@ -524,7 +601,7 @@ fn parallel_readfiles_in_same_dir_emit_one_dir_note_and_per_file_notes() {
     };
 
     assert_eq!(
-        count_occurrences(
+        count_runtime_note_occurrences(
             &prompt,
             &format!(
                 "first time to touch dir {}/",
@@ -535,7 +612,7 @@ fn parallel_readfiles_in_same_dir_emit_one_dir_note_and_per_file_notes() {
         "{prompt}"
     );
     assert!(
-        prompt.contains(&format!(
+        runtime_notes(&prompt).contains(&format!(
             "first time to touch file {}",
             fs::canonicalize(cwd.join("a/b/c.txt"))
                 .unwrap()
@@ -544,7 +621,7 @@ fn parallel_readfiles_in_same_dir_emit_one_dir_note_and_per_file_notes() {
         "{prompt}"
     );
     assert!(
-        prompt.contains(&format!(
+        runtime_notes(&prompt).contains(&format!(
             "first time to touch file {}",
             fs::canonicalize(cwd.join("a/b/d.txt"))
                 .unwrap()
@@ -3598,9 +3675,20 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let _ = core.begin_turn("查项目代号并统计文件", None);
     let prompt = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(
-            r#"{"status":"working","free_talk":"并行查询记忆和本地文件数量。","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project codename%"],"limit":5}},{"run_bash":{"cmd":"rg --files | wc -l","timeout_ms":5000}}]}"#,
-        ),
+        content: scored(json!({
+            "status": "working",
+            "free_talk": "并行查询记忆和本地文件数量。",
+            "working_still_action": [
+                {"memmgr": {"type": "durable", "op": "sql",
+                    "sql": "SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5",
+                    "params": ["%project codename%"], "limit": 5}},
+                {"run_bash": {"cmd": if cfg!(windows) {
+                    "(Get-ChildItem -File | Measure-Object).Count"
+                } else {
+                    "count=0; for file in *; do if [ -f \"$file\" ]; then count=$((count + 1)); fi; done; printf '%s\\n' \"$count\""
+                }, "timeout_ms": 5000}}
+            ]
+        }).to_string()),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -9301,22 +9389,23 @@ fn self_tool_runtime_configuration_keeps_core_owned_identity() {
         other => panic!("expected model continuation, got {other:?}"),
     };
 
-    assert!(prompt.contains(&format!("space_dir: {}", configured_space.display())));
-    assert!(prompt.contains(&format!("memory_dir: {}", configured_memory.display())));
+    let contents = tool_contents(&prompt).join("\n");
+    assert!(contents.contains(&format!("space_dir: {}", configured_space.display())));
+    assert!(contents.contains(&format!("memory_dir: {}", configured_memory.display())));
     let configured_api_stream = api_audit_stream_path(&configured_api_audit);
-    assert!(prompt.contains(&format!(
+    assert!(contents.contains(&format!(
         "api_audit_logical_stream: {}",
         configured_api_stream.display()
     )));
-    assert!(prompt.contains(&format!(
+    assert!(contents.contains(&format!(
         "api_audit_segments_dir: {}",
         rolling_file_store::segmented_directory(&configured_api_stream).display()
     )));
-    assert!(prompt.contains(&format!(
+    assert!(contents.contains(&format!(
         "action_audit_logical_stream: {}",
         configured_action_audit.display()
     )));
-    assert!(prompt.contains(&format!(
+    assert!(contents.contains(&format!(
         "action_audit_segments_dir: {}",
         rolling_file_store::segmented_directory(&configured_action_audit).display()
     )));
@@ -9419,7 +9508,9 @@ fn self_tool_cwd_without_new_path_reports_current_context_without_mutating_it() 
     };
     assert_eq!(core.current_prompt_cwd(), base_dir.as_path());
     assert!(
-        prompt.contains(&format!("CWD: {}", base_dir.display())),
+        tool_contents(&prompt)
+            .join("\n")
+            .contains(&format!("CWD: {}", base_dir.display())),
         "{prompt}"
     );
     assert!(!prompt.contains("CWD changed to:"), "{prompt}");
@@ -9485,7 +9576,9 @@ fn self_tool_cwd_changes_relative_context_and_emits_structured_state() {
 
     assert_eq!(core.current_prompt_cwd(), nested_dir.as_path());
     assert!(
-        prompt.contains(&format!("CWD changed to: {}", nested_dir.display())),
+        tool_contents(&prompt)
+            .join("\n")
+            .contains(&format!("CWD changed to: {}", nested_dir.display())),
         "{prompt}"
     );
     assert!(
@@ -9493,7 +9586,7 @@ fn self_tool_cwd_changes_relative_context_and_emits_structured_state() {
         "{prompt}"
     );
     assert!(
-        prompt.contains(&nested_dir.display().to_string()),
+        has_runtime_metadata(&prompt, "cwd", json!(nested_dir.to_string_lossy())),
         "{prompt}"
     );
 
