@@ -2693,42 +2693,26 @@ fn macos_cancel_older_term_resistant_job_publishes_one_killed_update() {
 }
 
 #[cfg(target_os = "macos")]
-struct EscapedPipeFixture(PathBuf);
+struct EscapedPipeFixture(
+    PathBuf,
+    crate::escaped_pipe_fixture::NativeEscapedPipeFixture,
+);
 
 #[cfg(target_os = "macos")]
 impl EscapedPipeFixture {
     fn new(name: &str) -> Self {
-        Self(tmp_memory_dir(name))
+        let dir = tmp_memory_dir(name);
+        let native = crate::escaped_pipe_fixture::NativeEscapedPipeFixture::new(&dir);
+        Self(dir, native)
     }
 
     fn command(&self, keep_launcher: bool) -> String {
-        // The child signals readiness only after setsid, making cancellation
-        // independent of the fork/reparent scheduling race. Cleanup is by the
-        // fixture's private release file, never by guessed process ancestry.
-        format!(
-            r#"printf shell_started > phase
-/usr/bin/python3 -c '
-import os,time
-open("phase","w").write("python_started")
-p=os.fork()
-if p==0:
- os.setsid()
- open("ready","w").close()
- deadline=time.monotonic()+8
- while not os.path.exists("release") and time.monotonic()<deadline: time.sleep(0.01)
- open("done","w").close()
- os._exit(0)
-while not os.path.exists("ready"): time.sleep(0.01)
-print("captured",flush=True)
-{}
-'"#,
-            if keep_launcher { "time.sleep(8)" } else { "" }
-        )
+        self.1.command(keep_launcher)
     }
 
     fn wait_ready(&self, store: &ShellJobManager) {
         let deadline = Instant::now() + Duration::from_secs(3);
-        while !self.0.join("ready").exists() {
+        while !self.1.path().join("ready").exists() {
             if Instant::now() >= deadline {
                 let jobs = store.state.jobs.lock().unwrap();
                 let diagnostics = jobs
@@ -2745,7 +2729,7 @@ print("captured",flush=True)
                     .collect::<Vec<_>>();
                 panic!(
                     "fixture did not escape: phase={:?}; jobs={diagnostics:?}",
-                    fs::read_to_string(self.0.join("phase"))
+                    fs::read_to_string(self.1.path().join("phase"))
                 );
             }
             thread::sleep(Duration::from_millis(10));
@@ -2756,14 +2740,7 @@ print("captured",flush=True)
 #[cfg(target_os = "macos")]
 impl Drop for EscapedPipeFixture {
     fn drop(&mut self) {
-        let _ = fs::write(self.0.join("release"), "");
-        let deadline = Instant::now() + Duration::from_secs(9);
-        while self.0.join("ready").exists()
-            && !self.0.join("done").exists()
-            && Instant::now() < deadline
-        {
-            thread::sleep(Duration::from_millis(10));
-        }
+        self.1.release();
         let _ = fs::remove_dir_all(&self.0);
     }
 }

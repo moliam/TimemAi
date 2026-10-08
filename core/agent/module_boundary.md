@@ -42,6 +42,12 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   response parsing, and audit redaction metadata. Hosts should not rebuild
   model API protocol details, execute model HTTP, or reinterpret model HTTP
   response semantics.
+- Native HTTP uses a cached current-thread runtime and connection pool. Transport
+  errors, cancellation, and incomplete/invalid streams retire that runtime and
+  cancel its async connection tasks before returning, so rejected bodies cannot
+  leave unread sockets retained while the runtime is idle. Successful complete
+  responses retain keep-alive reuse; a subsequent request rebuilds a retired
+  transport. Shutdown does not wait for already-running blocking DNS work.
 - Model retry policy, retry decision data, and model-call outcome accounting.
   Model service I/O belongs behind the core/model service boundary. Hosts may surface
   waiting/cancellation UX, but should not redefine retryability or retry

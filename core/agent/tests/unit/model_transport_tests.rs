@@ -358,6 +358,9 @@ fn streaming_response_is_rejected_when_accumulated_body_crosses_limit() {
     let addr = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let _ = read_http_request(&mut stream);
         stream
             .write_all(
@@ -365,17 +368,50 @@ fn streaming_response_is_rejected_when_accumulated_body_crosses_limit() {
             )
             .unwrap();
         let chunk = vec![b'x'; 1024 * 1024];
-        for _ in 0..=MAX_MODEL_RESPONSE_BYTES / chunk.len() {
-            if stream.write_all(&chunk).is_err() {
-                break;
+        // Exceed socket buffering as well as the model-body limit. The peer
+        // must close on rejection, not leave this writer blocked until the
+        // cached current-thread runtime happens to run another request.
+        for _ in 0..4 * MAX_MODEL_RESPONSE_BYTES / chunk.len() {
+            if let Err(error) = stream.write_all(&chunk) {
+                assert!(
+                    matches!(
+                        error.kind(),
+                        std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
+                    ),
+                    "rejected response did not close its connection: {error:?}"
+                );
+                return listener;
             }
         }
+        panic!("oversized response writer never observed connection closure");
     });
 
     let config = local_config(addr, 5);
     let audit_file = test_audit_file("streaming-oversized-response");
-    let error = call_model(&config, "oversized stream", &audit_file).unwrap_err();
+    let mut client = HttpModelClient::default();
+    let error = client
+        .call_model(&config, "oversized stream", &audit_file, &mut || false)
+        .unwrap_err();
     assert_eq!(error, model_response_too_large());
+    let listener = server.join().unwrap();
+    // The same public client remains usable after retiring the failed
+    // connection; successful requests still have separate keep-alive coverage.
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let _ = read_http_request(&mut stream);
+        stream
+            .write_all(&http_json_response("200 OK", &success_body("recovered")))
+            .unwrap();
+    });
+    let response = client
+        .call_model(&config, "try again", &audit_file, &mut || false)
+        .unwrap();
+    assert_eq!(response.content, "recovered");
     server.join().unwrap();
     let _ = std::fs::remove_file(audit_file);
 }

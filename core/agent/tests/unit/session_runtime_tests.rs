@@ -574,7 +574,6 @@ impl TurnUi for SupplementAndExpansionUi {
     }
 }
 
-#[cfg(unix)]
 /// Simulates a restart followed by the user immediately clicking manual
 /// context compression: the direct-resume turn starts while the Host has
 /// already set the manual-compact flag.
