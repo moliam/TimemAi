@@ -1489,14 +1489,14 @@ pub fn interpret_model_http_response(
             (Some(response), None) => response.clone(),
             (None, None) => Value::Null,
         };
-        let result = match decoded {
-            Err(error) => Err(error),
-            _ if let Some(failure) = upstream_failure.as_ref() => {
-                Err(openai_responses_stream_failure_message(failure))
+        let result = match (decoded, upstream_failure.as_ref()) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Some(failure)) => Err(openai_responses_stream_failure_message(failure)),
+            (Ok(_), None) if protocol_failed => Err("model_responses_stream_failed".into()),
+            (Ok(_), None) if raw_json.is_null() => {
+                Err("model_responses_stream_missing_terminal".into())
             }
-            _ if protocol_failed => Err("model_responses_stream_failed".into()),
-            _ if raw_json.is_null() => Err("model_responses_stream_missing_terminal".into()),
-            _ => parse_model_response(config, &raw_json),
+            (Ok(_), None) => parse_model_response(config, &raw_json),
         };
         return ModelHttpResponseInterpretation {
             status,
