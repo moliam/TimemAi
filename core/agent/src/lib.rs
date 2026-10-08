@@ -9220,3 +9220,7 @@ fn step_to_json(step: CoreStep) -> serde_json::Value {
 #[cfg(test)]
 #[path = "../tests/unit/lib_tests.rs"]
 mod prompt_component_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "../tests/unit/escaped_pipe_fixture.rs"]
+mod escaped_pipe_fixture;

@@ -4156,6 +4156,7 @@ fn model_prompt_reports_setsid_escaped_process_as_runtime_info() {
         .all(|pid| *pid != escapee));
 }
 
+#[cfg(unix)]
 #[test]
 fn model_prompt_reports_sigkilled_job_in_runtime_info_sysstat() {
     // Real process killed by SIGKILL: the exit update must reach the

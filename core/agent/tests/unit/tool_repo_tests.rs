@@ -315,17 +315,18 @@ fn self_test_rejects_incomplete_escaped_pipe_capture_without_hanging() {
     let root = temp_root("escaped_pipe_capture");
     let repo = SessionToolRepo::new(root.join("memory"), "session-output");
     let draft = repo.create_draft().unwrap();
+    let fixture = crate::escaped_pipe_fixture::NativeEscapedPipeFixture::new(&root);
     write_candidate(
         &draft,
         "escaped-output-validator",
-        "#!/bin/bash\n/usr/bin/python3 -c 'import os,time; p=os.fork(); (os.setsid(), time.sleep(3), os._exit(0)) if p==0 else None'\n",
+        &format!("#!/bin/bash\n{}\n", fixture.command(false)),
         "",
         &[],
     );
     let started = Instant::now();
     let result = repo.publish(&draft);
     let elapsed = started.elapsed();
-    thread::sleep(Duration::from_secs(3).saturating_sub(started.elapsed()));
+    drop(fixture);
     let _ = fs::remove_dir_all(root);
     assert!(elapsed < Duration::from_secs(2), "capture took {elapsed:?}");
     let error = result.expect_err("incomplete capture must not publish a tool");

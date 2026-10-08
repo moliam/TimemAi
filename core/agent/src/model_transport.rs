@@ -511,6 +511,18 @@ fn error_chain_text(error: &(dyn std::error::Error + 'static)) -> String {
 }
 
 impl HttpModelClient {
+    fn discard_transport(&mut self) {
+        if let Some(transport) = self.transport.take() {
+            // A dropped response only notifies Hyper's connection task. Our
+            // current-thread runtime stops polling when execute returns, so
+            // that task may otherwise retain an unread socket indefinitely.
+            // Cancel its async tasks now; do not wait for blocking DNS work.
+            // Successful responses keep the runtime and connection pool.
+            drop(transport.client);
+            transport.runtime.shutdown_background();
+        }
+    }
+
     fn transport(&mut self) -> Result<&mut NativeHttpTransport, String> {
         if self.transport.is_none() {
             self.transport = Some(NativeHttpTransport::new()?);
@@ -579,10 +591,18 @@ impl HttpModelClient {
         let observer = on_content
             .as_mut()
             .map(|callback| &mut **callback as &mut dyn FnMut(&serde_json::Value));
-        let response =
+        let result =
             self.transport()?
-                .execute(config, http_request, timeout, should_cancel, observer)?;
+                .execute(config, http_request, timeout, should_cancel, observer);
+        let response = match result {
+            Ok(response) => response,
+            Err(error) => {
+                self.discard_transport();
+                return Err(error);
+            }
+        };
         if let Some((error, diagnostics)) = &response.stream_error {
+            self.discard_transport();
             let event = serde_json::json!({
                 "type": "llm_response", "time_ms": crate::now_ms(),
                 "audit_request_id": audit_request_id,

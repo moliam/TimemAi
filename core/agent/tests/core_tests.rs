@@ -168,6 +168,7 @@ fn has_runtime_metadata(prompt: &str, key: &str, expected: Value) -> bool {
     })
 }
 
+#[cfg(unix)]
 fn action_result_pid(prompt: &str) -> Option<u64> {
     action_results(prompt)
         .iter()
@@ -195,6 +196,7 @@ fn tool_contents(prompt: &str) -> Vec<String> {
     tool_outputs(prompt, "content")
 }
 
+#[cfg(unix)]
 fn tool_content_field(prompt: &str, field: &str) -> Option<String> {
     let prefix = format!("{field}: ");
     tool_contents(prompt).iter().rev().find_map(|content| {
@@ -204,6 +206,7 @@ fn tool_content_field(prompt: &str, field: &str) -> Option<String> {
     })
 }
 
+#[cfg(unix)]
 fn has_action_status(prompt: &str, expected: &str) -> bool {
     has_runtime_metadata(prompt, "status", json!(expected))
 }
