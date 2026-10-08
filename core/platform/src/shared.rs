@@ -691,6 +691,12 @@ pub(super) fn local_filesystem_mount_points() -> Vec<std::path::PathBuf> {
 /// supported-type list.
 #[cfg(target_os = "macos")]
 pub(super) fn local_filesystem_mount_points() -> Vec<std::path::PathBuf> {
+    // "/" covers the internal APFS container free space (system and Data
+    // volumes share one container); "/Volumes/*" are real attached disks.
+    // Other "/System/Volumes/*" entries (VM swap, Preboot, Update, xarts,
+    // Hardware, ...) are system infrastructure whose size fluctuations would
+    // masquerade as user-data disk pressure, so they are excluded by path
+    // after the type filter.
     let supported = [
         "apfs", "hfs", "hfsplus", "msdos", "exfat", "ntfs", "udf", "nfs",
     ];
@@ -705,9 +711,19 @@ pub(super) fn local_filesystem_mount_points() -> Vec<std::path::PathBuf> {
         let fstype = unsafe { std::ffi::CStr::from_ptr(entry.f_fstypename.as_ptr().cast()) }
             .to_string_lossy()
             .to_string();
-        if supported.contains(&fstype.as_str()) {
-            let mount = unsafe { std::ffi::CStr::from_ptr(entry.f_mntonname.as_ptr().cast()) };
-            if let Ok(mount) = mount.to_str() {
+        if !supported.contains(&fstype.as_str()) {
+            continue;
+        }
+        let mount = unsafe { std::ffi::CStr::from_ptr(entry.f_mntonname.as_ptr().cast()) };
+        let Ok(mount) = mount.to_str() else {
+            continue;
+        };
+        if mount == "/" {
+            out.push(std::path::PathBuf::from(mount));
+            continue;
+        }
+        if let Some(rest) = mount.strip_prefix("/Volumes/") {
+            if !rest.is_empty() && !rest.contains('/') {
                 out.push(std::path::PathBuf::from(mount));
             }
         }

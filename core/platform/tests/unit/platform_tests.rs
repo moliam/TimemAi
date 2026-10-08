@@ -543,11 +543,16 @@ fn local_filesystem_mount_points_reports_root_and_skips_pseudo() {
         mounts.contains(&std::path::PathBuf::from("/")),
         "{mounts:?}"
     );
-    // Pseudo filesystems (devfs, autofs, nullfs overlays) must never appear.
+    // Pseudo filesystems (devfs, autofs) and system volumes (VM swap,
+    // Preboot, Update, xarts, ...) must never appear; external disks live
+    // directly under /Volumes only.
     for mount in &mounts {
         let text = mount.display().to_string();
         assert!(!text.starts_with("/dev"), "{text}");
-        assert!(!text.starts_with("/System/Volumes/VM"), "{text}");
+        assert!(!text.starts_with("/System/Volumes/"), "{text}");
+        if text != "/" {
+            assert!(text.strip_prefix("/Volumes/").is_some(), "{text}");
+        }
     }
 }
 
