@@ -157,6 +157,10 @@ wait_prompt
 send "Q1：最终答案只输出 NO_SUPPLEMENT。\r"
 answer_cursor_queries
 wait_model_request
+# No more response-wait handshakes follow. Keep consuming the fake server's
+# PTY while foreground expectations read Timem: cancellation tracebacks or
+# request diagnostics can otherwise fill that PTY and block HTTP replies.
+expect_background -i $model_server_spawn_id -re {.+} {}
 send "Q2：最终答案只输出 SUPPLEMENT_OK。\r"
 set supplement_output ""
 expect {

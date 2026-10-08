@@ -1205,7 +1205,29 @@ fn each_native_model_interaction_owns_a_distinct_visible_delta() {
 
 #[test]
 fn native_approval_resume_keeps_exchange_on_the_interaction_delta() {
-    let mut core = test_core("native_approval_interaction_delta");
+    // Approval is denied, so neither shell is executed. Exercise both host
+    // profiles on every OS instead of leaving this contract to platform CI.
+    for (host, shell) in [
+        (
+            crate::capability::CapabilityHostProfile::unix_with_local_command_execution(),
+            "run_bash",
+        ),
+        (
+            crate::capability::CapabilityHostProfile::windows_with_local_command_execution(),
+            "run_powershell",
+        ),
+    ] {
+        assert_native_approval_interaction_delta(host, shell);
+    }
+}
+
+fn assert_native_approval_interaction_delta(
+    host: crate::capability::CapabilityHostProfile,
+    shell: &str,
+) {
+    let mut core = test_core(&format!("native_approval_interaction_delta_{shell}"));
+    core.set_capability_registry(CapabilityRegistry::builtin_for_host(host));
+    assert!(core.capabilities.contains_tool(shell));
     core.set_interaction_profile(&native_test_profile());
     core.set_bash_approval_mode(BashApprovalMode::Ask);
     core.append_delta(vec![(
@@ -1219,7 +1241,7 @@ fn native_approval_resume_keeps_exchange_on_the_interaction_delta() {
         tool_calls: vec![NativeToolCall {
             assistant_continuation: None,
             id: "call_needs_approval".to_string(),
-            name: crate::os::local_shell_tool_name().to_string(),
+            name: shell.to_string(),
             raw_arguments: arguments.to_string(),
             arguments,
         }],
