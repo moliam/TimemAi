@@ -60,6 +60,24 @@ proc wait_prompt {} {
     }
 }
 
+proc wait_model_request {} {
+    global model_server_spawn_id spawn_id
+    set shell_spawn_id $spawn_id
+    # Keep draining the shell while waiting on the server: otherwise PTY
+    # backpressure can block rendering before the HTTP request is sent.
+    expect {
+        -timeout 15
+        -i $model_server_spawn_id -re "fake_model_response_waiting" { return }
+        -i $shell_spawn_id -re "\033\\\[6n" {
+            send -i $shell_spawn_id "\033\[24;1R"
+            exp_continue -continue_timer
+        }
+        -i $shell_spawn_id -re ".+" { exp_continue -continue_timer }
+        timeout { error "fake model did not enter its response wait" }
+        eof { error "test process exited before model response wait" }
+    }
+}
+
 proc wait_active_turn_cancelled {} {
     set output ""
     expect {
@@ -127,7 +145,7 @@ expect {
 wait_prompt
 send "请等待我取消这一轮。\r"
 answer_cursor_queries
-after 300
+wait_model_request
 send "\003"
 set cancel_started [clock milliseconds]
 set cancel_output [wait_active_turn_cancelled]
@@ -138,7 +156,7 @@ if {$cancel_elapsed > 1500} {
 wait_prompt
 send "Q1：最终答案只输出 NO_SUPPLEMENT。\r"
 answer_cursor_queries
-after 500
+wait_model_request
 send "Q2：最终答案只输出 SUPPLEMENT_OK。\r"
 set supplement_output ""
 expect {

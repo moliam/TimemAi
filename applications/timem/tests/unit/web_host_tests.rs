@@ -13368,16 +13368,22 @@ fn manual_toolgen_publishes_tool_and_retains_the_complete_web_event_chain() {
     .unwrap();
 
     let started = Instant::now();
-    loop {
+    'waiting: loop {
         for (event_session_id, context_id, worker_id, event) in drain_worker_events(&state) {
             handle_scoped_worker_event(&state, &event_session_id, &context_id, &worker_id, event);
-        }
-        let sessions = state.sessions.lock().unwrap();
-        let session = &sessions[&session_id];
-        let finished = session.state == "ready" && session.tools.len() == 1;
-        drop(sessions);
-        if finished {
-            break;
+            // Exercise a consumer observing every event boundary, not just
+            // whichever events happened to arrive in one drain batch.
+            let sessions = state.sessions.lock().unwrap();
+            let session = &sessions[&session_id];
+            if session.state == "ready"
+                && session.tools.len() == 1
+                && session
+                    .turns
+                    .last()
+                    .is_some_and(|turn| turn.state == "finished" && turn.completion.is_some())
+            {
+                break 'waiting;
+            }
         }
         assert!(
             started.elapsed() < Duration::from_secs(5),

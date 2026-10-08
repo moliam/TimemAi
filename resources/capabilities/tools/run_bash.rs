@@ -2548,6 +2548,7 @@ fn contains_long_normal_sleep(command: &str) -> bool {
     }
     false
 }
+#[cfg(not(windows))]
 fn sleep_arg_seconds(arg: &str) -> Option<f64> {
     let clean = arg.trim();
     let (number, multiplier) = if let Some(number) = clean.strip_suffix('s') {

@@ -417,18 +417,27 @@ fn command_action_escaped_pipe_reports_incomplete_without_unbounded_join() {
     let script = dir.join("escape.sh");
     fs::write(
         &script,
-        "#!/bin/sh\n/usr/bin/python3 -c 'import os,time; p=os.fork(); (os.setsid(), time.sleep(3), os._exit(0)) if p==0 else None'\n",
+        format!(
+            "#!/bin/sh\nprintf shell_started > '{0}'\n/usr/bin/python3 -c 'import os,time; open(\"{0}\",\"w\").write(\"python_started\"); p=os.fork(); (os.setsid(), open(\"{0}\",\"w\").write(\"escaped\"), time.sleep(3), os._exit(0)) if p==0 else None'\n",
+            dir.join("phase").display()
+        ),
     )
     .unwrap();
     let started = Instant::now();
     let outcome = execute_command_action_outcome("escape_tool", &script, &json!({}), 1000);
     let elapsed = started.elapsed();
+    let phase = fs::read_to_string(dir.join("phase"));
     // The fixture descendant expires independently; no ancestry guesses or
     // signalling an unowned PID, including on an assertion failure.
     thread::sleep(Duration::from_secs(3).saturating_sub(started.elapsed()));
     let _ = fs::remove_dir_all(dir);
     assert!(elapsed < Duration::from_secs(2), "capture took {elapsed:?}");
-    assert_eq!(outcome.status, crate::ActionStatus::Failed);
+    assert_eq!(
+        outcome.status,
+        crate::ActionStatus::Failed,
+        "phase={phase:?}; {}",
+        outcome.text
+    );
     assert!(
         outcome.text.contains("output_capture_incomplete"),
         "{}",
