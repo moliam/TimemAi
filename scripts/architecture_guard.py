@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import tempfile
 from pathlib import Path
 
@@ -328,6 +329,12 @@ def violations(root: Path) -> list[str]:
 
     for path in (root / "core/agent/src").rglob("*.rs") if (root / "core/agent/src").is_dir() else ():
         source = path.read_text(errors="replace")
+        for primitive in ("local_filesystem_mount_points", "filesystem_device_id", "filesystem_usage_bytes"):
+            if re.search(r"\b" + primitive + r"\s*\(", source):
+                errors.append(
+                    f"Agent filesystem sampling bypasses Platform snapshot facade: "
+                    f"{path.relative_to(root)} contains {primitive}"
+                )
         for primitive in PROCESS_PRIMITIVES:
             if primitive in source:
                 errors.append(
@@ -444,6 +451,7 @@ def self_test() -> None:
         ("model transport restores curl subprocess", lambda root: (root / "core/agent/src/model_transport.rs").write_text('fn send() { let _client: Option<reqwest::Client> = None; let _ = Command::new("curl"); }\n')),
         ("reverse dependency", lambda root: (root / "core/platform/Cargo.toml").write_text('[package]\nname = "timem_platform"\n[dependencies]\ntimem_shell = { path = "../../interfaces/shell" }\n')),
         ("UI contract reverse dependency", lambda root: (root / "core/ui_contract/Cargo.toml").write_text('[package]\nname = "timem_ui_contract"\n[dependencies]\nagent_core = { path = "../agent" }\n')),
+        ("Agent reconstructs filesystem sampling", lambda root: (root / "core/agent/src/leak.rs").write_text("fn leak() { os::filesystem_device_id(path); }\n")),
         ("escaped process primitive", lambda root: (root / "core/agent/src/leak.rs").write_text("fn leak() { libc::waitpid(0, std::ptr::null_mut(), 0); }\n")),
         ("missing Windows Platform backend", lambda root: (root / "core/platform/src/windows/system.rs").unlink()),
         ("missing target-scoped Windows dependency", lambda root: (root / "core/platform/Cargo.toml").write_text('[package]\nname = "timem_platform"\n')),

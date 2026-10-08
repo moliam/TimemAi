@@ -31,6 +31,7 @@ pub mod capability;
 #[path = "../../../resources/capabilities/tools/capmgr.rs"]
 pub mod capmgr;
 pub mod chat_library;
+mod command_output;
 pub mod mcp;
 pub use capability::CapabilityHostProfile;
 use capability::CapabilityRegistry;
@@ -1862,6 +1863,7 @@ pub struct AgentCore {
     /// Test-only override for the disk sample (total free, total capacity)
     /// so disk pressure windows can be simulated without mutating a real
     /// filesystem. None in production, where the real sample is taken.
+    #[cfg(test)]
     pub(crate) disk_free_override: Option<(u64, u64)>,
     #[cfg(test)]
     pub(crate) disk_sample_count: usize,
@@ -2013,6 +2015,7 @@ impl AgentCore {
             chat_history: FileChatHistoryStore::new(memory_dir),
             shell_jobs: ShellJobManager::new(memory_dir),
             disk_pressure: runtime_info::DiskPressureTracker::new(),
+            #[cfg(test)]
             disk_free_override: None,
             #[cfg(test)]
             disk_sample_count: 0,
@@ -2075,17 +2078,7 @@ impl AgentCore {
         // Runtime startup: seed the disk pressure baseline from the real
         // sample immediately, so the first sampling window after a restart
         // compares against startup free space instead of being blind.
-        let sample = {
-            let filesystems = Self::filesystems_for_info(&[]);
-            if filesystems.is_empty() {
-                None
-            } else {
-                Some((
-                    filesystems.iter().map(|fs| fs.free_bytes).sum(),
-                    filesystems.iter().map(|fs| fs.total_bytes).sum(),
-                ))
-            }
-        };
+        let sample = runtime_info::DiskSample::from_filesystems(&Self::filesystems_for_info(&[]));
         core.disk_pressure.seed_baseline(sample);
         core
     }
@@ -2445,12 +2438,14 @@ impl AgentCore {
                         }
                     };
                     format!(
-                        "RUNNING_JOB_UPDATE: pid={}, {}, cmd={}, now exits. elapsed time={}ms\nExit status: {}\nFinal output:\n{}{}",
+                        "RUNNING_JOB_UPDATE: pid={}, {}, cmd={}, now exits. elapsed time={}ms\nExit status: {}{}\n{}:\n{}{}",
                         update.pid,
                         update.description(),
                         compact_text(&update.command, 500),
                         update.elapsed_ms,
                         update.status,
+                        update.capture_error.as_ref().map(|error| format!("\nCapture error: {error}; output is partial; out-of-scope processes may still be running.")).unwrap_or_default(),
+                        if update.capture_error.is_some() { "Captured output (partial)" } else { "Final output" },
                         compact_text(&update.output, 4000),
                         orphan_hint,
                     )
@@ -2511,7 +2506,11 @@ impl AgentCore {
         &mut self,
         running: &[runtime_info::RunningJobSnapshot],
     ) -> Option<String> {
-        let override_sample = self.disk_free_override;
+        #[cfg(test)]
+        let override_sample = self.disk_free_override.map(|(free, capacity)| {
+            self.disk_pressure
+                .sample_with_totals_for_test(free, capacity)
+        });
         let mut filesystems = Vec::new();
         #[cfg(test)]
         let mut sampled = false;
@@ -2520,16 +2519,12 @@ impl AgentCore {
             {
                 sampled = true;
             }
+            #[cfg(test)]
             if let Some(sample) = override_sample {
                 return Some(sample);
             }
             filesystems = Self::filesystems_for_info(running);
-            (!filesystems.is_empty()).then(|| {
-                (
-                    filesystems.iter().map(|fs| fs.free_bytes).sum(),
-                    filesystems.iter().map(|fs| fs.total_bytes).sum(),
-                )
-            })
+            runtime_info::DiskSample::from_filesystems(&filesystems)
         });
         #[cfg(test)]
         if sampled {
@@ -2566,29 +2561,7 @@ impl AgentCore {
             }
             paths.push(std::path::PathBuf::from(&job.cwd));
         }
-        // Foreground tools can write to any mounted data disk, so the
-        // sample set also covers every local real filesystem mount point;
-        // per-device dedup below keeps each disk counted once.
-        paths.extend(os::local_filesystem_mount_points());
-        let mut seen_devices = std::collections::HashSet::new();
-        let mut out = Vec::new();
-        for path in paths {
-            let Some(device) = os::filesystem_device_id(&path) else {
-                continue;
-            };
-            if !seen_devices.insert(device) {
-                continue;
-            }
-            let Some((total, free)) = os::filesystem_usage_bytes(&path) else {
-                continue;
-            };
-            out.push(runtime_info::FilesystemUsage {
-                path: path.display().to_string(),
-                total_bytes: total,
-                free_bytes: free,
-            });
-        }
-        out
+        os::filesystem_usage_snapshot(&paths)
     }
 
     pub fn build_model_request_prompt(&mut self, current_prompt: &str) -> String {

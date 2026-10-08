@@ -443,7 +443,7 @@ async function main() {
     let sessionId;
     socket.addEventListener("message",({data})=>{let e=JSON.parse(String(data)); received.push(e); if(e.type==="semantic_event")e=e.event; if(e.type==="session_created")sessionId=e.session.session_id;});
     await new Promise((resolve,reject)=>{socket.addEventListener("open",resolve,{once:true});socket.addEventListener("error",reject,{once:true});});
-    socket.send(JSON.stringify({type:"session_create",display_name:"HTTP streaming acceptance",workspace_dir:mem}));
+    socket.send(JSON.stringify({type:"session_create",command_id:"fixture-session",display_name:"HTTP streaming acceptance",workspace_dir:mem}));
     await waitFor(()=>sessionId,"session creation failed");
     socket.send(JSON.stringify({type:"model_endpoint_upsert",command_id:"fixture-endpoint",endpoint:{id:"e2e-stream",name:"E2E stream",model:"preview-test",api_protocol:responses?"openai-responses":"openai-compatible",response_protocol:protocol==="native"?"xml":protocol,base_url:`http://127.0.0.1:${model.address().port}/v1`,api_key:"dummy",max_llm_input_tokens:100000,max_llm_output_tokens:10000,stream:true}}));
     await waitFor(()=>received.some(e=>e.type==="command_ack" && e.command_id==="fixture-endpoint" && e.status==="committed"),"endpoint creation failed");
@@ -593,7 +593,7 @@ async function main() {
     await browser.evaluate(`document.querySelector('button.session[title="HTTP streaming acceptance"]').click()`);
     await waitFor(() => browser.evaluate(`document.querySelector('.turn-final-delivery')?.textContent.includes('HTTP final')`), "final lost on reload");
     console.log(`PASS actual Host + HTTP SSE + Chrome: api=${responses ? "responses" : "chat"} protocol=${protocol} scenario=${scenario}; browser submission, early preview, final persisted and restored on reload`);
-  } catch(error) { console.error(logs); console.error("requests",requests); console.error("action evidence", JSON.stringify(received.flatMap(raw => { const e=raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.action" ? [e.event.payload] : []; }))); console.error("host errors", JSON.stringify(received.filter(e => JSON.stringify(e).includes("host_error")))); if(browser)console.error(await browser.evaluate("document.body.innerText")); throw error; }
+  } catch(error) { console.error(logs); console.error("product process", {pid:child.pid, exitCode:child.exitCode, signalCode:child.signalCode}); console.error("requests",requests); console.error("received event types", received.map(e => e.type)); console.error("command acknowledgements", JSON.stringify(received.filter(e => e.type === "command_ack"))); console.error("action evidence", JSON.stringify(received.flatMap(raw => { const e=raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.action" ? [e.event.payload] : []; }))); console.error("host errors", JSON.stringify(received.filter(e => JSON.stringify(e).includes("host_error")))); if(browser)console.error(await browser.evaluate("document.body.innerText")); throw error; }
   finally {
     release?.(); releaseFinal?.(); socket?.close(); if(browser)await browser.close();
     child.kill("SIGTERM"); await waitForProcessExit(child,5000);

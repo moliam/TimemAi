@@ -3626,6 +3626,7 @@ fn controlled_job_exit(pid: u32) -> ShellJobExitUpdate {
         created_at_ms: 1,
         elapsed_ms: 25,
         status: "0".to_string(),
+        capture_error: None,
         stdout: format!("stdout-{pid}"),
         stderr: String::new(),
         stdout_truncation: None,

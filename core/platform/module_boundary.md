@@ -5,7 +5,8 @@ low-level process primitives shared across Timem hosts.
 
 ## Layout
 
-- `src/api.rs`: general stable, UI-neutral platform API consumed by Core.
+- `src/api.rs`: general stable, UI-neutral platform API consumed by Core, including filesystem usage snapshots (local mount discovery, platform device identity, per-device deduplication and unavailable-path handling).
+- `src/child_output.rs`: exclusively owned child stdout/stderr pipes with bounded, interruptible reads; no job attribution or deadline policy.
 - `src/process_job.rs`: platform-neutral per-Job process-management facade and internal backend contract.
 - `src/shared.rs`: Unix primitives shared by macOS and Linux.
 - `src/macos.rs`: macOS policy and kernel-derived process identity.
@@ -24,6 +25,8 @@ low-level process primitives shared across Timem hosts.
 - Target-specific modules compile only on their matching target.
 - Unsupported targets fail closed for ownership/destructive decisions.
 - Platform behavior changes require tests under `core/platform/tests`.
+- macOS mount enumeration uses caller-owned `getfsstat` storage and bounded field decoding; never retain or traverse `getmntinfo` process-global storage across concurrent callers.
+- Filesystem snapshots expose device identity, capacity and free bytes; consumers supply working paths. Sampling schedules, comparable-baseline policy, pressure thresholds and model notices belong to Agent, not Platform. Agent must not reconstruct mount/device sampling outside this facade.
 - Windows Platform behavior follows `docs/windows-support-matrix.md`; a compiling Platform backend
   does not by itself claim Windows support for Agent, Bridge, Interface, host, or installation layers.
 

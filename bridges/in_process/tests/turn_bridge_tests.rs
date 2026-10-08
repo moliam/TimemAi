@@ -221,17 +221,81 @@ enum ProjectionSemantics {
 }
 
 fn stable_prompt_semantics(prompt: &str) -> String {
-    prompt
-        .lines()
-        .map(|line| {
+    let lines: Vec<_> = prompt.lines().collect();
+    lines
+        .iter()
+        .enumerate()
+        .map(|(index, &line)| {
             if line.starts_with("[BEGIN DELTA delta_id:") {
                 "[BEGIN DELTA <runtime-generated>]".to_string()
+            } else if index >= 2
+                && matches!(lines[index - 2], "## USER" | "## USER (supplement)")
+                && lines[index - 1].is_empty()
+                && lines.get(index + 1) == Some(&"")
+                && is_input_time_annotation(line)
+            {
+                // Independent calls have independent wall clocks. Preserve the
+                // annotation's presence/position; never strip arbitrary payload.
+                "[User input time: <runtime-generated>]".to_string()
             } else {
                 line.to_string()
             }
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn is_input_time_annotation(line: &str) -> bool {
+    let Some(timestamp) = line
+        .strip_prefix("[User input time: ")
+        .and_then(|value| value.strip_suffix(" UTC]"))
+    else {
+        return false;
+    };
+    let shape = b"0000-00-00 00:00:00";
+    timestamp.len() == shape.len()
+        && timestamp.bytes().zip(shape).all(|(actual, &expected)| {
+            if expected == b'0' {
+                actual.is_ascii_digit()
+            } else {
+                actual == expected
+            }
+        })
+}
+
+#[test]
+fn prompt_equivalence_normalizes_input_time_but_preserves_payload_and_structure() {
+    let first = "## USER\n\n[User input time: 2026-10-08 08:52:14 UTC]\n\nequivalent task";
+    let second = first.replace("08:52:14", "08:52:15");
+    assert_eq!(
+        stable_prompt_semantics(first),
+        stable_prompt_semantics(&second)
+    );
+    assert_ne!(
+        stable_prompt_semantics(first),
+        stable_prompt_semantics(&second.replace("equivalent task", "different task"))
+    );
+    assert_ne!(
+        stable_prompt_semantics(first),
+        stable_prompt_semantics("## USER\n\nequivalent task")
+    );
+    let malformed = first.replace("08:52:14 UTC", "not a timestamp");
+    assert_eq!(stable_prompt_semantics(&malformed), malformed);
+    let supplement = first.replace("## USER", "## USER (supplement)");
+    assert_eq!(
+        stable_prompt_semantics(&supplement),
+        stable_prompt_semantics(&supplement.replace("08:52:14", "08:52:15"))
+    );
+    let resume = first.replace("## USER", "## USER (user resume directly)");
+    assert_eq!(stable_prompt_semantics(&resume), resume);
+    let missing_separator = first.replace("UTC]\n\n", "UTC]\n");
+    assert_eq!(
+        stable_prompt_semantics(&missing_separator),
+        missing_separator
+    );
+    // Timestamp-shaped user payload is not runtime metadata.
+    let payload = "## USER\n\nplain text\n[User input time: 2026-10-08 08:52:14 UTC]";
+    assert_eq!(stable_prompt_semantics(payload), payload);
 }
 
 fn assert_single_turn_identity(projections: &[TurnProjection]) {

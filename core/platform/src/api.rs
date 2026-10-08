@@ -382,6 +382,8 @@ pub struct ManagedChildRegistration {
 }
 
 pub fn register_managed_child(pid: u32) -> ManagedChildRegistration {
+    #[cfg(not(unix))]
+    let _ = pid;
     ManagedChildRegistration {
         #[cfg(unix)]
         _inner: crate::shared::register_managed_child(pid),
@@ -721,20 +723,101 @@ pub fn process_group_running(group_leader_pid: u32) -> bool {
 /// filesystems. Disk sampling uses this so writes to any data disk are
 /// covered, not only the working directory.
 pub fn local_filesystem_mount_points() -> Vec<std::path::PathBuf> {
-    crate::shared::local_filesystem_mount_points()
+    #[cfg(unix)]
+    return crate::shared::local_filesystem_mount_points();
+    #[cfg(windows)]
+    return crate::windows::local_filesystem_mount_points();
+    #[cfg(not(any(unix, windows)))]
+    {
+        Vec::new()
+    }
 }
 
 /// Stable device identifier of the filesystem containing `path`, used to
 /// deduplicate paths on the same disk.
 pub fn filesystem_device_id(path: &std::path::Path) -> Option<u64> {
-    crate::shared::filesystem_device_id(path)
+    #[cfg(unix)]
+    return crate::shared::filesystem_device_id(path);
+    #[cfg(windows)]
+    return crate::windows::filesystem_device_id(path);
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 /// Filesystem usage for the filesystem containing `path`:
 /// (total_bytes, free_bytes). None when the stat call fails.
 pub fn filesystem_usage_bytes(path: &std::path::Path) -> Option<(u64, u64)> {
-    crate::shared::filesystem_usage_bytes(path)
+    #[cfg(unix)]
+    return crate::shared::filesystem_usage_bytes(path);
+    #[cfg(windows)]
+    return crate::windows::filesystem_usage_bytes(path);
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        None
+    }
 }
+
+/// One successfully sampled filesystem, deduplicated by platform device identity.
+/// `path` is a diagnostic alias, not the identity used for comparisons.
+#[derive(Clone, Debug)]
+pub struct FilesystemUsage {
+    pub device_id: u64,
+    pub path: String,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+}
+
+/// Sample caller-provided working paths and local data mounts once per device.
+/// Unavailable paths are omitted (never interpreted as zero free bytes). A later
+/// alias may still supply a sample when an earlier usage query failed. Consumers
+/// must compare device membership/capacity before comparing aggregate byte totals.
+/// No polling, baseline, pressure threshold, or notification policy lives here.
+pub fn filesystem_usage_snapshot(working_paths: &[PathBuf]) -> Vec<FilesystemUsage> {
+    collect_filesystem_usage(
+        working_paths
+            .iter()
+            .cloned()
+            .chain(local_filesystem_mount_points()),
+        filesystem_device_id,
+        filesystem_usage_bytes,
+    )
+}
+
+fn collect_filesystem_usage(
+    paths: impl IntoIterator<Item = PathBuf>,
+    mut device_id: impl FnMut(&Path) -> Option<u64>,
+    mut usage_bytes: impl FnMut(&Path) -> Option<(u64, u64)>,
+) -> Vec<FilesystemUsage> {
+    let mut seen = std::collections::HashSet::new();
+    let mut sampled = Vec::new();
+    for path in paths {
+        let Some(device) = device_id(&path) else {
+            continue;
+        };
+        if seen.contains(&device) {
+            continue;
+        }
+        let Some((total, free)) = usage_bytes(&path) else {
+            continue;
+        };
+        seen.insert(device);
+        sampled.push(FilesystemUsage {
+            device_id: device,
+            path: path.display().to_string(),
+            total_bytes: total,
+            free_bytes: free,
+        });
+    }
+    sampled
+}
+
+#[cfg(test)]
+#[path = "../tests/unit/filesystem_snapshot_tests.rs"]
+mod filesystem_snapshot_tests;
 
 pub fn list_live_process_group_members(group_leader_pid: u32) -> Vec<u32> {
     #[cfg(unix)]

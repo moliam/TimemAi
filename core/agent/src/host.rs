@@ -1502,6 +1502,7 @@ pub(crate) fn notification_topic_event(
 
 pub fn running_shell_job_exit_topic_event(update: &crate::ShellJobExitUpdate) -> CoreTopicEvent {
     let status = match update.status.as_str() {
+        _ if update.capture_error.is_some() => "failed",
         "0" => "completed",
         "cancelled" => "cancelled",
         _ => "failed",
@@ -1547,6 +1548,7 @@ pub fn running_shell_job_exit_topic_event(update: &crate::ShellJobExitUpdate) ->
             "status": status,
             "pid": update.pid,
             "exit_status": update.status,
+            "capture_error": update.capture_error,
             "elapsed_ms": update.elapsed_ms,
             "memory_activity": "none",
         }),

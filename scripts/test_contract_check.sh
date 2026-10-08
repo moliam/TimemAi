@@ -56,6 +56,7 @@ ci_required=(
   "scripts/linux_web_platform_smoke.sh"
   "scripts/macos_web_platform_smoke.sh"
   "== Linux Timem Web platform smoke =="
+  "== Linux cgroup delegation preflight =="
   "== macOS Timem Web platform smoke =="
   "scripts/web_license_check.sh"
   "scripts/version_consistency_check.sh"
@@ -131,7 +132,11 @@ done
 
 platform_matrix_required=(
   "ubuntu-latest"
+  "-p Delegate=yes"
+  '--uid="$(id -u)"'
   "macos-latest"
+  "macos-15"
+  "macos-15-intel"
 )
 for pattern in "${platform_matrix_required[@]}"; do
   if ! search_fixed "$pattern" .github/workflows/ci.yml; then

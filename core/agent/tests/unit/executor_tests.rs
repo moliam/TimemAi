@@ -409,3 +409,29 @@ fn command_action_timeout_kills_its_setsid_escapee_with_job_ownership() {
     );
     let _ = fs::remove_dir_all(dir);
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn command_action_escaped_pipe_reports_incomplete_without_unbounded_join() {
+    let dir = temp_case_dir("escaped_pipe_capture");
+    let script = dir.join("escape.sh");
+    fs::write(
+        &script,
+        "#!/bin/sh\n/usr/bin/python3 -c 'import os,time; p=os.fork(); (os.setsid(), time.sleep(3), os._exit(0)) if p==0 else None'\n",
+    )
+    .unwrap();
+    let started = Instant::now();
+    let outcome = execute_command_action_outcome("escape_tool", &script, &json!({}), 1000);
+    let elapsed = started.elapsed();
+    // The fixture descendant expires independently; no ancestry guesses or
+    // signalling an unowned PID, including on an assertion failure.
+    thread::sleep(Duration::from_secs(3).saturating_sub(started.elapsed()));
+    let _ = fs::remove_dir_all(dir);
+    assert!(elapsed < Duration::from_secs(2), "capture took {elapsed:?}");
+    assert_eq!(outcome.status, crate::ActionStatus::Failed);
+    assert!(
+        outcome.text.contains("output_capture_incomplete"),
+        "{}",
+        outcome.text
+    );
+}

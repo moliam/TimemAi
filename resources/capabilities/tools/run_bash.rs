@@ -61,6 +61,7 @@ pub struct ShellJobExitUpdate {
     pub created_at_ms: i64,
     pub elapsed_ms: i64,
     pub status: String,
+    pub capture_error: Option<String>,
     pub stdout: String,
     pub stderr: String,
     pub stdout_truncation: Option<StreamCaptureTruncation>,
@@ -170,6 +171,7 @@ struct FinishedShellJob {
     /// the child actually exited, so later delivery does not inflate elapsed.
     finished_at_ms: i64,
     status: String,
+    capture_error: Option<String>,
     stdout: String,
     stderr: String,
     stdout_truncation: Option<StreamCaptureTruncation>,
@@ -254,6 +256,7 @@ impl ManagedShellJob {
                 .saturating_sub(self.created_at_ms)
                 .max(0),
             status: finished.status.clone(),
+            capture_error: finished.capture_error.clone(),
             stdout: finished.stdout.clone(),
             stderr: finished.stderr.clone(),
             stdout_truncation: finished.stdout_truncation.clone(),
@@ -503,8 +506,8 @@ impl ShellJobManager {
         let pid = child.id();
         let child_registration = crate::os::register_managed_child(pid);
         // OS-level containment: on Windows the child joins the runtime's
-        // kill-on-close job object; on Unix this is a no-op and the subreaper
-        // safety net covers escapees instead.
+        // kill-on-close job object. On Unix this is a no-op: exact ownership
+        // requires the native Job backend; subreaping alone is not containment.
         if !crate::os::contain_child_process(pid) {
             terminate_process(pid);
             let _ = child.wait();
@@ -992,7 +995,7 @@ fn finished_output(
         stderr: finished.stderr.clone(),
         stdout_truncation: finished.stdout_truncation.clone(),
         stderr_truncation: finished.stderr_truncation.clone(),
-        error: None,
+        error: finished.capture_error.clone(),
         job_management: None,
         tail_out,
     }
@@ -1014,37 +1017,60 @@ fn cleanup_legacy_shell_job_artifacts(memory_dir: &Path) {
     }
 }
 
-fn spawn_output_drain<R: std::io::Read + Send + 'static>(
-    mut reader: R,
+/// Readers continue while the owned scope is active. Once it is empty (or
+/// execution has been cancelled), EOF gets a bounded grace period. This is an
+/// output deadline, never evidence for attributing or killing a pipe holder.
+struct ShellOutputDrain {
+    deadline: Arc<Mutex<Option<Instant>>>,
+    thread: thread::JoinHandle<bool>,
+}
+
+fn spawn_output_drain(
+    reader: impl Into<crate::os::ChildOutputPipe>,
     output: SharedShellOutput,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
+) -> ShellOutputDrain {
+    let mut reader = reader.into();
+    let deadline = Arc::new(Mutex::new(None::<Instant>));
+    let stop = Arc::clone(&deadline);
+    let thread = thread::spawn(move || {
         let mut chunk = [0_u8; 8192];
         loop {
-            match std::io::Read::read(&mut reader, &mut chunk) {
-                Ok(0) | Err(_) => break,
-                Ok(read) => {
+            if stop.lock().map_or(true, |deadline| {
+                deadline.is_some_and(|deadline| Instant::now() >= deadline)
+            }) {
+                return false;
+            }
+            match reader.read_with_timeout(&mut chunk, Duration::from_millis(20)) {
+                Ok(Some(0)) => return true,
+                Err(_) => return false,
+                Ok(None) => continue,
+                Ok(Some(read)) => {
                     if let Ok(mut output) = output.lock() {
                         output.push(&chunk[..read]);
                     } else {
-                        break;
+                        return false;
                     }
                 }
             }
         }
-    })
+    });
+    ShellOutputDrain { deadline, thread }
 }
 
-fn join_output_drains(
-    stdout: Option<thread::JoinHandle<()>>,
-    stderr: Option<thread::JoinHandle<()>>,
-) {
-    if let Some(stdout) = stdout {
-        let _ = stdout.join();
+/// Returns false if either pipe failed or did not reach EOF. Both readers are
+/// joined, including on failure; no detached blocked reader survives shutdown.
+fn join_output_drains(stdout: Option<ShellOutputDrain>, stderr: Option<ShellOutputDrain>) -> bool {
+    let deadline = Instant::now() + Duration::from_millis(250);
+    for drain in [&stdout, &stderr].into_iter().flatten() {
+        if let Ok(mut stop) = drain.deadline.lock() {
+            *stop = Some(deadline);
+        }
     }
-    if let Some(stderr) = stderr {
-        let _ = stderr.join();
+    let mut complete = true;
+    for drain in [stdout, stderr].into_iter().flatten() {
+        complete &= drain.thread.join().unwrap_or(false);
     }
+    complete
 }
 
 fn shell_output_snapshot(output: &SharedShellOutput) -> ShellOutputSnapshot {
@@ -1060,8 +1086,8 @@ fn shell_output_snapshot(output: &SharedShellOutput) -> ShellOutputSnapshot {
 fn supervise_shell_job(
     job: Arc<ManagedShellJob>,
     mut child: Child,
-    stdout_drain: Option<thread::JoinHandle<()>>,
-    stderr_drain: Option<thread::JoinHandle<()>>,
+    stdout_drain: Option<ShellOutputDrain>,
+    stderr_drain: Option<ShellOutputDrain>,
 ) {
     let status = match child.wait() {
         Ok(status) => {
@@ -1093,7 +1119,7 @@ fn supervise_shell_job(
     }
     // Drain threads run concurrently while descendants are alive, preventing
     // pipe backpressure. Join only after kernel ownership reports no members.
-    join_output_drains(stdout_drain, stderr_drain);
+    let capture_complete = join_output_drains(stdout_drain, stderr_drain);
     // A terminal update is published only after the kernel reports this job's
     // native Job empty. In degraded mode, only process-group membership is known.
     let stdout = shell_output_snapshot(&job.stdout);
@@ -1107,6 +1133,7 @@ fn supervise_shell_job(
         completion_sequence: *publication_sequence,
         finished_at_ms,
         status,
+        capture_error: (!capture_complete).then(|| "output_capture_incomplete".to_string()),
         output: normalized_shell_output(&combined_shell_output(&stdout.text, &stderr.text)),
         stdout: stdout.text,
         stderr: stderr.text,
@@ -2600,6 +2627,9 @@ impl BashCommandOutput {
 
     fn render_action_result(&self, action_name: &str) -> String {
         if let Some(error) = &self.error {
+            if error == "output_capture_incomplete" {
+                return format!("Action result: {action_name}\n{}\nLauncher exit code: {:?}; signal: {:?}\nCaptured output:\n{}", bash_runtime_error_message(error), self.status, self.signal, self.output);
+            }
             if let Some(details) = error.strip_prefix("long_running_still_running:") {
                 let (pid, elapsed_ms) = details.split_once(':').unwrap_or((details, "unknown"));
                 let mut out = format!(
@@ -2735,7 +2765,7 @@ fn execute_one_bash_structured_with_prompt_after(
             }
         }
     };
-    join_output_drains(stdout_drain, stderr_drain);
+    let capture_complete = join_output_drains(stdout_drain, stderr_drain);
     let stdout = shell_output_snapshot(&stdout);
     let stderr = shell_output_snapshot(&stderr);
     BashCommandOutput {
@@ -2747,7 +2777,7 @@ fn execute_one_bash_structured_with_prompt_after(
         stderr: stderr.text,
         stdout_truncation: stdout.truncation,
         stderr_truncation: stderr.truncation,
-        error: None,
+        error: (!capture_complete).then(|| "output_capture_incomplete".to_string()),
         job_management: None,
         tail_out: false,
     }
@@ -2777,6 +2807,7 @@ fn bash_error_type(error: &str) -> Option<&'static str> {
         "cancelled" | "cancelled_by_user" => Some("Cancelled"),
         "invalid_timeout" => Some("InvalidInput"),
         "command_failed" => Some("SpawnFailed"),
+        "output_capture_incomplete" => Some("OutputCaptureIncomplete"),
         _ if error.starts_with("timeout_still_running:")
             || error.starts_with("long_running_still_running:") =>
         {
@@ -2867,6 +2898,7 @@ fn bash_validation_message(reason: &str) -> &'static str {
 
 fn bash_runtime_error_message(error: &str) -> &'static str {
     match error {
+        "output_capture_incomplete" => "output_capture_incomplete: output capture failed or did not reach EOF after the managed scope ended. Captured output is partial; processes outside the managed scope may still be running.",
         "timeout" => {
             "Timem stopped waiting because the configured timeout was reached. This message does not by itself mean the process was killed. For long local work, use background=true; for waiting on external state, use loop_cmd with interval_ms."
         }

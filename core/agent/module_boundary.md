@@ -13,6 +13,7 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
 ## Belongs here
 
 - Protocol-neutral runtime data structures and algorithms.
+- `command_output` owns bounded retention and post-exit drain policy for finite command bindings and tool self-tests. Platform owns interruptible pipe reads; capture deadlines do not establish descendant ownership.
 - The authoritative per-Session Turn Gate and minimal Turn reducer: durable
   `TurnId`, monotonic `TurnEpoch`, exact `TurnToken` validation, Active-Turn
   ownership, stop intent, immutable terminal outcome, and rejection of stale or
@@ -185,6 +186,7 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   ToolGen failure must not replace a successful source-turn result. Hosts own
   the manual trigger and repository presentation, not candidate validation.
 - The single model-visible tool-result gate. Core validates the supported per-tool result budgets, defaults each AgentCore to 16 KiB, and bounds the complete structured action-result envelope while preserving valid JSON and head/tail retention semantics; Hosts may configure the value but may not recreate the gate.
+- Disk-pressure observation gates, comparable-sample baselines, thresholds and model notices. Filesystem discovery, device identity, deduplication and usage sampling are owned by `core/platform::filesystem_usage_snapshot`; Agent supplies only working paths and consumes platform-neutral snapshots.
 - Local tool execution abstractions that return structured action evidence.
 - Registered command-tool foreground/background execution semantics. Core owns
   background job ids, persisted status/output files, polling, cancellation,
