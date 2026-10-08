@@ -358,6 +358,10 @@ async function startBrowser(url) {
       socket.send(JSON.stringify({ id, method, params }));
     });
     await call("Runtime.enable"); await call("Page.enable");
+    // Visual assertions require an active page. Headless Chrome can leave this
+    // CDP-created target hidden, freezing its animation timeline at zero even
+    // while Runtime.evaluate and network replies continue to work.
+    await call("Emulation.setFocusEmulationEnabled", { enabled: true });
     // Pin the media preference so assertions cannot inherit the host OS
     // accessibility setting (the macOS 26 runner image enables system
     // Reduce Motion, which silently disabled every entrance animation).
@@ -1048,7 +1052,11 @@ async function main() {
     let timer;
     const page = await Promise.race([
       browser.evaluate(`({readyState: document.readyState, url: location.href,
-        text: document.body?.innerText.slice(0, 4096)})`).catch(error => ({ error: String(error) })),
+        visibility: document.visibilityState, focus: document.hasFocus(),
+        animations: document.querySelector('.stream-tool-fold')?.getAnimations().map(a => ({
+          state: a.playState, time: a.currentTime, timeline: a.timeline?.currentTime,
+          property: a.transitionProperty,
+        })), text: document.body?.innerText.slice(0, 4096)})`).catch(error => ({ error: String(error) })),
       new Promise(resolve => { timer = setTimeout(() => resolve({error: "diagnostic timeout"}), 2000); }),
     ]);
     clearTimeout(timer);

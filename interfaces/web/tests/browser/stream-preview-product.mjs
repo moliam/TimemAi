@@ -333,6 +333,10 @@ async function startBrowser(url) {
       socket.send(JSON.stringify({ id, method, params }));
     });
     await call("Runtime.enable"); await call("Page.enable");
+    // Visual assertions require an active page. Headless Chrome can leave this
+    // CDP-created target hidden, freezing its animation timeline at zero even
+    // while Runtime.evaluate and network replies continue to work.
+    await call("Emulation.setFocusEmulationEnabled", { enabled: true });
     const evaluate = async (expression) => {
       const result = await call("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
       if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
@@ -496,7 +500,15 @@ async function main() {
       await browser.call("Input.dispatchKeyEvent", {type:"keyDown",key:"c",code:"KeyC",modifiers:4,commands:["copy"]});
       await browser.call("Input.dispatchKeyEvent", {type:"keyUp",key:"c",code:"KeyC",modifiers:4});
       assert((await browser.evaluate(`navigator.clipboard.readText()`)).includes("HTTP early response"), "streamed response clipboard copy failed");
+      // Establish a fresh live-edge -> reading-away transition, rather than
+      // accepting an indicator left over from an earlier layout/selection.
+      await browser.evaluate(`(() => { const sc=document.querySelector('[data-session-timeline-active="true"] .response-preview').closest('.chat-scroll');sc.scrollTop=sc.scrollHeight; })()`);
+      await waitFor(() => browser.evaluate(`(() => { const sc=document.querySelector('[data-session-timeline-active="true"] .response-preview').closest('.chat-scroll');return sc.scrollHeight-sc.clientHeight > 500 && sc.scrollHeight-sc.clientHeight-sc.scrollTop < 8 && !!document.querySelector('.thread-working-away.at-live-edge'); })()`), "live-edge scroll precondition missing");
+      // Setting scrollTop is synchronous, but the scroll event that turns off
+      // follow-latest is not. Wait for the UI to acknowledge reading away from
+      // the bottom before injecting the next model chunk.
       const before = await browser.evaluate(`(() => { const sc=document.querySelector('[data-session-timeline-active="true"] .response-preview').closest('.chat-scroll');sc.scrollTop=100;return sc.scrollTop; })()`);
+      await waitFor(() => browser.evaluate(`(() => { const sc=document.querySelector('[data-session-timeline-active="true"] .response-preview').closest('.chat-scroll');return Math.abs(sc.scrollTop-100)<8 && !!document.querySelector('.thread-working-away.away-from-bottom'); })()`), "reading-away scroll event was not processed");
       appendStreaming("\n\nCONTINUED_AFTER_COPY");
       await waitFor(() => browser.evaluate(`document.querySelector('.response-preview')?.textContent.includes('CONTINUED_AFTER_COPY')`), "stream did not continue after copy");
       const after = await browser.evaluate(`document.querySelector('.response-preview').closest('.chat-scroll').scrollTop`);
