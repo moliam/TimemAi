@@ -601,11 +601,9 @@ pub(super) fn local_filesystem_mount_points() -> Vec<std::path::PathBuf> {
 }
 
 /// Local real filesystem mount points on macOS: APFS/HFS+ volumes from
-/// TODO(platform/macos): 待实现验证——此实现基于 getmntinfo 的静态核对，
-/// 尚未在真实 macOS 上编译与运行测试；到 macOS 平台开发时需补单元测试
-/// （/ 与 /Volumes/* 出现，devfs/autofs 排除）并按实际行为修正。
 /// getmntinfo (covers /, /System/Volumes/* and mounted /Volumes/* disks);
-/// pseudo mount types (devfs, autofs, nullfs, ...) are excluded.
+/// pseudo mount types (devfs, autofs, nullfs, ...) are excluded by the
+/// supported-type list.
 #[cfg(target_os = "macos")]
 pub(super) fn local_filesystem_mount_points() -> Vec<std::path::PathBuf> {
     let supported = [
@@ -619,7 +617,7 @@ pub(super) fn local_filesystem_mount_points() -> Vec<std::path::PathBuf> {
     }
     for index in 0..count as usize {
         let entry = unsafe { &*mounts.add(index) };
-        let fstype = unsafe { std::ffi::CStr::from_ptr(entry.fstype.as_ptr().cast()) }
+        let fstype = unsafe { std::ffi::CStr::from_ptr(entry.f_fstypename.as_ptr().cast()) }
             .to_string_lossy()
             .to_string();
         if supported.contains(&fstype.as_str()) {
