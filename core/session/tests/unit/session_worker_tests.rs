@@ -417,11 +417,15 @@ impl ModelClient for SupplementDispatchTimeoutModel {
 #[cfg(unix)]
 struct BackgroundThenFinalModel {
     calls: u32,
+    command: String,
+    final_delay: Duration,
 }
 
 #[cfg(unix)]
 struct TimeoutThenFinalModel {
     calls: u32,
+    command: String,
+    final_delay: Duration,
 }
 
 struct TruncatedEventModel {
@@ -457,9 +461,14 @@ impl ModelClient for TimeoutThenFinalModel {
     ) -> Result<LlmResponse, String> {
         self.calls += 1;
         let content = if self.calls == 1 {
-            r#"{"status":"working","working_still_action":[{"run_bash":{"cmd":"sleep 0.35; printf timeout_done","timeout_ms":50}}]}"#
+            serde_json::json!({
+                "status": "working",
+                "working_still_action": [{"run_bash": {"cmd": self.command, "timeout_ms":50}}]
+            })
+            .to_string()
         } else {
-            r#"{"status":"ALL_FINISHED","final_answer":"TIMEOUT_STARTED"}"#
+            std::thread::sleep(self.final_delay);
+            r#"{"status":"ALL_FINISHED","final_answer":"TIMEOUT_STARTED"}"#.to_string()
         };
         Ok(LlmResponse {
             tool_calls: Vec::new(),
@@ -482,9 +491,14 @@ impl ModelClient for BackgroundThenFinalModel {
     ) -> Result<LlmResponse, String> {
         self.calls += 1;
         let content = if self.calls == 1 {
-            r#"{"status":"working","working_still_action":[{"run_bash":{"cmd":"sleep 0.35; printf idle_done","background":true}}]}"#
+            serde_json::json!({
+                "status": "working",
+                "working_still_action": [{"run_bash": {"cmd": self.command, "background":true}}]
+            })
+            .to_string()
         } else {
-            r#"{"status":"ALL_FINISHED","final_answer":"BACKGROUND_STARTED"}"#
+            std::thread::sleep(self.final_delay);
+            r#"{"status":"ALL_FINISHED","final_answer":"BACKGROUND_STARTED"}"#.to_string()
         };
         Ok(LlmResponse {
             tool_calls: Vec::new(),
@@ -615,9 +629,34 @@ fn model_response_event_preserves_truncated_flag() {
 }
 
 #[cfg(unix)]
+fn idle_exit_command(release: &std::path::Path) -> String {
+    let quoted = release.to_string_lossy().replace('\'', "'\"'\"'");
+    // Hold the real child until the test observes TurnFinished, not for a
+    // guessed model/turn duration. Bound the fixture even if the test fails.
+    format!(
+        "i=0; while [ ! -f '{quoted}' ]; do i=$((i + 1)); [ \"$i\" -lt 1000 ] || exit 124; sleep 0.01; done; printf idle_done"
+    )
+}
+
+#[cfg(unix)]
 #[test]
 fn idle_worker_emits_terminal_topic_when_background_bash_exits_after_turn_finish() {
-    let dir = tmp_dir("idle_background_exit_topic");
+    check_idle_background_exit(Duration::ZERO);
+}
+
+#[cfg(unix)]
+#[test]
+fn idle_worker_emits_terminal_topic_when_background_bash_exits_after_turn_finish_with_slow_final() {
+    check_idle_background_exit(Duration::from_millis(800));
+}
+
+#[cfg(unix)]
+fn check_idle_background_exit(final_delay: Duration) {
+    let dir = tmp_dir(&format!(
+        "idle_background_exit_topic_{}",
+        final_delay.as_millis()
+    ));
+    let release = dir.join("release child after turn");
     let mut core = AgentCore::new(
         "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
         CoreProfile {
@@ -631,7 +670,11 @@ fn idle_worker_emits_terminal_topic_when_background_bash_exits_after_turn_finish
         core,
         test_config(),
         test_worker_config(&dir, "idle_background_exit_topic", 1),
-        BackgroundThenFinalModel { calls: 0 },
+        BackgroundThenFinalModel {
+            calls: 0,
+            command: idle_exit_command(&release),
+            final_delay,
+        },
     );
     let handle = worker.handle();
     let _lifecycle = worker
@@ -658,6 +701,7 @@ fn idle_worker_emits_terminal_topic_when_background_bash_exits_after_turn_finish
                     {
                         assert_eq!(event.payload["exit_status"], "0");
                         assert_eq!(event.payload["action"], "run_bash");
+                        worker.shutdown().unwrap();
                         let _ = std::fs::remove_dir_all(dir);
                         return;
                     }
@@ -666,6 +710,7 @@ fn idle_worker_emits_terminal_topic_when_background_bash_exits_after_turn_finish
             Ok(CoreSessionWorkerEvent::TurnFinished { outcome }) => {
                 assert!(!outcome.running_jobs.is_empty());
                 turn_finished = true;
+                std::fs::write(&release, b"release").unwrap();
             }
             Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -677,7 +722,22 @@ fn idle_worker_emits_terminal_topic_when_background_bash_exits_after_turn_finish
 #[cfg(unix)]
 #[test]
 fn idle_worker_emits_terminal_topic_when_timed_out_bash_exits_after_turn_finish() {
-    let dir = tmp_dir("idle_timeout_exit_topic");
+    check_idle_timed_out_exit(Duration::ZERO);
+}
+
+#[cfg(unix)]
+#[test]
+fn idle_worker_emits_terminal_topic_when_timed_out_bash_exits_after_turn_finish_with_slow_final() {
+    check_idle_timed_out_exit(Duration::from_millis(800));
+}
+
+#[cfg(unix)]
+fn check_idle_timed_out_exit(final_delay: Duration) {
+    let dir = tmp_dir(&format!(
+        "idle_timeout_exit_topic_{}",
+        final_delay.as_millis()
+    ));
+    let release = dir.join("release child after turn");
     let mut core = AgentCore::new(
         "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
         CoreProfile {
@@ -691,7 +751,11 @@ fn idle_worker_emits_terminal_topic_when_timed_out_bash_exits_after_turn_finish(
         core,
         test_config(),
         test_worker_config(&dir, "idle_timeout_exit_topic", 1),
-        TimeoutThenFinalModel { calls: 0 },
+        TimeoutThenFinalModel {
+            calls: 0,
+            command: idle_exit_command(&release),
+            final_delay,
+        },
     );
     let handle = worker.handle();
     let _lifecycle = worker
@@ -732,6 +796,7 @@ fn idle_worker_emits_terminal_topic_when_timed_out_bash_exits_after_turn_finish(
                 assert!(!outcome.running_jobs.is_empty());
                 assert_eq!(outcome.running_jobs[0].kind, "timeout");
                 turn_finished = true;
+                std::fs::write(&release, b"release").unwrap();
             }
             Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
