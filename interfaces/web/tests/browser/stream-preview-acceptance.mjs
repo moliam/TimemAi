@@ -26,11 +26,12 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
 async function waitFor(check, message, timeout = 10000) {
   const deadline = Date.now() + timeout;
+  let lastError;
   while (Date.now() < deadline) {
-    try { if (await check()) return; } catch {}
+    try { if (await check()) return; } catch (error) { lastError = error; }
     await sleep(40);
   }
-  throw new Error(message);
+  throw new Error(message, lastError ? { cause: lastError } : undefined);
 }
 
 async function waitForSubtreeIdle(browser, selector, message, timeout = 10000) {
@@ -315,7 +316,7 @@ async function startBrowser(url) {
     "--window-size=1440,1000", "about:blank",
   ], { stdio: ["ignore", "ignore", "pipe"] });
   let chromeError = "";
-  child.stderr.on("data", (chunk) => { chromeError += String(chunk); });
+  child.stderr.on("data", (chunk) => { chromeError = (chromeError + String(chunk)).slice(-8192); });
 
   try {
     let port = null;
@@ -338,8 +339,13 @@ async function startBrowser(url) {
     });
     let sequence = 0;
     const requests = new Map();
+    const pageErrors = [];
     socket.addEventListener("message", ({ data }) => {
       const message = JSON.parse(String(data));
+      if (message.method === "Runtime.exceptionThrown") {
+        pageErrors.push(message.params.exceptionDetails);
+        if (pageErrors.length > 8) pageErrors.shift();
+      }
       if (!message.id || !requests.has(message.id)) return;
       const { resolve, reject } = requests.get(message.id);
       requests.delete(message.id);
@@ -363,6 +369,7 @@ async function startBrowser(url) {
     };
     return {
       call, evaluate,
+      diagnostics: () => ({ pageErrors, chromeError }),
       async close() {
         socket.close();
         await stopBrowserProcess(child, profile);
@@ -469,7 +476,7 @@ async function main() {
       turns: [{ ...turn("turn-1"), state: "completed", events: completeEvents.slice(-40), final_answer: "ARCHIVE_DONE" }] }));
     for (let reload = 0; reload < 2; reload++) {
       await browser.call("Page.reload", { ignoreCache: true });
-      await waitFor(() => contains("body", "ARCHIVE_DONE"), "archive snapshot missing");
+      await waitFor(() => contains("body", "ARCHIVE_DONE"), `archive snapshot missing (reload ${reload + 1})`);
       await browser.evaluate(`document.querySelector('[aria-label="Show work details"]').click()`);
       await waitFor(() => contains("body", "ARCHIVE_PROGRESS_0"), "paged archive lost first thought");
       await waitFor(() => contains("body", "archive-tool-1"), "paged archive lost first tool");
@@ -1024,6 +1031,24 @@ async function main() {
     console.log("PASS Chrome work collapse: both modes, completion/interruption, reload, manual expansion");
     console.log("PASS Chrome round continuity: earlier thoughts/tools retained, no working archive, terminal trailer removed");
     console.log("PASS Chrome provisional UI: default off, midstream enable, response/chat updates, network interruption, reload snapshot, retraction");
+  } catch (error) {
+    // Keep the original failure. A fixture-only snapshot cannot expose user
+    // data; bounded diagnostics distinguish rendering errors from reconnects.
+    let timer;
+    const page = await Promise.race([
+      browser.evaluate(`({readyState: document.readyState, url: location.href,
+        text: document.body?.innerText.slice(0, 4096)})`).catch(error => ({ error: String(error) })),
+      new Promise(resolve => { timer = setTimeout(() => resolve({error: "diagnostic timeout"}), 2000); }),
+    ]);
+    clearTimeout(timer);
+    console.error("STREAM_PREVIEW_FAILURE", JSON.stringify({
+      page, ...browser.diagnostics(), connections: host.getConnectionCount(),
+      session: {state: host.getSession().state, turns: host.getSession().turns.map(turn => ({
+        id: turn.turn_id, state: turn.state, final_answer: turn.final_answer,
+      }))},
+      recentCommands: host.commands.slice(-8).map(command => command.type),
+    }));
+    throw error;
   } finally { await browser.close(); await host.close(); }
 }
 await main();

@@ -6810,12 +6810,14 @@ impl ModelClient for ParallelControlFallbackModel {
     }
 }
 
+#[cfg(unix)]
 #[derive(Default)]
 struct ParallelControlFallbackUi {
     profiles: Vec<crate::InteractionProfile>,
     persisted: Vec<crate::PersistedCapabilityProbe>,
 }
 
+#[cfg(unix)]
 impl TurnUi for ParallelControlFallbackUi {
     fn on_interaction_profile(&mut self, profile: &crate::InteractionProfile) {
         self.profiles.push(profile.clone());
