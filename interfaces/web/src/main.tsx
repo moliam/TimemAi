@@ -11135,9 +11135,7 @@ function FinalAnswerContent({ text, provisional = false }: { text: string; provi
       setShowOutline(false);
       return;
     }
-    let updateFrame: number | null = null;
     const update = () => {
-      updateFrame = null;
       const contentRect = content.getBoundingClientRect();
       const viewportRect = viewport.getBoundingClientRect();
       const bodyInset = Math.max(0, contentRect.left - viewportRect.left);
@@ -11179,10 +11177,10 @@ function FinalAnswerContent({ text, provisional = false }: { text: string; provi
         ),
       );
     };
-    const scheduleUpdate = () => {
-      if (updateFrame !== null) return;
-      updateFrame = window.requestAnimationFrame(update);
-    };
+    // A stale portaled top can itself extend scrollHeight after sibling work
+    // collapses. Repair geometry even when the display stops delivering rAF.
+    const layoutTask = createFrameTask({ run: update, fallbackMs: 100 });
+    const scheduleUpdate = () => layoutTask.request();
     update();
     window.addEventListener("resize", scheduleUpdate);
     const observer =
@@ -11201,7 +11199,7 @@ function FinalAnswerContent({ text, provisional = false }: { text: string; provi
     return () => {
       window.removeEventListener("resize", scheduleUpdate);
       observer?.disconnect();
-      if (updateFrame !== null) cancelAnimationFrame(updateFrame);
+      layoutTask.dispose();
     };
   }, [outline, outlineCollapsed, text, timelineActive, provisional]);
 
