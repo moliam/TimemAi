@@ -477,11 +477,22 @@ async function main() {
     for (let reload = 0; reload < 2; reload++) {
       await browser.call("Page.reload", { ignoreCache: true });
       await waitFor(() => contains("body", "ARCHIVE_DONE"), `archive snapshot missing (reload ${reload + 1})`);
+      // Host replies must progress even when the browser suspends animation
+      // frames (hidden tabs and headless display-link failures). Keep the
+      // existing deadline and verify all five pages, not just the snapshot.
+      if (reload === 0) await browser.evaluate(`
+        window.acceptanceRequestAnimationFrame = window.requestAnimationFrame;
+        window.requestAnimationFrame = () => 0;
+      `);
       await browser.evaluate(`document.querySelector('[aria-label="Show work details"]').click()`);
       await waitFor(() => contains("body", "ARCHIVE_PROGRESS_0"), "paged archive lost first thought");
       await waitFor(() => contains("body", "archive-tool-1"), "paged archive lost first tool");
       assert(await contains("body", "ARCHIVE_PROGRESS_78"), "paged archive lost last thought");
       assert(await contains("body", "archive-tool-79"), "paged archive lost last tool");
+      if (reload === 0) await browser.evaluate(`
+        window.requestAnimationFrame = window.acceptanceRequestAnimationFrame;
+        delete window.acceptanceRequestAnimationFrame;
+      `);
     }
     console.log("PASS Chrome wire ordering and paged archive recovery after reload");
     host.setSession(makeSession());

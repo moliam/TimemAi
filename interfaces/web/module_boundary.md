@@ -41,7 +41,9 @@ It may contain:
   from Core. Browser reducers must not infer Session/Turn working,
   input-admission, cancellation, or terminal state from core topics, worker
   activity, command ACK order, or visible final-answer timing.
-- Frame-budgeted, order-preserving inbound event batching; memoized turn
+- Frame-budgeted, order-preserving inbound event batching with a cancellable
+  timer fallback while events are pending, so suspended animation frames do not
+  stall Host snapshots or paged replies; memoized turn
   subtrees; and browser layout/paint containment for completed offscreen turns.
   These presentation optimizations must not drop or reorder semantic events.
 - Live one-shot browser command delivery. The UI may assign a correlation
