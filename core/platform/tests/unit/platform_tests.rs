@@ -536,6 +536,22 @@ fn local_filesystem_mount_points_reports_root_and_skips_pseudo() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn local_filesystem_mount_points_reports_root_and_skips_pseudo() {
+    let mounts = crate::local_filesystem_mount_points();
+    assert!(
+        mounts.contains(&std::path::PathBuf::from("/")),
+        "{mounts:?}"
+    );
+    // Pseudo filesystems (devfs, autofs, nullfs overlays) must never appear.
+    for mount in &mounts {
+        let text = mount.display().to_string();
+        assert!(!text.starts_with("/dev"), "{text}");
+        assert!(!text.starts_with("/System/Volumes/VM"), "{text}");
+    }
+}
+
+#[test]
 fn managed_command_status_preserves_owner_exit_status() {
     let status = crate::command_status(
         std::process::Command::new(crate::POSIX_SHELL_EXECUTABLE).args(["-c", "exit 27"]),
