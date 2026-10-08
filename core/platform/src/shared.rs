@@ -426,6 +426,7 @@ pub(super) fn reparented_detached_child_pids() -> Vec<u32> {
 /// A multithreaded subreaper process gets escaped orphans reparented under
 /// an arbitrary live thread TID of the process, not the leader PID, so a
 /// parent pid matches when it is either the leader or one of our threads.
+#[cfg(target_os = "linux")]
 fn parent_belongs_to_this_process(ppid: u32, self_pid: u32) -> bool {
     if ppid == self_pid {
         return true;

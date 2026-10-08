@@ -7,7 +7,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $RootDir = $PSScriptRoot
-$MinRustVersion = [Version]'1.78.0'
+$MinRustVersion = [Version]'1.83.0'
 
 function Get-CommandPath([string]$Name) {
     $command = Get-Command $Name -ErrorAction SilentlyContinue

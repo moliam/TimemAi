@@ -71,7 +71,7 @@ Both online and checkout flows are source builds. They require:
   manager.
 
 On macOS/Linux, if Rust/cargo is missing, `install.sh` installs the Rust toolchain
-with rustup. Cargo 1.78+ is required. To disable automatic Rust install/update:
+with rustup. Cargo 1.83+ is required. To disable automatic Rust install/update:
 
 ```bash
 TIMEM_SHELL_SKIP_RUST_INSTALL=1 ./install.sh

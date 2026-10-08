@@ -342,6 +342,9 @@ fn negotiate_interaction_for_turn(
     outcome
 }
 
+// `% == 0` is deliberate: `is_multiple_of` is stable only from Rust 1.87,
+// above the installer-declared MSRV (1.83).
+#[allow(clippy::manual_is_multiple_of)]
 fn should_reprobe_negative_capability(
     config: &ModelServiceConfig,
     profile: &crate::InteractionProfile,
@@ -352,7 +355,7 @@ fn should_reprobe_negative_capability(
         && config.api_protocol != crate::ApiProtocol::OpenAiResponses
         && profile.resolved_mode == crate::ToolCallMode::Inline
         && round > 0
-        && (round - 1).is_multiple_of(CAPABILITY_NEGATIVE_REPROBE_ROUND_INTERVAL)
+        && (round - 1) % CAPABILITY_NEGATIVE_REPROBE_ROUND_INTERVAL == 0
 }
 
 // This internal orchestration boundary deliberately keeps the turn-owned services
