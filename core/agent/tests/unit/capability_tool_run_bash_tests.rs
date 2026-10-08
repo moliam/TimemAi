@@ -2706,8 +2706,10 @@ impl EscapedPipeFixture {
         // independent of the fork/reparent scheduling race. Cleanup is by the
         // fixture's private release file, never by guessed process ancestry.
         format!(
-            r#"/usr/bin/python3 -c '
+            r#"printf shell_started > phase
+/usr/bin/python3 -c '
 import os,time
+open("phase","w").write("python_started")
 p=os.fork()
 if p==0:
  os.setsid()
@@ -2724,10 +2726,28 @@ print("captured",flush=True)
         )
     }
 
-    fn wait_ready(&self) {
+    fn wait_ready(&self, store: &ShellJobManager) {
         let deadline = Instant::now() + Duration::from_secs(3);
         while !self.0.join("ready").exists() {
-            assert!(Instant::now() < deadline, "fixture did not escape");
+            if Instant::now() >= deadline {
+                let jobs = store.state.jobs.lock().unwrap();
+                let diagnostics = jobs
+                    .values()
+                    .map(|job| {
+                        format!(
+                            "pid={} state={:?} stdout={:?} stderr={:?}",
+                            job.pid,
+                            job.state.lock().unwrap(),
+                            shell_output_snapshot(&job.stdout).text,
+                            shell_output_snapshot(&job.stderr).text
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                panic!(
+                    "fixture did not escape: phase={:?}; jobs={diagnostics:?}",
+                    fs::read_to_string(self.0.join("phase"))
+                );
+            }
             thread::sleep(Duration::from_millis(10));
         }
     }
@@ -2781,7 +2801,7 @@ fn macos_escaped_pipe_holder_does_not_block_cancel_or_duplicate_update() {
     let store = ShellJobManager::new(&fixture.0);
     let started = store.spawn_background(&fixture.command(true), &fixture.0, "escaped", "turn");
     assert!(started.contains("now keeps running"), "{started}");
-    fixture.wait_ready();
+    fixture.wait_ready(&store);
     let started = Instant::now();
     assert_eq!(store.cancel_unfinished_for_session("escaped").len(), 1);
     let update = loop {
@@ -2814,7 +2834,7 @@ fn macos_escaped_pipe_holder_does_not_block_manager_drop() {
     let store = ShellJobManager::new(&fixture.0);
     let started = store.spawn_background(&fixture.command(true), &fixture.0, "escaped", "turn");
     assert!(started.contains("now keeps running"), "{started}");
-    fixture.wait_ready();
+    fixture.wait_ready(&store);
     let started = Instant::now();
     drop(store);
     assert!(
