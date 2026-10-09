@@ -49,7 +49,9 @@ It may contain:
 - Portaled final-answer outline geometry coalesces resize invalidations by frame
   with a cancellable pending-only timer fallback. A collapsed sibling must not
   leave an old absolute outline position extending the scrollable area when
-  display frames stop; ordinary scroll navigation remains frame-only.
+  display frames stop. Known work-collapse and stream-archive commits directly
+  remeasure outline position; correctness must not wait for a ResizeObserver
+  notification. Ordinary scroll navigation remains frame-only.
 - Live one-shot browser command delivery. The UI may assign a correlation
   `command_id`, but sends only while the WebSocket is open and the initial Host
   snapshot is ready. It does not persist an outbox, replay commands after

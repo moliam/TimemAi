@@ -357,7 +357,11 @@ async function startBrowser(url) {
 
 async function main() {
   const mem = await mkdtemp(join(tmpdir(), "timem-stream-product-"));
-  await writeFile(join(mem, "Cargo.toml"), "stream readfile acceptance fixture");
+  // Every byte selector below must address this fixture, not an incidental
+  // repository file. Keep enough ASCII bytes for the inclusive 199 endpoint.
+  const readFixture = "stream readfile acceptance fixture\n".repeat(8);
+  assert(Buffer.byteLength(readFixture) > 199, "readfile fixture too short");
+  await writeFile(join(mem, "Cargo.toml"), readFixture);
   const scenario = process.env.STREAM_PREVIEW_SCENARIO ?? "normal";
   const protocol = process.env.STREAM_PREVIEW_PROTOCOL ?? "xml";
   const responses = process.env.STREAM_API_PROTOCOL === "openai-responses";
@@ -441,6 +445,18 @@ async function main() {
   let logs = ""; child.stdout.on("data",x=>logs+=x); child.stderr.on("data",x=>logs+=x);
   let browser, socket;
   const received = [];
+  const assertSuccessfulFixtureReads = async () => {
+    const readFinishes = () => received.flatMap(raw => {
+      const e = raw.type === "semantic_event" ? raw.event : raw;
+      return e.event?.topic?.name === "core.action" && e.event.payload.action === "readfile" && e.event.payload.event === "finish" ? [e.event.payload] : [];
+    });
+    // The HTTP model request and browser event stream have independent delivery
+    // queues: wait for terminal evidence before inspecting it or the tool UI.
+    await waitFor(() => readFinishes().length === 3, "three readfile finishes missing");
+    const finishes = readFinishes();
+    assert(finishes.every(e => e.status === "completed"), `expected three successful fixture reads: ${JSON.stringify(finishes)}`);
+    assert(modelInputs[1].includes("stream readfile acceptance fixture"), "fixture content missing from next model input");
+  };
   try {
     await waitFor(async()=>{try{return (await fetch("http://127.0.0.1:18987/")).ok;}catch{return false;}},"product did not start",30000);
     socket = new WebSocket("ws://127.0.0.1:18987/ws");
@@ -477,6 +493,7 @@ async function main() {
       await waitFor(() => browser.evaluate(`document.querySelector('button.work-title-chip')?.getAttribute('aria-expanded') === 'true'`), "non-stream working panel not expanded");
       release();
       await waitFor(() => !!releaseFinal, "next model request missing");
+      if (scenario === "tools") await assertSuccessfulFixtureReads();
       if (scenario === "tools") await waitFor(() => browser.evaluate(`document.querySelector('.turn-work-content')?.textContent.includes('readfile')`), "non-stream tool missing");
       releaseFinal();
       await waitFor(() => browser.evaluate(`document.querySelector('.turn-final-delivery')?.textContent.includes('HTTP final')`), "non-stream final missing");
@@ -548,6 +565,7 @@ async function main() {
       await waitFor(() => !!releaseFinal, "next model request missing");
       assert(await browser.evaluate(`!document.querySelector('.live-interim-answer')`), "stale interim UI remained");
       if (scenario === "tools") {
+        await assertSuccessfulFixtureReads();
         await waitFor(() => browser.evaluate(`document.querySelector('.turn-stream-tools')?.textContent.includes('readfile')`), "executed readfile missing while preview enabled");
         await waitFor(() => received.some(raw => { const e = raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.action" && e.event.payload.action === "readfile" && e.event.payload.event === "finish"; }), "readfile execution evidence missing");
         await waitFor(() => received.some(raw => { const e = raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.action" && e.event.payload.action === "readfile" && e.event.payload.event === "execution_start"; }), "readfile actual execution boundary missing");

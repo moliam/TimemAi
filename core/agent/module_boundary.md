@@ -118,7 +118,11 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
 - Active-turn reminders. Core evaluates the host-loaded, user-global reminder
   schedules independently for active-time and completed-round intervals, then
   submits each due random selection as a SYSTEM component before the next model
-  request. Selecting `NONE` consumes that interval without prompt injection.
+  request. Each post-round dispatch boundary evaluates progress, time, and round
+  schedules once, batching all due components into one prompt rebuild. Re-entering
+  that boundary for host updates must not inject another period before dispatch;
+  the next actual model round rearms evaluation. The first request has no reminder.
+  Selecting `NONE` consumes that interval without prompt injection.
   Host-decision wait time is excluded, long blocking calls are not interrupted,
   and missed time intervals collapse rather than building a stale backlog.
 - Host-decision results once chosen by the UI, such as applying user approval

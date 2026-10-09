@@ -67,7 +67,12 @@ checks, not a claim of a universal percentage speedup or benchmark score.
   caller-owned filesystem sampling buffers with real-volume filtering.
 - Verify nonblocking stdin backpressure, partial writes, exact payload delivery,
   and EOF on native Windows, Linux, and macOS runners.
-- Fix suspended-frame outline geometry and collision-prone restored history IDs.
+- Fix final-answer outline positioning after work collapse or stream archive,
+  including suspended frames and delayed size notifications; avoid collision-prone
+  restored history IDs.
+- Evaluate due progress, time, and round reminders together once before the next
+  model dispatch, preventing slow prompt rebuilds from repeatedly injecting a
+  reminder while preserving reminders on subsequent rounds.
 - Remove the standalone Terminal-Bench adapters, campaign scripts, and historical
   evaluation configuration from the product repository. Product tests and
   performance gates remain in place.
