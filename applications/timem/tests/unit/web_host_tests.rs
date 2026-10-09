@@ -12957,8 +12957,48 @@ fn drive_worker_until_session_ready(
     prompts: &Arc<Mutex<Vec<String>>>,
 ) {
     let started = Instant::now();
+    let mut trace = std::collections::VecDeque::new();
     loop {
         for (event_session_id, context_id, worker_id, event) in drain_worker_events(state) {
+            if event_session_id == session_id {
+                let detail = match &event {
+                    CoreSessionWorkerEvent::Topics(topics) => topics
+                        .iter()
+                        .map(|topic| {
+                            format!(
+                                "{}:{}",
+                                topic.topic.name,
+                                topic.payload.get("event").unwrap_or(&Value::Null)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    CoreSessionWorkerEvent::ModelError { error } => error.clone(),
+                    CoreSessionWorkerEvent::TurnFinished { outcome } => {
+                        format!("stop={:?}", outcome.stop_reason)
+                    }
+                    _ => String::new(),
+                };
+                if trace.len() == 32 {
+                    trace.pop_front();
+                }
+                trace.push_back(format!(
+                    "{}ms {:?} {}",
+                    started.elapsed().as_millis(),
+                    match &event {
+                        CoreSessionWorkerEvent::TurnStarted { .. } => "TurnStarted",
+                        CoreSessionWorkerEvent::TurnProjection(_) => "TurnProjection",
+                        CoreSessionWorkerEvent::Topics(_) => "Topics",
+                        CoreSessionWorkerEvent::ModelRequest { .. } => "ModelRequest",
+                        CoreSessionWorkerEvent::ModelResponse { .. } => "ModelResponse",
+                        CoreSessionWorkerEvent::ModelError { .. } => "ModelError",
+                        CoreSessionWorkerEvent::TurnFinished { .. } => "TurnFinished",
+                        CoreSessionWorkerEvent::WorkerStopped => "WorkerStopped",
+                        _ => "Other",
+                    },
+                    detail
+                ));
+            }
             handle_scoped_worker_event(state, &event_session_id, &context_id, &worker_id, event);
         }
         if !prompts.lock().unwrap().is_empty()
@@ -12966,10 +13006,14 @@ fn drive_worker_until_session_ready(
         {
             return;
         }
-        assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "ToolGen worker did not finish"
-        );
+        if started.elapsed() >= Duration::from_secs(3) {
+            let sessions = state.sessions.lock().unwrap();
+            let session = &sessions[session_id];
+            panic!("ToolGen worker did not finish: prompts={} state={} active={:?} pending={:?} workers={:?} turns={:?} trace={trace:?}",
+                prompts.lock().unwrap().len(), session.state, session.active_turn_id, session.pending_turn_id,
+                session.workers.iter().map(|worker| (&worker.worker_id, &worker.state)).collect::<Vec<_>>(),
+                session.turns.iter().map(|turn| (&turn.turn_id, &turn.state, turn.completion.is_some())).collect::<Vec<_>>());
+        }
         thread::sleep(Duration::from_millis(5));
     }
 }
