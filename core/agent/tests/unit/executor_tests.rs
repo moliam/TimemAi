@@ -288,6 +288,123 @@ fn command_action_timeout_is_bounded() {
 
 #[cfg(unix)]
 #[test]
+fn command_action_timeout_includes_blocked_stdin_delivery() {
+    let dir = temp_case_dir("blocked_stdin_deadline");
+    let script = dir.join("no_read.sh");
+    // A finite child bounds the negative control even before timeout handling
+    // is fixed. It never reads stdin, so a payload larger than the pipe blocks.
+    fs::write(&script, "#!/bin/sh\nexec sleep 4\n").unwrap();
+    let payload = json!({"message": "x".repeat(1024 * 1024)});
+    let started = Instant::now();
+    let outcome = execute_command_action_outcome("blocked_stdin", &script, &payload, 1000);
+    let elapsed = started.elapsed();
+    let _ = fs::remove_dir_all(&dir);
+    eprintln!(
+        "blocked stdin: status={:?} elapsed={elapsed:?} text={}",
+        outcome.status, outcome.text
+    );
+    assert_eq!(outcome.status, crate::ActionStatus::Timeout);
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "stdin bypassed deadline: {elapsed:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn command_action_delivers_exact_large_input_while_draining_both_outputs() {
+    let dir = temp_case_dir("duplex_input");
+    let program = dir.join("duplex.py");
+    let received = dir.join("received.bin");
+    // Output first deliberately fills both pipes before stdin is read. Reading
+    // to EOF also checks that the parent closes stdin after the final newline.
+    fs::write(
+        &program,
+        "import pathlib, sys\nsys.stdout.buffer.write(b'o' * 262144)\nsys.stdout.buffer.flush()\nsys.stderr.buffer.write(b'e' * 262144)\nsys.stderr.buffer.flush()\ndata = sys.stdin.buffer.read()\npathlib.Path(sys.argv[1]).write_bytes(data)\n",
+    )
+    .unwrap();
+    let script = dir.join("duplex.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nexec python3 '{}' '{}'\n",
+            program.display(),
+            received.display()
+        ),
+    )
+    .unwrap();
+    let payload = json!({"message": "中🙂\n\"\\".repeat(32768)});
+    let mut expected = payload.to_string().into_bytes();
+    expected.push(b'\n');
+    let outcome = execute_command_action_outcome("duplex", &script, &payload, 5000);
+    let actual = fs::read(&received);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        outcome.status,
+        crate::ActionStatus::Completed,
+        "{}",
+        outcome.text
+    );
+    assert_eq!(
+        actual.unwrap(),
+        expected,
+        "partial writes must preserve every byte and EOF"
+    );
+    let evidence = outcome.bash_result.unwrap();
+    assert!(evidence.stdout.contains("oooo"));
+    assert!(evidence.stderr.contains("eeee"));
+}
+
+#[cfg(unix)]
+#[test]
+fn command_action_closed_stdin_is_failure_with_captured_diagnostics() {
+    let dir = temp_case_dir("closed_stdin");
+    let script = dir.join("close.sh");
+    // Keep the leader alive after closing stdin, separating write failure from
+    // exit-status handling. Oversized input cannot fit before the close.
+    fs::write(
+        &script,
+        "#!/bin/sh\nprintf 'stdout-before-close\\n'\nprintf 'stderr-before-close\\n' >&2\nexec 0<&-\nexec sleep 4\n",
+    )
+    .unwrap();
+    let started = Instant::now();
+    let outcome = execute_command_action_outcome(
+        "closed_stdin",
+        &script,
+        &json!({"message": "x".repeat(1024 * 1024)}),
+        1000,
+    );
+    let elapsed = started.elapsed();
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        outcome.status,
+        crate::ActionStatus::Failed,
+        "{}",
+        outcome.text
+    );
+    assert!(
+        outcome.text.contains("command_input_failed"),
+        "{}",
+        outcome.text
+    );
+    assert!(
+        outcome.text.contains("stdout-before-close"),
+        "{}",
+        outcome.text
+    );
+    assert!(
+        outcome.text.contains("stderr-before-close"),
+        "{}",
+        outcome.text
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "closed input took {elapsed:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn command_action_timeout_retains_captured_stdout_and_stderr() {
     let dir = temp_case_dir("timeout_output");
     let script = dir.join("timeout.sh");
@@ -369,6 +486,78 @@ fn temp_case_dir(name: &str) -> PathBuf {
     ));
     fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+#[test]
+fn command_input_failure_evidence_is_bounded() {
+    let outcome = render_command_input_failure(
+        "bounded",
+        &"r".repeat(8192),
+        Ok((vec![b'x'; 65536], vec![b'y'; 65536])),
+    );
+    assert_eq!(outcome.status, crate::ActionStatus::Failed);
+    assert!(outcome.text.contains("partial_stdout: "));
+    assert!(outcome.text.contains("partial_stderr: "));
+    assert!(outcome.text.chars().count() < 5200);
+    let failed =
+        render_command_input_failure("failed_capture", "broken pipe", Err("incomplete".into()));
+    assert_eq!(failed.status, crate::ActionStatus::Failed);
+    assert!(failed.text.contains("capture_error: incomplete"));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_command_action_timeout_includes_blocked_stdin_delivery() {
+    let dir = temp_case_dir("windows_blocked_stdin");
+    let script = dir.join("no_read.ps1");
+    fs::write(&script, "Start-Sleep -Seconds 4\n").unwrap();
+    let started = Instant::now();
+    let outcome = execute_command_action_outcome(
+        "blocked_stdin",
+        &script,
+        &json!({"message": "x".repeat(1024 * 1024)}),
+        1000,
+    );
+    let elapsed = started.elapsed();
+    let _ = fs::remove_dir_all(dir);
+    assert_eq!(
+        outcome.status,
+        crate::ActionStatus::Timeout,
+        "{}",
+        outcome.text
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "stdin bypassed deadline: {elapsed:?}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_command_action_delivers_large_input_while_draining_both_outputs() {
+    let dir = temp_case_dir("windows_duplex_input");
+    let script = dir.join("duplex.ps1");
+    let received = dir.join("received.bin");
+    fs::write(&script, format!(
+        "[Console]::Out.Write(('o' * 262144))\n[Console]::Out.Flush()\n[Console]::Error.Write(('e' * 262144))\n[Console]::Error.Flush()\n$stream = [Console]::OpenStandardInput()\n$dest = [IO.File]::Create('{}')\ntry {{ $stream.CopyTo($dest) }} finally {{ $dest.Dispose() }}\n",
+        received.display().to_string().replace('\'', "''")
+    )).unwrap();
+    let payload = json!({"message": "中🙂\n\"\\".repeat(32768)});
+    let mut expected = payload.to_string().into_bytes();
+    expected.push(b'\n');
+    let outcome = execute_command_action_outcome("duplex", &script, &payload, 5000);
+    let actual = fs::read(&received);
+    let _ = fs::remove_dir_all(dir);
+    assert_eq!(
+        outcome.status,
+        crate::ActionStatus::Completed,
+        "{}",
+        outcome.text
+    );
+    assert_eq!(actual.unwrap(), expected);
+    let evidence = outcome.bash_result.unwrap();
+    assert!(evidence.stdout.contains("oooo"));
+    assert!(evidence.stderr.contains("eeee"));
 }
 
 #[cfg(windows)]

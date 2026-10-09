@@ -1,7 +1,7 @@
 use crate::capability::CapabilityRegistry;
 use crate::{ActionOutcome, BashResultEvidence};
 use serde_json::Value;
-use std::io::Write;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::thread;
@@ -124,6 +124,8 @@ fn execute_command_action_outcome_with_process_job(
             }
         };
     }
+    let mut input_bytes = payload.to_string().into_bytes();
+    input_bytes.push(b'\n');
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(_) if process_job.is_some() => {
@@ -150,24 +152,50 @@ fn execute_command_action_outcome_with_process_job(
             ))
         }
     };
-    let _child_registration = crate::os::register_managed_child(child.id());
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(payload.to_string().as_bytes());
-        let _ = stdin.write_all(b"\n");
-    }
-    let output =
-        crate::command_output::CommandOutput::start(&mut child, COMMAND_OUTPUT_CAPTURE_BYTES);
     let started = Instant::now();
     let timeout = Duration::from_millis(timeout_ms.clamp(1000, 15000));
+    let _child_registration = crate::os::register_managed_child(child.id());
+    // Drain output before delivering input: a child may write more than the
+    // stdout pipe capacity before reading its JSON payload.
+    let output =
+        crate::command_output::CommandOutput::start(&mut child, COMMAND_OUTPUT_CAPTURE_BYTES);
+    let mut input = match child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("child stdin unavailable"))
+        .and_then(crate::os::ChildInputPipe::new)
+    {
+        Ok(input) => Some(input),
+        Err(error) => {
+            terminate_command_process(&mut child, process_job.as_ref());
+            return render_command_input_failure(action, &error.to_string(), output.finish());
+        }
+    };
+    let mut input_offset: usize = 0;
     let status = loop {
+        // Input backpressure and process execution share one deadline. No
+        // blocking writer thread can remain after the result is returned.
+        if started.elapsed() >= timeout {
+            drop(input.take());
+            terminate_command_process(&mut child, process_job.as_ref());
+            return render_command_timeout(action, output.finish());
+        }
         match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() >= timeout => {
-                terminate_command_process(&mut child, process_job.as_ref());
-                return render_command_timeout(action, output.finish());
+            Ok(Some(status)) => {
+                if input.is_some() {
+                    drop(input.take());
+                    terminate_command_descendants(child.id(), process_job.as_ref());
+                    return render_command_input_failure(
+                        action,
+                        "child exited before input delivery completed",
+                        output.finish(),
+                    );
+                }
+                break status;
             }
-            Ok(None) => thread::sleep(COMMAND_POLL_INTERVAL),
+            Ok(None) => {}
             Err(err) => {
+                drop(input.take());
                 terminate_command_process(&mut child, process_job.as_ref());
                 let _ = output.finish();
                 return ActionOutcome::failed(format!(
@@ -176,11 +204,37 @@ fn execute_command_action_outcome_with_process_job(
                 ));
             }
         }
+        if let Some(pipe) = input.as_mut() {
+            let end = input_offset.saturating_add(8192).min(input_bytes.len());
+            match pipe.try_write(&input_bytes[input_offset..end]) {
+                Ok(written) => {
+                    input_offset += written;
+                    if input_offset == input_bytes.len() {
+                        // EOF is part of delivery; readers such as PowerShell's
+                        // $input enumerate until the write end is closed.
+                        drop(input.take());
+                    }
+                    continue;
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => {
+                    drop(input.take());
+                    terminate_command_process(&mut child, process_job.as_ref());
+                    return render_command_input_failure(
+                        action,
+                        &error.to_string(),
+                        output.finish(),
+                    );
+                }
+            }
+        }
+        thread::sleep(COMMAND_POLL_INTERVAL.min(timeout.saturating_sub(started.elapsed())));
     };
-    // Command capabilities are finite executions: descendants are not allowed
-    // to outlive the registered tool process, even when the leader exits 0.
-    // Kill residual members before joining pipe drains because a descendant may
-    // still hold stdout/stderr open.
+    // Command capabilities are finite executions. Clean owned residual members
+    // before joining pipe drains, even when the leader exits 0. The process-group
+    // fallback covers only non-escaping descendants; bounded capture does not
+    // certify that an escaped descendant has terminated.
     terminate_command_descendants(child.id(), process_job.as_ref());
     let (stdout, stderr) = match output.finish() {
         Ok(output) => output,
@@ -198,11 +252,29 @@ fn execute_command_action_outcome_with_process_job(
     )
 }
 
+fn render_command_input_failure(
+    action: &str,
+    reason: &str,
+    capture: Result<(Vec<u8>, Vec<u8>), String>,
+) -> ActionOutcome {
+    let mut text = format!(
+        "Action result: {action}\nerror: command_input_failed\nreason: {}",
+        compact_text(reason, 1000)
+    );
+    append_command_capture(&mut text, capture);
+    ActionOutcome::failed(text)
+}
+
 fn render_command_timeout(
     action: &str,
     capture: Result<(Vec<u8>, Vec<u8>), String>,
 ) -> ActionOutcome {
     let mut text = format!("Action result: {action}\nerror: timeout");
+    append_command_capture(&mut text, capture);
+    ActionOutcome::timeout(text)
+}
+
+fn append_command_capture(text: &mut String, capture: Result<(Vec<u8>, Vec<u8>), String>) {
     match capture {
         Ok((stdout, stderr)) => {
             let stdout = String::from_utf8_lossy(&stdout);
@@ -228,7 +300,6 @@ fn render_command_timeout(
         }
         Err(error) => text.push_str(&format!("\ncapture_error: {}", compact_text(&error, 1000))),
     }
-    ActionOutcome::timeout(text)
 }
 
 fn render_command_output(
