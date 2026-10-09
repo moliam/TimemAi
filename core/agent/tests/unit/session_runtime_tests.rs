@@ -1273,6 +1273,92 @@ fn session_turn_injects_due_focus_reminder_before_the_next_model_request() {
 }
 
 #[test]
+fn reminder_rebuild_crossing_time_boundary_does_not_repeat_before_dispatch() {
+    const ROUND_TIP: &str = "unique-round-dispatch-marker";
+    const TIP: &str = "unique-reminder-dispatch-marker";
+    struct SlowReminderRebuildUi {
+        delayed: bool,
+    }
+    impl TurnUi for SlowReminderRebuildUi {
+        fn apply_pending_runtime_updates(
+            &mut self,
+            core: &mut AgentCore,
+            _config: &mut ModelServiceConfig,
+        ) -> bool {
+            if !self.delayed && core.render_prompt().contains(TIP) {
+                self.delayed = true;
+                // Simulate scheduler/UI work crossing another reminder period
+                // after injection but before this request is dispatched.
+                thread::sleep(Duration::from_millis(150));
+            }
+            false
+        }
+    }
+    let dir = tmp_dir("reminder_slow_rebuild");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    core.set_reminder_tips_config(crate::ReminderTipsConfig {
+        schedules: vec![
+            crate::ReminderScheduleConfig {
+                every_minutes: Some(1),
+                every_rounds: None,
+                tips: vec![TIP.into()],
+            },
+            crate::ReminderScheduleConfig {
+                every_minutes: None,
+                every_rounds: Some(1),
+                tips: vec![ROUND_TIP.into()],
+            },
+        ],
+    });
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    let mut model = DelayedFirstReplayModel::new(
+        Duration::from_millis(150),
+        [
+            Ok(llm("not protocol compliant", 1_000, false)),
+            Ok(llm("not protocol compliant again", 1_050, false)),
+            Ok(llm(
+                r#"{"status":"ALL_FINISHED","final_answer":"done"}"#,
+                1_100,
+                false,
+            )),
+        ],
+    );
+    let mut ui = SlowReminderRebuildUi { delayed: false };
+    let outcome = run_session_turn_with_model_client_and_focus_interval(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "test reminder dispatch",
+            session: "slow_reminder",
+            audit_file: &audit,
+            runtime: "test_runtime",
+            run_bash_target: "test_target",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+        Duration::from_millis(100),
+    );
+    assert_eq!(outcome.text, "done");
+    assert!(
+        ui.delayed,
+        "negative control must cross a post-injection boundary"
+    );
+    assert_eq!(model.inner.prompts.len(), 3);
+    assert!(!model.inner.prompts[0].contains(TIP));
+    assert_eq!(model.inner.prompts[1].matches(TIP).count(), 1);
+    assert_eq!(model.inner.prompts[1].matches(ROUND_TIP).count(), 1);
+    // Both schedules were included in the second request. A real dispatch
+    // rearms evaluation: the crossed time period and next round reach request 3.
+    assert_eq!(model.inner.prompts[2].matches(TIP).count(), 2);
+    assert_eq!(model.inner.prompts[2].matches(ROUND_TIP).count(), 2);
+}
+
+#[test]
 fn session_turn_retries_transient_model_api_errors_and_reports_status() {
     let dir = tmp_dir("retry_transient_model_api_error");
     let audit = dir.join("audit.json");

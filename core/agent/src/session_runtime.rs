@@ -417,6 +417,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
         core.begin_turn(request.input, additional_context)
     };
     let mut rounds = 0u32;
+    let mut reminders_evaluated_after_round = None;
     let mut model_wait_this_turn = Duration::ZERO;
     let mut latest_usage: Option<UsageStats> = None;
 
@@ -483,7 +484,12 @@ fn run_session_turn_with_model_client_and_reminder_override(
                 // Reminders guide an already-running model turn. Never inject one
                 // before the first model request, even when runtime preparation
                 // has already crossed a time boundary.
-                if rounds > 0 {
+                if rounds > 0 && reminders_evaluated_after_round != Some(rounds) {
+                    // Evaluate once per dispatch boundary, not once per prompt
+                    // rebuild. Slow host work must not accumulate time reminders
+                    // before the same model request can leave this loop.
+                    reminders_evaluated_after_round = Some(rounds);
+                    let mut injected = false;
                     if let Some(reminder) = progress_reminder.take_due() {
                         core.submit_prompt_component(
                             PromptComponentRole::system(),
@@ -491,11 +497,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
                             reminder,
                             "turn_runtime",
                         );
-                        step = CoreStep::NeedModel {
-                            prompt: core.build_next_prompt(),
-                            rounds_remaining: core.remaining_rounds(),
-                        };
-                        continue;
+                        injected = true;
                     }
                     let active_elapsed = start.elapsed().saturating_sub(user_wait_this_turn);
                     let time_reminders = reminders.take_due_time(active_elapsed);
@@ -508,11 +510,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
                                 "turn_runtime",
                             );
                         }
-                        step = CoreStep::NeedModel {
-                            prompt: core.build_next_prompt(),
-                            rounds_remaining: core.remaining_rounds(),
-                        };
-                        continue;
+                        injected = true;
                     }
                     let round_reminders = reminders.take_due_rounds(rounds);
                     if !round_reminders.is_empty() {
@@ -524,6 +522,9 @@ fn run_session_turn_with_model_client_and_reminder_override(
                                 "turn_runtime",
                             );
                         }
+                        injected = true;
+                    }
+                    if injected {
                         step = CoreStep::NeedModel {
                             prompt: core.build_next_prompt(),
                             rounds_remaining: core.remaining_rounds(),

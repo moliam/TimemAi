@@ -10454,6 +10454,7 @@ const TurnInteraction = memo(function TurnInteraction({
           }
           latestThoughtTime={latestThoughtTime}
           streamRetained={streamRetentionActive}
+          workExpanded={workStreamVisible}
           onStreamArchived={archiveStream}
           toolGenPending={toolGenPending}
           toolGenBlocked={toolGenBlocked}
@@ -10834,6 +10835,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
 
 function TurnAnswerDelivery({
   streamRetained,
+  workExpanded,
   onStreamArchived,
   latestThoughtTime,
   turn,
@@ -10854,6 +10856,7 @@ function TurnAnswerDelivery({
   waitingModel: boolean;
   latestThoughtTime: number;
   streamRetained: boolean;
+  workExpanded: boolean;
   onStreamArchived: () => void;
   toolGenPending: boolean;
   toolGenBlocked: boolean;
@@ -10896,6 +10899,7 @@ function TurnAnswerDelivery({
       {(hasFinal || !!previewText) && (
         <FinalAnswerDelivery
           text={turn.final_answer || previewText}
+          layoutKey={`${streamRetained}:${workExpanded}`}
           provisional={!hasFinal}
           streaming={!hasFinal && preview?.response?.status === "streaming"}
           completion={turn.completion}
@@ -10942,6 +10946,7 @@ function TurnAnswerDelivery({
 
 function FinalAnswerDelivery({
   text,
+  layoutKey,
   provisional = false,
   streaming = false,
   completion,
@@ -10954,6 +10959,7 @@ function FinalAnswerDelivery({
   onDelete,
 }: {
   text: string;
+  layoutKey: string;
   provisional?: boolean;
   streaming?: boolean;
   completion: WebTurn["completion"];
@@ -11025,7 +11031,7 @@ function FinalAnswerDelivery({
   );
   return (
     <section className={provisional ? `response-preview${streaming ? " streaming" : ""}` : "turn-final-delivery"}>
-      <FinalAnswerContent text={text} provisional={provisional} />
+      <FinalAnswerContent text={text} provisional={provisional} layoutKey={layoutKey} />
       {provisional ? null : completion ? (
         <CompletionCard
           completion={completion}
@@ -11050,7 +11056,7 @@ const FINAL_ANSWER_OUTLINE_EDGE_GUARD = 12;
 const FINAL_ANSWER_OUTLINE_VIEWPORT_RATIO = 0.15;
 const FINAL_ANSWER_OUTLINE_TOGGLE_HEIGHT = 52;
 
-function FinalAnswerContent({ text, provisional = false }: { text: string; provisional?: boolean }) {
+function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: string; provisional?: boolean; layoutKey: string }) {
   const timelineActive = useContext(SessionTimelineActiveContext);
   const outline = useMemo(() => {
     try {
@@ -11118,6 +11124,8 @@ function FinalAnswerContent({ text, provisional = false }: { text: string; provi
       nav.scrollTop = nextScrollTop;
   }, [activeId, outlineCollapsed, showOutline]);
 
+  // Known sibling collapse/archive commits invalidate position immediately;
+  // ResizeObserver is supplementary and may arrive after the handoff deadline.
   useLayoutEffect(() => {
     const root = rootRef.current;
     const content = contentRef.current;
@@ -11201,7 +11209,7 @@ function FinalAnswerContent({ text, provisional = false }: { text: string; provi
       observer?.disconnect();
       layoutTask.dispose();
     };
-  }, [outline, outlineCollapsed, text, timelineActive, provisional]);
+  }, [outline, outlineCollapsed, text, timelineActive, provisional, layoutKey]);
 
   useEffect(() => {
     setOutlineCollapsed(outlinePlacement === "overlay");

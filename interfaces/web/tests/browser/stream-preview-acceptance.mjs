@@ -839,6 +839,20 @@ async function main() {
       await waitFor(() => browser.evaluate(`!document.querySelector('.stream-continuous-process') && !!document.querySelector('.collapsed-work')`), "process not archived after transition");
       assert(await browser.evaluate(`!document.querySelector('.stream-working-trailer')`), "terminal trailer still visible");
     }
+    // Simulate a late size notification after the synchronous reduced-motion
+    // archive. Final-answer position must not depend on that notification.
+    const resizeControl = await browser.call("Page.addScriptToEvaluateOnNewDocument", {source: `
+      const NativeResizeObserver = window.ResizeObserver;
+      window.ResizeObserver = class extends NativeResizeObserver {
+        constructor(callback) {
+          super((entries, observer) => {
+            if (entries.some(entry => entry.target.matches('.turn-interaction'))) {
+              setTimeout(() => callback(entries, observer), 500);
+            } else callback(entries, observer);
+          });
+        }
+      };
+    `});
     // A tall process must not leave stale scroll space after final-answer handoff.
     for (const reducedMotion of [false, true]) {
     await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: reducedMotion ? "reduce" : "no-preference" }] });
@@ -863,9 +877,12 @@ async function main() {
         const viewport = document.querySelector('.chat-scroll');
         const answer = document.querySelector('.turn-final-delivery').getBoundingClientRect();
         const view = viewport.getBoundingClientRect();
-        return { visible: answer.bottom > view.top && answer.top < view.bottom, trailing: viewport.scrollHeight - (answer.bottom - view.top + viewport.scrollTop), top: viewport.scrollTop };
+        return { visible: answer.bottom > view.top && answer.top < view.bottom, trailing: viewport.scrollHeight - (answer.bottom - view.top + viewport.scrollTop), top: viewport.scrollTop,
+          answer: {top:answer.top,bottom:answer.bottom,height:answer.height}, viewport: {top:view.top,bottom:view.bottom,height:viewport.clientHeight,scrollHeight:viewport.scrollHeight},
+          outlines: [...viewport.querySelectorAll('.final-answer-outline')].map(e => ({className:e.className,style:e.getAttribute('style'),top:e.getBoundingClientRect().top,height:e.getBoundingClientRect().height})),
+          animations: document.getAnimations().map(a => ({state:a.playState,time:a.currentTime,target:a.effect?.target?.className})) };
       })()`);
-      assert(geometry.visible && geometry.trailing < 150, `${streamMode}: archive left blank viewport/stale scroll space: ${JSON.stringify(geometry)}`);
+      assert(geometry.visible && geometry.trailing < 150, `stream=${streamMode} reducedMotion=${reducedMotion}: archive left blank viewport/stale scroll space: ${JSON.stringify(geometry)}`);
       if (!streamMode) await browser.evaluate(`
         window.requestAnimationFrame = window.acceptanceRequestAnimationFrame;
         delete window.acceptanceRequestAnimationFrame;
@@ -873,6 +890,7 @@ async function main() {
     }
     }
     await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] } );
+    await browser.call("Page.removeScriptToEvaluateOnNewDocument", {identifier:resizeControl.identifier});
     console.log("PASS Chrome large-tool handoff: final answer visible without stale scroll space in both UI and motion modes");
     await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", "true")`);
     // Visual interaction contracts, beyond node identity.
