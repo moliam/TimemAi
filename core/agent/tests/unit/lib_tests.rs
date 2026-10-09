@@ -2442,14 +2442,18 @@ fn combined_multi_action_output_is_budgeted_as_one_delta() {
 }
 
 #[test]
-fn same_batch_pending_action_updates_are_removed_with_oversized_delta() {
+fn pending_running_job_update_survives_oversized_action_delta() {
+    // Running-job exit updates are runtime sideband facts, not action
+    // results: the budget guard may drop oversized action results, but it
+    // must keep the job-exit notice so the model still learns the job
+    // finished.
     let mut core = test_core("pending_action_update_guard");
     core.set_max_llm_input_tokens(10_000);
-    core.last_observed_prompt_tokens = 9_200;
+    core.last_observed_prompt_tokens = 9_450;
     core.submit_prompt_component(
         PromptComponentRole::system(),
         "running_job_update",
-        format!("PENDING_JOB_OUTPUT{}", "z".repeat(3_000)),
+        "RUNNING_JOB_UPDATE: pid=86359, old timeout job, cmd=printf hi, now exits. elapsed time=1000ms\nExit status: 0\nFinal output:\n<no output>".to_string(),
         "runtime",
     );
 
@@ -2458,9 +2462,99 @@ fn same_batch_pending_action_updates_are_removed_with_oversized_delta() {
         "Action result: run_bash\nsmall result".to_string(),
     )]));
     let prompt = core.render_prompt();
-    assert!(!prompt.contains("PENDING_JOB_OUTPUT"));
+    assert!(prompt.contains("RUNNING_JOB_UPDATE: pid=86359"), "{prompt}");
     assert!(!prompt.contains("small result"));
     assert!(prompt.contains("Your action's output is too large:"));
+}
+
+#[test]
+fn runtime_sideband_kinds_render_without_action_result_heading() {
+    // Runtime sideband kinds (job exits, disk pressure, host supplement
+    // context) are runtime narration: they must render as RUNTIME deltas
+    // without the action-result heading, so that heading marks only real
+    // model action results.
+    let mut core = test_core("runtime_sideband_heading");
+    // The heading under test is the JSON suite's action-result heading;
+    // the XML suite has no heading at all.
+    core.set_interaction_profile(&InteractionProfile {
+        api_protocol: "openai_compatible".to_string(),
+        model: "test".to_string(),
+        gateway: "test".to_string(),
+        requested_mode: ToolCallMode::Native,
+        resolved_mode: ToolCallMode::Native,
+        active_prompt_protocol: "json".to_string(),
+        parallel_supported: true,
+        parallel_enabled: true,
+        source: CapabilityProbeSource::Explicit,
+        reason: "test".to_string(),
+        probe_latency_ms: None,
+        observed_tool_calls: 1,
+    });
+    core.submit_prompt_component(
+        PromptComponentRole::system(),
+        "running_job_update",
+        "RUNNING_JOB_UPDATE: pid=86359, old timeout job, now exits.",
+        "runtime",
+    );
+    core.submit_prompt_component(
+        PromptComponentRole::system(),
+        "disk_pressure",
+        "DISK_PRESSURE: free space dropped.",
+        "runtime",
+    );
+    core.submit_prompt_component(
+        PromptComponentRole::system(),
+        "user_supplement_context",
+        "## RUNTIME\nROLE_CONTEXT_SENTINEL",
+        "host_context",
+    );
+    core.flush_pending_prompt_components();
+    let prompt = core.render_prompt();
+    for sentinel in [
+        "RUNNING_JOB_UPDATE: pid=86359",
+        "DISK_PRESSURE: free space dropped",
+        "ROLE_CONTEXT_SENTINEL",
+    ] {
+        let offset = prompt
+            .find(sentinel)
+            .unwrap_or_else(|| panic!("{sentinel} missing: {prompt}"));
+        let start = prompt[..offset]
+            .rfind("[BEGIN DELTA ")
+            .unwrap_or_else(|| panic!("{sentinel} before any delta: {prompt}"));
+        let end = prompt[offset..]
+            .find("[BEGIN DELTA ")
+            .map(|o| offset + o)
+            .unwrap_or(prompt.len());
+        let delta = &prompt[start..end];
+        assert!(delta.contains("## RUNTIME"), "{sentinel}: {delta}");
+        assert!(
+            !delta.contains("The following are results of the actions generated in response:"),
+            "{sentinel}: {delta}"
+        );
+    }
+
+    // Positive control: a real action result keeps the heading.
+    core.submit_prompt_component(
+        PromptComponentRole::system(),
+        "result_of_llm_action",
+        "Action result: run_bash\nok",
+        "runtime",
+    );
+    core.flush_pending_prompt_components();
+    let prompt = core.render_prompt();
+    let offset = prompt
+        .find("Action result: run_bash")
+        .expect("control result");
+    let start = prompt[..offset].rfind("[BEGIN DELTA ").unwrap();
+    let end = prompt[offset..]
+        .find("[BEGIN DELTA ")
+        .map(|o| offset + o)
+        .unwrap_or(prompt.len());
+    let delta = &prompt[start..end];
+    assert!(
+        delta.contains("The following are results of the actions generated in response:"),
+        "{delta}"
+    );
 }
 
 #[test]
