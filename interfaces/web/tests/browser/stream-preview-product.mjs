@@ -30,7 +30,7 @@ async function waitFor(check, message, timeout = 10000) {
     try { if (await check()) return; } catch {}
     await sleep(40);
   }
-  throw new Error(message);
+  throw new Error(typeof message === "function" ? message() : message);
 }
 
 const worker = (state) => ({
@@ -296,17 +296,20 @@ async function startBrowser(url) {
     "--window-size=1440,1000", "about:blank",
   ], { stdio: ["ignore", "ignore", "pipe"] });
   let chromeError = "";
-  child.stderr.on("data", (chunk) => { chromeError += String(chunk); });
+  let spawnError = null;
+  let probeError = null;
+  child.on("error", (error) => { spawnError = error.message; });
+  child.stderr.on("data", (chunk) => { chromeError = (chromeError + String(chunk)).slice(-8192); });
 
   try {
     let port = null;
     await waitFor(async () => {
-      if (child.exitCode !== null) return false;
+      if (spawnError || child.exitCode !== null || child.signalCode !== null) return false;
       port = await readDevToolsPort(profile);
       if (port === null) return false;
-      try { return (await fetch(`http://127.0.0.1:${port}/json/version`)).ok; }
-      catch { return false; }
-    }, `Chrome DevTools did not start: ${chromeError}`, 12000);
+      try { return (await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(1000) })).ok; }
+      catch (error) { probeError = error.message; return false; }
+    }, () => `Chrome DevTools did not start: ${JSON.stringify({ executable: chrome, pid: child.pid, exitCode: child.exitCode, signalCode: child.signalCode, spawnError, port, probeError, stderr: chromeError })}`, 12000);
 
     const target = await (await fetch(
       `http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`,
