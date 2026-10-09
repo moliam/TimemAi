@@ -31,14 +31,15 @@ pub mod capability;
 #[path = "../../../resources/capabilities/tools/capmgr.rs"]
 pub mod capmgr;
 pub mod chat_library;
+mod command_output;
 pub mod mcp;
 pub use capability::CapabilityHostProfile;
 use capability::CapabilityRegistry;
 pub mod config_edit;
 pub mod config_report;
 pub mod context;
-#[path = "../../../resources/capabilities/tools/context_compact.rs"]
-pub mod context_compact;
+#[path = "../../../resources/capabilities/tools/context_compress.rs"]
+pub mod context_compress;
 pub mod context_policy;
 pub mod data_layout;
 pub mod executor;
@@ -49,11 +50,15 @@ pub mod memmgr;
 #[path = "../../../resources/capabilities/tools/memo.rs"]
 pub mod memo;
 pub mod model_api;
+pub mod model_catalog;
+mod model_payload;
+pub mod model_requirements;
 pub mod model_service_config;
 pub mod model_stream;
 pub mod model_transport;
 pub mod negotiation;
 mod notification;
+pub mod reasoning;
 pub use timem_platform as os;
 pub mod profiler;
 pub mod prompt_cache;
@@ -68,6 +73,7 @@ pub mod response_protocol;
 pub mod retry_policy;
 pub mod rolling_file_store;
 pub mod runtime_context;
+mod runtime_info;
 mod schema_optimizer;
 #[path = "../../../resources/capabilities/tools/self_tool.rs"]
 pub mod self_tool;
@@ -84,6 +90,9 @@ pub mod tool_jobs;
 pub(crate) mod tool_registry;
 pub mod tool_repo;
 mod tool_result_gate;
+pub use tool_result_gate::{
+    validate_model_tool_result_bytes, DEFAULT_MODEL_TOOL_RESULT_BYTES, MAX_MODEL_TOOL_RESULT_BYTES,
+};
 mod tool_schema_renderer;
 #[path = "../../../resources/capabilities/tools/toolgen.rs"]
 pub mod toolgen;
@@ -118,34 +127,37 @@ pub use context_policy::{
 };
 pub use data_layout::{
     create_memory_dir, default_data_root, default_memory_dir, layout_for_space, resolve_memory_dir,
-    workspace_config_file, RuntimeDataLayout,
+    web_instance_registry_dir, web_instance_registry_dir_from_default_memory,
+    workspace_config_file, RuntimeDataLayout, WebInstanceRegistryRecord,
 };
 pub use host::{
-    context_compact_requested_topic_event, context_compact_topic_event,
-    core_initialized_topic_event, core_initialized_topic_event_with_worker,
-    normalize_user_supplements, normalize_user_supplements_with_context, resolve_topic_reply,
-    runtime_root_repair_help_topic_event, session_worker_default_display_name, toolgen_topic_event,
-    topic_event_status_hint, work_instruction_load_topic_event, CoreActionTopic,
-    CoreContextCompactTopic, CoreDynamicContextSummary, CoreGlobalWorkerStatus,
-    CoreHostDecisionRequestTopic, CoreLifecycleEvent, CoreLifecycleTopic, CoreModelRepairTopic,
-    CoreModelResponseTopic, CoreSessionState, CoreSessionWorkerIdentity,
-    CoreSessionWorkerWorkspace, CoreTopic, CoreTopicEvent, CoreTopicEventSink, CoreTopicStatusHint,
-    CoreWorkInstructionLoadTopic, HostDecision, HostDecisionDefault, HostDecisionRequest,
-    LongRunningCommandContinueRequest, NoopTurnUi, OutputExpansionRequest,
-    OutputExpansionResolution, RoundLimitDecisionRequest, RoundLimitResolution, StoppedTurn,
-    TopicReply, TopicReplyError, TurnInput, TurnOutcome, TurnStopDetail, TurnStopReason,
-    TurnStopSummary, TurnUi, UserSupplement, CORE_TOPIC_ACTION, CORE_TOPIC_CONTEXT_COMPACT,
-    CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST, CORE_TOPIC_MEMO,
-    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST,
-    CORE_TOPIC_ROUND_LIMIT_REQUEST, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP,
-    CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST,
-    CORE_TOPIC_WORK_INSTRUCTION_LOAD, DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
-    USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT,
+    capability_negotiation_topic_event, context_compress_requested_topic_event,
+    context_compress_topic_event, core_initialized_topic_event,
+    core_initialized_topic_event_with_worker, normalize_user_supplements,
+    normalize_user_supplements_with_context, resolve_topic_reply,
+    running_shell_job_exit_topic_event, runtime_root_repair_help_topic_event,
+    session_worker_default_display_name, toolgen_topic_event, topic_event_status_hint,
+    work_instruction_load_topic_event, CoreActionTopic, CoreContextCompressTopic,
+    CoreDynamicContextSummary, CoreGlobalWorkerStatus, CoreHostDecisionRequestTopic,
+    CoreLifecycleEvent, CoreLifecycleTopic, CoreModelRepairTopic, CoreModelResponseTopic,
+    CoreSessionState, CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopic,
+    CoreTopicEvent, CoreTopicEventSink, CoreTopicStatusHint, CoreWorkInstructionLoadTopic,
+    HostDecision, HostDecisionDefault, HostDecisionRequest, LongRunningCommandContinueRequest,
+    NoopTurnUi, OutputExpansionRequest, OutputExpansionResolution, RoundLimitDecisionRequest,
+    RoundLimitResolution, StoppedTurn, TopicReply, TopicReplyError, TurnInput, TurnOutcome,
+    TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi, UserSupplement, CORE_TOPIC_ACTION,
+    CORE_TOPIC_CONTEXT_COMPRESS, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST,
+    CORE_TOPIC_MEMO, CORE_TOPIC_MODEL_CAPABILITY_NEGOTIATION, CORE_TOPIC_MODEL_REPAIR,
+    CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
+    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TOOLGEN,
+    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT, USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT,
 };
 pub use interaction::{
-    parse_parallel_tool_calls, parse_tool_call_mode, CapabilityProbeSource, InteractionConfig,
-    InteractionProfile, ModelImagePart, ModelInteractionRequest, NativeExchange, NativeToolCall,
-    NativeToolChoice, NativeToolResult, ParallelToolCalls, ToolCallMode, ToolDefinition,
+    parse_parallel_tool_calls, parse_tool_call_mode, CapabilityProbeIdentity,
+    CapabilityProbeSource, InteractionConfig, InteractionProfile, ModelImagePart,
+    ModelInteractionRequest, NativeExchange, NativeToolCall, NativeToolChoice, NativeToolResult,
+    ParallelToolCalls, PersistedCapabilityProbe, ToolCallMode, ToolDefinition,
     DEFAULT_MAX_TOOL_CALLS_PER_RESPONSE,
 };
 pub use model_api::{
@@ -169,7 +181,10 @@ pub use model_service_config::{
 pub use model_transport::{
     call_model, call_model_with_cancel, validate_model_private_ca_pem, HttpModelClient,
 };
-pub use negotiation::negotiate_interaction;
+pub use negotiation::{
+    capability_probe_identity, force_reprobe_interaction, negotiate_interaction,
+    negotiate_interaction_outcome, NegotiationOutcome,
+};
 use notification::CoreNotification;
 pub use notification::{CoreActionKind, CoreMemoryActivity};
 pub use profiler::{
@@ -190,11 +205,14 @@ pub use reminder_config::{
     TIMEM_RESOURCES_DIR_ENV,
 };
 pub use response_protocol::ResponseProtocolKind;
-use response_protocol::{ActionGroupOrder, ParsedAction, ParsedActionGroup, ParsedEnvelope};
+use response_protocol::{
+    ActionGroupOrder, ParsedAction, ParsedActionGroup, ParsedContextCompress, ParsedEnvelope,
+};
 pub use retry_policy::{
-    is_model_input_too_large_error, is_retryable_model_system_error, model_retry_decision,
-    ModelCallOutcome, ModelRetryDecision, ModelSystemRetryPolicy,
-    DEFAULT_MODEL_SYSTEM_ERROR_RETRIES, DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY,
+    is_explicit_native_tools_unsupported, is_model_input_too_large_error,
+    is_retryable_model_system_error, model_retry_decision, ModelCallOutcome, ModelRetryDecision,
+    ModelSystemRetryPolicy, DEFAULT_MODEL_SYSTEM_ERROR_RETRIES,
+    DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY,
 };
 pub use runtime_context::{
     local_datetime_label, local_time_label, runtime_time_context, LocalTimeParts,
@@ -243,6 +261,10 @@ pub use workspace::{
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const ACTION_OUTPUT_CONTEXT_SAFETY_PERCENT: u32 = 95;
 const PROMPT_DELTA_RENDER_OVERHEAD_TOKENS: u32 = 64;
+
+fn action_counts_as_tool_call(action: &str) -> bool {
+    !matches!(action, "task_finished" | "turn_finished")
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoreProfile {
@@ -357,7 +379,7 @@ fn role_for_prompt_type(prompt_type: &str, assistant_speaker_name: &str) -> Prom
         "llm_response"
         | "llm_response_raw_xml"
         | "llm_free_talk"
-        | "context_compaction_summary" => {
+        | "context_compression_summary" => {
             PromptComponentRole::assistant(assistant_speaker_name.to_string())
         }
         _ => PromptComponentRole::system(),
@@ -507,6 +529,27 @@ pub struct DynamicContextSnapshot {
     /// would desynchronize the long-task reminder from its context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_memo: Option<String>,
+    /// Runtime-authority memo closure notices that were still pending at
+    /// snapshot time. They describe runtime state the model must hear about
+    /// in the next turn, so they travel with the snapshot to survive a
+    /// restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_forcible_memo_note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_interrupted_memo_note: Option<String>,
+}
+
+impl DynamicContextSnapshot {
+    /// Whether the snapshot carries no model-visible history or runtime state
+    /// that must survive a restart. Token observations are metadata about the
+    /// carried context and do not make an otherwise empty snapshot restorable.
+    pub fn is_empty(&self) -> bool {
+        self.deltas.is_empty()
+            && self.native_exchanges.is_empty()
+            && self.active_memo.is_none()
+            && self.pending_forcible_memo_note.is_none()
+            && self.pending_interrupted_memo_note.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -643,10 +686,17 @@ impl PendingApprovedAction {
 const PROMPT_SLICE_TEXT_LIMIT: usize = 12_000;
 const MAX_MCP_SERVER_INSTRUCTIONS_CHARS: usize = 32_000;
 pub const UNLIMITED_ROUND_BUDGET: u32 = u32::MAX;
-const PERIODIC_REASONING_REVIEW_ROUND_INTERVAL: u32 = 35;
-const PERIODIC_REASONING_REVIEW_MIN_MESSAGES: usize = 30;
+pub const CONTEXT_COMPRESS_THRESHOLD_PERCENT_OPTIONS: [u8; 5] = [80, 85, 90, 95, 100];
+pub const DEFAULT_CONTEXT_COMPRESS_THRESHOLD_PERCENT: u8 = 90;
 const DEFAULT_ROUND_BUDGET: u32 = UNLIMITED_ROUND_BUDGET;
 const MAX_CONFIGURED_ROUND_BUDGET: u32 = 10_000;
+
+pub fn validate_context_compress_threshold_percent(percent: u8) -> Result<u8, String> {
+    CONTEXT_COMPRESS_THRESHOLD_PERCENT_OPTIONS
+        .contains(&percent)
+        .then_some(percent)
+        .ok_or_else(|| "context_compress_threshold_percent_invalid".to_string())
+}
 pub const MAX_PROTOCOL_REPAIR_ATTEMPTS: u32 = 20;
 const RUNTIME_CONFIG_CHANGED_NOTICE: &str =
     "User changes some runtime config, retrieve again when you need it.";
@@ -987,9 +1037,18 @@ impl ActionStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamCaptureTruncation {
+    pub original_bytes: usize,
+    pub retained_bytes: usize,
+    pub retained: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BashResultEvidence {
     pub stdout: String,
     pub stderr: String,
+    pub stdout_truncation: Option<StreamCaptureTruncation>,
+    pub stderr_truncation: Option<StreamCaptureTruncation>,
     pub exit_code: Option<i32>,
     pub signal: Option<i32>,
     pub pid: Option<u32>,
@@ -1034,6 +1093,8 @@ pub(crate) struct SelfToolResultEvidence {
 pub(crate) struct ActionOutcome {
     pub status: ActionStatus,
     pub text: String,
+    pub elapsed_ms: Option<u64>,
+    pub runtime_metadata: serde_json::Map<String, Value>,
     pub bash_result: Option<BashResultEvidence>,
     pub readfile_result: Option<ReadfileResultEvidence>,
     pub memmgr_result: Option<MemmgrResultEvidence>,
@@ -1045,11 +1106,27 @@ impl ActionOutcome {
         Self {
             status,
             text: text.into(),
+            elapsed_ms: None,
+            runtime_metadata: serde_json::Map::new(),
             bash_result: None,
             readfile_result: None,
             memmgr_result: None,
             self_tool_result: None,
         }
+    }
+
+    pub(crate) fn with_elapsed_ms(mut self, elapsed_ms: u64) -> Self {
+        self.elapsed_ms = Some(elapsed_ms);
+        self
+    }
+
+    pub(crate) fn with_runtime_metadata(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<Value>,
+    ) -> Self {
+        self.runtime_metadata.insert(key.into(), value.into());
+        self
     }
 
     pub(crate) fn with_bash_result(mut self, bash_result: BashResultEvidence) -> Self {
@@ -1097,6 +1174,39 @@ impl ActionOutcome {
 
     pub(crate) fn background_finished(text: impl Into<String>) -> Self {
         Self::new(ActionStatus::BackgroundFinished, text)
+    }
+
+    /// True when the action has not fully finished yet, so `elapsed_ms` only
+    /// reflects time already spent, not the total tool time.
+    #[cfg(test)]
+    pub(crate) fn still_running(&self) -> bool {
+        matches!(
+            self.status,
+            ActionStatus::Timeout | ActionStatus::BackgroundRunning
+        )
+    }
+}
+
+/// Human readable wall-clock duration: 0.3s, 9.8s, 10s, 2m3s, 1h3m3s.
+///
+/// Sub-10-second durations keep one decimal place, rounded up, so short tool
+/// calls never report a misleading "0s". Longer durations stay integral.
+pub(crate) fn format_time_elapsed_hms(ms: u64) -> String {
+    const SUB_TEN_SECONDS_CEILING_MS: u64 = 10_000;
+    if ms < SUB_TEN_SECONDS_CEILING_MS {
+        let tenths = ms.div_ceil(100);
+        return format!("{}.{}s", tenths / 10, tenths % 10);
+    }
+    let total_seconds = ms / 1000;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours}h{minutes}m{seconds}s")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds}s")
+    } else {
+        format!("{seconds}s")
     }
 }
 
@@ -1181,6 +1291,12 @@ pub trait ActionRuntime {
     /// The flag is consumed (reset to false) on each call.
     fn take_bash_always_allow(&mut self) -> bool {
         false
+    }
+
+    /// Returns the newest pending model-visible tool-result budget, if any.
+    /// Called immediately before action-result envelope formatting.
+    fn take_model_tool_result_bytes_update(&mut self) -> Option<usize> {
+        None
     }
 }
 
@@ -1711,13 +1827,25 @@ fn default_self_tool_process() -> SelfToolProcess {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThresholdCompactionFollowupState {
+    Available,
+    FollowupPending,
+    Exhausted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PostCompactionVerification {
+    Initial,
+    Followup,
+}
+
 #[derive(Debug)]
 pub struct AgentCore {
     memory_dir: PathBuf,
     static_prompt: String,
     runtime_system_context: String,
     rendered_static_prompt: String,
-    startup_stamp: String,
     interface_preferences: InterfacePreferences,
     profile: CoreProfile,
     pub(crate) capabilities: CapabilityRegistry,
@@ -1731,26 +1859,45 @@ pub struct AgentCore {
     pub(crate) scratch: FileScratchStore,
     pub(crate) chat_history: FileChatHistoryStore,
     pub(crate) shell_jobs: ShellJobManager,
+    pub(crate) disk_pressure: runtime_info::DiskPressureTracker,
+    /// Test-only override for the disk sample (total free, total capacity)
+    /// so disk pressure windows can be simulated without mutating a real
+    /// filesystem. None in production, where the real sample is taken.
+    #[cfg(test)]
+    pub(crate) disk_free_override: Option<(u64, u64)>,
+    #[cfg(test)]
+    pub(crate) disk_sample_count: usize,
     pub(crate) tool_jobs: FileToolJobStore,
     action_audit: FileActionAuditStore,
     pub(crate) self_tool: SelfToolState,
     deltas: Vec<PromptDelta>,
     max_llm_input_tokens: u32,
+    model_tool_result_bytes: usize,
+    context_compress_threshold_percent: u8,
     last_observed_prompt_tokens: u32,
-    context_compact_required: bool,
+    context_compress_required: bool,
+    /// True only when automatic context sizing crossed the forced-compaction
+    /// threshold. This is the sole Core scheduling signal for an H1 request;
+    /// manual compaction remains at the normal H0 baseline.
+    threshold_compaction_reasoning_required: bool,
     /// Set for a user-initiated compaction request: the next request carries
     /// the manual-compaction trailer wording instead of the forced-shrink one.
     manual_compact_trailer_pending: bool,
-    /// Set when the runtime first crosses the forced-shrink threshold and
-    /// injects the compaction request. The turn loop drains it into a
-    /// `core.context.compact` phase="requested" topic event for live UI.
-    pending_compact_request_notice: Option<(u32, u32)>,
-    rounds_since_reasoning: u32,
-    reasoning_review_due: bool,
-    /// Incrementally maintained count of user/assistant/summary message
-    /// elements in the dynamic context (deltas + native exchanges). Counted at
-    /// write time; never derived by scanning after the fact.
-    context_message_elements: usize,
+    /// Set when the runtime first crosses the forced-shrink threshold or a
+    /// provider-usage quality check schedules the bounded follow-up. The turn
+    /// loop drains it into a `core.context.compress` phase="requested" topic.
+    /// Tuple fields are observed prompt tokens, the configured force threshold,
+    /// and an optional post-compression quality target.
+    pending_compact_request_notice: Option<(u32, u32, Option<u32>)>,
+    /// Bounded automatic compression cycle: one initial threshold compression,
+    /// at most one forced follow-up, then an exhausted latch until occupancy
+    /// drops below the configured trigger threshold.
+    threshold_compaction_followup_state: ThresholdCompactionFollowupState,
+    /// When the local post-compaction estimate reaches the quality target,
+    /// verify it against the provider's prompt-token usage on the next valid
+    /// response. This catches estimator undercounts without rejecting or
+    /// discarding that response.
+    post_compaction_verification: Option<PostCompactionVerification>,
     configured_round_budget: u32,
     round_budget: u32,
     reminder_tips_config: ReminderTipsConfig,
@@ -1764,6 +1911,11 @@ pub struct AgentCore {
     pub(crate) bash_approval_mode: BashApprovalMode,
     current_action_turn_id: Option<String>,
     current_session_id: Option<String>,
+    /// Session whose current Runtime/Session aggregate process scopes have
+    /// already been persisted into the visible dynamic context.
+    process_scope_prompted_session: Option<String>,
+    #[cfg(test)]
+    process_scope_snapshot_override: Option<os::ProcessAggregateScopeSnapshot>,
     current_action_user_question: String,
     last_notifications: Vec<CoreNotification>,
     loaded_work_instruction_fingerprints: HashSet<String>,
@@ -1779,6 +1931,7 @@ pub struct AgentCore {
     tool_repo_session_id: String,
     resolved_tool_call_mode: ToolCallMode,
     native_parallel_tool_calls: bool,
+    send_native_parallel_tool_control: bool,
     native_exchanges: Vec<NativeExchange>,
     turn_finished_summary: Option<String>,
     active_memo: Option<String>,
@@ -1791,6 +1944,9 @@ pub struct AgentCore {
     /// memo-finish-guard budget was exhausted. The note is injected once at
     /// the start of the next turn.
     pending_forcible_memo_note: Option<String>,
+    /// Memo forcibly closed by the runtime when the user stopped/interrupted
+    /// the turn. The note is injected once at the start of the next turn.
+    pending_interrupted_memo_note: Option<String>,
     /// Memo text deleted during the current turn. Task finish in the same
     /// turn is challenged once (models may delete and immediately declare
     /// victory without genuinely re-checking the goal).
@@ -1830,23 +1986,21 @@ impl AgentCore {
         let response_protocol = ResponseProtocolKind::default();
         let configured_round_budget = configured_round_budget_from_env();
         let assistant_speaker_name = "TIMEM_ASSISTANT".to_string();
-        let startup_stamp = runtime_time_context();
         let current_prompt_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let model_tool_result_bytes = tool_result_gate::DEFAULT_MODEL_TOOL_RESULT_BYTES;
         let rendered_static_prompt = prompt_render::render_static_prompt_for_mode_with_preferences(
             &static_prompt,
             &capabilities,
             response_protocol.suite(),
             &assistant_speaker_name,
-            &startup_stamp,
             ToolCallMode::Inline,
             interface_preferences,
         );
-        Self {
+        let mut core = Self {
             memory_dir: memory_dir.to_path_buf(),
             static_prompt,
             runtime_system_context: String::new(),
             rendered_static_prompt,
-            startup_stamp,
             interface_preferences,
             profile,
             capabilities,
@@ -1860,18 +2014,25 @@ impl AgentCore {
             scratch: FileScratchStore::new(memory_dir),
             chat_history: FileChatHistoryStore::new(memory_dir),
             shell_jobs: ShellJobManager::new(memory_dir),
+            disk_pressure: runtime_info::DiskPressureTracker::new(),
+            #[cfg(test)]
+            disk_free_override: None,
+            #[cfg(test)]
+            disk_sample_count: 0,
             tool_jobs: FileToolJobStore::new(memory_dir),
             action_audit: FileActionAuditStore::new(memory_dir),
             self_tool,
             deltas: Vec::new(),
             max_llm_input_tokens: 100_000,
+            model_tool_result_bytes,
+            context_compress_threshold_percent: DEFAULT_CONTEXT_COMPRESS_THRESHOLD_PERCENT,
             last_observed_prompt_tokens: 0,
-            context_compact_required: false,
+            context_compress_required: false,
+            threshold_compaction_reasoning_required: false,
             manual_compact_trailer_pending: false,
             pending_compact_request_notice: None,
-            rounds_since_reasoning: 0,
-            reasoning_review_due: false,
-            context_message_elements: 0,
+            threshold_compaction_followup_state: ThresholdCompactionFollowupState::Available,
+            post_compaction_verification: None,
             configured_round_budget,
             round_budget: configured_round_budget,
             reminder_tips_config: ReminderTipsConfig::default(),
@@ -1885,6 +2046,9 @@ impl AgentCore {
             bash_approval_mode: BashApprovalMode::Approve,
             current_action_turn_id: None,
             current_session_id: None,
+            process_scope_prompted_session: None,
+            #[cfg(test)]
+            process_scope_snapshot_override: None,
             current_action_user_question: String::new(),
             last_notifications: Vec::new(),
             loaded_work_instruction_fingerprints: HashSet::new(),
@@ -1900,15 +2064,23 @@ impl AgentCore {
             tool_repo_session_id: "default".to_string(),
             resolved_tool_call_mode: ToolCallMode::Inline,
             native_parallel_tool_calls: false,
+            send_native_parallel_tool_control: false,
             native_exchanges: Vec::new(),
             turn_finished_summary: None,
             active_memo: None,
             memo_finish_guard_tokens: MEMO_FINISH_GUARD_TOKEN_CAP,
             pending_forcible_memo_note: None,
+            pending_interrupted_memo_note: None,
             memo_deleted_this_turn: None,
             memo_deleted_trailer_shown: false,
             pending_native_exchange: None,
-        }
+        };
+        // Runtime startup: seed the disk pressure baseline from the real
+        // sample immediately, so the first sampling window after a restart
+        // compares against startup free space instead of being blind.
+        let sample = runtime_info::DiskSample::from_filesystems(&Self::filesystems_for_info(&[]));
+        core.disk_pressure.seed_baseline(sample);
+        core
     }
 
     pub fn set_interaction_profile(&mut self, profile: &InteractionProfile) {
@@ -1924,6 +2096,8 @@ impl AgentCore {
             self.configured_inline_response_protocol
         };
         self.native_parallel_tool_calls = profile.parallel_enabled;
+        self.send_native_parallel_tool_control =
+            profile.reason != negotiation::PARALLEL_CONTROL_UNSUPPORTED_REASON;
         self.refresh_rendered_static_prompt();
     }
 
@@ -1949,7 +2123,8 @@ impl AgentCore {
             native_exchanges: self.native_exchanges.clone(),
             resolved_mode: ToolCallMode::Native,
             parallel_tool_calls: self.native_parallel_tool_calls,
-            tool_choice: if self.context_compact_required {
+            send_parallel_tool_calls: self.send_native_parallel_tool_control,
+            tool_choice: if self.context_compress_required {
                 NativeToolChoice::Required
             } else {
                 NativeToolChoice::Auto
@@ -1958,70 +2133,12 @@ impl AgentCore {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn context_message_elements_for_test(&self) -> usize {
-        self.context_message_elements
-    }
-
-    #[cfg(test)]
-    pub(crate) fn recount_context_message_elements_for_test(&mut self) {
-        self.recount_context_message_elements();
-    }
-
-    fn is_context_message_prompt_type(prompt_type: &str) -> bool {
-        matches!(
-            prompt_type,
-            "user_question"
-                | "user_supplement"
-                | "user_resume_directly"
-                | "llm_response"
-                | "llm_response_raw_xml"
-                | "llm_free_talk"
-                | "context_compaction_summary"
-        )
-    }
-
-    /// Full recomputation from authoritative state; used only at wholesale
-    /// replacement points (snapshot import, compaction shrink) where an
-    /// incremental delta is not expressible.
-    fn recount_context_message_elements(&mut self) {
-        let mut count = 0usize;
-        for delta in &self.deltas {
-            for slice in &delta.slices {
-                if Self::is_context_message_prompt_type(&slice.prompt_type) {
-                    count += 1;
-                }
-            }
-        }
-        for exchange in &self.native_exchanges {
-            count += 1;
-            count += exchange.calls.len().max(exchange.results.len());
-        }
-        self.context_message_elements = count;
+    pub fn reasoning_critical(&self) -> bool {
+        self.context_compress_required && self.threshold_compaction_reasoning_required
     }
 
     fn register_native_exchange(&mut self, exchange: NativeExchange) {
-        self.context_message_elements += 1 + exchange.calls.len().max(exchange.results.len());
         self.native_exchanges.push(exchange);
-    }
-
-    pub fn reasoning_critical(&self) -> bool {
-        self.context_compact_required || self.reasoning_review_due
-    }
-
-    fn evaluate_periodic_reasoning_review(&mut self) {
-        if self.context_compact_required {
-            self.rounds_since_reasoning = 0;
-            self.reasoning_review_due = false;
-            return;
-        }
-        self.rounds_since_reasoning = self.rounds_since_reasoning.saturating_add(1);
-        self.reasoning_review_due = self.rounds_since_reasoning
-            > PERIODIC_REASONING_REVIEW_ROUND_INTERVAL
-            && self.context_message_elements > PERIODIC_REASONING_REVIEW_MIN_MESSAGES;
-        if self.reasoning_review_due {
-            self.rounds_since_reasoning = 0;
-        }
     }
 
     fn attach_mcp_instructions_to_native_tools(&self, tools: &mut [ToolDefinition]) {
@@ -2071,6 +2188,8 @@ impl AgentCore {
         fork.configured_inline_response_protocol = self.configured_inline_response_protocol;
         fork.response_protocol = self.response_protocol;
         fork.max_llm_input_tokens = self.max_llm_input_tokens;
+        fork.model_tool_result_bytes = self.model_tool_result_bytes;
+        fork.context_compress_threshold_percent = self.context_compress_threshold_percent;
         fork.configured_round_budget = self.configured_round_budget;
         fork.round_budget = self.configured_round_budget;
         fork.bash_approval_mode = self.bash_approval_mode;
@@ -2110,6 +2229,16 @@ impl AgentCore {
 
     pub fn set_assistant_replay_mode(&mut self, mode: AssistantReplayMode) {
         self.assistant_replay_mode = mode;
+    }
+
+    pub fn set_model_tool_result_bytes(&mut self, max_bytes: usize) -> Result<(), String> {
+        tool_result_gate::validate_model_tool_result_bytes(max_bytes)?;
+        self.model_tool_result_bytes = max_bytes;
+        Ok(())
+    }
+
+    pub fn model_tool_result_bytes(&self) -> usize {
+        self.model_tool_result_bytes
     }
 
     pub fn set_claude_codex_tool_discovery(&mut self, enabled: bool) {
@@ -2229,6 +2358,16 @@ impl AgentCore {
         self.shell_jobs.query_running_for_session(session_id)
     }
 
+    /// Registers an event-driven callback fired immediately when a
+    /// background shell job's supervisor observes its exit. Used by session
+    /// workers to push finish topics to the UI without waiting for harvest.
+    pub fn set_shell_job_exit_listener(
+        &self,
+        listener: impl Fn(&ShellJobExitUpdate) + Send + Sync + 'static,
+    ) {
+        self.shell_jobs.set_exit_listener(listener);
+    }
+
     pub fn consume_completed_shell_jobs_for_session(
         &mut self,
         session_id: &str,
@@ -2264,13 +2403,17 @@ impl AgentCore {
         if let Some(runtime) = runtime {
             let events = updates
                 .iter()
+                // Jobs whose finish topic was already published through the
+                // manager's exit listener must not emit a duplicate topic;
+                // the textual RUNNING_JOB_UPDATE below still goes to the model.
+                .filter(|update| !update.topic_published)
                 .map(host::running_shell_job_exit_topic_event)
                 .collect::<Vec<_>>();
             if !events.is_empty() {
                 runtime.on_core_topic_events(&events);
             }
         }
-        self.submit_running_job_updates(updates);
+        self.submit_running_job_updates(updates, true);
     }
 
     fn format_running_job_updates(updates: &[ShellJobExitUpdate]) -> Option<String> {
@@ -2278,14 +2421,33 @@ impl AgentCore {
             updates
                 .iter()
                 .map(|update| {
+                    let orphan_hint = {
+                        let members = os::list_live_process_group_members(update.pid);
+                        if members.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                "\nORPHAN_PROCESS: the exited job pid={} left these programs still running: [{}]. They will keep running until stopped. Check what they are (e.g. `ps -fp <pid>`) and stop them with `kill <pid>` if they are leftovers.",
+                                update.pid,
+                                members
+                                    .iter()
+                                    .map(|pid| pid.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        }
+                    };
                     format!(
-                        "RUNNING_JOB_UPDATE: pid={}, {}, cmd={}, now exits. elapsed time={}ms\nExit status: {}\nFinal output:\n{}",
+                        "RUNNING_JOB_UPDATE: pid={}, {}, cmd={}, now exits. elapsed time={}ms\nExit status: {}{}\n{}:\n{}{}",
                         update.pid,
                         update.description(),
                         compact_text(&update.command, 500),
                         update.elapsed_ms,
                         update.status,
+                        update.capture_error.as_ref().map(|error| format!("\nCapture error: {error}; output is partial; out-of-scope processes may still be running.")).unwrap_or_default(),
+                        if update.capture_error.is_some() { "Captured output (partial)" } else { "Final output" },
                         compact_text(&update.output, 4000),
+                        orphan_hint,
                     )
                 })
                 .collect::<Vec<_>>()
@@ -2293,7 +2455,38 @@ impl AgentCore {
         })
     }
 
-    fn submit_running_job_updates(&mut self, updates: Vec<ShellJobExitUpdate>) {
+    fn submit_running_job_updates(
+        &mut self,
+        updates: Vec<ShellJobExitUpdate>,
+        persist_killed_notice: bool,
+    ) {
+        // Kill-looking exits (e.g. SIGKILL/OOM) are facts the model cannot
+        // diagnose from the job output alone. Emit them wherever the exit
+        // lands — including the async exit-listener path that never passes
+        // through the request-building snapshots — as a persistent sysstat
+        // notice so it is consumed, never dropped.
+        if persist_killed_notice {
+            let killed_notice = runtime_info::killed_jobs_notice(
+                &updates
+                    .iter()
+                    .map(|update| runtime_info::JobExitSnapshot {
+                        pid: update.pid,
+                        tool_call_id: update.tool_call_id.clone(),
+                        command: update.command.clone(),
+                        elapsed_ms: update.elapsed_ms,
+                        status: update.status.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            if let Some(notice) = killed_notice {
+                self.submit_prompt_component(
+                    PromptComponentRole::system(),
+                    "job_killed",
+                    notice,
+                    "runtime",
+                );
+            }
+        }
         let Some(text) = Self::format_running_job_updates(&updates) else {
             return;
         };
@@ -2305,31 +2498,70 @@ impl AgentCore {
         );
     }
 
-    fn still_running_cmds_context_from(&self, running: Vec<RunningShellJob>) -> Option<String> {
-        if running.is_empty() {
-            return None;
+    /// One observation point for the disk pressure tracker. The tracker
+    /// invokes the filesystem sampler only when its count or time gate is
+    /// due, keeping ordinary tool completions and model requests free of
+    /// mount enumeration and stat calls.
+    fn observe_disk_pressure(
+        &mut self,
+        running: &[runtime_info::RunningJobSnapshot],
+    ) -> Option<String> {
+        #[cfg(test)]
+        let override_sample = self.disk_free_override.map(|(free, capacity)| {
+            self.disk_pressure
+                .sample_with_totals_for_test(free, capacity)
+        });
+        let mut filesystems = Vec::new();
+        #[cfg(test)]
+        let mut sampled = false;
+        let event = self.disk_pressure.observe_with(|| {
+            #[cfg(test)]
+            {
+                sampled = true;
+            }
+            #[cfg(test)]
+            if let Some(sample) = override_sample {
+                return Some(sample);
+            }
+            filesystems = Self::filesystems_for_info(running);
+            runtime_info::DiskSample::from_filesystems(&filesystems)
+        });
+        #[cfg(test)]
+        if sampled {
+            self.disk_sample_count = self.disk_sample_count.saturating_add(1);
         }
-        let mut text = String::from(
-            "still running cmds:
+        // Persist immediately: even when the current request path takes an
+        // early return, the notice rides the next request instead of being
+        // dropped. Exit-event-like notices must be consumed, not lost.
+        let notice = event.map(|event| event.render(&filesystems));
+        if let Some(notice) = &notice {
+            self.submit_prompt_component(
+                PromptComponentRole::system(),
+                "disk_pressure",
+                notice.clone(),
+                "runtime",
+            );
+        }
+        notice
+    }
 
-### STILL RUNNING
-| pid | created by tool_call id | command |
-|---:|---|---|",
-        );
-        for job in running {
-            let call_id = markdown_table_cell(if job.tool_call_id.trim().is_empty() {
-                "unknown_tool_call"
-            } else {
-                &job.tool_call_id
-            });
-            let command = markdown_table_cell(&compact_text(&job.command, 500));
-            text.push_str(&format!(
-                "
-| {} | `{}` | `{}` |",
-                job.pid, call_id, command
-            ));
+    /// Sample filesystem usage for every disk the current work may write
+    /// to: the session working directory plus each running job's cwd,
+    /// deduplicated by device id so one disk reports once.
+    fn filesystems_for_info(
+        running: &[runtime_info::RunningJobSnapshot],
+    ) -> Vec<runtime_info::FilesystemUsage> {
+        let mut paths: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(dir) = std::env::current_dir() {
+            paths.push(dir);
         }
-        Some(text)
+        for job in running {
+            if job.cwd.trim().is_empty() {
+                continue;
+            }
+            paths.push(std::path::PathBuf::from(&job.cwd));
+        }
+        os::filesystem_usage_snapshot(&paths)
     }
 
     pub fn build_model_request_prompt(&mut self, current_prompt: &str) -> String {
@@ -2364,32 +2596,104 @@ impl AgentCore {
         &mut self,
         current_prompt: &str,
         runtime: Option<&mut dyn ActionRuntime>,
-        (running, mut updates): (Vec<RunningShellJob>, Vec<ShellJobExitUpdate>),
+        (mut running, mut updates): (Vec<RunningShellJob>, Vec<ShellJobExitUpdate>),
         final_scan: F,
     ) -> String
     where
         F: FnOnce() -> (Vec<RunningShellJob>, Vec<ShellJobExitUpdate>),
     {
-        let still_running = self.still_running_cmds_context_from(running);
         let (body, trailer) = prompt_render::split_formatted_response_trailer(current_prompt);
         let mut prompt = body.trim_end().to_string();
-        if let Some(still_running) = still_running.as_ref() {
-            prompt.push_str("\n\n");
-            prompt.push_str(still_running);
-        }
 
-        // Capture jobs that finish while the base prompt and running table are rendered.
-        // The request-local order is historical tool results, running snapshot, then exits.
-        let (_, final_updates) = final_scan();
+        // Capture state changes that race the first snapshot. Preserve jobs seen
+        // in the first scan so a job that finishes between scans is rendered in
+        // historical order (running, then exit), and merge newly registered jobs
+        // from the final scan so their still-running state is never omitted.
+        let (final_running, final_updates) = final_scan();
+        let mut known_running_pids = running
+            .iter()
+            .map(|job| job.pid)
+            .collect::<std::collections::HashSet<_>>();
+        running.extend(
+            final_running
+                .into_iter()
+                .filter(|job| known_running_pids.insert(job.pid)),
+        );
+        running.sort_by_key(|job| (job.created_at_ms, job.pid));
         updates.extend(final_updates);
+
+        let has_still_running = !running.is_empty();
+        let running_snapshot_for_info: Vec<runtime_info::RunningJobSnapshot> = running
+            .iter()
+            .map(|job| runtime_info::RunningJobSnapshot {
+                pid: job.pid,
+                tool_call_id: job.tool_call_id.clone(),
+                command: job.command.clone(),
+                cwd: job.cwd.clone(),
+                created_at_ms: job.created_at_ms,
+                elapsed_ms: job.elapsed_ms(),
+                notes: job.notes.clone(),
+            })
+            .collect();
+        let updates_snapshot_for_info: Vec<runtime_info::JobExitSnapshot> = updates
+            .iter()
+            .map(|update| runtime_info::JobExitSnapshot {
+                pid: update.pid,
+                tool_call_id: update.tool_call_id.clone(),
+                command: update.command.clone(),
+                elapsed_ms: update.elapsed_ms,
+                status: update.status.clone(),
+            })
+            .collect();
+        // RUNTIME_INFO is request-local. It is built only when a registered
+        // reporter has important state and is never persisted into history.
+        // Model API request observation point for disk pressure sampling.
+        let api_disk_notice = self.observe_disk_pressure(&running_snapshot_for_info);
+        let runtime_info = {
+            // Adoption/reap transitions are internal lifecycle bookkeeping.
+            // Drain them so the bounded queue cannot accumulate, but expose
+            // only current actionable state below (live/zombie fallback
+            // children and stale process scopes).
+            let _ = os::take_orphan_process_events();
+            let session_id = self.current_session_id();
+            let inputs = runtime_info::RuntimeInfoInputs {
+                running: running_snapshot_for_info,
+                updates: updates_snapshot_for_info,
+                stale_process_scopes: os::stale_process_scope_snapshots(&session_id)
+                    .into_iter()
+                    .map(|scope| runtime_info::StaleProcessScopeSnapshot {
+                        owner_pid: scope.owner_pid,
+                        notes: scope.observation_note,
+                    })
+                    .collect(),
+                fallback_processes: os::fallback_process_snapshots()
+                    .into_iter()
+                    .map(|process| runtime_info::FallbackProcessSnapshot {
+                        pid: process.pid,
+                        notes: os::process_observation_note(process.pid),
+                        process_name: process.process_name,
+                        zombie: process.zombie,
+                    })
+                    .collect(),
+                disk_pressure_notice: api_disk_notice,
+            };
+            runtime_info::default_registry().render(&inputs)
+        };
+        if let Some(runtime_info) = runtime_info.as_ref() {
+            prompt.push_str("\n\n");
+            prompt.push_str(runtime_info);
+        }
         if let Some(update_text) = Self::format_running_job_updates(&updates) {
             prompt.push_str("\n\n");
             prompt.push_str(&update_text);
         }
-
         if let Some(runtime) = runtime {
             let events = updates
                 .iter()
+                // Jobs whose finish topic was already published through the
+                // manager's exit listener must not emit a duplicate topic;
+                // the textual RUNNING_JOB_UPDATE below still goes to the model.
+                .filter(|update| !update.topic_published)
                 .map(host::running_shell_job_exit_topic_event)
                 .collect::<Vec<_>>();
             if !events.is_empty() {
@@ -2398,10 +2702,14 @@ impl AgentCore {
         }
         // Persist terminal updates for later prompts, but do not re-render that delta into this
         // request: the request-local copy above has the authoritative ordering.
-        self.submit_running_job_updates(updates.clone());
+        self.submit_running_job_updates(updates.clone(), false);
         self.flush_pending_prompt_components();
 
-        if still_running.is_none() && updates.is_empty() && !self.context_compact_required {
+        if !has_still_running
+            && updates.is_empty()
+            && runtime_info.is_none()
+            && !self.context_compress_required
+        {
             if let Some(trailer) = self.take_memo_deleted_trailer() {
                 let (body, response_trailer) =
                     prompt_render::split_formatted_response_trailer(current_prompt);
@@ -2422,11 +2730,11 @@ impl AgentCore {
         // The manual wording persists across retries (like the threshold
         // wording) until the compaction succeeds: the context may not be over
         // the limit, so retries must not fall back to "Context is too long".
-        if self.context_compact_required {
+        if self.context_compress_required {
             if self.manual_compact_trailer_pending {
-                prompt.push_str(prompt_render::MANUAL_CONTEXT_COMPACT_TRAILER);
+                prompt.push_str(prompt_render::MANUAL_CONTEXT_COMPRESS_TRAILER);
             } else {
-                prompt.push_str(prompt_render::CONTEXT_COMPACT_REQUIRED_TRAILER);
+                prompt.push_str(prompt_render::CONTEXT_COMPRESS_REQUIRED_TRAILER);
             }
         } else if let Some(trailer) = trailer {
             prompt.push_str(&trailer);
@@ -2435,7 +2743,7 @@ impl AgentCore {
     }
 
     pub fn should_suppress_model_response(&self, response: &LlmResponse) -> bool {
-        if !self.context_compact_required {
+        if !self.context_compress_required {
             return false;
         }
         let mut parsed = if self.resolved_tool_call_mode == ToolCallMode::Native {
@@ -2446,11 +2754,36 @@ impl AgentCore {
                 .parse(&response.content, &self.capabilities)
         };
         self.normalize_intrinsic_actions(&mut parsed);
-        parsed.context_compacts.len() != 1 || parsed.repair_issue.is_some()
+        parsed.context_compresses.len() != 1 || parsed.repair_issue.is_some()
     }
 
     pub fn set_max_llm_input_tokens(&mut self, max_llm_input_tokens: u32) {
         self.max_llm_input_tokens = max_llm_input_tokens.max(3_000);
+    }
+
+    pub fn context_compress_threshold_percent(&self) -> u8 {
+        self.context_compress_threshold_percent
+    }
+
+    pub fn set_context_compress_threshold_percent(&mut self, percent: u8) -> Result<(), String> {
+        self.context_compress_threshold_percent =
+            validate_context_compress_threshold_percent(percent)?;
+        // Runtime updates take effect before the next model request. Re-evaluate
+        // already accumulated context immediately instead of waiting for new
+        // user/tool text to happen to trigger another shrink review. Preserve a
+        // user-requested compact and the single already-scheduled quality
+        // follow-up: those are explicit/in-flight maintenance, not threshold
+        // admission decisions.
+        if !self.manual_compact_trailer_pending
+            && self.threshold_compaction_followup_state
+                != ThresholdCompactionFollowupState::FollowupPending
+        {
+            self.context_compress_required = false;
+            self.threshold_compaction_reasoning_required = false;
+            self.pending_compact_request_notice = None;
+            self.require_context_compress_if_needed(0);
+        }
+        Ok(())
     }
     pub fn configure_runtime_from_host(
         &mut self,
@@ -2540,7 +2873,6 @@ impl AgentCore {
             &self.capabilities,
             self.response_protocol.suite(),
             &self.assistant_speaker_name,
-            &self.startup_stamp,
             self.resolved_tool_call_mode,
             self.interface_preferences,
         );
@@ -2618,65 +2950,76 @@ impl AgentCore {
             .map(|tool| tool.server_id.as_str())
             .chain(self.mcp_instructions.keys().map(String::as_str))
             .collect::<HashSet<_>>();
-        let mut lines = self
+        let lines = self
             .mcp_servers
             .values()
             .filter(|server| visible_server_ids.contains(server.id.as_str()))
             .map(|server| mcp_server_update_line(server, McpServerUpdate::Enabled))
             .collect::<Vec<_>>();
-        let catalog = self.current_mcp_catalog_text();
-        if let Some(catalog) = catalog.as_ref() {
-            lines.push(catalog.clone());
-        }
         if lines.is_empty() {
             return;
         }
         self.append_delta(vec![(
-            if catalog.is_some() {
-                "mcp_capability_catalog"
-            } else {
-                "mcp_capability_update"
-            }
-            .to_string(),
+            "mcp_capability_update".to_string(),
             lines.join("\n"),
         )]);
     }
 
-    fn current_mcp_catalog_text(&self) -> Option<String> {
-        let tools = self.capabilities.render_native_dynamic_tool_catalog_json();
-        if tools.is_none() && self.mcp_instructions.is_empty() {
+    fn current_inline_mcp_section(&self) -> Option<String> {
+        if self.resolved_tool_call_mode == ToolCallMode::Native {
             return None;
         }
-        let instructions = self
-            .mcp_instructions
-            .iter()
-            .map(|(server_id, instructions)| {
-                let server_name = self
-                    .mcp_servers
-                    .get(server_id)
-                    .map(|server| server.name.as_str())
-                    .unwrap_or(server_id);
-                json!({
-                    "server_id": server_id,
-                    "server_name": server_name,
-                    "instructions": instructions,
-                })
-            })
-            .collect::<Vec<_>>();
-        let tools = tools
-            .as_deref()
-            .map(serde_json::from_str::<Value>)
-            .transpose()
-            .expect("rendered MCP tool definitions must be valid JSON")
-            .unwrap_or_else(|| Value::Array(Vec::new()));
-        let catalog = serde_json::to_string_pretty(&json!({
-            "server_instructions": instructions,
-            "tools": tools,
-        }))
-        .expect("MCP prompt catalog must serialize");
-        Some(format!(
-            "MCP update: the following MCP capabilities are enabled. Server instructions in this catalog are authoritative. This newer catalog overrides earlier entries for the same server or action name.\n\n```json\n{catalog}\n```"
-        ))
+        let tools = self
+            .capabilities
+            .render_mcp_tool_catalog_markdown_for_protocol(self.response_protocol.name());
+        if tools.trim().is_empty() && self.mcp_instructions.is_empty() {
+            return None;
+        }
+
+        let mut sections = vec![
+            "## Current MCP Capabilities".to_string(),
+            "These are the MCP capabilities currently available. Use the current definitions below, and apply each server-wide instruction to that server's tools.".to_string(),
+        ];
+        if !self.mcp_instructions.is_empty() {
+            sections.push("### MCP server-wide instructions".to_string());
+            sections.extend(
+                self.mcp_instructions
+                    .iter()
+                    .map(|(server_id, instructions)| {
+                        let label = self
+                            .mcp_servers
+                            .get(server_id)
+                            .map(mcp_server_label)
+                            .unwrap_or_else(|| server_id.clone());
+                        format!("#### {label}\n\n{instructions}")
+                    }),
+            );
+        }
+        if !tools.trim().is_empty() {
+            sections.push("### Available MCP tools".to_string());
+            sections.push(tools);
+        }
+        Some(sections.join("\n\n"))
+    }
+
+    fn render_prompt_from_deltas(&self, deltas: &[PromptDelta]) -> String {
+        let rendered = prompt_render::render_prompt_with_rendered_static_for_mode(
+            &self.rendered_static_prompt,
+            deltas,
+            &self.assistant_speaker_name,
+            self.response_protocol.suite(),
+            self.resolved_tool_call_mode,
+        );
+        let Some(mcp_section) = self.current_inline_mcp_section() else {
+            return rendered;
+        };
+        let (body, trailer) = prompt_render::split_formatted_response_trailer(&rendered);
+        let mut prompt = format!("{}\n\n{}", body.trim_end(), mcp_section);
+        if let Some(trailer) = trailer {
+            prompt.push_str("\n\n");
+            prompt.push_str(&trailer);
+        }
+        prompt
     }
 
     pub fn apply_mcp_update(
@@ -2829,21 +3172,9 @@ impl AgentCore {
                 "MCP update: instructions for MCP {label} ARE UPDATED."
             ));
         }
-        let includes_catalog =
-            !added.is_empty() || !updated.is_empty() || !changed_instruction_ids.is_empty();
-        if includes_catalog {
-            if let Some(catalog) = self.current_mcp_catalog_text() {
-                lines.push(catalog);
-            }
-        }
         if !lines.is_empty() {
             self.append_delta(vec![(
-                if includes_catalog {
-                    "mcp_capability_catalog"
-                } else {
-                    "mcp_capability_update"
-                }
-                .to_string(),
+                "mcp_capability_update".to_string(),
                 lines.join("\n"),
             )]);
         }
@@ -2950,7 +3281,14 @@ impl AgentCore {
         let mut visible_slice_count = 0usize;
         let mut text_tokens = 0_u32;
         for delta in &self.deltas {
-            for slice in prompt_render::render_delta_slices(delta) {
+            // Native rendering retains delta boundaries even without text slices:
+            // their owned tool exchanges still enter the model request.
+            if self.resolved_tool_call_mode == ToolCallMode::Native {
+                visible_delta_ids.insert(delta.delta_id.clone());
+            }
+            for slice in
+                prompt_render::render_delta_slices_for_mode(delta, self.resolved_tool_call_mode)
+            {
                 visible_delta_ids.insert(delta.delta_id.clone());
                 visible_slice_count += 1;
                 text_tokens = text_tokens.saturating_add(estimate_prompt_tokens(&slice.text));
@@ -2987,21 +3325,28 @@ impl AgentCore {
             native_exchanges: self.native_exchanges.clone(),
             last_observed_prompt_tokens: self.last_observed_prompt_tokens,
             active_memo: self.active_memo.clone(),
+            pending_forcible_memo_note: self.pending_forcible_memo_note.clone(),
+            pending_interrupted_memo_note: self.pending_interrupted_memo_note.clone(),
         }
     }
 
     pub fn import_dynamic_context(&mut self, snapshot: DynamicContextSnapshot) {
+        // Import is a wholesale replacement, including an empty snapshot. A
+        // reused worker must not retain text, native tool exchanges, pending
+        // components, or one-shot notices from the context being replaced.
+        self.clear_dynamic_context();
         // The memo is intentionally NOT reactivated: after a restart the
         // reminder must go inactive and the model is told to recreate it if
         // still necessary. The snapshot value is consumed by the Host for
         // the resume notice instead.
-        if snapshot.deltas.is_empty() {
-            return;
-        }
         self.deltas = snapshot.deltas;
         self.native_exchanges = snapshot.native_exchanges;
-        self.recount_context_message_elements();
         self.last_observed_prompt_tokens = snapshot.last_observed_prompt_tokens;
+        // Pending runtime-authority memo notices are runtime state for the
+        // next turn; they must survive a restart with the context they
+        // belong to.
+        self.pending_forcible_memo_note = snapshot.pending_forcible_memo_note;
+        self.pending_interrupted_memo_note = snapshot.pending_interrupted_memo_note;
         if let Some(max_seq) = self
             .deltas
             .iter()
@@ -3015,11 +3360,22 @@ impl AgentCore {
 
     pub fn clear_dynamic_context(&mut self) {
         self.deltas.clear();
-        self.context_message_elements = 0;
+        self.native_exchanges.clear();
+        self.pending_native_exchange = None;
+        self.pending_prompt_components.clear();
+        self.pending_user_interruption_note = false;
+        self.pending_forcible_memo_note = None;
+        self.pending_interrupted_memo_note = None;
+        self.memo_deleted_this_turn = None;
+        self.memo_deleted_trailer_shown = false;
+        self.touched_paths.clear();
         self.last_observed_prompt_tokens = 0;
-        self.context_compact_required = false;
+        self.context_compress_required = false;
+        self.threshold_compaction_reasoning_required = false;
         self.manual_compact_trailer_pending = false;
         self.pending_compact_request_notice = None;
+        self.threshold_compaction_followup_state = ThresholdCompactionFollowupState::Available;
+        self.post_compaction_verification = None;
         self.current_round = 0;
         self.current_stats = UsageStats::zero();
         self.repair_attempted = false;
@@ -3028,6 +3384,7 @@ impl AgentCore {
         self.pending_approval = None;
         self.current_action_turn_id = None;
         self.current_session_id = None;
+        self.process_scope_prompted_session = None;
         self.current_action_user_question.clear();
         self.last_notifications.clear();
         self.turn_finished_summary = None;
@@ -3184,6 +3541,9 @@ impl AgentCore {
 
     pub(crate) fn set_active_memo(&mut self, text: String) {
         self.active_memo = Some(text);
+        // A new active goal supersedes any pending deletion reminder.
+        self.memo_deleted_this_turn = None;
+        self.memo_deleted_trailer_shown = false;
     }
 
     /// The turn is finishing while a memo is still active and the guard
@@ -3199,6 +3559,14 @@ impl AgentCore {
                 "force_deleted",
             )]);
         }
+    }
+
+    /// A user stop/interrupt abandons the turn: close the memo on runtime
+    /// authority and record the notice for the next turn.
+    pub(crate) fn force_close_memo_on_interrupt(&mut self) -> Option<String> {
+        let memo = self.active_memo.take()?;
+        self.pending_interrupted_memo_note = Some(memo.clone());
+        Some(memo)
     }
 
     pub(crate) fn clear_active_memo(&mut self) {
@@ -3243,9 +3611,6 @@ impl AgentCore {
         self.memo_finish_guard_tokens = MEMO_FINISH_GUARD_TOKEN_CAP;
         self.memo_deleted_this_turn = None;
         self.memo_deleted_trailer_shown = false;
-        // A final assistant replay may already be pending from the previous turn.
-        // Keep it before the marker below; both may share a transport delta because
-        // BEGIN TURN, rather than delta batching, defines logical ownership.
         let action_turn_id = unique_id("action_turn");
         self.current_action_turn_id = Some(action_turn_id.clone());
         self.current_action_user_question = user_input.trim().to_string();
@@ -3254,24 +3619,23 @@ impl AgentCore {
             now_ms(),
             &self.current_action_user_question,
         );
-        let pending_token_estimate = self
-            .pending_prompt_components
-            .iter()
-            .map(|component| estimate_prompt_tokens(&component.content))
-            .sum::<u32>();
         let text = user_input.trim().to_string();
-        self.submit_prompt_component(
-            PromptComponentRole::system(),
-            "turn_boundary",
-            format!("[BEGIN TURN turn_id: {action_turn_id}]"),
-            "runtime",
-        );
         if self.pending_user_interruption_note && (direct_resume || !text.is_empty()) {
             self.pending_user_interruption_note = false;
             self.submit_prompt_component(
                 PromptComponentRole::system(),
                 "user_interrupted_work",
                 "NOTE: User interrupted the above work. Continue it based on the user's new input's intent. If not sure, ask the user.",
+                "runtime",
+            );
+        }
+        if let Some(memo) = self.pending_interrupted_memo_note.take() {
+            self.submit_prompt_component(
+                PromptComponentRole::system(),
+                "memo_interrupted_deleted",
+                format!(
+                    "User interrupted the previous work and the runtime forcibly deleted its active memo: {memo:?} Recreate the memo if necessary based on the user's new input."
+                ),
                 "runtime",
             );
         }
@@ -3302,13 +3666,7 @@ impl AgentCore {
             token_estimate_text.push_str(system_text);
         }
         let incoming_prompt_tokens = estimate_prompt_tokens(&token_estimate_text);
-        let pending_dynamic_tokens =
-            estimate_prompt_tokens(&token_estimate_text) + pending_token_estimate;
-        if let Some(shrink_review) =
-            self.consume_shrink_review_if_needed(incoming_prompt_tokens, pending_dynamic_tokens)
-        {
-            system_texts.push(format!("Long-context maintenance:\n{shrink_review}"));
-        }
+        self.require_context_compress_if_needed(incoming_prompt_tokens);
         for system_text in system_texts {
             self.submit_prompt_component(
                 PromptComponentRole::system(),
@@ -3473,22 +3831,22 @@ impl AgentCore {
         self.normalize_intrinsic_actions(&mut parsed);
         let preview_accepted = parsed.repair_issue.is_none()
             && !response.truncated
-            && (!self.context_compact_required || parsed.context_compacts.len() == 1);
+            && (!self.context_compress_required || parsed.context_compresses.len() == 1);
         runtime.on_model_response_validated(preview_accepted, !parsed.continue_work);
 
-        if self.context_compact_required
-            && (parsed.context_compacts.len() != 1 || parsed.repair_issue.is_some())
+        if self.context_compress_required
+            && (parsed.context_compresses.len() != 1 || parsed.repair_issue.is_some())
         {
             self.current_round = self.current_round.saturating_sub(1);
             let mut prompt = self.render_prompt();
             let (body, response_trailer) = prompt_render::split_formatted_response_trailer(&prompt);
             prompt = body.trim_end().to_string();
             prompt.push_str("\n\n");
-            prompt.push_str(if self.manual_compact_trailer_pending {
-                prompt_render::MANUAL_CONTEXT_COMPACT_TRAILER
+            if self.manual_compact_trailer_pending {
+                prompt.push_str(prompt_render::MANUAL_CONTEXT_COMPRESS_TRAILER);
             } else {
-                prompt_render::CONTEXT_COMPACT_REQUIRED_TRAILER
-            });
+                prompt.push_str(prompt_render::CONTEXT_COMPRESS_REQUIRED_TRAILER);
+            }
             if let Some(response_trailer) = response_trailer {
                 prompt.push_str("\n\n");
                 prompt.push_str(&response_trailer);
@@ -3518,7 +3876,7 @@ impl AgentCore {
             runtime.on_model_response_parsed(
                 tool_count,
                 !parsed.thought.trim().is_empty(),
-                tool_count > 0 || !parsed.context_compacts.is_empty() || !native_calls.is_empty(),
+                tool_count > 0 || !parsed.context_compresses.is_empty() || !native_calls.is_empty(),
             );
             if parsed.recovered_issue.as_deref() == Some("runtime_root_repair_help") {
                 runtime.on_core_topic_events(&[host::runtime_root_repair_help_topic_event(
@@ -3590,6 +3948,18 @@ impl AgentCore {
                 stop_summary: None,
             });
         }
+        if parsed.context_compresses.is_empty() {
+            if let Some(note) =
+                self.verify_post_compaction_provider_usage(response.usage.prompt_tokens)
+            {
+                slices.push(("runtime_note".to_string(), note));
+            }
+        } else {
+            // A new explicit compaction supersedes verification of the previous
+            // one. Do not let the old measurement reclassify or constrain the
+            // compaction currently being processed.
+            self.post_compaction_verification = None;
+        }
         self.last_notifications = notification::notifications_from_envelope(&parsed);
         if !self.last_notifications.is_empty() {
             let events = host::notification_topic_events(
@@ -3600,107 +3970,181 @@ impl AgentCore {
         }
         let deferred_compact_replay = parsed.continue_work
             && self.resolved_tool_call_mode != ToolCallMode::Native
-            && !parsed.context_compacts.is_empty();
+            && !parsed.context_compresses.is_empty();
         if parsed.continue_work
             && self.resolved_tool_call_mode != ToolCallMode::Native
             && !deferred_compact_replay
         {
             slices.extend(self.assistant_replay_slices(&raw_model_output, Some(&parsed), None));
         }
-        let compact_refs_mcp_catalog = parsed.context_compacts.iter().any(|compact| {
-            self.prompt_refs_include_type(
-                &compact.delta_ids,
-                &compact.slice_ids,
-                "mcp_capability_catalog",
-            )
-        });
         let compact_result_slice_start = slices.len();
         let mut compacted_successfully = false;
         let mut successful_compact_summaries = Vec::new();
-        for compact in &parsed.context_compacts {
+        let threshold_compaction_requested = self.threshold_compaction_reasoning_required;
+        let mut threshold_followup_required = false;
+        for compact in &parsed.context_compresses {
+            // Keep semantics are fail-closed: every explicitly retained or
+            // offloaded id must still be live. Unlike the old discard list, a
+            // missing keep id can silently destroy context, so it is never
+            // treated as idempotent success.
             let missing = self.missing_prompt_refs(&compact.delta_ids, &compact.slice_ids);
+            let existing_delta_ids = self
+                .deltas
+                .iter()
+                .map(|delta| delta.delta_id.clone())
+                .collect::<Vec<_>>();
+            let keep_delta_ids = compact
+                .keep_delta_ids
+                .iter()
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty())
+                .collect::<HashSet<_>>();
+            let discarded_delta_ids = existing_delta_ids
+                .iter()
+                .filter(|id| !keep_delta_ids.contains(id.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            let live_offload_ids = compact.offload_delta_ids.clone();
             if missing.is_empty() {
                 let estimated_before = self.dynamic_context_token_estimate();
-                let offload_record = if compact.offload_delta_ids.is_empty() {
+                let offload_record = if live_offload_ids.is_empty() {
                     None
                 } else {
-                    match self.collect_prompt_context_for_scratch(&compact.offload_delta_ids, &[]) {
-                        Ok(offload) => match self.scratch.write_record(
-                            "context_offload",
-                            "context compact offload",
-                            &offload.content,
-                            &offload.delta_ids,
-                            &offload.slice_ids,
-                        ) {
-                            Ok(record) => Some(record),
-                            Err(err) => {
-                                slices.push((
-                                    "result_of_llm_action".to_string(),
-                                    format!(
-                                        "Action result: context_compact\nerror: scratch_offload_failed\nreason: {}",
-                                        err
-                                    ),
-                                ));
-                                continue;
+                    match self.collect_prompt_context_for_scratch(&live_offload_ids, &[]) {
+                        Ok(offload) => {
+                            match self.scratch.write_record(
+                                "context_offload",
+                                "context compress offload",
+                                &offload.content,
+                                &offload.delta_ids,
+                                &offload.slice_ids,
+                            ) {
+                                Ok(record) => Some(record),
+                                Err(err) => {
+                                    let outcome = ActionOutcome::failed(format!(
+                                        "scratch_offload_failed: {err}"
+                                    ))
+                                    .with_runtime_metadata("error_type", "ScratchOffloadFailed");
+                                    let result = self.format_context_compress_outcome(
+                                        compact, &outcome, runtime,
+                                    );
+                                    slices.push(("result_of_llm_action".to_string(), result));
+                                    continue;
+                                }
                             }
-                        },
+                        }
                         Err(err) => {
-                            slices.push((
-                                "result_of_llm_action".to_string(),
-                                format!(
-                                    "Action result: context_compact\nerror: scratch_offload_failed\nreason: {}",
-                                    err
-                                ),
-                            ));
+                            let outcome =
+                                ActionOutcome::failed(format!("scratch_offload_failed: {err}"))
+                                    .with_runtime_metadata("error_type", "ScratchOffloadFailed");
+                            let result =
+                                self.format_context_compress_outcome(compact, &outcome, runtime);
+                            slices.push(("result_of_llm_action".to_string(), result));
                             continue;
                         }
                     }
                 };
-                let _ = self.apply_prompt_shrink(
-                    "Action result: context_compact",
-                    &compact.delta_ids,
-                    &compact.slice_ids,
-                );
+                // The detailed shrink report and selected ids are internal accounting.
+                // Re-injecting them would immediately spend the context that compaction
+                // just recovered. A minimal runtime confirmation is enough for the
+                // model; only an offload scratch id remains actionable afterward.
+                let _shrink_report =
+                    self.apply_prompt_shrink(&discarded_delta_ids, &compact.slice_ids);
+                if let Some(record) = offload_record.as_ref() {
+                    slices.push((
+                        "runtime_note".to_string(),
+                        format!(
+                            "Context offload saved. Retrieve it with memmgr scratch read using scratch_id: {}",
+                            record.id
+                        ),
+                    ));
+                }
                 let estimated_after = self.dynamic_context_token_estimate();
                 let summary_tokens = estimate_prompt_tokens(&compact.summary);
-                let compact_report = host::CoreContextCompactTopic {
-                    estimated_before_tokens: estimated_before.total_tokens(),
-                    estimated_after_tokens: estimated_after
-                        .total_tokens()
-                        .saturating_add(summary_tokens),
+                let estimated_before_tokens = estimated_before.total_tokens();
+                let estimated_after_tokens = estimated_after
+                    .total_tokens()
+                    .saturating_add(summary_tokens);
+                let compact_report = host::CoreContextCompressTopic {
+                    estimated_before_tokens,
+                    estimated_after_tokens,
                     estimated_text_before_tokens: estimated_before.text_tokens,
                     estimated_text_after_tokens: estimated_after
                         .text_tokens
                         .saturating_add(summary_tokens),
                     estimated_native_before_tokens: estimated_before.native_tokens,
                     estimated_native_after_tokens: estimated_after.native_tokens,
-                    discarded_delta_ids: compact.discard_delta_ids.clone(),
+                    discarded_delta_ids: discarded_delta_ids.clone(),
                     offloaded_delta_ids: compact.offload_delta_ids.clone(),
                     scratch_id: offload_record.as_ref().map(|record| record.id.clone()),
                 };
-                runtime.on_core_topic_events(&[host::context_compact_topic_event(
+                runtime.on_core_topic_events(&[host::context_compress_topic_event(
                     self.current_session_id(),
                     &compact_report,
                 )]);
+                let verification = if threshold_compaction_requested {
+                    Some(
+                        if self.threshold_compaction_followup_state
+                            == ThresholdCompactionFollowupState::FollowupPending
+                        {
+                            PostCompactionVerification::Followup
+                        } else {
+                            PostCompactionVerification::Initial
+                        },
+                    )
+                } else {
+                    None
+                };
+                let (force_followup, quality_note) = self.threshold_compaction_quality_note(
+                    threshold_compaction_requested,
+                    estimated_before_tokens,
+                    estimated_after_tokens,
+                );
+                if threshold_compaction_requested && !force_followup && quality_note.is_none() {
+                    self.post_compaction_verification = verification;
+                } else if threshold_compaction_requested {
+                    // A locally poor result already takes the existing bounded
+                    // follow-up/warning path; there is no normal post-compact
+                    // response to verify before that maintenance request.
+                    self.post_compaction_verification = None;
+                }
+                threshold_followup_required |= force_followup;
+                if let Some(note) = quality_note {
+                    slices.push(("runtime_note".to_string(), note));
+                }
                 successful_compact_summaries.push(compact.summary.trim().to_string());
                 compacted_successfully = true;
             } else {
-                slices.push((
-                    "result_of_llm_action".to_string(),
-                    format!(
-                        "Action result: context_compact\nerror: invalid_prompt_refs\nmissing_ids: {}",
-                        missing.join(", ")
-                    ),
-                ));
+                let outcome = ActionOutcome::failed(format!(
+                    "invalid_prompt_refs\nmissing_ids: {}\ncurrent_live_delta_refs:\n{}",
+                    missing.join(", "),
+                    self.live_delta_refs_hint()
+                ))
+                .with_runtime_metadata("error_type", "InvalidPromptRefs")
+                .with_runtime_metadata("missing_ids", json!(missing));
+                let result = self.format_context_compress_outcome(compact, &outcome, runtime);
+                slices.push(("result_of_llm_action".to_string(), result));
             }
+        }
+        if compacted_successfully {
+            // The request succeeded; superseded maintenance instructions and
+            // past failure echoes would only pollute future compactions.
+            self.hide_prompt_slices_matching("force_shrink_required");
+            self.hide_prompt_slices_matching("error: invalid_prompt_refs");
+            self.hide_prompt_slices_matching("error: scratch_offload_failed");
         }
         if compacted_successfully {
             // A successful compaction is accepted as-is: shrink depth cannot
             // be quantified reliably by the model, so depth guidance lives in
             // the compact trailers (discard stale deltas/tool noise, extract
             // a valuable short summary) rather than a numeric gate.
-            self.context_compact_required = false;
+            self.context_compress_required = threshold_followup_required;
+            self.threshold_compaction_reasoning_required = threshold_followup_required;
             self.manual_compact_trailer_pending = false;
+            self.process_scope_prompted_session = None;
+            if let Some(note) = self.take_process_aggregate_scopes_if_needed() {
+                slices.push(("runtime_note".to_string(), note));
+            }
         }
         if compacted_successfully {
             // A successful compact gets a dedicated assistant checkpoint in both
@@ -3717,7 +4161,7 @@ impl AgentCore {
             assistant_slices.extend(
                 successful_compact_summaries
                     .into_iter()
-                    .map(|summary| ("context_compaction_summary".to_string(), summary)),
+                    .map(|summary| ("context_compression_summary".to_string(), summary)),
             );
             slices.splice(
                 compact_result_slice_start..compact_result_slice_start,
@@ -3734,6 +4178,10 @@ impl AgentCore {
             );
         }
         if compacted_successfully {
+            // Only the latest runtime confirmation is operationally useful.
+            // Keep every assistant-authored compaction summary, but retire the
+            // prior CWD/memo confirmation before appending its replacement.
+            self.hide_prompt_slices_by_type("context_compressed");
             // The runtime-held memo survives compaction; restate it so the
             // next submission still carries the long-task reminder.
             let memo_line = self
@@ -3742,20 +4190,15 @@ impl AgentCore {
                 .map(|memo| format!("\nmemo active: {memo}"))
                 .unwrap_or_default();
             slices.push((
-                "context_compacted".to_string(),
+                "context_compressed".to_string(),
                 format!(
-                    "context compacted successfully.\nCWD: {}{memo_line}",
+                    "context compressed successfully.\nCWD: {}{memo_line}",
                     self.current_prompt_cwd.display()
                 ),
             ));
         }
-        if compacted_successfully && compact_refs_mcp_catalog {
-            if let Some(catalog) = self.current_mcp_catalog_text() {
-                slices.push(("mcp_capability_catalog".to_string(), catalog));
-            }
-        }
-        if !parsed.context_compacts.is_empty() && !compacted_successfully {
-            // context_compact is a barrier: later actions were authored against the
+        if !parsed.context_compresses.is_empty() && !compacted_successfully {
+            // context_compress is a barrier: later actions were authored against the
             // pre-compaction response but must not run unless the state rewrite succeeds.
             self.submit_running_job_updates_for_session(&self.current_session_id(), runtime);
             self.append_delta_with_action_output_budget(slices);
@@ -3774,7 +4217,7 @@ impl AgentCore {
             // The compact call rewrites its own context and is represented by the
             // independently persisted summary. Keep only later native calls for
             // provider replay and tool-result correlation.
-            native_calls.retain(|call| call.name != "context_compact");
+            native_calls.retain(|call| call.name != "context_compress");
         }
         if !parsed.continue_work {
             for candidate in &parsed.memory_candidates {
@@ -3850,29 +4293,33 @@ impl AgentCore {
                 Ok(result_lines) => result_lines,
                 Err((result_lines, pending)) => {
                     if !native_calls.is_empty() {
+                        let delta_id = self.append_native_interaction_delta(slices);
                         self.pending_native_exchange = Some((
-                            self.current_native_delta_id(),
+                            delta_id,
                             response.content.clone(),
                             native_calls,
                             result_lines,
                         ));
-                    } else if !result_lines.is_empty() {
-                        slices.push((
-                            "result_of_llm_action".to_string(),
-                            result_lines.join("\n\n"),
-                        ));
+                    } else {
+                        slices.extend(
+                            result_lines
+                                .into_iter()
+                                .map(|result| ("result_of_llm_action".to_string(), result)),
+                        );
+                        self.append_delta_with_action_output_budget(slices);
                     }
-                    self.append_delta_with_action_output_budget(slices);
                     let request = pending.request.clone();
                     self.pending_approval = Some(pending);
                     return CoreStep::NeedsUserApproval { request };
                 }
             };
-            if !result_lines.is_empty() && native_calls.is_empty() {
-                slices.push((
-                    "result_of_llm_action".to_string(),
-                    result_lines.join("\n\n"),
-                ));
+            if native_calls.is_empty() {
+                slices.extend(
+                    result_lines
+                        .iter()
+                        .cloned()
+                        .map(|result| ("result_of_llm_action".to_string(), result)),
+                );
             }
             if let Some(stop_summary) = self.take_turn_finished_summary() {
                 if let Some(memo) = self.active_memo.clone() {
@@ -3893,23 +4340,26 @@ impl AgentCore {
                             memo_finish_guard_reminder(&memo),
                         ));
                         if !native_calls.is_empty() {
+                            let exchange_results = native_calls
+                                .iter()
+                                .zip(result_lines.iter())
+                                .map(|(call, result)| NativeToolResult {
+                                    call_id: call.id.clone(),
+                                    name: call.name.clone(),
+                                    content: result.clone(),
+                                    is_error: Self::action_result_is_error(result),
+                                })
+                                .collect();
+                            let delta_id = self.append_native_interaction_delta(slices);
                             self.register_native_exchange(NativeExchange {
-                                delta_id: self.current_native_delta_id(),
+                                delta_id,
                                 assistant_text: response.content.clone(),
-                                results: native_calls
-                                    .iter()
-                                    .zip(result_lines.iter())
-                                    .map(|(call, result)| NativeToolResult {
-                                        call_id: call.id.clone(),
-                                        name: call.name.clone(),
-                                        content: result.clone(),
-                                        is_error: result.contains("\nerror:"),
-                                    })
-                                    .collect(),
+                                results: exchange_results,
                                 calls: native_calls,
                             });
+                        } else {
+                            self.append_delta_with_action_output_budget(slices);
                         }
-                        self.append_delta_with_action_output_budget(slices);
                         return CoreStep::NeedModel {
                             prompt: self.render_prompt(),
                             rounds_remaining: self.remaining_rounds(),
@@ -3925,29 +4375,32 @@ impl AgentCore {
                 // task_finished was executed among the actions above. Its native
                 // tool exchange is still recorded below so the provider message
                 // sequence stays valid; the turn ends here regardless.
-                if !native_calls.is_empty() {
-                    self.register_native_exchange(NativeExchange {
-                        delta_id: self.current_native_delta_id(),
-                        assistant_text: response.content.clone(),
-                        results: native_calls
-                            .iter()
-                            .zip(result_lines.iter())
-                            .map(|(call, result)| NativeToolResult {
-                                call_id: call.id.clone(),
-                                name: call.name.clone(),
-                                content: result.clone(),
-                                is_error: result.contains("\nerror:"),
-                            })
-                            .collect(),
-                        calls: native_calls,
-                    });
-                }
                 slices.extend(self.assistant_replay_slices(
                     &raw_model_output,
                     Some(&parsed),
                     Some(&stop_summary),
                 ));
-                self.defer_next_turn_slices(slices);
+                if !native_calls.is_empty() {
+                    let exchange_results = native_calls
+                        .iter()
+                        .zip(result_lines.iter())
+                        .map(|(call, result)| NativeToolResult {
+                            call_id: call.id.clone(),
+                            name: call.name.clone(),
+                            content: result.clone(),
+                            is_error: Self::action_result_is_error(result),
+                        })
+                        .collect();
+                    let delta_id = self.append_native_interaction_delta(slices);
+                    self.register_native_exchange(NativeExchange {
+                        delta_id,
+                        assistant_text: response.content.clone(),
+                        results: exchange_results,
+                        calls: native_calls,
+                    });
+                } else {
+                    self.defer_next_turn_slices(slices);
+                }
                 let stats = self.current_stats.clone();
                 return CoreStep::Final(TurnFinal {
                     final_answer: stop_summary.clone(),
@@ -3958,9 +4411,11 @@ impl AgentCore {
                     stop_summary: Some(TurnStopSummary::turn_finished(stop_summary, stats)),
                 });
             }
-            if !native_calls.is_empty() {
-                self.register_native_exchange(NativeExchange {
-                    delta_id: self.current_native_delta_id(),
+            let native_exchange = if native_calls.is_empty() {
+                None
+            } else {
+                Some(NativeExchange {
+                    delta_id: String::new(),
                     assistant_text: response.content.clone(),
                     results: native_calls
                         .iter()
@@ -3969,15 +4424,20 @@ impl AgentCore {
                             call_id: call.id.clone(),
                             name: call.name.clone(),
                             content: result.clone(),
-                            is_error: result.contains("\nerror:"),
+                            is_error: Self::action_result_is_error(result),
                         })
                         .collect(),
                     calls: native_calls,
-                });
-            }
+                })
+            };
             self.recharge_memo_guard_tokens();
             self.submit_running_job_updates_for_session(&self.current_session_id(), runtime);
-            self.append_delta_with_action_output_budget(slices);
+            if let Some(mut exchange) = native_exchange {
+                exchange.delta_id = self.append_native_interaction_delta(slices);
+                self.register_native_exchange(exchange);
+            } else {
+                self.append_delta_with_action_output_budget(slices);
+            }
             self.append_in_turn_shrink_review_if_needed();
             if self.remaining_rounds() == 0 {
                 return CoreStep::RoundLimitReached {
@@ -3989,8 +4449,8 @@ impl AgentCore {
                 rounds_remaining: self.remaining_rounds(),
             };
         }
-        if !parsed.context_compacts.is_empty() {
-            // context_compact is an intrinsic state rewrite. In native mode, do not
+        if !parsed.context_compresses.is_empty() {
+            // context_compress is an intrinsic state rewrite. In native mode, do not
             // retain its tool exchange: its owning delta may be removed by the same
             // operation. The independently persisted summary and runtime confirmation
             // below are the canonical continuation context.
@@ -4100,7 +4560,7 @@ impl AgentCore {
             thought_keep_in_context: !response.content.trim().is_empty(),
             next_actions: Vec::new(),
             action_groups,
-            context_compacts: Vec::new(),
+            context_compresses: Vec::new(),
             memory_candidates: Vec::new(),
             accepted_response: None,
             runtime_note: None,
@@ -4114,6 +4574,27 @@ impl AgentCore {
             .last()
             .map(|delta| delta.delta_id.clone())
             .unwrap_or_else(|| "pd_0".to_string())
+    }
+
+    fn append_native_interaction_delta(&mut self, slices: Vec<(String, String)>) -> String {
+        // One native model interaction is one transport batch. When the batch has
+        // no textual components, retain an empty PromptDelta so its visible delta
+        // boundary can own the structured assistant/tool exchange and remain
+        // independently addressable by context compression.
+        let delta_count_before = self.deltas.len();
+        self.append_delta_with_action_output_budget(slices);
+        if self.deltas.len() == delta_count_before {
+            let time_ms = now_ms();
+            let delta_sequence = self.next_delta_sequence;
+            self.next_delta_sequence = self.next_delta_sequence.saturating_add(1);
+            self.deltas.push(PromptDelta {
+                delta_id: format!("pd_{delta_sequence}"),
+                time_ms,
+                slices: Vec::new(),
+                hidden_slice_ids: Vec::new(),
+            });
+        }
+        self.current_native_delta_id()
     }
 
     fn materialize_native_exchanges(&mut self) {
@@ -4175,7 +4656,7 @@ impl AgentCore {
                 NativeToolResult {
                     call_id: call.id.clone(),
                     name: call.name.clone(),
-                    is_error: content.contains("\nerror:"),
+                    is_error: Self::action_result_is_error(&content),
                     content,
                 }
             })
@@ -4202,29 +4683,36 @@ impl AgentCore {
                     .actions
                     .iter()
                     .enumerate()
-                    .filter(|(_, action)| action.action == "context_compact")
+                    .filter(|(_, action)| action.action == "context_compress")
                     .map(move |(action_index, _)| (group_index, action_index))
             })
             .collect::<Vec<_>>();
         if compact_positions.is_empty() {
             return;
         }
-        if compact_positions.len() != 1 || !parsed.context_compacts.is_empty() {
-            parsed.repair_issue = Some("context_compact_only_once".to_string());
+        if compact_positions.len() != 1 || !parsed.context_compresses.is_empty() {
+            parsed.repair_issue = Some("context_compress_only_once".to_string());
             return;
         }
         let (group_index, action_index) = compact_positions[0];
         if group_index != 0 || action_index != 0 {
-            parsed.repair_issue = Some("context_compact_must_be_first".to_string());
+            parsed.repair_issue = Some("context_compress_must_be_first".to_string());
             return;
         }
         let action = parsed.action_groups[0].actions.remove(0);
         if parsed.action_groups[0].actions.is_empty() {
             parsed.action_groups.remove(0);
         }
-        match context_compact::from_action(&action) {
+        if let Err(issue) = self
+            .capabilities
+            .validate_action_input(&action.action, &action.raw_input)
+        {
+            parsed.repair_issue = Some(format!("context_compress.{issue}"));
+            return;
+        }
+        match context_compress::from_action(&action) {
             Ok(compact) => {
-                parsed.context_compacts.push(compact);
+                parsed.context_compresses.push(compact);
                 parsed.continue_work = true;
             }
             Err(issue) => parsed.repair_issue = Some(issue),
@@ -4512,13 +5000,7 @@ impl AgentCore {
                 }
             }
         } else {
-            ActionOutcome::failed(format!(
-                "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: denied_by_user\nreason: {}",
-                pending.request.action,
-                pending.approved_action.command(),
-                pending.request.approval_id,
-                pending.request.reason
-            ))
+            self.denied_approval_outcome(&pending)
         };
         self.record_pending_approval_audit(&pending, approved, &outcome.text);
         self.emit_action_finish_topic(
@@ -4532,7 +5014,7 @@ impl AgentCore {
             },
             runtime,
         );
-        let prompt_result = self.format_pending_action_result(&pending, &outcome.text);
+        let prompt_result = self.format_pending_action_result(&pending, &outcome, runtime);
         if !self.complete_pending_native_exchange(vec![prompt_result.clone()]) {
             self.append_delta_with_action_output_budget(vec![(
                 "result_of_llm_action".to_string(),
@@ -4551,14 +5033,11 @@ impl AgentCore {
         }
     }
 
-    fn denied_approval_result(&self, pending: &PendingApproval) -> String {
-        format!(
-            "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: denied_by_user\nreason: {}",
-            pending.request.action,
-            pending.approved_action.command(),
-            pending.request.approval_id,
-            pending.request.reason
-        )
+    fn denied_approval_outcome(&self, pending: &PendingApproval) -> ActionOutcome {
+        ActionOutcome::failed("approval denied by user")
+            .with_runtime_metadata("approval_status", "denied_by_user")
+            .with_runtime_metadata("approval_id", pending.request.approval_id.clone())
+            .with_runtime_metadata("approval_reason", pending.request.reason.clone())
     }
 
     #[allow(clippy::result_large_err)]
@@ -4613,7 +5092,9 @@ impl AgentCore {
             match self.execute_action(action.clone(), runtime) {
                 ActionExecution::Completed(outcome) => {
                     if let Some(slot) = results.get_mut(idx) {
-                        *slot = Some(self.format_action_outcome(&action, &outcome));
+                        *slot = Some(
+                            self.format_action_outcome_with_runtime(&action, &outcome, runtime),
+                        );
                     }
                 }
                 ActionExecution::NeedsApproval(pending) => {
@@ -4673,9 +5154,9 @@ impl AgentCore {
                 self.bash_approval_mode = BashApprovalMode::Approve;
             }
         } else {
-            let result = self.denied_approval_result(&pending);
-            self.record_pending_approval_audit(&pending, false, &result);
-            let prompt_result = self.format_pending_action_result(&pending, &result);
+            let outcome = self.denied_approval_outcome(&pending);
+            self.record_pending_approval_audit(&pending, false, &outcome.text);
+            let prompt_result = self.format_pending_action_result(&pending, &outcome, runtime);
             denied_results.push((current_index, prompt_result));
         }
 
@@ -4686,8 +5167,10 @@ impl AgentCore {
             }
             match self.execute_action(action.clone(), runtime) {
                 ActionExecution::Completed(outcome) => {
-                    completed_results
-                        .push((next_index, self.format_action_outcome(&action, &outcome)));
+                    completed_results.push((
+                        next_index,
+                        self.format_action_outcome_with_runtime(&action, &outcome, runtime),
+                    ));
                 }
                 ActionExecution::NeedsApproval(next_pending) => {
                     let pending = Self::pending_approval_with_parallel_continuation(
@@ -4718,10 +5201,12 @@ impl AgentCore {
                 if let Some((_, _, _, results)) = self.pending_native_exchange.as_mut() {
                     results.extend(partial);
                 } else {
-                    self.append_delta_with_action_output_budget(vec![(
-                        "result_of_llm_action".to_string(),
-                        partial.join("\n\n"),
-                    )]);
+                    self.append_delta_with_action_output_budget(
+                        partial
+                            .into_iter()
+                            .map(|result| ("result_of_llm_action".to_string(), result))
+                            .collect(),
+                    );
                 }
                 return CoreStep::NeedsUserApproval {
                     request: pending.request,
@@ -4730,10 +5215,12 @@ impl AgentCore {
         };
 
         if !self.complete_pending_native_exchange(result_lines.clone()) {
-            self.append_delta_with_action_output_budget(vec![(
-                "result_of_llm_action".to_string(),
-                result_lines.join("\n\n"),
-            )]);
+            self.append_delta_with_action_output_budget(
+                result_lines
+                    .into_iter()
+                    .map(|result| ("result_of_llm_action".to_string(), result))
+                    .collect(),
+            );
         }
         self.append_in_turn_shrink_review_if_needed();
         if self.remaining_rounds() == 0 {
@@ -4867,13 +5354,7 @@ impl AgentCore {
     }
 
     pub fn render_prompt(&self) -> String {
-        prompt_render::render_prompt_with_rendered_static_for_mode(
-            &self.rendered_static_prompt,
-            &self.deltas,
-            &self.assistant_speaker_name,
-            self.response_protocol.suite(),
-            self.resolved_tool_call_mode,
-        )
+        self.render_prompt_from_deltas(&self.deltas)
     }
 
     pub fn submit_prompt_component(
@@ -4910,7 +5391,54 @@ impl AgentCore {
         ))
     }
 
+    const PROCESS_AGGREGATE_SCOPES_MARKER: &'static str = "PROCESS_AGGREGATE_SCOPES:";
+
+    fn current_process_aggregate_scope_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Option<os::ProcessAggregateScopeSnapshot> {
+        #[cfg(test)]
+        if let Some(snapshot) = self.process_scope_snapshot_override.clone() {
+            return Some(snapshot);
+        }
+        os::process_aggregate_scope_snapshot(session_id)
+            .ok()
+            .flatten()
+    }
+
+    fn take_process_aggregate_scopes_if_needed(&mut self) -> Option<String> {
+        let session_id = self.current_session_id.clone()?;
+        if self.process_scope_prompted_session.as_deref() == Some(session_id.as_str()) {
+            return None;
+        }
+        // A restored Context can contain a path from a previous Runtime. Hide
+        // it before publishing the current Runtime identity. If cgroup
+        // delegation is unavailable, do not leave stale scope claims visible.
+        self.hide_prompt_slices_matching(Self::PROCESS_AGGREGATE_SCOPES_MARKER);
+        let snapshot = self.current_process_aggregate_scope_snapshot(&session_id)?;
+        self.process_scope_prompted_session = Some(session_id);
+        Some(format!(
+            "{}\n- Runtime process scope: {}\n- Current Session process scope: {}\nThese are aggregate observation directories; exact process ownership and cancellation use their per-Job child scopes. Inspect standard cgroup files there when resource or process diagnosis is needed.",
+            Self::PROCESS_AGGREGATE_SCOPES_MARKER,
+            snapshot.runtime_observation_note,
+            snapshot.session_observation_note,
+        ))
+    }
+
+    fn submit_process_aggregate_scopes_if_needed(&mut self) {
+        let Some(note) = self.take_process_aggregate_scopes_if_needed() else {
+            return;
+        };
+        self.submit_prompt_component(
+            PromptComponentRole::system(),
+            "runtime_note",
+            note,
+            "runtime_process_scope",
+        );
+    }
+
     pub fn build_next_prompt(&mut self) -> String {
+        self.submit_process_aggregate_scopes_if_needed();
         if self.runtime_config_changed_notice_pending {
             self.runtime_config_changed_notice_pending = false;
             self.submit_prompt_component(
@@ -4934,16 +5462,16 @@ impl AgentCore {
                 prompt.push_str(&response_trailer);
             }
         }
-        if self.context_compact_required {
+        if self.context_compress_required {
             let (body, response_trailer) = prompt_render::split_formatted_response_trailer(&prompt);
             // The manual wording persists across retries (like the
             // threshold wording) until the compaction succeeds: the context
             // may not actually be over the limit, so the retry must not fall
             // back to "Context is too long".
             let compact_trailer = if self.manual_compact_trailer_pending {
-                prompt_render::MANUAL_CONTEXT_COMPACT_TRAILER
+                prompt_render::MANUAL_CONTEXT_COMPRESS_TRAILER
             } else {
-                prompt_render::CONTEXT_COMPACT_REQUIRED_TRAILER
+                prompt_render::CONTEXT_COMPRESS_REQUIRED_TRAILER
             };
             prompt = body.trim_end().to_string();
             prompt.push_str("\n\n");
@@ -4952,12 +5480,7 @@ impl AgentCore {
                 let _ = response_trailer;
             }
         }
-        self.evaluate_periodic_reasoning_review();
-        if self.reasoning_review_due {
-            format!("{}\n\n{}", prompt, prompt_render::REASONING_REVIEW_TRAILER)
-        } else {
-            prompt
-        }
+        prompt
     }
 
     fn guard_pending_action_output_budget(&mut self) -> bool {
@@ -5072,7 +5595,7 @@ impl AgentCore {
         let chunks = slice_texts
             .into_iter()
             .flat_map(|(prompt_type, text)| {
-                split_text_for_prompt_slices(&text, PROMPT_SLICE_TEXT_LIMIT)
+                split_prompt_component_text(&prompt_type, &text, PROMPT_SLICE_TEXT_LIMIT)
                     .into_iter()
                     .map(move |chunk| (prompt_type.clone(), chunk))
                     .collect::<Vec<_>>()
@@ -5107,22 +5630,11 @@ impl AgentCore {
             slices,
             hidden_slice_ids: Vec::new(),
         });
-        prompt_render::render_prompt_with_rendered_static_for_mode(
-            &self.rendered_static_prompt,
-            &deltas,
-            &self.assistant_speaker_name,
-            self.response_protocol.suite(),
-            self.resolved_tool_call_mode,
-        )
+        self.render_prompt_from_deltas(&deltas)
     }
 
     fn append_in_turn_shrink_review_if_needed(&mut self) {
-        if let Some(shrink_review) = self.consume_shrink_review_if_needed(0, 0) {
-            self.append_delta(vec![(
-                "result_of_llm_action".to_string(),
-                format!("Long-context maintenance:\n{shrink_review}"),
-            )]);
-        }
+        self.require_context_compress_if_needed(0);
     }
 
     fn inline_tool_call_labels(&self, parsed: &ParsedEnvelope) -> Vec<(String, String)> {
@@ -5204,7 +5716,7 @@ Runtime tool_call ids:",
                     if !parsed.thought.is_empty() {
                         slices.push(("llm_free_talk".to_string(), parsed.thought.to_string()));
                     }
-                    for compact in &parsed.context_compacts {
+                    for compact in &parsed.context_compresses {
                         if !compact.summary.trim().is_empty() {
                             slices.push((
                                 "llm_response".to_string(),
@@ -5236,11 +5748,17 @@ Runtime tool_call ids:",
     ) -> Option<String> {
         let kind = kind.into();
         let mut content = content.into();
-        if role.prompt_type_hint(&kind) == "result_of_llm_action" {
+        if role.prompt_type_hint(&kind) == "result_of_llm_action"
+            && !prompt_render::is_structured_action_result_envelope(&content)
+        {
             // Defensive ingress for legacy/internal producers that do not originate
-            // from a typed action. Normal tool execution has already selected its
-            // per-call retention policy before reaching this point.
-            content = tool_result_gate::gate(&content, tool_result_gate::Retention::Head);
+            // from a typed action. Structured action envelopes have already applied
+            // their per-call model budget and must remain valid JSON end to end.
+            content = tool_result_gate::fit(
+                &content,
+                self.model_tool_result_bytes,
+                tool_result_gate::Retention::Head,
+            );
         }
         // Explicit resume is a header-only user behavior, not synthetic text.
         if content.trim().is_empty()
@@ -5443,17 +5961,21 @@ Runtime tool_call ids:",
                 let prompt_type = component.prompt_type();
                 let component_id = component.id;
                 let slice_time_ms = component.created_at_ms;
-                split_text_for_prompt_slices(&component.content, PROMPT_SLICE_TEXT_LIMIT)
-                    .into_iter()
-                    .map(move |chunk| {
-                        (
-                            component_id.clone(),
-                            prompt_type.clone(),
-                            slice_time_ms,
-                            chunk,
-                        )
-                    })
-                    .collect::<Vec<_>>()
+                split_prompt_component_text(
+                    &prompt_type,
+                    &component.content,
+                    PROMPT_SLICE_TEXT_LIMIT,
+                )
+                .into_iter()
+                .map(move |chunk| {
+                    (
+                        component_id.clone(),
+                        prompt_type.clone(),
+                        slice_time_ms,
+                        chunk,
+                    )
+                })
+                .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
         let slice_count = chunks.len();
@@ -5478,10 +6000,6 @@ Runtime tool_call ids:",
                 }
             })
             .collect::<Vec<_>>();
-        self.context_message_elements += slices
-            .iter()
-            .filter(|slice| Self::is_context_message_prompt_type(&slice.prompt_type))
-            .count();
         self.deltas.push(PromptDelta {
             delta_id,
             time_ms: timestamp,
@@ -5499,106 +6017,141 @@ Runtime tool_call ids:",
         );
     }
 
-    fn consume_shrink_review_if_needed(
-        &mut self,
-        incoming_prompt_tokens: u32,
-        pending_dynamic_tokens: u32,
-    ) -> Option<String> {
+    fn require_context_compress_if_needed(&mut self, incoming_prompt_tokens: u32) {
         let estimated_prompt_tokens = self.estimate_rendered_prompt_tokens(incoming_prompt_tokens);
-        let force_threshold = self.max_llm_input_tokens.saturating_mul(90) / 100;
-        if !self.context_compact_required && estimated_prompt_tokens < force_threshold {
-            return None;
+        let force_threshold = self
+            .max_llm_input_tokens
+            .saturating_mul(u32::from(self.context_compress_threshold_percent))
+            / 100;
+        let threshold_crossed = estimated_prompt_tokens >= force_threshold;
+        if !threshold_crossed && !self.context_compress_required {
+            self.threshold_compaction_followup_state = ThresholdCompactionFollowupState::Available;
+            return;
         }
-        // Native exchanges remain structured and keep their original delta
-        // ownership. Forced compaction may remove complete delta closures
-        // without rewriting provider-native history into text.
-        let slices = self.render_prompt_slices();
-        if slices.is_empty() {
-            return None;
+        if self.render_prompt_slices().is_empty() {
+            return;
         }
-        if !self.context_compact_required {
-            self.pending_compact_request_notice = Some((estimated_prompt_tokens, force_threshold));
+        if threshold_crossed {
+            // A manual request keeps its user-facing wording, but crossing the
+            // automatic threshold still upgrades the model request to critical
+            // reasoning and subjects the result to the bounded quality
+            // follow-up. The exhausted latch blocks only a new automatic cycle;
+            // it must never block an explicit user request.
+            if !self.manual_compact_trailer_pending
+                && !self.context_compress_required
+                && self.threshold_compaction_followup_state
+                    == ThresholdCompactionFollowupState::Exhausted
+            {
+                return;
+            }
+            if !self.manual_compact_trailer_pending && !self.context_compress_required {
+                self.pending_compact_request_notice =
+                    Some((estimated_prompt_tokens, force_threshold, None));
+            }
+            self.threshold_compaction_reasoning_required = true;
         }
-        self.context_compact_required = true;
-        let dynamic_tokens = slices
-            .iter()
-            .map(|slice| estimate_prompt_tokens(&slice.text))
-            .sum::<u32>()
-            .saturating_add(pending_dynamic_tokens);
-        let current_count = self.deltas.len();
-        let delta_refs = self
-            .deltas
-            .iter()
-            // Include deltas that own native tool exchanges even without
-            // text slices: a pure tool round is exactly the fat bulk a
-            // compaction should be able to discard.
-            .filter(|delta| {
-                !prompt_render::render_delta_slices(delta).is_empty()
-                    || self
-                        .native_exchanges
-                        .iter()
-                        .any(|exchange| exchange.delta_id == delta.delta_id)
-            })
-            .rev()
-            .take(12)
-            .map(|delta| {
-                // Size hint must include the delta's native exchanges (tool
-                // calls/results): they are the bulk of a native-mode context.
-                // Text-only hints made fat native deltas look small, so the
-                // model discarded small stale deltas and compaction barely
-                // shrank anything.
-                let text_tokens = prompt_render::render_delta_slices(delta)
-                    .iter()
-                    .map(|slice| estimate_prompt_tokens(&slice.text))
-                    .sum::<u32>();
-                let native_tokens = self
-                    .native_exchanges
-                    .iter()
-                    .filter(|exchange| exchange.delta_id == delta.delta_id)
-                    .map(estimate_native_exchange_tokens)
-                    .fold(0_u32, u32::saturating_add);
-                format!(
-                    "- delta_id={} time_ms={} visible_slices={} estimated_tokens={} (text {} + tool_exchanges {})",
-                    delta.delta_id,
-                    delta.time_ms,
-                    prompt_render::render_delta_slices(delta).len(),
-                    text_tokens.saturating_add(native_tokens),
-                    text_tokens,
-                    native_tokens
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let tip = "TIPS: You can update your job list plan, steer and optimize your work based on the above work.";
-        // A manual compaction request must not claim the threshold was
-        // crossed; it demands a deep shrink of the same 10%-20% footprint.
-        let instruction = if self.manual_compact_trailer_pending {
-            "User manually requests context compaction. Your tool calls must start with context_compact. Try to discard stale deltas and bulky tool results, extract what is valuable into a short summary, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use the response protocol's context_compact block: discard stale delta ids, offload important but lengthy delta ids, and provide the summary. Do not target prompt_0. You may include later tool calls in the same response; they run only after context_compact succeeds. Until compaction succeeds, responses that do not start with context_compact are ignored without being shown or executed."
-        } else {
-            "Context is above 90% of the configured input window. Your tool calls must start with context_compact. Summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use the response protocol's context_compact block: discard stale delta ids, offload important but lengthy delta ids, and provide the summary. Do not target prompt_0. You may include later tool calls in the same response; they run only after context_compact succeeds. Until compaction succeeds, responses that do not start with context_compact are ignored without being shown or executed."
-        };
-        Some(format!(
-            "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\ndynamic_context_tokens={dynamic_tokens}\nprompt_delta_count={current_count}\nrecent_prompt_delta_refs:\n{delta_refs}\n{tip}\n{instruction}",
-            self.max_llm_input_tokens
-        ))
+        self.context_compress_required = true;
     }
-    /// Drains the pending forced-compaction request notice (estimated prompt
-    /// tokens, force threshold). Called by the turn loop each iteration.
-    pub fn take_pending_compact_request_notice(&mut self) -> Option<(u32, u32)> {
+
+    /// Drains the pending forced-compaction request notice (observed/estimated
+    /// prompt tokens, configured force threshold, optional quality target).
+    /// Called by the turn loop each iteration.
+    pub fn take_pending_compact_request_notice(&mut self) -> Option<(u32, u32, Option<u32>)> {
         self.pending_compact_request_notice.take()
     }
 
     /// User-initiated compaction request: the next model request must lead
-    /// with context_compact, announced with the manual-request wording. The
+    /// with context_compress, announced with the manual-request wording. The
     /// forced-shrink machinery (response suppression, tool-call gating) is
     /// reused so the compaction actually happens.
-    pub fn request_manual_context_compact(&mut self) {
+    pub fn request_manual_context_compress(&mut self) {
         self.manual_compact_trailer_pending = true;
-        self.context_compact_required = true;
+        self.context_compress_required = true;
         // The "compacting..." UI notice for a manual request is published
         // immediately by the Host when the user clicks, so Core must not
         // schedule a second requested notice here; only the forced-shrink
         // threshold path still emits its own notice.
+    }
+
+    fn verify_post_compaction_provider_usage(&mut self, prompt_tokens: u32) -> Option<String> {
+        let verification = self.post_compaction_verification.take()?;
+        if prompt_tokens == 0 {
+            // Some compatible services omit usage. Zero is "not observed", not
+            // evidence that compression reached the provider-measured target.
+            self.post_compaction_verification = Some(verification);
+            return None;
+        }
+        let target_tokens = self.max_llm_input_tokens.saturating_mul(25) / 100;
+        let force_threshold_tokens = self
+            .max_llm_input_tokens
+            .saturating_mul(u32::from(self.context_compress_threshold_percent))
+            / 100;
+        let remains_above_target =
+            u64::from(prompt_tokens) * 100 > u64::from(self.max_llm_input_tokens) * 25;
+        if !remains_above_target {
+            self.threshold_compaction_followup_state = ThresholdCompactionFollowupState::Available;
+            return None;
+        }
+
+        match verification {
+            PostCompactionVerification::Initial => {
+                self.threshold_compaction_followup_state =
+                    ThresholdCompactionFollowupState::FollowupPending;
+                self.context_compress_required = true;
+                self.threshold_compaction_reasoning_required = true;
+                self.pending_compact_request_notice =
+                    Some((prompt_tokens, force_threshold_tokens, Some(target_tokens)));
+                None
+            }
+            PostCompactionVerification::Followup => {
+                self.threshold_compaction_followup_state =
+                    ThresholdCompactionFollowupState::Exhausted;
+                let occupancy_percent = (u64::from(prompt_tokens) * 100)
+                    .div_ceil(u64::from(self.max_llm_input_tokens))
+                    as u32;
+                Some(format!(
+                    "**WARN**: provider-reported prompt usage remains at {occupancy_percent}% of the model window after one forced compression follow-up; automatic compression will not loop. Retain only necessary state and discard bulky side information during later work."
+                ))
+            }
+        }
+    }
+
+    fn threshold_compaction_quality_note(
+        &mut self,
+        threshold_triggered: bool,
+        estimated_before_tokens: u32,
+        estimated_after_tokens: u32,
+    ) -> (bool, Option<String>) {
+        if !threshold_triggered {
+            return (false, None);
+        }
+        let window_tokens = self.max_llm_input_tokens;
+        let remains_above_target =
+            u64::from(estimated_after_tokens) * 100 > u64::from(window_tokens) * 25;
+        if !remains_above_target {
+            self.threshold_compaction_followup_state = ThresholdCompactionFollowupState::Available;
+            return (false, None);
+        }
+
+        if self.threshold_compaction_followup_state == ThresholdCompactionFollowupState::Available {
+            self.threshold_compaction_followup_state =
+                ThresholdCompactionFollowupState::FollowupPending;
+            return (true, None);
+        }
+        self.threshold_compaction_followup_state = ThresholdCompactionFollowupState::Exhausted;
+
+        let occupancy_percent = |tokens: u32| {
+            let numerator = u64::from(tokens) * 100;
+            numerator.div_ceil(u64::from(window_tokens)) as u32
+        };
+        (
+            false,
+            Some(format!(
+                "**WARN**: context compression ratio is not very good, {}% -> {}%; one forced follow-up was already attempted, so automatic compression will not loop. Retain only necessary state and discard bulky side information during later work.",
+                occupancy_percent(estimated_before_tokens),
+                occupancy_percent(estimated_after_tokens)
+            )),
+        )
     }
 
     fn estimate_rendered_prompt_tokens(&self, incoming_prompt_tokens: u32) -> u32 {
@@ -5735,118 +6288,427 @@ Runtime tool_call ids:",
         notes.join("\n")
     }
 
-    fn format_action_outcome_body(
+    fn action_runtime_notes(
         &mut self,
         action: &ParsedAction,
         outcome: &ActionOutcome,
-    ) -> String {
-        // First-touch reminders are runtime notes about the model's live prompt
-        // context rather than tool output, so they are attached outside the
-        // tool-result truncation gate and always reach the model in full.
-        let first_touch_note = if action.action == "readfile" {
+    ) -> Vec<String> {
+        let notes = if action.action == "readfile" {
             self.readfile_first_touch_notes(outcome)
         } else if shell_exec::is_local_shell_action(&action.action) {
             self.local_shell_first_touch_notes(action)
         } else {
             String::new()
         };
-        let body = self.format_action_outcome_body_inner(action, outcome);
-        if first_touch_note.is_empty() {
-            body
-        } else {
-            format!("{first_touch_note}\n{body}")
+        notes
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn truncation_report(fragment: &tool_result_gate::RetainedFragment) -> Option<Value> {
+        fragment.truncated.then(|| {
+            json!({
+                "truncated": true,
+                "retained": fragment.retained,
+                "original_bytes": fragment.original_bytes,
+                "retained_bytes": fragment.retained_bytes,
+            })
+        })
+    }
+
+    fn capture_truncation_report(truncation: &StreamCaptureTruncation) -> Value {
+        json!({
+            "truncated": true,
+            "retained": truncation.retained,
+            "original_bytes": truncation.original_bytes,
+            "retained_bytes": truncation.retained_bytes,
+        })
+    }
+
+    fn insert_truncation_stage(
+        truncation: &mut serde_json::Map<String, Value>,
+        field: &str,
+        stage: &str,
+        report: Value,
+    ) {
+        let stages = truncation
+            .entry(field.to_string())
+            .or_insert_with(|| json!({}));
+        if let Some(stages) = stages.as_object_mut() {
+            stages.insert(stage.to_string(), report);
         }
     }
 
-    fn format_action_outcome_body_inner(
+    fn insert_sparse_metadata(
+        metadata: &mut serde_json::Map<String, Value>,
+        key: impl Into<String>,
+        value: Value,
+    ) {
+        let meaningful = match &value {
+            Value::Null => false,
+            Value::Bool(value) => *value,
+            Value::String(value) => !value.is_empty(),
+            Value::Array(value) => !value.is_empty(),
+            Value::Object(value) => !value.is_empty(),
+            Value::Number(_) => true,
+        };
+        if meaningful {
+            metadata.insert(key.into(), value);
+        }
+    }
+
+    fn structured_tool_output(
         &self,
         action: &ParsedAction,
         outcome: &ActionOutcome,
-    ) -> String {
-        let retention = tool_result_gate::Retention::from_tail_out(action.input_bool("tail_out"));
-        if self.response_protocol == ResponseProtocolKind::Xml {
-            let output_time_ms = now_ms();
-            if shell_exec::is_local_shell_action(&action.action) {
-                if let Some(bash_result) = outcome.bash_result.as_ref() {
-                    return prompt_render::render_xml_bash_result_with_retention(
-                        action.name.as_deref(),
-                        outcome.status,
-                        bash_result,
-                        output_time_ms,
-                        retention,
+        output_budget: usize,
+    ) -> (Value, serde_json::Map<String, Value>) {
+        let tail_out = action
+            .raw_input
+            .get("tail_out")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| shell_exec::is_local_shell_action(&action.action));
+        let retention = tool_result_gate::Retention::from_tail_out(tail_out);
+        let output_budget = output_budget.min(self.model_tool_result_bytes);
+        if shell_exec::is_local_shell_action(&action.action) {
+            if let Some(result) = outcome.bash_result.as_ref() {
+                let stdout_budget = if result.stderr.is_empty() {
+                    output_budget
+                } else {
+                    output_budget / 2
+                };
+                let stderr_budget = if result.stdout.is_empty() {
+                    output_budget
+                } else {
+                    output_budget.saturating_sub(stdout_budget)
+                };
+                let stdout = tool_result_gate::retain_fragment(
+                    result.stdout.trim_end(),
+                    stdout_budget,
+                    retention,
+                );
+                let stderr = tool_result_gate::retain_fragment(
+                    result.stderr.trim_end(),
+                    stderr_budget,
+                    retention,
+                );
+                let mut truncation = serde_json::Map::new();
+                if let Some(report) = Self::truncation_report(&stdout) {
+                    Self::insert_truncation_stage(
+                        &mut truncation,
+                        "stdout",
+                        "model_result_budget",
+                        report,
                     );
                 }
-            }
-            if action.action == "readfile" {
-                if let Some(readfile_result) = outcome.readfile_result.as_ref() {
-                    return prompt_render::render_xml_readfile_result_with_retention(
-                        action.name.as_deref(),
-                        outcome.status,
-                        readfile_result,
-                        output_time_ms,
-                        retention,
+                if let Some(report) = Self::truncation_report(&stderr) {
+                    Self::insert_truncation_stage(
+                        &mut truncation,
+                        "stderr",
+                        "model_result_budget",
+                        report,
                     );
                 }
-            }
-            if action.action == "memmgr" {
-                if let Some(memmgr_result) = outcome.memmgr_result.as_ref() {
-                    return prompt_render::render_xml_memmgr_result_with_retention(
-                        action.name.as_deref(),
-                        outcome.status,
-                        memmgr_result,
-                        output_time_ms,
-                        retention,
-                    );
+                let mut tool_output = serde_json::Map::new();
+                if !stdout.text.is_empty() {
+                    tool_output.insert("stdout".to_string(), json!(stdout.text));
                 }
-            }
-            if action.action == "self_tool" {
-                if let Some(self_tool_result) = outcome.self_tool_result.as_ref() {
-                    return prompt_render::render_xml_self_tool_result_with_retention(
-                        action.name.as_deref(),
-                        outcome.status,
-                        self_tool_result,
-                        output_time_ms,
-                        retention,
-                    );
+                if !stderr.text.is_empty() {
+                    tool_output.insert("stderr".to_string(), json!(stderr.text));
                 }
+                return (Value::Object(tool_output), truncation);
             }
-            prompt_render::render_xml_action_result_with_retention(
-                &action.action,
-                action.name.as_deref(),
-                &outcome.text,
-                now_ms(),
-                retention,
-            )
-        } else {
-            tool_result_gate::gate(&outcome.text, retention)
         }
+        let content = if action.action == "readfile" {
+            outcome
+                .readfile_result
+                .as_ref()
+                .map(|result| result.content.as_str())
+        } else if action.action == "memmgr" {
+            outcome
+                .memmgr_result
+                .as_ref()
+                .map(|result| result.content.as_str())
+        } else if action.action == "self_tool" {
+            outcome
+                .self_tool_result
+                .as_ref()
+                .map(|result| result.content.as_str())
+        } else {
+            None
+        }
+        .unwrap_or(outcome.text.as_str());
+        let content =
+            tool_result_gate::retain_fragment(content.trim_end(), output_budget, retention);
+        let mut truncation = serde_json::Map::new();
+        if let Some(report) = Self::truncation_report(&content) {
+            Self::insert_truncation_stage(
+                &mut truncation,
+                "content",
+                "model_result_budget",
+                report,
+            );
+        }
+        let mut tool_output = serde_json::Map::new();
+        if !content.text.is_empty() {
+            tool_output.insert("content".to_string(), json!(content.text));
+        }
+        (Value::Object(tool_output), truncation)
+    }
+
+    fn action_runtime_metadata(
+        &self,
+        outcome: &ActionOutcome,
+        runtime_notes: Vec<String>,
+    ) -> Value {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("status".to_string(), json!(outcome.status.as_str()));
+        if let Some(elapsed_ms) = outcome.elapsed_ms {
+            metadata.insert("elapsed_ms".to_string(), json!(elapsed_ms));
+        }
+        if !runtime_notes.is_empty() {
+            let notes = runtime_notes
+                .into_iter()
+                .map(|note| {
+                    tool_result_gate::retain_fragment(
+                        &note,
+                        2 * 1024,
+                        tool_result_gate::Retention::Head,
+                    )
+                    .text
+                })
+                .collect::<Vec<_>>();
+            metadata.insert("notes".to_string(), json!(notes));
+        }
+        for (key, value) in &outcome.runtime_metadata {
+            if !metadata.contains_key(key) {
+                Self::insert_sparse_metadata(&mut metadata, key.clone(), value.clone());
+            }
+        }
+        let mut truncation = serde_json::Map::new();
+        if let Some(result) = outcome.bash_result.as_ref() {
+            if let Some(value) = result.exit_code {
+                metadata.insert("exit_code".to_string(), json!(value));
+            }
+            if let Some(value) = result.signal {
+                metadata.insert("signal".to_string(), json!(value));
+            }
+            if let Some(value) = result.pid {
+                metadata.insert("pid".to_string(), json!(value));
+            }
+            if result.timed_out {
+                metadata.insert("timed_out".to_string(), json!(true));
+            }
+            if let Some(value) = &result.pid_kind {
+                Self::insert_sparse_metadata(&mut metadata, "pid_kind", json!(value));
+            }
+            if let Some(value) = &result.error_type {
+                Self::insert_sparse_metadata(&mut metadata, "error_type", json!(value));
+            }
+            if let Some(value) = &result.stdout_truncation {
+                Self::insert_truncation_stage(
+                    &mut truncation,
+                    "stdout",
+                    "execution_capture",
+                    Self::capture_truncation_report(value),
+                );
+            }
+            if let Some(value) = &result.stderr_truncation {
+                Self::insert_truncation_stage(
+                    &mut truncation,
+                    "stderr",
+                    "execution_capture",
+                    Self::capture_truncation_report(value),
+                );
+            }
+        } else if let Some(result) = outcome.readfile_result.as_ref() {
+            Self::insert_sparse_metadata(&mut metadata, "path", json!(result.path));
+            if let Some(value) = &result.matcher {
+                Self::insert_sparse_metadata(&mut metadata, "matcher", json!(value));
+            }
+            if let Some(value) = result.start_line {
+                metadata.insert("start_line".to_string(), json!(value));
+            }
+            if let Some(value) = result.end_line {
+                metadata.insert("end_line".to_string(), json!(value));
+            }
+            if let Some(value) = result.total_lines {
+                metadata.insert("total_lines".to_string(), json!(value));
+            }
+            if let Some(value) = &result.encoding {
+                Self::insert_sparse_metadata(&mut metadata, "encoding", json!(value));
+            }
+            if let Some(value) = result.file_bytes {
+                metadata.insert("file_bytes".to_string(), json!(value));
+            }
+            if let Some(value) = result.content_bytes {
+                metadata.insert("content_bytes".to_string(), json!(value));
+            }
+            if result.limited == Some(true) {
+                Self::insert_truncation_stage(
+                    &mut truncation,
+                    "content",
+                    "tool_selection",
+                    json!({
+                        "truncated": true,
+                        "retained": if result.tail_out == Some(true) { "tail" } else { "head" },
+                        "retained_bytes": result.content_bytes,
+                    }),
+                );
+            }
+            if result.tail_out == Some(true) {
+                metadata.insert("tail_out".to_string(), json!(true));
+            }
+            if let Some(value) = &result.error_type {
+                Self::insert_sparse_metadata(&mut metadata, "error_type", json!(value));
+            }
+        } else if let Some(result) = outcome.memmgr_result.as_ref() {
+            Self::insert_sparse_metadata(&mut metadata, "memory_type", json!(result.memory_type));
+            Self::insert_sparse_metadata(&mut metadata, "operation", json!(result.op));
+            if let Some(value) = &result.error_type {
+                Self::insert_sparse_metadata(&mut metadata, "error_type", json!(value));
+            }
+        } else if let Some(result) = outcome.self_tool_result.as_ref() {
+            Self::insert_sparse_metadata(&mut metadata, "self_type", json!(result.self_type));
+            if let Some(value) = &result.cwd {
+                Self::insert_sparse_metadata(&mut metadata, "cwd", json!(value));
+            }
+            if let Some(value) = &result.error_type {
+                Self::insert_sparse_metadata(&mut metadata, "error_type", json!(value));
+            }
+        }
+        if !truncation.is_empty() {
+            metadata.insert("truncation".to_string(), Value::Object(truncation));
+        }
+        Value::Object(metadata)
+    }
+
+    fn merge_truncation(
+        runtime_metadata: &mut serde_json::Map<String, Value>,
+        additional: serde_json::Map<String, Value>,
+    ) {
+        if additional.is_empty() {
+            return;
+        }
+        let truncation = runtime_metadata
+            .entry("truncation".to_string())
+            .or_insert_with(|| json!({}));
+        let Some(fields) = truncation.as_object_mut() else {
+            return;
+        };
+        for (field, stages) in additional {
+            let current = fields.entry(field).or_insert_with(|| json!({}));
+            if let (Some(current), Some(stages)) = (current.as_object_mut(), stages.as_object()) {
+                for (stage, report) in stages {
+                    current.insert(stage.clone(), report.clone());
+                }
+            }
+        }
+    }
+
+    fn render_action_result_envelope(
+        &self,
+        action: &ParsedAction,
+        outcome: &ActionOutcome,
+        runtime_metadata: &Value,
+        output_budget: usize,
+    ) -> String {
+        let (tool_output, truncation) = self.structured_tool_output(action, outcome, output_budget);
+        let mut runtime_metadata = runtime_metadata.as_object().cloned().unwrap_or_default();
+        Self::merge_truncation(&mut runtime_metadata, truncation);
+        serde_json::to_string(&json!({
+            "action_result": {
+                "tool_call_id": action.call_id,
+                "runtime_metadata": runtime_metadata,
+                "tool_output": tool_output,
+            }
+        }))
+        .unwrap_or_else(|_| {
+            "{\"action_result\":{\"runtime_metadata\":{\"status\":\"serialization_failed\"}}}"
+                .to_string()
+        })
+    }
+
+    fn format_action_outcome_with_runtime(
+        &mut self,
+        action: &ParsedAction,
+        outcome: &ActionOutcome,
+        runtime: &mut dyn ActionRuntime,
+    ) -> String {
+        if let Some(max_bytes) = runtime.take_model_tool_result_bytes_update() {
+            let _ = self.set_model_tool_result_bytes(max_bytes);
+        }
+        self.format_action_outcome(action, outcome)
     }
 
     fn format_action_outcome(&mut self, action: &ParsedAction, outcome: &ActionOutcome) -> String {
-        let body = self.format_action_outcome_body(action, outcome);
-        if self.response_protocol == ResponseProtocolKind::Xml {
-            format!("<tool_call_id>{}</tool_call_id>{body}", action.call_id)
-        } else {
-            format!(
-                "tool_call_id: {}
-{body}",
-                action.call_id
-            )
+        let runtime_notes = self.action_runtime_notes(action, outcome);
+        let runtime_metadata = self.action_runtime_metadata(outcome, runtime_notes);
+        let max_bytes = self.model_tool_result_bytes;
+        let mut low = 0usize;
+        let mut high = max_bytes;
+        let mut best = self.render_action_result_envelope(action, outcome, &runtime_metadata, 0);
+        while low <= high {
+            let candidate_budget = low + (high - low) / 2;
+            let candidate = self.render_action_result_envelope(
+                action,
+                outcome,
+                &runtime_metadata,
+                candidate_budget,
+            );
+            if candidate.len() <= max_bytes {
+                best = candidate;
+                low = candidate_budget.saturating_add(1);
+            } else if candidate_budget == 0 {
+                break;
+            } else {
+                high = candidate_budget - 1;
+            }
         }
+        best
     }
 
-    fn format_action_result(&mut self, action: &ParsedAction, result: &str) -> String {
-        self.format_action_outcome(action, &ActionOutcome::completed(result))
+    fn format_context_compress_outcome(
+        &mut self,
+        compact: &ParsedContextCompress,
+        outcome: &ActionOutcome,
+        runtime: &mut dyn ActionRuntime,
+    ) -> String {
+        let action = ParsedAction {
+            action: "context_compress".to_string(),
+            name: None,
+            call_id: compact.call_id.clone(),
+            raw_input: json!({}),
+        };
+        self.format_action_outcome_with_runtime(&action, outcome, runtime)
     }
 
-    fn format_pending_action_result(&mut self, pending: &PendingApproval, result: &str) -> String {
+    fn action_result_is_error(content: &str) -> bool {
+        let Ok(envelope) = serde_json::from_str::<Value>(content) else {
+            return true;
+        };
+        !matches!(
+            envelope["action_result"]["runtime_metadata"]["status"].as_str(),
+            Some("completed" | "background_finished")
+        )
+    }
+
+    fn format_pending_action_result(
+        &mut self,
+        pending: &PendingApproval,
+        outcome: &ActionOutcome,
+        runtime: &mut dyn ActionRuntime,
+    ) -> String {
         let action = ParsedAction {
             action: pending.request.action.clone(),
             name: pending.action_name.clone(),
             call_id: pending.action_call_id.clone(),
             raw_input: json!({ "tail_out": pending.approved_action.tail_out() }),
         };
-        self.format_action_result(&action, result)
+        self.format_action_outcome_with_runtime(&action, outcome, runtime)
     }
 
     #[allow(clippy::result_large_err)]
@@ -5870,7 +6732,9 @@ Runtime tool_call ids:",
             for action in group.actions {
                 match self.execute_action(action.clone(), runtime) {
                     ActionExecution::Completed(outcome) => {
-                        result_lines.push(self.format_action_outcome(&action, &outcome));
+                        result_lines.push(
+                            self.format_action_outcome_with_runtime(&action, &outcome, runtime),
+                        );
                     }
                     ActionExecution::NeedsApproval(pending) => {
                         return Err((result_lines, pending));
@@ -5909,14 +6773,19 @@ Runtime tool_call ids:",
     ) -> ParallelActionHandle {
         let action_for_thread = action.clone();
         let cwd = self.current_prompt_cwd().to_path_buf();
-        self.current_stats.tool_calls += 1;
+        let model_tool_result_bytes = self.model_tool_result_bytes;
+        if action_counts_as_tool_call(&action.action) {
+            self.current_stats.tool_calls += 1;
+        }
         thread::spawn(move || {
+            let wall_start = Instant::now();
             let cpu_start = thread_cpu_time();
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                readfile::execute_with_timeout_outcome(
+                readfile::execute_with_timeout_outcome_and_limit(
                     &cwd,
                     &action_for_thread.raw_input,
                     readfile::DEFAULT_TIMEOUT,
+                    model_tool_result_bytes,
                 )
             }))
             .unwrap_or_else(|_| {
@@ -5946,6 +6815,7 @@ Runtime tool_call ids:",
                     error_type: Some("InternalError".to_string()),
                 })
             });
+            let outcome = outcome.with_elapsed_ms(wall_start.elapsed().as_millis() as u64);
             (idx, action, outcome, elapsed_thread_cpu(cpu_start))
         })
     }
@@ -5968,8 +6838,11 @@ Runtime tool_call ids:",
         };
         let pending_for_thread = pending.clone();
         let shell_jobs = self.shell_jobs.clone();
-        self.current_stats.tool_calls += 1;
+        if action_counts_as_tool_call(&action.action) {
+            self.current_stats.tool_calls += 1;
+        }
         thread::spawn(move || {
+            let wall_start = Instant::now();
             let result = match &pending_for_thread.approved_action {
                 PendingApprovedAction::RunBash {
                     command,
@@ -6012,6 +6885,10 @@ Runtime tool_call ids:",
                     )
                 }
             };
+            let mut result = result;
+            if result.elapsed_ms.is_none() {
+                result.elapsed_ms = Some(wall_start.elapsed().as_millis() as u64);
+            }
             (idx, action, pending_for_thread, result, None)
         })
     }
@@ -6027,8 +6904,11 @@ Runtime tool_call ids:",
         let session_id = self.current_session_id();
         let turn_id = self.current_action_turn_id();
         let cwd = self.current_prompt_cwd().to_path_buf();
-        self.current_stats.tool_calls += 1;
+        if action_counts_as_tool_call(&action.action) {
+            self.current_stats.tool_calls += 1;
+        }
         thread::spawn(move || {
+            let wall_start = Instant::now();
             let loop_command = action.input_str("loop_cmd");
             let is_regular_command = loop_command.is_empty();
             let cmd_command = action.input_str("cmd");
@@ -6065,12 +6945,21 @@ Runtime tool_call ids:",
                     &turn_id,
                     action.call_id.as_str(),
                     is_regular_command,
-                    action.input_bool("tail_out"),
+                    action
+                        .raw_input
+                        .get("tail_out")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
                     &mut runtime,
                 )
             };
             let outcome = match result {
-                ActionExecution::Completed(outcome) => outcome,
+                ActionExecution::Completed(mut outcome) => {
+                    if outcome.elapsed_ms.is_none() {
+                        outcome.elapsed_ms = Some(wall_start.elapsed().as_millis() as u64);
+                    }
+                    outcome
+                }
                 ActionExecution::NeedsApproval(_) => ActionOutcome::failed(format!(
                     "Action result: {}\ncommand: {}\nerror: unexpected_parallel_approval_request",
                     action.action, command,
@@ -6101,7 +6990,9 @@ Runtime tool_call ids:",
                     self.record_action_audit(&action, outcome.status.as_str(), Some(&outcome.text));
                     self.emit_action_finish_topic(&action, &outcome, cpu_time, runtime);
                     if let Some(slot) = results.get_mut(idx) {
-                        *slot = Some(self.format_action_outcome(&action, &outcome));
+                        *slot = Some(
+                            self.format_action_outcome_with_runtime(&action, &outcome, runtime),
+                        );
                     }
                 }
                 Err(_) => {
@@ -6136,7 +7027,9 @@ Runtime tool_call ids:",
                     self.record_pending_approval_audit(&pending, true, &outcome.text);
                     self.emit_action_finish_topic(&action, &outcome, cpu_time, runtime);
                     if let Some(slot) = results.get_mut(idx) {
-                        *slot = Some(self.format_action_outcome(&action, &outcome));
+                        *slot = Some(
+                            self.format_action_outcome_with_runtime(&action, &outcome, runtime),
+                        );
                     }
                 }
                 Err(_) => {
@@ -6201,7 +7094,8 @@ Runtime tool_call ids:",
             }
             match self.execute_action(action.clone(), runtime) {
                 ActionExecution::Completed(outcome) => {
-                    results[idx] = Some(self.format_action_outcome(&action, &outcome));
+                    results[idx] =
+                        Some(self.format_action_outcome_with_runtime(&action, &outcome, runtime));
                 }
                 ActionExecution::NeedsApproval(pending) => {
                     self.collect_parallel_action_handles(
@@ -6231,6 +7125,29 @@ Runtime tool_call ids:",
     }
 
     fn execute_action(
+        &mut self,
+        action: ParsedAction,
+        runtime: &mut dyn ActionRuntime,
+    ) -> ActionExecution {
+        let wall_start = Instant::now();
+        let mut execution = self.execute_action_inner(action, runtime);
+        // Completed tool run observation point for disk pressure sampling.
+        if matches!(execution, ActionExecution::Completed(_)) {
+            self.observe_disk_pressure(&[]);
+        }
+        let elapsed_ms = wall_start.elapsed().as_millis() as u64;
+        match &mut execution {
+            ActionExecution::Completed(outcome) => {
+                if outcome.elapsed_ms.is_none() {
+                    outcome.elapsed_ms = Some(elapsed_ms);
+                }
+            }
+            ActionExecution::NeedsApproval(_) => {}
+        }
+        execution
+    }
+
+    fn execute_action_inner(
         &mut self,
         action: ParsedAction,
         runtime: &mut dyn ActionRuntime,
@@ -6294,7 +7211,9 @@ Runtime tool_call ids:",
             tool_name,
         } = &executor_target
         {
-            self.current_stats.tool_calls += 1;
+            if action_counts_as_tool_call(&action.action) {
+                self.current_stats.tool_calls += 1;
+            }
             self.emit_action_execution_start_topic(&action, runtime);
             let outcome = match self.mcp_servers.get(server_id) {
                 Some(config) => {
@@ -6333,7 +7252,9 @@ Runtime tool_call ids:",
             }
         };
 
-        self.current_stats.tool_calls += 1;
+        if action_counts_as_tool_call(&action.action) {
+            self.current_stats.tool_calls += 1;
+        }
         if !shell_exec::is_local_shell_action(&action.action)
             || self.bash_approval_mode == BashApprovalMode::Approve
         {
@@ -6458,7 +7379,9 @@ Runtime tool_call ids:",
     }
 
     fn execute_command_capability(&mut self, action: &ParsedAction, path: &Path) -> ActionOutcome {
-        self.current_stats.tool_calls += 1;
+        if action_counts_as_tool_call(&action.action) {
+            self.current_stats.tool_calls += 1;
+        }
         let payload = json!({
             "action": action.action,
             "args": action.raw_input,
@@ -6623,14 +7546,40 @@ Runtime tool_call ids:",
         })
     }
 
+    /// Hide every visible slice with the exact structured prompt type. Used
+    /// when lifecycle cleanup must not reinterpret or match user/model text.
+    fn hide_prompt_slices_by_type(&mut self, prompt_type: &str) {
+        for delta in &mut self.deltas {
+            for slice in prompt_render::render_delta_slices(delta) {
+                if slice.prompt_type == prompt_type
+                    && !delta.hidden_slice_ids.contains(&slice.slice_id)
+                {
+                    delta.hidden_slice_ids.push(slice.slice_id.clone());
+                }
+            }
+        }
+    }
+
+    /// Hide every visible slice whose text contains `needle`. Used to retire
+    /// superseded long-context maintenance instructions and stale compaction
+    /// failure echoes without touching unrelated history.
+    fn hide_prompt_slices_matching(&mut self, needle: &str) {
+        for delta in &mut self.deltas {
+            for slice in prompt_render::render_delta_slices(delta) {
+                if slice.text.contains(needle) && !delta.hidden_slice_ids.contains(&slice.slice_id)
+                {
+                    delta.hidden_slice_ids.push(slice.slice_id.clone());
+                }
+            }
+        }
+    }
+
     pub(crate) fn apply_prompt_shrink(
         &mut self,
-        action_result_header: &str,
         delta_ids: &[String],
         slice_ids: &[String],
     ) -> String {
         // Wholesale removal invalidates the incremental counter; recount.
-        self.recount_context_message_elements();
         let delta_id_set = delta_ids
             .iter()
             .map(|id| id.trim().to_string())
@@ -6703,13 +7652,42 @@ Runtime tool_call ids:",
             missing.join(", ")
         };
         format!(
-            "{}\nremoved_delta_count: {}\nhidden_slice_count: {}\nshrunk_tokens_estimate: {}\nmissing_ids: {}",
-            action_result_header,
-            removed_delta_count,
-            hidden_slice_count,
-            shrunk_tokens_estimate,
-            missing_text
+            "removed_delta_count: {}\nhidden_slice_count: {}\nshrunk_tokens_estimate: {}\nmissing_ids: {}",
+            removed_delta_count, hidden_slice_count, shrunk_tokens_estimate, missing_text
         )
+    }
+
+    /// Current authoritative delta ids with their text+native token hints for
+    /// invalid-reference repair. Native exchanges share the visible id of their
+    /// owning delta, including owners with no visible text slices.
+    fn live_delta_refs_hint(&self) -> String {
+        self.deltas
+            .iter()
+            .filter(|delta| {
+                self.native_exchanges
+                    .iter()
+                    .any(|exchange| exchange.delta_id == delta.delta_id)
+            })
+            .rev()
+            .take(12)
+            .map(|delta| {
+                let text_tokens = prompt_render::render_delta_slices(delta)
+                    .iter()
+                    .map(|slice| estimate_prompt_tokens(&slice.text))
+                    .sum::<u32>();
+                let native_tokens = self
+                    .native_exchanges
+                    .iter()
+                    .filter(|exchange| exchange.delta_id == delta.delta_id)
+                    .map(estimate_native_exchange_tokens)
+                    .fold(0_u32, u32::saturating_add);
+                format!(
+                    "- delta_id={} (text {} + tool_exchanges {})",
+                    delta.delta_id, text_tokens, native_tokens
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn missing_prompt_refs(&self, delta_ids: &[String], slice_ids: &[String]) -> Vec<String> {
@@ -6745,25 +7723,6 @@ Runtime tool_call ids:",
         missing.sort();
         missing.dedup();
         missing
-    }
-
-    fn prompt_refs_include_type(
-        &self,
-        delta_ids: &[String],
-        slice_ids: &[String],
-        prompt_type: &str,
-    ) -> bool {
-        let delta_ids = delta_ids.iter().map(String::as_str).collect::<HashSet<_>>();
-        let slice_ids = slice_ids.iter().map(String::as_str).collect::<HashSet<_>>();
-        self.deltas.iter().any(|delta| {
-            prompt_render::render_delta_slices(delta)
-                .iter()
-                .any(|slice| {
-                    slice.prompt_type == prompt_type
-                        && (delta_ids.contains(delta.delta_id.as_str())
-                            || slice_ids.contains(slice.slice_id.as_str()))
-                })
-        })
     }
 }
 
@@ -7035,51 +7994,56 @@ impl FileMemoryStore {
         if !self.file.exists() {
             return;
         }
-        if Command::new("git")
-            .arg("-C")
-            .arg(&self.dir)
-            .arg("init")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| !status.success())
-            .unwrap_or(true)
+        if timem_platform::command_status(
+            Command::new("git")
+                .arg("-C")
+                .arg(&self.dir)
+                .arg("init")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .map(|status| !status.success())
+        .unwrap_or(true)
         {
             return;
         }
-        let _ = Command::new("git")
-            .arg("-C")
-            .arg(&self.dir)
-            .args(["config", "user.name", "timem-memory"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        let _ = Command::new("git")
-            .arg("-C")
-            .arg(&self.dir)
-            .args(["config", "user.email", "timem-memory@example.invalid"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if Command::new("git")
-            .arg("-C")
-            .arg(&self.dir)
-            .args(["add", "memory.jsonl"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| !status.success())
-            .unwrap_or(true)
+        let _ = timem_platform::command_status(
+            Command::new("git")
+                .arg("-C")
+                .arg(&self.dir)
+                .args(["config", "user.name", "timem-memory"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
+        let _ = timem_platform::command_status(
+            Command::new("git")
+                .arg("-C")
+                .arg(&self.dir)
+                .args(["config", "user.email", "timem-memory@example.invalid"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
+        if timem_platform::command_status(
+            Command::new("git")
+                .arg("-C")
+                .arg(&self.dir)
+                .args(["add", "memory.jsonl"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .map(|status| !status.success())
+        .unwrap_or(true)
         {
             return;
         }
-        let _ = Command::new("git")
-            .arg("-C")
-            .arg(&self.dir)
-            .args(["commit", "-m", message])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let _ = timem_platform::command_status(
+            Command::new("git")
+                .arg("-C")
+                .arg(&self.dir)
+                .args(["commit", "-m", message])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        );
     }
 
     fn read_all_unlocked(&self) -> std::io::Result<Vec<MemoryRecord>> {
@@ -7098,21 +8062,22 @@ impl FileMemoryStore {
     }
 
     fn git_commit_count(&self) -> usize {
-        Command::new("git")
-            .arg("-C")
-            .arg(&self.dir)
-            .args(["rev-list", "--count", "HEAD"])
-            .output()
-            .ok()
-            .and_then(|output| {
-                if output.status.success() {
-                    String::from_utf8(output.stdout).ok()
-                } else {
-                    None
-                }
-            })
-            .and_then(|text| text.trim().parse::<usize>().ok())
-            .unwrap_or_default()
+        timem_platform::command_output(
+            Command::new("git")
+                .arg("-C")
+                .arg(&self.dir)
+                .args(["rev-list", "--count", "HEAD"]),
+        )
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                String::from_utf8(output.stdout).ok()
+            } else {
+                None
+            }
+        })
+        .and_then(|text| text.trim().parse::<usize>().ok())
+        .unwrap_or_default()
     }
 
     fn schema_text(&self) -> String {
@@ -7688,6 +8653,16 @@ fn validate_memory_sql(sql: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn split_prompt_component_text(prompt_type: &str, text: &str, limit: usize) -> Vec<String> {
+    if prompt_type == "result_of_llm_action"
+        && prompt_render::is_structured_action_result_envelope(text)
+    {
+        vec![text.to_string()]
+    } else {
+        split_text_for_prompt_slices(text, limit)
+    }
+}
+
 fn split_text_for_prompt_slices(text: &str, limit: usize) -> Vec<String> {
     let safe_limit = limit.max(1);
     if text.len() <= safe_limit {
@@ -7756,6 +8731,7 @@ fn estimate_native_exchange_tokens(exchange: &NativeExchange) -> u32 {
                 "id": call.id,
                 "name": call.name,
                 "arguments": call.raw_arguments,
+                "assistant_continuation": call.assistant_continuation,
             })
         })
         .collect::<Vec<_>>();
@@ -7801,7 +8777,7 @@ fn action_output_too_large_note(output_bytes: usize, remaining_tokens: u32) -> S
     let output_kb = output_bytes.div_ceil(1024);
     let remaining_kb = (remaining_tokens as usize).saturating_mul(4).div_ceil(1024);
     format!(
-        "Your action's output is too large: {output_kb} KB, while the context window has only {remaining_kb} KB left. You need to optimize your action or compact context."
+        "Your action's output is too large: {output_kb} KB, while the context window has only {remaining_kb} KB left. You need to optimize your action or compress context."
     )
 }
 
@@ -7905,14 +8881,6 @@ fn memory_missing_expected_version_result(
 fn should_run_memory_precheck(supporting_context: &str) -> bool {
     supporting_context.contains("memory_lookup_hint:")
 }
-fn markdown_table_cell(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('|', "\\|")
-        .replace('`', "\\`")
-        .replace(['\r', '\n'], " ")
-}
-
 fn compact_text(text: &str, max_chars: usize) -> String {
     let mut out = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if out.chars().count() > max_chars {
@@ -7961,7 +8929,7 @@ fn prompt_type_role_for_scratch(
         "llm_response"
         | "llm_response_raw_xml"
         | "llm_free_talk"
-        | "context_compaction_summary" => spec.assistant_role,
+        | "context_compression_summary" => spec.assistant_role,
         "result_of_llm_action" => spec.runtime_role,
         _ => spec.runtime_role,
     }
@@ -8252,3 +9220,7 @@ fn step_to_json(step: CoreStep) -> serde_json::Value {
 #[cfg(test)]
 #[path = "../tests/unit/lib_tests.rs"]
 mod prompt_component_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "../tests/unit/escaped_pipe_fixture.rs"]
+mod escaped_pipe_fixture;

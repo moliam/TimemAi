@@ -1,0 +1,49 @@
+kind: tool
+id: context_compress
+binding_type: builtin
+binding_name: context_compress
+summary: Create a dense checkpoint for continued work, optionally preserving exact deltas or saving bulky source material.
+description: |
+  Create a dense, authoritative checkpoint before continuing. Read the whole live context and put every useful goal, decision, constraint, user correction, piece of evidence, failed approach, current status, artifact, running job, and next action into `summary`. Resolve superseded or contradictory history instead of carrying both versions forward.
+  Use `keep` only when the exact original wording or complete tool exchange of a delta is still necessary. Do not keep a delta merely because it contains useful information; extract that information into `summary`. If an exact provider-native tool exchange is needed, keep the delta id that owns it. Normally omit `keep` and continue from the summary alone. Any live delta not listed in `keep` will no longer be available after compression.
+  Use `offload` only for important bulky source material that may need to be retrieved later but does not belong in the active context. Do not put the same id in both `keep` and `offload`. After a successful offload, retain the returned `scratch_id` if later retrieval may be needed.
+  When a context threshold warning is triggered, make the resulting active context no more than 25% of the model input window. Compression should be ultra-dense and low-loss. Merge useful state from any previous compression summary into the new summary rather than keeping old summaries by default. Use these exact section titles:
+  * **Design Blueprint**: Authoritative design or root-doc and settled interface contracts; important design rule corrected by user.
+  * **Roadmap Coordinates**: High level work plan, active milestone and the current task item.
+  * **User Corrections**: User-clarified misconceptions, misguided approaches, prioritization, useful methodology, working criteria, and user-mandated always-keep information.
+  * **Toolchain & Env**: Toolchain, environment variables, connections, worktrees, running processes, and other material environment facts.
+  * **Anti-Patterns & Negative Findings**: Approaches, libraries, or logic proven invalid and why (hard "Do Not Repeat" flags).
+  * **Execution & Detail Gates**: Criteria for when to mock versus implement and validation checks required before exiting this iteration.
+  * **Curr state**: Current work status, progress, artifacts, uncommitted changes, running jobs, and temporary targets to clean.
+  * **Next work**: The next concrete action.
+
+  Before calling, check that every useful fact from each non-kept delta is represented in `summary`, all ids were provided by the runtime, and `keep` and `offload` do not overlap.
+  Provide a non-empty `summary` and use only runtime-provided dynamic delta ids.
+  `keep` and `offload` are optional. Prefer summary-only compression; add `keep`
+  only for exact content still needed and `offload` only for bulky material that
+  may need later retrieval.
+  When combined with other capability calls, `context_compress` must be the first
+  call. Later calls run only after compression succeeds.
+  After success, continue from the checkpoint you created. A successful call
+  does not reinsert a verbose action result; when offload is used, it returns a
+  scratch_id for later memmgr scratch read. Retrieve that material only when it
+  is needed. Correct any validation or persistence error before continuing.
+input_schema: |
+  {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "keep": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1, "pattern": "\\S"}, "description": "Live delta ids whose exact original content is still needed after compression."},
+      "offload": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1, "pattern": "\\S"}, "description": "Important bulky delta ids that may need later retrieval from scratch."},
+      "summary": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Dense authoritative checkpoint containing all useful state needed to continue."}
+    },
+    "required": ["summary"]
+  }
+example_json: |
+  {
+    "context_compress": {
+      "keep": ["pd_4"],
+      "offload": ["pd_2"],
+      "summary": "The active task is ... Current progress ... Next steps ..."
+    }
+  }

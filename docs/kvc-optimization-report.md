@@ -17,6 +17,39 @@ The replay tool is:
 
 `python3 scripts/kvc_replay.py --data-dir data`
 
+The current tool has two evidence layers that must not be conflated:
+
+- `observed_cache` pairs audited provider responses and reports their actual
+  input/cached token usage.
+- `canonical_prompt_prefix` and the strategy table analyze normalized prompt
+  structure locally. They can reveal prefix rewrites, but do not prove why a
+  provider did or did not reuse its internal KV cache.
+- `simulation_coverage` reports how many audited requests were actually eligible
+  for the strategy simulation. Requests without an extractable prompt or a known
+  Timem delta boundary are counted explicitly instead of being silently omitted.
+
+Rolling `api_audit.jsonl.segments` streams and OpenAI Responses native message,
+function-call, and function-output items are included in this analysis. Both the
+legacy `[BEGIN DELTA]` boundary and the current `[BEGIN DELTA delta_id: …]`
+boundary are recognized.
+
+### Current native Responses diagnostic
+
+A read-only replay of the newest 24 physical audit segments produced:
+
+- 720 model requests and 717 request/response usage pairs;
+- provider-observed aggregate cache rate: 91.3%;
+- median per-request cache rate: 96.3%;
+- 164 paired requests below 90%;
+- median canonical shared-prefix character ratio across adjacent requests: 97.7%.
+
+These are separate observations, not a causal chain. In particular, high
+canonical prefix continuity coexists with zero-cache provider responses in the
+same data, so the replay does not claim that structural continuity predicts or
+explains provider KV reuse. It is used to identify request rewrites and select
+historical low-efficiency cases; only provider usage is reported as an observed
+cache hit rate.
+
 It reads local `api_audit` files and replays `llm_request` events. The simulator
 models Claude/Anthropic-style cache control as a prefix cache:
 

@@ -6,7 +6,7 @@ stream presentation.
 
 ## Live compacting notice
 
-- Core now emits a `core.context.compact` topic with `phase=requested` the
+- Core now emits a `core.context.compress` topic with `phase=requested` the
   moment the forced-shrink threshold is crossed, so the WebUI can show a
   "Context compacting..." state with an indeterminate meter while the model
   still has to run the compaction; the existing completion event now carries

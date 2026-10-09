@@ -9,6 +9,7 @@ name = "agent_core"
 crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
+time = "=0.3.36"
 timem_platform = { path = "../platform" }
 timem_ui_contract = { path = "../ui_contract" }
 serde = { version = "1", features = ["derive"] }
@@ -22,4 +23,3 @@ tokio = { version = "1", features = ["rt", "time", "macros"] }
 [dev-dependencies]
 rcgen = "0.12"
 rustls = "0.21"
-time = "=0.3.36"

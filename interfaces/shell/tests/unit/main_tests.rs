@@ -27,9 +27,9 @@ use super::{
     workspace_menu_line_count, wrapped_terminal_rows, ApprovalChoice, ApprovalKey, CliTurnUi,
     ConfigField, ConfigRow, ConfigTableItem, CoreTopicEvent, HostDecision, HostDecisionRequest,
     MenuKey, PasteRecord, PasteRecoveryChoice, PasteRecoveryKey, PasteRecoverySummary,
-    QueuedInputDrain, SharedPasteRecords, SharedPrefillInput, ThinkingStatus, TimemEditMode,
-    TimemPasteHighlighter, TimemReedlinePrompt, TurnUi, ANSI_HIGHLIGHT, PASTE_END_MARKER,
-    PASTE_START_MARKER, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
+    QueuedInputDrain, SharedPasteRecords, SharedPrefillInput, ShellUiMode, ThinkingStatus,
+    TimemEditMode, TimemPasteHighlighter, TimemReedlinePrompt, TurnUi, ANSI_HIGHLIGHT,
+    PASTE_END_MARKER, PASTE_START_MARKER, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -211,7 +211,7 @@ fn shell_accepts_only_matching_authoritative_terminal_projection() {
 #[test]
 fn shell_ignores_activity_and_new_active_projection_after_terminal() {
     let token = projection_token("turn-1", 1);
-    let mut status = ThinkingStatus::start("qwen-plus", 100_000);
+    let mut status = ThinkingStatus::start("qwen-plus", 100_000, ShellUiMode::Ordinary);
     let mut ui = CliTurnUi {
         status: Some(&mut status),
         interactive_approval: false,
@@ -255,7 +255,7 @@ fn shell_ignores_activity_and_new_active_projection_after_terminal() {
 #[test]
 fn shell_stop_requested_display_comes_from_active_projection() {
     let token = projection_token("turn-1", 1);
-    let mut status = ThinkingStatus::start("qwen-plus", 100_000);
+    let mut status = ThinkingStatus::start("qwen-plus", 100_000, ShellUiMode::Ordinary);
     let mut ui = CliTurnUi {
         status: Some(&mut status),
         interactive_approval: false,
@@ -371,7 +371,7 @@ fn active_elapsed_excludes_user_pause_duration() {
 
 #[test]
 fn thinking_status_finish_wakes_renderer_without_waiting_for_tick() {
-    let mut status = ThinkingStatus::start("qwen-plus", 100_000);
+    let mut status = ThinkingStatus::start("qwen-plus", 100_000, ShellUiMode::Ordinary);
 
     let start = Instant::now();
     status.finish();
@@ -385,7 +385,7 @@ fn thinking_status_finish_wakes_renderer_without_waiting_for_tick() {
 
 #[test]
 fn thinking_status_initial_frame_includes_thought_panel() {
-    let mut status = ThinkingStatus::start("qwen-plus", 100_000);
+    let mut status = ThinkingStatus::start("qwen-plus", 100_000, ShellUiMode::Ordinary);
     let snapshot = status.state.lock().unwrap().clone();
     let rendered = timem_shell::render_thinking_view_at(&snapshot, "12:00:00");
 
@@ -398,7 +398,7 @@ fn thinking_status_initial_frame_includes_thought_panel() {
 
 #[test]
 fn thinking_status_model_request_does_not_duplicate_initial_thinking_line() {
-    let mut status = ThinkingStatus::start("qwen-plus", 100_000);
+    let mut status = ThinkingStatus::start("qwen-plus", 100_000, ShellUiMode::Ordinary);
     status.set_transient_observation("思考中...");
     let snapshot = status.state.lock().unwrap().clone();
     let rendered = timem_shell::render_thinking_view_at(&snapshot, "12:00:00");
@@ -411,7 +411,7 @@ fn thinking_status_model_request_does_not_duplicate_initial_thinking_line() {
 
 #[test]
 fn thinking_status_finish_cancelled_preserves_display_and_stats() {
-    let mut status = ThinkingStatus::start("qwen-plus", 100_000);
+    let mut status = ThinkingStatus::start("qwen-plus", 100_000, ShellUiMode::Ordinary);
     status.set_usage(super::UsageStats {
         llm_calls: 1,
         prompt_tokens: 5000,
@@ -429,6 +429,103 @@ fn thinking_status_finish_cancelled_preserves_display_and_stats() {
     assert_eq!(snapshot.status.intent, "已取消");
     assert_eq!(snapshot.status.usage.prompt_tokens, 5000);
     assert_eq!(snapshot.status.usage.completion_tokens, 200);
+}
+
+#[test]
+fn native_stream_routes_structured_actions_to_the_fold_not_the_ordinary_panel() {
+    let event = timem_in_process::agent_api::CoreTopicEvent::new(
+        "shell-session",
+        timem_in_process::agent_api::CoreTopic::new(
+            timem_shell::CORE_TOPIC_ACTION,
+            serde_json::json!({}),
+        ),
+        timem_in_process::agent_api::CoreSessionState::Running,
+        serde_json::json!({
+            "action": "run_bash",
+            "action_id": "native-action",
+            "input": {"cmd": "printf native-stream-marker"},
+            "kind": {
+                "kind": "bash",
+                "command": "printf native-stream-marker",
+                "mode": "normal",
+                "interval_ms": null,
+                "timeout_ms": null,
+                "loop_timeout_ms": null,
+                "once_timeout_ms": null
+            },
+            "event": "start",
+            "status": "running",
+            "active": true
+        }),
+    );
+    let mut status = ThinkingStatus::start("qwen-plus", 100_000, ShellUiMode::Stream);
+    {
+        let mut ui = CliTurnUi {
+            status: Some(&mut status),
+            interactive_approval: false,
+            queued_input: None,
+            queued_questions: Vec::new(),
+            active_turn: Some(projection_token("turn-stream", 1)),
+            terminal_outcome: None,
+        };
+        ui.on_core_topic_events(&[event]);
+    }
+
+    let presentation = status.presentation.lock().unwrap().clone();
+    assert_eq!(presentation.tools.active_count(), 1);
+    assert!(
+        timem_shell::render_stream_tool_fold(&presentation.tools).contains("native-stream-marker")
+    );
+    let observations = status.state.lock().unwrap().observations.clone();
+    assert!(!timem_shell::render_observation_panel(&observations).contains("native-stream-marker"));
+    status.finish();
+}
+
+#[test]
+fn native_ordinary_keeps_structured_actions_in_the_existing_observation_panel() {
+    let event = timem_in_process::agent_api::CoreTopicEvent::new(
+        "shell-session",
+        timem_in_process::agent_api::CoreTopic::new(
+            timem_shell::CORE_TOPIC_ACTION,
+            serde_json::json!({}),
+        ),
+        timem_in_process::agent_api::CoreSessionState::Running,
+        serde_json::json!({
+            "action": "run_bash",
+            "action_id": "native-action",
+            "input": {"cmd": "printf native-ordinary-marker"},
+            "kind": {
+                "kind": "bash",
+                "command": "printf native-ordinary-marker",
+                "mode": "normal",
+                "interval_ms": null,
+                "timeout_ms": null,
+                "loop_timeout_ms": null,
+                "once_timeout_ms": null
+            },
+            "event": "start",
+            "status": "running",
+            "active": true
+        }),
+    );
+    let mut status = ThinkingStatus::start("qwen-plus", 100_000, ShellUiMode::Ordinary);
+    {
+        let mut ui = CliTurnUi {
+            status: Some(&mut status),
+            interactive_approval: false,
+            queued_input: None,
+            queued_questions: Vec::new(),
+            active_turn: Some(projection_token("turn-ordinary", 1)),
+            terminal_outcome: None,
+        };
+        ui.on_core_topic_events(&[event]);
+    }
+
+    let presentation = status.presentation.lock().unwrap().clone();
+    assert!(presentation.tools.is_empty());
+    let observations = status.state.lock().unwrap().observations.clone();
+    assert!(timem_shell::render_observation_panel(&observations).contains("native-ordinary-marker"));
+    status.finish();
 }
 
 #[test]
@@ -1107,6 +1204,8 @@ fn cli_help_lists_all_env_backed_options() {
         "Windows PowerShell: $env:TIMEM_API_KEY",
         "--space",
         "TIMEM_SPACE",
+        "--ui-mode",
+        "TIMEM_UI_MODE",
         "--api-protocol",
         "TIMEM_API_PROTOCOL",
         "--base-url",
@@ -1137,7 +1236,7 @@ fn cli_help_lists_all_env_backed_options() {
         "Use Ctrl+D or /exit",
         "timem                     start Web Host",
         "timem --shell [options]   start interactive shell",
-        "timem attach [--space <absolute-path>]   attach a terminal to a running Web Host session",
+        "timem attach [--space <absolute-path>] [--ui-mode ordinary|stream]   attach a terminal to a running Web Host session",
     ] {
         assert!(help.contains(expected), "missing help item: {expected}");
     }
@@ -1156,6 +1255,10 @@ fn cli_help_lists_all_env_backed_options() {
         "--space <absolute-path>        env TIMEM_SPACE; MEM directory, default under the user home"
     ));
     assert!(help.contains("timem --shell --space /absolute/path/to/mem"));
+    assert!(help.contains("Attach selects the Host and Session before prompting for the UI mode."));
+    assert!(help.contains(
+        "Non-interactive terminals default to ordinary; --once-json always uses ordinary."
+    ));
     assert!(!help.contains("--space <name>"));
     assert!(!help.contains("default .test_mem"));
 }

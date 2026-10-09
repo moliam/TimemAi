@@ -30,6 +30,7 @@ It may contain:
   rename groups, and use dnd-kit for keyboard/pointer-accessible ordering and
   cross-group movement. The Host remains authoritative for persisted library
   state.
+- System settings presentation. The first-level System category may expose Host-owned, MEM-persisted configuration such as the exact per-tool model-visible result budget, plus stable browser presentation preferences such as showing answers while they are generated. Experimental switches remain grouped in a distinct Beta subsection. The browser sends intent and renders authoritative snapshot/events; it must not independently enforce Core prompt-size policy.
 - MCP server management presentation: transport-specific forms, connection and
   tool-count status, per-Session enable switches, reconnect/edit/delete
   controls, responsive layout, and redacted secret placeholders.
@@ -40,9 +41,17 @@ It may contain:
   from Core. Browser reducers must not infer Session/Turn working,
   input-admission, cancellation, or terminal state from core topics, worker
   activity, command ACK order, or visible final-answer timing.
-- Frame-budgeted, order-preserving inbound event batching; memoized turn
+- Frame-budgeted, order-preserving inbound event batching with a cancellable
+  timer fallback while events are pending, so suspended animation frames do not
+  stall Host snapshots or paged replies; memoized turn
   subtrees; and browser layout/paint containment for completed offscreen turns.
   These presentation optimizations must not drop or reorder semantic events.
+- Portaled final-answer outline geometry coalesces resize invalidations by frame
+  with a cancellable pending-only timer fallback. A collapsed sibling must not
+  leave an old absolute outline position extending the scrollable area when
+  display frames stop. Known work-collapse and stream-archive commits directly
+  remeasure outline position; correctness must not wait for a ResizeObserver
+  notification. Ordinary scroll navigation remains frame-only.
 - Live one-shot browser command delivery. The UI may assign a correlation
   `command_id`, but sends only while the WebSocket is open and the initial Host
   snapshot is ready. It does not persist an outbox, replay commands after
@@ -76,3 +85,62 @@ It must not contain:
 
 The browser may understand every public topic field and choose its own visual
 representation. It must not merge events from different session or request ids.
+
+
+Endpoint sharing is isolated in `src/endpoint_share.tsx`: a transient top-level
+Portal dialog above Settings owns category checkboxes, opaque share content,
+Lucide warning/progress icons, copy/paste, and local result presentation. Exported
+content is a copy-only, focusable, automatically wrapping code output; import uses
+an uncontrolled bounded textarea so large pasted payloads do not enter React state
+on every keystroke. The modal uses opaque surfaces rather than live backdrop
+sampling and is memoized behind stable parent callbacks. Basic is selected by
+default; advanced and personal are opt-in. Host commands perform
+encoding, validation, collision resolution and persistence. The browser must
+not export redacted snapshots as original configurations, interpret ACK as
+import success, retain share strings across dialog unmount/MEM switch/disconnect,
+or put them in replay storage. Success, rejection, timeout and disconnect share
+one correlated completion path; closing/cancelling clears that correlation and
+drops late replies. Unknown Host errors use a safe localized fallback rather
+than exposing internal codes or paths.
+
+
+Built-in tool activity rows may derive visual summaries only from structured
+Host `core.action.input`: `src/tool_presentation.ts` validates known shapes and
+falls back to the generic redacted argument string for malformed, unknown or
+third-party inputs. `readfile` uses `SquareText` with path and selector-aware
+line/byte/match summaries; historical `max_bytes` is validated only as a legacy
+input field and omitted from the primary summary while remaining in expanded
+redacted details. `memmgr` search/SQL uses `DatabaseSearch`, while its
+other operations use `Database`; `self_tool` uses `Info` with a schema-validated
+action summary. A recognized structured summary replaces raw parameters only in
+the primary chat row: the expandable disclosure retains the complete redacted
+argument detail supplied by the Host projection. These are Interface affordances
+only and must not reinterpret action status, success, persistence or capability
+semantics. Ordinary and stream presentations share the same identity and summary. Tool
+surfaces use the locally bundled IBM Plex Mono face, are 90% of the prose width
+on wider viewports (full width on narrow screens), and keep elapsed metadata at
+the right edge. Running rows alone show a muted leading execution dot; successful
+rows omit both the marker and its layout slot so tool identity shifts left and
+returns to the stronger settled color, while failures retain an explicit status.
+Rows with details are the disclosure target themselves, with hover/focus feedback,
+keyboard activation and selection protection rather than a persistent arrow.
+Live elapsed and countdown values use fixed-width, tabular digit cells: only
+changed digits perform a short clipped vertical roll, labels and units remain
+stationary, and outgoing/incoming glyphs never cross-fade in the same pixels.
+Reduced-motion presentation updates without animation. Settled duration facts
+remain static. Local-work state uses a reduced-motion-aware swaying wrench;
+model waiting keeps its existing star identity. System notices use their own half-pixel-larger type
+contract. An in-progress context-compression notice is one concise status line
+(“Conversation compressing...” / “对话压缩中...”), without a duplicate category
+title and detail; completed notices retain their compression metrics.
+
+Browser acceptance startup evidence lives in `tests/browser/browser-startup.mjs`,
+not the application bundle. It preserves the 12-second startup gate and records
+bounded stderr and HTTP probe timing/status. Linux failure diagnostics read only
+the spawned Chrome PID's counters and at most 16 thread wait locations, plus
+system pressure counters; they never inspect command lines or environments.
+Unavailable diagnostic files must not replace the original startup failure.
+Failure evidence has a separate 250 ms wait cap; this is not extra startup time
+and does not cancel an outstanding kernel read. Counters are a single cumulative
+snapshot, not interval deltas or proof of a blocking cause. HTTP readiness still
+depends on response headers, without waiting for body cancellation.

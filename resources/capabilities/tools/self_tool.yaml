@@ -3,31 +3,19 @@ id: self_tool
 binding_type: builtin
 binding_name: self_tool
 summary: Locate Timem runtime resources, change cwd, or inspect effective configuration.
-prompt_synopsis: |
-  {"self_tool":{"type":"path"}}
-  {"self_tool":{"type":"cwd"}}
-  {"self_tool":{"type":"cwd","new_path":"path/to/workspace"}}
-  {"self_tool":{"type":"params"}}
 description: |
   Use this tool when work requires information about Timem itself or when the
   current prompt context working directory should be queried or changed.
-  Ask for path when you need to know where runtime resources are. Use cwd without
-  new_path to query the current prompt-context directory, or with new_path to
-  change the directory used by later local tools. Ask for params when you need to
-  know how the current runtime is configured.
-prompt_input: |
-  Use type=path for runtime-resource locations. Use type=cwd without new_path to
-  query the current prompt-context directory. To change it, set new_path to an
-  absolute path or a path relative to the current prompt-context cwd.
-  Promptly switch the cwd to help users better understand your work.
-  Use type=params for effective runtime configuration and limits.
-prompt_result: |
-  path returns relevant runtime file and directory locations, including audit
-  logical streams and their physical rolling-segment directories. cwd without
-  new_path returns `CWD: ...` without changing state. cwd with new_path changes
-  the prompt-context directory and returns `CWD changed to: ...`; later local command
-  and readfile actions in the same context use the canonical path. params returns
-  relevant effective, non-sensitive runtime values. Secrets are never returned.
+  Prefer it over inferring runtime identity from process tables, guessed
+  paths, or environment variables: one type=path call answers which MEM/space
+  (space_dir, memory_dir, sessions_dir), executable, and process cwd serve
+  this session, plus model_endpoints_file, config, and audit locations;
+  type=params reports pid, model, api/response protocols, token limits,
+  timeouts, and approval mode. Use cwd without new_path to query the current
+  prompt-context directory, or with new_path to change the directory used by
+  later local tools; on success it returns `CWD changed to: ...` so later
+  local command and readfile actions use the canonical path. Secrets are
+  never returned.
 input_schema: |
   {
     "type": "object",

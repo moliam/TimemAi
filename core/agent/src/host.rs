@@ -377,9 +377,10 @@ pub struct CoreTopicEvent {
 
 pub const CORE_TOPIC_MODEL_RESPONSE: &str = "core.model.response";
 pub const CORE_TOPIC_MODEL_REPAIR: &str = "core.model.repair";
+pub const CORE_TOPIC_MODEL_CAPABILITY_NEGOTIATION: &str = "core.model.capability_negotiation";
 pub const CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP: &str = "core.runtime_root_repair_help";
 pub const CORE_TOPIC_ACTION: &str = "core.action";
-pub const CORE_TOPIC_CONTEXT_COMPACT: &str = "core.context.compact";
+pub const CORE_TOPIC_CONTEXT_COMPRESS: &str = "core.context.compress";
 pub const CORE_TOPIC_TOOLGEN: &str = "core.toolgen";
 pub const CORE_TOPIC_LIFECYCLE: &str = "core.lifecycle";
 pub const CORE_TOPIC_MEMO: &str = "core.memo";
@@ -409,7 +410,7 @@ pub struct CoreModelRepairTopic {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CoreContextCompactTopic {
+pub struct CoreContextCompressTopic {
     pub estimated_before_tokens: u32,
     pub estimated_after_tokens: u32,
     pub estimated_text_before_tokens: u32,
@@ -629,11 +630,11 @@ impl CoreTopicEvent {
         })
     }
 
-    pub fn as_context_compact(&self) -> Option<CoreContextCompactTopic> {
-        if self.topic.name != CORE_TOPIC_CONTEXT_COMPACT {
+    pub fn as_context_compress(&self) -> Option<CoreContextCompressTopic> {
+        if self.topic.name != CORE_TOPIC_CONTEXT_COMPRESS {
             return None;
         }
-        Some(CoreContextCompactTopic {
+        Some(CoreContextCompressTopic {
             estimated_before_tokens: self.payload["estimated_before_tokens"].as_u64()? as u32,
             estimated_after_tokens: self.payload["estimated_after_tokens"].as_u64()? as u32,
             estimated_text_before_tokens: self.payload["estimated_text_before_tokens"]
@@ -774,6 +775,32 @@ pub fn runtime_root_repair_help_topic_event(session_id: impl Into<String>) -> Co
     )
 }
 
+pub fn capability_negotiation_topic_event(
+    session_id: impl Into<String>,
+    phase: &str,
+    identity: Option<&crate::CapabilityProbeIdentity>,
+    profile: Option<&crate::InteractionProfile>,
+    reason: Option<&str>,
+) -> CoreTopicEvent {
+    CoreTopicEvent::new(
+        session_id,
+        CoreTopic::new(
+            CORE_TOPIC_MODEL_CAPABILITY_NEGOTIATION,
+            json!({
+                "name": CORE_TOPIC_MODEL_CAPABILITY_NEGOTIATION,
+                "phase": phase,
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "phase": phase,
+            "identity": identity,
+            "profile": profile,
+            "reason": reason,
+        }),
+    )
+}
+
 pub fn model_repair_topic_event(
     session_id: impl Into<String>,
     issue: impl Into<String>,
@@ -801,40 +828,49 @@ pub fn model_repair_topic_event(
     )
 }
 
-/// The runtime crossed the forced-shrink threshold and injected the
-/// compaction request into the prompt. UI renders this as "compacting...".
-pub fn context_compact_requested_topic_event(
+/// The runtime injected a forced compaction request after either crossing the
+/// configured threshold or failing post-compaction provider-usage validation.
+/// UI renders both reasons as "compacting..."; payload fields preserve the
+/// distinction for diagnostics.
+pub fn context_compress_requested_topic_event(
     session_id: impl Into<String>,
     estimated_prompt_tokens: u32,
     force_threshold_tokens: u32,
+    quality_target_tokens: Option<u32>,
 ) -> CoreTopicEvent {
     CoreTopicEvent::new(
         session_id,
         CoreTopic::new(
-            CORE_TOPIC_CONTEXT_COMPACT,
+            CORE_TOPIC_CONTEXT_COMPRESS,
             json!({
-                "name": CORE_TOPIC_CONTEXT_COMPACT,
+                "name": CORE_TOPIC_CONTEXT_COMPRESS,
             }),
         ),
         CoreSessionState::Running,
         json!({
             "phase": "requested",
+            "trigger": if quality_target_tokens.is_some() {
+                "provider_post_compaction_quality"
+            } else {
+                "threshold_crossed"
+            },
             "estimated_prompt_tokens": estimated_prompt_tokens,
             "force_shrink_threshold_tokens": force_threshold_tokens,
+            "quality_target_tokens": quality_target_tokens,
         }),
     )
 }
 
-pub fn context_compact_topic_event(
+pub fn context_compress_topic_event(
     session_id: impl Into<String>,
-    report: &CoreContextCompactTopic,
+    report: &CoreContextCompressTopic,
 ) -> CoreTopicEvent {
     CoreTopicEvent::new(
         session_id,
         CoreTopic::new(
-            CORE_TOPIC_CONTEXT_COMPACT,
+            CORE_TOPIC_CONTEXT_COMPRESS,
             json!({
-                "name": CORE_TOPIC_CONTEXT_COMPACT,
+                "name": CORE_TOPIC_CONTEXT_COMPRESS,
             }),
         ),
         CoreSessionState::Running,
@@ -1466,6 +1502,7 @@ pub(crate) fn notification_topic_event(
 
 pub fn running_shell_job_exit_topic_event(update: &crate::ShellJobExitUpdate) -> CoreTopicEvent {
     let status = match update.status.as_str() {
+        _ if update.capture_error.is_some() => "failed",
         "0" => "completed",
         "cancelled" => "cancelled",
         _ => "failed",
@@ -1511,6 +1548,7 @@ pub fn running_shell_job_exit_topic_event(update: &crate::ShellJobExitUpdate) ->
             "status": status,
             "pid": update.pid,
             "exit_status": update.status,
+            "capture_error": update.capture_error,
             "elapsed_ms": update.elapsed_ms,
             "memory_activity": "none",
         }),
@@ -1758,9 +1796,9 @@ pub trait TurnUi {
         self.is_cancel_requested()
     }
 
-    /// User-initiated manual context compaction request (WebUI action).
+    /// User-initiated manual context compression request (WebUI action).
     /// Consumed by the turn loop each iteration; safe to set mid-turn.
-    fn take_manual_context_compact_request(&mut self) -> bool {
+    fn take_manual_context_compress_request(&mut self) -> bool {
         false
     }
 
@@ -1799,6 +1837,13 @@ pub trait TurnUi {
         false
     }
 
+    /// Consumes only a pending tool-result budget update. This narrow hook may
+    /// run after a model response has arrived and immediately before its tool
+    /// results are formatted, without applying unrelated model/runtime changes.
+    fn take_model_tool_result_bytes_update(&mut self) -> Option<usize> {
+        None
+    }
+
     fn on_model_request(&mut self, _round: u32, _prompt: &str) {}
 
     fn on_model_interaction_request(
@@ -1820,6 +1865,12 @@ pub trait TurnUi {
         self.on_model_interaction_request(round, request);
     }
 
+    fn on_reasoning_upgrade(
+        &mut self,
+        _upgrade: Option<crate::model_requirements::ReasoningUpgrade>,
+    ) {
+    }
+
     fn on_model_request_completed(&mut self, _latency: Duration) {}
 
     fn on_model_response(&mut self, _round: u32, _usage: &UsageStats, _content: &str) {}
@@ -1831,6 +1882,15 @@ pub trait TurnUi {
     fn on_model_response_parsed(&mut self, _tool_count: usize) {}
 
     fn on_interaction_profile(&mut self, _profile: &crate::InteractionProfile) {}
+
+    /// Persists or clears a Core-owned capability result. Hosts must key this
+    /// only by the stable endpoint id and must not reinterpret probe semantics.
+    fn on_persisted_capability_probe(
+        &mut self,
+        _identity: &crate::CapabilityProbeIdentity,
+        _record: Option<&crate::PersistedCapabilityProbe>,
+    ) {
+    }
 
     fn on_core_topic_events(&mut self, _events: &[CoreTopicEvent]) {}
 

@@ -4,7 +4,8 @@
 //! process and file-reading safety limits belong to those layers; prompt-size policy
 //! belongs here so inline and native tool calling cannot drift apart.
 
-pub(crate) const MAX_MODEL_TOOL_RESULT_BYTES: usize = 32 * 1024;
+pub const MAX_MODEL_TOOL_RESULT_BYTES: usize = 30 * 1024;
+pub const DEFAULT_MODEL_TOOL_RESULT_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Retention {
@@ -22,8 +23,43 @@ impl Retention {
     }
 }
 
-pub(crate) fn gate(text: &str, retention: Retention) -> String {
-    fit(text, MAX_MODEL_TOOL_RESULT_BYTES, retention)
+pub fn validate_model_tool_result_bytes(max_bytes: usize) -> Result<(), String> {
+    if matches!(max_bytes, 8_192 | 10_240 | 16_384 | 20_480 | 30_720) {
+        Ok(())
+    } else {
+        Err("model_tool_result_bytes_invalid".to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RetainedFragment {
+    pub text: String,
+    pub truncated: bool,
+    pub original_bytes: usize,
+    pub retained_bytes: usize,
+    pub retained: &'static str,
+}
+
+pub(crate) fn retain_fragment(text: &str, budget: usize, retention: Retention) -> RetainedFragment {
+    let original_bytes = text.len();
+    let retained_text = if original_bytes <= budget {
+        text.to_string()
+    } else {
+        match retention {
+            Retention::Head => utf8_prefix(text, budget).to_string(),
+            Retention::Tail => text[utf8_suffix_start(text, budget)..].to_string(),
+        }
+    };
+    RetainedFragment {
+        retained_bytes: retained_text.len(),
+        text: retained_text,
+        truncated: original_bytes > budget,
+        original_bytes,
+        retained: match retention {
+            Retention::Head => "head",
+            Retention::Tail => "tail",
+        },
+    }
 }
 
 pub(crate) fn fit(text: &str, budget: usize, retention: Retention) -> String {

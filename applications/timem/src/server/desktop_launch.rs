@@ -16,7 +16,9 @@ pub(super) fn open_browser(url: &str) -> Result<(), String> {
         .args(args)
         .spawn()
         .map_err(|error| error.to_string())?;
+    let child_registration = agent_core::os::register_managed_child(child.id());
     std::thread::spawn(move || {
+        let _child_registration = child_registration;
         let _ = child.wait();
     });
     Ok(())
@@ -44,7 +46,9 @@ pub(super) fn open_directory_in_terminal(path: &Path) -> Result<(), String> {
         .args(args)
         .spawn()
         .map_err(|error| format!("terminal_open_failed:{error}"))?;
+    let child_registration = agent_core::os::register_managed_child(child.id());
     std::thread::spawn(move || {
+        let _child_registration = child_registration;
         let _ = child.wait();
     });
     Ok(())

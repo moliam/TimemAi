@@ -1,7 +1,8 @@
+import { createStartupDiagnostics } from "./browser-startup.mjs";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { extname, join, resolve } from "node:path";
@@ -30,7 +31,7 @@ async function waitFor(check, message, timeout = 10000) {
     try { if (await check()) return; } catch {}
     await sleep(40);
   }
-  throw new Error(message);
+  throw new Error(typeof message === "function" ? await message() : message);
 }
 
 const worker = (state) => ({
@@ -295,18 +296,17 @@ async function startBrowser(url) {
     "--disable-background-networking", "--disable-component-update", "--disable-sync",
     "--window-size=1440,1000", "about:blank",
   ], { stdio: ["ignore", "ignore", "pipe"] });
-  let chromeError = "";
-  child.stderr.on("data", (chunk) => { chromeError += String(chunk); });
+  const startup = createStartupDiagnostics(child, chrome);
 
   try {
     let port = null;
     await waitFor(async () => {
-      if (child.exitCode !== null) return false;
+      if (startup.stopped()) return false;
       port = await readDevToolsPort(profile);
+      startup.port(port);
       if (port === null) return false;
-      try { return (await fetch(`http://127.0.0.1:${port}/json/version`)).ok; }
-      catch { return false; }
-    }, `Chrome DevTools did not start: ${chromeError}`, 12000);
+      return startup.probe(`http://127.0.0.1:${port}/json/version`);
+    }, () => startup.failure(), 12000);
 
     const target = await (await fetch(
       `http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`,
@@ -333,6 +333,10 @@ async function startBrowser(url) {
       socket.send(JSON.stringify({ id, method, params }));
     });
     await call("Runtime.enable"); await call("Page.enable");
+    // Visual assertions require an active page. Headless Chrome can leave this
+    // CDP-created target hidden, freezing its animation timeline at zero even
+    // while Runtime.evaluate and network replies continue to work.
+    await call("Emulation.setFocusEmulationEnabled", { enabled: true });
     const evaluate = async (expression) => {
       const result = await call("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
       if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
@@ -353,9 +357,14 @@ async function startBrowser(url) {
 
 async function main() {
   const mem = await mkdtemp(join(tmpdir(), "timem-stream-product-"));
-  await writeFile(join(mem, "Cargo.toml"), "stream readfile acceptance fixture");
+  // Every byte selector below must address this fixture, not an incidental
+  // repository file. Keep enough ASCII bytes for the inclusive 199 endpoint.
+  const readFixture = "stream readfile acceptance fixture\n".repeat(8);
+  assert(Buffer.byteLength(readFixture) > 199, "readfile fixture too short");
+  await writeFile(join(mem, "Cargo.toml"), readFixture);
   const scenario = process.env.STREAM_PREVIEW_SCENARIO ?? "normal";
   const protocol = process.env.STREAM_PREVIEW_PROTOCOL ?? "xml";
+  const responses = process.env.STREAM_API_PROTOCOL === "openai-responses";
   const streamMode = process.env.STREAM_UI_MODE !== "false";
   assert(["xml", "json", "native"].includes(protocol), "unsupported preview protocol");
   assert(["normal", "invalid", "network", "stop", "supplement", "interaction", "tools"].includes(scenario), "unsupported preview scenario");
@@ -374,8 +383,31 @@ async function main() {
     assert(JSON.parse(body).stream === true, "streaming request must not require TIMEM_STREAM environment configuration");
     requests++;
     res.writeHead(200, {"Content-Type":"text/event-stream"});
-    const write = (content) => res.write(`data: ${JSON.stringify({choices:[{delta:{content}}]})}\n\n`);
+    let fullText = "";
+    const write = (content) => {
+      fullText += content;
+      res.write(`data: ${JSON.stringify(responses ? {type:"response.output_text.delta",delta:content} : {choices:[{delta:{content}}]})}\n\n`);
+    };
     appendStreaming = write;
+    if (protocol === "native" && responses) {
+      assert(req.url === "/v1/responses", "wrong Responses route");
+      assert(Array.isArray(JSON.parse(body).tools), "native tools missing from request");
+      let output;
+      if (requests === 1) {
+        write("HTTP early response");
+        await new Promise(resolve => { release = resolve; });
+        output = [{type:"message",content:[{type:"output_text",text:fullText}]},
+          {type:"function_call",id:"fc_read",call_id:"call_read",name:"readfile",arguments:JSON.stringify({path:"Cargo.toml",ender:{byte_nr:199}})}];
+        res.write(`data: ${JSON.stringify({type:"response.function_call_arguments.delta",item_id:"fc_read",output_index:1,delta:'{"path":'})}\n\n`);
+        res.write(`data: ${JSON.stringify({type:"response.function_call_arguments.delta",item_id:"fc_read",output_index:1,delta:'"Cargo.toml","ender":{"byte_nr":199}}'})}\n\n`);
+      } else {
+        assert(body.includes("function_call_output") && body.includes("stream readfile acceptance fixture"), "tool result not returned to Responses input");
+        await new Promise(resolve => { releaseFinal = resolve; });
+        output = [{type:"function_call",id:"fc_final",call_id:"call_final",name:"task_finished",arguments:JSON.stringify({summary:"HTTP final"})}];
+      }
+      res.end(`data: ${JSON.stringify({type:"response.completed",response:{status:"completed",model:"preview-test",output,usage:{input_tokens:100,output_tokens:20,total_tokens:120}}})}\n\n`);
+      return;
+    }
     if (protocol === "native") {
       if (requests === 1) {
         write("HTTP early response");
@@ -386,41 +418,57 @@ async function main() {
         // deltas alone never terminate the turn.
         res.write(`data: ${JSON.stringify({choices:[{delta:{tool_calls:[{index:0,id:"call_final",type:"function",function:{name:"task_finished",arguments:JSON.stringify({summary:"HTTP final"})}}]}}]})}\n\n`);
       }
-      res.end("data: [DONE]\n\n"); return;
+      res.end(responses ? `data: ${JSON.stringify({type:"response.completed",response:{status:"completed",model:"preview-test",output:[{type:"message",content:[{type:"output_text",text:fullText}]}],usage:{input_tokens:100,output_tokens:20,total_tokens:120}}})}\n\n` : "data: [DONE]\n\n"); return;
     }
     if (requests === 1) {
       // For the interaction scenario keep <free_talk> open so appended
       // streaming text stays previewable (only free_talk/final_answer text is
       // forwarded by the XML preview stream).
       const interactionXml = protocol === "xml" && scenario === "interaction";
-      write(protocol === "json" ? '{"status":"working","free_talk":"HTTP early response","working_still_action":[{"readfile":{"path":"Cargo.toml","max_bytes":200}}' : interactionXml ? '<ASSISTANT><free_talk>HTTP early response' : '<ASSISTANT><free_talk>HTTP early response</free_talk><actions><readfile><path>Cargo.toml</path><max_bytes>200</max_bytes>');
+      write(protocol === "json" ? '{"status":"working","free_talk":"HTTP early response","working_still_action":[{"readfile":{"path":"Cargo.toml","ender":{"byte_nr":199}}}' : interactionXml ? '<ASSISTANT><free_talk>HTTP early response' : '<ASSISTANT><free_talk>HTTP early response</free_talk><actions><readfile><path>Cargo.toml</path><ender><byte_nr>199</byte_nr></ender>');
       await new Promise(resolve => { release = resolve; });
       if (scenario === 'network') { res.destroy(); return; }
       if (scenario === 'invalid') write('</readfile></actions><invalid></ASSISTANT>');
-      else if (interactionXml) write('</free_talk><actions><readfile><path>Cargo.toml</path><max_bytes>200</max_bytes></readfile></actions></ASSISTANT>');
-      else if (scenario === "tools") write('</readfile><readfile><path>Cargo.toml</path><max_bytes>200</max_bytes></readfile><readfile><path>Cargo.toml</path><max_bytes>100</max_bytes></readfile></actions></ASSISTANT>');
+      else if (interactionXml) write('</free_talk><actions><readfile><path>Cargo.toml</path><ender><byte_nr>199</byte_nr></ender></readfile></actions></ASSISTANT>');
+      else if (scenario === "tools") write('</readfile><readfile><path>Cargo.toml</path><ender><byte_nr>199</byte_nr></ender></readfile><readfile><path>Cargo.toml</path><ender><byte_nr>99</byte_nr></ender></readfile></actions></ASSISTANT>');
       else write(protocol === "json" ? ']}' : '</readfile></actions></ASSISTANT>');
     } else {
       if (scenario === "normal" || scenario === "tools") await new Promise(resolve => { releaseFinal = resolve; });
       write(protocol === "json" ? JSON.stringify({status:"all_finished",final_answer:"HTTP final"}) : "<ASSISTANT><finish_confirm>Now let me think seriously twice before I announce stop. Review user's task list. Is my delivery consistent with user's demand?</finish_confirm><final_answer>HTTP final</final_answer></ASSISTANT>");
     }
-    res.end("data: [DONE]\n\n");
+    res.end(responses ? `data: ${JSON.stringify({type:"response.completed",response:{status:"completed",model:"preview-test",output:[{type:"message",content:[{type:"output_text",text:fullText}]}],usage:{input_tokens:100,output_tokens:20,total_tokens:120}}})}\n\n` : "data: [DONE]\n\n");
   });
   await new Promise(resolve => model.listen(0,"127.0.0.1",resolve));
   const child = spawn(resolve(root,"../../target/debug/timem"), ["--no-open","--space",mem,"--port","18987"], {
-    env:{PATH:process.env.PATH,HOME:mem,TIMEM_API_KEY:"dummy",TIMEM_API_PROTOCOL:"openai-compatible",TIMEM_RESPONSE_PROTOCOL:protocol === "native" ? "xml" : protocol,TIMEM_TOOL_CALL_MODE:protocol === "native" ? "native" : "inline",TIMEM_BASE_URL:`http://127.0.0.1:${model.address().port}/v1`,TIMEM_MODEL:"preview-test",TIMEM_WORK_INSTRUCTIONS:"off"}, stdio:["ignore","pipe","pipe"]
+    env:{PATH:process.env.PATH,HOME:mem,TIMEM_API_KEY:"dummy",TIMEM_API_PROTOCOL:responses ? "openai-responses" : "openai-compatible",TIMEM_RESPONSE_PROTOCOL:protocol === "native" ? "xml" : protocol,TIMEM_TOOL_CALL_MODE:protocol === "native" ? "native" : "inline",TIMEM_BASE_URL:`http://127.0.0.1:${model.address().port}/v1`,TIMEM_MODEL:"preview-test",TIMEM_WORK_INSTRUCTIONS:"off"}, stdio:["ignore","pipe","pipe"]
   });
   let logs = ""; child.stdout.on("data",x=>logs+=x); child.stderr.on("data",x=>logs+=x);
   let browser, socket;
   const received = [];
+  const assertSuccessfulFixtureReads = async () => {
+    const readFinishes = () => received.flatMap(raw => {
+      const e = raw.type === "semantic_event" ? raw.event : raw;
+      return e.event?.topic?.name === "core.action" && e.event.payload.action === "readfile" && e.event.payload.event === "finish" ? [e.event.payload] : [];
+    });
+    // The HTTP model request and browser event stream have independent delivery
+    // queues: wait for terminal evidence before inspecting it or the tool UI.
+    await waitFor(() => readFinishes().length === 3, "three readfile finishes missing");
+    const finishes = readFinishes();
+    assert(finishes.every(e => e.status === "completed"), `expected three successful fixture reads: ${JSON.stringify(finishes)}`);
+    assert(modelInputs[1].includes("stream readfile acceptance fixture"), "fixture content missing from next model input");
+  };
   try {
     await waitFor(async()=>{try{return (await fetch("http://127.0.0.1:18987/")).ok;}catch{return false;}},"product did not start",30000);
     socket = new WebSocket("ws://127.0.0.1:18987/ws");
     let sessionId;
     socket.addEventListener("message",({data})=>{let e=JSON.parse(String(data)); received.push(e); if(e.type==="semantic_event")e=e.event; if(e.type==="session_created")sessionId=e.session.session_id;});
     await new Promise((resolve,reject)=>{socket.addEventListener("open",resolve,{once:true});socket.addEventListener("error",reject,{once:true});});
-    socket.send(JSON.stringify({type:"session_create",display_name:"HTTP streaming acceptance",workspace_dir:mem}));
+    socket.send(JSON.stringify({type:"session_create",command_id:"fixture-session",display_name:"HTTP streaming acceptance",workspace_dir:mem}));
     await waitFor(()=>sessionId,"session creation failed");
+    socket.send(JSON.stringify({type:"model_endpoint_upsert",command_id:"fixture-endpoint",endpoint:{id:"e2e-stream",name:"E2E stream",model:"preview-test",api_protocol:responses?"openai-responses":"openai-compatible",response_protocol:protocol==="native"?"xml":protocol,base_url:`http://127.0.0.1:${model.address().port}/v1`,api_key:"dummy",max_llm_input_tokens:100000,max_llm_output_tokens:10000,stream:true}}));
+    await waitFor(()=>received.some(e=>e.type==="command_ack" && e.command_id==="fixture-endpoint" && e.status==="committed"),"endpoint creation failed");
+    socket.send(JSON.stringify({type:"model_endpoint_apply",command_id:"fixture-apply",session_id:sessionId,endpoint_id:"e2e-stream"}));
+    await waitFor(()=>received.some(e=>e.type==="command_ack" && e.command_id==="fixture-apply" && e.status==="committed"),"endpoint apply failed");
     browser = await startBrowser("http://127.0.0.1:18987/");
     // The CDP target may still be on about:blank right after creation, where
     // localStorage access is denied; wait until the app origin is live.
@@ -435,13 +483,17 @@ async function main() {
     await waitFor(()=>browser.evaluate(`!!document.querySelector('textarea[aria-label="Message Timem"]')`),"composer missing");
     await waitFor(() => browser.evaluate(`!!document.querySelector('button.session[title="HTTP streaming acceptance"]')`), "session button missing");
     await browser.evaluate(`document.querySelector('button.session[title="HTTP streaming acceptance"]')?.click()`);
-    socket.send(JSON.stringify({type:"turn_submit",session_id:sessionId,text:"HTTP streaming acceptance"}));
+    await browser.evaluate(`(() => { const e=document.querySelector('textarea[aria-label="Message Timem"]'); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(e,'HTTP streaming acceptance'); e.dispatchEvent(new Event('input',{bubbles:true})); })()`);
+    await browser.evaluate(`document.querySelector('textarea[aria-label="Message Timem"]').focus()`);
+    await browser.call("Input.dispatchKeyEvent",{type:"keyDown",key:"Enter",code:"Enter",windowsVirtualKeyCode:13});
+    await browser.call("Input.dispatchKeyEvent",{type:"keyUp",key:"Enter",code:"Enter",windowsVirtualKeyCode:13});
     if (!streamMode) {
       await waitFor(() => !!release, "initial model request missing");
       assert(await browser.evaluate(`!document.querySelector('.response-preview, .turn-stream-tools')`), "non-stream mode leaked provisional UI");
       await waitFor(() => browser.evaluate(`document.querySelector('button.work-title-chip')?.getAttribute('aria-expanded') === 'true'`), "non-stream working panel not expanded");
       release();
       await waitFor(() => !!releaseFinal, "next model request missing");
+      if (scenario === "tools") await assertSuccessfulFixtureReads();
       if (scenario === "tools") await waitFor(() => browser.evaluate(`document.querySelector('.turn-work-content')?.textContent.includes('readfile')`), "non-stream tool missing");
       releaseFinal();
       await waitFor(() => browser.evaluate(`document.querySelector('.turn-final-delivery')?.textContent.includes('HTTP final')`), "non-stream final missing");
@@ -465,7 +517,15 @@ async function main() {
       await browser.call("Input.dispatchKeyEvent", {type:"keyDown",key:"c",code:"KeyC",modifiers:4,commands:["copy"]});
       await browser.call("Input.dispatchKeyEvent", {type:"keyUp",key:"c",code:"KeyC",modifiers:4});
       assert((await browser.evaluate(`navigator.clipboard.readText()`)).includes("HTTP early response"), "streamed response clipboard copy failed");
+      // Establish a fresh live-edge -> reading-away transition, rather than
+      // accepting an indicator left over from an earlier layout/selection.
+      await browser.evaluate(`(() => { const sc=document.querySelector('[data-session-timeline-active="true"] .response-preview').closest('.chat-scroll');sc.scrollTop=sc.scrollHeight; })()`);
+      await waitFor(() => browser.evaluate(`(() => { const sc=document.querySelector('[data-session-timeline-active="true"] .response-preview').closest('.chat-scroll');return sc.scrollHeight-sc.clientHeight > 500 && sc.scrollHeight-sc.clientHeight-sc.scrollTop < 8 && !!document.querySelector('.thread-working-away.at-live-edge'); })()`), "live-edge scroll precondition missing");
+      // Setting scrollTop is synchronous, but the scroll event that turns off
+      // follow-latest is not. Wait for the UI to acknowledge reading away from
+      // the bottom before injecting the next model chunk.
       const before = await browser.evaluate(`(() => { const sc=document.querySelector('[data-session-timeline-active="true"] .response-preview').closest('.chat-scroll');sc.scrollTop=100;return sc.scrollTop; })()`);
+      await waitFor(() => browser.evaluate(`(() => { const sc=document.querySelector('[data-session-timeline-active="true"] .response-preview').closest('.chat-scroll');return Math.abs(sc.scrollTop-100)<8 && !!document.querySelector('.thread-working-away.away-from-bottom'); })()`), "reading-away scroll event was not processed");
       appendStreaming("\n\nCONTINUED_AFTER_COPY");
       await waitFor(() => browser.evaluate(`document.querySelector('.response-preview')?.textContent.includes('CONTINUED_AFTER_COPY')`), "stream did not continue after copy");
       const after = await browser.evaluate(`document.querySelector('.response-preview').closest('.chat-scroll').scrollTop`);
@@ -505,6 +565,7 @@ async function main() {
       await waitFor(() => !!releaseFinal, "next model request missing");
       assert(await browser.evaluate(`!document.querySelector('.live-interim-answer')`), "stale interim UI remained");
       if (scenario === "tools") {
+        await assertSuccessfulFixtureReads();
         await waitFor(() => browser.evaluate(`document.querySelector('.turn-stream-tools')?.textContent.includes('readfile')`), "executed readfile missing while preview enabled");
         await waitFor(() => received.some(raw => { const e = raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.action" && e.event.payload.action === "readfile" && e.event.payload.event === "finish"; }), "readfile execution evidence missing");
         await waitFor(() => received.some(raw => { const e = raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.action" && e.event.payload.action === "readfile" && e.event.payload.event === "execution_start"; }), "readfile actual execution boundary missing");
@@ -520,6 +581,12 @@ async function main() {
       return;
     }
     await waitFor(()=>browser.evaluate(`document.querySelector('.turn-final-delivery')?.textContent.includes('HTTP final')`),"final answer absent",20000);
+    if (scenario === "normal") {
+      assert(!received.some(raw => {
+        const event = raw.type === "semantic_event" ? raw.event : raw;
+        return event.type === "core_topic" && event.event?.topic?.name === "core.model.repair";
+      }), "normal streaming fixture unexpectedly triggered protocol repair");
+    }
     if (scenario === "tools") {
       await waitFor(() => browser.evaluate(`!document.querySelector('button[aria-label="Cancel current turn"]')`), "terminal projection missing");
       assert(await browser.evaluate(`Array.from(document.querySelectorAll('.turn-assistant-heading')).some(e=>e.textContent.includes('Thought/Action'))`), "Thought/Action disappeared after final delivery");
@@ -539,8 +606,24 @@ async function main() {
     if (scenario === "invalid") {
       assert(received.some(raw => { const e = raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.model.preview" && e.event.payload.attempt === 1 && e.event.payload.response === null; }), "invalid attempt did not retract all previews");
     }
-    console.log(`PASS actual Host + HTTP SSE + Chrome: protocol=${protocol} scenario=${scenario}; response visible before HTTP completion, final delivered`);
-  } catch(error) { console.error(logs); console.error("requests",requests); console.error("action evidence", JSON.stringify(received.flatMap(raw => { const e=raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.action" ? [e.event.payload] : []; }))); console.error("host errors", JSON.stringify(received.filter(e => JSON.stringify(e).includes("host_error")))); if(browser)console.error(await browser.evaluate("document.body.innerText")); throw error; }
+    const persistedFinal = async (dir) => {
+      for (const entry of await readdir(dir, {withFileTypes:true})) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) { if (await persistedFinal(path)) return true; }
+        else if (entry.isFile() && (entry.name.endsWith(".jsonl") || entry.name.endsWith(".json"))) {
+          const text = await readFile(path,"utf8");
+          if (text.includes("HTTP final") && text.includes(sessionId)) return true;
+        }
+      }
+      return false;
+    };
+    await waitFor(() => persistedFinal(mem), "final not found in persisted JSON/JSONL records");
+    await browser.call("Page.reload", {ignoreCache:true});
+    await waitFor(() => browser.evaluate(`!!document.querySelector('button.session[title="HTTP streaming acceptance"]')`), "session missing after final reload");
+    await browser.evaluate(`document.querySelector('button.session[title="HTTP streaming acceptance"]').click()`);
+    await waitFor(() => browser.evaluate(`document.querySelector('.turn-final-delivery')?.textContent.includes('HTTP final')`), "final lost on reload");
+    console.log(`PASS actual Host + HTTP SSE + Chrome: api=${responses ? "responses" : "chat"} protocol=${protocol} scenario=${scenario}; browser submission, early preview, final persisted and restored on reload`);
+  } catch(error) { console.error(logs); console.error("product process", {pid:child.pid, exitCode:child.exitCode, signalCode:child.signalCode}); console.error("requests",requests); console.error("received event types", received.map(e => e.type)); console.error("command acknowledgements", JSON.stringify(received.filter(e => e.type === "command_ack"))); console.error("action evidence", JSON.stringify(received.flatMap(raw => { const e=raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.action" ? [e.event.payload] : []; }))); console.error("host errors", JSON.stringify(received.filter(e => JSON.stringify(e).includes("host_error")))); if(browser)console.error(await browser.evaluate("document.body.innerText")); throw error; }
   finally {
     release?.(); releaseFinal?.(); socket?.close(); if(browser)await browser.close();
     child.kill("SIGTERM"); await waitForProcessExit(child,5000);

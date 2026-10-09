@@ -27,14 +27,26 @@ export function createFrameEventQueue<T>({
   const queue: T[] = [];
   let scheduled: number | null = null;
   let disposed = false;
+  let fallback: ReturnType<typeof setTimeout> | null = null;
+
+  const cancelFlush = () => {
+    if (scheduled !== null) cancel(scheduled);
+    if (fallback !== null) clearTimeout(fallback);
+    scheduled = null;
+    fallback = null;
+  };
 
   const requestFlush = () => {
     if (disposed || scheduled !== null) return;
     scheduled = schedule(flush);
+    // Animation frames may stop in a hidden tab or without a working display
+    // link. Host snapshots and paged replies must still advance. Race one
+    // cancellable timer per pending batch, not a permanent polling loop.
+    fallback = setTimeout(flush, 100);
   };
 
   const flush = () => {
-    scheduled = null;
+    cancelFlush();
     if (disposed || queue.length === 0) return;
     const started = now();
     const batch: T[] = [];
@@ -51,8 +63,6 @@ export function createFrameEventQueue<T>({
       if (disposed) return;
       queue.push(item);
       if (flushImmediately) {
-        if (scheduled !== null) cancel(scheduled);
-        scheduled = null;
         // Make the first live update visible without waiting for the next frame,
         // but preserve the normal batch/time budget for any accumulated burst.
         // Synchronously draining the whole queue can monopolize the browser main
@@ -65,8 +75,7 @@ export function createFrameEventQueue<T>({
     dispose() {
       disposed = true;
       queue.length = 0;
-      if (scheduled !== null) cancel(scheduled);
-      scheduled = null;
+      cancelFlush();
     },
     pending: () => queue.length,
   };

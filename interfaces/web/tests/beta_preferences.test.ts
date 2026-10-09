@@ -55,11 +55,12 @@ describe("Beta browser preferences", () => {
     p.setBetaPreference("toolResults", false);
     expect(p.getBetaPreference("toolResults")).toBe(false);
   });
-  it("wires Host defaults, Beta switch, neutral rows and folded groups without mutating tool status", () => {
+  it("wires Host defaults, Beta switch, native row icons and folded group summaries", () => {
     const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
     expect(main).toContain("applyBetaDebugDefault(snapshot.server.debug_mode)");
     expect(main).toContain("<ToolResultStatusSetting />");
-    expect(main).toContain('!showResults && !isToolActivityRunning(status) ? t("tools.done") : label');
+    expect(main).toContain("<ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} />");
+    expect(main).toContain('className="tool-failure-icon"');
     expect(main).toContain('t("tools.doneCount", { count: completed.length })');
     expect(main).toContain('if (!showResults && summary.status !== "running") return t("tools.done")');
     expect(main).toContain('if (showResults && summary.failedCount > 0)');

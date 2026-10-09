@@ -43,8 +43,13 @@ def file_exists_token(token: str) -> bool:
     if "/" in token:
         return (ROOT / token).exists()
     if token.endswith((".ts", ".tsx", ".mjs", ".rs", ".sh", ".md")):
+        if (ROOT / token).is_file():
+            return True
+        # Evidence belongs to source trees, never volatile build/dependency output.
         for base in [
-            ROOT,
+            ROOT / "bridges",
+            ROOT / "interfaces" / "shell" / "tests",
+            ROOT / "core" / "platform" / "tests",
             ROOT / "interfaces" / "web" / "tests",
             ROOT / "core" / "agent" / "tests",
             ROOT / "core" / "session" / "tests",

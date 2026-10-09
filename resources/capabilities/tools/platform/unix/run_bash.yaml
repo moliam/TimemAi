@@ -4,10 +4,6 @@ binding_type: builtin
 binding_name: run_bash
 requires_host: bash_execution
 summary: Run local shell commands.
-prompt_synopsis: |
-  {"run_bash":{"cmd":"git status --short","timeout_ms":5000}}
-  {"run_bash":{"cmd":"cargo test","timeout_ms":120000,"tail_out":true}}
-  {"run_bash":{"loop_cmd":"test -f build/done","interval_ms":1000,"loop_timeout_ms":120000,"once_timeout_ms":5000}}
 description: |
   RUNTIME's local command environment is ({{RUN_BASH_HOST_ENVIRONMENT}}).
   `run_bash` runs a shell command on the local machine and captures its result.
@@ -17,9 +13,9 @@ description: |
   files.
   `timeout_ms` is only how long Timem waits for a normal command. It is not a
   kill deadline. If the wait budget is reached, Timem returns the pid and stops
-  waiting while the process may still be running. Set `tail_out=true` to
-  retain the end of oversized command output, which is useful for compiler and
-  test summaries.
+  waiting while the process may still be running. Oversized command output
+  retains its end by default, which is useful for compiler and test summaries.
+  Set `tail_out=false` to retain its beginning.
   Accomplish your goals by intelligently choosing and organizing your commands.
   Revert tmp changes in the user's environment in a timely manner. Prefer to
   transform long sleeps into loop_cmd or `while` loops with short sleeps that
@@ -30,9 +26,9 @@ description: |
   being waited on; obtain that value by making `loop_cmd` read the task's status
   file, wait result, or remote API state.
   For long local work that should keep running across interaction rounds, use
-  background=true. Runtime
-  rejects explicit process-group escape such as `setsid`, `disown`, or daemon
-  launchers, including in background mode.
+  background=true. Runtime-managed jobs are cleaned up on cancellation or
+  shutdown where the host platform permits; prefer background=true rather than
+  manually detaching child processes.
   Background and timeout jobs return a pid; manage them with
   normal shell commands if the user asks you to inspect or stop them. Tracking
   and captured output are process-local and bounded; a runtime restart
@@ -40,25 +36,27 @@ description: |
   NOTE: CAREFULLY USE MULTI-LINE CMD. Try to split them into individual
   run_bash calls via parallel/serial execution. Properly set 'set -euo pipefail'
   for better error collection in multi-line cmd.
-prompt_input: |
-  If the command writes, creates, or modifies any file, you MUST set `edit` to
-  the absolute path (string) or paths (array of strings) of every file being
-  written. Read-only commands must omit `edit`.
-  Choose exactly one mode. For a normal/background command, provide cmd and do
-  not provide loop_cmd or interval_ms; timeout_ms, background, and tail_out are
-  optional. For polling, provide loop_cmd with interval_ms, omit cmd, and keep
-  background false or absent. loop_timeout_ms is the total polling wait budget;
-  once_timeout_ms is the per-check command timeout.
-prompt_result: |
+  SAFETY SCAN GUIDANCE: commands are statically scanned for unmanaged
+  background launches and long sleeps. Quoted strings and heredoc bodies are
+  treated as data, not shell syntax. So when a command must EMBED sample command text (test
+  fixtures, scripts about shell commands), keep that text inside single
+  quotes or a quoted heredoc body (<<'EOF') instead of bare/unquoted; do not
+  place real `sleep N` (N>=30) or a trailing `&` outside quotes. If a
+  legitimate command is rejected by the scan, restructure it (quote the data
+  part) rather than trying obfuscation.
+  For the call itself: for a normal or background command provide cmd and do
+  not provide loop_cmd or interval_ms; timeout_ms, background, and tail_out
+  are optional. For polling, provide loop_cmd with interval_ms, omit cmd, and
+  keep background false or absent. loop_timeout_ms is the total polling wait
+  budget; once_timeout_ms is the per-check command timeout.
   Normal and polling execution use the standard structured result with lifecycle
   `status`, `exit_code`, and stdout/stderr. In polling mode, `exit_code` belongs
   to the last `loop_cmd`, not automatically to the task being waited on. Timem's
   shared result gate bounds only the model-visible evidence according to tail_out. Background
   returns `pid=..., now keeps running in background`.
-  NOTE: Timeout command won't be killed automatically,
-  instead you will receive its pid info.
-  !!! YOU MUST REMEMBER TO MANAGE/CLEAN/CHECK THESE STILL RUNNING PIDs.
-  !!! YOU MUST confirm whether the pid is still running and yours before killing it.
+  NOTE: Timeout command won't be killed automatically, instead you will receive
+  its pid info. You MUST manage/clean/check these still running PIDs, confirming
+  the pid is still running and yours before killing it.
 input_schema: |
   {
     "type": "object",
@@ -67,11 +65,11 @@ input_schema: |
       "cmd": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Non-empty shell command for normal or background mode. Mutually exclusive with loop_cmd."},
       "loop_cmd": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Non-empty polling check command. Runtime re-runs it until it exits with code 0. Mutually exclusive with cmd and requires interval_ms."},
       "timeout_ms": {"type": "integer", "minimum": 1, "description": "Normal command wait budget in milliseconds. Default: 5000."},
-      "loop_timeout_ms": {"type": "integer", "minimum": 1, "description": "Total polling wait budget in milliseconds. Default: 600000 when loop_cmd is present."},
+      "loop_timeout_ms": {"type": "integer", "minimum": 1, "description": "Total polling wait budget in milliseconds. Default: 60000 when loop_cmd is present."},
       "once_timeout_ms": {"type": "integer", "minimum": 1, "description": "Per-check timeout in polling mode. Default: 5000."},
       "interval_ms": {"type": "integer", "minimum": 1, "description": "Polling interval in milliseconds. Required with loop_cmd and invalid with cmd."},
       "background": {"type": "boolean", "description": "When true, runtime continues interaction without blocking on the action, returning a pid for future reference. Use it for persistent long-running commands that should keep running across interaction rounds."},
-      "tail_out": {"type": "boolean", "description": "When true, oversized output retains its ending and places the truncation notice before the retained content. Default: false."},
+      "tail_out": {"type": "boolean", "description": "Controls which side of oversized output is retained. True retains the ending; false retains the beginning. Default: true. Truncation facts are reported in runtime metadata, not inserted into stdout or stderr."},
       "edit": {"description": "Absolute paths of every file this command creates, modifies, or writes. Accept a single path string or an array of path strings. Required whenever the command writes files (sed -i, >>, >, tee, cp/mv onto a file, patch, formatters --write, heredocs like cat > file <<'EOF', etc.); list each file once, even inside compound commands. Omit entirely for read-only commands.", "oneOf": [{"type": "string", "minLength": 1, "pattern": "\\S"}, {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1, "pattern": "\\S"}}]}
     },
     "x-required-any": [["cmd", "loop_cmd"]],

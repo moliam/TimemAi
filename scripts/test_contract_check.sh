@@ -56,6 +56,7 @@ ci_required=(
   "scripts/linux_web_platform_smoke.sh"
   "scripts/macos_web_platform_smoke.sh"
   "== Linux Timem Web platform smoke =="
+  "== Linux cgroup delegation preflight =="
   "== macOS Timem Web platform smoke =="
   "scripts/web_license_check.sh"
   "scripts/version_consistency_check.sh"
@@ -69,6 +70,47 @@ ci_required=(
 for pattern in "${ci_required[@]}"; do
   if ! search_fixed "$pattern" scripts/ci.sh; then
     echo "missing required CI gate: $pattern" >&2
+    exit 1
+  fi
+done
+
+# This contract runs before any Rust compilation in scripts/ci.sh. Keep it
+# independent from generated Cargo output so a stale build-script artifact that
+# names a removed worktree cannot prevent the guard itself from reporting the
+# regression.
+embedded_asset_build="applications/timem/build.rs"
+embedded_asset_test="applications/timem/tests/embedded_assets_tests.rs"
+embedded_asset_required=(
+  'env::var_os("OUT_DIR")'
+  'concat!(env!(\"CARGO_MANIFEST_DIR\")'
+  'concat!(env!(\"OUT_DIR\")'
+  'out_dir.join("web-gzip")'
+)
+for pattern in "${embedded_asset_required[@]}"; do
+  if ! search_fixed "$pattern" "$embedded_asset_build"; then
+    echo "missing stable embedded Web asset path contract: $pattern" >&2
+    exit 1
+  fi
+done
+embedded_asset_forbidden=(
+  '.canonicalize()'
+  'std::env::temp_dir()'
+)
+for pattern in "${embedded_asset_forbidden[@]}"; do
+  if search_fixed "$pattern" "$embedded_asset_build"; then
+    echo "embedded Web assets must not depend on build-time absolute or temporary paths: $pattern" >&2
+    exit 1
+  fi
+done
+embedded_asset_test_required=(
+  'asset_table_uses_compile_time_roots_not_build_time_absolute_paths'
+  'embedded_index_and_gzip_match_current_dist'
+  'concat!(env!("OUT_DIR"), "/embedded_web_assets.rs")'
+  'include_bytes!("../../../interfaces/web/dist/index.html")'
+)
+for pattern in "${embedded_asset_test_required[@]}"; do
+  if ! search_fixed "$pattern" "$embedded_asset_test"; then
+    echo "missing embedded Web asset regression coverage: $pattern" >&2
     exit 1
   fi
 done
@@ -90,7 +132,11 @@ done
 
 platform_matrix_required=(
   "ubuntu-latest"
+  "-p Delegate=yes"
+  '--uid="$(id -u)"'
   "macos-latest"
+  "macos-15"
+  "macos-15-intel"
 )
 for pattern in "${platform_matrix_required[@]}"; do
   if ! search_fixed "$pattern" .github/workflows/ci.yml; then

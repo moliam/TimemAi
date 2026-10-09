@@ -1,6 +1,12 @@
+import { MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation } from "./tool_invocation";
+import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
+import { initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
+import type { CatalogModel } from "./model_endpoints";
 import { applyBetaDebugDefault } from "./beta_preferences";
 import { StreamUiModeSetting, useStreamUiMode, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
 import { StreamText } from "./stream_reveal";
+import { FlippingTime } from "./flipping_time";
+import { UserText } from "./user_text";
 import {
   AssistantRuntimeProvider,
   ThreadMessageLike,
@@ -28,6 +34,8 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
+  ArrowBigDown,
+  ArrowBigUp,
   ArrowDown,
   ArrowDownToLine,
   ArrowLeftRight,
@@ -40,7 +48,10 @@ import {
   ChevronRight,
   ChevronUp,
   CircleStop,
+  CircleX,
+  ClipboardCheck,
   Clock3,
+  Clock8,
   Copy,
   CornerUpLeft,
   Cpu,
@@ -51,6 +62,7 @@ import {
   FolderOpen,
   FolderPlus,
   Gauge,
+  Infinity as InfinityIcon,
   GripVertical,
   KeyRound,
   LoaderCircle,
@@ -67,12 +79,13 @@ import {
   RefreshCw,
   Search,
   Send,
-  Eraser,
+  Share2,
   Hand,
   Settings,
   Sparkles,
   Star,
   Terminal,
+  SquareTerminal,
   TriangleAlert,
   Trash2,
   Wrench,
@@ -107,6 +120,7 @@ import {
 import { loadToolGenEnabled, saveToolGenEnabled } from "./beta_features";
 import {
   Activity,
+  ChatHistoryRecord,
   ChatFavorite,
   ChatLibraryCapacity,
   ChatMessage,
@@ -114,11 +128,13 @@ import {
   ClientCommand,
   clientId,
   CommandWithId,
+  ContextCompressThresholdPercent,
   Decision,
   McpServerConfig,
   McpServerReport,
   McpTransport,
   MemTemporaryItem,
+  ModelToolResultBytes,
   ModelEndpoint,
   ModelEndpointImportCandidate,
   Session,
@@ -166,6 +182,7 @@ import {
   clearDecisionsForWorker,
   coalesceActionLifecycle,
   compareTurnTimelineItems,
+  compareTurnStreamItems,
   composerPrimaryAction,
   composerSendDecision,
   turnCommandId,
@@ -179,6 +196,7 @@ import {
   groupDecisionsBySessionTurn,
   manualToolGenCommand,
   prependHistoryRecords,
+  turnsFromHistoryRecords,
   pruneSessionDrafts,
   pruneSessionSubmissionLocks,
   releaseSessionDraftSubmission,
@@ -188,10 +206,11 @@ import {
   resolveActiveSessionId,
   runtimeConnectionLabel,
   sessionCacheHitPercent,
+  sessionCacheTokenTotals,
   sessionCancellationApplies,
   shouldRenderTurnWorkFrame,
   sessionContextUsage,
-  sessionContextCompactPending,
+  sessionContextCompressPending,
   sessionCreateDecision,
   sessionInteractionLockReason as sessionInteractionLockReasonForState,
   sessionRenameDecision,
@@ -203,6 +222,7 @@ import {
   toolActivityDisplayName,
   toolDisplayName,
   turnElapsedMs,
+  turnWorkPhaseBoundary,
   turnLiveUsage,
   turnShouldRenderInTimeline,
   turnTimelinePlacement,
@@ -244,6 +264,7 @@ import {
 } from "./model_service_ui";
 import {
   endpointDraftValid,
+  MAX_LLM_INPUT_TOKENS_CEILING,
   REASONING_EFFORT_DISABLED,
   REASONING_EFFORT_OPTIONS,
   endpointMatchesProfile,
@@ -255,7 +276,7 @@ import {
   ModelEndpointDraft,
 } from "./model_endpoints";
 import { createFrameEventQueue } from "./frame_event_queue";
-import { formatTokens } from "./token_format";
+import { formatTokens, formatTokensCoarse } from "./token_format";
 import {
   computeStreamRetention,
   streamToolHandoffIds,
@@ -278,8 +299,8 @@ import {
 import { clipboardImageFiles } from "./clipboard_images";
 import {
   formatToolElapsed,
-  humanizeToolStatus,
   toolResultCountsLabel,
+  isToolActivityFailed,
   isToolActivityRunning,
   TOOL_STATUS_RUNNING,
   formatLiveElapsed,
@@ -374,6 +395,10 @@ function initialAccessToken() {
   const query = new URLSearchParams(window.location.search).get("token") ?? "";
   if (query) {
     try {
+      // Persist across tabs and browser restarts so auxiliary views (debug
+      // browse links) keep working long after the initial authenticated
+      // visit. sessionStorage is kept as a mirror for older sessions.
+      window.localStorage.setItem(TOKEN_STORAGE_KEY, query);
       window.sessionStorage.setItem(TOKEN_STORAGE_KEY, query);
     } catch {
       /* Keep the in-memory token. */
@@ -381,7 +406,11 @@ function initialAccessToken() {
     return query;
   }
   try {
-    return window.sessionStorage.getItem(TOKEN_STORAGE_KEY) ?? "";
+    return (
+      window.localStorage.getItem(TOKEN_STORAGE_KEY) ??
+      window.sessionStorage.getItem(TOKEN_STORAGE_KEY) ??
+      ""
+    );
   } catch {
     return "";
   }
@@ -446,7 +475,9 @@ function loadSidebarLayout(): SidebarLayout {
     leftWidth: 200,
     rightWidth: 200,
     leftCollapsed: false,
-    rightCollapsed: false,
+    // The worker-role panel always starts collapsed after reload/restart;
+    // persisted expand state is intentionally not restored.
+    rightCollapsed: true,
   };
   try {
     const stored = JSON.parse(
@@ -465,7 +496,7 @@ function loadSidebarLayout(): SidebarLayout {
         RIGHT_SIDEBAR_MAX_WIDTH,
       ),
       leftCollapsed: stored.leftCollapsed === true,
-      rightCollapsed: stored.rightCollapsed === true,
+      rightCollapsed: true,
     };
   } catch {
     return fallback;
@@ -690,6 +721,10 @@ function TimemApp() {
     useState(false);
   const [pendingClaudeCodexToolDiscovery, setPendingClaudeCodexToolDiscovery] =
     useState(false);
+  const [pendingModelToolResultBytes, setPendingModelToolResultBytes] =
+    useState(false);
+  const [pendingContextCompressThreshold, setPendingContextCompressThreshold] =
+    useState(false);
   const [rejectedSubmitCommandIds, setRejectedSubmitCommandIds] = useState<
     Set<string>
   >(() => new Set());
@@ -724,6 +759,7 @@ function TimemApp() {
   const pendingMcpKeysRef = useRef<Set<string>>(new Set());
   const pendingEndpointDeleteIdsRef = useRef<Set<string>>(new Set());
   const pendingEndpointDeleteCommandRef = useRef("");
+  const turnHistoryPagesRef = useRef(new Map<string, { records: ChatHistoryRecord[]; offset: number }>());
   const pendingHistorySessionIdsRef = useRef<Set<string>>(new Set());
   const pendingUploadSessionIdsRef = useRef<Set<string>>(new Set());
   const pendingToolgenRequestsRef = useRef<Set<string>>(new Set());
@@ -768,6 +804,8 @@ function TimemApp() {
       title: string,
       detail: string,
       sessionId = activeSessionIdRef.current || "system",
+      diagnostic?: string,
+      kind?: Activity["kind"],
     ) => {
       pushActivity({
         id: clientId(),
@@ -775,6 +813,8 @@ function TimemApp() {
         tone: "error",
         title,
         detail,
+        ...(diagnostic ? { diagnostic } : {}),
+        ...(kind ? { kind } : {}),
         createdAt: Date.now(),
       });
     },
@@ -1018,11 +1058,16 @@ function TimemApp() {
     [snapshotReady],
   );
 
+  const sendCommandRef = useRef(sendCommand);
+  sendCommandRef.current = sendCommand;
+
   const closeSettingsCenter = useCallback(() => {
     if (
       !pendingMemRetention &&
       !pendingMemConversationCapacity &&
       !pendingClaudeCodexToolDiscovery &&
+      !pendingModelToolResultBytes &&
+      !pendingContextCompressThreshold &&
       !favoriteCapacityUpdating &&
       !pendingMemSwitch &&
       !memTemporaryItemsDeleting
@@ -1033,6 +1078,8 @@ function TimemApp() {
     favoriteCapacityUpdating,
     memTemporaryItemsDeleting,
     pendingClaudeCodexToolDiscovery,
+    pendingContextCompressThreshold,
+    pendingModelToolResultBytes,
     pendingMemConversationCapacity,
     pendingMemRetention,
     pendingMemSwitch,
@@ -1051,6 +1098,42 @@ function TimemApp() {
     },
     [sendCommand],
   );
+  const endpointSharePending = useRef<{
+    id: string;
+    receive: (result: ShareResult) => void;
+    timer: number;
+  } | null>(null);
+  const cancelEndpointShare = useCallback((requestId?: string) => {
+    const pending = endpointSharePending.current;
+    if (!pending || (requestId && pending.id !== requestId)) return false;
+    window.clearTimeout(pending.timer);
+    sentCommandsRef.current.delete(pending.id);
+    endpointSharePending.current = null;
+    return true;
+  }, []);
+  const finishEndpointShare = useCallback((requestId: string, result: ShareResult) => {
+    const pending = endpointSharePending.current;
+    if (!pending || pending.id !== requestId) return false;
+    window.clearTimeout(pending.timer);
+    sentCommandsRef.current.delete(requestId);
+    endpointSharePending.current = null;
+    pending.receive(result);
+    return true;
+  }, []);
+  const interruptEndpointShare = useCallback((error = "endpoint_share_disconnected") => {
+    const pending = endpointSharePending.current;
+    if (pending) finishEndpointShare(pending.id, { error });
+  }, [finishEndpointShare]);
+  const endpointShareTransport: ShareTransport = useCallback((command, receive) => {
+    cancelEndpointShare();
+    const timer = window.setTimeout(() => {
+      finishEndpointShare(command.request_id, { error: "endpoint_share_timeout" });
+    }, 15000);
+    endpointSharePending.current = { id: command.request_id, receive, timer };
+    if (!sendCommand(command, command.request_id))
+      finishEndpointShare(command.request_id, { error: "endpoint_share_disconnected" });
+    return () => { cancelEndpointShare(command.request_id); };
+  }, [cancelEndpointShare, finishEndpointShare, sendCommand]);
   const revealModelEndpoint = useCallback(
     (endpointId: string) => {
       sendCommand({
@@ -1068,22 +1151,34 @@ function TimemApp() {
   );
   const scanModelEndpointImport = useCallback(
     (codexDir: string, claudeDir: string) => {
-      sendCommand({
+      if (!sendCommand({
         type: "model_endpoint_import_scan",
         codex_dir: codexDir.trim() || null,
         claude_dir: claudeDir.trim() || null,
-      });
+      })) {
+        reportUiError(
+          t("errors.endpointImportScanTitle"),
+          t("errors.checkConnection"),
+          "system",
+        );
+      }
     },
-    [sendCommand],
+    [reportUiError, sendCommand, t],
   );
   const importModelEndpoints = useCallback(
     (candidateIds: string[]) => {
-      sendCommand({
+      if (!sendCommand({
         type: "model_endpoint_import_apply",
         candidate_ids: candidateIds,
-      });
+      })) {
+        reportUiError(
+          t("errors.endpointImportApplyTitle"),
+          t("errors.checkConnection"),
+          "system",
+        );
+      }
     },
-    [sendCommand],
+    [reportUiError, sendCommand, t],
   );
   const confirmModelEndpointDelete = useCallback(
     (endpoints: ModelEndpoint[]) => {
@@ -1150,6 +1245,44 @@ function TimemApp() {
         reportUiError(
           "Mem settings failed",
           "Reconnect to Timem Web before updating conversation capacity.",
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand],
+  );
+  const saveModelToolResultBytes = useCallback(
+    (maxBytes: ModelToolResultBytes) => {
+      setPendingModelToolResultBytes(true);
+      if (
+        !sendCommand({
+          type: "system_model_tool_result_bytes_update",
+          max_bytes: maxBytes,
+        })
+      ) {
+        setPendingModelToolResultBytes(false);
+        reportUiError(
+          "System setting failed",
+          "Reconnect to Timem Web before changing the tool result retention length.",
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand],
+  );
+  const saveContextCompressThreshold = useCallback(
+    (percent: ContextCompressThresholdPercent) => {
+      setPendingContextCompressThreshold(true);
+      if (
+        !sendCommand({
+          type: "system_context_compress_threshold_update",
+          percent,
+        })
+      ) {
+        setPendingContextCompressThreshold(false);
+        reportUiError(
+          "System setting failed",
+          "Reconnect to Timem Web before changing the context compression threshold.",
           "system",
         );
       }
@@ -1325,6 +1458,7 @@ function TimemApp() {
   );
 
   const clearAllPendingCommands = useCallback(() => {
+    interruptEndpointShare();
     creatingSessionRef.current = false;
     cancellingSessionIds.current.clear();
     setStopClickLockedSessionIds(new Set());
@@ -1374,8 +1508,10 @@ function TimemApp() {
     setPendingToolgenRequests(new Set());
     setPendingMemSwitch(false);
     setPendingClaudeCodexToolDiscovery(false);
+    setPendingModelToolResultBytes(false);
+    setPendingContextCompressThreshold(false);
     setMemSwitchCandidate(null);
-  }, []);
+  }, [interruptEndpointShare]);
 
   useEffect(() => {
     const liveSessionIds = new Set(
@@ -1537,6 +1673,7 @@ function TimemApp() {
     function receiveWireEvent(event: WireEvent, fromSemantic = false) {
       if (!fromSemantic) {
         if (event.type === "hello") {
+          turnHistoryPagesRef.current.clear();
           // A reconnect may intentionally target an older Host, so Hello resets
           // rather than only ever enabling this connection-level capability.
           semanticDeliveryRef.current = enablesSemanticDelivery(event);
@@ -1575,8 +1712,19 @@ function TimemApp() {
         eventCursorRef.current = event.event_seq;
         return;
       }
+      if (event.type === "model_endpoint_share_exported" || event.type === "model_endpoint_share_imported") {
+        finishEndpointShare(
+          event.request_id,
+          event.type === "model_endpoint_share_exported" ? { data: event.data } : { name: event.name },
+        );
+        return;
+      }
       if (event.type === "command_ack") {
         if (event.status === "accepted") return;
+        if (event.status === "rejected" && finishEndpointShare(
+          event.command_id,
+          { error: event.error ?? "model_endpoint_share_failed" },
+        )) return;
         const completed = sentCommandsRef.current.get(event.command_id);
         sentCommandsRef.current.delete(event.command_id);
         if (
@@ -1653,6 +1801,10 @@ function TimemApp() {
             setPendingMemConversationCapacity(false);
           if (completed?.type === "beta_claude_codex_tool_discovery_update")
             setPendingClaudeCodexToolDiscovery(false);
+          if (completed?.type === "system_model_tool_result_bytes_update")
+            setPendingModelToolResultBytes(false);
+          if (completed?.type === "system_context_compress_threshold_update")
+            setPendingContextCompressThreshold(false);
           const memSwitchNeedsConfirmation =
             completed?.type === "mem_switch" &&
             !completed.stop_running &&
@@ -1680,7 +1832,7 @@ function TimemApp() {
             // model_endpoints_updated event closes it after a commit.
             reportUiError(
               t("errors.endpointSaveTitle"),
-              event.error || t("errors.endpointSaveRetry"),
+              endpointSaveErrorMessage(event.error),
               "system",
             );
             return;
@@ -1699,6 +1851,22 @@ function TimemApp() {
             );
             return;
           }
+          if (completed?.type === "model_endpoint_import_scan") {
+            reportUiError(
+              t("errors.endpointImportScanTitle"),
+              endpointImportCommandErrorMessage("scan", event.error),
+              "system",
+            );
+            return;
+          }
+          if (completed?.type === "model_endpoint_import_apply") {
+            reportUiError(
+              t("errors.endpointImportApplyTitle"),
+              endpointImportCommandErrorMessage("apply", event.error),
+              "system",
+            );
+            return;
+          }
           if (memSwitchNeedsConfirmation) {
             // The confirmation dialog is the actionable authoritative response.
           } else if (pendingCredential) {
@@ -1712,7 +1880,13 @@ function TimemApp() {
             const issue = modelServiceIssue(
               event.error || "The runtime rejected this model request.",
             );
-            reportUiError(issue.title, issue.detail, sessionId);
+            reportUiError(
+              issue.title,
+              issue.detail,
+              sessionId,
+              issue.diagnostic,
+              "model_service_issue",
+            );
           } else if (completed?.type === "favorite_capacity_update") {
             setFavoriteCapacityUpdating(false);
             reportUiError(t("errors.favoritesResizeTitle"), t("errors.retryLater"), sessionId);
@@ -1741,6 +1915,8 @@ function TimemApp() {
         setPendingMemRetention(false);
         setPendingMemConversationCapacity(false);
         setPendingClaudeCodexToolDiscovery(false);
+        setPendingModelToolResultBytes(false);
+        setPendingContextCompressThreshold(false);
         setServer((current) =>
           current
             ? {
@@ -1753,6 +1929,9 @@ function TimemApp() {
                     event.conversation_capacity_bytes,
                   claude_codex_tool_discovery:
                     event.claude_codex_tool_discovery,
+                  model_tool_result_bytes: event.model_tool_result_bytes,
+                  context_compress_threshold_percent:
+                    event.context_compress_threshold_percent,
                 },
               }
             : current,
@@ -1767,6 +1946,7 @@ function TimemApp() {
         return;
       }
       if (event.type === "hello") {
+        turnHistoryPagesRef.current.clear();
         // Hello carries the complete authoritative baseline. Adopt its exact
         // sequence before any later semantic event is reduced; reconnecting to
         // a Host that has already emitted events must not look like a gap from
@@ -1781,7 +1961,14 @@ function TimemApp() {
         setFavoriteCapacityNotice(null);
         setFavoriteCapacityUpdating(false);
         setFavoritesLoading(true);
-        setSnapshotReady(true);
+        // Show the list as soon as it has content: sessions restore newest
+        // first in the background, so the user sees their page immediately
+        // while older sessions keep filling in progressively. The loading
+        // placeholder only stays when nothing is restored yet.
+        setSnapshotReady(
+          event.snapshot.server.restoring !== true ||
+            event.snapshot.sessions.length > 0,
+        );
         queueMicrotask(() => {
           if (!sendCommand({ type: "favorites_list" }))
             setFavoritesLoading(false);
@@ -1789,6 +1976,10 @@ function TimemApp() {
         return;
       }
       if (event.type === "session_created") {
+        // A user-initiated creation takes over the view; background restore
+        // publications only fill the list progressively without stealing
+        // the user's current selection.
+        const userInitiated = creatingSessionRef.current;
         creatingSessionRef.current = false;
         setCreatingSession(false);
         setSessions((current) => upsertSession(current, event.session));
@@ -1796,7 +1987,13 @@ function TimemApp() {
           event.session.session_id,
           event.session.tools.length,
         );
-        setActiveSessionId(event.session.session_id);
+        if (userInitiated) {
+          setActiveSessionId(event.session.session_id);
+        }
+        // Progressive background restore publishes sessions before the final
+        // Hello; the first restored (newest) session is enough to replace the
+        // loading placeholder instead of masking the list until restore ends.
+        setSnapshotReady(true);
         return;
       }
       if (event.type === "session_restart_cwd_resolved") {
@@ -2168,6 +2365,7 @@ function TimemApp() {
         return;
       }
       if (event.type === "host_error") {
+        turnHistoryPagesRef.current.clear();
         clearAllPendingCommands();
         pushActivity({
           id: clientId(),
@@ -2358,6 +2556,25 @@ function TimemApp() {
         );
         return;
       }
+      if (event.type === "turn_history_page") {
+        const key = sessionTurnKey(event.session_id, event.turn_id);
+        const pending = turnHistoryPagesRef.current.get(key);
+        if (!pending || pending.offset !== event.offset) return;
+        pending.records.push(...event.records);
+        if (event.next_offset !== null) {
+          pending.offset = event.next_offset;
+          if (!sendCommandRef.current({ type: "turn_history_page", session_id: event.session_id,
+            turn_id: event.turn_id, offset: event.next_offset })) turnHistoryPagesRef.current.delete(key);
+        } else {
+          const restored = turnsFromHistoryRecords(pending.records).find((turn) => turn.turn_id === event.turn_id);
+          turnHistoryPagesRef.current.delete(key);
+          if (restored) setSessions((current) => current.map((session) => session.session_id !== event.session_id ? session : {
+            ...session, turns: session.turns.map((turn) => turn.turn_id === event.turn_id && turn.state !== "working"
+              ? { ...turn, events: restored.events, user_entries: turn.user_entries.map((entry) => ({ ...entry, timeline_seq: undefined })) } : turn),
+          }));
+        }
+        return;
+      }
       if (event.type === "history_page") {
         removePendingKey(
           pendingHistorySessionIdsRef,
@@ -2455,7 +2672,8 @@ function TimemApp() {
           event_id: event.turn_event_id ?? clientId(),
           source: "worker_activity",
           payload: event.event,
-          created_at_ms: Date.now(),
+          created_at_ms: event.created_at_ms ?? Date.now(),
+          timeline_seq: event.timeline_seq ?? undefined,
         };
         const workerState =
           kind === "model_request"
@@ -2544,7 +2762,8 @@ function TimemApp() {
             event_id: event.turn_event_id ?? clientId(),
             source: "core_topic",
             payload: topic as unknown as Record<string, unknown>,
-            created_at_ms: Date.now(),
+            created_at_ms: event.created_at_ms ?? Date.now(),
+            timeline_seq: event.timeline_seq ?? undefined,
           }),
           topic,
           (text) => makeMessage("assistant", text),
@@ -2741,6 +2960,7 @@ function TimemApp() {
         cancelAllPendingSessionApiKeyCommands(
           "The runtime connection closed before the credential update completed. Your input was kept; reconnect and try again.",
         );
+        interruptEndpointShare();
         const nextAttempt = retryAttempt + 1;
         retryAttempt = nextAttempt;
         setReconnectAttempt(nextAttempt);
@@ -2775,10 +2995,11 @@ function TimemApp() {
       inboundEvents.dispose();
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       cancelAllPendingSessionApiKeyCommands();
+      cancelEndpointShare();
       socket.current?.close();
       socket.current = null;
     };
-  }, [cancelAllPendingSessionApiKeyCommands, pushActivity, receive]);
+  }, [cancelAllPendingSessionApiKeyCommands, cancelEndpointShare, interruptEndpointShare, pushActivity, receive]);
 
   const sendTextForSession = useCallback(
     (
@@ -2992,17 +3213,27 @@ function TimemApp() {
   );
 
   const runtimeMessages = useMemo<readonly ThreadMessageLike[]>(
-    () =>
-      activeMessages
+    () => {
+      const seenIds = new Set<string>();
+      return activeMessages
         .filter(
           (message): message is ChatMessage & { role: "user" | "assistant" } =>
             message.role !== "system",
         )
+        // assistant-ui message repositories treat duplicate ids as a fatal
+        // React error (whole-page blank). History ids are unique per record,
+        // but the feed stays defensive against any snapshot regression.
+        .filter((message) => {
+          if (seenIds.has(message.id)) return false;
+          seenIds.add(message.id);
+          return true;
+        })
         .map((message) => ({
           id: message.id,
           role: message.role,
           content: [{ type: "text" as const, text: message.text }],
-        })),
+        }));
+    },
     [activeMessages],
   );
   const runtimeMessageSessionId = activeSession?.session_id ?? "";
@@ -3487,6 +3718,13 @@ function TimemApp() {
     return () => document.body.classList.remove("workspace-modal-open");
   }, [workspaceModalOpen]);
   return (
+    <TurnHistoryRequestContext.Provider value={(sessionId, turnId) => {
+      const key = sessionTurnKey(sessionId, turnId);
+      if (turnHistoryPagesRef.current.has(key)) return;
+      turnHistoryPagesRef.current.set(key, { records: [], offset: 0 });
+      if (!sendCommand({ type: "turn_history_page", session_id: sessionId, turn_id: turnId, offset: 0 }))
+        turnHistoryPagesRef.current.delete(key);
+    }}>
     <AssistantRuntimeProvider runtime={runtime}>
       <div
         inert={workspaceModalOpen}
@@ -3625,7 +3863,7 @@ function TimemApp() {
                   aria-label={t("sessions.cancelDelete")}
                   onClick={cancelSessionDeleteMode}
                 >
-                  <X size={14} strokeWidth={3} />
+                  <X size={14} strokeWidth={2.25} />
                 </button>
               )}
               <button
@@ -3661,7 +3899,7 @@ function TimemApp() {
                 }}
               >
                 {sessionDeleteMode ? (
-                  <Check size={15} strokeWidth={3} />
+                  <Check size={15} strokeWidth={2.25} />
                 ) : (
                   <Trash2 size={15} />
                 )}
@@ -4409,7 +4647,7 @@ function TimemApp() {
                   activeSession
                     ? () =>
                         sendCommand({
-                          type: "session_request_context_compact",
+                          type: "session_request_context_compress",
                           session_id: activeSession.session_id,
                         })
                     : null
@@ -4570,6 +4808,16 @@ function TimemApp() {
               toolGenEnabled={toolGenEnabled}
               toolGenToggleDisabled={pendingToolgenRequests.size > 0}
               onToolGenEnabledChange={setToolGenEnabled}
+              modelToolResultBytes={
+                server?.mem?.model_tool_result_bytes ?? 16384
+              }
+              modelToolResultBytesPending={pendingModelToolResultBytes}
+              onModelToolResultBytesChange={saveModelToolResultBytes}
+              contextCompressThresholdPercent={
+                server?.mem?.context_compress_threshold_percent ?? 90
+              }
+              contextCompressThresholdPending={pendingContextCompressThreshold}
+              onContextCompressThresholdChange={saveContextCompressThreshold}
               claudeCodexToolDiscoveryEnabled={
                 server?.mem?.claude_codex_tool_discovery ?? false
               }
@@ -4594,12 +4842,15 @@ function TimemApp() {
               temporaryItemsLoading={memTemporaryItemsLoading}
               temporaryItemsDeleting={memTemporaryItemsDeleting}
               temporaryItemsError={memTemporaryItemsError}
+              catalog={server?.model_catalog ?? []}
+              providers={server?.model_providers ?? []}
               endpoints={server?.model_endpoints ?? []}
               endpointEditor={endpointEditor}
               endpointImportCandidates={endpointImportCandidates}
               endpointImportIssues={endpointImportIssues}
               onScanEndpointImport={scanModelEndpointImport}
               onImportEndpoints={importModelEndpoints}
+              endpointShareTransport={endpointShareTransport}
               revealedEndpointApiKeys={revealedEndpointApiKeys}
               revealedEndpointHeaders={revealedEndpointHeaders}
               revealedEndpointRequestFields={revealedEndpointRequestFields}
@@ -4651,7 +4902,7 @@ function TimemApp() {
               session={activeSession}
               onEdit={openEndpointSettings}
               onApply={(endpointId) => {
-                if (!activeSession || activeSession.state === "working") return;
+                if (!activeSession) return;
                 sendCommand({
                   type: "model_endpoint_apply",
                   session_id: activeSession.session_id,
@@ -5304,6 +5555,7 @@ function TimemApp() {
           )}
       </div>
     </AssistantRuntimeProvider>
+    </TurnHistoryRequestContext.Provider>
   );
 }
 
@@ -5576,6 +5828,9 @@ function WorkerRolePanel({
   const [collapsedRoleGroupIds, setCollapsedRoleGroupIds] = useState<
     Set<string>
   >(() => new Set());
+  // Role groups are collapsed by default: track which group ids have been
+  // seen so far so newly appearing groups also start collapsed.
+  const knownRoleGroupIdsRef = useRef<Set<string>>(new Set());
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -5600,10 +5855,18 @@ function WorkerRolePanel({
       "ungrouped",
       ...library.groups.map((group) => group.id),
     ]);
-    setCollapsedRoleGroupIds(
-      (current) =>
-        new Set(Array.from(current).filter((id) => validGroupIds.has(id))),
+    const known = knownRoleGroupIdsRef.current;
+    const freshGroupIds = Array.from(validGroupIds).filter(
+      (id) => !known.has(id),
     );
+    knownRoleGroupIdsRef.current = new Set(validGroupIds);
+    setCollapsedRoleGroupIds((current) => {
+      const next = new Set(
+        Array.from(current).filter((id) => validGroupIds.has(id)),
+      );
+      for (const id of freshGroupIds) next.add(id);
+      return next;
+    });
   }, [library.groups]);
   useEffect(() => {
     if (
@@ -5820,7 +6083,7 @@ function WorkerRolePanel({
                     setSelectedDeleteRoleId("");
                   }}
                 >
-                  <X size={14} strokeWidth={3} />
+                  <X size={14} strokeWidth={2.25} />
                 </button>
               )}
               <button
@@ -5867,7 +6130,7 @@ function WorkerRolePanel({
                 }}
               >
                 {roleDeleteMode ? (
-                  <Check size={14} strokeWidth={3} />
+                  <Check size={14} strokeWidth={2.25} />
                 ) : (
                   <Trash2 size={14} />
                 )}
@@ -6283,7 +6546,7 @@ const ChatLibraryFavoriteRow = memo(function ChatLibraryFavoriteRow({
       >
         {deleteMode && (
           <span className="chat-library-favorite-check" aria-hidden="true">
-            {selected && <Check size={13} strokeWidth={3} />}
+            {selected && <Check size={13} strokeWidth={2.25} />}
           </span>
         )}
         <span className="chat-library-favorite-copy">
@@ -7268,6 +7531,7 @@ function ToolRepoPanel({
 }
 
 const EMPTY_DECISIONS: Decision[] = [];
+const TurnHistoryRequestContext = createContext<(sessionId: string, turnId: string) => void>(() => {});
 const SessionTimelineActiveContext = createContext(false);
 
 /**
@@ -7760,17 +8024,8 @@ function TimemThread({
   >(new Map());
   const turns = activeSession?.turns ?? [];
   const activeSessionId = activeSession?.session_id;
-  const queuedMessagesPause =
-    activeSession && !activeSession.message_queue.auto_send_enabled
-      ? {
-          paused: true as const,
-          reason:
-            activeSession.message_queue.continuation.state === "blocked"
-              ? activeSession.message_queue.continuation.reason
-              : t("composer.autoSendDisabledByUser"),
-          stoppedAtMs: 0,
-        }
-      : null;
+  const queuedMessagesPaused =
+    !!activeSession && !activeSession.message_queue.auto_send_enabled;
   const draft = draftForSession(draftsBySession, activeSessionId);
   const queuedMessages: QueuedMessage[] =
     activeSession?.message_queue.items.map((item) => ({
@@ -8715,13 +8970,13 @@ function TimemThread({
       <div className="composer-wrap aui-thread-footer">
           {!!activeSession && displayQueuedMessages.length > 0 && (
             <section
-              className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPause ? "paused" : ""}`}
+              className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPaused ? "paused" : ""}`}
               aria-label={`${displayQueuedMessages.length} queued message${displayQueuedMessages.length === 1 ? "" : "s"}`}
               aria-live="polite"
             >
               <header>
                 <span>{t("composer.queueTitle")}</span>
-                {queuePanelCollapsed ? (
+                {queuePanelCollapsed && (
                   <div
                     className={`queued-message-summary ${firstQueuedMessage?.deliveryError ? "delivery-error" : ""}`}
                     title={
@@ -8741,14 +8996,6 @@ function TimemThread({
                       {t("composer.countLabel", { count: displayQueuedMessages.length })}
                     </small>
                   </div>
-                ) : (
-                  <small title={queuedMessagesPause?.reason}>
-                    {queuedMessagesPause
-                      ? queuedMessagesPause.reason
-                        ? t("composer.autoSendStoppedReason", { reason: queuedMessagesPause.reason })
-                        : t("composer.autoSendStopped")
-                      : t("composer.migratingToQueue")}
-                  </small>
                 )}
                 <div className="queued-message-header-actions">
                   <label className="queued-auto-send-control">
@@ -8757,14 +9004,14 @@ function TimemThread({
                       type="button"
                       role="switch"
                       className="queued-auto-send-switch"
-                      aria-checked={!queuedMessagesPause}
+                      aria-checked={!queuedMessagesPaused}
                       aria-label={
-                        queuedMessagesPause
+                        queuedMessagesPaused
                           ? t("composer.enableAutoSend")
                           : t("composer.pauseAutoSend")
                       }
                       title={
-                        queuedMessagesPause
+                        queuedMessagesPaused
                           ? t("composer.enableAutoSend")
                           : t("composer.pauseAutoSend")
                       }
@@ -8773,7 +9020,7 @@ function TimemThread({
                         onMessageQueueCommand({
                           type: "message_queue_auto_send_set",
                           session_id: activeSessionId,
-                          enabled: !!queuedMessagesPause,
+                          enabled: queuedMessagesPaused,
                         });
                       }}
                     >
@@ -9448,7 +9695,7 @@ function TimemThread({
           disabled={!userMessageNavigation.previous}
           onClick={() => navigateUserMessage("previous")}
         >
-          <ChevronUp size={14} strokeWidth={2.2} aria-hidden="true" />
+          <ChevronUp size={14} strokeWidth={1.65} aria-hidden="true" />
         </button>
         <button
           type="button"
@@ -9466,7 +9713,7 @@ function TimemThread({
             else navigateToThreadBottom();
           }}
         >
-          <ChevronDown size={14} strokeWidth={2.2} aria-hidden="true" />
+          <ChevronDown size={14} strokeWidth={1.65} aria-hidden="true" />
         </button>
         {activeSession && (
           <button
@@ -9507,11 +9754,11 @@ function TimemThread({
                     viewBox="0 0 24 24"
                     aria-hidden="true"
                   >
-                    <circle cx="12" cy="12" r="9" pathLength="100" />
+                    <circle cx="12" cy="12" r="11" pathLength="100" />
                   </svg>
                   {activeSession.active_memo ? (
                     <span className="thread-working-pin" aria-hidden="true">
-                      📌
+                      <MemoIcon size={16.8} />
                     </span>
                   ) : (
                     <span className="thread-working-core" />
@@ -9521,7 +9768,7 @@ function TimemThread({
                 <ArrowDownToLine
                   className="thread-idle-bottom-icon"
                   size={17}
-                  strokeWidth={2.35}
+                  strokeWidth={1.7625}
                 />
               )}
             </span>
@@ -9539,7 +9786,7 @@ function TimemThread({
             aria-label={t("messageNav.memoIndicator")}
           >
             <span className="thread-memo-icon" aria-hidden="true">
-              📌
+              <MemoIcon size={13} />
             </span>
             <span className="thread-memo-tooltip" role="tooltip">
               <span className="thread-memo-caption">
@@ -9602,9 +9849,15 @@ type TurnInteractionProps = {
 const WorkingElapsed = memo(function WorkingElapsed({
   createdAtMs,
   endedAtMs,
+  hideBeforeMs = 0,
+  liveFormat = false,
+  className = "working-elapsed",
 }: {
   createdAtMs: number;
   endedAtMs?: number | null;
+  hideBeforeMs?: number;
+  liveFormat?: boolean;
+  className?: string;
 }) {
   const elapsedAt = useCallback(
     () => turnElapsedMs(createdAtMs, Date.now(), endedAtMs),
@@ -9614,12 +9867,23 @@ const WorkingElapsed = memo(function WorkingElapsed({
   useEffect(() => {
     setElapsedMs(elapsedAt());
     if (endedAtMs != null) return;
-    const timer = window.setInterval(() => setElapsedMs(elapsedAt()), 1_000);
-    return () => window.clearInterval(timer);
+    let timer = 0;
+    const refresh = () => {
+      const next = elapsedAt();
+      setElapsedMs(next);
+      timer = window.setTimeout(refresh, Math.max(50, 1_000 - (next % 1_000)));
+    };
+    const initial = elapsedAt();
+    timer = window.setTimeout(refresh, Math.max(50, 1_000 - (initial % 1_000)));
+    return () => window.clearTimeout(timer);
   }, [elapsedAt, endedAtMs]);
+  if (elapsedMs < hideBeforeMs) return null;
+  const formattedElapsed = liveFormat
+    ? formatLiveElapsed(elapsedMs)
+    : formatDuration(elapsedMs)!;
   return (
-    <span className="working-elapsed" aria-hidden="true">
-      {formatDuration(elapsedMs)}
+    <span className={className} aria-hidden="true">
+      <FlippingTime value={formattedElapsed} />
     </span>
   );
 });
@@ -9641,6 +9905,7 @@ const TurnInteraction = memo(function TurnInteraction({
   onRequestToolGen,
   onRequestMessageDelete,
 }: TurnInteractionProps) {
+  const requestTurnHistory = useContext(TurnHistoryRequestContext);
   const workScrollRef = useRef<HTMLDivElement | null>(null);
   const workContentRef = useRef<HTMLDivElement | null>(null);
   const followLatest = useRef(true);
@@ -9678,10 +9943,11 @@ const TurnInteraction = memo(function TurnInteraction({
         type: "event" as const,
         key: event.presentation_id ?? event.event_id,
         createdAt: event.presentation_created_at_ms ?? event.created_at_ms,
+        timelineSeq: event.timeline_seq,
         event,
         activity: (() => {
           const activity = activityFromTurnEvent({ ...event, event_id: event.presentation_id ?? event.event_id }, sessionId);
-          return activity ? { ...activity, execution_order: event.execution_order, settled_order: event.settled_order } : activity;
+          return activity ? { ...activity, timelineSeq: event.timeline_seq, execution_order: event.execution_order, settled_order: event.settled_order } : activity;
         })(),
       })),
     [lifecycleEvents, sessionId],
@@ -9695,6 +9961,7 @@ const TurnInteraction = memo(function TurnInteraction({
           type: "supplement" as const,
           key: `user-supplement-${entry.created_at_ms}-${roleIndex}`,
           createdAt: entry.created_at_ms,
+          timelineSeq: entry.timeline_seq,
           activity: {
             id: `user-supplement-${turn.turn_id}-${entry.created_at_ms}-${roleIndex}`,
             sessionId,
@@ -9703,15 +9970,16 @@ const TurnInteraction = memo(function TurnInteraction({
             title: t("composer.supplementTitle"),
             detail: entry.text,
             createdAt: entry.created_at_ms,
+            timelineSeq: entry.timeline_seq,
           },
         })),
     [sessionId, turn.turn_id, turn.user_entries],
   );
   const timelineItems = useMemo(
     () =>
-      [...lifecycleItems, ...supplementItems].sort(
-        (left, right) => left.createdAt - right.createdAt,
-      ),
+      [...lifecycleItems, ...supplementItems]
+        .map((item, fallbackIndex) => ({ ...item, fallbackIndex }))
+        .sort(compareTurnStreamItems),
     [lifecycleItems, supplementItems],
   );
   const visibleItems = timelineItems;
@@ -9730,7 +9998,7 @@ const TurnInteraction = memo(function TurnInteraction({
     () => new Set(persistentToolGenItems.map(({ key }) => key)),
     [persistentToolGenItems],
   );
-  // A completed context compaction supersedes its earlier "compacting..."
+  // A completed context compression supersedes its earlier "compressing..."
   // notice; without this the requested notice keeps its indeterminate
   // animation forever after the real compaction already finished. A turn
   // reaching a terminal state (e.g. cancelled) without a completion notice
@@ -9743,7 +10011,7 @@ const TurnInteraction = memo(function TurnInteraction({
     let completedAfter = false;
     for (let i = visibleItems.length - 1; i >= 0; i--) {
       const activity = visibleItems[i].activity;
-      if (activity?.kind !== "context_compact") continue;
+      if (activity?.kind !== "context_compress") continue;
       if (activity.compact_phase === "completed") completedAfter = true;
       else if (completedAfter && activity.compact_phase === "requested")
         seen.add(visibleItems[i].key);
@@ -9751,7 +10019,7 @@ const TurnInteraction = memo(function TurnInteraction({
     if (turn.completion) {
       for (const item of visibleItems) {
         if (
-          item.activity?.kind === "context_compact" &&
+          item.activity?.kind === "context_compress" &&
           item.activity.compact_phase === "requested"
         )
           seen.add(item.key);
@@ -9964,7 +10232,7 @@ const TurnInteraction = memo(function TurnInteraction({
                     <Trash2 size={13} />
                   </button>
                   {entry.kind === "supplement" && <span>{t("composer.supplementTag")}</span>}
-                  <MarkdownContent text={entry.text} />
+                  <UserText text={entry.text} />
                   {(
                     entry.worker_roles ??
                     (entry.worker_role ? [entry.worker_role] : [])
@@ -10018,7 +10286,10 @@ const TurnInteraction = memo(function TurnInteraction({
                   showWorkStream ? "Hide work details" : "Show work details"
                 }
                 aria-expanded={showWorkStream}
-                onClick={() => setShowWorkStream((visible) => !visible)}
+                onClick={() => {
+                  if (!showWorkStream && !isWorking) requestTurnHistory(sessionId, turn.turn_id);
+                  setShowWorkStream((visible) => !visible);
+                }}
               >
                 <ChevronRight
                   className="work-collapse-arrow"
@@ -10183,6 +10454,7 @@ const TurnInteraction = memo(function TurnInteraction({
           }
           latestThoughtTime={latestThoughtTime}
           streamRetained={streamRetentionActive}
+          workExpanded={workStreamVisible}
           onStreamArchived={archiveStream}
           toolGenPending={toolGenPending}
           toolGenBlocked={toolGenBlocked}
@@ -10313,14 +10585,30 @@ function StreamProcess({ closing, onArchived, children }: {
   return <div ref={ref} className={`stream-continuous-process${closing ? " archiving" : ""}`}>{children}</div>;
 }
 
-function StreamActivityPresentation({ thoughtText, activities, responseArriving }: {
+function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activities, responseArriving }: {
   responseArriving: boolean;
   thoughtText: string;
+  thoughtTimelineSeq?: number;
   activities: Activity[];
 }) {
   const entries = [
-    ...activities.map(activity => ({ key: activity.id, time: activity.createdAt, activity })),
-  ].sort((a, b) => a.time - b.time);
+    ...activities.map((activity, fallbackIndex) => ({
+      key: activity.id,
+      time: activity.createdAt,
+      timelineSeq: activity.timelineSeq,
+      fallbackIndex,
+      activity,
+      thoughtText: "",
+    })),
+    ...(thoughtText ? [{
+      key: "model-thought-preview",
+      time: Number.MAX_SAFE_INTEGER,
+      timelineSeq: thoughtTimelineSeq,
+      fallbackIndex: activities.length,
+      activity: null,
+      thoughtText,
+    }] : []),
+  ].map(entry => ({ ...entry, createdAt: entry.time })).sort(compareTurnStreamItems);
   const groups: (typeof entries)[] = [];
   for (const entry of entries) {
     const previous = groups.at(-1);
@@ -10346,11 +10634,13 @@ function StreamActivityPresentation({ thoughtText, activities, responseArriving 
         const superseded = responseArriving || !!thoughtText || index < lastReplyIndex;
         return <StreamToolRun key={key} activities={group.map(entry => entry.activity!)} superseded={superseded} handoffIds={handoffIds} />;
       }
+      const previewText = group[0].thoughtText;
+      if (previewText)
+        return <div key={key} className="stream-thought-text" aria-label="Model thought preview"><StreamText text={previewText} /></div>;
       return activity?.kind === "free_talk"
           ? <div key={key} className="stream-thought-text"><MarkdownContent text={activity.detail ?? ""} /></div>
           : activity ? <ActivityView key={key} activity={activity} /> : null;
     })}
-    {thoughtText && <div className="stream-thought-text" aria-label="Model thought preview"><StreamText text={thoughtText} /></div>}
   </section>;
 }
 
@@ -10409,7 +10699,7 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
   // 收起态只报数量 xN，不表达对错状态；保留按钮与行节点，仅新计数可重放反馈。
   return <div ref={runRef} className="stream-tool-run">
     {completed.length > 0 && <button className="stream-tool-run-toggle" type="button" aria-expanded={!merged} onClick={() => setExpanded(value => !value)}>
-      {merged ? <Plus size={13} aria-hidden="true" /> : <Minus size={13} aria-hidden="true" />}<span>{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={merged ? t("tools.doneCount", { count: completed.length }) : showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{merged ? `x${completed.length}` : showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
+      <span className="stream-tool-run-sign" aria-hidden="true">{merged ? <Plus size={11} strokeWidth={1.65} /> : <Minus size={11} strokeWidth={1.65} />}</span><Wrench size={13} strokeWidth={1.575} className="stream-tool-run-glyph" aria-hidden="true" /><span className="sr-only">{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={merged ? t("tools.doneCount", { count: completed.length }) : showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{merged ? `x${completed.length}` : showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
     </button>}
     {activities.map(activity => <div key={activity.id} className={`stream-tool-merged-item${merged && completedIds.has(activity.id) ? " merged" : ""}`} inert={merged && completedIds.has(activity.id)}>
       <div><StreamToolRow activity={activity} /></div>
@@ -10418,20 +10708,35 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
 
 }
 
-/** Only the status field announces and highlights lifecycle updates. */
-function ActionStatus({ status, label, className }: { status: string; label: string; className: string }) {
-  const showResults = useToolResultStatus();
-  const previous = useRef(status);
-  const [revision, setRevision] = useState(0);
-  useEffect(() => {
-    if (previous.current !== status) {
-      previous.current = status;
-      setRevision(value => value + 1);
-    }
-  }, [status]);
-  return <span className={className} role="status" aria-live="polite" aria-atomic="true" aria-label={!showResults && !isToolActivityRunning(status) ? t("tools.done") : status === "completed" ? t("tools.succeeded") : status === "failed" ? t("tools.failed") : undefined}>
-    <span key={revision} className={revision ? "action-status-changed" : undefined}>{!showResults && !isToolActivityRunning(status) ? t("tools.done") : label}</span>
-  </span>;
+function ToolActivityIcon({
+  activity,
+  toolName,
+  failed,
+}: {
+  activity: Activity;
+  toolName: string;
+  failed: boolean;
+}) {
+  if (failed)
+    return (
+      <span className="tool-failure-icon" title={t("tools.failed")}>
+        <CircleX size={14} aria-hidden="true" />
+        <span className="sr-only">{t("tools.failed")}</span>
+      </span>
+    );
+  if (activity.run_bash_edit) return <RunBashEditIcon />;
+  if (activity.readfile) return <ReadFileIcon />;
+  if (activity.memory_search) return <MemorySearchIcon />;
+  if (activity.self_tool) return <SelfToolIcon />;
+  if (activity.tool_name === "memmgr") return <MemoryIcon />;
+  if ((activity.tool_name || activity.title) === "run_bash")
+    return (
+      <span className="bash-tool-icon" title={toolName}>
+        <SquareTerminal size={14} aria-hidden="true" />
+        <span className="sr-only">{toolName}</span>
+      </span>
+    );
+  return toolName;
 }
 
 const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Activity }) {
@@ -10442,8 +10747,9 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
     activity.tool_name || activity.title,
     activity.tool_mode,
   );
-  const command =
-    activity.code?.trim() || toolInvocationPreview(activity) || "";
+  const structuredInvocation = !!activity.run_bash_edit || !!activity.readfile || !!activity.memory_search || !!activity.self_tool;
+  const code = activity.code?.trim();
+  const invocationPreview = !structuredInvocation ? toolInvocationPreview(activity) : undefined;
   const detail = activity.detail?.trim();
   const [liveElapsedMs, setLiveElapsedMs] = useState(() =>
     Math.max(0, Date.now() - activity.createdAt),
@@ -10471,31 +10777,47 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
     return subscribeStreamInteraction(update);
   }, []);
   const open = expanded || interactionHeld;
+  const hasExpandableDetail = !!code || !!detail;
+  const toggle = () => {
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed && rowRef.current?.contains(selection.anchorNode)) return;
+    setExpanded(current => !current);
+  };
   return (
     <div ref={rowRef} className={`stream-tool-row${running ? " running" : ""}`}>
-      <div className="stream-tool-head">
-        <button type="button" className="stream-tool-toggle" aria-expanded={open} aria-label={open ? t("tools.collapseOutput") : t("tools.expandOutput")} onClick={() => setExpanded(!open)}><ChevronRight size={13} /></button>
-        {/* One fixed leading slot keeps execution and result markers in place. */}
-        <span className="stream-tool-status-slot" aria-label={running ? (status === "background_running" ? t("tools.runningBg") : t("tools.running")) : undefined}>
-          {running && <span className="stream-tool-dot" aria-hidden="true" />}
-          <ActionStatus status={status} label={running ? "" : humanizeToolStatus(status)} className="stream-tool-status" />
-        </span>
-        <b>{toolName}</b>
-        {status === "background_running" && <span className="stream-tool-background">(bg)</span>}
-        {command && <span className="stream-tool-command-preview" title={command}>{command.replace(/\s+/g, " ")}</span>}
-        {(running
-          ? liveElapsedMs
-          : activity.elapsed_ms) !== undefined && (
-          <span className="stream-tool-elapsed">
-            {running
-              ? formatLiveElapsed(liveElapsedMs)
-              : formatToolElapsed(activity.elapsed_ms!)}
+      <div className={`stream-tool-head${hasExpandableDetail ? " stream-tool-toggle" : ""}`}
+        role={hasExpandableDetail ? "button" : undefined} tabIndex={hasExpandableDetail ? 0 : undefined}
+        aria-expanded={hasExpandableDetail ? open : undefined}
+        aria-label={hasExpandableDetail ? (open ? t("tools.collapseOutput") : t("tools.expandOutput")) : undefined}
+        onClick={hasExpandableDetail ? toggle : undefined}
+        onKeyDown={hasExpandableDetail ? event => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault(); toggle();
+        } : undefined}>
+        {running && (
+          <span className="stream-tool-status-slot" aria-label={status === "background_running" ? t("tools.runningBg") : t("tools.running")}>
+            <span className="stream-tool-dot" aria-hidden="true" />
           </span>
         )}
+        <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
+        {status === "background_running" && <span className="stream-tool-background">(bg)</span>}
+        {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && <span className="stream-tool-command-preview tool-invocation-preview" title={invocationPreview}>{invocationPreview.replace(/\s+/g, " ")}</span>}
+        {(running
+          ? liveElapsedMs
+          : activity.elapsed_ms) !== undefined && (() => {
+          const elapsed = running
+            ? formatLiveElapsed(liveElapsedMs)
+            : formatToolElapsed(activity.elapsed_ms!);
+          return (
+            <span className="stream-tool-elapsed" aria-label={elapsed}>
+              {running ? <FlippingTime value={elapsed} /> : elapsed}
+            </span>
+          );
+        })()}
       </div>
       <div className={`stream-tool-fold${open ? " expanded" : ""}`} inert={!open}>
         <div>
-          {command && <pre className="stream-tool-command">{command}</pre>}
+          {code && <pre className="stream-tool-command">{code}</pre>}
           {detail && <div className="stream-tool-detail">{detail}</div>}
         </div>
       </div>
@@ -10506,11 +10828,14 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
   const b = next.activity;
   return a.id === b.id && a.tool_status === b.tool_status && a.tool_name === b.tool_name &&
     a.tool_mode === b.tool_mode && a.title === b.title && a.code === b.code && a.detail === b.detail &&
-    a.elapsed_ms === b.elapsed_ms;
+    a.elapsed_ms === b.elapsed_ms && JSON.stringify(a.memory_search) === JSON.stringify(b.memory_search) &&
+    JSON.stringify(a.self_tool) === JSON.stringify(b.self_tool) && JSON.stringify(a.readfile) === JSON.stringify(b.readfile) &&
+    JSON.stringify(a.run_bash_edit) === JSON.stringify(b.run_bash_edit);
 });
 
 function TurnAnswerDelivery({
   streamRetained,
+  workExpanded,
   onStreamArchived,
   latestThoughtTime,
   turn,
@@ -10531,6 +10856,7 @@ function TurnAnswerDelivery({
   waitingModel: boolean;
   latestThoughtTime: number;
   streamRetained: boolean;
+  workExpanded: boolean;
   onStreamArchived: () => void;
   toolGenPending: boolean;
   toolGenBlocked: boolean;
@@ -10551,15 +10877,29 @@ function TurnAnswerDelivery({
     (streamWorking && intermediate ? preview?.response?.text ?? "" : "");
   const hasPreview = !!previewText;
   const hasFinal = !!turn.final_answer;
+  const modelPhase = waitingModel || preview?.response?.status === "streaming";
+  const phase = modelPhase ? "model" : "local";
+  const phaseBoundary = turnWorkPhaseBoundary(turn, phase);
+  const phaseStartedAt = useMemo(
+    () => phaseBoundary.startedAtMs ?? Date.now(),
+    [phaseBoundary.id, phaseBoundary.startedAtMs],
+  );
+  const phaseTimerKey = `${phase}:${phaseBoundary.id}`;
   return (
     <section className="turn-answer-delivery">
       {streamRetained && <StreamProcess closing={turn.state !== "working"} onArchived={onStreamArchived}>
-        <StreamActivityPresentation thoughtText={intermediate && !retainedThought ? thoughtText : ""} activities={streamTools} responseArriving={!!previewText} />
+        <StreamActivityPresentation
+          thoughtText={intermediate && !retainedThought ? thoughtText : ""}
+          thoughtTimelineSeq={preview?.timeline_seq}
+          activities={streamTools}
+          responseArriving={!!previewText}
+        />
       </StreamProcess>}
       {hasPreview && preview?.interruption && <div className="response-preview-interruption" role="status">{preview.interruption === "cancelled" ? "Stopped — partial response" : preview.interruption === "network_error" ? "Network error — partial response" : "Model error — partial response"}</div>}
       {(hasFinal || !!previewText) && (
         <FinalAnswerDelivery
           text={turn.final_answer || previewText}
+          layoutKey={`${streamRetained}:${workExpanded}`}
           provisional={!hasFinal}
           streaming={!hasFinal && preview?.response?.status === "streaming"}
           completion={turn.completion}
@@ -10574,14 +10914,29 @@ function TurnAnswerDelivery({
       )}
       {streamUiMode && streamWorking && (
         <div
-          className={`stream-working-trailer${waitingModel || preview?.response?.status === "streaming" ? " model-waiting" : " tool-active"}`}
+          className={`stream-working-trailer${modelPhase ? " model-waiting" : " tool-active"}`}
           role="status"
-          aria-label="Working"
+          title={modelPhase ? t("tools.waitingModel") : t("tools.localWorking")}
+          aria-label={modelPhase ? t("tools.waitingModel") : t("tools.localWorking")}
         >
-          <span className="stream-working-dot" aria-hidden="true" />
-          <WorkingElapsed createdAtMs={turn.created_at_ms} />
-          <span className="stream-working-calls" aria-hidden="true">
-            ✦ {countTurnModelRequests(turn)}
+          <span className="stream-working-current">
+            {modelPhase ? (
+              <span className="stream-working-star" aria-hidden="true">✦</span>
+            ) : (
+              <Wrench className="stream-working-wrench" size={13} strokeWidth={1.65} aria-hidden="true" />
+            )}
+            <WorkingElapsed
+              key={phaseTimerKey}
+              createdAtMs={phaseStartedAt}
+              hideBeforeMs={1_000}
+              liveFormat
+              className="stream-working-phase-elapsed"
+            />
+          </span>
+          <span className="stream-working-total" aria-hidden="true">
+            <Clock8 size={12} />
+            <WorkingElapsed createdAtMs={turn.created_at_ms} liveFormat className="stream-working-turn-elapsed" />
+            <span className="stream-working-calls">✦ {countTurnModelRequests(turn)}</span>
           </span>
         </div>
       )}
@@ -10591,6 +10946,7 @@ function TurnAnswerDelivery({
 
 function FinalAnswerDelivery({
   text,
+  layoutKey,
   provisional = false,
   streaming = false,
   completion,
@@ -10603,6 +10959,7 @@ function FinalAnswerDelivery({
   onDelete,
 }: {
   text: string;
+  layoutKey: string;
   provisional?: boolean;
   streaming?: boolean;
   completion: WebTurn["completion"];
@@ -10674,7 +11031,7 @@ function FinalAnswerDelivery({
   );
   return (
     <section className={provisional ? `response-preview${streaming ? " streaming" : ""}` : "turn-final-delivery"}>
-      <FinalAnswerContent text={text} provisional={provisional} />
+      <FinalAnswerContent text={text} provisional={provisional} layoutKey={layoutKey} />
       {provisional ? null : completion ? (
         <CompletionCard
           completion={completion}
@@ -10699,7 +11056,7 @@ const FINAL_ANSWER_OUTLINE_EDGE_GUARD = 12;
 const FINAL_ANSWER_OUTLINE_VIEWPORT_RATIO = 0.15;
 const FINAL_ANSWER_OUTLINE_TOGGLE_HEIGHT = 52;
 
-function FinalAnswerContent({ text, provisional = false }: { text: string; provisional?: boolean }) {
+function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: string; provisional?: boolean; layoutKey: string }) {
   const timelineActive = useContext(SessionTimelineActiveContext);
   const outline = useMemo(() => {
     try {
@@ -10767,6 +11124,8 @@ function FinalAnswerContent({ text, provisional = false }: { text: string; provi
       nav.scrollTop = nextScrollTop;
   }, [activeId, outlineCollapsed, showOutline]);
 
+  // Known sibling collapse/archive commits invalidate position immediately;
+  // ResizeObserver is supplementary and may arrive after the handoff deadline.
   useLayoutEffect(() => {
     const root = rootRef.current;
     const content = contentRef.current;
@@ -10784,9 +11143,7 @@ function FinalAnswerContent({ text, provisional = false }: { text: string; provi
       setShowOutline(false);
       return;
     }
-    let updateFrame: number | null = null;
     const update = () => {
-      updateFrame = null;
       const contentRect = content.getBoundingClientRect();
       const viewportRect = viewport.getBoundingClientRect();
       const bodyInset = Math.max(0, contentRect.left - viewportRect.left);
@@ -10828,10 +11185,10 @@ function FinalAnswerContent({ text, provisional = false }: { text: string; provi
         ),
       );
     };
-    const scheduleUpdate = () => {
-      if (updateFrame !== null) return;
-      updateFrame = window.requestAnimationFrame(update);
-    };
+    // A stale portaled top can itself extend scrollHeight after sibling work
+    // collapses. Repair geometry even when the display stops delivering rAF.
+    const layoutTask = createFrameTask({ run: update, fallbackMs: 100 });
+    const scheduleUpdate = () => layoutTask.request();
     update();
     window.addEventListener("resize", scheduleUpdate);
     const observer =
@@ -10850,9 +11207,9 @@ function FinalAnswerContent({ text, provisional = false }: { text: string; provi
     return () => {
       window.removeEventListener("resize", scheduleUpdate);
       observer?.disconnect();
-      if (updateFrame !== null) cancelAnimationFrame(updateFrame);
+      layoutTask.dispose();
     };
-  }, [outline, outlineCollapsed, text, timelineActive, provisional]);
+  }, [outline, outlineCollapsed, text, timelineActive, provisional, layoutKey]);
 
   useEffect(() => {
     setOutlineCollapsed(outlinePlacement === "overlay");
@@ -11075,11 +11432,11 @@ function FinalAnswerContent({ text, provisional = false }: { text: string; provi
                   title="Show table of contents"
                   onClick={() => setOutlineCollapsed(false)}
                 >
-                  <BookText size={19} strokeWidth={1.8} aria-hidden="true" />
+                  <BookText size={19} strokeWidth={1.35} aria-hidden="true" />
                   <ChevronRight
                     className="final-answer-outline-toggle-arrow"
                     size={14}
-                    strokeWidth={2.4}
+                    strokeWidth={1.8}
                     aria-hidden="true"
                   />
                 </button>
@@ -11096,14 +11453,14 @@ function FinalAnswerContent({ text, provisional = false }: { text: string; provi
                     >
                       <ChevronLeft
                         size={16}
-                        strokeWidth={2.4}
+                        strokeWidth={1.8}
                         aria-hidden="true"
                       />
                     </button>
                     <span>
                       <BookText
                         size={13}
-                        strokeWidth={1.8}
+                        strokeWidth={1.35}
                         aria-hidden="true"
                       />
                       {t("outline.contents")}
@@ -11201,18 +11558,24 @@ function HeaderContextUsage({
   }, [menuOpen]);
   const usage = session ? sessionContextUsage(session) : undefined;
   const cacheHitPercent = session ? sessionCacheHitPercent(session) : undefined;
+  const cacheTotals = session ? sessionCacheTokenTotals(session) : undefined;
   const limit = session?.max_llm_input_tokens || undefined;
   const ratio = limit
     ? Math.min(100, Math.ceil(((usage?.prompt_tokens ?? 0) * 100) / limit))
     : 0;
   const level = ratio >= 90 ? "critical" : ratio >= 75 ? "warning" : "normal";
-  const cacheLabel =
-    cacheHitPercent === undefined
-      ? "cache: —"
-      : `cache: ${cacheHitPercent.toFixed(1)}%`;
+  const cachePercentLabel =
+    cacheHitPercent === undefined ? "cache: —" : `cache: ${cacheHitPercent.toFixed(1)}%`;
+  const cacheInputLabel = formatTokensCoarse(cacheTotals?.prompt_tokens ?? 0) ?? "0";
+  const cacheOutputLabel = formatTokensCoarse(cacheTotals?.completion_tokens ?? 0) ?? "0";
+  const cacheLabel = cacheHitPercent === undefined
+    ? cachePercentLabel
+    : `${cachePercentLabel}, input: ${cacheInputLabel}, output: ${cacheOutputLabel}`;
+  const cacheRateBasis =
+    "Cache rate excludes the first model request after a detected runtime restart; input/output totals still include it.";
   const contextUsageLabel = limit
-    ? `Context usage ${ratio}% · ${formatTokens(usage?.prompt_tokens ?? 0)} / ${formatTokens(limit)} input tokens · ${cacheLabel}`
-    : `Context usage waiting for runtime usage · ${cacheLabel}`;
+    ? `Context usage ${ratio}% · ${formatTokens(usage?.prompt_tokens ?? 0)} / ${formatTokens(limit)} input tokens · ${cacheLabel}. ${cacheRateBasis}`
+    : `Context usage waiting for runtime usage · ${cacheLabel}. ${cacheRateBasis}`;
   return (
     <span
       className={`header-context ${level}`}
@@ -11244,16 +11607,15 @@ function HeaderContextUsage({
                   <button
                     type="button"
                     role="menuitem"
-                    disabled={session ? sessionContextCompactPending(session) : false}
+                    disabled={session ? sessionContextCompressPending(session) : false}
                     onClick={() => {
                       setMenuOpen(false);
                       onCompact();
                     }}
                   >
-                    <Eraser size={11} aria-hidden="true" />
-                    {session && sessionContextCompactPending(session)
-                      ? t("context.compactingAction")
-                      : t("context.compactAction")}
+                    {session && sessionContextCompressPending(session)
+                      ? t("context.compressingAction")
+                      : t("context.compressAction")}
                   </button>
                 )}
                 {onClear && (
@@ -11265,7 +11627,6 @@ function HeaderContextUsage({
                       if (window.confirm(t("context.clearConfirm"))) onClear();
                     }}
                   >
-                    <Eraser size={11} aria-hidden="true" />
                     {t("context.clearAction")}
                   </button>
                 )}
@@ -11274,9 +11635,20 @@ function HeaderContextUsage({
           </span>
         )}
       </span>
-      <span className="header-cache-rate">
-        <span aria-hidden="true">· </span>
-        {cacheLabel}
+      <span className="header-cache-rate" aria-hidden="true">
+        <span>· {cachePercentLabel}</span>
+        {cacheHitPercent !== undefined && (
+          <>
+            <span className="header-cache-token header-cache-input">
+              <ArrowBigUp size={12} strokeWidth={1.8} />
+              {cacheInputLabel}
+            </span>
+            <span className="header-cache-token header-cache-output">
+              <ArrowBigDown size={12} strokeWidth={1.8} />
+              {cacheOutputLabel}
+            </span>
+          </>
+        )}
       </span>
     </span>
   );
@@ -11305,10 +11677,17 @@ function LiveTurnUsage({ turn }: { turn: WebTurn }) {
 }
 
 function ActivityView({ activity, enterPulse = false }: { activity: Activity; enterPulse?: boolean }) {
-  if (activity.kind === "context_compact")
-    return <ContextCompactNotice activity={activity} />;
+  if (activity.kind === "reasoning_notice")
+    return <div className="turn-work-item notice system-notice reasoning-notice" role="status">
+      <span className="activity-mark" aria-hidden="true"><InfinityIcon size={13} /></span>
+      <div className="system-notice-line"><span className="system-notice-title">{activity.title}</span></div>
+    </div>;
+  if (activity.kind === "context_compress")
+    return <ContextCompressNotice activity={activity} />;
   if (activity.kind === "toolgen") return <ToolGenNotice activity={activity} />;
   if (activity.kind === "memo_notice") return <MemoNotice activity={activity} />;
+  if (activity.kind === "model_service_issue")
+    return <ModelServiceIssueNotice activity={activity} />;
   if (activity.kind === "user_supplement")
     return (
       <div className="turn-work-item thinking user-supplement">
@@ -11317,7 +11696,7 @@ function ActivityView({ activity, enterPulse = false }: { activity: Activity; en
         </span>
         <div className="user-supplement-line">
           <strong>{activity.title}</strong>
-          {activity.detail && <MarkdownContent text={activity.detail} />}
+          {activity.detail && <UserText text={activity.detail} />}
         </div>
       </div>
     );
@@ -11354,13 +11733,38 @@ function ActivityView({ activity, enterPulse = false }: { activity: Activity; en
   );
 }
 
+function ModelServiceIssueNotice({ activity }: { activity: Activity }) {
+  return (
+    <div className={`turn-work-item ${activity.tone} model-service-issue`}>
+      <span className="activity-mark" aria-hidden="true">
+        {activity.tone === "error" ? "×" : "i"}
+      </span>
+      <div>
+        <strong>{activity.title}</strong>
+        {activity.detail && (
+          <div className="turn-work-detail">
+            <UserText text={activity.detail} />
+          </div>
+        )}
+        {activity.diagnostic && (
+          <details className="model-service-diagnostic">
+            <summary>{t("service.diagnosticLabel")}</summary>
+            <UserText text={activity.diagnostic} />
+          </details>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ToolGenNotice({ activity }: { activity: Activity }) {
   const [open, setOpen] = useState(false);
   const hasDetail = !!activity.detail?.trim();
   if (!hasDetail)
     return (
-      <blockquote className={`toolgen-notice ${activity.toolgen_phase ?? ""}`}>
-        <span>{activity.title}</span>
+      <blockquote className={`system-notice system-notice-row toolgen-notice ${activity.toolgen_phase ?? ""}`}>
+        <span className="system-notice-icon" aria-hidden="true"><Wrench size={13} /></span>
+        <span className="system-notice-title">{activity.title}</span>
       </blockquote>
     );
   const collapse = () => setOpen(false);
@@ -11372,18 +11776,19 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
     : toolgenBaseLabel;
   return (
     <details
-      className={`toolgen-notice ${activity.toolgen_phase ?? ""}`}
+      className={`system-notice toolgen-notice ${activity.toolgen_phase ?? ""}`}
       open={open}
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
       <summary
+        className="system-notice-row"
         title={open ? t("tools.toolgenCollapse") : t("tools.toolgenExpand")}
         aria-label={summaryLabel}
         data-expanded-label={t("common.collapse")}
         data-collapsed-label={t("common.expand")}
       >
-        <ChevronRight size={13} />
-        <span>{activity.title}</span>
+        <span className="system-notice-icon" aria-hidden="true"><ChevronRight size={13} /></span>
+        <span className="system-notice-title">{activity.title}</span>
       </summary>
       <div>
         <button
@@ -11411,8 +11816,8 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
 }
 
 function toolActivityGroupStatusLabel(summary: ToolActivitySummary, showResults: boolean) {
+  if (summary.status === "completed") return "";
   if (!showResults && summary.status !== "running") return t("tools.done");
-  if (summary.status === "completed") return "✓";
   if (summary.status === "failed") return `✗(${summary.failedCount})`;
 
   const activeParts: string[] = [];
@@ -11461,7 +11866,7 @@ function ToolActivityGroup({ summary, enterPulse = false }: { summary: ToolActiv
           size={14}
           aria-hidden="true"
         />
-        <span className="tool-activity-group-status">{groupStatusLabel}</span>
+        {groupStatusLabel && <span className="tool-activity-group-status">{groupStatusLabel}</span>}
         <span className="tool-activity-group-counts" aria-hidden="true">
           {summary.counts.map(({ name, count }, index) => (
             <span className="tool-activity-group-count" key={name}>
@@ -11478,6 +11883,26 @@ function ToolActivityGroup({ summary, enterPulse = false }: { summary: ToolActiv
         ))}
       </div>
     </details>
+  );
+}
+
+function LocalizedFlippingTime({
+  message,
+  time,
+}: {
+  message: "tools.remaining" | "tools.elapsed";
+  time: string;
+}) {
+  const marker = "\uE000";
+  const localized = t(message, { time: marker });
+  const markerIndex = localized.indexOf(marker);
+  if (markerIndex < 0) return <FlippingTime value={time} />;
+  return (
+    <>
+      {localized.slice(0, markerIndex)}
+      <FlippingTime value={time} />
+      {localized.slice(markerIndex + marker.length)}
+    </>
   );
 }
 
@@ -11505,7 +11930,8 @@ function ToolActivity({ activity }: { activity: Activity }) {
     const timer = window.setInterval(updateElapsed, 1_000);
     return () => window.clearInterval(timer);
   }, [activity.createdAt, pollingActivity, running, waitBudgetMs]);
-  const invocationPreview = activity.tool_name === "sub_answer" ? undefined : toolInvocationPreview(activity);
+  const structuredInvocation = !!activity.run_bash_edit || !!activity.readfile || !!activity.memory_search || !!activity.self_tool;
+  const invocationPreview = activity.tool_name === "sub_answer" || structuredInvocation ? undefined : toolInvocationPreview(activity);
   const detail = activity.detail?.trim();
   const code = activity.code?.trim();
   const hasExpandableDetail = !!detail || !!code;
@@ -11518,59 +11944,58 @@ function ToolActivity({ activity }: { activity: Activity }) {
     running && activity.execution_started && waitBudgetMs !== undefined
       ? Math.max(0, waitBudgetMs - liveElapsedMs)
       : undefined;
-  const statusLabel =
-    status === "timeout" && bashActivity
-      ? activity.pid !== undefined
-        ? t("tools.waitEndedRunning", { pid: activity.pid })
-        : t("tools.waitEndedMaybe")
-      : humanizeToolStatus(status);
   const summaryLabel = t("tools.detailSummary", {
     action: open ? t("tools.detailCollapse") : t("tools.detailExpand"),
     name: toolName,
   });
   const summaryContent = (
     <>
-      {hasExpandableDetail ? (
-        <ChevronRight
-          className="tool-activity-icon tool-activity-chevron"
-          size={14}
-          aria-hidden="true"
-        />
-      ) : (
-        <span
-          className={`tool-activity-icon ${pollingActivity ? "poll-activity-icon" : "tool-command-symbol"}`}
-          aria-hidden="true"
-        >
-          {pollingActivity ? <Clock3 size={13} /> : ">_"}
+      {running && (
+        <span className="tool-activity-running-marker" aria-label={status === "background_running" ? t("tools.runningBg") : t("tools.running")}>
+          <span className="tool-activity-dot" aria-hidden="true" />
         </span>
       )}
-      <b>{toolName}</b>
-      <span className="tool-activity-meta">
-        <ActionStatus status={status} label={statusLabel} className="tool-activity-status" />
-        {remainingWaitMs !== undefined && (
-          <span className="tool-activity-countdown">
-            {t("tools.remaining", { time: formatRemainingDuration(remainingWaitMs) })}
-          </span>
-        )}
-        {displayedElapsedMs !== undefined && (
-          <span className="tool-activity-duration">
-            {running
-              ? t("tools.elapsed", { time: formatLiveElapsed(displayedElapsedMs) })
-              : formatDuration(displayedElapsedMs)}
-          </span>
-        )}
-      </span>
-      {invocationPreview && (
-        <code className="tool-activity-command" title={invocationPreview}>
+      <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
+      {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && (
+        <code className="tool-activity-command tool-invocation-preview" title={invocationPreview}>
           {invocationPreview}
         </code>
+      )}
+      {(remainingWaitMs !== undefined || displayedElapsedMs !== undefined) && (
+        <span className="tool-activity-timing">
+          {status === "background_running" && (
+            <span className="tool-activity-background">{t("tools.statusBg")}</span>
+          )}
+          {remainingWaitMs !== undefined && (() => {
+            const time = formatRemainingDuration(remainingWaitMs);
+            const label = t("tools.remaining", { time });
+            return (
+              <span className="tool-activity-countdown" aria-label={label}>
+                <LocalizedFlippingTime message="tools.remaining" time={time} />
+              </span>
+            );
+          })()}
+          {displayedElapsedMs !== undefined && (() => {
+            const time = running
+              ? formatLiveElapsed(displayedElapsedMs)
+              : formatDuration(displayedElapsedMs)!;
+            const label = running ? t("tools.elapsed", { time }) : time;
+            return (
+              <span className="tool-activity-duration" aria-label={label}>
+                {running
+                  ? <LocalizedFlippingTime message="tools.elapsed" time={time} />
+                  : time}
+              </span>
+            );
+          })()}
+        </span>
       )}
     </>
   );
   if (!hasExpandableDetail)
     return (
       <div
-        className={`tool-activity tool-activity-static ${bashActivity ? "bash-activity" : ""}${pollingActivity ? " poll-activity" : ""} ${running ? "running" : "settled"}`}
+        className={`tool-activity tool-activity-static ${bashActivity ? "bash-activity" : ""}${pollingActivity ? " poll-activity" : ""} ${running ? "running" : status === "completed" ? "settled completed" : "settled terminal-status"}`}
         aria-busy={running || undefined}
       >
         {summaryContent}
@@ -11578,7 +12003,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
     );
   return (
     <details
-      className={`tool-activity ${bashActivity ? "bash-activity" : ""}${pollingActivity ? " poll-activity" : ""} ${running ? "running" : "settled"}`}
+      className={`tool-activity ${bashActivity ? "bash-activity" : ""}${pollingActivity ? " poll-activity" : ""} ${running ? "running" : status === "completed" ? "settled completed" : "settled terminal-status"}`}
       aria-busy={running || undefined}
       open={open}
       onToggle={(event) => setOpen(event.currentTarget.open)}
@@ -11586,6 +12011,11 @@ function ToolActivity({ activity }: { activity: Activity }) {
       <summary
         title={open ? t("tools.detailCollapse") : t("tools.detailExpand")}
         aria-label={summaryLabel}
+        onClick={event => {
+          const selection = window.getSelection();
+          if (selection && !selection.isCollapsed && event.currentTarget.contains(selection.anchorNode))
+            event.preventDefault();
+        }}
       >
         {summaryContent}
       </summary>
@@ -11605,6 +12035,10 @@ function ToolActivity({ activity }: { activity: Activity }) {
   );
 }
 
+function MemoIcon({ size }: { size: number }) {
+  return <ClipboardCheck size={size} />;
+}
+
 function MemoNotice({ activity }: { activity: Activity }) {
   const op =
     activity.title === "memo created"
@@ -11616,24 +12050,17 @@ function MemoNotice({ activity }: { activity: Activity }) {
           : activity.title === "memo forcibly deleted by runtime"
             ? "messageNav.memoForceDeleted"
             : "messageNav.memoStopsFinish";
-  const icon =
-    activity.title === "memo stops_finish" || activity.title === "memo stops finish"
-      ? "🛑"
-      : activity.title === "memo forcibly deleted by runtime"
-        ? "⚙️"
-        : activity.title === "memo deleted"
-          ? "🗑️"
-          : activity.title === "memo updated"
-            ? "📝"
-            : "📝";
+  // Keep every memo surface on the same Lucide identity, including the
+  // runtime finish guard and the working-state indicator.
+  const icon = <MemoIcon size={13} />;
   return (
-    <div className="turn-work-item notice memo-notice">
+    <div className="turn-work-item notice system-notice memo-notice">
       <span className="activity-mark" aria-hidden="true">
         {icon}
       </span>
-      <div className="memo-notice-line">
-        <strong>{t(op)}</strong>
-        {activity.detail && <span className="memo-notice-text">{activity.detail}</span>}
+      <div className="system-notice-line">
+        <strong className="system-notice-title">{t(op)}</strong>
+        {activity.detail && <span className="system-notice-detail system-notice-long-detail">{activity.detail}</span>}
       </div>
     </div>
   );
@@ -11673,6 +12100,10 @@ function activityFromTurnEvent(
   }
   if (event.source !== "worker_activity") return null;
   const kind = String(event.payload.kind ?? "worker_event");
+  if (kind === "reasoning_upgrade" && typeof event.payload.from === "string" && typeof event.payload.to === "string")
+    return { id: event.event_id, sessionId, tone: "notice", kind: "reasoning_notice",
+      title: t("context.reasoningUpgrade", { from: event.payload.from, to: event.payload.to }), createdAt: event.created_at_ms };
+
   if (
     kind === "model_request" ||
     kind === "model_response" ||
@@ -11687,6 +12118,8 @@ function activityFromTurnEvent(
       tone: "error",
       title: issue.title,
       detail: issue.detail,
+      diagnostic: issue.diagnostic,
+      kind: "model_service_issue",
       createdAt: event.created_at_ms,
     };
   }
@@ -11714,39 +12147,31 @@ function activityFromTurnEvent(
   };
 }
 
-function ContextCompactNotice({ activity }: { activity: Activity }) {
+function ContextCompressNotice({ activity }: { activity: Activity }) {
   const before = activity.before_tokens;
   const after = activity.after_tokens;
-  if (activity.compact_phase === "requested") {
-    const label = t("context.compactingAria", {
-      tokens: formatTokens(activity.estimated_prompt_tokens) ?? t("context.unknown"),
-    });
-    return (
-      <section
-        className="context-compact-notice is-compacting"
-        aria-label={label}
-        role="status"
-      >
-        <div className="compact-icon">
-          <Gauge size={13} />
-        </div>
-        <div className="compact-copy">
-          <span>{t("context.dynamic")}</span>
-          <strong>{t("context.compacting")}</strong>
-        </div>
-        <div className="compact-meter" aria-hidden="true">
-          <span className="compact-before compact-indeterminate" />
-        </div>
-      </section>
-    );
-  }
-  const ratio =
-    before && after !== undefined
-      ? Math.max(6, Math.min(100, (after / before) * 100))
-      : 36;
   const hasBreakdown =
     activity.text_before_tokens !== undefined ||
     activity.native_before_tokens !== undefined;
+  if (activity.compact_phase === "requested") {
+    const label = t("context.compressingAria", {
+      tokens: formatTokens(activity.estimated_prompt_tokens) ?? t("context.unknown"),
+    });
+    return (
+      <div
+        className="turn-work-item notice system-notice context-compress-notice"
+        role="status"
+        aria-label={label}
+      >
+        <span className="activity-mark" aria-hidden="true">
+          <Gauge size={13} />
+        </span>
+        <div className="system-notice-line">
+          <strong className="system-notice-title">{t("context.compressing")}</strong>
+        </div>
+      </div>
+    );
+  }
   const breakdown = hasBreakdown
     ? t("context.textToolBreakdown", {
         textBefore: formatTokens(activity.text_before_tokens) ?? "?",
@@ -11755,35 +12180,27 @@ function ContextCompactNotice({ activity }: { activity: Activity }) {
         toolAfter: formatTokens(activity.native_after_tokens) ?? "?",
       })
     : undefined;
-  const label = t("context.compactedAria", {
+  const label = t("context.compressedAria", {
     before: formatTokens(before) ?? t("context.unknown"),
     after: formatTokens(after) ?? t("context.unknown"),
-    suffix: breakdown ? t("context.compactedSuffix", { breakdown }) : "",
+    suffix: breakdown ? t("context.compressedSuffix", { breakdown }) : "",
   });
   return (
-    <section
-      className="context-compact-notice"
-      aria-label={label}
-      title={breakdown}
-    >
-      <div className="compact-icon">
+    <div className="turn-work-item notice system-notice context-compress-notice" aria-label={label} title={breakdown}>
+      <span className="activity-mark" aria-hidden="true">
         <Gauge size={13} />
-      </div>
-      <div className="compact-copy">
-        <span>{t("context.dynamic")}</span>
-        <strong>
+      </span>
+      <div className="system-notice-line">
+        <strong className="system-notice-title">{t("context.dynamic")}</strong>
+        <span className="system-notice-metric">
           {formatTokens(before) ?? "?"} → {formatTokens(after) ?? "?"}
           {before && after !== undefined && before > 0
             ? ` (${Math.max(0, Math.round((1 - after / before) * 100))}% off)`
             : ""}
-        </strong>
-        {breakdown && <small>{breakdown}</small>}
+        </span>
+        {breakdown && <span className="system-notice-detail system-notice-long-detail">{breakdown}</span>}
       </div>
-      <div className="compact-meter" aria-hidden="true">
-        <span className="compact-before" />
-        <span className="compact-after" style={{ width: `${ratio}%` }} />
-      </div>
-    </section>
+    </div>
   );
 }
 
@@ -11880,7 +12297,7 @@ function McpPanel({
               aria-label={t("mcp.cancelDelete")}
               onClick={cancelDeleteMode}
             >
-              <X size={14} strokeWidth={3} />
+              <X size={14} strokeWidth={2.25} />
             </button>
           )}
           {!editing && (
@@ -11915,7 +12332,7 @@ function McpPanel({
               }}
             >
               {deleteMode ? (
-                <Check size={14} strokeWidth={3} />
+                <Check size={14} strokeWidth={2.25} />
               ) : (
                 <Trash2 size={14} />
               )}
@@ -12613,7 +13030,7 @@ function McpEditor({
   );
 }
 
-type SettingsSection = "appearance" | "endpoints" | "memory" | "beta";
+type SettingsSection = "appearance" | "endpoints" | "memory" | "system";
 
 type SettingsCenterProps = {
   panelRef: MutableRefObject<HTMLElement | null>;
@@ -12624,6 +13041,14 @@ type SettingsCenterProps = {
   toolGenEnabled: boolean;
   toolGenToggleDisabled: boolean;
   onToolGenEnabledChange: (enabled: boolean) => void;
+  modelToolResultBytes: ModelToolResultBytes;
+  modelToolResultBytesPending: boolean;
+  onModelToolResultBytesChange: (maxBytes: ModelToolResultBytes) => void;
+  contextCompressThresholdPercent: ContextCompressThresholdPercent;
+  contextCompressThresholdPending: boolean;
+  onContextCompressThresholdChange: (
+    percent: ContextCompressThresholdPercent,
+  ) => void;
   claudeCodexToolDiscoveryEnabled: boolean;
   claudeCodexToolDiscoveryPending: boolean;
   onClaudeCodexToolDiscoveryChange: (enabled: boolean) => void;
@@ -12642,12 +13067,15 @@ type SettingsCenterProps = {
   temporaryItemsLoading: boolean;
   temporaryItemsDeleting: boolean;
   temporaryItemsError: string;
+  catalog: CatalogModel[];
+  providers: ProviderSpec[];
   endpoints: ModelEndpoint[];
   endpointEditor: ModelEndpoint | "new" | null;
   endpointImportCandidates: ModelEndpointImportCandidate[];
   endpointImportIssues: string[];
   onScanEndpointImport: (codexDir: string, claudeDir: string) => void;
   onImportEndpoints: (candidateIds: string[]) => void;
+  endpointShareTransport: ShareTransport;
   revealedEndpointApiKeys: Record<string, string>;
   revealedEndpointHeaders: Record<string, Record<string, string>>;
   revealedEndpointRequestFields: Record<string, Record<string, unknown>>;
@@ -12682,6 +13110,12 @@ const SettingsCenter = memo(function SettingsCenter(
     toolGenEnabled,
     toolGenToggleDisabled,
     onToolGenEnabledChange,
+    modelToolResultBytes,
+    modelToolResultBytesPending,
+    onModelToolResultBytesChange,
+    contextCompressThresholdPercent,
+    contextCompressThresholdPending,
+    onContextCompressThresholdChange,
     claudeCodexToolDiscoveryEnabled,
     claudeCodexToolDiscoveryPending,
     onClaudeCodexToolDiscoveryChange,
@@ -12700,12 +13134,15 @@ const SettingsCenter = memo(function SettingsCenter(
     temporaryItemsLoading,
     temporaryItemsDeleting,
     temporaryItemsError,
+    catalog,
+    providers,
     endpoints,
     endpointEditor,
     endpointImportCandidates,
     endpointImportIssues,
     onScanEndpointImport,
     onImportEndpoints,
+    endpointShareTransport,
     revealedEndpointApiKeys,
     revealedEndpointHeaders,
     revealedEndpointRequestFields,
@@ -12744,6 +13181,8 @@ const SettingsCenter = memo(function SettingsCenter(
   const busy =
     retentionPending ||
     conversationCapacityPending ||
+    modelToolResultBytesPending ||
+    contextCompressThresholdPending ||
     claudeCodexToolDiscoveryPending ||
     favoriteCapacityPending ||
     switchPending ||
@@ -12900,14 +13339,14 @@ const SettingsCenter = memo(function SettingsCenter(
             </button>
             <button
               type="button"
-              className={section === "beta" ? "active" : ""}
-              aria-current={section === "beta" ? "page" : undefined}
+              className={section === "system" ? "active" : ""}
+              aria-current={section === "system" ? "page" : undefined}
               disabled={switchPending}
-              onClick={() => selectSettingsSection("beta")}
+              onClick={() => selectSettingsSection("system")}
             >
-              <TriangleAlert size={16} />
+              <Settings size={16} />
               <span>
-                <strong>{t("settings.beta")}</strong>
+                <strong>{t("settings.system")}</strong>
               </span>
             </button>
           </nav>
@@ -12989,7 +13428,7 @@ const SettingsCenter = memo(function SettingsCenter(
                       }
                     />
                     <span className="appearance-checkbox" aria-hidden="true">
-                      <Check size={12} strokeWidth={3} />
+                      <Check size={12} strokeWidth={2.25} />
                     </span>
                     <span>{t("settings.bold")}</span>
                   </label>
@@ -13046,7 +13485,7 @@ const SettingsCenter = memo(function SettingsCenter(
                       }
                     />
                     <span className="appearance-checkbox" aria-hidden="true">
-                      <Check size={12} strokeWidth={3} />
+                      <Check size={12} strokeWidth={2.25} />
                     </span>
                     <span>{t("settings.bold")}</span>
                   </label>
@@ -13094,6 +13533,10 @@ const SettingsCenter = memo(function SettingsCenter(
             )}
             {section === "endpoints" && (
               <EndpointSettingsPane
+                key={`${connected}:${memPath}`}
+                shareTransport={endpointShareTransport}
+                catalog={catalog}
+                providers={providers}
                 endpoints={endpoints}
                 endpointEditor={endpointEditor}
                 importCandidates={endpointImportCandidates}
@@ -13111,16 +13554,84 @@ const SettingsCenter = memo(function SettingsCenter(
                 onSave={onSaveEndpoint}
               />
             )}
-            {section === "beta" && (
+            {section === "system" && (
               <section
                 className="settings-pane toolgen-settings-pane"
-                aria-labelledby="beta-settings-title"
+                aria-labelledby="system-settings-title"
               >
                 <div className="settings-pane-heading">
-                  <h3 id="beta-settings-title">{t("beta.title")}</h3>
-                  <TriangleAlert size={19} aria-hidden="true" />
+                  <h3 id="system-settings-title">{t("system.title")}</h3>
+                  <Settings size={19} aria-hidden="true" />
                 </div>
+                <section className="settings-group system-tool-result-limit">
+                  <div className="settings-group-heading">
+                    <div>
+                      <strong>{t("system.toolResultLimitTitle")}</strong>
+                      <p>{t("system.toolResultLimitDesc")}</p>
+                    </div>
+                  </div>
+                  <div
+                    className="segmented-control system-tool-result-options"
+                    aria-label={t("system.toolResultLimitAria")}
+                  >
+                    {([30720, 20480, 16384, 10240, 8192] as const).map(
+                      (maxBytes) => (
+                        <button
+                          type="button"
+                          key={maxBytes}
+                          className={modelToolResultBytes === maxBytes ? "active" : ""}
+                          aria-pressed={modelToolResultBytes === maxBytes}
+                          disabled={modelToolResultBytesPending || !connected}
+                          onClick={() => onModelToolResultBytesChange(maxBytes)}
+                        >
+                          {maxBytes / 1024}K
+                        </button>
+                      ),
+                    )}
+                  </div>
+                  {modelToolResultBytesPending && (
+                    <small className="system-setting-status" role="status" aria-live="polite">
+                      {t("system.saving")}
+                    </small>
+                  )}
+                </section>
+                <section className="settings-group system-context-compress-threshold">
+                  <div className="settings-group-heading">
+                    <div>
+                      <strong>{t("system.contextCompressThresholdTitle")}</strong>
+                      <p>{t("system.contextCompressThresholdDesc")}</p>
+                    </div>
+                  </div>
+                  <div
+                    className="segmented-control system-context-compress-options"
+                    aria-label={t("system.contextCompressThresholdAria")}
+                  >
+                    {([80, 85, 90, 95, 100] as const).map((percent) => (
+                      <button
+                        type="button"
+                        key={percent}
+                        className={
+                          contextCompressThresholdPercent === percent ? "active" : ""
+                        }
+                        aria-pressed={contextCompressThresholdPercent === percent}
+                        disabled={contextCompressThresholdPending || !connected}
+                        onClick={() => onContextCompressThresholdChange(percent)}
+                      >
+                        {percent}%
+                      </button>
+                    ))}
+                  </div>
+                  {contextCompressThresholdPending && (
+                    <small className="system-setting-status" role="status" aria-live="polite">
+                      {t("system.saving")}
+                    </small>
+                  )}
+                </section>
                 <StreamUiModeSetting />
+                <div className="system-subsection-heading">
+                  <strong>{t("system.betaFeaturesTitle")}</strong>
+                  <p>{t("system.betaFeaturesDesc")}</p>
+                </div>
                 <ToolResultStatusSetting />
                 <section className="settings-group toolgen-beta-card">
                   <div className="settings-group-heading">
@@ -13179,31 +13690,6 @@ const SettingsCenter = memo(function SettingsCenter(
                     >
                       <span className="settings-feature-switch-thumb" />
                     </button>
-                  </div>
-                  <div
-                    className="toolgen-beta-status"
-                    role="status"
-                    aria-live="polite"
-                  >
-                    <span
-                      className={
-                        claudeCodexToolDiscoveryEnabled ? "enabled" : "disabled"
-                      }
-                    />
-                    <strong>
-                      {claudeCodexToolDiscoveryPending
-                        ? t("beta.saving")
-                        : claudeCodexToolDiscoveryEnabled
-                          ? t("beta.enabled")
-                          : t("beta.disabledByDefault")}
-                    </strong>
-                    <small>
-                      {claudeCodexToolDiscoveryPending
-                        ? t("beta.pendingWait")
-                        : claudeCodexToolDiscoveryEnabled
-                          ? t("beta.instructionPresent")
-                          : t("beta.instructionAbsent")}
-                    </small>
                   </div>
                 </section>
                 <section className="toolgen-beta-note">
@@ -13767,6 +14253,9 @@ const SettingsCenter = memo(function SettingsCenter(
 });
 
 function EndpointSettingsPane({
+  shareTransport,
+  catalog,
+  providers,
   endpoints,
   endpointEditor,
   importCandidates,
@@ -13783,6 +14272,9 @@ function EndpointSettingsPane({
   onReveal,
   onSave,
 }: {
+  shareTransport: ShareTransport;
+  catalog: CatalogModel[];
+  providers: ProviderSpec[];
   endpoints: ModelEndpoint[];
   endpointEditor: ModelEndpoint | "new" | null;
   importCandidates: ModelEndpointImportCandidate[];
@@ -13799,6 +14291,8 @@ function EndpointSettingsPane({
   onReveal: (endpointId: string) => void;
   onSave: (endpoint: ModelEndpointDraft) => void;
 }) {
+  const [shareTarget, setShareTarget] = useState<ModelEndpoint | "import" | null>(null);
+  const closeEndpointShare = useCallback(() => setShareTarget(null), []);
   const [deleteMode, setDeleteMode] = useState(false);
   const [selectedEndpointIds, setSelectedEndpointIds] = useState<Set<string>>(
     () => new Set(),
@@ -13843,6 +14337,8 @@ function EndpointSettingsPane({
         aria-label="Model endpoint editor"
       >
         <ModelEndpointEditor
+          catalog={catalog}
+          providers={providers}
           endpoint={endpointEditor === "new" ? undefined : endpointEditor}
           revealedApiKey={
             endpointEditor === "new"
@@ -13969,6 +14465,9 @@ function EndpointSettingsPane({
               ? t("endpoints.importHide")
               : t("endpoints.importButton")}
           </button>
+          <button type="button" className="secondary compact" disabled={deleteMode} onClick={() => { setShowImport(false); setShareTarget("import"); }}>
+            <FolderInput size={14} /> {t("endpoints.shareImport")}
+          </button>
           <button
             type="button"
             className="primary compact"
@@ -13979,6 +14478,8 @@ function EndpointSettingsPane({
           </button>
         </div>
       </div>
+      {shareTarget && <EndpointSharePanel key={shareTarget === "import" ? "import" : shareTarget.id}
+        endpoint={shareTarget === "import" ? undefined : shareTarget} transport={shareTransport} onClose={closeEndpointShare} />}
       {showImport && (
         <div className="endpoint-import-panel">
           <div className="endpoint-import-heading">
@@ -14016,7 +14517,7 @@ function EndpointSettingsPane({
           {importIssues.length > 0 && (
             <ul className="endpoint-import-issues">
               {importIssues.map((issue) => (
-                <li key={issue}>{issue}</li>
+                <li key={issue}>{endpointImportIssueMessage(issue)}</li>
               ))}
             </ul>
           )}
@@ -14141,24 +14642,31 @@ function EndpointSettingsPane({
                   </button>
                 )}
                 {!deleteMode && (
-                  <button
-                    type="button"
-                    className="endpoint-settings-edit"
-                    title={t("endpoints.editEndpoint")}
-                    aria-label={t("endpoints.editEndpoint")}
-                    onClick={() => {
-                      onEdit(endpoint);
-                      if (
-                        (endpoint.api_key_configured ||
-                          Object.keys(endpoint.http_headers).length > 0 ||
-                          Object.keys(endpoint.request_fields).length > 0) &&
-                        revealedEndpointApiKeys[endpoint.id] === undefined
-                      )
-                        onReveal(endpoint.id);
-                    }}
-                  >
-                    <Pencil size={14} />
-                  </button>
+                  <div className="endpoint-settings-actions">
+                    <button
+                      type="button"
+                      className="secondary compact endpoint-settings-action endpoint-share-export"
+                      onClick={() => setShareTarget(endpoint)}
+                    >
+                      <Share2 size={14} /> {t("endpoints.shareExport")}
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary compact endpoint-settings-action endpoint-settings-edit"
+                      onClick={() => {
+                        onEdit(endpoint);
+                        if (
+                          (endpoint.api_key_configured ||
+                            Object.keys(endpoint.http_headers).length > 0 ||
+                            Object.keys(endpoint.request_fields).length > 0) &&
+                          revealedEndpointApiKeys[endpoint.id] === undefined
+                        )
+                          onReveal(endpoint.id);
+                      }}
+                    >
+                      <Pencil size={14} /> {t("common.edit")}
+                    </button>
+                  </div>
                 )}
               </div>
             );
@@ -14213,7 +14721,7 @@ function CompletionCard({
     ["Tools", stats.tool_calls],
     ["Repair", stats.repair_calls],
     ["Memory", formatMemoryOps(stats.mem_reads, stats.mem_writes)],
-    ["Compact", formatOptionalTokens(stats.shrunk_tokens)],
+    ["Compress", formatOptionalTokens(stats.shrunk_tokens)],
   ].filter(
     ([label, value]) =>
       label === "Completed" ||
@@ -14287,10 +14795,10 @@ function completionFactTitle(
     return stats.cache_created_tokens === undefined
       ? undefined
       : `${stats.cache_created_tokens} cache-created input tokens`;
-  if (label === "Compact")
+  if (label === "Compress")
     return stats.shrunk_tokens === undefined
       ? undefined
-      : `${stats.shrunk_tokens} compacted tokens`;
+      : `${stats.shrunk_tokens} compressed tokens`;
   if (label === "Memory")
     return `${stats.mem_reads ?? 0} memory reads / ${stats.mem_writes ?? 0} memory writes`;
   return undefined;
@@ -14397,7 +14905,7 @@ function ModelEndpointPanel({
                   type="button"
                   className="endpoint-select"
                   aria-pressed={active}
-                  disabled={!session || session.state === "working"}
+                  disabled={!session}
                   onClick={() => onApply(endpoint.id)}
                 >
                   <span className="endpoint-copy">
@@ -14435,7 +14943,7 @@ function ModelEndpointPanel({
                     className={`endpoint-choice-box ${active ? "selected" : ""}`}
                     aria-hidden="true"
                   >
-                    {active && <Check size={11} strokeWidth={3} />}
+                    {active && <Check size={11} strokeWidth={2.25} />}
                   </span>
                 </button>
               </div>
@@ -14453,6 +14961,8 @@ function ModelEndpointPanel({
 }
 
 function ModelEndpointEditor({
+  catalog,
+  providers,
   endpoint,
   revealedApiKey,
   revealedHeaders,
@@ -14461,6 +14971,8 @@ function ModelEndpointEditor({
   onClose,
   onSave,
 }: {
+  catalog: CatalogModel[];
+  providers: ProviderSpec[];
   endpoint?: ModelEndpoint;
   revealedApiKey?: string;
   revealedHeaders?: Record<string, string>;
@@ -14470,6 +14982,8 @@ function ModelEndpointEditor({
   onSave: (endpoint: ModelEndpointDraft) => void;
 }) {
   const [draft, setDraft] = useState<ModelEndpointDraft>(() => ({
+    requirements: initialEndpointRequirements(endpoint, catalog),
+    catalog_id: endpoint?.catalog_id ?? null,
     id: endpoint?.id,
     name: endpoint?.name ?? "",
     model: endpoint?.model ?? "",
@@ -14479,29 +14993,33 @@ function ModelEndpointEditor({
     max_llm_input_tokens: endpoint?.max_llm_input_tokens ?? 100_000,
     max_llm_output_tokens: endpoint?.max_llm_output_tokens ?? 10_000,
     stream: endpoint?.stream ?? true,
+    function_calling: endpoint?.function_calling ?? true,
     api_key: revealedApiKey,
-    http_headers: endpoint?.http_headers ?? {},
-    request_fields: endpoint?.request_fields ?? {},
+    http_headers: revealedHeaders ?? endpoint?.http_headers ?? {},
+    request_fields: revealedRequestFields ?? endpoint?.request_fields ?? {},
     allow_cross_origin_redirects:
       endpoint?.allow_cross_origin_redirects ?? false,
     private_ca_pem: revealedPrivateCaPem,
     reasoning_effort: endpoint?.reasoning_effort ?? null,
   }));
   const [headerRows, setHeaderRows] = useState<StructuredRow[]>(() =>
-    structuredRows(endpoint?.http_headers ?? {}),
+    structuredRows(revealedHeaders ?? endpoint?.http_headers ?? {}),
   );
   const [requestRows, setRequestRows] = useState<StructuredRow[]>(() =>
-    requestFieldRows(endpoint?.request_fields ?? {}),
+    requestFieldRows(revealedRequestFields ?? endpoint?.request_fields ?? {}),
   );
+  const initialDraftRef = useRef<ModelEndpointDraft>(structuredClone(draft));
   const [showApiKey, setShowApiKey] = useState(false);
   const [showHeaders, setShowHeaders] = useState(!endpoint);
   const [showRequestFields, setShowRequestFields] = useState(!endpoint);
   useEffect(() => {
-    if (revealedApiKey !== undefined)
-      setDraft((current) => ({ ...current, api_key: revealedApiKey }));
+    if (revealedApiKey === undefined) return;
+    initialDraftRef.current = { ...initialDraftRef.current, api_key: revealedApiKey };
+    setDraft((current) => ({ ...current, api_key: revealedApiKey }));
   }, [revealedApiKey]);
   useEffect(() => {
     if (!revealedHeaders) return;
+    initialDraftRef.current = { ...initialDraftRef.current, http_headers: structuredClone(revealedHeaders) };
     setHeaderRows((rows) =>
       rows.map((row) => ({
         ...row,
@@ -14510,14 +15028,16 @@ function ModelEndpointEditor({
     );
   }, [revealedHeaders]);
   useEffect(() => {
-    if (revealedPrivateCaPem !== undefined)
-      setDraft((current) => ({
-        ...current,
-        private_ca_pem: revealedPrivateCaPem,
-      }));
+    if (revealedPrivateCaPem === undefined) return;
+    initialDraftRef.current = { ...initialDraftRef.current, private_ca_pem: revealedPrivateCaPem };
+    setDraft((current) => ({
+      ...current,
+      private_ca_pem: revealedPrivateCaPem,
+    }));
   }, [revealedPrivateCaPem]);
   useEffect(() => {
     if (!revealedRequestFields) return;
+    initialDraftRef.current = { ...initialDraftRef.current, request_fields: structuredClone(revealedRequestFields) };
     setRequestRows((rows) =>
       rows.map((row) => ({
         ...row,
@@ -14532,6 +15052,44 @@ function ModelEndpointEditor({
     setShowHeaders(!endpoint);
     setShowRequestFields(!endpoint);
   }, [endpoint?.id]);
+  const selectedTemplate = catalog.find((model) => model.id === draft.catalog_id);
+  const selectedModel = capabilityModelForDraft(draft, catalog);
+  const selectedProtocol = selectedModel?.protocols.find((p) => p.protocol === draft.api_protocol);
+  const selectModel = (id: string) => setDraft(current => applyEndpointTemplate(current, catalog.find(m => m.id === id)));
+  const edit = (patch: Partial<ModelEndpointDraft>) => setDraft(current => editEndpoint(current, patch));
+  const editRequirements = (patch: Parameters<typeof editEndpointRequirements>[1]) => setDraft(current => editEndpointRequirements(current, patch));
+  const allowed = draft.requirements?.allowed_reasoning;
+  const daily = draft.reasoning_effort === "disabled" ? "none" : draft.reasoning_effort ?? selectedModel?.default_effort;
+  const displayedAllowed = effectiveAllowedReasoning(allowed, selectedModel?.efforts, daily);
+  const updateAllowedReasoning = (level: string, checked: boolean) => setDraft((current) => {
+    const model = catalog.find((candidate) => candidate.provider === current.requirements?.provider && candidate.model === current.model);
+    const currentDaily = current.reasoning_effort === REASONING_EFFORT_DISABLED
+      ? "none"
+      : current.reasoning_effort ?? model?.default_effort;
+    const next = toggleAllowedReasoning(
+      current.requirements?.allowed_reasoning,
+      model?.efforts,
+      currentDaily,
+      model?.default_effort,
+      level,
+      checked,
+    );
+    let updated = editEndpointRequirements(current, { allowed_reasoning: next.allowedReasoning });
+    if (next.dailyReasoning !== currentDaily) {
+      updated = editEndpoint(updated, {
+        reasoning_effort: next.dailyReasoning === "none" && !model
+          ? REASONING_EFFORT_DISABLED
+          : next.dailyReasoning,
+      });
+    }
+    return updated;
+  });
+  const providerLabels: Record<string, string> = { openai: "OpenAI", zhipu: t("endpoints.zhipu") };
+  const capabilityIssue = endpointCapabilityIssue(draft, selectedModel, providers);
+  const catalogInvalid = capabilityIssue !== null;
+  const dailyReasoningOptions = allowed != null
+    ? displayedAllowed
+    : selectedModel?.efforts ?? REASONING_EFFORT_OPTIONS;
   const apiKey = draft.api_key ?? "";
   const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(
     apiKey,
@@ -14551,7 +15109,10 @@ function ModelEndpointEditor({
   };
   const duplicateHeaderNames = hasDuplicateStructuredKeys(headerRows);
   const duplicateRequestNames = hasDuplicateStructuredKeys(requestRows);
+  const hasChanges = endpointDraftChanged(initialDraftRef.current, endpointDraft);
   const saveDisabled =
+    !hasChanges ||
+    catalogInvalid ||
     duplicateHeaderNames ||
     duplicateRequestNames ||
     !!parsedRequestFields.error ||
@@ -14561,17 +15122,33 @@ function ModelEndpointEditor({
   };
   return (
     <div className="endpoint-editor">
-      <div className="endpoint-editor-heading">
-        <strong>{endpoint ? t("endpoints.editEndpoint") : t("endpoints.newEndpoint")}</strong>
-        <button
-          type="button"
-          aria-label={t("endpoints.closeEditor")}
-          onClick={onClose}
-        >
-          <X size={14} />
-        </button>
+      <div className="endpoint-editor-topbar">
+        <div className="endpoint-editor-heading">
+          <strong>{endpoint ? t("endpoints.editEndpoint") : t("endpoints.newEndpoint")}</strong>
+          <div className="endpoint-editor-buttons">
+            <button type="button" className="secondary compact" onClick={onClose}>
+              {t("common.cancel")}
+            </button>
+            <button
+              type="button"
+              className="primary compact"
+              disabled={saveDisabled}
+              onClick={save}
+            >
+              {t("endpoints.saveEndpoint")}
+            </button>
+          </div>
+        </div>
       </div>
+      <label className="endpoint-catalog-picker">
+        <span>{t("endpoints.useTemplate")}</span>
+        <select aria-label={t("endpoints.useTemplate")} value={draft.catalog_id ?? ""} onChange={(e) => selectModel(e.target.value)}>
+          <option value="">{t("endpoints.noTemplate")}</option>
+          {catalog.map((m) => <option key={m.id} value={m.id}>{providerLabels[m.provider] ?? m.provider}: {m.label}</option>)}
+        </select>
+      </label>
       <div className="endpoint-editor-grid">
+        <h4 className="wide endpoint-section-title">{t("endpoints.connectionSection")}</h4>
         <label>
           {t("endpoints.nameLabel")}
           <input
@@ -14579,7 +15156,7 @@ function ModelEndpointEditor({
             value={draft.name}
             placeholder={t("endpoints.namePlaceholder")}
             onChange={(event) =>
-              setDraft({ ...draft, name: event.target.value })
+              edit({ name: event.target.value })
             }
           />
         </label>
@@ -14587,9 +15164,9 @@ function ModelEndpointEditor({
           {t("endpoints.modelIdLabel")}
           <input
             value={draft.model}
-            placeholder="gpt-4.1"
+            placeholder="my-model-id"
             onChange={(event) =>
-              setDraft({ ...draft, model: event.target.value })
+              edit({ model: event.target.value })
             }
           />
         </label>
@@ -14599,10 +15176,11 @@ function ModelEndpointEditor({
             value={draft.base_url}
             placeholder="https://api.example.com/v1"
             onChange={(event) =>
-              setDraft({ ...draft, base_url: event.target.value })
+              edit({ base_url: event.target.value })
             }
           />
         </label>
+        {canRestoreEndpointTemplateUrl(draft, selectedTemplate) && <div className="wide endpoint-base-reset"><button type="button" onClick={() => setDraft(current => restoreEndpointTemplateUrl(current, selectedTemplate))}>{t("endpoints.restoreBaseUrl")}</button><small>{t("endpoints.baseOverrideHint")}</small></div>}
         <label className="wide">
           API Key
           <div className="endpoint-api-key">
@@ -14646,6 +15224,13 @@ function ModelEndpointEditor({
             </div>
           </div>
         </label>
+        <label>{t("endpoints.provider")}
+          <select value={draft.requirements?.provider ?? ""} onChange={e => editRequirements({ provider: e.target.value || null })}>
+            <option value="">{t("endpoints.genericProvider")}</option>
+            {providers.map((spec) => <option key={spec.id} value={spec.id}>{providerLabels[spec.id] ?? spec.id}</option>)}
+          </select>
+        </label>
+        <h4 className="wide endpoint-section-title">{t("endpoints.parametersSection")}</h4>
         <div className="endpoint-api-protocol">
           <label>
             {t("endpoints.apiProtocol")}
@@ -14653,16 +15238,14 @@ function ModelEndpointEditor({
               value={draft.api_protocol}
               onChange={(event) => {
                 const api_protocol = event.target.value;
-                setDraft({
-                  ...draft,
-                  api_protocol,
-                  stream: api_protocol === "openai-compatible",
-                });
+                setDraft(current => changeEndpointProtocol(current, api_protocol, selectedTemplate));
               }}
             >
-              <option value="openai-compatible">openai-compatible</option>
-              <option value="openai-responses">openai-responses</option>
-              <option value="anthropic">anthropic</option>
+              {endpointProtocolOptions(draft, selectedModel, providers).map(({ protocol, disabled }) => (
+                <option key={protocol} value={protocol} disabled={disabled}>
+                  {({ "openai-compatible": "Chat Completions", "openai-responses": "Responses", anthropic: "Anthropic Messages" } as Record<string, string>)[protocol] ?? protocol}{disabled ? ` (${t("endpoints.protocolUnavailable")})` : ""}
+                </option>
+              ))}
             </select>
           </label>
           <label
@@ -14672,13 +15255,24 @@ function ModelEndpointEditor({
             <input
               type="checkbox"
               checked={draft.stream}
-              disabled={draft.api_protocol !== "openai-compatible"}
+              disabled={draft.api_protocol === "anthropic"}
               onChange={(event) =>
-                setDraft({ ...draft, stream: event.target.checked })
+                edit({ stream: event.target.checked })
               }
             />
             <span>{t("endpoints.streamLabel")}</span>
           </label>
+          {draft.api_protocol !== "openai-responses" && <label
+            className="endpoint-stream-toggle"
+            title={t("endpoints.functionCallingHint")}
+          >
+            <input
+              type="checkbox"
+              checked={draft.function_calling}
+              onChange={(event) => edit({ function_calling: event.target.checked })}
+            />
+            <span>{t("endpoints.functionCallingLabel")}</span>
+          </label>}
         </div>
         <label>
           {t("endpoints.responseProtocol")}
@@ -14694,102 +15288,76 @@ function ModelEndpointEditor({
         </label>
 
         <label>
-          {t("endpoints.contextWindow")}
-          <select
-            value={
-              MODEL_CONTEXT_WINDOW_OPTIONS.includes(
-                draft.max_llm_input_tokens as (typeof MODEL_CONTEXT_WINDOW_OPTIONS)[number],
-              )
-                ? draft.max_llm_input_tokens
-                : "custom"
-            }
-            onChange={(event) => {
-              const value = event.target.value;
-              if (value === "custom") {
-                setDraft((current) => ({
-                  ...current,
-                  max_llm_input_tokens: current.max_llm_input_tokens + 1,
-                }));
-                return;
-              }
-              setDraft({
-                ...draft,
-                max_llm_input_tokens: Number(value),
-              });
-            }}
-          >
-            {MODEL_CONTEXT_WINDOW_OPTIONS.map((tokens) => (
-              <option key={tokens} value={tokens}>
-                {formatContextWindowTokens(tokens)}
-              </option>
-            ))}
-            <option value="custom">{t("endpoints.contextWindowCustom")}</option>
-          </select>
-          {!MODEL_CONTEXT_WINDOW_OPTIONS.includes(
-            draft.max_llm_input_tokens as (typeof MODEL_CONTEXT_WINDOW_OPTIONS)[number],
-          ) && (
-            <input
-              className="endpoint-context-custom-input"
-              type="number"
-              inputMode="numeric"
-              min={1}
-              step={1}
-              value={draft.max_llm_input_tokens}
-              onChange={(event) => {
-                const parsed = Number(event.target.value);
-                if (!Number.isInteger(parsed)) return;
-                setDraft({
-                  ...draft,
-                  max_llm_input_tokens: parsed,
-                });
-              }}
-            />
-          )}
+          {t("endpoints.inputBudget")}
+          <input className="endpoint-token-budget" type="number" inputMode="numeric" onKeyDown={(event) => { if (event.key === "ArrowUp" || event.key === "ArrowDown") event.preventDefault(); }} min={selectedModel?.min_input ?? 3000} max={selectedModel ? Math.min(selectedModel.max_input, selectedModel.context_window - draft.max_llm_output_tokens) : MAX_LLM_INPUT_TOKENS_CEILING} step={1}
+            value={draft.max_llm_input_tokens} onChange={(e) => edit({ max_llm_input_tokens: Number(e.target.value) })} />
+          {selectedModel && <small>{selectedModel.min_input.toLocaleString()} – {Math.min(selectedModel.max_input, selectedModel.context_window - draft.max_llm_output_tokens).toLocaleString()}</small>}
         </label>
         <label>
           {t("endpoints.maxOutput")}
-          <select
-            value={draft.max_llm_output_tokens}
-            onChange={(event) =>
-              setDraft({
-                ...draft,
-                max_llm_output_tokens: Number(event.target.value),
-              })
-            }
-          >
-            {MODEL_OUTPUT_TOKEN_OPTIONS.map((tokens) => (
-              <option key={tokens} value={tokens}>
-                {tokens / 1_000}K
-              </option>
-            ))}
-          </select>
+          <input className="endpoint-token-budget" type="number" inputMode="numeric" onKeyDown={(event) => { if (event.key === "ArrowUp" || event.key === "ArrowDown") event.preventDefault(); }} min={selectedModel?.min_output ?? 512} max={selectedModel ? Math.min(selectedModel.max_output, selectedModel.context_window - draft.max_llm_input_tokens) : MAX_LLM_INPUT_TOKENS_CEILING} step={1}
+            value={draft.max_llm_output_tokens} onChange={(e) => edit({ max_llm_output_tokens: Number(e.target.value) })} />
+          {selectedModel && <small>{selectedModel.min_output.toLocaleString()} – {Math.min(selectedModel.max_output, selectedModel.context_window - draft.max_llm_input_tokens).toLocaleString()}</small>}
         </label>
-        <label>
-          {t("endpoints.reasoningEffort")}
-          <select
-            value={draft.reasoning_effort ?? ""}
-            disabled={
-              draft.api_protocol !== "openai-compatible" &&
-              draft.api_protocol !== "openai-responses"
-            }
-            onChange={(event) =>
-              setDraft({
-                ...draft,
-                reasoning_effort: event.target.value || null,
-              })
-            }
-          >
-            <option value="">{t("endpoints.reasoningEffortDefault")}</option>
-            {REASONING_EFFORT_OPTIONS.map((effort) => (
-              <option key={effort} value={effort}>
-                {effort}
-              </option>
-            ))}
-            <option value={REASONING_EFFORT_DISABLED}>
-              {t("endpoints.reasoningEffortDisabled")}
-            </option>
-          </select>
-        </label>
+        <section className="wide endpoint-reasoning-panel" aria-label={t("endpoints.reasoningSettings")}>
+          <details className="endpoint-reasoning-config">
+            <summary><strong>{t("endpoints.configureReasoningClick")}</strong><span>{t("endpoints.configureReasoningLevels")}</span></summary>
+          <fieldset className="endpoint-allowed-reasoning">
+            <legend className="endpoint-reasoning-legend">{t("endpoints.allowedReasoning")}</legend>
+            <div className="endpoint-reasoning-levels">
+            {(selectedModel?.efforts ?? ["none", ...REASONING_EFFORT_OPTIONS]).map(level => <label className="endpoint-reasoning-chip" key={level}>
+              <input type="checkbox" checked={displayedAllowed.includes(level)} onChange={e =>
+                updateAllowedReasoning(level, e.target.checked)
+              } /><span>{level}<Check className="endpoint-reasoning-check" size={11} strokeWidth={3} aria-hidden="true" /></span>
+            </label>)}
+            </div>
+            <button
+              className="endpoint-reasoning-default"
+              type="button"
+              aria-pressed={selectedTemplate
+                ? JSON.stringify(allowed) === JSON.stringify(selectedTemplate.efforts)
+                : allowed == null}
+              onClick={() => selectedTemplate
+                ? setDraft((current) => restoreEndpointTemplateReasoning(current, selectedTemplate))
+                : editRequirements({ allowed_reasoning: null })}
+            >
+              {t(selectedTemplate
+                ? "endpoints.restoreTemplateDefault"
+                : selectedModel
+                  ? "endpoints.modelReasoningRange"
+                  : "endpoints.unknownCapabilities")}
+            </button>
+          </fieldset>
+          </details>
+          <div className="endpoint-reasoning-policy">
+            <label className="endpoint-reasoning-daily">
+              <span>{t("endpoints.dailyReasoningLevel")}</span>
+              <select
+                value={draft.reasoning_effort ?? ""}
+                disabled={
+                  (draft.api_protocol !== "openai-compatible" &&
+                  draft.api_protocol !== "openai-responses")
+                }
+                onChange={(event) =>
+                  edit({ reasoning_effort: event.target.value || null })
+                }
+              >
+                {<option value="">{t("endpoints.reasoningEffortDefault")}</option>}
+                {dailyReasoningOptions.map((effort) => (
+                  <option key={effort} value={effort}>{effort}{selectedModel?.default_effort === effort && !selectedProtocol?.fixed_effort ? t("endpoints.defaultSuffix") : ""}</option>
+                ))}
+                {!selectedModel && <option value={REASONING_EFFORT_DISABLED}>{t("endpoints.reasoningEffortDisabled")}</option>}
+              </select>
+              {selectedProtocol?.fixed_effort ? <small className="endpoint-constraint-note">{t("endpoints.fixedReasoningNote", { level: selectedProtocol.fixed_effort })}</small> : selectedModel?.middle_default ? <small>{t("endpoints.middleDefaultNote")}</small> : null}
+            </label>
+            <label className="endpoint-reasoning-adaptive">
+              <input type="checkbox" checked={draft.requirements?.adaptive_reasoning ?? (!!daily && daily !== "none")} onChange={e => editRequirements({ adaptive_reasoning: e.target.checked })} />
+              <strong>{t("endpoints.adaptiveReasoning")}</strong>
+            </label>
+          </div>
+        </section>
+        {capabilityIssue && <p role="alert" className="wide endpoint-validation-note">{endpointCapabilityIssueMessage(capabilityIssue)}</p>}
+        <details className="wide endpoint-advanced"><summary>{t("endpoints.advancedSection")}</summary><div className="endpoint-editor-grid">
         <label className="wide endpoint-transport-toggle">
           <span>
             <input
@@ -14918,20 +15486,9 @@ function ModelEndpointEditor({
             </small>
           )}
         </div>
+        </div></details>
       </div>
-      <div className="endpoint-editor-buttons">
-        <button type="button" className="secondary compact" onClick={onClose}>
-          {t("common.cancel")}
-        </button>
-        <button
-          type="button"
-          className="primary compact"
-          disabled={saveDisabled}
-          onClick={save}
-        >
-          {t("endpoints.saveEndpoint")}
-        </button>
-      </div>
+
     </div>
   );
 }

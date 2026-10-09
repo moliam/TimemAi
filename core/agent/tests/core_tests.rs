@@ -65,15 +65,191 @@ fn oversized_readfile_action_result_has_common_prompt_truncation_notice() {
         other => panic!("expected readfile action result, got {other:?}"),
     };
 
-    assert!(prompt.contains("Action result: readfile"), "{prompt}");
+    assert!(!action_results(&prompt).is_empty(), "{prompt}");
+    let results = action_results(&prompt);
     assert!(
-        prompt.contains("words truncated. Generate more actions if necessary !!!"),
+        results.iter().any(|result| {
+            result["action_result"]["runtime_metadata"]["truncation"]["content"]
+                .get("tool_selection")
+                .is_some()
+        }),
         "{prompt}"
     );
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "words truncated. Generate more actions if necessary !!!"
+    ));
 }
 
-fn count_occurrences(haystack: &str, needle: &str) -> usize {
-    haystack.match_indices(needle).count()
+#[test]
+fn readfile_runtime_budget_reaches_serial_and_parallel_model_results() {
+    let cwd = tmp_dir("readfile_runtime_budget_paths");
+    fs::write(cwd.join("short.txt"), "short evidence").unwrap();
+    fs::write(cwd.join("large-a.txt"), "a".repeat(20 * 1024)).unwrap();
+    fs::write(cwd.join("large-b.txt"), "b".repeat(20 * 1024)).unwrap();
+
+    let run = |content: &str, memory_label: &str| {
+        let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir(memory_label));
+        core.set_model_tool_result_bytes(8 * 1024).unwrap();
+        core.change_prompt_cwd(cwd.to_string_lossy()).unwrap();
+        let _ = core.begin_turn("read files", None);
+        match core.apply_model_response(LlmResponse {
+            tool_calls: Vec::new(),
+            content: scored(content),
+            model_name: "qwen-plus".to_string(),
+            usage: usage(),
+            truncated: false,
+        }) {
+            CoreStep::NeedModel { prompt, .. } => prompt,
+            other => panic!("expected readfile action result, got {other:?}"),
+        }
+    };
+
+    let short = run(
+        r#"{"working_still_action":{"readfile":{"path":"short.txt"}}}"#,
+        "readfile_runtime_budget_short_mem",
+    );
+    let short_result = &action_results(&short)[0]["action_result"];
+    assert_eq!(short_result["runtime_metadata"]["content_bytes"], 14);
+    assert!(short_result["runtime_metadata"].get("truncation").is_none());
+    assert_eq!(short_result["tool_output"]["content"], "short evidence");
+
+    let serial = run(
+        r#"{"working_still_action":{"readfile":{"path":"large-a.txt"}}}"#,
+        "readfile_runtime_budget_serial_mem",
+    );
+    let serial_result = &action_results(&serial)[0]["action_result"];
+    assert_eq!(serial_result["runtime_metadata"]["content_bytes"], 8 * 1024);
+    assert_eq!(
+        serial_result["runtime_metadata"]["truncation"]["content"]["tool_selection"]["truncated"],
+        true
+    );
+
+    let parallel = run(
+        r#"{"working_still_action":[[{"readfile":{"path":"large-a.txt"}},{"readfile":{"path":"large-b.txt"}}]]}"#,
+        "readfile_runtime_budget_parallel_mem",
+    );
+    let parallel_results = action_results(&parallel);
+    assert_eq!(parallel_results.len(), 2, "{parallel}");
+    for result in parallel_results {
+        let result = &result["action_result"];
+        assert_eq!(result["runtime_metadata"]["content_bytes"], 8 * 1024);
+        assert_eq!(
+            result["runtime_metadata"]["truncation"]["content"]["tool_selection"]["truncated"],
+            true
+        );
+    }
+}
+
+fn runtime_notes(prompt: &str) -> String {
+    action_results(prompt)
+        .into_iter()
+        .flat_map(|result| {
+            result["action_result"]["runtime_metadata"]["notes"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|note| note.as_str().map(str::to_string))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn count_runtime_note_occurrences(haystack: &str, needle: &str) -> usize {
+    runtime_notes(haystack).match_indices(needle).count()
+}
+
+fn action_results(prompt: &str) -> Vec<Value> {
+    prompt
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.starts_with(r#"{"action_result":"#) {
+                serde_json::from_str(line).ok()
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn structured_result_assertions_decode_paths_without_matching_assistant_echoes() {
+    for path in [
+        r"C:\Users\runner\file.txt",
+        r"\\?\C:\long path\file.txt",
+        "/tmp/quoted\"file.txt",
+    ] {
+        let note = format!("first time to touch file {path}");
+        let result = json!({"action_result": {
+            "runtime_metadata": {"notes": [note], "cwd": path},
+            "tool_output": {"content": format!("CWD: {path}")}
+        }});
+        let prompt = format!("assistant echoed {note}\n{result}\n");
+        assert_eq!(count_runtime_note_occurrences(&prompt, &note), 1);
+        assert!(has_tool_output_containing(
+            &prompt,
+            "content",
+            &format!("CWD: {path}")
+        ));
+        assert!(has_runtime_metadata(&prompt, "cwd", json!(path)));
+        assert_eq!(
+            count_runtime_note_occurrences(&format!("assistant echoed {note}"), &note),
+            0
+        );
+    }
+}
+
+fn has_runtime_metadata(prompt: &str, key: &str, expected: Value) -> bool {
+    action_results(prompt).iter().any(|envelope| {
+        envelope["action_result"]["runtime_metadata"]
+            .get(key)
+            .is_some_and(|value| value == &expected)
+    })
+}
+
+#[cfg(unix)]
+fn action_result_pid(prompt: &str) -> Option<u64> {
+    action_results(prompt)
+        .iter()
+        .find_map(|envelope| envelope["action_result"]["runtime_metadata"]["pid"].as_u64())
+}
+
+fn tool_outputs(prompt: &str, key: &str) -> Vec<String> {
+    action_results(prompt)
+        .iter()
+        .filter_map(|envelope| {
+            envelope["action_result"]["tool_output"][key]
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+fn has_tool_output_containing(prompt: &str, key: &str, expected: &str) -> bool {
+    tool_outputs(prompt, key)
+        .iter()
+        .any(|value| value.contains(expected))
+}
+
+fn tool_contents(prompt: &str) -> Vec<String> {
+    tool_outputs(prompt, "content")
+}
+
+#[cfg(unix)]
+fn tool_content_field(prompt: &str, field: &str) -> Option<String> {
+    let prefix = format!("{field}: ");
+    tool_contents(prompt).iter().rev().find_map(|content| {
+        content
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix).map(str::to_string))
+    })
+}
+
+#[cfg(unix)]
+fn has_action_status(prompt: &str, expected: &str) -> bool {
+    has_runtime_metadata(prompt, "status", json!(expected))
 }
 
 fn readfile_first_touch_read(core: &mut AgentCore, path: &str) -> String {
@@ -125,21 +301,37 @@ fn readfile_first_touch_notes_are_injected_once_per_path() {
     );
 
     let first = readfile_first_touch_read(&mut core, "a/b/c.txt");
-    assert!(first.contains(&dir_note), "{first}");
-    assert!(first.contains(&file_c_note), "{first}");
+    assert!(runtime_notes(&first).contains(&dir_note), "{first}");
+    assert!(runtime_notes(&first).contains(&file_c_note), "{first}");
 
     let second = readfile_first_touch_read(&mut core, "a/b/c.txt");
-    assert_eq!(count_occurrences(&second, &dir_note), 1, "{second}");
-    assert_eq!(count_occurrences(&second, &file_c_note), 1, "{second}");
+    assert_eq!(
+        count_runtime_note_occurrences(&second, &dir_note),
+        1,
+        "{second}"
+    );
+    assert_eq!(
+        count_runtime_note_occurrences(&second, &file_c_note),
+        1,
+        "{second}"
+    );
     assert!(
-        count_occurrences(&second, "first time to touch file") == 1,
+        count_runtime_note_occurrences(&second, "first time to touch file") == 1,
         "{second}"
     );
 
     let third = readfile_first_touch_read(&mut core, "a/b/d.txt");
-    assert_eq!(count_occurrences(&third, &dir_note), 1, "{third}");
-    assert_eq!(count_occurrences(&third, &file_c_note), 1, "{third}");
-    assert!(third.contains(&file_d_note), "{third}");
+    assert_eq!(
+        count_runtime_note_occurrences(&third, &dir_note),
+        1,
+        "{third}"
+    );
+    assert_eq!(
+        count_runtime_note_occurrences(&third, &file_c_note),
+        1,
+        "{third}"
+    );
+    assert!(runtime_notes(&third).contains(&file_d_note), "{third}");
 }
 
 fn run_bash_edit_first_touch_read(core: &mut AgentCore, path: &str) -> String {
@@ -199,18 +391,26 @@ fn run_bash_edit_stringified_array_emits_clean_first_touch_paths() {
     let expected_file = cwd.join("a/b/c.txt").to_string_lossy().to_string();
     let expected_dir = format!("{}/", cwd.join("a/b").to_string_lossy());
     assert!(
-        prompt.contains(&format!("first time to touch file {expected_file}")),
+        runtime_notes(&prompt).contains(&format!("first time to touch file {expected_file}")),
         "{prompt}"
     );
     assert!(
-        prompt.contains(&format!("first time to touch dir {expected_dir}")),
+        runtime_notes(&prompt).contains(&format!("first time to touch dir {expected_dir}")),
         "{prompt}"
     );
-    // No bracketed/quoted garbage from the stringified wrapper remains.
-    assert!(
-        !prompt.contains("[\""),
-        "bracketed garbage leaked into first-touch notes: {prompt}"
-    );
+    // JSON history legitimately contains the original stringified array; only
+    // runtime first-touch notes must use clean paths.
+    let notes = action_results(&prompt)
+        .into_iter()
+        .flat_map(|result| {
+            result["action_result"]["runtime_metadata"]["notes"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|note| note.as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    assert!(notes.iter().all(|note| !note.contains("[\"")), "{notes:?}");
 }
 
 #[test]
@@ -240,20 +440,36 @@ fn run_bash_edit_first_touch_notes_are_injected_once_per_path() {
     );
 
     let first = run_bash_edit_first_touch_read(&mut core, "a/b/c.txt");
-    assert!(first.contains(&dir_note), "{first}");
-    assert!(first.contains(&file_c_note), "{first}");
+    assert!(runtime_notes(&first).contains(&dir_note), "{first}");
+    assert!(runtime_notes(&first).contains(&file_c_note), "{first}");
 
     // The prompt keeps history, so the notes stay visible exactly once and are
     // not re-emitted on the second run_bash `edit` of the same path.
     let second = run_bash_edit_first_touch_read(&mut core, "a/b/c.txt");
-    assert_eq!(count_occurrences(&second, &dir_note), 1, "{second}");
-    assert_eq!(count_occurrences(&second, &file_c_note), 1, "{second}");
+    assert_eq!(
+        count_runtime_note_occurrences(&second, &dir_note),
+        1,
+        "{second}"
+    );
+    assert_eq!(
+        count_runtime_note_occurrences(&second, &file_c_note),
+        1,
+        "{second}"
+    );
 
     // readfile of the same file must not re-emit notes already emitted via the
     // run_bash `edit` anchor.
     let third = readfile_first_touch_read(&mut core, "a/b/c.txt");
-    assert_eq!(count_occurrences(&third, &dir_note), 1, "{third}");
-    assert_eq!(count_occurrences(&third, &file_c_note), 1, "{third}");
+    assert_eq!(
+        count_runtime_note_occurrences(&third, &dir_note),
+        1,
+        "{third}"
+    );
+    assert_eq!(
+        count_runtime_note_occurrences(&third, &file_c_note),
+        1,
+        "{third}"
+    );
 }
 
 #[test]
@@ -270,7 +486,7 @@ fn readfile_first_touch_note_survives_truncated_tool_result() {
 
     let prompt = readfile_first_touch_read(&mut core, "big.txt");
     assert!(
-        prompt.contains(&format!(
+        runtime_notes(&prompt).contains(&format!(
             "first time to touch file {}",
             fs::canonicalize(cwd.join("big.txt"))
                 .unwrap()
@@ -279,13 +495,22 @@ fn readfile_first_touch_note_survives_truncated_tool_result() {
         "{prompt}"
     );
     assert!(
-        prompt.contains("words truncated. Generate more actions if necessary !!!"),
+        action_results(&prompt).iter().any(|result| {
+            result["action_result"]["runtime_metadata"]["truncation"]["content"]
+                .get("tool_selection")
+                .is_some()
+        }),
         "{prompt}"
     );
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "words truncated. Generate more actions if necessary !!!"
+    ));
 }
 
 #[test]
-fn context_compact_resets_readfile_first_touch_tracking() {
+fn context_compress_resets_readfile_first_touch_tracking() {
     let cwd = tmp_dir("readfile_first_touch_compact");
     fs::create_dir_all(cwd.join("a/b")).unwrap();
     fs::write(cwd.join("a/b/c.txt"), "one\n").unwrap();
@@ -318,17 +543,12 @@ fn context_compact_resets_readfile_first_touch_tracking() {
     );
 
     let first = readfile_first_touch_read(&mut core, "a/b/c.txt");
-    assert!(first.contains(&dir_note), "{first}");
-    assert!(first.contains(&file_c_note), "{first}");
+    assert!(runtime_notes(&first).contains(&dir_note), "{first}");
+    assert!(runtime_notes(&first).contains(&file_c_note), "{first}");
 
-    let delta_ids = field_values(&first, "delta_id");
-    assert!(!delta_ids.is_empty(), "{first}");
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(format!(
-            r#"{{"context_compact":{{"discard":{},"summary":"reset first touch tracking"}}}}"#,
-            serde_json::to_string(&delta_ids).unwrap()
-        )),
+        content: scored(r#"{"context_compress":{"summary":"reset first touch tracking"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -338,15 +558,19 @@ fn context_compact_resets_readfile_first_touch_tracking() {
         other => panic!("expected model continuation, got {other:?}"),
     };
     assert!(
-        prompt.contains("context compacted successfully."),
+        prompt.contains("context compressed successfully."),
         "{prompt}"
     );
-    assert!(!prompt.contains(&file_c_note), "{prompt}");
+    assert!(!runtime_notes(&prompt).contains(&file_c_note), "{prompt}");
 
     let after = readfile_first_touch_read(&mut core, "a/b/d.txt");
-    assert_eq!(count_occurrences(&after, &dir_note), 1, "{after}");
-    assert!(after.contains(&file_d_note), "{after}");
-    assert!(!after.contains(&file_c_note), "{after}");
+    assert_eq!(
+        count_runtime_note_occurrences(&after, &dir_note),
+        1,
+        "{after}"
+    );
+    assert!(runtime_notes(&after).contains(&file_d_note), "{after}");
+    assert!(!runtime_notes(&after).contains(&file_c_note), "{after}");
 }
 
 #[test]
@@ -377,7 +601,7 @@ fn parallel_readfiles_in_same_dir_emit_one_dir_note_and_per_file_notes() {
     };
 
     assert_eq!(
-        count_occurrences(
+        count_runtime_note_occurrences(
             &prompt,
             &format!(
                 "first time to touch dir {}/",
@@ -388,7 +612,7 @@ fn parallel_readfiles_in_same_dir_emit_one_dir_note_and_per_file_notes() {
         "{prompt}"
     );
     assert!(
-        prompt.contains(&format!(
+        runtime_notes(&prompt).contains(&format!(
             "first time to touch file {}",
             fs::canonicalize(cwd.join("a/b/c.txt"))
                 .unwrap()
@@ -397,7 +621,7 @@ fn parallel_readfiles_in_same_dir_emit_one_dir_note_and_per_file_notes() {
         "{prompt}"
     );
     assert!(
-        prompt.contains(&format!(
+        runtime_notes(&prompt).contains(&format!(
             "first time to touch file {}",
             fs::canonicalize(cwd.join("a/b/d.txt"))
                 .unwrap()
@@ -460,14 +684,14 @@ fn test_core(
 }
 
 #[test]
-fn manual_context_compact_request_carries_manual_trailer_and_clears_after_compact() {
+fn manual_context_compress_request_carries_manual_trailer_and_clears_after_compact() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
         tmp_dir("manual_compact_mem"),
     );
     let _ = core.begin_turn("work", None);
-    core.request_manual_context_compact();
+    core.request_manual_context_compress();
 
     // First follow-up request carries the manual wording.
     let first = match core.apply_model_response(LlmResponse {
@@ -483,16 +707,13 @@ fn manual_context_compact_request_carries_manual_trailer_and_clears_after_compac
         other => panic!("expected model continuation, got {other:?}"),
     };
     assert!(
-        first.contains("User manually requests context compaction."),
+        first.contains("User manually requests context compression."),
         "{first}"
     );
     assert!(
-        first.contains("Please compact context before further work"),
-        "{first}"
-    );
-    // The manual trailer carries qualitative depth guidance (no numeric floor).
-    assert!(
-        first.contains("discard stale deltas and bulky tool results"),
+        first.contains(
+            "Please compress it now (see the `context_compress` tool description), before further work"
+        ),
         "{first}"
     );
     assert!(
@@ -516,7 +737,7 @@ fn manual_context_compact_request_carries_manual_trailer_and_clears_after_compac
         other => panic!("expected retry request, got {other:?}"),
     };
     assert!(
-        retry.contains("User manually requests context compaction."),
+        retry.contains("User manually requests context compression."),
         "retry must keep the manual wording: {retry}"
     );
     assert!(
@@ -525,19 +746,11 @@ fn manual_context_compact_request_carries_manual_trailer_and_clears_after_compac
     );
 
     // Compacting clears the requirement; the next request is a normal one.
-    let delta_id = first
-        .split(
-            "
-",
-        )
-        .find_map(|line| line.strip_prefix("[BEGIN DELTA delta_id: "))
-        .and_then(|rest| rest.split(",").next())
-        .expect("delta id");
     let after = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(format!(
-            r#"{{"status":"working","free_talk":"压缩完成。","context_compact":{{"discard":[{delta_id:?}],"summary":"保留目标"}}}}"#
-        )),
+        content: scored(
+            r#"{"status":"working","free_talk":"压缩完成。","context_compress":{"summary":"保留目标"}}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -546,7 +759,7 @@ fn manual_context_compact_request_carries_manual_trailer_and_clears_after_compac
         other => panic!("expected model continuation after compaction, got {other:?}"),
     };
     assert!(
-        !after.contains("User manually requests context compaction.")
+        !after.contains("User manually requests context compression.")
             && !after.contains("Context is too long."),
         "compaction success must clear the compact trailer: {after}"
     );
@@ -576,7 +789,7 @@ fn manual_compact_succeeds_on_any_successful_compaction() {
             panic!("expected continuation at step {i}")
         };
     }
-    core.request_manual_context_compact();
+    core.request_manual_context_compress();
     let prompt = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(
@@ -589,15 +802,17 @@ fn manual_compact_succeeds_on_any_successful_compaction() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected model continuation, got {other:?}"),
     };
-    // The manual trailer carries qualitative guidance (discard stale deltas,
+    // The manual trailer carries qualitative guidance (replace stale deltas,
     // short valuable summary), not a quantified shrink floor.
     assert!(
-        prompt.contains("User manually requests context compaction."),
+        prompt.contains("User manually requests context compression."),
         "{prompt}"
     );
     assert!(
-        prompt.contains("discard stale deltas and bulky tool results"),
-        "manual trailer must guide the compaction depth qualitatively: {prompt}"
+        prompt.contains(
+            "Please compress it now (see the `context_compress` tool description), before further work"
+        ),
+        "manual trailer must point at the context_compress tool desc: {prompt}"
     );
     let delta_ids: Vec<String> = prompt
         .lines()
@@ -605,13 +820,13 @@ fn manual_compact_succeeds_on_any_successful_compaction() {
         .map(|rest| rest.split(',').next().unwrap_or("").to_string())
         .collect();
     assert!(delta_ids.len() >= 2, "{prompt}");
-    // Even a compact that discards only part of the deltas is accepted: no
-    // numeric shrink gate, so the requirement clears on success.
-    let partial = serde_json::to_string(&delta_ids[..1]).unwrap();
+    // Even a compact that retains most deltas is accepted: no numeric shrink
+    // gate, so the requirement clears on any successful rewrite.
+    let retained = serde_json::to_string(&delta_ids[1..]).unwrap();
     let after = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"status":"working","free_talk":"压缩完成。","context_compact":{{"discard":{partial},"summary":"保留任务状态"}}}}"#
+            r#"{{"status":"working","free_talk":"压缩完成。","context_compress":{{"keep":{retained},"summary":"保留任务状态"}}}}"#
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -621,7 +836,7 @@ fn manual_compact_succeeds_on_any_successful_compaction() {
         other => panic!("expected continuation after compact, got {other:?}"),
     };
     assert!(
-        !after.contains("User manually requests context compaction.")
+        !after.contains("User manually requests context compression.")
             && !after.contains("Context is too long."),
         "any successful compaction must clear the requirement: {after}"
     );
@@ -680,8 +895,8 @@ fn mcp_action_runs_through_protocol_registry_and_executor() {
     };
     assert!(prompt.contains("mcp_demo_mcp__echo"), "{prompt}");
     let dynamic_heading = prompt
-        .find("MCP update: the following MCP capabilities are enabled")
-        .expect("MCP catalog must be stored in a prompt delta");
+        .find("## Current MCP Capabilities")
+        .expect("current MCP capabilities must be rendered for this request");
     assert!(
         !prompt[..dynamic_heading].contains("mcp_demo_mcp__echo"),
         "{prompt}"
@@ -1069,7 +1284,8 @@ fn prompt_is_append_only_and_segmented() {
     assert!(first.contains("## USER"));
     assert!(!first.contains("slice_id: ps_"));
     assert!(!first.contains("prompt_type: user_question"));
-    assert!(first.contains(", time_ms: "));
+    assert!(!first.contains(", time_ms: "));
+    assert!(first.contains("[User input time:"));
     assert!(!first.contains("{\"segment_type\""));
 
     let final_step = core.apply_model_response(LlmResponse {
@@ -1088,11 +1304,11 @@ fn prompt_is_append_only_and_segmented() {
     assert!(second.contains("## TIMEM_ASSISTANT"));
     assert!(second.contains(r#"{"status":"ALL_FINISHED","final_answer":"你好"}"#));
     assert!(!second.contains("All previous pending open tasks are completed."));
-    assert!(second.contains("## USER\n\n继续"));
+    assert!(second.contains("\n\n继续"));
 }
 
 #[test]
-fn startup_stamp_is_fixed_for_one_core_instance_across_static_prompt_refreshes() {
+fn startup_timestamp_section_is_removed_from_static_prompt() {
     let mut core = AgentCore::new(
         include_str!("../../../resources/system_prompt/system_prompt.md"),
         profile("qwen-plus"),
@@ -1102,26 +1318,15 @@ fn startup_stamp_is_fixed_for_one_core_instance_across_static_prompt_refreshes()
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    // The checked-out Markdown template may use CRLF on Windows. Parse a
-    // normalized view so this test verifies the rendered semantic section rather
-    // than Git's platform-specific working-tree line endings.
-    let first_normalized = first.replace("\r\n", "\n");
-    let timestamp_section = "## STARTUP_TIMESTAMP\nTimem restarted at:\n";
-    let stamp = first_normalized
-        .rsplit_once(timestamp_section)
-        .and_then(|(_, rest)| rest.lines().next())
-        .expect("startup stamp should be rendered")
-        .to_string();
-    assert!(
-        stamp.contains("local_time") || stamp == "local_time_unavailable",
-        "unexpected rendered startup stamp: {stamp:?}"
-    );
+    // The restart timestamp is now carried only by the runtime resume notice
+    // in the user-message side, not by the static system prompt.
+    assert!(!first.contains("## STARTUP_TIMESTAMP"));
+    assert!(!first.contains("Timem restarted at"));
     assert!(!first.contains("{{STARTUP_STAMP}}"));
 
     core.set_assistant_speaker_name("Ai2");
     let refreshed = core.build_next_prompt();
-    let refreshed_normalized = refreshed.replace("\r\n", "\n");
-    assert!(refreshed_normalized.contains(&format!("{timestamp_section}{stamp}")));
+    assert!(!refreshed.contains("## STARTUP_TIMESTAMP"));
     assert!(!refreshed.contains("{{STARTUP_STAMP}}"));
 }
 
@@ -1194,10 +1399,12 @@ fn extracted_fields_replay_keeps_the_complete_accepted_xml_response() {
     assert!(!replay_delta.contains(r#"<ASSISTANT name="Session Assistant">"#));
     assert_eq!(replay_delta.matches("<ASSISTANT>").count(), 1);
     assert_eq!(replay_delta.matches("&lt;ASSISTANT&gt;").count(), 0);
-    assert!(prompt.contains(
-        r#"<self_tool_result task="inspect runtime parameters" type="params" status="finished">"#
-    ));
-    assert!(!prompt.contains("The following are results of the actions generated in response:"));
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("params")),
+        "{prompt}"
+    );
+    assert_eq!(action_results(&prompt).len(), 1, "{prompt}");
+    assert!(!prompt.contains("<self_tool_result"));
     assert!(!prompt.contains("newly initiated actions"));
 }
 
@@ -1231,42 +1438,23 @@ fn xml_action_results_preserve_names_for_sequential_and_parallel_actions() {
         other => panic!("expected named XML action results, got {other:?}"),
     };
 
-    assert!(
-        prompt.contains(
-            r#"<self_tool_result task="inspect runtime paths" type="path" status="finished">"#
-        ),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains(r#"<self_tool_result task="inspect runtime parameters" type="params" status="finished">"#),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains(r#"<self_tool_result task="inspect current directory" type="cwd" cwd=""#),
-        "{prompt}"
-    );
+    let results = action_results(&prompt);
+    assert_eq!(results.len(), 3, "{prompt}");
     assert_eq!(
-        prompt.matches("<self_tool_result ").count(),
-        3,
-        "every sequential/parallel self_tool action must have one specialized result: {prompt}"
+        results
+            .iter()
+            .filter(|result| result["action_result"]["runtime_metadata"]
+                .get("self_type")
+                .is_some())
+            .count(),
+        3
     );
-    assert_eq!(
-        prompt.matches("<<<CONTENT_").count(),
-        3,
-        "every successful self_tool result must have one content boundary: {prompt}"
-    );
-    assert_eq!(
-        prompt.matches("</self_tool_result>").count(),
-        3,
-        "every specialized result must have a closing root tag: {prompt}"
-    );
-    assert!(!prompt.contains("<output_id_"));
-    assert_eq!(
-        core.build_next_prompt(),
-        prompt,
-        "re-rendering unchanged context must preserve output IDs"
-    );
-    assert!(!prompt.contains("The following are results of the actions generated in response:"));
+    assert!(results.iter().all(|result| {
+        result["action_result"].get("tool_call_id").is_some()
+            && result["action_result"]["tool_output"]["content"].is_string()
+    }));
+    assert!(!prompt.contains("<self_tool_result"));
+    assert_eq!(core.build_next_prompt(), prompt);
 }
 
 #[test]
@@ -1304,16 +1492,15 @@ fn xml_readfile_result_reports_file_name_matcher_and_line_range_before_content()
         other => panic!("expected readfile action result, got {other:?}"),
     };
 
-    assert!(
-        prompt.contains(r#"<readfile_result task="read matched notes" path=""#),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains(r#"matcher="START ... END" lines="2-4" total_lines="5""#)
-            && prompt.contains("<<<CONTENT_")
-            && prompt.contains("START\nmiddle\nEND"),
-        "{prompt}"
-    );
+    let results = action_results(&prompt);
+    assert_eq!(results.len(), 1, "{prompt}");
+    let result = &results[0]["action_result"];
+    assert_eq!(result["runtime_metadata"]["matcher"], "START ... END");
+    assert_eq!(result["runtime_metadata"]["start_line"], 2);
+    assert_eq!(result["runtime_metadata"]["end_line"], 4);
+    assert_eq!(result["runtime_metadata"]["total_lines"], 5);
+    assert_eq!(result["tool_output"]["content"], "START\nmiddle\nEND");
+    assert!(!prompt.contains("<readfile_result"));
 }
 
 #[cfg(unix)]
@@ -1344,35 +1531,13 @@ fn xml_timeout_still_running_uses_orthogonal_lifecycle_evidence() {
         other => panic!("expected XML timed-out running Bash result, got {other:?}"),
     };
 
-    let result_start = prompt
-        .find(r#"<bash_result task="wait briefly for managed task" status="running" pid=""#)
-        .expect("running Bash result with managed pid");
-    let result = &prompt[result_start..];
-    assert!(result.contains(r#"timed_out="true""#), "{prompt}");
-    #[cfg(unix)]
-    assert!(
-        result.contains(r#"pid_kind="runtime_child_process_group""#),
-        "{prompt}"
-    );
-    #[cfg(not(unix))]
-    assert!(
-        result.contains(r#"pid_kind="runtime_child_process""#),
-        "{prompt}"
-    );
-    assert!(
-        !result
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .contains(r#"status="timeout""#),
-        "{prompt}"
-    );
-
-    let pid = result
-        .split_once(r#" pid=""#)
-        .and_then(|(_, rest)| rest.split('"').next())
-        .expect("managed pid")
-        .to_string();
+    let results = action_results(&prompt);
+    let result = results.last().expect("running Bash result");
+    let metadata = &result["action_result"]["runtime_metadata"];
+    assert_eq!(metadata["status"], "background_running");
+    assert_eq!(metadata["timed_out"], true);
+    assert_eq!(metadata["pid_kind"], "runtime_child_process_group");
+    let pid = metadata["pid"].as_u64().expect("managed pid").to_string();
 
     let cleanup = format!(
         r#"<ASSISTANT><actions><run_bash name="stop managed task" timeout_ms="1000"><cmd>kill {pid}</cmd></run_bash></actions></ASSISTANT>"#
@@ -1388,10 +1553,10 @@ fn xml_timeout_still_running_uses_orthogonal_lifecycle_evidence() {
         other => panic!("expected cleanup action result, got {other:?}"),
     };
     assert!(
-        cleanup_prompt
-            .contains(r#"<bash_result task="stop managed task" status="finished" exit_code="0">"#),
+        has_runtime_metadata(&cleanup_prompt, "exit_code", json!(0)),
         "{cleanup_prompt}"
     );
+    assert!(!cleanup_prompt.contains("<bash_result"));
 }
 
 #[cfg(unix)]
@@ -1425,53 +1590,23 @@ fn xml_parallel_run_bash_results_use_action_names_without_repeating_commands() {
         other => panic!("expected XML parallel bash results, got {other:?}"),
     };
 
-    let first_tag =
-        r#"<bash_result task="output first concurrent marker" status="finished" exit_code="0">"#;
-    let second_tag =
-        r#"<bash_result task="output second concurrent marker" status="finished" exit_code="0">"#;
-    let first = prompt.find(first_tag).expect("first named result");
-    let second = prompt.find(second_tag).expect("second named result");
-
-    assert!(
-        first < second,
-        "parallel results must retain declared order"
-    );
-    let action_results = &prompt[first..];
-    assert!(action_results.contains("FIRST_XML_MARKER"), "{prompt}");
-    assert!(action_results.contains("SECOND_XML_MARKER"), "{prompt}");
-    assert!(!action_results.contains("Command:"), "{prompt}");
-    assert!(
-        !action_results.contains("printf FIRST_XML_MARKER"),
-        "{prompt}"
-    );
-    assert!(
-        !action_results.contains("printf SECOND_XML_MARKER"),
-        "{prompt}"
-    );
-
-    let ids = action_results
-        .match_indices("<<<OUTPUT_")
-        .filter_map(|(start, _)| {
-            let suffix = &action_results[start + "<<<OUTPUT_".len()..];
-            Some(suffix.get(..4)?.to_string())
-        })
-        .collect::<Vec<_>>();
+    let results = action_results(&prompt);
+    assert_eq!(results.len(), 2, "{prompt}");
     assert_eq!(
-        ids.len(),
-        2,
-        "each Bash result must have one output boundary: {prompt}"
+        results[0]["action_result"]["tool_output"]["stdout"],
+        "FIRST_XML_MARKER"
     );
-    assert_ne!(
-        ids[0], ids[1],
-        "parallel Bash results must have independent IDs"
+    assert_eq!(
+        results[1]["action_result"]["tool_output"]["stdout"],
+        "SECOND_XML_MARKER"
     );
-    for id in ids {
-        assert_eq!(
-            action_results.matches(&format!("OUTPUT_{id}")).count(),
-            2,
-            "each ID must appear in one opening and one closing marker: {prompt}"
-        );
-    }
+    assert!(results.iter().all(|result| {
+        result["action_result"]["runtime_metadata"]["exit_code"] == json!(0)
+            && result["action_result"].get("action").is_none()
+            && result["action_result"].get("name").is_none()
+            && result["action_result"].get("input").is_none()
+    }));
+    assert!(!prompt.contains("<bash_result"));
 }
 
 #[cfg(unix)]
@@ -1503,10 +1638,15 @@ fn xml_denied_approval_result_preserves_action_name() {
         other => panic!("expected denied approval result, got {other:?}"),
     };
     assert!(
-        prompt.contains(r#"<action_result><run_bash name="remove missing file">"#),
+        has_runtime_metadata(&prompt, "approval_status", json!("denied_by_user")),
         "{prompt}"
     );
-    assert!(prompt.contains("status: denied_by_user"), "{prompt}");
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "approval denied by user"
+    ));
+    assert!(!prompt.contains("<action_result><run_bash"));
 }
 
 #[test]
@@ -1539,7 +1679,7 @@ fn raw_assistant_replay_is_included_before_action_results_for_working_turns() {
         .unwrap();
     assert!(assistant < raw);
     assert!(raw < system_result);
-    assert!(prompt.contains("Action result: self_tool"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(!prompt.contains("## TIMEM_ASSISTANT\n\n需要读取自身信息。"));
 }
 
@@ -1772,7 +1912,7 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
     };
     assert_eq!(max_rounds, 1);
     let limited_prompt = core.render_prompt();
-    assert!(limited_prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&limited_prompt).is_empty());
 
     let audit_file = tmp_dir("round_limit_continue_audit").join("audit.json");
     let resolution = core.resolve_round_limit_with_audit(
@@ -1802,7 +1942,7 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
     assert_eq!(events[0]["max_rounds"], 1);
     assert_eq!(events[0]["continued"], true);
     assert_eq!(rounds_remaining, UNLIMITED_ROUND_BUDGET);
-    assert!(prompt.contains("## USER\n\n需要两步完成"));
+    assert!(prompt.contains("\n\n需要两步完成"));
     assert!(prompt.contains("Runtime round budget continued by user."));
     assert!(!prompt.contains("rounds_remaining:"));
 
@@ -1821,7 +1961,7 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
         panic!("unexpected step: {step:?}");
     };
     assert_eq!(rounds_remaining, UNLIMITED_ROUND_BUDGET);
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
 }
 
 #[test]
@@ -2016,8 +2156,14 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("max_llm_input_tokens=3000"));
-    assert!(prompt.contains("force_shrink_threshold_tokens=2700"));
+    assert!(prompt.ends_with(
+        "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
+    ));
+    let (_, threshold, quality_target) = core
+        .take_pending_compact_request_notice()
+        .expect("threshold crossing notice");
+    assert_eq!(quality_target, None);
+    assert_eq!(threshold, 2_700);
 
     let report = core
         .apply_runtime_config_update(
@@ -2081,13 +2227,19 @@ fn runtime_host_configuration_sync_is_core_owned() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("max_llm_input_tokens=3000"));
+    assert!(prompt.ends_with(
+        "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
+    ));
+    assert!(!prompt.contains("Long-context maintenance:"));
+    let (estimated, threshold, quality_target) = core
+        .take_pending_compact_request_notice()
+        .expect("threshold crossing notice");
+    assert_eq!(quality_target, None);
+    assert!(estimated >= threshold);
+    assert_eq!(threshold, 2_700);
 
-    let compact_ids = field_values(&prompt, "delta_id");
-    let compact_response = format!(
-        r#"{{"context_compact":{{"discard":{},"summary":"retain runtime configuration test state"}}}}"#,
-        serde_json::to_string(&compact_ids).unwrap()
-    );
+    let compact_response =
+        r#"{"context_compress":{"summary":"retain runtime configuration test state"}}"#;
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(compact_response),
@@ -2107,10 +2259,10 @@ fn runtime_host_configuration_sync_is_core_owned() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains(&format!(
-        "Action result: {}",
-        agent_core::os::local_shell_tool_name()
-    )));
+    assert!(
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
+        "{prompt}"
+    );
     assert!(prompt.contains("configured"));
 }
 
@@ -2123,7 +2275,7 @@ fn one_prompt_delta_can_render_to_multiple_slices() {
         other => panic!("unexpected step: {other:?}"),
     };
 
-    assert!(prompt.contains("[BEGIN DELTA delta_id: pd_1, time_ms: "));
+    assert!(prompt.contains("[BEGIN DELTA delta_id: pd_1]"));
     assert!(!prompt.contains("slice_id: ps_"));
     assert!(!prompt.contains("prompt_type: user_question"));
     assert_eq!(prompt.matches("[BEGIN DELTA ").count(), 1);
@@ -2286,7 +2438,7 @@ fn shorter_worker_role_description_is_not_mistaken_for_a_repeated_prefix() {
 }
 
 #[test]
-fn worker_role_is_expanded_again_after_its_delta_is_discarded() {
+fn worker_role_is_expanded_again_after_its_delta_is_removed_by_compression() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -2297,15 +2449,11 @@ fn worker_role_is_expanded_again_after_its_delta_is_discarded() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    let delta_id = first_field_value(&first, "delta_id");
     assert!(first.contains("comply this worker's methodology: Inspect evidence."));
 
     let compacted = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(format!(
-            r#"{{"context_compact":{{"discard":["{}"],"summary":"role description was discarded"}}}}"#,
-            delta_id
-        )),
+        content: scored(r#"{"context_compress":{"summary":"role description was removed"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2571,7 +2719,7 @@ fn missing_durable_score_does_not_block_valid_actions() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("测试代号是 ALPHA-42"));
     assert!(!prompt.contains("response is not protocol compliant"));
 }
@@ -2587,26 +2735,20 @@ fn prompt_rendering_does_not_expose_durable_ctx_score() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("## USER\n\n不要记住：纪念日这个词只是测试"));
+    assert!(prompt.contains("\n\n不要记住：纪念日这个词只是测试"));
     assert!(!prompt.contains("durable_ctx_score"));
 }
 
 #[test]
-fn prompt_discard_can_remove_whole_delta_by_delta_id() {
+fn context_compress_summary_only_removes_all_existing_deltas() {
     let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("shrink_delta_id"));
-    let prompt = match core.begin_turn("REMOVE_THIS_DELTA", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
+    match core.begin_turn("REMOVE_THIS_DELTA", None) {
+        CoreStep::NeedModel { .. } => {}
         other => panic!("unexpected step: {other:?}"),
-    };
-    let delta_id = first_field_value(&prompt, "delta_id");
-    assert!(!delta_id.is_empty());
-
+    }
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(format!(
-            r#"{{"context_compact":{{"discard":["{}"],"summary":"remove stale test delta"}}}}"#,
-            delta_id
-        )),
+        content: scored(r#"{"context_compress":{"summary":"remove stale test delta"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2615,17 +2757,25 @@ fn prompt_discard_can_remove_whole_delta_by_delta_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(!prompt.contains("Action result: context_compact"));
-    assert!(!prompt.contains("removed_delta_count:"));
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "removed_delta_count:"
+    ));
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "Action result: context_compress"
+    ));
     assert!(!prompt.contains("REMOVE_THIS_DELTA"));
-    assert!(prompt.contains("context compacted successfully."));
-    assert!(!prompt.contains("Context compact summary replacing"));
+    assert!(prompt.contains("context compressed successfully."));
+    assert!(!prompt.contains("Context compress summary replacing"));
     assert_eq!(prompt.matches("remove stale test delta").count(), 1);
     let assistant = prompt
-        .find("## TIMEM_ASSISTANT (context compaction summary)")
+        .find("## TIMEM_ASSISTANT (context compression summary)")
         .unwrap();
     let compact_request = prompt.find("remove stale test delta").unwrap();
-    let compact_result = prompt.find("context compacted successfully.").unwrap();
+    let compact_result = prompt.find("context compressed successfully.").unwrap();
     let system = prompt[..compact_result].rfind("## RUNTIME").unwrap();
     assert!(assistant < compact_request);
     assert!(compact_request < system);
@@ -2652,18 +2802,13 @@ fn extracted_replay_keeps_compact_summary_once_as_assistant_before_system_result
         tmp_dir("shrink_extracted_replay_order"),
     );
     core.set_assistant_replay_mode(AssistantReplayMode::ExtractedFields);
-    let prompt = match core.begin_turn("REMOVE_EXTRACTED_DELTA", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
+    match core.begin_turn("REMOVE_EXTRACTED_DELTA", None) {
+        CoreStep::NeedModel { .. } => {}
         other => panic!("unexpected step: {other:?}"),
-    };
-    let delta_id = first_field_value(&prompt, "delta_id");
-
+    }
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(format!(
-            r#"{{"context_compact":{{"discard":["{}"],"summary":"retain extracted compact state"}}}}"#,
-            delta_id
-        )),
+        content: scored(r#"{"context_compress":{"summary":"retain extracted compact state"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2675,10 +2820,10 @@ fn extracted_replay_keeps_compact_summary_once_as_assistant_before_system_result
 
     assert_eq!(prompt.matches("retain extracted compact state").count(), 1);
     let assistant = prompt
-        .find("## TIMEM_ASSISTANT (context compaction summary)")
+        .find("## TIMEM_ASSISTANT (context compression summary)")
         .unwrap();
     let summary = prompt.find("retain extracted compact state").unwrap();
-    let compact_result = prompt.find("context compacted successfully.").unwrap();
+    let compact_result = prompt.find("context compressed successfully.").unwrap();
     let system = prompt[..compact_result].rfind("## RUNTIME").unwrap();
     assert!(assistant < summary);
     assert!(summary < system);
@@ -2686,7 +2831,7 @@ fn extracted_replay_keeps_compact_summary_once_as_assistant_before_system_result
 }
 
 #[test]
-fn prompt_delta_ids_are_simple_global_sequence_and_not_reused_after_discard() {
+fn prompt_delta_ids_are_simple_global_sequence_and_not_reused_after_compression() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -2714,7 +2859,7 @@ fn prompt_delta_ids_are_simple_global_sequence_and_not_reused_after_discard() {
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"context_compact":{"discard":["pd_1"],"summary":"drop first delta"}}"#),
+        content: scored(r#"{"context_compress":{"keep":["pd_2"],"summary":"drop first delta"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2758,11 +2903,11 @@ fn memmgr_context_discard_is_not_executable() {
 }
 
 #[test]
-fn response_context_compact_hides_refs_and_appends_summary_slice() {
+fn response_context_compress_hides_refs_and_appends_summary_slice() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
-        tmp_dir("response_context_compact"),
+        tmp_dir("response_context_compress"),
     );
     core.set_response_protocol(ResponseProtocolKind::Json);
     let prompt = match core.begin_turn("OLD_DYNAMIC_CONTEXT_TO_COMPACT", None) {
@@ -2774,10 +2919,7 @@ fn response_context_compact_hides_refs_and_appends_summary_slice() {
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(format!(
-            r#"{{"free_talk":"整理旧上下文。","context_compact":{{"discard":[{}],"summary":"旧任务已经完成，只保留 compact 后的测试摘要。"}}}}"#,
-            serde_json::to_string(&delta_id).unwrap()
-        )),
+        content: scored(r#"{"free_talk":"整理旧上下文。","context_compress":{"summary":"旧任务已经完成，只保留 compact 后的测试摘要。"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2788,22 +2930,30 @@ fn response_context_compact_hides_refs_and_appends_summary_slice() {
     };
 
     assert!(prompt.contains("## RUNTIME"));
-    assert!(prompt.contains("## TIMEM_ASSISTANT (context compaction summary)"));
+    assert!(prompt.contains("## TIMEM_ASSISTANT (context compression summary)"));
     assert!(prompt.contains("旧任务已经完成，只保留 compact 后的测试摘要"));
-    assert!(prompt.contains("context compacted successfully."));
+    assert!(prompt.contains("context compressed successfully."));
     assert!(prompt.contains("CWD: "));
-    assert!(!prompt.contains("Action result: context_compact"));
-    assert!(!prompt.contains("removed_delta_count:"));
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "removed_delta_count:"
+    ));
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "Action result: context_compress"
+    ));
     assert!(!prompt.contains("OLD_DYNAMIC_CONTEXT_TO_COMPACT"));
-    assert!(!prompt.contains("Active MCP capabilities after context compaction"));
+    assert!(!prompt.contains("Active MCP capabilities after context compression"));
 }
 
 #[test]
-fn response_context_compact_does_not_append_redundant_mcp_summary() {
+fn response_context_compress_does_not_append_redundant_mcp_summary() {
     let mut core = test_core(
         "STATIC\n{{TOOL_CATALOG}}\n",
         profile("qwen-plus"),
-        tmp_dir("response_context_compact_mcp"),
+        tmp_dir("response_context_compress_mcp"),
     );
     core.set_response_protocol(ResponseProtocolKind::Json);
     core.configure_mcp(
@@ -2820,21 +2970,15 @@ fn response_context_compact_does_not_append_redundant_mcp_summary() {
         }],
     )
     .unwrap();
-    let prompt = match core.begin_turn("MCP_CONTEXT_TO_COMPACT", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
+    match core.begin_turn("MCP_CONTEXT_TO_COMPACT", None) {
+        CoreStep::NeedModel { .. } => {}
         other => panic!("unexpected step: {other:?}"),
-    };
-    let delta_id = field_values(&prompt, "delta_id")
-        .into_iter()
-        .last()
-        .expect("user input must be the latest persistent delta");
-
+    }
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(format!(
-            r#"{{"free_talk":"整理旧上下文。","context_compact":{{"discard":[{}],"summary":"保留当前任务状态。"}}}}"#,
-            serde_json::to_string(&delta_id).unwrap()
-        )),
+        content: scored(
+            r#"{"free_talk":"整理旧上下文。","context_compress":{"summary":"保留当前任务状态。"}}"#,
+        ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2845,14 +2989,14 @@ fn response_context_compact_does_not_append_redundant_mcp_summary() {
     };
 
     assert!(prompt.contains("## RUNTIME"));
-    assert!(prompt.contains("context compacted successfully."));
+    assert!(prompt.contains("context compressed successfully."));
     assert!(prompt.contains("CWD: "));
-    assert!(!prompt.contains("Active MCP capabilities after context compaction"));
+    assert!(!prompt.contains("Active MCP capabilities after context compression"));
     assert!(!prompt.contains("MCP_CONTEXT_TO_COMPACT"));
 }
 
 #[test]
-fn prompt_discard_can_remove_visible_delta_by_delta_id() {
+fn context_compress_summary_only_removes_visible_delta() {
     let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("shrink_slice_id"));
     core.set_response_protocol(ResponseProtocolKind::Json);
     let long_input = format!("SLICE_ONE_ONLY{}", "a".repeat(13_000));
@@ -2866,10 +3010,7 @@ fn prompt_discard_can_remove_visible_delta_by_delta_id() {
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(format!(
-            r#"{{"context_compact":{{"discard":["{}"],"summary":"remove visible test delta"}}}}"#,
-            delta_id
-        )),
+        content: scored(r#"{"context_compress":{"summary":"remove visible test delta"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2878,10 +3019,18 @@ fn prompt_discard_can_remove_visible_delta_by_delta_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("context compacted successfully."));
-    assert!(!prompt.contains("Action result: context_compact"));
-    assert!(!prompt.contains("removed_delta_count:"));
-    assert!(!prompt.contains(&format!("[BEGIN DELTA]\ndelta_id: {}", delta_id)));
+    assert!(prompt.contains("context compressed successfully."));
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "removed_delta_count:"
+    ));
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "Action result: context_compress"
+    ));
+    assert!(!prompt.contains(&format!("[BEGIN DELTA delta_id: {delta_id}]")));
     assert!(!prompt.contains("SLICE_ONE_ONLY"));
 
     let final_step = core.apply_model_response(LlmResponse {
@@ -2913,9 +3062,9 @@ fn prompt0_is_static_global_only() {
     assert!(prompt0.contains("STATIC_GLOBAL"));
     assert!(!prompt0.contains("secret user question"));
     assert!(!prompt0.contains("runtime_time: now"));
-    assert!(prompt.contains("## USER\n\nsecret user question"));
+    assert!(prompt.contains("\n\nsecret user question"));
     let runtime = prompt.find("runtime_time: now").unwrap();
-    let user = prompt.find("## USER\n\nsecret user question").unwrap();
+    let user = prompt.find("\n\nsecret user question").unwrap();
     assert!(prompt[..runtime].rfind("## RUNTIME").is_some());
     assert!(runtime < user);
     assert!(!prompt[..runtime].contains("## USER"));
@@ -3035,10 +3184,16 @@ fn long_context_uses_observed_model_prompt_tokens_plus_new_delta_estimate() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Long-context maintenance:"));
-    assert!(prompt.contains("mode=force_shrink_required"));
-    assert!(prompt.contains("max_llm_input_tokens=3000"));
-    assert!(prompt.contains("force_shrink_threshold_tokens=2700"));
+    assert!(prompt.ends_with(
+        "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
+    ));
+    assert!(!prompt.contains("Long-context maintenance:"));
+    let (estimated, threshold, quality_target) = core
+        .take_pending_compact_request_notice()
+        .expect("threshold crossing notice");
+    assert_eq!(quality_target, None);
+    assert!(estimated >= threshold);
+    assert_eq!(threshold, 2_700);
 }
 
 #[test]
@@ -3059,25 +3214,23 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("mode=force_shrink_required"));
-    assert!(prompt.contains("Your tool calls must start with context_compact"));
-    assert!(prompt.contains("force_shrink_threshold_tokens=2700"));
-    assert!(prompt.contains("target_dynamic_context_ratio=10%-20%"));
-    assert!(prompt.contains("Summarize all dynamic prompt deltas into about 10%-20%"));
-    assert!(prompt.contains("task description"));
-    assert!(prompt.contains("working environment facts"));
-    assert!(prompt.contains("current progress"));
-    assert!(prompt.contains("todo/next steps"));
-    assert!(prompt.contains("high-level work principles"));
-    assert!(prompt.contains("response protocol's context_compact block"));
-    assert!(prompt.contains("offload important but lengthy delta ids"));
-    assert!(prompt.contains("discard stale delta ids"));
-    assert!(!prompt.contains("use scratch_write"));
-    assert!(!prompt.contains("use prompt_shrink"));
-    assert!(!prompt.contains("shrink_review_threshold_tokens"));
-    assert!(!prompt.contains("first_shrink_review_threshold_tokens"));
-    assert!(!prompt.contains("next_shrink_review_step_tokens"));
-    assert!(!prompt.contains("durable_ctx_score"));
+    assert!(prompt.ends_with(
+        "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
+    ));
+    for redundant in [
+        "Long-context maintenance:",
+        "mode=force_shrink_required",
+        "target_dynamic_context_ratio",
+        "dynamic_context_tokens=",
+        "prompt_delta_count=",
+        "Summarize all dynamic prompt deltas",
+        "Pick delta ids yourself",
+    ] {
+        assert!(
+            !prompt.contains(redundant),
+            "unexpected {redundant}: {prompt}"
+        );
+    }
 }
 
 #[test]
@@ -3102,16 +3255,15 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(shrink_prompt.contains("mode=force_shrink_required"));
+    assert!(shrink_prompt
+        .contains("Please compress it now (see the `context_compress` tool description)"));
+    assert!(!shrink_prompt.contains("Long-context maintenance:"));
     let mut delta_ids = field_values(&shrink_prompt, "delta_id");
     delta_ids.sort();
     delta_ids.dedup();
     assert!(!delta_ids.is_empty());
 
-    let shrink_response = format!(
-        r#"{{"context_compact":{{"discard":{},"summary":"compact old prompt context and keep current task state"}}}}"#,
-        serde_json::to_string(&delta_ids).unwrap()
-    );
+    let shrink_response = r#"{"context_compress":{"summary":"compact old prompt context and keep current task state"}}"#;
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(shrink_response),
@@ -3124,10 +3276,19 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
         other => panic!("unexpected step: {other:?}"),
     };
 
-    assert!(next_prompt.contains("context compacted successfully."));
-    assert!(!next_prompt.contains("Action result: context_compact"));
-    assert!(!next_prompt.contains("removed_delta_count"));
-    assert!(!next_prompt.contains("mode=force_shrink_required"));
+    assert!(next_prompt.contains("context compressed successfully."));
+    assert!(!has_tool_output_containing(
+        &next_prompt,
+        "content",
+        "removed_delta_count"
+    ));
+    assert!(!has_tool_output_containing(
+        &next_prompt,
+        "content",
+        "Action result: context_compress"
+    ));
+    assert!(!next_prompt
+        .contains("Please compress it now (see the `context_compress` tool description)"));
 
     let final_step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -3156,7 +3317,9 @@ fn forced_shrink_is_not_reissued_when_dynamic_context_cannot_reduce_enough() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(!prompt.contains("mode=force_shrink_required"));
+    assert!(
+        !prompt.contains("Please compress it now (see the `context_compress` tool description)")
+    );
 }
 
 #[test]
@@ -3202,7 +3365,7 @@ fn query_memory_action_returns_action_result_delta() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("2099-06-12"));
 }
 
@@ -3228,9 +3391,15 @@ fn memmgr_durable_sql_returns_action_result_delta() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("type: durable"));
-    assert!(prompt.contains("op: sql"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "memory_type", json!("durable")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "operation", json!("sql")),
+        "{prompt}"
+    );
     assert!(prompt.contains("2099-06-12"));
 }
 
@@ -3259,14 +3428,14 @@ fn canonical_tools_accept_json_object_args() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("测试代号是 ALPHA-42"));
-    assert!(prompt.contains(&format!(
-        "Action result: {}",
-        agent_core::os::local_shell_tool_name()
-    )));
+    assert!(
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
+        "{prompt}"
+    );
     assert!(prompt.contains("kv-ok"));
-    assert!(prompt.contains("Action result: self_tool"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("TimemAi"));
 }
 
@@ -3370,28 +3539,61 @@ fn builtin_tools_end_to_end_parse_validate_and_execute_manifest_args() {
         other => panic!("expected action results, got {other:?}"),
     };
 
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("type: durable"));
-    assert!(prompt.contains("op: insert"));
-    assert!(prompt.contains("stored: builtin e2e fact value"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "memory_type", json!("durable")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "operation", json!("upsert")),
+        "{prompt}"
+    );
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "stored: builtin e2e fact value"
+    ));
     assert!(prompt.contains("builtin e2e fact value"));
-    assert!(prompt.contains("type: raw_chat"));
-    assert!(prompt.contains("BUILTIN-RAW-42"));
-    assert!(prompt.contains("label: builtin e2e note"));
-    assert!(prompt.contains("Action result: capmgr"));
+    assert!(
+        has_runtime_metadata(&prompt, "memory_type", json!("raw_chat")),
+        "{prompt}"
+    );
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "BUILTIN-RAW-42"
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "label: builtin e2e note"
+    ));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("op: list"));
     assert!(prompt.contains("id=run_bash"));
     assert!(prompt.contains("op: load"));
     assert!(prompt.contains("#### `run_bash`"));
-    assert!(prompt.contains("Action result: self_tool"));
-    assert!(prompt.contains("type: path"));
-    assert!(prompt.contains("type: params"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("path")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("params")),
+        "{prompt}"
+    );
     assert!(prompt.contains("TimemAi"));
-    assert!(prompt.contains("Action result: run_bash"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("builtin-normal"));
-    assert!(prompt.contains("Polling state: finished"));
-    assert!(prompt.contains("now keeps running in background"));
-    assert!(prompt.contains("pid="));
+    assert!(
+        has_runtime_metadata(&prompt, "polling_state", json!("finished")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "status", json!("background_running")),
+        "{prompt}"
+    );
+    assert!(action_result_pid(&prompt).is_some(), "{prompt}");
     std::thread::sleep(std::time::Duration::from_millis(250));
 
     let second_response = json!({
@@ -3412,7 +3614,7 @@ fn builtin_tools_end_to_end_parse_validate_and_execute_manifest_args() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected run_bash result, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: run_bash"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("checked"));
     assert!(prompt.contains("RUNNING_JOB_UPDATE"));
     assert!(prompt.contains("background job"));
@@ -3473,9 +3675,20 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     let _ = core.begin_turn("查项目代号并统计文件", None);
     let prompt = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(
-            r#"{"status":"working","free_talk":"并行查询记忆和本地文件数量。","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project codename%"],"limit":5}},{"run_bash":{"cmd":"rg --files | wc -l","timeout_ms":5000}}]}"#,
-        ),
+        content: scored(json!({
+            "status": "working",
+            "free_talk": "并行查询记忆和本地文件数量。",
+            "working_still_action": [
+                {"memmgr": {"type": "durable", "op": "sql",
+                    "sql": "SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5",
+                    "params": ["%project codename%"], "limit": 5}},
+                {"run_bash": {"cmd": if cfg!(windows) {
+                    "(Get-ChildItem -File | Measure-Object).Count"
+                } else {
+                    "count=0; for file in *; do if [ -f \"$file\" ]; then count=$((count + 1)); fi; done; printf '%s\\n' \"$count\""
+                }, "timeout_ms": 5000}}
+            ]
+        }).to_string()),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3484,11 +3697,11 @@ fn protocol_examples_cover_normal_and_corner_flows() {
         other => panic!("expected action results, got {other:?}"),
     };
     assert!(prompt.contains("并行查询记忆和本地文件数量。"));
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains(&format!(
-        "Action result: {}",
-        agent_core::os::local_shell_tool_name()
-    )));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
+        "{prompt}"
+    );
 
     let _ = core.begin_turn("最终确认发布包", None);
     let final_turn = match core.apply_model_response(LlmResponse {
@@ -3520,7 +3733,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected memory update action result, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("Project-Alpha"));
 
     let _ = core.begin_turn("读取受保护路径", None);
@@ -3536,8 +3749,11 @@ fn protocol_examples_cover_normal_and_corner_flows() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected self_tool action result, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: self_tool"));
-    assert!(prompt.contains("type: path"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("path")),
+        "{prompt}"
+    );
 
     let compact_request_prompt = match core.begin_turn("上下文收缩", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -3545,9 +3761,9 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     };
     let compact_ids = field_values(&compact_request_prompt, "delta_id");
     assert!(compact_ids.len() >= 2);
+    let compact_keep = serde_json::to_string(&compact_ids[2..]).unwrap();
     let compact_response = scored(format!(
-        r#"{{"status":"working","free_talk":"将测试 delta ids 移出活跃上下文。","context_compact":{{"discard":[{}],"offload":[{}],"summary":"保留测试状态摘要"}}}}"#,
-        serde_json::to_string(&compact_ids[0]).unwrap(),
+        r#"{{"status":"working","free_talk":"将测试 delta ids 移出活跃上下文。","context_compress":{{"keep":{compact_keep},"offload":[{}],"summary":"保留测试状态摘要"}}}}"#,
         serde_json::to_string(&compact_ids[1]).unwrap(),
     ));
     let prompt = match core.apply_model_response(LlmResponse {
@@ -3560,9 +3776,13 @@ fn protocol_examples_cover_normal_and_corner_flows() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected context maintenance action results, got {other:?}"),
     };
-    assert!(prompt.contains("context compacted successfully."));
+    assert!(prompt.contains("context compressed successfully."));
     assert!(prompt.contains("CWD: "));
-    assert!(!prompt.contains("Action result: context_compact"));
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "Action result: context_compress"
+    ));
 
     let _ = core.begin_turn("读取错误日志", None);
     let prompt = match core.apply_model_response(LlmResponse {
@@ -3577,10 +3797,10 @@ fn protocol_examples_cover_normal_and_corner_flows() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected bash action result, got {other:?}"),
     };
-    assert!(prompt.contains(&format!(
-        "Action result: {}",
-        agent_core::os::local_shell_tool_name()
-    )));
+    assert!(
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
+        "{prompt}"
+    );
     assert!(prompt.contains("ERROR"));
 
     let _ = core.begin_turn("最小动作", None);
@@ -3729,11 +3949,25 @@ fn memmgr_raw_chat_search_reads_persisted_chat_records() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("type: raw_chat"));
-    assert!(prompt.contains("op: search"));
-    assert!(prompt.contains("chat_records"));
-    assert!(prompt.contains("测试物品 BLUE-17"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "memory_type", json!("raw_chat")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "operation", json!("search")),
+        "{prompt}"
+    );
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "chat_records"
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "测试物品 BLUE-17"
+    ));
 }
 
 #[test]
@@ -3901,6 +4135,46 @@ fn protocol_repair_slice_focuses_previous_response_around_error() {
 }
 
 #[test]
+fn protocol_repair_prompt_includes_current_request_level_mcp_capabilities() {
+    let mut core = test_core(
+        "STATIC\n{{TOOL_CATALOG}}",
+        profile("qwen-plus"),
+        tmp_dir("repair_prompt_current_mcp"),
+    );
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    core.configure_mcp(
+        test_registry(),
+        McpRuntime::default(),
+        Vec::new(),
+        vec![McpTool {
+            server_id: "repair".to_string(),
+            server_name: "Repair MCP".to_string(),
+            name: "lookup".to_string(),
+            action_name: "mcp_repair_mcp__lookup".to_string(),
+            description: "Lookup repair metadata".to_string(),
+            input_schema: json!({"type": "object", "properties": {}}),
+        }],
+    )
+    .unwrap();
+    let _ = core.begin_turn("继续", None);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"final_answer":"缺少完成状态"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel repair, got {other:?}"),
+    };
+
+    assert_eq!(prompt.matches("## Current MCP Capabilities").count(), 1);
+    assert!(prompt.contains("mcp_repair_mcp__lookup"), "{prompt}");
+    assert!(prompt.contains("response is not protocol compliant"));
+}
+
+#[test]
 fn protocol_repair_delta_separates_previous_output_from_system_error() {
     let mut core = test_core(
         "STATIC",
@@ -4062,7 +4336,7 @@ fn status_working_requires_working_still_action_and_keeps_progress_separate() {
     };
     assert!(!prompt.contains("prompt_type: llm_progress"));
     assert!(!prompt.contains("progress:\n正在查询。"));
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(!prompt.contains("intent: Find evidence."));
 }
 
@@ -4440,10 +4714,17 @@ fn action_input_decodes_common_json_escape_sequences() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("stored: tab:\tend\nline2\r\nunicode:你好"));
-    assert!(prompt.contains("path:C:\\Users\\me\\file"));
-    assert!(prompt.contains("quote:\"ok\" slash:/ regex:\\d+"));
+    assert!(!action_results(&prompt).is_empty());
+    let content = tool_contents(&prompt).join("\n");
+    assert!(
+        content.contains("stored: tab:\tend\nline2\r\nunicode:你好"),
+        "{content:?}"
+    );
+    assert!(content.contains("path:C:\\Users\\me\\file"), "{content:?}");
+    assert!(
+        content.contains("quote:\"ok\" slash:/ regex:\\d+"),
+        "{content:?}"
+    );
 }
 
 #[test]
@@ -4576,9 +4857,15 @@ fn memmgr_durable_sql_lists_recent_records() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(!prompt.contains("response is not protocol compliant"));
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("type: durable"));
-    assert!(prompt.contains("op: sql"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "memory_type", json!("durable")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "operation", json!("sql")),
+        "{prompt}"
+    );
     assert!(prompt.contains("新测试记忆"));
     assert!(!prompt.contains("旧测试记忆"));
 }
@@ -4616,7 +4903,15 @@ fn xml_memmgr_durable_sql_lists_recent_records_without_repair() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(!prompt.contains("response is not protocol compliant"));
-    assert!(prompt.contains(r#"<memmgr_result task="list recent durable memories" type="durable" op="sql" status="finished">"#));
+    assert!(
+        has_runtime_metadata(&prompt, "memory_type", json!("durable")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "operation", json!("sql")),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("<memmgr_result"));
     assert!(prompt.contains("第二条 durable 记录"));
     assert!(prompt.contains("第一条 durable 记录"));
 }
@@ -4645,7 +4940,7 @@ fn progress_and_working_still_action_continue_with_implicit_continue_note() {
     };
     assert!(!prompt.contains("prompt_type: llm_progress"));
     assert!(!prompt.contains("上轮回复没有写 status"));
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
 }
 
 #[test]
@@ -4665,7 +4960,7 @@ fn next_action_without_intent_uses_action_name_fallback() {
     };
     assert!(!prompt.contains("response is not protocol compliant"));
     assert!(!prompt.contains("intent_required"));
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
 }
 
 #[test]
@@ -4705,7 +5000,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("label: release checkpoint"));
     assert!(prompt.contains("type: notes"));
     assert!(prompt.contains("content_preview: continue this task later"));
@@ -4732,7 +5027,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("found: true"));
     assert!(prompt.contains("continue this task later"));
 
@@ -4747,7 +5042,7 @@ fn scratch_notes_can_be_written_queried_and_deleted() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("deleted: true"));
     assert!(!fs::read_to_string(core.scratch_file())
         .unwrap()
@@ -4773,11 +5068,25 @@ fn memmgr_scratch_write_and_read_notes() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("type: scratch"));
-    assert!(prompt.contains("op: write"));
-    assert!(prompt.contains("label: release checkpoint"));
-    assert!(prompt.contains("content_preview: continue this task later"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "memory_type", json!("scratch")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "operation", json!("write")),
+        "{prompt}"
+    );
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "label: release checkpoint"
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "content_preview: continue this task later"
+    ));
     let stored = fs::read_to_string(core.scratch_file()).unwrap();
     let scratch_id = stored
         .lines()
@@ -4801,10 +5110,21 @@ fn memmgr_scratch_write_and_read_notes() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("op: read"));
-    assert!(prompt.contains("found: true"));
-    assert!(prompt.contains("continue this task later"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "operation", json!("read")),
+        "{prompt}"
+    );
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "found: true"
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "continue this task later"
+    ));
 }
 
 #[test]
@@ -4888,7 +5208,7 @@ fn scratch_search_empty_text_lists_recent_notes_with_limit() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("scratch_new"));
     assert!(prompt.contains("label=new label"));
     assert!(prompt.contains("new checkpoint"));
@@ -4997,7 +5317,7 @@ fn scratch_delete_missing_id_is_non_destructive() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("deleted: false"));
     assert!(fs::read_to_string(core.scratch_file())
         .unwrap()
@@ -5005,7 +5325,7 @@ fn scratch_delete_missing_id_is_non_destructive() {
 }
 
 #[test]
-fn json_context_compact_runs_before_later_action_in_same_response() {
+fn json_context_compress_runs_before_later_action_in_same_response() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -5023,10 +5343,9 @@ fn json_context_compact_runs_before_later_action_in_same_response() {
         tool_calls: Vec::new(),
         content: serde_json::json!({
             "free_talk": "compact first, then continue",
-            "context_compact": {
-                "discard": [old_delta_id],
+            "context_compress": {
                 "summary": "KEEP JSON ACTIVE STATE"
-            },
+                },
             "working_still_action": {
                 "self_tool": {"type": "cwd"}
             }
@@ -5042,12 +5361,12 @@ fn json_context_compact_runs_before_later_action_in_same_response() {
 
     assert!(!prompt.contains("OLD JSON CONTEXT"));
     assert!(prompt.contains("KEEP JSON ACTIVE STATE"));
-    assert!(prompt.contains("Action result: self_tool"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("CWD:"));
 }
 
 #[test]
-fn json_failed_context_compact_blocks_later_action() {
+fn json_failed_context_compress_blocks_later_action() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -5059,8 +5378,8 @@ fn json_failed_context_compact_blocks_later_action() {
     let prompt = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: serde_json::json!({
-            "context_compact": {
-                "discard": ["pd_missing"],
+            "context_compress": {
+                "keep": ["prompt_0"],
                 "summary": "INVALID JSON COMPACT"
             },
             "working_still_action": {
@@ -5076,13 +5395,22 @@ fn json_failed_context_compact_blocks_later_action() {
         other => panic!("expected failed compact barrier to continue, got {other:?}"),
     };
 
-    assert!(prompt.contains("error: invalid_prompt_refs"));
-    assert!(!prompt.contains("Action result: self_tool"));
+    assert!(has_runtime_metadata(
+        &prompt,
+        "error_type",
+        json!("InvalidPromptRefs")
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "invalid_prompt_refs"
+    ));
+    assert!(!has_runtime_metadata(&prompt, "self_type", json!("cwd")));
     assert!(prompt.contains("KEEP JSON OLD STATE"));
 }
 
 #[test]
-fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
+fn context_compress_offload_stores_runtime_prompt_delta_by_id() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -5101,7 +5429,7 @@ fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compact":{{"offload":["{}"],"summary":"large investigation context is offloaded; keep the current task active"}}}}"#,
+            r#"{{"context_compress":{{"offload":["{}"],"summary":"large investigation context is offloaded; keep the current task active"}}}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -5112,10 +5440,19 @@ fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("context compacted successfully."));
+    assert!(prompt.contains("context compressed successfully."));
     assert!(prompt.contains("CWD: "));
-    assert!(!prompt.contains("Action result: context_compact"));
-    assert!(!prompt.contains("scratch_id:"));
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "Action result: context_compress"
+    ));
+    assert!(prompt.contains("Context offload saved."), "{prompt}");
+    assert!(prompt.contains("scratch_id: scratch_"), "{prompt}");
+    assert!(!prompt.contains("tool_call_id"), "{prompt}");
+    assert!(action_results(&prompt).is_empty(), "{prompt}");
+    assert!(!prompt.contains("removed_delta_count:"), "{prompt}");
+    assert!(!prompt.contains("current_live_delta_refs:"), "{prompt}");
 
     let stored = fs::read_to_string(core.scratch_file()).unwrap();
     let scratch_id = stored
@@ -5125,9 +5462,13 @@ fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
         .unwrap_or_default()
         .to_string();
     assert!(scratch_id.starts_with("scratch_"));
+    assert!(
+        prompt.contains(&format!("scratch_id: {scratch_id}")),
+        "{prompt}"
+    );
 
     assert!(stored.contains("\"scratch_type\":\"context_offload\""));
-    assert!(stored.contains("\"label\":\"context compact offload\""));
+    assert!(stored.contains("\"label\":\"context compress offload\""));
     assert!(stored.contains("large investigation context that should move to scratch"));
     assert!(stored.contains(&delta_id));
 
@@ -5145,13 +5486,13 @@ fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("found: true"));
     assert!(prompt.contains("large investigation context that should move to scratch"));
 }
 
 #[test]
-fn context_compact_offload_rejects_invalid_prompt_refs_without_writing() {
+fn context_compress_offload_rejects_invalid_prompt_refs_without_writing() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -5160,7 +5501,7 @@ fn context_compact_offload_rejects_invalid_prompt_refs_without_writing() {
     let _ = core.begin_turn("seed context", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"free_talk":"checking compact refs","context_compact":{"offload":["pd_missing"],"summary":"bad refs should not write scratch"}}"#),
+        content: scored(r#"{"free_talk":"checking compact refs","context_compress":{"offload":["prompt_0"],"summary":"bad refs should not write scratch"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5169,20 +5510,38 @@ fn context_compact_offload_rejects_invalid_prompt_refs_without_writing() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: context_compact"));
-    assert!(prompt.contains("error: invalid_prompt_refs"));
-    assert!(prompt.contains("missing_ids: pd_missing"));
+    let results = action_results(&prompt);
+    assert_eq!(results.len(), 1, "{prompt}");
+    let result = &results[0]["action_result"];
+    assert_eq!(result["runtime_metadata"]["status"], "failed");
+    assert_eq!(
+        result["runtime_metadata"]["error_type"],
+        "InvalidPromptRefs"
+    );
+    assert_eq!(
+        result["runtime_metadata"]["missing_ids"],
+        json!(["prompt_0"])
+    );
+    assert!(result["tool_output"]["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("current_live_delta_refs:")));
+    assert!(result["runtime_metadata"]
+        .get("discarded_delta_ids")
+        .is_none());
+    assert!(result["runtime_metadata"]
+        .get("offloaded_delta_ids")
+        .is_none());
     assert!(prompt.contains("checking compact refs"));
     assert!(prompt.contains("bad refs should not write scratch"));
     let assistant = prompt.find("## TIMEM_ASSISTANT").unwrap();
-    let action_result = prompt.find("Action result: context_compact").unwrap();
+    let action_result = prompt.find(r#"{"action_result":"#).unwrap();
     assert!(assistant < action_result);
-    assert!(!prompt.contains("## TIMEM_ASSISTANT (context compaction summary)"));
+    assert!(!prompt.contains("## TIMEM_ASSISTANT (context compression summary)"));
     assert!(!core.scratch_file().exists());
 }
 
 #[test]
-fn context_compact_requires_prompt_refs_in_protocol() {
+fn context_compress_summary_only_replaces_all_live_deltas() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -5191,7 +5550,7 @@ fn context_compact_requires_prompt_refs_in_protocol() {
     let _ = core.begin_turn("seed context", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"context_compact":{"summary":"missing refs should repair"}}"#),
+        content: scored(r#"{"context_compress":{"summary":"summary-only replacement"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5200,8 +5559,12 @@ fn context_compact_requires_prompt_refs_in_protocol() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("response is not protocol compliant"));
-    assert!(prompt.contains("context_compact[0].ids_required"));
+    assert!(
+        prompt.contains("context compressed successfully."),
+        "{prompt}"
+    );
+    assert!(prompt.contains("summary-only replacement"), "{prompt}");
+    assert!(!prompt.contains("seed context"), "{prompt}");
 }
 
 #[test]
@@ -5248,7 +5611,7 @@ fn query_memory_does_not_expand_semantic_aliases() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("results: none"));
     assert!(!prompt.contains("测试代号是 ALPHA-42"));
 }
@@ -5300,7 +5663,8 @@ fn memory_lookup_context_triggers_runtime_precheck_before_model_reply() {
     };
     assert!(prompt.contains("## USER"));
     assert!(prompt.contains("## RUNTIME"));
-    assert!(prompt.contains("Action result: runtime_memory_precheck"));
+    assert!(action_results(&prompt).is_empty());
+    assert!(prompt.contains("runtime_memory_precheck"));
     assert!(prompt.contains("lexical_results: none"));
     assert!(prompt.contains("recent_memory_evidence"));
     assert!(prompt.contains("测试代号是 ALPHA-42"));
@@ -5346,7 +5710,7 @@ fn sql_read_action_returns_rows() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("content=测试代号是 ALPHA-42"));
     assert!(prompt.contains("created_at_ms=11"));
 }
@@ -5374,7 +5738,7 @@ fn durable_sql_empty_filter_reports_total_rows() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("results: none"));
     assert!(prompt.contains("durable_memory_total_rows: 2"));
 }
@@ -5429,7 +5793,7 @@ fn sql_read_allows_with_cte_reads() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("content=测试代号是 ALPHA-42"));
     assert!(prompt.contains("created_at_ms=11"));
 }
@@ -5456,7 +5820,7 @@ fn sql_read_rejects_write_statement() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("error: read_only_sql_required"));
 }
 
@@ -5483,7 +5847,7 @@ fn memory_sql_query_uses_action_limit_without_sql_limit() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("content=第一条记忆"));
     assert!(!prompt.contains("content=第二条记忆"));
 }
@@ -5523,7 +5887,7 @@ fn memory_schema_action_returns_native_schema_contract() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains(
         "memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)"
     ));
@@ -5547,7 +5911,7 @@ fn memory_sql_query_allows_pragma_table_info() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("name=content"));
     assert!(prompt.contains("name=created_at_ms"));
 }
@@ -5571,7 +5935,7 @@ fn memory_sql_query_rejects_chat_messages_table_info() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("error: only_declared_tables_are_allowed"));
 }
 
@@ -5690,7 +6054,7 @@ fn memory_sql_prepare_error_exposes_sqlite_reason_to_model() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(!prompt.contains("response is not protocol compliant"));
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("sql_prepare_failed"));
     assert!(prompt.contains("no such column: key"));
     assert!(!prompt.contains("用户的秘密：ABC=123456"));
@@ -5722,7 +6086,7 @@ fn chat_history_query_reads_persisted_chat_records() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("chat_records"));
     assert!(prompt.contains("source=chat_history"));
     assert!(prompt.contains("shell_old"));
@@ -5756,7 +6120,7 @@ fn chat_history_query_reads_legacy_jsonl_audit_records() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("source=chat_history"));
     assert!(prompt.contains("legacy_shell"));
     assert!(prompt.contains("测试物品 GREEN-29"));
@@ -5785,7 +6149,7 @@ fn chat_history_query_keeps_current_prompt_delta_fallback() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("测试物品 BLUE-17"));
     assert!(prompt.contains("current_prompt_deltas"));
     assert!(prompt.contains("source=prompt_delta"));
@@ -5843,7 +6207,7 @@ fn memory_sql_query_rejects_chat_messages_reads() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("error: only_declared_tables_are_allowed"));
 }
 
@@ -5896,7 +6260,7 @@ fn memory_sql_query_accepts_common_llm_param_shapes() {
             CoreStep::NeedModel { prompt, .. } => prompt,
             other => panic!("{case_name} unexpected step: {other:?}"),
         };
-        assert!(prompt.contains("Action result: memmgr"), "{case_name}");
+        assert!(!action_results(&prompt).is_empty(), "{case_name}");
         assert!(prompt.contains("results: none"), "{case_name}: {prompt}");
         assert!(!prompt.contains("error:"), "{case_name}: {prompt}");
     }
@@ -5917,7 +6281,7 @@ fn memory_sql_query_rejects_raw_update_sql() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("error: read_only_sql_required"));
 }
 
@@ -5948,7 +6312,7 @@ fn memory_sql_query_rejects_chat_history_delete_sql() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("error: read_only_sql_required"));
     assert_eq!(fs::read_to_string(&audit_file).unwrap(), before);
 }
@@ -5981,7 +6345,7 @@ fn chat_history_delete_removes_matching_turn_from_audit_log() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("deleted_count: 1"));
     let stored = fs::read_to_string(&audit_file).unwrap();
     assert!(!stored.contains("删除目标"));
@@ -6005,7 +6369,7 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("id: user_name"));
     let git_available = Command::new("git")
         .arg("--version")
@@ -6045,8 +6409,11 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("op: update"));
-    assert!(prompt.contains("version: 2"));
+    assert!(
+        has_runtime_metadata(&prompt, "operation", json!("update")),
+        "{prompt}"
+    );
+    assert!(has_tool_output_containing(&prompt, "content", "version: 2"));
     let stored = fs::read_to_string(core.memory_file()).unwrap();
     assert!(stored.contains("测试代号是 BETA-43"));
     assert!(!stored.contains("测试代号是 ALPHA-42\""));
@@ -6065,7 +6432,10 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("op: delete"));
+    assert!(
+        has_runtime_metadata(&prompt, "operation", json!("delete")),
+        "{prompt}"
+    );
     assert!(!fs::read_to_string(core.memory_file())
         .unwrap()
         .contains("user_name"));
@@ -6171,7 +6541,10 @@ fn memory_update_concurrent_same_version_conflicts_allow_only_one_winner() {
         .collect::<Vec<_>>();
     let success_count = prompts
         .iter()
-        .filter(|prompt| prompt.contains("op: update") && prompt.contains("version: 2"))
+        .filter(|prompt| {
+            has_runtime_metadata(prompt, "operation", json!("update"))
+                && has_tool_output_containing(prompt, "content", "version: 2")
+        })
         .count();
     let conflict_count = prompts
         .iter()
@@ -6389,10 +6762,16 @@ fn run_bash_allows_readonly_count_command() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: run_bash"));
-    assert!(prompt.contains("Exit code: 0"));
-    assert!(prompt.contains("Return:"));
-    assert!(!prompt.contains("Output:"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
+        "{prompt}"
+    );
+    assert!(
+        has_tool_output_containing(&prompt, "stdout", "1"),
+        "{prompt}"
+    );
+    assert!(!has_tool_output_containing(&prompt, "stdout", "Return:"));
 }
 
 #[test]
@@ -6519,9 +6898,12 @@ fn run_bash_background_job_enters_running_list_and_later_emits_exit_update() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("now keeps running in background"));
-    assert!(prompt.contains("pid="));
-    assert!(!prompt.contains("### STILL RUNNING"));
+    assert!(
+        has_runtime_metadata(&prompt, "status", json!("background_running")),
+        "{prompt}"
+    );
+    assert!(action_result_pid(&prompt).is_some(), "{prompt}");
+    assert!(!prompt.contains("#### jobmanager"));
 
     std::thread::sleep(std::time::Duration::from_millis(250));
     let step = core.apply_model_response(LlmResponse {
@@ -6596,12 +6978,12 @@ fn model_request_refresh_includes_a_just_finished_background_jobs_exit_status() 
     assert!(prompt.contains("RUNNING_JOB_UPDATE"), "{prompt}");
     assert!(prompt.contains("Exit status: 0"), "{prompt}");
     assert!(prompt.contains("boundary-ok"), "{prompt}");
-    assert!(!prompt.contains("### STILL RUNNING"), "{prompt}");
+    assert!(!prompt.contains("#### jobmanager"), "{prompt}");
 }
 
 #[cfg(unix)]
 #[test]
-fn still_running_table_survives_discard_of_the_original_action_delta() {
+fn still_running_table_survives_removal_of_the_original_action_delta() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -6625,29 +7007,21 @@ fn still_running_table_survives_discard_of_the_original_action_delta() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(
-        prompt.contains("now keeps running in background"),
-        "{prompt}"
-    );
-    assert!(!prompt.contains("### STILL RUNNING"), "{prompt}");
+    assert!(has_action_status(&prompt, "background_running"), "{prompt}");
+    assert!(!prompt.contains("#### jobmanager"), "{prompt}");
     let running_delta_id = field_values(&prompt, "delta_id")
         .into_iter()
         .last()
         .expect("running delta id");
     assert_ne!(running_delta_id, user_delta_id);
     #[cfg(unix)]
-    let pid = prompt
-        .lines()
-        .find_map(|line| line.strip_prefix("pid="))
-        .and_then(|rest| rest.split(',').next())
-        .expect("pid")
-        .to_string();
+    let pid = action_result_pid(&prompt).expect("pid").to_string();
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compact":{{"discard":["{}"],"summary":"hide running job delta but keep job status"}}}}"#,
-            running_delta_id
+            r#"{{"context_compress":{{"keep":["{}"],"summary":"hide running job delta but keep job status"}}}}"#,
+            user_delta_id
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -6659,17 +7033,18 @@ fn still_running_table_survives_discard_of_the_original_action_delta() {
     };
     let prompt = core.build_model_request_prompt(&prompt);
     assert!(
-        prompt.contains("context compacted successfully."),
+        prompt.contains("context compressed successfully."),
         "{prompt}"
     );
-    assert!(
-        !prompt.contains("Action result: context_compact"),
-        "{prompt}"
-    );
-    assert!(prompt.contains("### STILL RUNNING"), "{prompt}");
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "Action result: context_compress"
+    ));
+    assert!(prompt.contains("#### jobmanager"), "{prompt}");
     assert!(prompt.contains("created by tool_call id"), "{prompt}");
     assert!(
-        prompt.contains("| pid | created by tool_call id | command |"),
+        prompt.contains("| pid | elapsed | created by tool_call id | command | notes |"),
         "{prompt}"
     );
     assert!(prompt.contains("`sleep 5; printf late`"), "{prompt}");
@@ -6693,7 +7068,7 @@ fn still_running_table_survives_discard_of_the_original_action_delta() {
 
 #[cfg(unix)]
 #[test]
-fn still_running_table_is_universal_even_when_compaction_targets_an_unrelated_delta() {
+fn still_running_table_is_universal_when_only_the_action_delta_is_kept() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -6717,23 +7092,20 @@ fn still_running_table_is_universal_even_when_compaction_targets_an_unrelated_de
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(
-        prompt.contains("now keeps running in background"),
-        "{prompt}"
-    );
+    assert!(has_action_status(&prompt, "background_running"), "{prompt}");
+    let running_delta_id = field_values(&prompt, "delta_id")
+        .into_iter()
+        .last()
+        .expect("running delta id");
+    assert_ne!(running_delta_id, user_delta_id);
     #[cfg(unix)]
-    let pid = prompt
-        .lines()
-        .find_map(|line| line.strip_prefix("pid="))
-        .and_then(|rest| rest.split(',').next())
-        .expect("pid")
-        .to_string();
+    let pid = action_result_pid(&prompt).expect("pid").to_string();
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compact":{{"discard":["{}"],"summary":"hide unrelated user delta only"}}}}"#,
-            user_delta_id
+            r#"{{"context_compress":{{"keep":["{}"],"summary":"hide unrelated user delta only"}}}}"#,
+            running_delta_id
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -6745,14 +7117,15 @@ fn still_running_table_is_universal_even_when_compaction_targets_an_unrelated_de
     };
     let prompt = core.build_model_request_prompt(&prompt);
     assert!(
-        prompt.contains("context compacted successfully."),
+        prompt.contains("context compressed successfully."),
         "{prompt}"
     );
-    assert!(
-        !prompt.contains("Action result: context_compact"),
-        "{prompt}"
-    );
-    assert!(prompt.contains("### STILL RUNNING"), "{prompt}");
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "Action result: context_compress"
+    ));
+    assert!(prompt.contains("#### jobmanager"), "{prompt}");
 
     #[cfg(unix)]
     {
@@ -6795,17 +7168,12 @@ fn still_running_table_survives_offload_of_the_original_action_delta() {
         .last()
         .expect("running delta id");
     #[cfg(unix)]
-    let pid = prompt
-        .lines()
-        .find_map(|line| line.strip_prefix("pid="))
-        .and_then(|rest| rest.split(',').next())
-        .expect("pid")
-        .to_string();
+    let pid = action_result_pid(&prompt).expect("pid").to_string();
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compact":{{"offload":["{}"],"summary":"running job context is offloaded and its status must remain visible"}}}}"#,
+            r#"{{"context_compress":{{"offload":["{}"],"summary":"running job context is offloaded and its status must remain visible"}}}}"#,
             running_delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -6816,13 +7184,15 @@ fn still_running_table_survives_offload_of_the_original_action_delta() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(!prompt.contains("scratch_id:"), "{prompt}");
+    assert!(prompt.contains("Context offload saved."), "{prompt}");
+    assert!(prompt.contains("scratch_id: scratch_"), "{prompt}");
+    assert!(!prompt.contains("tool_call_id"), "{prompt}");
     let prompt = core.build_model_request_prompt(&prompt);
     assert!(
-        prompt.contains("context compacted successfully."),
+        prompt.contains("context compressed successfully."),
         "{prompt}"
     );
-    assert!(prompt.contains("### STILL RUNNING"), "{prompt}");
+    assert!(prompt.contains("#### jobmanager"), "{prompt}");
     assert!(prompt.contains("created by tool_call id"), "{prompt}");
     assert!(
         prompt
@@ -6844,7 +7214,7 @@ fn still_running_table_survives_offload_of_the_original_action_delta() {
 
 #[cfg(unix)]
 #[test]
-fn still_running_table_survives_xml_style_compaction_of_the_original_action_delta() {
+fn still_running_table_survives_summary_only_compaction_of_the_original_action_delta() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -6870,24 +7240,12 @@ fn still_running_table_survives_xml_style_compaction_of_the_original_action_delt
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    let running_delta_id = field_values(&prompt, "delta_id")
-        .into_iter()
-        .last()
-        .expect("running delta id");
     #[cfg(unix)]
-    let pid = prompt
-        .lines()
-        .find_map(|line| line.strip_prefix("pid="))
-        .and_then(|rest| rest.split(',').next())
-        .expect("pid")
-        .to_string();
+    let pid = action_result_pid(&prompt).expect("pid").to_string();
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(format!(
-            r#"{{"free_talk":"压缩旧上下文。","context_compact":{{"discard":[{}],"summary":"后台任务仍在运行，需要保留运行状态。"}}}}"#,
-            serde_json::to_string(&running_delta_id).unwrap()
-        )),
+        content: scored(r#"{"free_talk":"压缩旧上下文。","context_compress":{"summary":"后台任务仍在运行，需要保留运行状态。"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -6898,14 +7256,15 @@ fn still_running_table_survives_xml_style_compaction_of_the_original_action_delt
     };
     let prompt = core.build_model_request_prompt(&prompt);
     assert!(
-        prompt.contains("context compacted successfully."),
+        prompt.contains("context compressed successfully."),
         "{prompt}"
     );
-    assert!(
-        !prompt.contains("Action result: context_compact"),
-        "{prompt}"
-    );
-    assert!(prompt.contains("### STILL RUNNING"), "{prompt}");
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "Action result: context_compress"
+    ));
+    assert!(prompt.contains("#### jobmanager"), "{prompt}");
     assert!(prompt.contains("created by tool_call id"), "{prompt}");
     assert!(
         prompt
@@ -6965,13 +7324,12 @@ fn timeout_job_is_reported_running_and_model_can_kill_by_pid() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("timeout, but is still running"), "{prompt}");
-    let pid = prompt
-        .lines()
-        .find_map(|line| line.strip_prefix("pid="))
-        .and_then(|rest| rest.split(',').next())
-        .expect("pid")
-        .to_string();
+    assert!(has_action_status(&prompt, "background_running"), "{prompt}");
+    assert!(
+        has_runtime_metadata(&prompt, "timed_out", json!(true)),
+        "{prompt}"
+    );
+    let pid = action_result_pid(&prompt).expect("pid").to_string();
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -6987,7 +7345,7 @@ fn timeout_job_is_reported_running_and_model_can_kill_by_pid() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: run_bash"));
+    assert!(!action_results(&prompt).is_empty());
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while core
@@ -7111,7 +7469,10 @@ fn run_bash_requires_approval_for_mutating_commands() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("status: denied_by_user"));
+    assert!(
+        has_runtime_metadata(&prompt, "approval_status", json!("denied_by_user")),
+        "{prompt}"
+    );
     assert!(prompt.contains(&request.approval_id));
     let turn_audit_doc = read_api_audit_doc(&api_audit_stream_path(&turn_audit)).unwrap();
     let events = turn_audit_doc["events"].as_array().unwrap();
@@ -7198,7 +7559,10 @@ fn run_bash_always_allow_promotes_remaining_parallel_approvals() {
     };
     assert!(prompt.contains("rm missing_one"));
     assert!(prompt.contains("rm missing_two"));
-    assert!(prompt.contains("approved_by_user"));
+    assert!(
+        has_runtime_metadata(&prompt, "approval_status", json!("approved_by_user")),
+        "{prompt}"
+    );
 }
 
 #[cfg(unix)]
@@ -7222,8 +7586,11 @@ fn run_bash_allows_compound_local_write_commands() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: run_bash"));
-    assert!(prompt.contains("Exit code: 0"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
+        "{prompt}"
+    );
     assert!(prompt.contains("ok"));
     let _ = fs::remove_dir_all("target/timem_test");
     let _ = fs::remove_dir("target");
@@ -7289,9 +7656,15 @@ fn run_bash_executes_shell_syntax_after_user_approval() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Exit code: 0"));
+    assert!(
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
+        "{prompt}"
+    );
     assert!(prompt.contains("Ok"));
-    assert!(prompt.contains("approval_status: approved_by_user"));
+    assert!(
+        has_runtime_metadata(&prompt, "approval_status", json!("approved_by_user")),
+        "{prompt}"
+    );
     assert!(!prompt.contains("shell_expansion_not_allowed"));
 }
 
@@ -7318,8 +7691,14 @@ fn run_bash_child_sigsegv_isolated_and_turn_can_still_finish() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step after child signal: {other:?}"),
     };
-    assert!(prompt.contains("process signal"), "{prompt}");
-    assert!(prompt.contains("Signal: 11"), "{prompt}");
+    assert!(
+        has_runtime_metadata(&prompt, "status", json!("failed")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "signal", json!(11)),
+        "{prompt}"
+    );
 
     let final_turn = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -7404,12 +7783,18 @@ fn run_bash_allows_low_risk_system_identity_commands() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: run_bash"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(!prompt.contains("intent: Read system identity."));
     assert!(!prompt.contains("Command: uname -s"));
     assert!(!prompt.contains("Command:"));
-    assert!(prompt.contains("Exit code: 0"));
-    assert!(!prompt.contains("approval_status: approved_by_user"));
+    assert!(
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
+        "{prompt}"
+    );
+    assert!(
+        !has_runtime_metadata(&prompt, "approval_status", json!("approved_by_user")),
+        "{prompt}"
+    );
 }
 
 #[cfg(unix)]
@@ -7425,7 +7810,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(first_prompt.contains("## USER\n\n测试项目纪念日是 2099-06-12"));
+    assert!(first_prompt.contains("\n\n测试项目纪念日是 2099-06-12"));
     let runtime = first_prompt.find("runtime_time:").unwrap();
     let user = first_prompt.find("## USER\n").unwrap();
     assert!(first_prompt[..runtime].rfind("## RUNTIME").is_some());
@@ -7453,7 +7838,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(recall_prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&recall_prompt).is_empty());
     assert!(recall_prompt.contains("测试项目纪念日是 2099-06-12"));
     let recall_final = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -7481,7 +7866,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(delete_prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&delete_prompt).is_empty());
     assert!(delete_prompt.contains("error: id_not_found"));
 
     let delete_prompt = match core.apply_model_response(LlmResponse {
@@ -7494,7 +7879,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(delete_prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&delete_prompt).is_empty());
     assert!(delete_prompt.contains("content=测试项目纪念日是 2099-06-12"));
     assert!(delete_prompt.contains("version=1"));
 
@@ -7519,7 +7904,10 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(delete_final_prompt.contains("op: delete"));
+    assert!(
+        has_runtime_metadata(&delete_final_prompt, "operation", json!("delete")),
+        "{delete_final_prompt}"
+    );
     assert!(!fs::read_to_string(core.memory_file())
         .unwrap()
         .contains("测试项目纪念日"));
@@ -7548,8 +7936,11 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(shell_prompt.contains("Action result: run_bash"));
-    assert!(shell_prompt.contains("Exit code: 0"));
+    assert!(!action_results(&shell_prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&shell_prompt, "exit_code", json!(0)),
+        "{shell_prompt}"
+    );
 
     core.set_bash_approval_mode(BashApprovalMode::Ask);
     let _ = core.begin_turn("把 /etc/passwd 读出来", None);
@@ -7565,7 +7956,6 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     };
     assert_eq!(security_request.reason, "run_bash_requires_user_approval");
 
-    core.set_max_llm_input_tokens(3_000);
     for index in 0..3 {
         let _ = core.begin_turn(
             &format!("无关闲聊 {} {}", index, "长上下文 ".repeat(600)),
@@ -7583,16 +7973,16 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         });
         assert!(matches!(step, CoreStep::Final(_)));
     }
+    core.set_max_llm_input_tokens(3_000);
     let long_prompt = match core.begin_turn("继续一个新任务", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(long_prompt.starts_with("[BEGIN SYSTEM PROMPT]\nSTATIC_GLOBAL_RULES"));
-    assert!(long_prompt.contains("Long-context maintenance:"));
-    assert!(long_prompt.contains("mode=force_shrink_required"));
-    assert!(long_prompt.contains("force_shrink_threshold_tokens=2700"));
-    assert!(long_prompt.contains("target_dynamic_context_ratio=10%-20%"));
-    assert!(long_prompt.contains("prompt_delta_count="));
+    assert!(long_prompt
+        .contains("Please compress it now (see the `context_compress` tool description)"));
+    assert!(!long_prompt.contains("Long-context maintenance:"));
+    assert!(!long_prompt.contains("target_dynamic_context_ratio"));
 }
 
 #[cfg(unix)]
@@ -7618,10 +8008,13 @@ fn scenario_coding_inspects_project_and_reports_from_shell_evidence() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected shell evidence prompt, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: run_bash"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("target/timem_scenario_files.txt"));
     assert!(prompt.contains("target/timem_scenario_tests.rs"));
-    assert!(prompt.contains("Exit code: 0"));
+    assert!(
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
+        "{prompt}"
+    );
 
     let final_turn = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -7676,7 +8069,7 @@ fn scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected memory evidence prompt, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: memmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("测试代号是 ALPHA-42"));
     assert!(prompt.contains("测试发布检查"));
     assert!(prompt.contains("完整 CI 和真实 TTY smoke"));
@@ -7712,9 +8105,15 @@ fn scenario_self_qa_returns_runtime_params_and_paths() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected self_tool evidence prompt, got {other:?}"),
     };
-    assert!(prompt.contains("type: params"));
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("params")),
+        "{prompt}"
+    );
     assert!(prompt.contains("name: TimemAi"));
-    assert!(prompt.contains("type: path"));
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("path")),
+        "{prompt}"
+    );
     assert!(prompt.contains("api_audit_logical_stream:"));
     assert!(prompt.contains("api_audit_segments_dir:"));
     assert!(prompt.contains("action_audit_logical_stream:"));
@@ -7761,11 +8160,14 @@ fn scenario_file_writing_outputs_artifact_and_verifies_content() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected file evidence prompt, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: run_bash"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("Release_Check"));
     assert!(prompt.contains("CI_passed"));
     assert!(prompt.contains("Sensitive_scan_passed"));
-    assert!(prompt.contains("Exit code: 0"));
+    assert!(
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
+        "{prompt}"
+    );
     assert!(
         fs::read_to_string("target/timem_scenario_output/release_check.md")
             .unwrap()
@@ -7936,8 +8338,8 @@ fn rendered_prompt_response_schema_is_injected_from_resource() {
     assert!(prompt.contains("\"final_answer?\""));
     assert!(prompt.contains("\"free_talk?\""));
     assert!(prompt.contains("\"working_still_action?\""));
-    assert!(prompt.contains("context_compact may be followed by other actions"));
-    assert!(prompt.contains("context_compact"));
+    assert!(prompt.contains("context_compress may be followed by other actions"));
+    assert!(prompt.contains("context_compress"));
     assert!(prompt.contains("ALL_FINISHED"));
 }
 
@@ -8195,12 +8597,11 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(json_prompt.contains("organized as JSON"));
     assert!(json_prompt.contains("\"working_still_action\""));
     assert!(json_prompt.contains("\"ALL_FINISHED\""));
-    assert!(json_prompt.contains("[BEGIN DELTA delta_id: pd_1, time_ms: 123]"));
+    assert!(json_prompt.contains("[BEGIN DELTA delta_id: pd_1]"));
     assert!(!json_prompt.contains("[END DELTA]"));
     assert!(!json_prompt.contains("<prompt_delta "));
     assert!(!json_prompt.contains("</prompt_delta>"));
-    assert!(json_prompt
-        .contains("A dynamic delta starts with `[BEGIN DELTA delta_id: <id>, time_ms: <time>]`"));
+    assert!(json_prompt.contains("A dynamic delta starts with `[BEGIN DELTA delta_id: <id>]`"));
     assert!(!json_prompt.contains("Each `<prompt_delta>` is an outer dynamic container"));
     assert!(!json_prompt.contains("{{PROMPT_DELTA_EXAMPLE}}"));
     assert!(!json_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
@@ -8224,22 +8625,25 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(xml_prompt.contains("<actions>"));
     assert!(xml_prompt.contains("<parallel>"));
     assert!(!xml_prompt.contains("<action_json>"));
-    assert!(xml_prompt.contains("<context_compact>"));
-    assert!(xml_prompt.contains("<discard>"));
+    assert!(xml_prompt.contains("<context_compress>"));
+    assert!(xml_prompt.contains("<keep>"));
+    assert!(!xml_prompt.contains("<discard>"));
     assert!(xml_prompt.contains("<offload>"));
     assert!(xml_prompt.contains("<summary>"));
-    assert!(xml_prompt.contains("will be saved into scratch memory"));
+    assert!(xml_prompt.contains("Use `offload` only for important bulky source material"));
+    assert!(xml_prompt.contains("Before calling, check"));
+    assert!(!xml_prompt.contains("save these important bulky deltas to scratch before removal"));
     assert!(xml_prompt.contains("## RESPONSE EXAMPLES"));
-    assert!(xml_prompt.contains(r#"<prompt_delta id="pd_1" time_ms="123">"#));
+    assert!(xml_prompt.contains(r#"<prompt_delta id="pd_1">"#));
     assert!(xml_prompt.contains("</prompt_delta>"));
     assert!(xml_prompt.contains(
         "Each `<prompt_delta>` is an outer dynamic transport container that may wrap `<USER>"
     ));
-    assert!(xml_prompt.contains("[BEGIN TURN turn_id: <id>]"));
+    assert!(!xml_prompt.contains("BEGIN TURN"));
     assert!(xml_prompt.contains(r#"<USER kind="supplement">"#));
     assert!(!xml_prompt.contains("[BEGIN DELTA] and [END DELTA]"));
     let example_start = xml_prompt
-        .find(r#"<prompt_delta id="pd_1" time_ms="123">"#)
+        .find(r#"<prompt_delta id="pd_1">"#)
         .expect("XML delta example should render");
     let example_end = xml_prompt[example_start..]
         .find("</prompt_delta>")
@@ -8253,13 +8657,10 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
         .find("<ASSISTANT>")
         .expect("ASSISTANT entry should be in delta");
     assert!(!example.contains("<ASSISTANT name="));
-    let turn_runtime = example
-        .find("<RUNTIME>\n[BEGIN TURN turn_id: turn_1]")
-        .expect("turn boundary runtime entry should be in delta");
     let feedback_runtime = example
         .rfind("<RUNTIME>")
         .expect("feedback RUNTIME entry should be in delta");
-    assert!(turn_runtime < user && user < assistant && assistant < feedback_runtime);
+    assert!(user < assistant && assistant < feedback_runtime);
     assert!(!xml_prompt.contains("[BEGIN DELTA]"));
     assert!(!xml_prompt.contains("[END DELTA]"));
     assert!(!xml_prompt.contains("delta_id: pd_1"));
@@ -8310,7 +8711,7 @@ fn no_local_command_host_omits_bash_from_prompt_and_rejects_bash_actions() {
     };
     assert!(repair_prompt.contains("response is not protocol compliant"));
     assert!(repair_prompt.contains("unsupported_action:run_bash"));
-    assert!(!repair_prompt.contains("Exit code: 0"));
+    assert!(!has_runtime_metadata(&repair_prompt, "exit_code", json!(0)));
     assert!(!repair_prompt.contains("output:\n"));
 }
 
@@ -8602,8 +9003,6 @@ fn memmgr_tool_catalog_does_not_expose_legacy_query_surface() {
     let memmgr = &prompt[start..end];
 
     assert!(memmgr.contains(r#"{"memmgr":{"type":"durable","op":"sql""#));
-    assert!(memmgr.contains(r#"{"memmgr":{"type":"raw_chat","op":"search""#));
-    assert!(memmgr.contains(r#"{"memmgr":{"type":"scratch","op":"read""#));
     assert!(memmgr.contains("durable: schema|sql|insert|update|upsert|delete"));
     assert!(memmgr.contains("raw_chat: search|delete"));
     assert!(!memmgr.contains("raw_chat: search|sql|delete"));
@@ -8638,9 +9037,15 @@ fn canonical_tool_action_is_validated_through_capability_registry() {
         other => panic!("expected NeedModel after action, got {other:?}"),
     };
 
-    assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("type: durable"));
-    assert!(prompt.contains("op: sql"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "memory_type", json!("durable")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "operation", json!("sql")),
+        "{prompt}"
+    );
     assert!(!prompt.contains("response is not protocol compliant"));
 }
 
@@ -8699,7 +9104,7 @@ fn capmgr_load_skill_adds_skill_body_as_action_result() {
         other => panic!("expected NeedModel after capmgr load, got {other:?}"),
     };
 
-    assert!(prompt.contains("Action result: capmgr"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("kind: skill"));
     assert!(prompt.contains("id: release_quality_gate"));
     assert!(prompt.contains("# Release Quality Gate"));
@@ -8767,8 +9172,11 @@ fn self_tool_reads_runtime_paths_and_params() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected model continuation, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: self_tool"));
-    assert!(prompt.contains("type: path"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("path")),
+        "{prompt}"
+    );
     assert!(prompt.contains("memory_file:"));
     assert!(prompt.contains("reminder_tips_file:"));
     assert!(prompt.contains("session_index_file:"));
@@ -8779,7 +9187,10 @@ fn self_tool_reads_runtime_paths_and_params() {
     assert!(prompt.contains("action_audit_segments_dir:"));
     assert!(prompt.contains("audit_storage_note:"));
     assert!(!prompt.contains("api_audit_file:"));
-    assert!(prompt.contains("type: params"));
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("params")),
+        "{prompt}"
+    );
     assert!(prompt.contains("name: TimemAi"));
     assert!(prompt.contains("pid:"));
     assert!(prompt.contains("process_cwd:"));
@@ -8847,15 +9258,25 @@ fn self_tool_public_surface_groups_self_information_into_path_and_params() {
     let CoreStep::NeedModel { prompt, .. } = step else {
         panic!("expected model continuation, got {step:?}");
     };
-    assert!(prompt.contains("type: path"));
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("path")),
+        "{prompt}"
+    );
     assert!(prompt.contains("reminder_tips_file:"));
     assert!(prompt.contains("memory_file:"));
-    assert!(prompt.contains("type: params"));
-    assert!(prompt.contains("model: \"self-model\""));
-    assert!(prompt.contains("base_url: \"https://example.invalid/v1\""));
-    assert!(prompt.contains("api_key_configured: true"));
-    assert!(prompt.contains("max_llm_output_tokens: \"20000\""));
-    assert!(prompt.contains("max_steps: 200"));
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("params")),
+        "{prompt}"
+    );
+    let self_content = tool_contents(&prompt).join("\n");
+    assert!(
+        self_content.contains("model: \"self-model\""),
+        "{self_content}"
+    );
+    assert!(self_content.contains("base_url: \"https://example.invalid/v1\""));
+    assert!(self_content.contains("api_key_configured: true"));
+    assert!(self_content.contains("max_llm_output_tokens: \"20000\""));
+    assert!(self_content.contains("max_steps: 200"));
     assert!(!prompt.contains("non_sensitive_session_env_json"));
     assert!(!prompt.contains("never-expose-this-key"));
     assert!(!prompt.contains("TIMEM_API_KEY"));
@@ -8968,22 +9389,23 @@ fn self_tool_runtime_configuration_keeps_core_owned_identity() {
         other => panic!("expected model continuation, got {other:?}"),
     };
 
-    assert!(prompt.contains(&format!("space_dir: {}", configured_space.display())));
-    assert!(prompt.contains(&format!("memory_dir: {}", configured_memory.display())));
+    let contents = tool_contents(&prompt).join("\n");
+    assert!(contents.contains(&format!("space_dir: {}", configured_space.display())));
+    assert!(contents.contains(&format!("memory_dir: {}", configured_memory.display())));
     let configured_api_stream = api_audit_stream_path(&configured_api_audit);
-    assert!(prompt.contains(&format!(
+    assert!(contents.contains(&format!(
         "api_audit_logical_stream: {}",
         configured_api_stream.display()
     )));
-    assert!(prompt.contains(&format!(
+    assert!(contents.contains(&format!(
         "api_audit_segments_dir: {}",
         rolling_file_store::segmented_directory(&configured_api_stream).display()
     )));
-    assert!(prompt.contains(&format!(
+    assert!(contents.contains(&format!(
         "action_audit_logical_stream: {}",
         configured_action_audit.display()
     )));
-    assert!(prompt.contains(&format!(
+    assert!(contents.contains(&format!(
         "action_audit_segments_dir: {}",
         rolling_file_store::segmented_directory(&configured_action_audit).display()
     )));
@@ -9008,8 +9430,11 @@ fn self_tool_params_excludes_credentials_and_arbitrary_environment() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected model continuation, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: self_tool"));
-    assert!(prompt.contains("type: params"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("params")),
+        "{prompt}"
+    );
     assert!(!prompt.contains("TIMEM_API_KEY"));
 }
 
@@ -9034,8 +9459,11 @@ fn self_tool_path_is_read_only_and_reports_data_root() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected model continuation, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: self_tool"));
-    assert!(prompt.contains("type: path"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("path")),
+        "{prompt}"
+    );
     assert!(prompt.contains("data_root:"));
 }
 
@@ -9080,7 +9508,9 @@ fn self_tool_cwd_without_new_path_reports_current_context_without_mutating_it() 
     };
     assert_eq!(core.current_prompt_cwd(), base_dir.as_path());
     assert!(
-        prompt.contains(&format!("CWD: {}", base_dir.display())),
+        tool_contents(&prompt)
+            .join("\n")
+            .contains(&format!("CWD: {}", base_dir.display())),
         "{prompt}"
     );
     assert!(!prompt.contains("CWD changed to:"), "{prompt}");
@@ -9146,18 +9576,17 @@ fn self_tool_cwd_changes_relative_context_and_emits_structured_state() {
 
     assert_eq!(core.current_prompt_cwd(), nested_dir.as_path());
     assert!(
-        prompt.contains(&format!("CWD changed to: {}", nested_dir.display())),
+        tool_contents(&prompt)
+            .join("\n")
+            .contains(&format!("CWD changed to: {}", nested_dir.display())),
         "{prompt}"
     );
     assert!(
-        prompt.contains(&format!(
-            "Action result: {}",
-            agent_core::os::local_shell_tool_name()
-        )),
+        has_runtime_metadata(&prompt, "exit_code", json!(0)),
         "{prompt}"
     );
     assert!(
-        prompt.contains(&nested_dir.display().to_string()),
+        has_runtime_metadata(&prompt, "cwd", json!(nested_dir.to_string_lossy())),
         "{prompt}"
     );
 
@@ -9217,14 +9646,21 @@ fn self_tool_cwd_failure_keeps_context_and_emits_no_structured_state() {
     };
 
     assert_eq!(core.current_prompt_cwd(), base_dir.as_path());
-    let action_result = prompt
-        .split("The following are results of the actions generated in response:")
-        .nth(1)
-        .expect("action result section");
-    assert!(action_result.contains("error: path_not_found"), "{prompt}");
-    assert!(!action_result.contains("new_path:"), "{prompt}");
-    assert!(!action_result.contains("/forged"), "{prompt}");
-    assert!(!action_result.contains("CWD changed to: "), "{prompt}");
+    assert!(
+        has_runtime_metadata(&prompt, "status", json!("failed")),
+        "{prompt}"
+    );
+    assert!(
+        has_runtime_metadata(&prompt, "error_type", json!("InvalidPath")),
+        "{prompt}"
+    );
+    assert_eq!(tool_contents(&prompt), vec!["path_not_found".to_string()]);
+    assert!(!has_tool_output_containing(&prompt, "content", "/forged"));
+    assert!(!has_tool_output_containing(
+        &prompt,
+        "content",
+        "CWD changed to: "
+    ));
 
     let cwd_finish = runtime
         .0
@@ -9279,7 +9715,10 @@ fn self_tool_path_read_remains_read_only() {
     };
 
     assert_eq!(core.current_prompt_cwd(), base_dir.as_path());
-    assert!(prompt.contains("type: path"), "{prompt}");
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("path")),
+        "{prompt}"
+    );
     assert!(runtime
         .0
         .iter()
@@ -9307,8 +9746,11 @@ fn self_tool_supports_identity_and_process_qa_replay() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected model continuation, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: self_tool"));
-    assert!(prompt.contains("type: params"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(
+        has_runtime_metadata(&prompt, "self_type", json!("params")),
+        "{prompt}"
+    );
     assert!(prompt.contains("name: TimemAi"));
     assert!(prompt.contains("version:"));
     assert!(prompt.contains("pid:"));
@@ -9479,7 +9921,7 @@ example_json: |
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected overlay command result, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: cap_echo"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("cap_echo_ok"));
     assert!(prompt.contains(r#""text":"hello""#));
     assert!(!prompt.contains("response is not protocol compliant"));
@@ -9569,7 +10011,7 @@ example_json: |
         other => panic!("expected command action result, got {other:?}"),
     };
 
-    assert!(prompt.contains("Action result: echo_payload"));
+    assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("overlay_command_ok"));
     assert!(prompt.contains("\"text\":\"hello\""));
 }
@@ -9685,15 +10127,18 @@ example_json: |
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected background job result, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: echo_payload"));
-    assert!(prompt.contains("status: background_started"));
-    assert!(prompt.contains("next_action: capmgr op=job_status"));
-    let job_id = prompt
-        .lines()
-        .find_map(|line| line.strip_prefix("job_id: "))
-        .expect("job id in action result")
-        .trim()
-        .to_string();
+    assert!(!action_results(&prompt).is_empty());
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "status: background_started"
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "next_action: capmgr op=job_status"
+    ));
+    let job_id = tool_content_field(&prompt, "job_id").expect("job id in action result");
 
     let prompt = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -9708,11 +10153,27 @@ example_json: |
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected tool job status result, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: capmgr"));
-    assert!(prompt.contains("op: job_status"));
-    assert!(prompt.contains("action: echo_payload"));
-    assert!(prompt.contains("state: finished"));
-    assert!(prompt.contains("registered_background_ok"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "op: job_status"
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "action: echo_payload"
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "state: finished"
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "registered_background_ok"
+    ));
 }
 
 #[cfg(unix)]
@@ -9770,12 +10231,7 @@ example_json: |
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected background job result, got {other:?}"),
     };
-    let job_id = prompt
-        .lines()
-        .find_map(|line| line.strip_prefix("job_id: "))
-        .expect("job id in action result")
-        .trim()
-        .to_string();
+    let job_id = tool_content_field(&prompt, "job_id").expect("job id in action result");
 
     let prompt = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -9790,10 +10246,22 @@ example_json: |
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected tool job cancel result, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: capmgr"));
-    assert!(prompt.contains("op: job_cancel"));
-    assert!(prompt.contains("action: slow_payload"));
-    assert!(prompt.contains("state: cancelled"));
+    assert!(!action_results(&prompt).is_empty());
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "op: job_cancel"
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "action: slow_payload"
+    ));
+    assert!(has_tool_output_containing(
+        &prompt,
+        "content",
+        "state: cancelled"
+    ));
 }
 
 #[test]

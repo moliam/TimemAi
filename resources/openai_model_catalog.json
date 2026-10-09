@@ -1,0 +1,1497 @@
+{
+  "schema_version": 2,
+  "kind": "timem.provider_model_catalog",
+  "revision": 2,
+  "activation": "runtime_supported",
+  "coverage": "specified_model_pages_only",
+  "models": [
+    {
+      "id": "openai/gpt-5.6-sol",
+      "revision": 2,
+      "provider_id": "openai",
+      "model_id": "gpt-5.6-sol",
+      "label": "GPT-5.6 Sol",
+      "connection": {
+        "default_base_url": "https://api.openai.com/v1",
+        "allow_base_url_override": true,
+        "auth_handler": "bearer_api_key"
+      },
+      "dimensions": [
+        {
+          "id": "api.protocol",
+          "label": "API 协议",
+          "type": "enum",
+          "ordered": false,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "openai-responses",
+              "label": "Responses"
+            },
+            {
+              "id": "openai-compatible",
+              "label": "Chat Completions"
+            }
+          ],
+          "default_policy": {
+            "type": "explicit",
+            "value": "openai-responses",
+            "source": "product"
+          },
+          "handler": "api_protocol",
+          "ui": {
+            "group": "connection",
+            "order": 10
+          },
+          "source_refs": [
+            "gpt-5.6-sol"
+          ]
+        },
+        {
+          "id": "reasoning.effort",
+          "label": "推理强度",
+          "type": "enum",
+          "allow_unset": true,
+          "options": [
+            {
+              "id": "none",
+              "label": "none"
+            },
+            {
+              "id": "low",
+              "label": "low"
+            },
+            {
+              "id": "medium",
+              "label": "medium"
+            },
+            {
+              "id": "high",
+              "label": "high"
+            },
+            {
+              "id": "xhigh",
+              "label": "xhigh"
+            },
+            {
+              "id": "max",
+              "label": "max"
+            }
+          ],
+          "source_refs": [
+            "gpt-5.6-sol"
+          ],
+          "ordered": true,
+          "handler": "reasoning_effort",
+          "default_policy": {
+            "official_value": "medium",
+            "fallback": {
+              "type": "middle_option",
+              "candidates": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "even_count": "lower"
+            }
+          },
+          "ui": {
+            "group": "reasoning",
+            "order": 20
+          }
+        }
+      ],
+      "profiles": [
+        {
+          "protocol": "openai-responses",
+          "route": "/responses",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "source_refs": [
+            "gpt-5.6-sol"
+          ],
+          "binding_status": "pending_api_reference_review",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning/effort"
+            }
+          ]
+        },
+        {
+          "protocol": "openai-compatible",
+          "route": "/chat/completions",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "source_refs": [
+            "gpt-5.6-sol"
+          ],
+          "binding_status": "pending_api_reference_review",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning_effort"
+            }
+          ]
+        }
+      ],
+      "documented_facts": {
+        "source_refs": [
+          "gpt-5.6-sol"
+        ],
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "streaming": "supported",
+        "default_snapshot": "gpt-5.6-sol"
+      },
+      "constraints": [],
+      "limits": {
+        "context_window_tokens": 1050000,
+        "max_input_tokens": 922000,
+        "max_output_tokens": 128000,
+        "source_refs": [
+          "gpt-5.6-sol"
+        ]
+      }
+    },
+    {
+      "id": "openai/gpt-5.6-terra",
+      "revision": 2,
+      "provider_id": "openai",
+      "model_id": "gpt-5.6-terra",
+      "label": "GPT-5.6 Terra",
+      "connection": {
+        "default_base_url": "https://api.openai.com/v1",
+        "allow_base_url_override": true,
+        "auth_handler": "bearer_api_key"
+      },
+      "dimensions": [
+        {
+          "id": "api.protocol",
+          "label": "API 协议",
+          "type": "enum",
+          "ordered": false,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "openai-responses",
+              "label": "Responses"
+            },
+            {
+              "id": "openai-compatible",
+              "label": "Chat Completions"
+            }
+          ],
+          "default_policy": {
+            "type": "explicit",
+            "value": "openai-responses",
+            "source": "product"
+          },
+          "handler": "api_protocol",
+          "ui": {
+            "group": "connection",
+            "order": 10
+          },
+          "source_refs": [
+            "gpt-5.6-terra"
+          ]
+        },
+        {
+          "id": "reasoning.effort",
+          "label": "推理强度",
+          "type": "enum",
+          "allow_unset": true,
+          "options": [
+            {
+              "id": "none",
+              "label": "none"
+            },
+            {
+              "id": "low",
+              "label": "low"
+            },
+            {
+              "id": "medium",
+              "label": "medium"
+            },
+            {
+              "id": "high",
+              "label": "high"
+            },
+            {
+              "id": "xhigh",
+              "label": "xhigh"
+            },
+            {
+              "id": "max",
+              "label": "max"
+            }
+          ],
+          "source_refs": [
+            "gpt-5.6-terra"
+          ],
+          "ordered": true,
+          "handler": "reasoning_effort",
+          "default_policy": {
+            "official_value": "medium",
+            "fallback": {
+              "type": "middle_option",
+              "candidates": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "even_count": "lower"
+            }
+          },
+          "ui": {
+            "group": "reasoning",
+            "order": 20
+          }
+        }
+      ],
+      "profiles": [
+        {
+          "protocol": "openai-responses",
+          "route": "/responses",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "source_refs": [
+            "gpt-5.6-terra"
+          ],
+          "binding_status": "pending_api_reference_review",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning/effort"
+            }
+          ]
+        },
+        {
+          "protocol": "openai-compatible",
+          "route": "/chat/completions",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "source_refs": [
+            "gpt-5.6-terra"
+          ],
+          "binding_status": "pending_api_reference_review",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning_effort"
+            }
+          ]
+        }
+      ],
+      "documented_facts": {
+        "source_refs": [
+          "gpt-5.6-terra"
+        ],
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "streaming": "supported",
+        "default_snapshot": "gpt-5.6-terra"
+      },
+      "constraints": [],
+      "limits": {
+        "context_window_tokens": 1050000,
+        "max_input_tokens": 922000,
+        "max_output_tokens": 128000,
+        "source_refs": [
+          "gpt-5.6-terra"
+        ]
+      }
+    },
+    {
+      "id": "openai/gpt-5.6-luna",
+      "revision": 2,
+      "provider_id": "openai",
+      "model_id": "gpt-5.6-luna",
+      "label": "GPT-5.6 Luna",
+      "connection": {
+        "default_base_url": "https://api.openai.com/v1",
+        "allow_base_url_override": true,
+        "auth_handler": "bearer_api_key"
+      },
+      "dimensions": [
+        {
+          "id": "api.protocol",
+          "label": "API 协议",
+          "type": "enum",
+          "ordered": false,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "openai-responses",
+              "label": "Responses"
+            },
+            {
+              "id": "openai-compatible",
+              "label": "Chat Completions"
+            }
+          ],
+          "default_policy": {
+            "type": "explicit",
+            "value": "openai-responses",
+            "source": "product"
+          },
+          "handler": "api_protocol",
+          "ui": {
+            "group": "connection",
+            "order": 10
+          },
+          "source_refs": [
+            "gpt-5.6-luna"
+          ]
+        },
+        {
+          "id": "reasoning.effort",
+          "label": "推理强度",
+          "type": "enum",
+          "allow_unset": true,
+          "options": [
+            {
+              "id": "none",
+              "label": "none"
+            },
+            {
+              "id": "low",
+              "label": "low"
+            },
+            {
+              "id": "medium",
+              "label": "medium"
+            },
+            {
+              "id": "high",
+              "label": "high"
+            },
+            {
+              "id": "xhigh",
+              "label": "xhigh"
+            },
+            {
+              "id": "max",
+              "label": "max"
+            }
+          ],
+          "source_refs": [
+            "gpt-5.6-luna"
+          ],
+          "ordered": true,
+          "handler": "reasoning_effort",
+          "default_policy": {
+            "official_value": "medium",
+            "fallback": {
+              "type": "middle_option",
+              "candidates": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "even_count": "lower"
+            }
+          },
+          "ui": {
+            "group": "reasoning",
+            "order": 20
+          }
+        }
+      ],
+      "profiles": [
+        {
+          "protocol": "openai-responses",
+          "route": "/responses",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "source_refs": [
+            "gpt-5.6-luna"
+          ],
+          "binding_status": "pending_api_reference_review",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning/effort"
+            }
+          ]
+        },
+        {
+          "protocol": "openai-compatible",
+          "route": "/chat/completions",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "source_refs": [
+            "gpt-5.6-luna"
+          ],
+          "binding_status": "pending_api_reference_review",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning_effort"
+            }
+          ]
+        }
+      ],
+      "documented_facts": {
+        "source_refs": [
+          "gpt-5.6-luna"
+        ],
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "streaming": "supported",
+        "default_snapshot": "gpt-5.6-luna"
+      },
+      "constraints": [],
+      "limits": {
+        "context_window_tokens": 1050000,
+        "max_input_tokens": 922000,
+        "max_output_tokens": 128000,
+        "source_refs": [
+          "gpt-5.6-luna"
+        ]
+      }
+    },
+    {
+      "id": "openai/gpt-6-sol",
+      "revision": 2,
+      "provider_id": "openai",
+      "model_id": "gpt-6-sol",
+      "label": "GPT-6 Sol",
+      "connection": {
+        "default_base_url": "https://api.openai.com/v1",
+        "allow_base_url_override": true,
+        "auth_handler": "bearer_api_key"
+      },
+      "dimensions": [
+        {
+          "id": "api.protocol",
+          "label": "API 协议",
+          "type": "enum",
+          "ordered": false,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "openai-responses",
+              "label": "Responses"
+            },
+            {
+              "id": "openai-compatible",
+              "label": "Chat Completions"
+            }
+          ],
+          "default_policy": {
+            "type": "explicit",
+            "value": "openai-responses",
+            "source": "product"
+          },
+          "handler": "api_protocol",
+          "ui": {
+            "group": "connection",
+            "order": 10
+          },
+          "source_refs": [
+            "gpt-6-sol"
+          ]
+        },
+        {
+          "id": "reasoning.effort",
+          "label": "推理强度",
+          "type": "enum",
+          "allow_unset": true,
+          "options": [
+            {
+              "id": "none",
+              "label": "none"
+            },
+            {
+              "id": "low",
+              "label": "low"
+            },
+            {
+              "id": "medium",
+              "label": "medium"
+            },
+            {
+              "id": "high",
+              "label": "high"
+            },
+            {
+              "id": "xhigh",
+              "label": "xhigh"
+            },
+            {
+              "id": "max",
+              "label": "max"
+            }
+          ],
+          "source_refs": [
+            "gpt-6-sol"
+          ],
+          "ordered": true,
+          "handler": "reasoning_effort",
+          "default_policy": {
+            "official_value": "medium",
+            "fallback": {
+              "type": "middle_option",
+              "candidates": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "even_count": "lower"
+            }
+          },
+          "ui": {
+            "group": "reasoning",
+            "order": 20
+          }
+        }
+      ],
+      "profiles": [
+        {
+          "protocol": "openai-responses",
+          "route": "/responses",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "source_refs": [
+            "gpt-6-sol"
+          ],
+          "binding_status": "pending_api_reference_review",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning/effort"
+            }
+          ]
+        },
+        {
+          "protocol": "openai-compatible",
+          "route": "/chat/completions",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "conditional",
+          "source_refs": [
+            "gpt-6-sol"
+          ],
+          "binding_status": "pending_api_reference_review",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning_effort"
+            }
+          ]
+        }
+      ],
+      "documented_facts": {
+        "source_refs": [
+          "gpt-6-sol"
+        ],
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "streaming": "supported",
+        "default_snapshot": "gpt-6-sol"
+      },
+      "constraints": [
+        {
+          "id": "chat-native-tools-require-none",
+          "when": {
+            "all": [
+              {
+                "dimension": "api.protocol",
+                "equals": "openai-compatible"
+              },
+              {
+                "context": "tool_mode",
+                "equals": "native_function_calling"
+              }
+            ]
+          },
+          "effects": [
+            {
+              "type": "fixed_selection",
+              "dimension": "reasoning.effort",
+              "value": "none",
+              "send_policy": "explicit"
+            }
+          ],
+          "reason": "此模型通过 Chat Completions 使用原生函数调用时必须关闭推理。若要开启推理，请切换到 Responses。",
+          "source_refs": [
+            "gpt-6-sol"
+          ]
+        }
+      ],
+      "limits": {
+        "context_window_tokens": 1050000,
+        "max_input_tokens": 922000,
+        "max_output_tokens": 128000,
+        "source_refs": [
+          "gpt-6-sol"
+        ]
+      }
+    },
+    {
+      "id": "openai/gpt-6-astra",
+      "revision": 2,
+      "provider_id": "openai",
+      "model_id": "gpt-6-astra",
+      "label": "GPT-6 Astra",
+      "connection": {
+        "default_base_url": "https://api.openai.com/v1",
+        "allow_base_url_override": true,
+        "auth_handler": "bearer_api_key"
+      },
+      "dimensions": [
+        {
+          "id": "api.protocol",
+          "label": "API 协议",
+          "type": "enum",
+          "ordered": false,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "openai-responses",
+              "label": "Responses"
+            },
+            {
+              "id": "openai-compatible",
+              "label": "Chat Completions"
+            }
+          ],
+          "default_policy": {
+            "type": "explicit",
+            "value": "openai-responses",
+            "source": "product"
+          },
+          "handler": "api_protocol",
+          "ui": {
+            "group": "connection",
+            "order": 10
+          },
+          "source_refs": [
+            "gpt-6-astra"
+          ]
+        },
+        {
+          "id": "reasoning.effort",
+          "label": "推理强度",
+          "type": "enum",
+          "allow_unset": true,
+          "options": [
+            {
+              "id": "low",
+              "label": "low"
+            },
+            {
+              "id": "medium",
+              "label": "medium"
+            },
+            {
+              "id": "high",
+              "label": "high"
+            },
+            {
+              "id": "xhigh",
+              "label": "xhigh"
+            },
+            {
+              "id": "max",
+              "label": "max"
+            }
+          ],
+          "source_refs": [
+            "gpt-6-astra"
+          ],
+          "ordered": true,
+          "handler": "reasoning_effort",
+          "default_policy": {
+            "official_value": null,
+            "fallback": {
+              "type": "middle_option",
+              "candidates": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "even_count": "lower"
+            }
+          },
+          "ui": {
+            "group": "reasoning",
+            "order": 20
+          }
+        }
+      ],
+      "profiles": [
+        {
+          "protocol": "openai-responses",
+          "route": "/responses",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "source_refs": [
+            "gpt-6-astra"
+          ],
+          "binding_status": "pending_api_reference_review",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning/effort"
+            }
+          ]
+        },
+        {
+          "protocol": "openai-compatible",
+          "route": "/chat/completions",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "source_refs": [
+            "gpt-6-astra"
+          ],
+          "binding_status": "pending_api_reference_review",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning_effort"
+            }
+          ]
+        }
+      ],
+      "documented_facts": {
+        "source_refs": [
+          "gpt-6-astra"
+        ],
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "streaming": "supported",
+        "default_snapshot": "gpt-6-astra"
+      },
+      "constraints": [],
+      "limits": {
+        "context_window_tokens": 1050000,
+        "max_input_tokens": 922000,
+        "max_output_tokens": 128000,
+        "source_refs": [
+          "gpt-6-astra"
+        ]
+      }
+    },
+    {
+      "id": "openai/gpt-6.1-sol",
+      "revision": 2,
+      "provider_id": "openai",
+      "model_id": "gpt-6.1-sol",
+      "label": "GPT-6.1 Sol",
+      "connection": {
+        "default_base_url": "https://api.openai.com/v1",
+        "allow_base_url_override": true,
+        "auth_handler": "bearer_api_key"
+      },
+      "dimensions": [
+        {
+          "id": "api.protocol",
+          "label": "API 协议",
+          "type": "enum",
+          "ordered": false,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "openai-responses",
+              "label": "Responses"
+            },
+            {
+              "id": "openai-compatible",
+              "label": "Chat Completions"
+            }
+          ],
+          "default_policy": {
+            "type": "explicit",
+            "value": "openai-responses",
+            "source": "product"
+          },
+          "handler": "api_protocol",
+          "ui": {
+            "group": "connection",
+            "order": 10
+          },
+          "source_refs": [
+            "gpt-6.1-sol"
+          ]
+        },
+        {
+          "id": "reasoning.effort",
+          "label": "推理强度",
+          "type": "enum",
+          "allow_unset": true,
+          "options": [
+            {
+              "id": "low",
+              "label": "low"
+            },
+            {
+              "id": "medium",
+              "label": "medium"
+            },
+            {
+              "id": "high",
+              "label": "high"
+            },
+            {
+              "id": "xhigh",
+              "label": "xhigh"
+            },
+            {
+              "id": "max",
+              "label": "max"
+            }
+          ],
+          "source_refs": [
+            "gpt-6.1-sol"
+          ],
+          "ordered": true,
+          "handler": "reasoning_effort",
+          "default_policy": {
+            "official_value": "medium",
+            "fallback": {
+              "type": "middle_option",
+              "candidates": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "even_count": "lower"
+            }
+          },
+          "ui": {
+            "group": "reasoning",
+            "order": 20
+          }
+        }
+      ],
+      "profiles": [
+        {
+          "protocol": "openai-responses",
+          "route": "/responses",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "source_refs": [
+            "gpt-6.1-sol"
+          ],
+          "binding_status": "pending_api_reference_review",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning/effort"
+            }
+          ]
+        },
+        {
+          "protocol": "openai-compatible",
+          "route": "/chat/completions",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "unsupported",
+          "source_refs": [
+            "gpt-6.1-sol"
+          ],
+          "binding_status": "pending_api_reference_review",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning_effort"
+            }
+          ]
+        }
+      ],
+      "documented_facts": {
+        "source_refs": [
+          "gpt-6.1-sol"
+        ],
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "streaming": "supported",
+        "default_snapshot": "gpt-6.1-sol"
+      },
+      "constraints": [
+        {
+          "id": "native-tools-disable-chat",
+          "when": {
+            "all": [
+              {
+                "context": "tool_mode",
+                "equals": "native_function_calling"
+              }
+            ]
+          },
+          "effects": [
+            {
+              "type": "disable_option",
+              "dimension": "api.protocol",
+              "value": "openai-compatible"
+            }
+          ],
+          "reason": "此模型的 Chat Completions 不支持原生函数调用，请使用 Responses。",
+          "source_refs": [
+            "gpt-6.1-sol"
+          ]
+        }
+      ],
+      "limits": {
+        "context_window_tokens": 1050000,
+        "max_input_tokens": 922000,
+        "max_output_tokens": 128000,
+        "source_refs": [
+          "gpt-6.1-sol"
+        ]
+      }
+    },
+    {
+      "id": "openai/gpt-6-luna",
+      "revision": 2,
+      "provider_id": "openai",
+      "model_id": "gpt-6-luna",
+      "label": "GPT-6 Luna",
+      "connection": {
+        "default_base_url": "https://api.openai.com/v1",
+        "allow_base_url_override": true,
+        "auth_handler": "bearer_api_key"
+      },
+      "dimensions": [
+        {
+          "id": "api.protocol",
+          "label": "API 协议",
+          "type": "enum",
+          "ordered": false,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "openai-responses",
+              "label": "Responses"
+            },
+            {
+              "id": "openai-compatible",
+              "label": "Chat Completions"
+            }
+          ],
+          "default_policy": {
+            "type": "explicit",
+            "value": "openai-responses",
+            "source": "product"
+          },
+          "handler": "api_protocol",
+          "ui": {
+            "group": "connection",
+            "order": 10
+          },
+          "source_refs": [
+            "gpt-6-luna"
+          ]
+        },
+        {
+          "id": "reasoning.effort",
+          "label": "推理强度",
+          "type": "enum",
+          "allow_unset": true,
+          "options": [
+            {
+              "id": "none",
+              "label": "none"
+            },
+            {
+              "id": "low",
+              "label": "low"
+            },
+            {
+              "id": "medium",
+              "label": "medium"
+            },
+            {
+              "id": "high",
+              "label": "high"
+            },
+            {
+              "id": "xhigh",
+              "label": "xhigh"
+            },
+            {
+              "id": "max",
+              "label": "max"
+            }
+          ],
+          "source_refs": [
+            "gpt-6-luna"
+          ],
+          "ordered": true,
+          "handler": "reasoning_effort",
+          "default_policy": {
+            "official_value": "medium",
+            "fallback": {
+              "type": "middle_option",
+              "candidates": [
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ],
+              "even_count": "lower"
+            }
+          },
+          "ui": {
+            "group": "reasoning",
+            "order": 20
+          }
+        }
+      ],
+      "profiles": [
+        {
+          "protocol": "openai-responses",
+          "route": "/responses",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "source_refs": [
+            "gpt-6-luna"
+          ],
+          "binding_status": "pending_api_reference_review",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning/effort"
+            }
+          ]
+        },
+        {
+          "protocol": "openai-compatible",
+          "route": "/chat/completions",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "conditional",
+          "source_refs": [
+            "gpt-6-luna"
+          ],
+          "binding_status": "pending_api_reference_review",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning_effort"
+            }
+          ]
+        }
+      ],
+      "documented_facts": {
+        "source_refs": [
+          "gpt-6-luna"
+        ],
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "streaming": "supported",
+        "default_snapshot": "gpt-6-luna"
+      },
+      "constraints": [
+        {
+          "id": "chat-native-tools-require-none",
+          "when": {
+            "all": [
+              {
+                "dimension": "api.protocol",
+                "equals": "openai-compatible"
+              },
+              {
+                "context": "tool_mode",
+                "equals": "native_function_calling"
+              }
+            ]
+          },
+          "effects": [
+            {
+              "type": "fixed_selection",
+              "dimension": "reasoning.effort",
+              "value": "none",
+              "send_policy": "explicit"
+            }
+          ],
+          "reason": "此模型通过 Chat Completions 使用原生函数调用时必须关闭推理。若要开启推理，请切换到 Responses。",
+          "source_refs": [
+            "gpt-6-luna"
+          ]
+        }
+      ],
+      "limits": {
+        "context_window_tokens": 1050000,
+        "max_input_tokens": 922000,
+        "max_output_tokens": 128000,
+        "source_refs": [
+          "gpt-6-luna"
+        ]
+      }
+    },
+    {
+      "id": "openai/gpt-5.5",
+      "revision": 2,
+      "provider_id": "openai",
+      "model_id": "gpt-5.5",
+      "label": "GPT-5.5",
+      "connection": {
+        "default_base_url": "https://api.openai.com/v1",
+        "allow_base_url_override": true,
+        "auth_handler": "bearer_api_key"
+      },
+      "dimensions": [
+        {
+          "id": "api.protocol",
+          "label": "API 协议",
+          "type": "enum",
+          "ordered": false,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "openai-responses",
+              "label": "Responses"
+            },
+            {
+              "id": "openai-compatible",
+              "label": "Chat Completions"
+            }
+          ],
+          "default_policy": {
+            "type": "explicit",
+            "value": "openai-responses",
+            "source": "product"
+          },
+          "handler": "api_protocol",
+          "ui": {
+            "group": "connection",
+            "order": 10
+          },
+          "source_refs": [
+            "gpt-5.5"
+          ]
+        },
+        {
+          "id": "reasoning.effort",
+          "label": "推理强度",
+          "type": "enum",
+          "allow_unset": true,
+          "options": [
+            {
+              "id": "none",
+              "label": "none"
+            },
+            {
+              "id": "low",
+              "label": "low"
+            },
+            {
+              "id": "medium",
+              "label": "medium"
+            },
+            {
+              "id": "high",
+              "label": "high"
+            },
+            {
+              "id": "xhigh",
+              "label": "xhigh"
+            }
+          ],
+          "source_refs": [
+            "gpt-5.5"
+          ],
+          "ordered": true,
+          "handler": "reasoning_effort",
+          "default_policy": {
+            "official_value": "medium",
+            "fallback": {
+              "type": "middle_option",
+              "candidates": [
+                "low",
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "even_count": "lower"
+            }
+          },
+          "ui": {
+            "group": "reasoning",
+            "order": 20
+          }
+        }
+      ],
+      "profiles": [
+        {
+          "protocol": "openai-responses",
+          "route": "/responses",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "source_refs": [
+            "gpt-5.5"
+          ],
+          "binding_status": "pending_api_reference_review",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning/effort"
+            }
+          ]
+        },
+        {
+          "protocol": "openai-compatible",
+          "route": "/chat/completions",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "source_refs": [
+            "gpt-5.5"
+          ],
+          "binding_status": "pending_api_reference_review",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning_effort"
+            }
+          ]
+        }
+      ],
+      "documented_facts": {
+        "source_refs": [
+          "gpt-5.5"
+        ],
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "streaming": "supported",
+        "default_snapshot": "gpt-5.5-2026-04-23"
+      },
+      "constraints": [],
+      "limits": {
+        "context_window_tokens": 1050000,
+        "max_input_tokens": null,
+        "max_output_tokens": 128000,
+        "source_refs": [
+          "gpt-5.5"
+        ]
+      }
+    },
+    {
+      "id": "openai/gpt-5.5-pro",
+      "revision": 2,
+      "provider_id": "openai",
+      "model_id": "gpt-5.5-pro",
+      "label": "GPT-5.5 Pro",
+      "connection": {
+        "default_base_url": "https://api.openai.com/v1",
+        "allow_base_url_override": true,
+        "auth_handler": "bearer_api_key"
+      },
+      "dimensions": [
+        {
+          "id": "api.protocol",
+          "label": "API 协议",
+          "type": "enum",
+          "ordered": false,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "openai-responses",
+              "label": "Responses"
+            }
+          ],
+          "default_policy": {
+            "type": "explicit",
+            "value": "openai-responses",
+            "source": "product"
+          },
+          "handler": "api_protocol",
+          "ui": {
+            "group": "connection",
+            "order": 10
+          },
+          "source_refs": [
+            "gpt-5.5-pro"
+          ]
+        },
+        {
+          "id": "reasoning.effort",
+          "label": "推理强度",
+          "type": "enum",
+          "allow_unset": true,
+          "options": [
+            {
+              "id": "medium",
+              "label": "medium"
+            },
+            {
+              "id": "high",
+              "label": "high"
+            },
+            {
+              "id": "xhigh",
+              "label": "xhigh"
+            }
+          ],
+          "source_refs": [
+            "gpt-5.5-pro"
+          ],
+          "ordered": true,
+          "handler": "reasoning_effort",
+          "default_policy": {
+            "official_value": "high",
+            "fallback": {
+              "type": "middle_option",
+              "candidates": [
+                "medium",
+                "high",
+                "xhigh"
+              ],
+              "even_count": "lower"
+            }
+          },
+          "ui": {
+            "group": "reasoning",
+            "order": 20
+          }
+        }
+      ],
+      "profiles": [
+        {
+          "protocol": "openai-responses",
+          "route": "/responses",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "source_refs": [
+            "gpt-5.5-pro"
+          ],
+          "binding_status": "pending_api_reference_review",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning/effort"
+            }
+          ]
+        }
+      ],
+      "documented_facts": {
+        "source_refs": [
+          "gpt-5.5-pro"
+        ],
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "streaming": "unknown",
+        "default_snapshot": "gpt-5.5-pro-2026-04-23"
+      },
+      "constraints": [],
+      "limits": {
+        "context_window_tokens": 1050000,
+        "max_input_tokens": null,
+        "max_output_tokens": 128000,
+        "source_refs": [
+          "gpt-5.5-pro"
+        ]
+      }
+    }
+  ],
+  "$schema": "provider_model_catalog.schema.json"
+}

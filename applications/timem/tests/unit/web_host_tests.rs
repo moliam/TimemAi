@@ -1767,6 +1767,7 @@ fn stale_turn_started_cannot_revive_an_interrupted_turn_but_new_pending_turn_can
                 text: "old work".to_string(),
                 attachments: Vec::new(),
                 created_at_ms: 1,
+                timeline_seq: None,
                 command_id: Some(stale_command_id.to_string()),
                 delivery_state: Some(ChatCommandDeliveryState::CoreAccepted),
                 worker_roles: Vec::new(),
@@ -2729,7 +2730,7 @@ async fn local_static_web_entry_needs_no_token_and_public_entry_sets_auth_cookie
             .get(header::SET_COOKIE)
             .and_then(|value| value.to_str().ok())
             .unwrap_or(""),
-        "timem_web_token=test; Path=/; SameSite=Strict; HttpOnly"
+        "timem_web_token_12345=test; Path=/; SameSite=Strict; HttpOnly; Max-Age=604800"
     );
 
     let mut headers = HeaderMap::new();
@@ -2741,7 +2742,7 @@ async fn local_static_web_entry_needs_no_token_and_public_entry_sets_auth_cookie
         State((state, TEST_PORT)),
         Query(AuthQuery { token: None }),
         headers,
-        Uri::from_static("/assets/index.js"),
+        Uri::from_static("/assets/index-Dt1y9Jrn.js"),
     )
     .await;
     assert_ne!(cookie_allowed.status(), StatusCode::UNAUTHORIZED);
@@ -3151,6 +3152,44 @@ fn browser_commands_are_strictly_tagged_and_do_not_accept_unknown_variants() {
     assert!(matches!(
         attachment_remove,
         ClientCommand::AttachmentRemove { .. }
+    ));
+
+    let request_context_compress = serde_json::from_str::<ClientCommand>(
+        r#"{"type":"session_request_context_compress","session_id":"session_1"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        request_context_compress,
+        ClientCommand::SessionRequestContextCompress { ref session_id }
+            if session_id == "session_1"
+    ));
+    assert!(serde_json::from_str::<ClientCommand>(
+        r#"{"type":"session_request_context_compact","session_id":"session_1"}"#,
+    )
+    .is_err());
+
+    let endpoint_upsert = serde_json::from_value::<ClientCommand>(json!({
+        "type": "model_endpoint_upsert",
+        "endpoint": {
+            "id": "endpoint-json",
+            "name": "JSON endpoint",
+            "model": "test-model",
+            "api_protocol": "openai-compatible",
+            "response_protocol": "json",
+            "base_url": "https://example.test/v1",
+            "max_llm_input_tokens": 100000,
+            "max_llm_output_tokens": 4096,
+            "stream": true,
+            "function_calling": true
+        }
+    }))
+    .unwrap();
+    assert!(matches!(
+        endpoint_upsert,
+        ClientCommand::ModelEndpointUpsert { endpoint }
+            if endpoint.id.as_deref() == Some("endpoint-json")
+                && endpoint.model == "test-model"
+                && endpoint.function_calling
     ));
 
     let mem_switch =
@@ -5398,6 +5437,40 @@ fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web(
 }
 
 #[test]
+fn restored_session_rejects_invalid_cached_headers_and_request_fields() {
+    let state = routing_test_state();
+
+    for (key, value, expected) in [
+        (
+            "TIMEM_HTTP_HEADERS",
+            "not-json",
+            "invalid_session_http_headers",
+        ),
+        (
+            "TIMEM_HTTP_HEADERS",
+            r#"{"Bad\nHeader":"value"}"#,
+            "invalid_session_http_headers",
+        ),
+        (
+            "TIMEM_REQUEST_FIELDS",
+            "[]",
+            "invalid_session_request_fields",
+        ),
+        (
+            "TIMEM_REQUEST_FIELDS",
+            r#"{"model":"must-not-override"}"#,
+            "invalid_session_request_fields",
+        ),
+    ] {
+        let env = BTreeMap::from([(key.to_string(), value.to_string())]);
+        assert_eq!(
+            state.template.restored_session_settings(&env).unwrap_err(),
+            expected
+        );
+    }
+}
+
+#[test]
 fn restored_web_turns_follow_history_time_not_turn_id_lexical_order() {
     let records = vec![
         ChatHistoryRecord::Message {
@@ -5556,7 +5629,7 @@ fn restored_web_turns_preserve_user_entry_kinds() {
 }
 
 #[test]
-fn runtime_restart_materializes_never_dispatched_queue_items_as_queued_interrupted() {
+fn runtime_restart_preserves_never_dispatched_queue_items_in_message_queue() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("restart_queued_interrupted"));
     std::fs::create_dir_all(&root).unwrap();
@@ -5613,26 +5686,36 @@ fn runtime_restart_materializes_never_dispatched_queue_items_as_queued_interrupt
     {
         let sessions = restarted.sessions.lock().unwrap();
         let restored = &sessions[&session_id];
-        assert!(restored.message_queue.is_empty());
-        let queued_turn = restored
-            .turns
-            .iter()
-            .find(|candidate| {
-                candidate
-                    .user_entries
-                    .iter()
-                    .any(|entry| entry.command_id.as_deref() == Some("queued_never_dispatched"))
-            })
-            .expect("queued input remains visible after the restart");
-        assert_eq!(queued_turn.state, "interrupted");
-        assert_eq!(queued_turn.final_answer, None);
-        assert_eq!(queued_turn.completion, None);
         assert_eq!(
-            queued_turn.user_entries[0].kind.as_str(),
-            "queued_interrupted",
-            "history shown to the model must not label never-dispatched input as a task"
+            restored.message_queue.len(),
+            1,
+            "never-dispatched queued input must survive the restart in the message queue"
+        );
+        assert_eq!(
+            restored.message_queue.projection().items[0].payload.text,
+            "never sent before the restart"
         );
         assert!(restored
+            .message_queue
+            .projection()
+            .dispatching_command_id
+            .is_none());
+        assert_eq!(
+            restored.message_queue.projection().continuation,
+            timem_session::message_queue::MessageQueueContinuation::AwaitingNormalCompletion,
+            "restart must not carry an automatic-dispatch grant"
+        );
+        // The queued input is preserved as pending input, not flushed into
+        // chat history as a phantom turn.
+        assert!(restored
+            .turns
+            .iter()
+            .filter(|turn| turn.final_answer.is_none() && turn.completion.is_none())
+            .all(|turn| turn
+                .user_entries
+                .iter()
+                .all(|entry| entry.kind.as_str() != "queued_interrupted")));
+        assert!(!restored
             .messages
             .iter()
             .any(|message| message.kind.as_deref() == Some("queued_interrupted")));
@@ -5644,7 +5727,7 @@ fn runtime_restart_materializes_never_dispatched_queue_items_as_queued_interrupt
             .history_path_for_session(&session_id),
     )
     .unwrap();
-    assert!(records
+    assert!(!records
         .iter()
         .any(|record| matches!(record, ChatHistoryRecord::Message { role: ChatHistoryRole::User, kind: Some(kind), .. } if kind == "queued_interrupted")));
 }
@@ -6149,6 +6232,8 @@ fn snapshot_reports_the_active_mem_space_and_paths() {
         Some(MEM_CAPACITY_128_MB)
     );
     assert!(snapshot.server.mem.claude_codex_tool_discovery);
+    assert_eq!(snapshot.server.mem.model_tool_result_bytes, 16 * 1024);
+    assert_eq!(snapshot.server.mem.context_compress_threshold_percent, 90);
 }
 
 #[test]
@@ -6164,6 +6249,8 @@ fn web_mem_capacity_defaults_follow_launch_mode_without_overriding_saved_values(
         Some(MEM_CAPACITY_128_MB)
     );
     assert!(normal.claude_codex_tool_discovery);
+    assert_eq!(normal.model_tool_result_bytes, 16 * 1024);
+    assert_eq!(normal.context_compress_threshold_percent, 90);
 
     let debug = load_web_mem_settings(&root, true).unwrap();
     assert_eq!(debug.temporary_retention_days, Some(5));
@@ -6180,6 +6267,8 @@ fn web_mem_capacity_defaults_follow_launch_mode_without_overriding_saved_values(
     assert_eq!(saved.temporary_capacity_bytes, None);
     assert_eq!(saved.conversation_capacity_bytes, Some(MEM_CAPACITY_512_MB));
     assert!(saved.claude_codex_tool_discovery);
+    assert_eq!(saved.model_tool_result_bytes, 16 * 1024);
+    assert_eq!(saved.context_compress_threshold_percent, 90);
 
     std::fs::write(
         web_mem_settings_path(&root),
@@ -6196,6 +6285,8 @@ fn web_mem_capacity_defaults_follow_launch_mode_without_overriding_saved_values(
         migrated_normal.conversation_capacity_bytes,
         Some(MEM_CAPACITY_128_MB)
     );
+    assert_eq!(migrated_normal.model_tool_result_bytes, 16 * 1024);
+    assert_eq!(migrated_normal.context_compress_threshold_percent, 90);
     let migrated_debug = load_web_mem_settings(&root, true).unwrap();
     assert_eq!(
         migrated_debug.temporary_capacity_bytes,
@@ -6207,6 +6298,119 @@ fn web_mem_capacity_defaults_follow_launch_mode_without_overriding_saved_values(
     );
 
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn model_tool_result_budget_is_authoritative_mem_persistent_and_validated() {
+    let state = routing_test_state();
+    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+    assert_eq!(
+        snapshot_for(&state, TEST_PORT)
+            .server
+            .mem
+            .model_tool_result_bytes,
+        16 * 1024
+    );
+
+    for max_bytes in [30, 20, 16, 10, 8].map(|kib| kib * 1024) {
+        let event = handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::SystemModelToolResultBytesUpdate { max_bytes },
+        )
+        .unwrap()
+        .unwrap();
+        let WireEvent::MemSettingsUpdated {
+            model_tool_result_bytes,
+            ..
+        } = event
+        else {
+            panic!("expected authoritative MEM settings event")
+        };
+        assert_eq!(model_tool_result_bytes, max_bytes);
+        assert_eq!(
+            load_web_mem_settings(&memory_dir, false)
+                .unwrap()
+                .model_tool_result_bytes,
+            max_bytes
+        );
+    }
+
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::SystemModelToolResultBytesUpdate {
+                max_bytes: 32 * 1024,
+            },
+        )
+        .unwrap_err(),
+        "model_tool_result_bytes_invalid"
+    );
+    assert_eq!(
+        snapshot_for(&state, TEST_PORT)
+            .server
+            .mem
+            .model_tool_result_bytes,
+        8 * 1024
+    );
+}
+
+#[test]
+fn context_compress_threshold_is_authoritative_mem_persistent_and_validated() {
+    let state = routing_test_state();
+    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+    assert_eq!(
+        snapshot_for(&state, TEST_PORT)
+            .server
+            .mem
+            .context_compress_threshold_percent,
+        90
+    );
+
+    for percent in [80, 85, 90, 95, 100] {
+        let command = ClientCommand::SystemContextCompressThresholdUpdate { percent };
+        assert_eq!(command.mutation_lane().as_deref(), Some("global"));
+        assert!(command.uses_global_mutation_barrier());
+        let event = handle_command(&state, TEST_PORT, command).unwrap().unwrap();
+        let WireEvent::MemSettingsUpdated {
+            context_compress_threshold_percent,
+            ..
+        } = event
+        else {
+            panic!("expected authoritative MEM settings event")
+        };
+        assert_eq!(context_compress_threshold_percent, percent);
+        assert_eq!(
+            load_web_mem_settings(&memory_dir, false)
+                .unwrap()
+                .context_compress_threshold_percent,
+            percent
+        );
+    }
+
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::SystemContextCompressThresholdUpdate { percent: 89 },
+        )
+        .unwrap_err(),
+        "context_compress_threshold_percent_invalid"
+    );
+    assert_eq!(
+        snapshot_for(&state, TEST_PORT)
+            .server
+            .mem
+            .context_compress_threshold_percent,
+        100
+    );
+    assert_eq!(
+        load_web_mem_settings(&memory_dir, false)
+            .unwrap()
+            .context_compress_threshold_percent,
+        100
+    );
 }
 
 #[test]
@@ -6384,6 +6588,7 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
         temporary_capacity_bytes,
         conversation_capacity_bytes,
         claude_codex_tool_discovery,
+        ..
     } = event
     else {
         panic!("expected authoritative MEM settings event")
@@ -7041,8 +7246,19 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
     .unwrap()
     .is_none());
 
-    let WireEvent::Hello { snapshot, .. } = events.try_recv().unwrap() else {
-        panic!("expected hello snapshot after mem switch")
+    // The mem switch restores beta sessions, which publish progressive
+    // session_created events before the Hello baseline; skip those.
+    let snapshot = loop {
+        match events.try_recv().unwrap() {
+            WireEvent::Hello { snapshot, .. } => break snapshot,
+            WireEvent::SemanticEvent { event, .. } => {
+                assert!(
+                    matches!(*event, WireEvent::SessionCreated { .. }),
+                    "unexpected semantic event before hello"
+                );
+            }
+            other => panic!("unexpected event before hello: {other:?}"),
+        }
     };
     assert_eq!(
         snapshot.server.mem.space,
@@ -7492,6 +7708,8 @@ fn routing_test_state() -> AppState {
     let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
     AppState {
         token: "test".to_string(),
+        listen_port: std::sync::Arc::new(std::sync::atomic::AtomicU16::new(TEST_PORT)),
+        session_restore_in_progress: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         public_access: false,
         manager: Arc::new(Mutex::new(CoreSessionWorkerManager::new())),
         mem: Arc::new(Mutex::new(
@@ -7509,6 +7727,7 @@ fn routing_test_state() -> AppState {
             )
             .unwrap(),
         )),
+        web_instance_registration: Arc::new(Mutex::new(None)),
         command_lanes: Arc::new(Mutex::new(HashMap::new())),
         command_global_barrier: Arc::new(RwLock::new(())),
         mem_epoch: Arc::new(RwLock::new(1)),
@@ -7820,6 +8039,139 @@ fn drain_wire_events(receiver: &mut broadcast::Receiver<WireEvent>) -> Vec<WireE
             }
         }
     }
+}
+
+#[test]
+fn response_preview_and_final_event_keep_authoritative_turn_timeline_order() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let web_turn = start_web_turn(&state, session_id, "inspect the stream order").unwrap();
+    let worker_id = test_worker_id(session_id);
+    let core_turn_id = "core_turn_timeline_order";
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Active(
+            agent_core::ActiveTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.to_string(),
+                    turn_id: core_turn_id.to_string(),
+                    epoch: 1,
+                },
+                stop_requested: false,
+                input_admission: agent_core::TurnInputAdmission::Open,
+                activity: agent_core::TurnActivity::Running,
+            },
+        )),
+    );
+
+    let preview = |attempt: u64, revision: u64, text: &str| {
+        CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new("core.model.preview", json!({})),
+            CoreSessionState::WaitingModel,
+            json!({
+                "turn_id": core_turn_id,
+                "attempt": attempt,
+                "revision": revision,
+                "interruption": null,
+                "response": {
+                    "attempt": attempt,
+                    "revision": revision,
+                    "text": text,
+                    "status": "intermediate"
+                }
+            }),
+        )
+        .with_worker_scope(test_context_id(session_id), worker_id.clone())
+    };
+
+    response_preview::publish(&state, session_id, &worker_id, &preview(1, 1, "first"));
+    let first_seq = state.sessions.lock().unwrap()[session_id]
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == web_turn.turn_id)
+        .unwrap()
+        .preview
+        .as_ref()
+        .unwrap()["timeline_seq"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(first_seq, 1);
+
+    response_preview::publish(&state, session_id, &worker_id, &preview(1, 2, "revised"));
+    let revised_seq = state.sessions.lock().unwrap()[session_id]
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == web_turn.turn_id)
+        .unwrap()
+        .preview
+        .as_ref()
+        .unwrap()["timeline_seq"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(revised_seq, first_seq);
+
+    append_turn_user_entry(
+        &state,
+        session_id,
+        "supplement",
+        "later supplement".to_string(),
+    )
+    .unwrap();
+    let supplement_seq = state.sessions.lock().unwrap()[session_id]
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == web_turn.turn_id)
+        .unwrap()
+        .user_entries
+        .last()
+        .unwrap()
+        .timeline_seq
+        .unwrap();
+    assert!(supplement_seq > first_seq);
+
+    append_turn_event(
+        &state,
+        session_id,
+        Some(&web_turn.turn_id),
+        "core_topic",
+        json!({
+            "topic": {"name": CORE_TOPIC_MODEL_RESPONSE},
+            "payload": {"free_talk": "settled first attempt"}
+        }),
+    )
+    .unwrap();
+    let final_seq = state.sessions.lock().unwrap()[session_id]
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == web_turn.turn_id)
+        .unwrap()
+        .events
+        .last()
+        .unwrap()
+        .timeline_seq
+        .unwrap();
+    assert_eq!(final_seq, first_seq);
+    assert!(final_seq < supplement_seq);
+
+    response_preview::publish(
+        &state,
+        session_id,
+        &worker_id,
+        &preview(2, 3, "second attempt"),
+    );
+    let second_attempt_seq = state.sessions.lock().unwrap()[session_id]
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == web_turn.turn_id)
+        .unwrap()
+        .preview
+        .as_ref()
+        .unwrap()["timeline_seq"]
+        .as_u64()
+        .unwrap();
+    assert!(second_attempt_seq > supplement_seq);
 }
 
 #[test]
@@ -8270,7 +8622,7 @@ fn primary_turn_finish_clears_stale_working_workers_and_session_spinner() {
 }
 
 #[test]
-fn final_answer_is_preserved_before_unconsumed_supplement_starts_a_new_turn() {
+fn failed_unconsumed_handoff_preserves_final_answer_and_pending_supplement() {
     let state = routing_test_state();
     let session_id = "session_a";
     let first = start_web_turn(&state, session_id, "Q1").unwrap();
@@ -8303,7 +8655,12 @@ fn final_answer_is_preserved_before_unconsumed_supplement_starts_a_new_turn() {
         &context_id,
         &worker_id,
         CoreSessionWorkerEvent::UnconsumedSupplements {
-            supplements: vec!["Q2".to_string()],
+            supplements: vec![timem_session::UnconsumedSupplement {
+                manual_context_compress: false,
+                text: "Q2".to_string(),
+                additional_context: None,
+                command_id: None,
+            }],
         },
     );
     handle_scoped_worker_event(
@@ -8324,23 +8681,24 @@ fn final_answer_is_preserved_before_unconsumed_supplement_starts_a_new_turn() {
 
     let sessions = state.sessions.lock().unwrap();
     let session = sessions.get(session_id).unwrap();
-    assert_eq!(session.turns.len(), 2);
+    assert_eq!(session.turns.len(), 1);
     assert_eq!(session.turns[0].turn_id, first.turn_id);
     assert_eq!(
         session.turns[0].final_answer.as_deref(),
         Some("final_answer1")
     );
     assert_eq!(session.turns[0].state, "finished");
-    assert_ne!(session.turns[1].turn_id, first.turn_id);
-    assert_eq!(session.turns[1].user_entries.len(), 1);
-    assert_eq!(session.turns[1].user_entries[0].kind, "task");
-    assert_eq!(session.turns[1].user_entries[0].text, "Q2");
-    assert!(session.turns[1].final_answer.is_none());
-    assert!(
-        session.active_turn_id.as_deref() == Some(session.turns[1].turn_id.as_str())
-            || session.pending_turn_id.as_deref() == Some(session.turns[1].turn_id.as_str()),
-        "Q2 must have a distinct active or pending turn identity"
+    assert_eq!(
+        session
+            .pending_unconsumed_supplements
+            .iter()
+            .map(|supplement| supplement.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Q2"],
+        "failed in-process handoff must remain retryable in memory"
     );
+    assert!(session.active_turn_id.is_none());
+    assert!(session.pending_turn_id.is_none());
     assert_eq!(
         session
             .messages
@@ -8354,7 +8712,7 @@ fn final_answer_is_preserved_before_unconsumed_supplement_starts_a_new_turn() {
 }
 
 #[test]
-fn task_finished_turn_resubmits_unconsumed_supplements_as_new_turn() {
+fn task_finished_handoff_failure_keeps_unconsumed_supplement_in_memory() {
     let state = routing_test_state();
     let session_id = "session_a";
     start_web_turn(&state, session_id, "Q1").unwrap();
@@ -8387,7 +8745,12 @@ fn task_finished_turn_resubmits_unconsumed_supplements_as_new_turn() {
         &context_id,
         &worker_id,
         CoreSessionWorkerEvent::UnconsumedSupplements {
-            supplements: vec!["late follow-up".to_string()],
+            supplements: vec![timem_session::UnconsumedSupplement {
+                manual_context_compress: false,
+                text: "late follow-up".to_string(),
+                additional_context: None,
+                command_id: None,
+            }],
         },
     );
 
@@ -8409,26 +8772,189 @@ fn task_finished_turn_resubmits_unconsumed_supplements_as_new_turn() {
 
     let sessions = state.sessions.lock().unwrap();
     let session = sessions.get(session_id).unwrap();
-    // In the routing-test harness the Core worker handle is absent, so the
-    // resubmit enqueues the queued turn but cannot hand it to Core; the turn
-    // identity and entry below still prove the supplement was not silently
-    // dropped on a TurnFinished completion.
-    assert_eq!(session.turns.len(), 2);
-    assert_eq!(session.turns[1].user_entries.len(), 1);
-    assert_eq!(session.turns[1].user_entries[0].kind, "task");
-    assert_eq!(session.turns[1].user_entries[0].text, "late follow-up");
+    assert_eq!(session.turns.len(), 1);
+    assert_eq!(
+        session
+            .pending_unconsumed_supplements
+            .iter()
+            .map(|supplement| supplement.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["late follow-up"]
+    );
+}
+
+#[test]
+fn normal_completion_hands_unconsumed_supplement_off_before_ordinary_queue() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "unconsumed-priority");
+    let first = start_web_turn(&state, &session_id, "Q1").unwrap();
+    let (context_id, worker_id) = primary_worker_scope(&state, &session_id).unwrap();
+    let role = WorkerRole {
+        id: "priority-role".to_string(),
+        name: "Priority reviewer".to_string(),
+        description: "Preserve this role across terminal handoff.".to_string(),
+    };
+    let attachment = WebAttachment {
+        id: "priority-attachment".to_string(),
+        name: "evidence.txt".to_string(),
+        path: "/tmp/priority-evidence.txt".to_string(),
+        bytes: 8,
+    };
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session
+            .turns
+            .iter_mut()
+            .find(|turn| turn.turn_id == first.turn_id)
+            .unwrap()
+            .user_entries
+            .push(WebTurnUserEntry {
+                kind: "supplement".to_string(),
+                text: "S priority".to_string(),
+                attachments: vec![attachment.clone()],
+                created_at_ms: now_ms(),
+                timeline_seq: Some(1),
+                command_id: Some("supplement-command".to_string()),
+                delivery_state: Some(ChatCommandDeliveryState::CoreAccepted),
+                worker_roles: vec![role.clone()],
+            });
+        session
+            .message_queue
+            .enqueue(
+                "ordinary-q",
+                WebNextTurnPayload {
+                    send_after_cancel: false,
+                    turn_id: "ordinary-q-turn".to_string(),
+                    created_at_ms: now_ms(),
+                    text: "Q ordinary".to_string(),
+                    attachments: Vec::new(),
+                    worker_roles: Vec::new(),
+                },
+            )
+            .unwrap();
+    }
+
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::UnconsumedSupplements {
+            supplements: vec![timem_session::UnconsumedSupplement {
+                manual_context_compress: false,
+                text: "S priority".to_string(),
+                additional_context: Some("RETURNED_CONTEXT_MARKER".to_string()),
+                command_id: Some("supplement-command".to_string()),
+            }],
+        },
+    );
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Finished(
+            agent_core::FinishedTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.clone(),
+                    turn_id: first.turn_id.clone(),
+                    epoch: 1,
+                },
+                outcome: agent_core::TurnProjectionOutcome::Completed,
+            },
+        )),
+    );
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::TurnFinished {
+            outcome: TurnOutcome::final_response(
+                "done",
+                UsageStats::zero(),
+                None,
+                None,
+                Duration::from_millis(1),
+            ),
+        },
+    );
+
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = sessions.get(&session_id).unwrap();
+        assert_eq!(session.turns.len(), 2);
+        let priority = session.turns.last().unwrap();
+        assert_eq!(priority.user_entries.len(), 1);
+        assert_eq!(priority.user_entries[0].text, "S priority");
+        assert_eq!(
+            priority.user_entries[0].command_id.as_deref(),
+            Some("supplement-command")
+        );
+        assert_eq!(priority.user_entries[0].attachments, vec![attachment]);
+        assert_eq!(priority.user_entries[0].worker_roles, vec![role]);
+        assert_eq!(
+            session.pending_turn_id.as_deref(),
+            Some(priority.turn_id.as_str())
+        );
+        assert_eq!(session.message_queue.len(), 1);
+        assert_eq!(
+            session.message_queue.projection().items[0].command_id,
+            "ordinary-q"
+        );
+        assert!(session
+            .message_queue
+            .projection()
+            .dispatching_command_id
+            .is_none());
+        assert!(session.pending_unconsumed_supplements.is_empty());
+    }
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
 }
 
 #[test]
 fn stopped_primary_turn_preserves_unconsumed_supplements_without_resubmitting() {
     let state = routing_test_state();
     let session_id = "session_a";
-    let supplements = vec!["follow-up one".to_string(), "follow-up two".to_string()];
+    let supplements = vec![
+        timem_session::UnconsumedSupplement {
+            manual_context_compress: false,
+            text: "follow-up one".to_string(),
+            additional_context: None,
+            command_id: None,
+        },
+        timem_session::UnconsumedSupplement {
+            manual_context_compress: false,
+            text: "follow-up two".to_string(),
+            additional_context: None,
+            command_id: None,
+        },
+    ];
 
     let turns_before = {
         let mut sessions = state.sessions.lock().unwrap();
         let session = sessions.get_mut(session_id).unwrap();
         session.pending_unconsumed_supplements = supplements.clone();
+        session
+            .message_queue
+            .enqueue(
+                "ordinary-after-cancel",
+                WebNextTurnPayload {
+                    send_after_cancel: false,
+                    turn_id: "ordinary-after-cancel-turn".to_string(),
+                    created_at_ms: now_ms(),
+                    text: "ordinary queued question".to_string(),
+                    attachments: Vec::new(),
+                    worker_roles: Vec::new(),
+                },
+            )
+            .unwrap();
         session.turns.len()
     };
 
@@ -8439,6 +8965,20 @@ fn stopped_primary_turn_preserves_unconsumed_supplements_without_resubmitting() 
     handle_worker_event(
         &state,
         session_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Finished(
+            agent_core::FinishedTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.to_string(),
+                    turn_id: "cancelled-turn".to_string(),
+                    epoch: 1,
+                },
+                outcome: agent_core::TurnProjectionOutcome::Cancelled,
+            },
+        )),
+    );
+    handle_worker_event(
+        &state,
+        session_id,
         CoreSessionWorkerEvent::TurnFinished { outcome },
     );
 
@@ -8446,6 +8986,16 @@ fn stopped_primary_turn_preserves_unconsumed_supplements_without_resubmitting() 
     let session = sessions.get(session_id).unwrap();
     assert_eq!(session.pending_unconsumed_supplements, supplements);
     assert_eq!(session.turns.len(), turns_before);
+    assert_eq!(session.message_queue.len(), 1);
+    assert_eq!(
+        session.message_queue.projection().items[0].command_id,
+        "ordinary-after-cancel"
+    );
+    assert!(session
+        .message_queue
+        .projection()
+        .dispatching_command_id
+        .is_none());
 }
 
 #[test]
@@ -9887,6 +10437,7 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
                     delta_id: "pd_1".to_string(),
                     assistant_text: "previous".to_string(),
                     calls: vec![agent_core::NativeToolCall {
+                        assistant_continuation: None,
                         id: "call_previous".to_string(),
                         name: "self_tool".to_string(),
                         arguments: json!({"type": "cwd"}),
@@ -9901,6 +10452,7 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
                 }],
                 resolved_mode: agent_core::ToolCallMode::Native,
                 parallel_tool_calls: true,
+                send_parallel_tool_calls: true,
                 tool_choice: agent_core::NativeToolChoice::Auto,
                 critical_reasoning: false,
             })),
@@ -9933,6 +10485,7 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
             usage: UsageStats::zero(),
             content: "I will inspect the workspace.".to_string(),
             tool_calls: vec![agent_core::NativeToolCall {
+                assistant_continuation: None,
                 id: "call_current".to_string(),
                 name: "self_tool".to_string(),
                 arguments: json!({"type": "cwd"}),
@@ -11093,7 +11646,7 @@ fn repeated_user_sends_during_an_active_turn_are_ordered_supplements() {
 }
 
 #[test]
-fn runtime_restart_interrupts_and_clears_persisted_message_queue() {
+fn runtime_restart_preserves_persisted_message_queue_without_dispatch_grant() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("restart_restores_queue"));
     std::fs::create_dir_all(&root).unwrap();
@@ -11162,25 +11715,33 @@ fn runtime_restart_interrupts_and_clears_persisted_message_queue() {
         1
     );
     let sessions = restarted.sessions.lock().unwrap();
-    assert!(
-        sessions[&session_id].message_queue.is_empty(),
-        "runtime restart is a hard boundary and must not retain executable work"
+    assert_eq!(
+        sessions[&session_id].message_queue.len(),
+        1,
+        "queued input must survive a runtime restart in the message queue"
     );
-    let interrupted = sessions[&session_id]
-        .turns
-        .iter()
-        .find(|turn| {
-            turn.user_entries
-                .iter()
-                .any(|entry| entry.command_id.as_deref() == Some("queued-command"))
-        })
-        .expect("accepted queued input remains visible as interrupted history");
-    assert_eq!(interrupted.state, "interrupted");
-    assert_eq!(interrupted.user_entries[0].text, "queued survives");
+    let queued = &sessions[&session_id].message_queue.projection().items[0];
+    assert_eq!(queued.command_id, "queued-command");
+    assert_eq!(queued.payload.text, "queued survives");
+    assert!(sessions[&session_id]
+        .message_queue
+        .projection()
+        .dispatching_command_id
+        .is_none());
+    assert_eq!(
+        sessions[&session_id]
+            .message_queue
+            .projection()
+            .continuation,
+        timem_session::message_queue::MessageQueueContinuation::AwaitingNormalCompletion
+    );
     drop(sessions);
-    assert!(load_message_queue(&restarted, &session_id)
-        .unwrap()
-        .is_empty());
+    let persisted_after_restart = load_message_queue(&restarted, &session_id).unwrap();
+    assert_eq!(
+        persisted_after_restart.len(),
+        1,
+        "persisted queue file must retain the queued item after the restart"
+    );
     let manager = {
         let mut guard = restarted.manager.lock().unwrap();
         std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
@@ -12012,7 +12573,8 @@ impl ModelClient for ToolGenPublishModel {
         self.calls += 1;
         let content = if self.calls == 1 {
             "<ASSISTANT><free_talk>Checking the reusable workflow.</free_talk><actions><run_bash name=\"check reusable workflow\" timeout_ms=\"5000\"><cmd>printf toolgen-host-check</cmd></run_bash></actions></ASSISTANT>".to_string()
-        } else if prompt.contains(r#"<action_result><toolgen name="publish verified draft">"#) {
+        } else if prompt.contains(r#""status":"completed""#) && prompt.contains(r#"status: ready"#)
+        {
             confirmed_xml_response("<toolgen_retrospect>Published host-tool after runtime validation.</toolgen_retrospect><final_answer>ToolGen host workflow completed.</final_answer>")
         } else {
             let marker = "Write the new tool files only in this temporary staging directory:\n";
@@ -12395,8 +12957,48 @@ fn drive_worker_until_session_ready(
     prompts: &Arc<Mutex<Vec<String>>>,
 ) {
     let started = Instant::now();
+    let mut trace = std::collections::VecDeque::new();
     loop {
         for (event_session_id, context_id, worker_id, event) in drain_worker_events(state) {
+            if event_session_id == session_id {
+                let detail = match &event {
+                    CoreSessionWorkerEvent::Topics(topics) => topics
+                        .iter()
+                        .map(|topic| {
+                            format!(
+                                "{}:{}",
+                                topic.topic.name,
+                                topic.payload.get("event").unwrap_or(&Value::Null)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    CoreSessionWorkerEvent::ModelError { error } => error.clone(),
+                    CoreSessionWorkerEvent::TurnFinished { outcome } => {
+                        format!("stop={:?}", outcome.stop_reason)
+                    }
+                    _ => String::new(),
+                };
+                if trace.len() == 32 {
+                    trace.pop_front();
+                }
+                trace.push_back(format!(
+                    "{}ms {:?} {}",
+                    started.elapsed().as_millis(),
+                    match &event {
+                        CoreSessionWorkerEvent::TurnStarted { .. } => "TurnStarted",
+                        CoreSessionWorkerEvent::TurnProjection(_) => "TurnProjection",
+                        CoreSessionWorkerEvent::Topics(_) => "Topics",
+                        CoreSessionWorkerEvent::ModelRequest { .. } => "ModelRequest",
+                        CoreSessionWorkerEvent::ModelResponse { .. } => "ModelResponse",
+                        CoreSessionWorkerEvent::ModelError { .. } => "ModelError",
+                        CoreSessionWorkerEvent::TurnFinished { .. } => "TurnFinished",
+                        CoreSessionWorkerEvent::WorkerStopped => "WorkerStopped",
+                        _ => "Other",
+                    },
+                    detail
+                ));
+            }
             handle_scoped_worker_event(state, &event_session_id, &context_id, &worker_id, event);
         }
         if !prompts.lock().unwrap().is_empty()
@@ -12404,10 +13006,14 @@ fn drive_worker_until_session_ready(
         {
             return;
         }
-        assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "ToolGen worker did not finish"
-        );
+        if started.elapsed() >= Duration::from_secs(3) {
+            let sessions = state.sessions.lock().unwrap();
+            let session = &sessions[session_id];
+            panic!("ToolGen worker did not finish: prompts={} state={} active={:?} pending={:?} workers={:?} turns={:?} trace={trace:?}",
+                prompts.lock().unwrap().len(), session.state, session.active_turn_id, session.pending_turn_id,
+                session.workers.iter().map(|worker| (&worker.worker_id, &worker.state)).collect::<Vec<_>>(),
+                session.turns.iter().map(|turn| (&turn.turn_id, &turn.state, turn.completion.is_some())).collect::<Vec<_>>());
+        }
         thread::sleep(Duration::from_millis(5));
     }
 }
@@ -12553,35 +13159,75 @@ fn direct_resume_host_rejects_invalid_payload_and_non_idle_state() {
         handle_command(&working, TEST_PORT, direct_resume_command("session_a")).unwrap_err(),
         "resume_directly_requires_idle_session"
     );
+}
 
-    let queued = routing_test_state();
-    start_web_turn(&queued, "session_a", "active task").unwrap();
-    handle_command_with_id(
-        &queued,
-        TEST_PORT,
-        Some("queued-task"),
-        ClientCommand::TurnSubmit {
-            session_id: "session_a".to_string(),
-            text: "queued task".to_string(),
-            attachment_ids: None,
-            input_kind: None,
-            source_turn_id: None,
-            role_id: None,
-            role_ids: Vec::new(),
-        },
-    )
-    .unwrap();
+#[test]
+fn direct_resume_bypasses_a_failed_continuation_without_dropping_the_queue() {
+    let state = routing_test_state();
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let session_id = register_direct_resume_capture_worker(&state, Arc::clone(&prompts));
     {
-        let mut sessions = queued.sessions.lock().unwrap();
-        let session = sessions.get_mut("session_a").unwrap();
-        session.active_turn_id = None;
-        session.pending_turn_id = None;
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session
+            .message_queue
+            .enqueue(
+                "queued-after-failure",
+                WebNextTurnPayload {
+                    turn_id: unique_web_id("web_turn"),
+                    created_at_ms: now_ms(),
+                    text: "queued task survives".to_string(),
+                    attachments: Vec::new(),
+                    worker_roles: Vec::new(),
+                    send_after_cancel: false,
+                },
+            )
+            .unwrap();
+        session
+            .message_queue
+            .block_continuation(MessageQueueBlockReason::TurnFailed);
         session.state = "ready".to_string();
     }
-    assert_eq!(
-        handle_command(&queued, TEST_PORT, direct_resume_command("session_a")).unwrap_err(),
-        "resume_directly_requires_idle_session"
-    );
+
+    let event = handle_command(&state, TEST_PORT, direct_resume_command(&session_id))
+        .unwrap()
+        .expect("a queued message alone must not block direct resume");
+    assert!(matches!(event, WireEvent::TurnUpdated { .. }));
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let queue = sessions[&session_id].message_queue.projection();
+        assert_eq!(
+            queue.items.len(),
+            1,
+            "direct resume must retain queued work"
+        );
+        assert_eq!(queue.items[0].command_id, "queued-after-failure");
+    }
+
+    let started = Instant::now();
+    loop {
+        for (event_session_id, context_id, worker_id, event) in drain_worker_events(&state) {
+            handle_scoped_worker_event(&state, &event_session_id, &context_id, &worker_id, event);
+        }
+        let recovered = {
+            let sessions = state.sessions.lock().unwrap();
+            let session = &sessions[&session_id];
+            prompts.lock().unwrap().len() >= 2
+                && session.state == "ready"
+                && session.message_queue.is_empty()
+        };
+        if recovered {
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "direct resume did not recover and drain the failed continuation queue"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    let prompts = prompts.lock().unwrap();
+    assert!(prompts[0].contains(agent_core::DIRECT_RESUME_USER_INPUT));
+    assert!(prompts[1].contains("queued task survives"));
 }
 
 #[tokio::test]
@@ -12766,16 +13412,22 @@ fn manual_toolgen_publishes_tool_and_retains_the_complete_web_event_chain() {
     .unwrap();
 
     let started = Instant::now();
-    loop {
+    'waiting: loop {
         for (event_session_id, context_id, worker_id, event) in drain_worker_events(&state) {
             handle_scoped_worker_event(&state, &event_session_id, &context_id, &worker_id, event);
-        }
-        let sessions = state.sessions.lock().unwrap();
-        let session = &sessions[&session_id];
-        let finished = session.state == "ready" && session.tools.len() == 1;
-        drop(sessions);
-        if finished {
-            break;
+            // Exercise a consumer observing every event boundary, not just
+            // whichever events happened to arrive in one drain batch.
+            let sessions = state.sessions.lock().unwrap();
+            let session = &sessions[&session_id];
+            if session.state == "ready"
+                && session.tools.len() == 1
+                && session
+                    .turns
+                    .last()
+                    .is_some_and(|turn| turn.state == "finished" && turn.completion.is_some())
+            {
+                break 'waiting;
+            }
         }
         assert!(
             started.elapsed() < Duration::from_secs(5),
@@ -13452,6 +14104,60 @@ fn friendly_web_instance_error_replaces_in_use_with_actionable_message() {
 }
 
 #[test]
+fn web_instance_registration_updates_mem_and_removes_only_its_own_record() {
+    let root = std::env::temp_dir().join(unique_web_id("web_instance_registry"));
+    let registry = root.join("registry");
+    let first_mem = root.join("first mem");
+    let second_mem = root.join("second mem");
+    let info = WebInstanceInfo {
+        pid: 4242,
+        launch_parent_pid: None,
+        port: Some(18080),
+        token: Some("must-not-enter-registry".to_string()),
+        browser_url: Some("http://127.0.0.1:18080/".to_string()),
+        public_access: false,
+        started_at_ms: 123,
+    };
+
+    let mut registration = WebInstanceRegistration::publish(&registry, &first_mem, &info).unwrap();
+    let path = registration.path().to_path_buf();
+    let first: agent_core::WebInstanceRegistryRecord =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(first.memory_dir, first_mem);
+    assert_eq!(first.registration_id, "4242-123");
+    assert!(!String::from_utf8(std::fs::read(&path).unwrap())
+        .unwrap()
+        .contains("must-not-enter-registry"));
+
+    registration.update_memory_dir(&second_mem).unwrap();
+    let second: agent_core::WebInstanceRegistryRecord =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(second.memory_dir, second_mem);
+
+    let replacement = agent_core::WebInstanceRegistryRecord {
+        registration_id: "replacement".to_string(),
+        memory_dir: root.join("replacement"),
+        pid: 999,
+        started_at_ms: 999,
+    };
+    agent_core::atomic_write_file(&path, &serde_json::to_vec(&replacement).unwrap()).unwrap();
+    drop(registration);
+    assert_eq!(
+        serde_json::from_slice::<agent_core::WebInstanceRegistryRecord>(
+            &std::fs::read(&path).unwrap()
+        )
+        .unwrap(),
+        replacement
+    );
+
+    let owned = WebInstanceRegistration::publish(&registry, &first_mem, &info).unwrap();
+    let owned_path = owned.path().to_path_buf();
+    drop(owned);
+    assert!(!owned_path.exists());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn existing_instance_is_rejected_with_pid_url_and_stop_command() {
     let path = std::env::temp_dir().join(unique_web_id("existing_instance_recovery"));
     let mut lease = WebInstanceLease::acquire(&path).unwrap();
@@ -14072,13 +14778,7 @@ wire_api = "responses"
         .find(|candidate| candidate.source == "claude")
         .unwrap();
     assert_eq!(claude.reasoning_effort, None);
-    assert_eq!(
-        claude.request_fields.get("thinking"),
-        Some(&serde_json::json!({
-            "type": "enabled",
-            "budget_tokens": 16000
-        }))
-    );
+    assert!(claude.request_fields.is_empty());
     assert_eq!(
         claude.http_headers.get("X-Tenant").map(String::as_str),
         Some("tenant-one")
@@ -14087,6 +14787,10 @@ wire_api = "responses"
         .issues
         .iter()
         .any(|issue| issue == "claude_effort_level_not_imported"));
+    assert!(scanned
+        .issues
+        .iter()
+        .any(|issue| issue == "claude_thinking_tokens_not_imported"));
 
     let codex_id = codex.id.clone();
     let claude_id = claude.id.clone();
@@ -14110,7 +14814,7 @@ wire_api = "responses"
         .find(|endpoint| endpoint.name == "Claude Code")
         .unwrap();
     assert_eq!(imported_claude.reasoning_effort, None);
-    assert!(imported_claude.request_fields.contains_key("thinking"));
+    assert!(imported_claude.request_fields.is_empty());
     drop(mem);
 
     // Reasoning effort cannot be stored on an Anthropic endpoint directly.
@@ -14118,6 +14822,8 @@ wire_api = "responses"
         normalize_model_endpoint_input(
             None,
             ModelEndpointInput {
+                requirements: Default::default(),
+                catalog_id: None,
                 id: None,
                 name: "Bad Claude".to_string(),
                 model: "claude-sonnet-4-5".to_string(),
@@ -14129,6 +14835,7 @@ wire_api = "responses"
                 stream: false,
                 api_key: None,
                 reasoning_effort: Some("high".to_string()),
+                function_calling: true,
                 http_headers: Default::default(),
                 request_fields: Default::default(),
                 allow_cross_origin_redirects: false,
@@ -14161,6 +14868,8 @@ fn model_endpoint_import_scan_and_apply_round_trip() {
     upsert_model_endpoint(
         &state,
         ModelEndpointInput {
+            requirements: Default::default(),
+            catalog_id: None,
             id: None,
             name: "Claude Code".to_string(),
             model: "existing-model".to_string(),
@@ -14176,6 +14885,7 @@ fn model_endpoint_import_scan_and_apply_round_trip() {
             allow_cross_origin_redirects: false,
             private_ca_pem: None,
             reasoning_effort: None,
+            function_calling: true,
         },
     )
     .unwrap();
@@ -14274,6 +14984,8 @@ fn model_endpoint_delete_many_is_atomic_and_bounded() {
     let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_delete_many"));
     set_test_mem(&state, root.clone(), ".test_mem");
     let endpoint = |id: &str, name: &str| ModelEndpointConfig {
+        requirements: Default::default(),
+        catalog_id: None,
         id: id.to_string(),
         name: name.to_string(),
         model: format!("{name}-model"),
@@ -14289,6 +15001,8 @@ fn model_endpoint_delete_many_is_atomic_and_bounded() {
         http_headers: Default::default(),
         request_fields: Default::default(),
         reasoning_effort: None,
+        capability_probe: None,
+        function_calling: true,
     };
     let endpoints = vec![
         endpoint("endpoint-one", "One"),
@@ -14397,6 +15111,8 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
 
     fn endpoint(index: usize) -> ModelEndpointConfig {
         ModelEndpointConfig {
+            requirements: Default::default(),
+            catalog_id: None,
             id: format!("endpoint-{index:05}"),
             name: format!("Endpoint {index:05}"),
             model: "gpt-4.1-mini".to_string(),
@@ -14412,6 +15128,8 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
             http_headers: Default::default(),
             request_fields: Default::default(),
             reasoning_effort: None,
+            capability_probe: None,
+            function_calling: true,
         }
     }
 
@@ -14457,6 +15175,8 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
         upsert_model_endpoint(
             &state,
             ModelEndpointInput {
+                requirements: Default::default(),
+                catalog_id: None,
                 id: Some(format!("endpoint-{:05}", count - 1)),
                 name: format!("Endpoint {:05} renamed", count - 1),
                 model: "gpt-4.1".to_string(),
@@ -14475,6 +15195,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                 ]),
                 request_fields: Default::default(),
                 reasoning_effort: None,
+                function_calling: true,
             },
         )
         .unwrap();
@@ -14515,6 +15236,8 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                 upsert_model_endpoint(
                     &state,
                     ModelEndpointInput {
+                        requirements: Default::default(),
+                        catalog_id: None,
                         id: Some(format!("endpoint-{index:05}")),
                         name: format!("Concurrent {index:05}"),
                         model: "gpt-4.1-mini".to_string(),
@@ -14530,6 +15253,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                         http_headers: Default::default(),
                         request_fields: Default::default(),
                         reasoning_effort: None,
+                        function_calling: true,
                     },
                 )
                 .unwrap();
@@ -14561,6 +15285,7 @@ fn legacy_model_endpoints_load_with_default_token_limits() {
     .unwrap();
 
     let endpoints = load_model_endpoints_resilient(&memory_dir).unwrap();
+    assert!(endpoints[0].catalog_id.is_none());
     assert_eq!(endpoints[0].max_llm_input_tokens, 100_000);
     assert_eq!(endpoints[0].max_llm_output_tokens, 10_000);
     assert!(!endpoints[0].stream);
@@ -14599,6 +15324,8 @@ fn model_endpoint_headers_accept_safe_special_values_and_reject_injection() {
 #[test]
 fn model_endpoint_rejects_token_limits_outside_supported_lists() {
     let zero_input = ModelEndpointInput {
+        requirements: Default::default(),
+        catalog_id: None,
         id: None,
         name: "Invalid input".to_string(),
         model: "gpt".to_string(),
@@ -14614,6 +15341,7 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         http_headers: Default::default(),
         request_fields: Default::default(),
         reasoning_effort: None,
+        function_calling: true,
     };
     assert_eq!(
         normalize_model_endpoint_input(None, zero_input).unwrap_err(),
@@ -14621,6 +15349,8 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
     );
 
     let custom_input = ModelEndpointInput {
+        requirements: Default::default(),
+        catalog_id: None,
         id: None,
         name: "Custom window".to_string(),
         model: "gpt".to_string(),
@@ -14636,10 +15366,13 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         http_headers: Default::default(),
         request_fields: Default::default(),
         reasoning_effort: None,
+        function_calling: true,
     };
     assert!(normalize_model_endpoint_input(None, custom_input).is_ok());
 
     let invalid_output = ModelEndpointInput {
+        requirements: Default::default(),
+        catalog_id: None,
         id: None,
         name: "Invalid output".to_string(),
         model: "gpt".to_string(),
@@ -14647,7 +15380,7 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         response_protocol: "xml".to_string(),
         base_url: "https://api.example.test/v1".to_string(),
         max_llm_input_tokens: 200_000,
-        max_llm_output_tokens: 8_000,
+        max_llm_output_tokens: 511,
         stream: false,
         allow_cross_origin_redirects: false,
         private_ca_pem: None,
@@ -14655,6 +15388,7 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         http_headers: Default::default(),
         request_fields: Default::default(),
         reasoning_effort: None,
+        function_calling: true,
     };
     assert_eq!(
         normalize_model_endpoint_input(None, invalid_output).unwrap_err(),
@@ -14665,6 +15399,8 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
 #[test]
 fn model_endpoint_rejects_invalid_private_ca_before_persisting() {
     let input = ModelEndpointInput {
+        requirements: Default::default(),
+        catalog_id: None,
         id: None,
         name: "Invalid private CA".to_string(),
         model: "gpt".to_string(),
@@ -14680,6 +15416,7 @@ fn model_endpoint_rejects_invalid_private_ca_before_persisting() {
         http_headers: Default::default(),
         request_fields: Default::default(),
         reasoning_effort: None,
+        function_calling: true,
     };
     let error = normalize_model_endpoint_input(None, input).unwrap_err();
     assert!(
@@ -14689,8 +15426,10 @@ fn model_endpoint_rejects_invalid_private_ca_before_persisting() {
 }
 
 #[test]
-fn model_endpoint_stream_requires_openai_compatible_protocol() {
+fn model_endpoint_stream_accepts_responses_but_not_anthropic() {
     let input = ModelEndpointInput {
+        requirements: Default::default(),
+        catalog_id: None,
         id: None,
         name: "Responses stream".to_string(),
         model: "gpt".to_string(),
@@ -14706,11 +15445,652 @@ fn model_endpoint_stream_requires_openai_compatible_protocol() {
         http_headers: Default::default(),
         request_fields: Default::default(),
         reasoning_effort: None,
+        function_calling: true,
     };
+    assert!(
+        normalize_model_endpoint_input(None, input.clone())
+            .unwrap()
+            .stream
+    );
+    let mut input = input;
+    input.api_protocol = "anthropic".into();
     assert_eq!(
         normalize_model_endpoint_input(None, input).unwrap_err(),
         "model_endpoint_stream_requires_openai_compatible"
     );
+}
+
+struct EndpointRequestBoundaryModel {
+    captured: Arc<Mutex<Vec<ModelServiceConfig>>>,
+    entered: std::sync::mpsc::Sender<usize>,
+    release: std::sync::mpsc::Receiver<()>,
+    calls: usize,
+}
+
+impl ModelClient for EndpointRequestBoundaryModel {
+    fn call_model(
+        &mut self,
+        config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.captured.lock().unwrap().push(config.clone());
+        self.calls += 1;
+        self.entered
+            .send(self.calls)
+            .map_err(|error| format!("endpoint_boundary_entered_send_failed:{error}"))?;
+        self.release
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|error| format!("endpoint_boundary_release_failed:{error}"))?;
+        Ok(LlmResponse {
+            tool_calls: Vec::new(),
+            content: confirmed_xml_response("<final_answer>request complete</final_answer>"),
+            model_name: config.model.clone(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        })
+    }
+}
+
+fn endpoint_boundary_input(id: &str, effort: &str) -> ModelEndpointInput {
+    let endpoint_b = id == "endpoint-boundary-b";
+    ModelEndpointInput {
+        catalog_id: None,
+        requirements: agent_core::model_requirements::EndpointRequirements {
+            version: 1,
+            provider: None,
+            allowed_reasoning: Some(if endpoint_b {
+                vec!["low".to_string(), "high".to_string()]
+            } else {
+                vec!["medium".to_string(), "high".to_string()]
+            }),
+            adaptive_reasoning: Some(false),
+            field_sources: Default::default(),
+        },
+        id: Some(id.to_string()),
+        name: if endpoint_b {
+            "Boundary B".to_string()
+        } else {
+            "Boundary A".to_string()
+        },
+        model: if endpoint_b {
+            "boundary-model-b".to_string()
+        } else {
+            "boundary-model-a".to_string()
+        },
+        api_protocol: if endpoint_b {
+            "openai-responses".to_string()
+        } else {
+            "openai-compatible".to_string()
+        },
+        response_protocol: "xml".to_string(),
+        base_url: if endpoint_b {
+            "https://boundary-b.example.test/v1".to_string()
+        } else {
+            "https://boundary-a.example.test/v1".to_string()
+        },
+        max_llm_input_tokens: if endpoint_b { 64_000 } else { 32_000 },
+        max_llm_output_tokens: if endpoint_b { 8_000 } else { 4_000 },
+        stream: endpoint_b,
+        api_key: Some(if endpoint_b {
+            "boundary-secret-b".to_string()
+        } else {
+            "boundary-secret-a".to_string()
+        }),
+        http_headers: BTreeMap::from([(
+            "X-Boundary".to_string(),
+            if endpoint_b { "b" } else { "a" }.to_string(),
+        )]),
+        request_fields: BTreeMap::from([(
+            "route".to_string(),
+            json!(if endpoint_b { "b" } else { "a" }),
+        )]),
+        allow_cross_origin_redirects: endpoint_b,
+        private_ca_pem: None,
+        reasoning_effort: Some(effort.to_string()),
+        function_calling: true,
+    }
+}
+
+fn register_endpoint_boundary_worker(
+    state: &AppState,
+    captured: Arc<Mutex<Vec<ModelServiceConfig>>>,
+    entered: std::sync::mpsc::Sender<usize>,
+    release: std::sync::mpsc::Receiver<()>,
+    worker_dir: &Path,
+) -> String {
+    let session_id = unique_web_id("endpoint_boundary_session");
+    let context_id = test_context_id(&session_id);
+    std::fs::create_dir_all(worker_dir).unwrap();
+    let core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        worker_dir,
+    );
+    let worker_id = state
+        .manager
+        .lock()
+        .unwrap()
+        .spawn_worker_in_session_with_model_client(
+            core,
+            state.template.settings.lock().unwrap().config.clone(),
+            CoreSessionWorkerWorkspace::new(
+                worker_dir,
+                worker_dir.join("audit.json"),
+                "test-web",
+                "local",
+            ),
+            session_id.clone(),
+            context_id.clone(),
+            Some("Endpoint boundary".to_string()),
+            None,
+            EndpointRequestBoundaryModel {
+                captured,
+                entered,
+                release,
+                calls: 0,
+            },
+        )
+        .unwrap();
+    let mut session = test_web_session(&session_id, 0, "Endpoint boundary".to_string());
+    session.current_dir = worker_dir.display().to_string();
+    session.contexts[0] = WebContext {
+        context_id: context_id.clone(),
+        current_dir: worker_dir.display().to_string(),
+        worker_ids: vec![worker_id.clone()],
+    };
+    session.workers[0].worker_id = worker_id.clone();
+    session.workers[0].context_id = context_id.clone();
+    session.active_context_id = context_id;
+    session.primary_worker_id = worker_id;
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session);
+    persist_web_session(state, &session_id).unwrap();
+    session_id
+}
+
+fn drive_endpoint_boundary_turn_until_ready(state: &AppState, session_id: &str) {
+    let started = Instant::now();
+    loop {
+        for (event_session_id, context_id, worker_id, event) in drain_worker_events(state) {
+            handle_scoped_worker_event(state, &event_session_id, &context_id, &worker_id, event);
+        }
+        let ready = {
+            let sessions = state.sessions.lock().unwrap();
+            let session = &sessions[session_id];
+            session.pending_turn_id.is_none()
+                && session.active_turn_id.is_none()
+                && session.state == "ready"
+                && session
+                    .turns
+                    .last()
+                    .is_some_and(|turn| turn.state != "pending" && turn.state != "working")
+        };
+        if ready {
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "endpoint boundary Turn did not finish"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn endpoint_edits_and_switches_apply_at_the_next_new_request_boundary() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_boundary"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let worker_dir = root.join("worker");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let session_id = register_endpoint_boundary_worker(
+        &state,
+        Arc::clone(&captured),
+        entered_tx,
+        release_rx,
+        &worker_dir,
+    );
+
+    for endpoint in [
+        endpoint_boundary_input("endpoint-boundary-a", "medium"),
+        endpoint_boundary_input("endpoint-boundary-b", "low"),
+    ] {
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::ModelEndpointUpsert {
+                endpoint: Box::new(endpoint),
+            },
+        )
+        .unwrap();
+    }
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointApply {
+            session_id: session_id.clone(),
+            endpoint_id: "endpoint-boundary-a".to_string(),
+        },
+    )
+    .unwrap();
+
+    submit_turn(&state, &session_id, "first request".to_string()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+    {
+        let calls = captured.lock().unwrap();
+        assert_eq!(calls[0].model, "boundary-model-a");
+        assert_eq!(
+            calls[0].openai_compatible.reasoning_effort.as_deref(),
+            Some("medium")
+        );
+    }
+
+    // Editing only the daily effort used to be missed by endpoint equality.
+    // The in-flight request keeps medium; the following new Turn must use high.
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointUpsert {
+            endpoint: Box::new(endpoint_boundary_input("endpoint-boundary-a", "high")),
+        },
+    )
+    .unwrap();
+    {
+        let session = &state.sessions.lock().unwrap()[&session_id];
+        assert_eq!(
+            session
+                .runtime
+                .settings
+                .config
+                .openai_compatible
+                .reasoning_effort
+                .as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            session.runtime.model_endpoint_id.as_deref(),
+            Some("endpoint-boundary-a")
+        );
+    }
+    assert_eq!(
+        captured.lock().unwrap()[0]
+            .openai_compatible
+            .reasoning_effort
+            .as_deref(),
+        Some("medium")
+    );
+    release_tx.send(()).unwrap();
+    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
+
+    submit_turn(&state, &session_id, "second request".to_string()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+    {
+        let calls = captured.lock().unwrap();
+        assert_eq!(calls[1].model, "boundary-model-a");
+        assert_eq!(calls[1].base_url, "https://boundary-a.example.test/v1");
+        assert_eq!(calls[1].api_key, "boundary-secret-a");
+        assert_eq!(
+            calls[1].http_headers.get("X-Boundary").map(String::as_str),
+            Some("a")
+        );
+        assert_eq!(calls[1].request_fields.get("route"), Some(&json!("a")));
+        assert_eq!(
+            calls[1].openai_compatible.reasoning_effort.as_deref(),
+            Some("high")
+        );
+    }
+
+    // Switching while this request is active changes only the durable binding.
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointApply {
+            session_id: session_id.clone(),
+            endpoint_id: "endpoint-boundary-b".to_string(),
+        },
+    )
+    .unwrap();
+    {
+        let session = &state.sessions.lock().unwrap()[&session_id];
+        assert_eq!(
+            session.runtime.model_endpoint_id.as_deref(),
+            Some("endpoint-boundary-b")
+        );
+        assert_eq!(session.runtime.settings.config.model, "boundary-model-a");
+        assert_eq!(
+            session
+                .runtime
+                .settings
+                .config
+                .openai_compatible
+                .reasoning_effort
+                .as_deref(),
+            Some("high")
+        );
+    }
+    assert_eq!(captured.lock().unwrap()[1].model, "boundary-model-a");
+    release_tx.send(()).unwrap();
+    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
+
+    submit_turn(&state, &session_id, "third request".to_string()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 3);
+    {
+        let calls = captured.lock().unwrap();
+        let config = &calls[2];
+        assert_eq!(config.model, "boundary-model-b");
+        assert_eq!(config.base_url, "https://boundary-b.example.test/v1");
+        assert_eq!(config.api_protocol.label(), "openai-responses");
+        assert_eq!(config.max_llm_input_tokens, 64_000);
+        assert_eq!(config.max_llm_output_tokens, 8_000);
+        assert!(config.openai_compatible.stream);
+        assert_eq!(config.api_key, "boundary-secret-b");
+        assert_eq!(
+            config.http_headers.get("X-Boundary").map(String::as_str),
+            Some("b")
+        );
+        assert_eq!(config.request_fields.get("route"), Some(&json!("b")));
+        assert!(config.http_transport.allow_cross_origin_redirects);
+        assert_eq!(
+            config.openai_compatible.reasoning_effort.as_deref(),
+            Some("low")
+        );
+        assert_eq!(
+            config
+                .openai_compatible
+                .requirements
+                .allowed_reasoning
+                .as_deref(),
+            Some(["low".to_string(), "high".to_string()].as_slice())
+        );
+    }
+    release_tx.send(()).unwrap();
+    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn model_endpoint_apply_persistence_failure_rolls_back_worker_memory_and_disk() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("endpoint_apply_atomic"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let worker_dir = root.join("worker");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let session_id = register_endpoint_boundary_worker(
+        &state,
+        Arc::clone(&captured),
+        entered_tx,
+        release_rx,
+        &worker_dir,
+    );
+
+    for endpoint in [
+        endpoint_boundary_input("endpoint-boundary-a", "medium"),
+        endpoint_boundary_input("endpoint-boundary-b", "low"),
+    ] {
+        upsert_model_endpoint(&state, endpoint).unwrap();
+    }
+    apply_model_endpoint(&state, &session_id, "endpoint-boundary-a").unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session
+            .runtime
+            .env_overrides
+            .insert("TIMEM_MODEL".to_string(), "stale-manual-model".to_string());
+        session.runtime.env_overrides.insert(
+            "TIMEM_BASE_URL".to_string(),
+            "https://stale-manual.example.test/v1".to_string(),
+        );
+        session.runtime.forward_compatible_cache.insert(
+            "TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS".to_string(),
+            "false".to_string(),
+        );
+        session.runtime.forward_compatible_cache.insert(
+            "TIMEM_PRIVATE_CA_PEM".to_string(),
+            "stale-private-ca".to_string(),
+        );
+    }
+
+    let (
+        before_config,
+        before_profile,
+        before_max_input,
+        before_binding,
+        before_overrides,
+        before_forward_cache,
+    ) = {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        (
+            session.runtime.settings.config.clone(),
+            session.runtime_profile.clone(),
+            session.max_llm_input_tokens,
+            session.runtime.model_endpoint_id.clone(),
+            session.runtime.env_overrides.clone(),
+            session.runtime.forward_compatible_cache.clone(),
+        )
+    };
+    let store = current_session_store(&state).unwrap();
+    let metadata = store.metadata_path_for_session(&session_id);
+    let before_disk = std::fs::read(&metadata).unwrap();
+
+    // The Worker receives B first. Replacing the destination file with a
+    // directory then forces the later atomic rename to fail, exercising the
+    // Worker rollback path rather than rejecting before any live update.
+    std::fs::remove_file(&metadata).unwrap();
+    std::fs::create_dir(&metadata).unwrap();
+    assert_eq!(
+        apply_model_endpoint(&state, &session_id, "endpoint-boundary-b").unwrap_err(),
+        "session_metadata_write_failed"
+    );
+
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(session.runtime.settings.config, before_config);
+        assert_eq!(session.runtime_profile, before_profile);
+        assert_eq!(session.max_llm_input_tokens, before_max_input);
+        assert_eq!(session.runtime.model_endpoint_id, before_binding);
+        assert_eq!(session.runtime.env_overrides, before_overrides);
+        assert_eq!(
+            session.runtime.forward_compatible_cache,
+            before_forward_cache
+        );
+    }
+    let metadata_parent = metadata.parent().unwrap();
+    assert!(std::fs::read_dir(metadata_parent).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".session.json.tmp-")
+    }));
+
+    std::fs::remove_dir(&metadata).unwrap();
+    std::fs::write(&metadata, &before_disk).unwrap();
+    assert_eq!(std::fs::read(&metadata).unwrap(), before_disk);
+
+    submit_turn(
+        &state,
+        &session_id,
+        "request after failed apply".to_string(),
+    )
+    .unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+    {
+        let calls = captured.lock().unwrap();
+        assert_eq!(calls[0], before_config);
+        assert_eq!(calls[0].model, "boundary-model-a");
+        assert_eq!(calls[0].api_key, "boundary-secret-a");
+        assert_eq!(calls[0].request_fields.get("route"), Some(&json!("a")));
+    }
+    release_tx.send(()).unwrap();
+    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
+
+    apply_model_endpoint(&state, &session_id, "endpoint-boundary-b").unwrap();
+    submit_turn(
+        &state,
+        &session_id,
+        "request after successful retry".to_string(),
+    )
+    .unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+    {
+        let calls = captured.lock().unwrap();
+        let config = &calls[1];
+        assert_eq!(config.model, "boundary-model-b");
+        assert_eq!(config.api_protocol.label(), "openai-responses");
+        assert_eq!(config.base_url, "https://boundary-b.example.test/v1");
+        assert_eq!(config.max_llm_input_tokens, 64_000);
+        assert_eq!(config.max_llm_output_tokens, 8_000);
+        assert_eq!(config.api_key, "boundary-secret-b");
+        assert_eq!(
+            config.http_headers.get("X-Boundary").map(String::as_str),
+            Some("b")
+        );
+        assert_eq!(config.request_fields.get("route"), Some(&json!("b")));
+        assert!(config.http_transport.allow_cross_origin_redirects);
+        assert!(config.openai_compatible.stream);
+        assert_eq!(
+            config.openai_compatible.reasoning_effort.as_deref(),
+            Some("low")
+        );
+    }
+    release_tx.send(()).unwrap();
+    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
+
+    let persisted = current_session_store(&state)
+        .unwrap()
+        .load_session(&session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        persisted.model_endpoint_id.as_deref(),
+        Some("endpoint-boundary-b")
+    );
+    assert_eq!(persisted.profile.model, "boundary-model-b");
+    assert_eq!(
+        persisted.env.get("TIMEM_BASE_URL").map(String::as_str),
+        Some("https://boundary-b.example.test/v1")
+    );
+    assert_eq!(
+        persisted.env.get("TIMEM_API_KEY").map(String::as_str),
+        Some("boundary-secret-b")
+    );
+    assert_eq!(
+        persisted
+            .env
+            .get("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS")
+            .map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        persisted
+            .env
+            .get("TIMEM_PRIVATE_CA_PEM")
+            .map(String::as_str),
+        Some("")
+    );
+    let persisted_overrides = persisted.env_overrides.as_ref().unwrap();
+    assert_eq!(
+        persisted_overrides.get("TIMEM_MODEL").map(String::as_str),
+        Some("boundary-model-b")
+    );
+    assert_eq!(
+        persisted_overrides
+            .get("TIMEM_BASE_URL")
+            .map(String::as_str),
+        Some("https://boundary-b.example.test/v1")
+    );
+    assert!(!persisted_overrides.contains_key("TIMEM_API_KEY"));
+    assert!(!persisted_overrides.contains_key("TIMEM_HTTP_HEADERS"));
+    assert!(!persisted_overrides.contains_key("TIMEM_REQUEST_FIELDS"));
+    assert!(!persisted_overrides.contains_key("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS"));
+    assert!(!persisted_overrides.contains_key("TIMEM_PRIVATE_CA_PEM"));
+
+    let restored_env = sanitize_restored_session_env(
+        persisted.env.clone(),
+        persisted.env_overrides.as_ref().unwrap(),
+    );
+    let restored_settings = state
+        .template
+        .restored_session_settings(&restored_env)
+        .unwrap();
+    assert_eq!(restored_settings.config.model, "boundary-model-b");
+    assert_eq!(
+        restored_settings.config.base_url,
+        "https://boundary-b.example.test/v1"
+    );
+    assert_eq!(restored_settings.config.api_key, "boundary-secret-b");
+    assert_eq!(
+        restored_settings
+            .config
+            .http_headers
+            .get("X-Boundary")
+            .map(String::as_str),
+        Some("b")
+    );
+    assert_eq!(
+        restored_settings.config.request_fields.get("route"),
+        Some(&json!("b"))
+    );
+    // Transport security options are intentionally not trusted from the
+    // effective cache. A bound endpoint reapplies them authoritatively at the
+    // next request boundary.
+    assert!(
+        !restored_settings
+            .config
+            .http_transport
+            .allow_cross_origin_redirects
+    );
+    assert!(restored_settings
+        .config
+        .http_transport
+        .private_ca_pem
+        .is_none());
+    let mut restored_session = state.sessions.lock().unwrap()[&session_id].clone();
+    restored_session.runtime.settings = restored_settings;
+    let endpoint_b = model_endpoint_config(&state, "endpoint-boundary-b").unwrap();
+    let rebound = model_endpoint_session_candidate(&restored_session, &endpoint_b).unwrap();
+    assert!(
+        rebound
+            .runtime
+            .settings
+            .config
+            .http_transport
+            .allow_cross_origin_redirects
+    );
+    assert!(rebound
+        .runtime
+        .settings
+        .config
+        .http_transport
+        .private_ca_pem
+        .is_none());
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -14724,7 +16104,9 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
         &state,
         TEST_PORT,
         ClientCommand::ModelEndpointUpsert {
-            endpoint: ModelEndpointInput {
+            endpoint: Box::new(ModelEndpointInput {
+                requirements: Default::default(),
+                catalog_id: None,
                 id: Some("endpoint-one".to_string()),
                 name: "Production".to_string(),
                 model: "gpt-4.1".to_string(),
@@ -14749,7 +16131,8 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                     ),
                 ]),
                 reasoning_effort: None,
-            },
+                function_calling: true,
+            }),
         },
     )
     .unwrap()
@@ -14844,7 +16227,9 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
         &state,
         TEST_PORT,
         ClientCommand::ModelEndpointUpsert {
-            endpoint: ModelEndpointInput {
+            endpoint: Box::new(ModelEndpointInput {
+                requirements: Default::default(),
+                catalog_id: None,
                 id: Some("endpoint-one".to_string()),
                 name: "Production".to_string(),
                 model: "gpt-4.1".to_string(),
@@ -14860,7 +16245,8 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 http_headers: Default::default(),
                 request_fields: Default::default(),
                 reasoning_effort: None,
-            },
+                function_calling: true,
+            }),
         },
     )
     .unwrap();
@@ -14893,7 +16279,9 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
         &state,
         TEST_PORT,
         ClientCommand::ModelEndpointUpsert {
-            endpoint: ModelEndpointInput {
+            endpoint: Box::new(ModelEndpointInput {
+                requirements: Default::default(),
+                catalog_id: None,
                 id: Some("endpoint-one".to_string()),
                 name: "Production renamed".to_string(),
                 model: "gpt-4.1-mini".to_string(),
@@ -14909,7 +16297,8 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 http_headers: Default::default(),
                 request_fields: Default::default(),
                 reasoning_effort: None,
-            },
+                function_calling: true,
+            }),
         },
     )
     .unwrap();
@@ -15300,4 +16689,1609 @@ fn task_finished_outcome_persists_assistant_history_and_turn_final_answer() {
         restored_turn.final_answer.as_deref(),
         Some("task_finished summary as final answer")
     );
+}
+
+#[test]
+fn queued_message_turn_uses_consume_time_not_enqueue_time_for_chat_order() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let worker_id = state.sessions.lock().unwrap()[session_id]
+        .primary_worker_id
+        .clone();
+
+    // Enqueue at an old timestamp, then simulate a reorder-to-later consumption.
+    let enqueue_at_ms = 1u128;
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id).unwrap();
+        session
+            .message_queue
+            .enqueue(
+                "queued_early_command",
+                WebNextTurnPayload {
+                    send_after_cancel: false,
+                    turn_id: "queued_early_turn".to_string(),
+                    created_at_ms: enqueue_at_ms,
+                    text: "typed early, consumed later".to_string(),
+                    attachments: Vec::new(),
+                    worker_roles: Vec::new(),
+                },
+            )
+            .unwrap();
+        session
+            .message_queue
+            .begin_immediate_dispatch("queued_early_command")
+            .unwrap();
+    }
+
+    let started =
+        activate_core_started_turn(&state, session_id, &worker_id, Some("queued_early_command"))
+            .expect("dispatching queued command should materialize a turn");
+
+    // The chat timeline must reflect real consumption order, not enqueue order:
+    // a reordered-to-later message consumed now sorts at now, not at its
+    // original enqueue timestamp.
+    assert!(started.0.created_at_ms > enqueue_at_ms);
+    assert!(started.0.user_entries[0].created_at_ms > enqueue_at_ms);
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[session_id];
+    assert!(session.turns.last().unwrap().created_at_ms > enqueue_at_ms);
+    let chat = session.messages.last().unwrap();
+    assert_eq!(chat.text, "typed early, consumed later");
+    assert!(chat.created_at_ms > enqueue_at_ms);
+    assert!(
+        session.message_queue.item("queued_early_command").is_none(),
+        "confirmed turn must consume the queue item"
+    );
+}
+
+#[tokio::test]
+async fn static_assets_cache_by_path_class_and_negotiate_gzip() {
+    let state = routing_test_state();
+
+    // Content-hashed build assets are immutable and cached for a year.
+    // Discover the current hashed entry asset from the embedded shell so the
+    // test survives dist rebuilds that change content hashes.
+    let shell_html = std::str::from_utf8(embedded_web_asset("/index.html").unwrap()).unwrap();
+    let hashed_path = shell_html
+        .split('"')
+        .find(|part| part.starts_with("/assets/index-") && part.ends_with(".js"))
+        .expect("embedded shell must reference a hashed index asset")
+        .to_string();
+    let hashed = static_asset(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery {
+            token: Some("test".to_string()),
+        }),
+        HeaderMap::new(),
+        Uri::try_from(hashed_path.as_str()).unwrap(),
+    )
+    .await;
+    assert_eq!(hashed.status(), StatusCode::OK);
+    assert_eq!(
+        hashed.headers().get(header::CACHE_CONTROL).unwrap(),
+        "public, max-age=31536000, immutable"
+    );
+    assert!(hashed.headers().get(header::CONTENT_ENCODING).is_none());
+    assert_eq!(
+        hashed.headers().get(header::VARY).unwrap(),
+        "Accept-Encoding"
+    );
+
+    // The HTML shell revalidates so a new release is always picked up.
+    let shell = static_asset(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery {
+            token: Some("test".to_string()),
+        }),
+        HeaderMap::new(),
+        Uri::from_static("/"),
+    )
+    .await;
+    assert_eq!(shell.status(), StatusCode::OK);
+    assert_eq!(
+        shell.headers().get(header::CACHE_CONTROL).unwrap(),
+        "no-cache"
+    );
+
+    // A request advertising gzip receives the precompressed representation.
+    let mut gzip_headers = HeaderMap::new();
+    gzip_headers.insert(
+        header::ACCEPT_ENCODING,
+        HeaderValue::from_static("gzip, br"),
+    );
+    let gzipped = static_asset(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery {
+            token: Some("test".to_string()),
+        }),
+        gzip_headers,
+        Uri::try_from(hashed_path.as_str()).unwrap(),
+    )
+    .await;
+    assert_eq!(gzipped.status(), StatusCode::OK);
+    assert_eq!(
+        gzipped.headers().get(header::CONTENT_ENCODING).unwrap(),
+        "gzip"
+    );
+    assert_eq!(
+        gzipped.headers().get(header::VARY).unwrap(),
+        "Accept-Encoding"
+    );
+    let body = axum::body::to_bytes(gzipped.into_body(), 1 << 20)
+        .await
+        .expect("gzip body");
+    let mut decoder = flate2::read::GzDecoder::new(&body[..]);
+    let mut plain = Vec::new();
+    std::io::Read::read_to_end(&mut decoder, &mut plain).expect("decode gzip body");
+    assert_eq!(plain, embedded_web_asset(&hashed_path).unwrap());
+}
+
+#[tokio::test]
+async fn background_restore_publishes_sessions_newest_first() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("restore_newest_first"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let space = "restore_newest_mem";
+    set_test_mem(&state, data_dir.clone(), space);
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template.clone());
+    state.sessions.lock().unwrap().clear();
+
+    // Three sessions with strictly increasing updated_at_ms timestamps.
+    let mut ids = Vec::new();
+    for index in 0..3 {
+        let session_id = create_session(
+            &state,
+            Some(format!("Session {index}")),
+            Some(root.display().to_string()),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        ids.push(session_id.clone());
+        let store = current_session_store(&state).unwrap();
+        let mut stored = store.load_session(&session_id).unwrap().unwrap();
+        stored.updated_at_ms = 1_000 + index as i64;
+        store.upsert_session(&stored).unwrap();
+    }
+    state.sessions.lock().unwrap().clear();
+
+    let mut restarted = routing_test_state();
+    restarted.sessions.lock().unwrap().clear();
+    restarted.template = Arc::new(template);
+    set_test_mem(&restarted, data_dir, space);
+    let mut receiver = restarted.events.subscribe();
+
+    let restored = restore_stored_sessions(&restarted).unwrap();
+    assert_eq!(restored, 3);
+
+    // Each restored session must have been published progressively; the
+    // newest session (updated_at_ms=1002) must arrive before the older ones.
+    let mut published = Vec::new();
+    loop {
+        match receiver.try_recv() {
+            Ok(WireEvent::SessionCreated { session }) => {
+                published.push(session.session_id.clone());
+            }
+            Ok(WireEvent::SemanticEvent { event, .. })
+                if matches!(*event, WireEvent::SessionCreated { .. }) =>
+            {
+                let WireEvent::SessionCreated { session } = *event else {
+                    unreachable!()
+                };
+                published.push(session.session_id.clone());
+            }
+            Ok(_) => continue,
+            Err(broadcast::error::TryRecvError::Empty) => break,
+            Err(broadcast::error::TryRecvError::Closed) => break,
+            Err(broadcast::error::TryRecvError::Lagged(_)) => break,
+        }
+    }
+    assert_eq!(published.len(), 3, "every restored session publishes once");
+    assert_eq!(
+        published.first(),
+        Some(&ids[2]),
+        "newest session must be the first progressively visible session"
+    );
+    let mut published_sorted = published.clone();
+    published_sorted.sort();
+    let mut expected = ids.clone();
+    expected.sort();
+    assert_eq!(published_sorted, expected);
+}
+
+#[test]
+fn task_finished_hands_manual_compact_off_to_direct_resume() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "compact-finish-handoff");
+    let first = start_web_turn(&state, &session_id, "Q1").unwrap();
+    let (context_id, worker_id) = primary_worker_scope(&state, &session_id).unwrap();
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::UnconsumedSupplements {
+            supplements: vec![timem_session::UnconsumedSupplement {
+                manual_context_compress: true,
+                text: String::new(),
+                additional_context: None,
+                command_id: None,
+            }],
+        },
+    );
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Finished(
+            agent_core::FinishedTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.clone(),
+                    turn_id: first.turn_id,
+                    epoch: 1,
+                },
+                outcome: agent_core::TurnProjectionOutcome::Completed,
+            },
+        )),
+    );
+    let mut outcome =
+        TurnOutcome::final_response("done", UsageStats::zero(), None, None, Duration::ZERO);
+    outcome.stop_reason = Some(agent_core::TurnStopReason::TurnFinished);
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::TurnFinished { outcome },
+    );
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = sessions.get(&session_id).unwrap();
+        assert_eq!(session.turns.len(), 2);
+        let next = session.turns.last().unwrap();
+        assert_eq!(next.user_entries[0].kind, "resume_directly");
+        assert_eq!(
+            session.pending_turn_id.as_deref(),
+            Some(next.turn_id.as_str())
+        );
+        assert!(session.pending_unconsumed_supplements.is_empty());
+    }
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+}
+
+#[test]
+fn live_worker_wire_preserves_snapshot_timeline_metadata() {
+    let state = routing_test_state();
+    let id = "session_a";
+    start_web_turn(&state, id, "timeline").unwrap();
+    let mut receiver = state.events.subscribe();
+    emit_worker_activity(
+        &state,
+        id,
+        &test_context_id(id),
+        &test_worker_id(id),
+        json!({"kind":"model_request"}),
+    );
+    let events = drain_wire_events(&mut receiver);
+    let wire = events
+        .iter()
+        .find(|event| matches!(event, WireEvent::WorkerActivity { .. }))
+        .unwrap();
+    let json = serde_json::to_value(wire).unwrap();
+    let sessions = state.sessions.lock().unwrap();
+    let saved = sessions[id].turns.last().unwrap().events.last().unwrap();
+    assert_eq!(json["timeline_seq"], json!(saved.timeline_seq));
+    assert_eq!(json["created_at_ms"], json!(saved.created_at_ms));
+    assert_eq!(json["turn_event_id"], json!(saved.event_id));
+}
+
+#[test]
+fn bounded_turn_history_pages_recover_all_events_beyond_snapshot_tail() {
+    let state = routing_test_state();
+    let id = "session_a";
+    let turn = start_web_turn(&state, id, "history pages").unwrap();
+    for index in 0..150 {
+        append_turn_event(
+            &state,
+            id,
+            Some(&turn.turn_id),
+            "core_topic",
+            json!({
+                "topic": {"name":"core.model.response"},
+                "payload": {"free_talk":format!("progress-{index}-{}", "x".repeat(600))}
+            }),
+        )
+        .unwrap();
+    }
+    let store = current_session_store(&state).unwrap();
+    let mut offset = 0;
+    let mut records = Vec::new();
+    loop {
+        let (page, next) = store
+            .read_turn_history_page(id, &turn.turn_id, offset)
+            .unwrap();
+        assert!(page.len() <= 64);
+        records.extend(page);
+        if let Some(next) = next {
+            assert!(next > offset);
+            offset = next;
+        } else {
+            break;
+        }
+    }
+    let events: Vec<_> = records
+        .iter()
+        .filter_map(|record| match record {
+            ChatHistoryRecord::Event { extra, .. }
+                if extra.get("source") == Some(&json!("core_topic")) =>
+            {
+                Some(extra)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(events.len(), 150);
+    assert!(
+        events[0]["payload"]["payload"]["free_talk"]
+            .as_str()
+            .unwrap()
+            .len()
+            > 600
+    );
+    let sessions = state.sessions.lock().unwrap();
+    let slim = slim_restored_turn_for_snapshot(sessions[id].turns.last().unwrap());
+    assert_eq!(slim.events.len(), 40);
+    assert_eq!(
+        store
+            .read_turn_history_page(id, "missing-turn", 0)
+            .unwrap()
+            .0
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn turn_history_detail_rejects_unsafe_session_and_oversized_record() {
+    let state = routing_test_state();
+    let store = current_session_store(&state).unwrap();
+    assert!(store
+        .read_turn_history_page("../outside", "turn", 0)
+        .is_err());
+    let turn = start_web_turn(&state, "session_a", "large record").unwrap();
+    append_turn_event(
+        &state,
+        "session_a",
+        Some(&turn.turn_id),
+        "core_topic",
+        json!({
+            "payload": {"text": "x".repeat(2 * 1024 * 1024 + 1)}
+        }),
+    )
+    .unwrap();
+    let (_, next) = store
+        .read_turn_history_page("session_a", &turn.turn_id, 0)
+        .unwrap();
+    let error = store
+        .read_turn_history_page("session_a", &turn.turn_id, next.unwrap())
+        .unwrap_err();
+    assert_eq!(error, "turn_history_record_too_large");
+}
+
+#[test]
+fn restart_heavy_history_restores_chat_and_only_latest_consecutive_notice() {
+    let state = routing_test_state();
+    let store = current_session_store(&state).unwrap();
+    for (role, text) in [
+        (ChatHistoryRole::User, "legacy task"),
+        (ChatHistoryRole::Assistant, "legacy answer"),
+    ] {
+        store
+            .append_history_record(
+                "session_a",
+                &ChatHistoryRecord::Message {
+                    role,
+                    turn_id: "legacy_chat".to_string(),
+                    created_at_ms: 1,
+                    kind: None,
+                    command_id: None,
+                    delivery_state: None,
+                    content: text.to_string(),
+                },
+            )
+            .unwrap();
+    }
+    for n in 0..40 {
+        store
+            .append_history_record(
+                "session_a",
+                &ChatHistoryRecord::Message {
+                    role: ChatHistoryRole::System,
+                    turn_id: format!("restart_marker_{n}"),
+                    created_at_ms: 100 + n,
+                    kind: Some("runtime_restart".to_string()),
+                    command_id: None,
+                    delivery_state: None,
+                    content: "Runtime restarted".to_string(),
+                },
+            )
+            .unwrap();
+    }
+    let page = store
+        .read_history_page("session_a", None, SESSION_HISTORY_PAGE_LIMIT)
+        .unwrap();
+    let turns = restored_turns_from_history_records(&page.records);
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].user_entries[0].text, "legacy task");
+    assert_eq!(turns[0].final_answer.as_deref(), Some("legacy answer"));
+    let messages = restored_messages_from_history_records(&page.records);
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages.last().unwrap().created_at_ms, 139);
+    assert!(!page.has_more);
+}
+
+fn context_handoff_fixture(id: &str) -> agent_core::DynamicContextSnapshot {
+    serde_json::from_value(json!({
+        "deltas": [{"delta_id": id, "time_ms": 1, "slices": [], "hidden_slice_ids": []}],
+        "native_exchanges": [], "last_observed_prompt_tokens": 213371
+    }))
+    .unwrap()
+}
+
+#[test]
+fn context_handoff_persists_runtime_state_without_text_deltas() {
+    let state = routing_test_state();
+    let id = "handoff-runtime-state-only";
+    let snapshot = agent_core::DynamicContextSnapshot {
+        deltas: Vec::new(),
+        native_exchanges: Vec::new(),
+        last_observed_prompt_tokens: 0,
+        active_memo: Some("resume the long task".to_string()),
+        pending_forcible_memo_note: Some("memo was closed by runtime".to_string()),
+        pending_interrupted_memo_note: None,
+    };
+
+    write_prompt_context_snapshot(&state, id, &snapshot).unwrap();
+    let path = current_session_store(&state)
+        .unwrap()
+        .prompt_context_path_for_session(id);
+    assert!(
+        path.exists(),
+        "Core-owned runtime context state must not be discarded because text deltas are empty"
+    );
+    let saved: agent_core::DynamicContextSnapshot =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved, snapshot);
+
+    std::fs::remove_dir_all(&state.template.data_dir).unwrap();
+}
+
+#[test]
+fn context_handoff_is_consumed_before_import_and_cannot_replay_after_crash() {
+    let state = routing_test_state();
+    let id = register_real_worker(&state, "handoff-consume");
+    let snapshot = context_handoff_fixture("pd_76");
+    write_prompt_context_snapshot(&state, &id, &snapshot).unwrap();
+    let path = current_session_store(&state)
+        .unwrap()
+        .prompt_context_path_for_session(&id);
+    restore_prompt_context_snapshot(&state, &id).unwrap();
+    assert!(
+        !path.exists(),
+        "restored generation must not remain replayable"
+    );
+    let handle = session_worker_handle(&state, &id, None).unwrap();
+    assert_eq!(
+        handle.export_dynamic_context().unwrap().unwrap().deltas,
+        snapshot.deltas
+    );
+    // Simulate the next runtime's empty worker after an ungraceful exit.
+    handle.clear_dynamic_context().unwrap();
+    restore_prompt_context_snapshot(&state, &id).unwrap();
+    assert!(handle
+        .export_dynamic_context()
+        .unwrap()
+        .unwrap()
+        .deltas
+        .is_empty());
+    std::mem::take(&mut *state.manager.lock().unwrap())
+        .shutdown_all_detached()
+        .unwrap();
+    std::fs::remove_dir_all(&state.template.data_dir).unwrap();
+}
+
+#[test]
+fn context_handoff_shutdown_uses_registered_primary_not_first_worker() {
+    let state = routing_test_state();
+    state.sessions.lock().unwrap().clear();
+    let id = register_real_worker(&state, "handoff-primary");
+    let old = session_worker_handle(&state, &id, None).unwrap();
+    old.import_dynamic_context(context_handoff_fixture("pd_76"))
+        .unwrap();
+    let dir = state.template.data_dir.join("replacement");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (_, primary) =
+        create_context_with_worker(&state, &id, dir, Some("new primary".into()), None, true)
+            .unwrap();
+    let current = state.manager.lock().unwrap().handle(&primary).unwrap();
+    let compacted = context_handoff_fixture("pd_82");
+    current.import_dynamic_context(compacted.clone()).unwrap();
+    persist_prompt_context_snapshots(&state, &state.manager.lock().unwrap()).unwrap();
+    let path = current_session_store(&state)
+        .unwrap()
+        .prompt_context_path_for_session(&id);
+    let saved: agent_core::DynamicContextSnapshot =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved.deltas, compacted.deltas);
+    current.clear_dynamic_context().unwrap();
+    restore_prompt_context_snapshot(&state, &id).unwrap();
+    assert_eq!(
+        current.export_dynamic_context().unwrap().unwrap().deltas,
+        compacted.deltas
+    );
+    assert!(!path.exists());
+    std::mem::take(&mut *state.manager.lock().unwrap())
+        .shutdown_all_detached()
+        .unwrap();
+    std::fs::remove_dir_all(&state.template.data_dir).unwrap();
+}
+
+#[test]
+fn context_handoff_failed_export_invalidates_previous_snapshot() {
+    let state = routing_test_state();
+    state.sessions.lock().unwrap().clear();
+    let id = register_real_worker(&state, "handoff-failure");
+    write_prompt_context_snapshot(&state, &id, &context_handoff_fixture("pd_76")).unwrap();
+    std::mem::take(&mut *state.manager.lock().unwrap())
+        .shutdown_all_detached()
+        .unwrap();
+    assert!(persist_prompt_context_snapshots(&state, &state.manager.lock().unwrap()).is_err());
+    let path = current_session_store(&state)
+        .unwrap()
+        .prompt_context_path_for_session(&id);
+    assert!(!path.exists());
+    std::fs::remove_dir_all(&state.template.data_dir).unwrap();
+}
+
+#[test]
+fn context_handoff_real_compaction_survives_graceful_restart() {
+    let state = routing_test_state();
+    state.sessions.lock().unwrap().clear();
+    let id = register_real_worker(&state, "handoff-compact");
+    let mut core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test".into(),
+        },
+        &state.template.data_dir,
+    );
+    let mut initial = context_handoff_fixture("pd_76");
+    initial.last_observed_prompt_tokens = 100;
+    core.import_dynamic_context(initial);
+    write_prompt_context_snapshot(&state, &id, &core.export_dynamic_context()).unwrap();
+    core.set_capability_registry(
+        agent_core::capability::CapabilityRegistry::builtin_for_host(
+            agent_core::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
+    );
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    core.set_interaction_profile(&agent_core::InteractionProfile {
+        api_protocol: "openai_compatible".into(),
+        model: "test".into(),
+        gateway: "test".into(),
+        requested_mode: agent_core::ToolCallMode::Native,
+        resolved_mode: agent_core::ToolCallMode::Native,
+        active_prompt_protocol: "json".into(),
+        parallel_supported: true,
+        parallel_enabled: true,
+        source: agent_core::CapabilityProbeSource::Explicit,
+        reason: "test".into(),
+        probe_latency_ms: None,
+        observed_tool_calls: 1,
+    });
+    let arguments = json!({"summary": "ONLY_COMPACTED_STATE"});
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![agent_core::NativeToolCall {
+            assistant_continuation: None,
+            id: "compact_handoff".into(),
+            name: "context_compress".into(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "test".into(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    assert!(matches!(step, agent_core::CoreStep::NeedModel { .. }));
+    let compacted = core.export_dynamic_context();
+    assert!(!compacted.deltas.iter().any(|d| d.delta_id == "pd_76"));
+    assert!(
+        core.render_prompt().contains("ONLY_COMPACTED_STATE"),
+        "step={step:?} snapshot={compacted:?}"
+    );
+    let handle = session_worker_handle(&state, &id, None).unwrap();
+    handle.import_dynamic_context(compacted.clone()).unwrap();
+    persist_prompt_context_snapshots(&state, &state.manager.lock().unwrap()).unwrap();
+    handle.clear_dynamic_context().unwrap();
+    restore_prompt_context_snapshot(&state, &id).unwrap();
+    let restored = handle.export_dynamic_context().unwrap().unwrap();
+    assert_eq!(restored.deltas, compacted.deltas);
+    let mut next = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test".into(),
+        },
+        &state.template.data_dir,
+    );
+    next.import_dynamic_context(restored);
+    let prompt = next.build_next_prompt();
+    assert!(prompt.contains("ONLY_COMPACTED_STATE"));
+    assert!(!prompt.contains("delta_id: pd_76,"));
+    std::mem::take(&mut *state.manager.lock().unwrap())
+        .shutdown_all_detached()
+        .unwrap();
+    std::fs::remove_dir_all(&state.template.data_dir).unwrap();
+}
+
+#[test]
+fn catalog_endpoint_admission_enforces_rules_and_preserves_overrides() {
+    let value = serde_json::json!({
+        "name":"Catalog test", "catalog_id":"openai/gpt-6-sol", "model":"gpt-6-sol",
+        "api_protocol":"openai-compatible", "response_protocol":"xml",
+        "base_url":"https://proxy.example.test/v1", "max_llm_input_tokens":120000,
+        "max_llm_output_tokens":30000, "reasoning_effort":"none"
+    });
+    let input: ModelEndpointInput = serde_json::from_value(value).unwrap();
+    let saved = normalize_model_endpoint_input(None, input.clone()).unwrap();
+    assert_eq!(saved.catalog_id.as_deref(), Some("openai/gpt-6-sol"));
+    assert_eq!(saved.max_llm_output_tokens, 30000);
+    assert_eq!(saved.base_url, "https://proxy.example.test/v1");
+    let mut invalid = input.clone();
+    invalid.reasoning_effort = Some("high".into());
+    assert!(normalize_model_endpoint_input(None, invalid).is_err());
+    let mut invalid = input.clone();
+    invalid.max_llm_output_tokens = 128001;
+    assert!(normalize_model_endpoint_input(None, invalid).is_err());
+    let mut custom = input;
+    custom.catalog_id = None;
+    custom.reasoning_effort = Some("high".into());
+    assert!(normalize_model_endpoint_input(None, custom).is_ok());
+}
+
+#[test]
+fn catalog_legacy_session_restore_accepts_missing_empty_and_explicit_binding() {
+    let state = routing_test_state();
+    state
+        .template
+        .settings
+        .lock()
+        .unwrap()
+        .config
+        .openai_compatible
+        .catalog_id = Some("openai/gpt-6-sol".into());
+    let restored = state
+        .template
+        .restored_session_settings(&BTreeMap::new())
+        .unwrap();
+    assert!(restored.config.openai_compatible.catalog_id.is_none());
+    for value in ["", "  "] {
+        let env = BTreeMap::from([("TIMEM_MODEL_CATALOG_ID".into(), value.into())]);
+        let restored = state.template.restored_session_settings(&env).unwrap();
+        assert!(restored.config.openai_compatible.catalog_id.is_none());
+        let configured = state.template.session_settings(&env).unwrap();
+        assert!(configured.config.openai_compatible.catalog_id.is_none());
+        let cached = session_cached_env_values(&restored);
+        let again = state.template.restored_session_settings(&cached).unwrap();
+        assert!(again.config.openai_compatible.catalog_id.is_none());
+    }
+    let env = BTreeMap::from([("TIMEM_MODEL_CATALOG_ID".into(), "openai/gpt-6-astra".into())]);
+    let restored = state.template.restored_session_settings(&env).unwrap();
+    assert_eq!(
+        restored.config.openai_compatible.catalog_id.as_deref(),
+        Some("openai/gpt-6-astra")
+    );
+    let env = BTreeMap::from([("TIMEM_MODEL_CATALOG_ID".into(), "unknown/model".into())]);
+    assert!(state
+        .template
+        .restored_session_settings(&env)
+        .unwrap()
+        .config
+        .openai_compatible
+        .catalog_id
+        .is_none());
+}
+
+#[test]
+fn catalog_persisted_sessions_restore_missing_and_empty_bindings_with_history() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_legacy_sessions"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let space = "legacy_sessions_mem";
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template.clone());
+    set_test_mem(&state, data_dir.clone(), space);
+    state.sessions.lock().unwrap().clear();
+
+    for name in ["ADstart", "self-dev"] {
+        let session_id = create_session(
+            &state,
+            Some(name.to_string()),
+            Some(root.display().to_string()),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        start_web_turn(&state, &session_id, &format!("legacy history {name}")).unwrap();
+        let store = current_session_store(&state).unwrap();
+        let mut stored = store.load_session(&session_id).unwrap().unwrap();
+        stored.env.insert(
+            "TIMEM_GATEWAY_PROVIDER".to_string(),
+            "retired-provider".to_string(),
+        );
+        stored.env_overrides = None;
+        if name == "ADstart" {
+            stored.env.remove("TIMEM_MODEL_CATALOG_ID");
+        } else {
+            stored
+                .env
+                .insert("TIMEM_MODEL_CATALOG_ID".into(), String::new());
+        }
+        store.upsert_session(&stored).unwrap();
+    }
+
+    let mut restarted = routing_test_state();
+    restarted.sessions.lock().unwrap().clear();
+    template
+        .settings
+        .lock()
+        .unwrap()
+        .config
+        .openai_compatible
+        .catalog_id = Some("openai/gpt-6-sol".into());
+    restarted.template = Arc::new(template);
+    set_test_mem(&restarted, data_dir, space);
+
+    assert_eq!(restore_stored_sessions(&restarted).unwrap(), 2);
+    let sessions = restarted.sessions.lock().unwrap();
+    let names = sessions
+        .values()
+        .map(|session| session.display_name.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(names, BTreeSet::from(["ADstart", "self-dev"]));
+    for session in sessions.values() {
+        assert!(session
+            .runtime
+            .settings
+            .config
+            .openai_compatible
+            .catalog_id
+            .is_none());
+        assert_eq!(
+            session.messages[0].text,
+            format!("legacy history {}", session.display_name)
+        );
+    }
+    drop(sessions);
+
+    for stored in current_session_store(&restarted)
+        .unwrap()
+        .list_sessions()
+        .unwrap()
+    {
+        assert!(!stored.env.contains_key("TIMEM_GATEWAY_PROVIDER"));
+    }
+    // Read the persisted result a second time, not only the original fixture.
+    restarted.sessions.lock().unwrap().clear();
+    assert_eq!(restore_stored_sessions(&restarted).unwrap(), 2);
+    let sessions = restarted.sessions.lock().unwrap();
+    for session in sessions.values() {
+        assert!(session
+            .runtime
+            .settings
+            .config
+            .openai_compatible
+            .catalog_id
+            .is_none());
+        assert_eq!(
+            session.messages[0].text,
+            format!("legacy history {}", session.display_name)
+        );
+    }
+}
+
+#[test]
+fn catalog_legacy_endpoint_file_round_trip_preserves_configuration_and_log_bytes() {
+    let root = std::env::temp_dir().join(unique_web_id("legacy_endpoint_roundtrip"));
+    std::fs::create_dir_all(&root).unwrap();
+    let value = json!([{
+        "id":"old", "name":"旧配置", "model":"gpt-6-sol",
+        "api_protocol":"openai-compatible", "response_protocol":"xml",
+        "base_url":"https://proxy.example.test/v1", "api_key":"legacy-secret",
+        "max_llm_input_tokens":200000, "max_llm_output_tokens":8000,
+        "stream":true, "reasoning_effort":"high",
+        "http_headers":{"X-Tenant":"历史用户"},
+        "request_fields":{"vendor_options":{"custom":true}}
+    }]);
+    let bytes = serde_json::to_vec(&value).unwrap();
+    std::fs::write(model_endpoints_path(&root), &bytes).unwrap();
+    let log = root.join("legacy-audit.jsonl");
+    let log_bytes = b"{\"type\":\"legacy_event\",\"content\":\"preserve me\"}\n";
+    std::fs::write(&log, log_bytes).unwrap();
+    let mut endpoints = load_model_endpoints_resilient(&root).unwrap();
+    assert!(endpoints[0].catalog_id.is_none());
+    assert_eq!(std::fs::read(model_endpoints_path(&root)).unwrap(), bytes);
+    endpoints[0].name = "修改名称".into();
+    save_model_endpoints(&root, &endpoints).unwrap();
+    let loaded = load_model_endpoints_resilient(&root).unwrap();
+    let actual = serde_json::to_value(&loaded[0]).unwrap();
+    for (key, expected) in value[0].as_object().unwrap() {
+        if key != "name" {
+            assert_eq!(&actual[key], expected, "{key}");
+        }
+    }
+    assert_eq!(loaded[0].name, "修改名称");
+    assert!(loaded[0].catalog_id.is_none());
+    assert_eq!(std::fs::read(&log).unwrap(), log_bytes);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unknown_catalog_import_and_persisted_endpoint_become_custom_without_parameter_loss() {
+    let root = std::env::temp_dir().join(unique_web_id("unknown_catalog_custom"));
+    std::fs::create_dir_all(&root).unwrap();
+    let value = json!({"id":"unknown", "catalog_id":"other/future-model", "name":"Imported",
+        "model":"private-model", "api_protocol":"openai-compatible", "response_protocol":"xml",
+        "base_url":"https://private.example.test/v1", "api_key":"retained-secret",
+        "max_llm_input_tokens":100000,"max_llm_output_tokens":8000,"reasoning_effort":"high",
+        "request_fields":{"vendor_options":{"flag":true}}});
+    let input: ModelEndpointInput = serde_json::from_value(value.clone()).unwrap();
+    let normalized = normalize_model_endpoint_input(None, input).unwrap();
+    assert!(normalized.catalog_id.is_none());
+    let original = serde_json::to_vec(&json!([value])).unwrap();
+    std::fs::write(model_endpoints_path(&root), &original).unwrap();
+    let loaded = load_model_endpoints_resilient(&root).unwrap();
+    assert!(loaded[0].catalog_id.is_none());
+    assert_eq!(
+        std::fs::read(model_endpoints_path(&root)).unwrap(),
+        original
+    );
+    for endpoint in [&normalized, &loaded[0]] {
+        assert_eq!(endpoint.model, "private-model");
+        assert_eq!(endpoint.api_key, "retained-secret");
+        assert_eq!(endpoint.max_llm_output_tokens, 8000);
+        assert_eq!(
+            endpoint.request_fields["vendor_options"],
+            json!({"flag":true})
+        );
+    }
+    save_model_endpoints(&root, &loaded).unwrap();
+    assert!(load_model_endpoints_resilient(&root).unwrap()[0]
+        .catalog_id
+        .is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn zhipu_catalog_endpoints_roundtrip_and_reject_forbidden_efforts() {
+    let root = std::env::temp_dir().join(unique_web_id("zhipu_catalog"));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut endpoints = Vec::new();
+    for suffix in ["5.2", "5.3", "5.3-flash"] {
+        let value = json!({"name":format!("z-glm{suffix}"),"catalog_id":format!("z-glm{suffix}"),
+            "model":format!("glm-{suffix}"),"api_protocol":"openai-compatible","response_protocol":"xml",
+            "base_url":"https://open.bigmodel.cn/api/paas/v4","max_llm_input_tokens":200000,
+            "max_llm_output_tokens":131072,"reasoning_effort":"max","stream":true});
+        let input: ModelEndpointInput = serde_json::from_value(value).unwrap();
+        let endpoint = normalize_model_endpoint_input(None, input.clone()).unwrap();
+        assert_eq!(
+            endpoint.catalog_id.as_deref(),
+            Some(format!("z-glm{suffix}").as_str())
+        );
+        assert_eq!(endpoint.reasoning_effort.as_deref(), Some("max"));
+        let mut wrong = input.clone();
+        wrong.reasoning_effort = Some("none".into());
+        assert_eq!(
+            normalize_model_endpoint_input(None, wrong).is_ok(),
+            suffix == "5.2"
+        );
+        let mut switched = input.clone();
+        switched.api_protocol = "openai-responses".into();
+        if suffix == "5.3" {
+            switched.base_url = "https://open.bigmodel.cn/api/v1".into();
+            let admitted = normalize_model_endpoint_input(None, switched.clone()).unwrap();
+            assert_eq!(admitted.api_protocol, "openai-responses");
+            switched.reasoning_effort = Some("medium".into());
+            assert!(normalize_model_endpoint_input(None, switched).is_err());
+        } else {
+            assert!(normalize_model_endpoint_input(None, switched).is_err());
+        }
+        endpoints.push(endpoint);
+    }
+    save_model_endpoints(&root, &endpoints).unwrap();
+    let restored = load_model_endpoints_resilient(&root).unwrap();
+    assert_eq!(
+        serde_json::to_value(&restored).unwrap(),
+        serde_json::to_value(&endpoints).unwrap()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn endpoint_requirements_and_cleared_preferences_survive_session_cache_roundtrip() {
+    let state = routing_test_state();
+    {
+        let mut settings = state.template.settings.lock().unwrap();
+        settings.config.openai_compatible.enable_thinking = Some(false);
+        settings.config.openai_compatible.reasoning_effort = Some("max".into());
+        settings.config.openai_compatible.requirements =
+            serde_json::from_value(json!({"version":1,"provider":"zhipu"})).unwrap();
+    }
+    assert_eq!(
+        state
+            .template
+            .restored_session_settings(&BTreeMap::new())
+            .unwrap()
+            .config
+            .openai_compatible
+            .requirements
+            .version,
+        0
+    );
+    let demand = json!({"version":1,"provider":"openai","allowed_reasoning":["low","high"],"adaptive_reasoning":false,"field_sources":{"model":"user","provider":"template"}});
+    let env = BTreeMap::from([
+        ("TIMEM_MODEL_REQUIREMENTS".into(), demand.to_string()),
+        ("TIMEM_ENABLE_THINKING".into(), "".into()),
+        ("TIMEM_REASONING_EFFORT".into(), "".into()),
+    ]);
+    let restored = state.template.restored_session_settings(&env).unwrap();
+    let cached = session_cached_env_values(&restored);
+    assert_eq!(cached["TIMEM_ENABLE_THINKING"], "");
+    assert_eq!(cached["TIMEM_REASONING_EFFORT"], "");
+    let again = state.template.restored_session_settings(&cached).unwrap();
+    assert_eq!(again.config.openai_compatible.enable_thinking, None);
+    assert_eq!(again.config.openai_compatible.reasoning_effort, None);
+    assert_eq!(
+        serde_json::to_value(again.config.openai_compatible.requirements).unwrap(),
+        demand
+    );
+    let root = std::env::temp_dir().join(unique_web_id("requirements_roundtrip"));
+    let input: ModelEndpointInput = serde_json::from_value(json!({
+        "name":"Requirements", "model":"custom-openai-fixture", "api_protocol":"openai-responses", "response_protocol":"xml",
+        "base_url":"https://proxy.example.test/v1", "max_llm_input_tokens":120000, "max_llm_output_tokens":20000,
+        "requirements":demand,"reasoning_effort":"low"
+    })).unwrap();
+    let endpoint = normalize_model_endpoint_input(None, input).unwrap();
+    save_model_endpoints(&root, &[endpoint]).unwrap();
+    let loaded = load_model_endpoints_resilient(&root).unwrap();
+    assert_eq!(
+        serde_json::to_value(&loaded[0].requirements).unwrap(),
+        demand
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn endpoint_share_commands_roundtrip_categories_collisions_and_private_delivery() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("endpoint_share"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let input: ModelEndpointInput = serde_json::from_value(json!({
+        "name":"mygpt", "model":"custom-model", "api_protocol":"openai-compatible",
+        "response_protocol":"xml", "base_url":"https://example.test/v1",
+        "max_llm_input_tokens":100000, "max_llm_output_tokens":10000,
+        "stream":true, "api_key":"share-test-secret", "reasoning_effort":"high",
+        "http_headers":{"X-Tenant":"tenant-secret"},
+        "request_fields":{"vendor_options":{"custom":"中文"}},
+        "allow_cross_origin_redirects":true
+    }))
+    .unwrap();
+    let id = upsert_model_endpoint(&state, input).unwrap();
+    let original = model_endpoint_config(&state, &id).unwrap();
+    let mut events = state.events.subscribe();
+    for (basic, advanced, personal) in [
+        (true, false, false),
+        (true, true, false),
+        (true, false, true),
+        (true, true, true),
+        (false, true, false),
+        (false, false, true),
+        (false, true, true),
+    ] {
+        let command = ClientCommand::ModelEndpointShareExport {
+            request_id: "share-request".into(),
+            endpoint_id: id.clone(),
+            basic,
+            advanced,
+            personal,
+        };
+        assert!(command.result_is_direct() && command.result_is_sensitive());
+        let completion = execute_browser_command(
+            &state,
+            TEST_PORT,
+            BrowserCommand {
+                command_id: Some("share-request".into()),
+                accepted_mem_epoch: 1,
+                accepted_lane: None,
+                accepted_at_ms: now_ms(),
+                performance_sent_at_ms: None,
+                command,
+            },
+        );
+        let Some(WireEvent::ModelEndpointShareExported { request_id, data }) = completion.event
+        else {
+            panic!("export must be a direct reply");
+        };
+        assert_eq!(request_id, "share-request");
+        assert!(events.try_recv().is_err(), "export must not broadcast");
+        assert!(!state
+            .command_dedup
+            .lock()
+            .unwrap()
+            .contains("share-request"));
+        let raw = STANDARD.decode(&data).unwrap();
+        let share: Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(share["format"], "timem.endpoint");
+        assert_eq!(share["version"], 1);
+        assert_eq!(share.get("basic").is_some(), basic);
+        assert_eq!(share.get("advanced").is_some(), advanced);
+        assert_eq!(share.get("personal").is_some(), personal);
+        assert!(share.get("id").is_none());
+        if !personal {
+            assert!(!String::from_utf8(raw).unwrap().contains("secret"));
+        }
+        if !basic {
+            assert_eq!(
+                model_endpoint_share::import(&state, &data).unwrap_err(),
+                "model_endpoint_share_basic_required"
+            );
+            continue;
+        }
+        let result = handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::ModelEndpointShareImport {
+                request_id: "import-request".into(),
+                data,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        let WireEvent::ModelEndpointShareImported { name, request_id } = result else {
+            panic!("missing import reply")
+        };
+        assert_eq!(request_id, "import-request");
+        let report = model_endpoint_reports(&state)
+            .unwrap()
+            .into_iter()
+            .find(|v| v.name == name)
+            .unwrap();
+        let imported = model_endpoint_config(&state, &report.id).unwrap();
+        assert_ne!(imported.id, id);
+        assert_eq!(imported.model, original.model);
+        assert_eq!(imported.stream, original.stream);
+        assert_eq!(imported.reasoning_effort, original.reasoning_effort);
+        assert_eq!(imported.requirements, original.requirements);
+        assert_eq!(!imported.api_key.is_empty(), personal);
+        assert_eq!(!imported.http_headers.is_empty(), personal);
+        assert_eq!(!imported.request_fields.is_empty(), advanced);
+        assert_eq!(imported.allow_cross_origin_redirects, advanced);
+        while let Ok(event) = events.try_recv() {
+            let json = serde_json::to_string(&event).unwrap();
+            assert!(!json.contains("share-test-secret") && !json.contains("tenant-secret"));
+            assert!(!json.contains("model_endpoint_share_exported"));
+        }
+    }
+    let reports = model_endpoint_reports(&state).unwrap();
+    assert_eq!(
+        reports.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+        vec!["mygpt", "mygpt1", "mygpt2", "mygpt3", "mygpt4"]
+    );
+    assert_eq!(model_endpoint_config(&state, &id).unwrap(), original);
+    let mem = state.mem.lock().unwrap();
+    assert_eq!(
+        load_model_endpoints_resilient(&mem.layout.memory_dir()).unwrap(),
+        mem.model_endpoints
+    );
+    drop(mem);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn endpoint_share_invalid_input_is_bounded_redacted_and_never_mutates() {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("endpoint_share_invalid"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let input: ModelEndpointInput = serde_json::from_value(json!({
+        "name":"中文接入点", "model":"model", "api_protocol":"openai-compatible",
+        "response_protocol":"xml", "base_url":"https://example.test/v1",
+        "max_llm_input_tokens":100000, "max_llm_output_tokens":10000
+    }))
+    .unwrap();
+    let endpoint = normalize_model_endpoint_input(None, input).unwrap();
+    let valid = model_endpoint_share::export(&endpoint, true, true, true).unwrap();
+    let share: Value = serde_json::from_slice(&STANDARD.decode(&valid).unwrap()).unwrap();
+    let mut invalids = vec![
+        "not base64!!!".into(),
+        STANDARD.encode(b"not json"),
+        "A".repeat(262145),
+    ];
+    for (path, value) in [
+        ("/version", json!(2)),
+        ("/format", json!("other-format")),
+        ("/basic/max_llm_input_tokens", json!(0)),
+        ("/basic/api_protocol", json!("secret-invalid-protocol")),
+        ("/personal/api_key", json!({"secret":"do-not-echo"})),
+    ] {
+        let mut changed = share.clone();
+        *changed.pointer_mut(path).unwrap() = value;
+        invalids.push(STANDARD.encode(serde_json::to_vec(&changed).unwrap()));
+    }
+    let mut injected_id = share.clone();
+    injected_id["id"] = json!("existing-id");
+    invalids.push(STANDARD.encode(serde_json::to_vec(&injected_id).unwrap()));
+    for data in invalids {
+        let error = model_endpoint_share::import(&state, &data).unwrap_err();
+        assert!(error.starts_with("model_endpoint_share_"));
+        assert!(!error.contains("secret") && !error.contains("do-not-echo"));
+        assert!(model_endpoint_reports(&state).unwrap().is_empty());
+    }
+    assert!(model_endpoint_share::export(&endpoint, false, false, false).is_err());
+    assert_eq!(
+        model_endpoint_share::import(&state, &format!(" \n{valid}\n ")).unwrap(),
+        "中文接入点"
+    );
+    let command = ClientCommand::ModelEndpointShareImport {
+        request_id: "import".into(),
+        data: valid,
+    };
+    assert_eq!(command.mutation_lane().as_deref(), Some("global"));
+    assert!(command.uses_global_mutation_barrier() && command.result_is_direct());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn endpoint_share_failed_persistence_is_atomic_and_concurrent_names_are_unique() {
+    let state = Arc::new(routing_test_state());
+    let root = std::env::temp_dir().join(unique_web_id("endpoint_share_atomic"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let input: ModelEndpointInput = serde_json::from_value(json!({
+        "name":"mygpt", "model":"model", "api_protocol":"openai-compatible",
+        "response_protocol":"xml", "base_url":"https://example.test/v1",
+        "max_llm_input_tokens":100000, "max_llm_output_tokens":10000
+    }))
+    .unwrap();
+    let id = upsert_model_endpoint(&state, input).unwrap();
+    let endpoint = model_endpoint_config(&state, &id).unwrap();
+    let data = model_endpoint_share::export(&endpoint, true, false, false).unwrap();
+    let path = model_endpoints_path(&state.mem.lock().unwrap().layout.memory_dir());
+    let before = std::fs::read(&path).unwrap();
+    // A directory at the temp-file path forces a portable open failure.
+    let temporary = path.with_extension("json.tmp");
+    std::fs::create_dir(&temporary).unwrap();
+    assert!(model_endpoint_share::import(&state, &data).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(
+        state.mem.lock().unwrap().model_endpoints,
+        vec![endpoint.clone()]
+    );
+    std::fs::remove_dir(&temporary).unwrap();
+    let jobs: Vec<_> = (0..8)
+        .map(|_| {
+            let state = state.clone();
+            let data = data.clone();
+            std::thread::spawn(move || model_endpoint_share::import(&state, &data).unwrap())
+        })
+        .collect();
+    let names: BTreeSet<_> = jobs.into_iter().map(|job| job.join().unwrap()).collect();
+    assert_eq!(names, (1..=8).map(|n| format!("mygpt{n}")).collect());
+    assert_eq!(model_endpoint_config(&state, &id).unwrap(), endpoint);
+    let mem = state.mem.lock().unwrap();
+    assert_eq!(
+        load_model_endpoints_resilient(&mem.layout.memory_dir()).unwrap(),
+        mem.model_endpoints
+    );
+    drop(mem);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn model_endpoint_persistence_failures_leave_memory_and_disk_unchanged() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("endpoint_store_atomic"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+
+    let original_id = upsert_model_endpoint(
+        &state,
+        endpoint_boundary_input("endpoint-boundary-a", "medium"),
+    )
+    .unwrap();
+    let original = model_endpoint_config(&state, &original_id).unwrap();
+    let path = model_endpoints_path(&state.mem.lock().unwrap().layout.memory_dir());
+    let before = std::fs::read(&path).unwrap();
+    let temporary = path.with_extension("json.tmp");
+    std::fs::create_dir(&temporary).unwrap();
+
+    assert!(upsert_model_endpoint(
+        &state,
+        endpoint_boundary_input("endpoint-boundary-b", "low"),
+    )
+    .is_err());
+
+    let mut edited = endpoint_boundary_input("endpoint-boundary-a", "high");
+    edited.name = "Boundary A edited".to_string();
+    assert!(upsert_model_endpoint(&state, edited).is_err());
+    assert!(delete_model_endpoint(&state, &original_id).is_err());
+
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(
+        state.mem.lock().unwrap().model_endpoints,
+        vec![original.clone()]
+    );
+    assert_eq!(
+        model_endpoint_config(&state, &original_id).unwrap(),
+        original
+    );
+
+    std::fs::remove_dir(&temporary).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn model_endpoint_import_persistence_failure_is_atomic_and_retryable() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("endpoint_import_atomic"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+
+    let original_id = upsert_model_endpoint(
+        &state,
+        endpoint_boundary_input("endpoint-boundary-a", "medium"),
+    )
+    .unwrap();
+    let original = model_endpoint_config(&state, &original_id).unwrap();
+    let candidates = vec![
+        ModelEndpointImportCandidate {
+            id: "atomic-import-a".to_string(),
+            source: "codex",
+            name: "Imported A".to_string(),
+            model: "imported-a".to_string(),
+            api_protocol: "openai-compatible".to_string(),
+            response_protocol: "xml".to_string(),
+            base_url: "https://import-a.example.test/v1".to_string(),
+            max_llm_input_tokens: 64_000,
+            max_llm_output_tokens: 8_000,
+            stream: true,
+            api_key: "import-secret-a".to_string(),
+            reasoning_effort: Some("medium".to_string()),
+            http_headers: BTreeMap::from([("X-Import".to_string(), "a".to_string())]),
+            request_fields: BTreeMap::from([("route".to_string(), json!("a"))]),
+        },
+        ModelEndpointImportCandidate {
+            id: "atomic-import-b".to_string(),
+            source: "claude",
+            name: "Imported B".to_string(),
+            model: "imported-b".to_string(),
+            api_protocol: "anthropic".to_string(),
+            response_protocol: "xml".to_string(),
+            base_url: "https://import-b.example.test".to_string(),
+            max_llm_input_tokens: 200_000,
+            max_llm_output_tokens: 20_000,
+            stream: false,
+            api_key: "import-secret-b".to_string(),
+            reasoning_effort: None,
+            http_headers: BTreeMap::new(),
+            request_fields: BTreeMap::new(),
+        },
+    ];
+    let candidate_ids: Vec<_> = candidates
+        .iter()
+        .map(|candidate| candidate.id.clone())
+        .collect();
+    *state.model_endpoint_imports.lock().unwrap() = candidates;
+
+    let path = model_endpoints_path(&state.mem.lock().unwrap().layout.memory_dir());
+    let before = std::fs::read(&path).unwrap();
+    let temporary = path.with_extension("json.tmp");
+    std::fs::create_dir(&temporary).unwrap();
+
+    assert!(import_model_endpoints(&state, &candidate_ids).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(
+        state.mem.lock().unwrap().model_endpoints,
+        vec![original.clone()]
+    );
+    assert_eq!(
+        state
+            .model_endpoint_imports
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|candidate| candidate.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["atomic-import-a", "atomic-import-b"]
+    );
+
+    std::fs::remove_dir(&temporary).unwrap();
+    let imported_ids = import_model_endpoints(&state, &candidate_ids).unwrap();
+    assert_eq!(imported_ids.len(), 2);
+    assert!(state.model_endpoint_imports.lock().unwrap().is_empty());
+    let mem = state.mem.lock().unwrap();
+    assert_eq!(mem.model_endpoints.len(), 3);
+    assert_eq!(
+        load_model_endpoints_resilient(&mem.layout.memory_dir()).unwrap(),
+        mem.model_endpoints
+    );
+    drop(mem);
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn stale_capability_probe_event_cannot_overwrite_an_edited_endpoint() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("stale_capability_probe"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+
+    let old_endpoint = ModelEndpointConfig {
+        catalog_id: None,
+        requirements: Default::default(),
+        id: "capability-race-endpoint".to_string(),
+        name: "Capability race".to_string(),
+        model: "old-model".to_string(),
+        api_protocol: "openai-compatible".to_string(),
+        response_protocol: "xml".to_string(),
+        base_url: "https://old.example.test/v1".to_string(),
+        max_llm_input_tokens: 100_000,
+        max_llm_output_tokens: 4_096,
+        stream: true,
+        api_key: "secret".to_string(),
+        http_headers: Default::default(),
+        request_fields: Default::default(),
+        allow_cross_origin_redirects: false,
+        private_ca_pem: String::new(),
+        reasoning_effort: None,
+        function_calling: true,
+        capability_probe: None,
+    };
+    let old_session = {
+        let session = state.sessions.lock().unwrap()["session_a"].clone();
+        model_endpoint_session_candidate(&session, &old_endpoint).unwrap()
+    };
+    let old_identity =
+        agent_core::capability_probe_identity(&old_session.runtime.settings.config).unwrap();
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert("session_a".to_string(), old_session);
+
+    let mut edited_endpoint = ModelEndpointConfig {
+        model: "new-model".to_string(),
+        base_url: "https://new.example.test/v1".to_string(),
+        ..old_endpoint
+    };
+    let edited_identity = {
+        let session = state.sessions.lock().unwrap()["session_a"].clone();
+        let candidate = model_endpoint_session_candidate(&session, &edited_endpoint).unwrap();
+        agent_core::capability_probe_identity(&candidate.runtime.settings.config).unwrap()
+    };
+    edited_endpoint.capability_probe = Some(agent_core::PersistedCapabilityProbe {
+        identity: edited_identity,
+        native_supported: true,
+        parallel_supported: true,
+        observed_tool_calls: 2,
+        reason: "new endpoint capability".to_string(),
+    });
+    {
+        let mut mem = state.mem.lock().unwrap();
+        mem.model_endpoints = vec![edited_endpoint.clone()];
+        save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints).unwrap();
+    }
+    let stale_record = agent_core::PersistedCapabilityProbe {
+        identity: old_identity.clone(),
+        native_supported: false,
+        parallel_supported: false,
+        observed_tool_calls: 0,
+        reason: "explicit native tools unsupported".to_string(),
+    };
+
+    persist_capability_probe_event(&state, "session_a", &old_identity, Some(stale_record)).unwrap();
+    persist_capability_probe_event(&state, "session_a", &old_identity, None).unwrap();
+
+    let mem = state.mem.lock().unwrap();
+    assert_eq!(mem.model_endpoints, vec![edited_endpoint]);
+    assert_eq!(
+        load_model_endpoints_resilient(&mem.layout.memory_dir()).unwrap(),
+        mem.model_endpoints
+    );
+    drop(mem);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn model_endpoint_native_tools_knowledge_requires_an_exact_catalog_route() {
+    use agent_core::model_catalog::FunctionCallingSupport;
+
+    agent_core::model_catalog::ensure_loaded().unwrap();
+    let find = |support| {
+        agent_core::model_catalog::models()
+            .iter()
+            .find_map(|model| {
+                model
+                    .protocols
+                    .iter()
+                    .find(|protocol| {
+                        protocol.protocol != "openai-responses"
+                            && protocol.function_calling == support
+                    })
+                    .map(|protocol| (model, protocol))
+            })
+            .unwrap_or_else(|| panic!("catalog must contain a non-Responses {support:?} profile"))
+    };
+    let endpoint_for =
+        |model: &agent_core::model_catalog::CatalogModel,
+         protocol: &agent_core::model_catalog::CatalogProtocol| {
+            ModelEndpointConfig {
+                catalog_id: Some(model.id.clone()),
+                requirements: agent_core::model_requirements::EndpointRequirements {
+                    provider: Some(model.provider.clone()),
+                    ..Default::default()
+                },
+                id: format!("catalog-route-{}-{}", model.id, protocol.protocol),
+                name: model.label.clone(),
+                model: model.model.clone(),
+                api_protocol: protocol.protocol.clone(),
+                response_protocol: "xml".to_string(),
+                base_url: protocol.base_url.clone(),
+                max_llm_input_tokens: model.max_input,
+                max_llm_output_tokens: model.max_output,
+                stream: true,
+                api_key: String::new(),
+                http_headers: Default::default(),
+                request_fields: Default::default(),
+                allow_cross_origin_redirects: false,
+                private_ca_pem: String::new(),
+                reasoning_effort: None,
+                function_calling: true,
+                capability_probe: None,
+            }
+        };
+
+    for support in [
+        FunctionCallingSupport::Supported,
+        FunctionCallingSupport::Conditional,
+    ] {
+        let (model, protocol) = find(support);
+        let endpoint = endpoint_for(model, protocol);
+        assert_eq!(model_endpoint_native_tools_knowledge(&endpoint), Some(true));
+    }
+
+    let (model, protocol) = find(FunctionCallingSupport::Supported);
+    let exact = endpoint_for(model, protocol);
+    for changed in [
+        ModelEndpointConfig {
+            model: format!("{}-custom", exact.model),
+            ..exact.clone()
+        },
+        ModelEndpointConfig {
+            requirements: agent_core::model_requirements::EndpointRequirements {
+                provider: Some("custom-provider".to_string()),
+                ..exact.requirements.clone()
+            },
+            ..exact.clone()
+        },
+        ModelEndpointConfig {
+            base_url: format!("{}/proxy", exact.base_url.trim_end_matches('/')),
+            ..exact.clone()
+        },
+    ] {
+        assert_eq!(model_endpoint_native_tools_knowledge(&changed), None);
+    }
+
+    let custom = ModelEndpointConfig {
+        catalog_id: None,
+        ..exact.clone()
+    };
+    assert_eq!(model_endpoint_native_tools_knowledge(&custom), None);
+    let disabled = ModelEndpointConfig {
+        function_calling: false,
+        ..exact.clone()
+    };
+    assert_eq!(
+        model_endpoint_native_tools_knowledge(&disabled),
+        Some(false)
+    );
+
+    let (unsupported_model, unsupported_protocol) = find(FunctionCallingSupport::Unsupported);
+    let unsupported = endpoint_for(unsupported_model, unsupported_protocol);
+    assert_eq!(model_endpoint_native_tools_knowledge(&unsupported), None);
+
+    let responses = ModelEndpointConfig {
+        api_protocol: "openai-responses".to_string(),
+        function_calling: false,
+        catalog_id: None,
+        ..exact
+    };
+    assert_eq!(
+        model_endpoint_native_tools_knowledge(&responses),
+        Some(true)
+    );
+}
+
+#[test]
+fn restored_history_message_ids_stay_unique_for_same_millisecond_entries() {
+    let record = |kind: Option<&str>, content: &str| ChatHistoryRecord::Message {
+        role: ChatHistoryRole::User,
+        turn_id: "turn_1".to_string(),
+        created_at_ms: 1_791_125_099_126,
+        kind: kind.map(str::to_string),
+        command_id: None,
+        delivery_state: None,
+        content: content.to_string(),
+    };
+    let records = vec![
+        record(Some("task"), "first task"),
+        record(Some("supplement"), "supplement while working"),
+        // An identical duplicated record must collapse instead of producing a
+        // second message with the same id.
+        record(Some("task"), "first task"),
+    ];
+    let messages = restored_messages_from_history_records(&records);
+    assert_eq!(messages.len(), 2, "identical duplicates must collapse");
+    // Locked to the TypeScript mirror in interfaces/web/src/view_model.ts
+    // (historyMessageId + fnv1a32Hex); diverging either side strands restored
+    // ids across restarts. FNV-1a("first task") = fe687892,
+    // FNV-1a("supplement while working") = 8e15f2ec.
+    assert_eq!(
+        messages[0].id,
+        "history_msg_turn_1_1791125099126_user_task_fe687892"
+    );
+    assert_eq!(
+        messages[1].id,
+        "history_msg_turn_1_1791125099126_user_supplement_8e15f2ec"
+    );
+}
+
+#[test]
+fn interrupted_queued_message_id_follows_the_shared_history_formula() {
+    let item = timem_session::message_queue::MessageQueueItem {
+        command_id: "cmd_1".to_string(),
+        enqueue_seq: 0,
+        payload: WebNextTurnPayload {
+            send_after_cancel: false,
+            turn_id: "turn_q".to_string(),
+            created_at_ms: 1_791_125_099_999,
+            text: "queued text".to_string(),
+            attachments: Vec::new(),
+            worker_roles: Vec::new(),
+        },
+    };
+    let (message, turn) = interrupted_turn_from_queued_message(&item, 5000);
+    // FNV-1a("queued text") = eeb4203b; the live queued-interrupt path must
+    // derive the same identity scheme as restored history records, otherwise
+    // a restart turns one message into two (or drops it on id collision).
+    assert_eq!(
+        message.id,
+        "history_msg_turn_q_1791125099999_user_queued_interrupted_eeb4203b"
+    );
+    assert_eq!(turn.turn_id, "turn_q");
+    assert_eq!(turn.state, "interrupted");
 }

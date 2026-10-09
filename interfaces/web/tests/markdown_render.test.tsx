@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { MarkdownContent } from "../src/markdown_render";
+import { MarkdownContentFull as MarkdownContent } from "../src/markdown_pipeline";
 import { extractMarkdownOutline } from "../src/markdown_outline";
 
 function render(markdown: string, headingIdPrefix?: string) {

@@ -181,23 +181,41 @@ fn reads_relative_utf8_file_from_session_cwd() {
 }
 
 #[test]
-fn default_read_is_limited_to_the_thirty_two_kibibyte_output_budget() {
-    assert_eq!(DEFAULT_MAX_BYTES, 32 * 1024);
-    assert_eq!(MAX_RETURN_BYTES, 32 * 1024);
+fn default_read_uses_the_default_runtime_tool_result_budget() {
     let dir = TempDir::new("default_output_budget");
     fs::write(
         dir.path().join("large.txt"),
-        "x".repeat(MAX_RETURN_BYTES + 500),
+        "x".repeat(DEFAULT_MODEL_TOOL_RESULT_BYTES + 500),
     )
     .unwrap();
 
     let result = execute(dir.path(), &json!({"path": "large.txt"}));
 
     assert!(
-        result.contains(&format!("content_bytes: {MAX_RETURN_BYTES}")),
+        result.contains(&format!("content_bytes: {DEFAULT_MODEL_TOOL_RESULT_BYTES}")),
         "{result}"
     );
     assert!(result.contains("limited: true"), "{result}");
+}
+
+#[test]
+fn runtime_budget_alone_controls_returned_content() {
+    let dir = TempDir::new("runtime_output_budget");
+    fs::write(dir.path().join("large.txt"), "x".repeat(40 * 1024)).unwrap();
+
+    for budget in [8 * 1024, 16 * 1024, MAX_MODEL_TOOL_RESULT_BYTES] {
+        let outcome = execute_with_timeout_outcome_and_limit(
+            dir.path(),
+            &json!({"path": "large.txt"}),
+            DEFAULT_TIMEOUT,
+            budget,
+        );
+        assert_eq!(outcome.status, crate::ActionStatus::Completed);
+        let evidence = outcome.readfile_result.expect("readfile evidence");
+        assert_eq!(evidence.content_bytes, Some(budget));
+        assert_eq!(evidence.content.len(), budget);
+        assert_eq!(evidence.limited, Some(true));
+    }
 }
 
 #[test]
@@ -227,8 +245,7 @@ fn end_line_beyond_eof_clamps_to_the_actual_last_line() {
         &json!({
             "path": "short.txt",
             "starter": {"line_nr": 1},
-            "ender": {"line_nr": 240},
-            "max_bytes": 32768
+            "ender": {"line_nr": 240}
         }),
     );
 
@@ -239,25 +256,38 @@ fn end_line_beyond_eof_clamps_to_the_actual_last_line() {
 }
 
 #[test]
-fn end_line_beyond_eof_still_respects_max_bytes() {
+fn end_line_beyond_eof_still_respects_the_runtime_budget() {
     let dir = TempDir::new("end_line_beyond_eof_budget");
-    fs::write(dir.path().join("short.txt"), "first\nsecond\nthird").unwrap();
+    fs::write(
+        dir.path().join("short.txt"),
+        "first
+second
+third",
+    )
+    .unwrap();
 
-    let result = execute(
+    let outcome = execute_with_timeout_outcome_and_limit(
         dir.path(),
         &json!({
             "path": "short.txt",
             "starter": {"line_nr": 1},
-            "ender": {"line_nr": 240},
-            "max_bytes": 8
+            "ender": {"line_nr": 240}
         }),
+        DEFAULT_TIMEOUT,
+        8,
     );
+    let result = outcome.text;
 
     assert!(result.contains("status: ok"), "{result}");
     assert!(result.contains("content_bytes: 8"), "{result}");
     assert!(result.contains("limited: true"), "{result}");
     assert!(
-        result.contains("content:\nfirst\nse\n!!!Too long, 2 words truncated after."),
+        result.contains(
+            "content:
+first
+se
+!!!Too long, 2 words truncated after."
+        ),
         "{result}"
     );
 }
@@ -302,19 +332,25 @@ fn match_selectors_use_first_start_and_last_complete_end_in_window() {
     let dir = TempDir::new("matches");
     fs::write(dir.path().join("matches.txt"), "xxA1B2BzzA3Btail").unwrap();
 
-    let result = execute(
+    let outcome = execute_with_timeout_outcome_and_limit(
         dir.path(),
         &json!({
             "path": "matches.txt",
             "starter": {"match": "A"},
-            "ender": {"match": "B"},
-            "max_bytes": 8
+            "ender": {"match": "B"}
         }),
+        DEFAULT_TIMEOUT,
+        8,
     );
+    let result = outcome.text;
 
     assert!(result.contains("limited: true"), "{result}");
     assert!(
-        result.contains("content:\nA1B2B\n!!!Too long, 0 words truncated after."),
+        result.contains(
+            "content:
+A1B2B
+!!!Too long, 0 words truncated after."
+        ),
         "{result}"
     );
 }
@@ -333,8 +369,7 @@ fn match_selectors_are_unicode_safe() {
         &json!({
             "path": "matches.txt",
             "starter": {"match": "【开始】"},
-            "ender": {"match": "【结束】"},
-            "max_bytes": 128
+            "ender": {"match": "【结束】"}
         }),
     );
 
@@ -382,16 +417,26 @@ fn byte_selectors_reject_multibyte_character_splits() {
 }
 
 #[test]
-fn max_bytes_never_splits_returned_utf8() {
+fn runtime_budget_never_splits_returned_utf8() {
     let dir = TempDir::new("utf8_limit");
     fs::write(dir.path().join("utf8.txt"), "éé").unwrap();
 
-    let result = execute(dir.path(), &json!({"path": "utf8.txt", "max_bytes": 3}));
+    let outcome = execute_with_timeout_outcome_and_limit(
+        dir.path(),
+        &json!({"path": "utf8.txt"}),
+        DEFAULT_TIMEOUT,
+        3,
+    );
+    let result = outcome.text;
 
     assert!(result.contains("content_bytes: 2"), "{result}");
     assert!(result.contains("limited: true"), "{result}");
     assert!(
-        result.contains("content:\né\n!!!Too long, 1 words truncated after."),
+        result.contains(
+            "content:
+é
+!!!Too long, 1 words truncated after."
+        ),
         "{result}"
     );
 }
@@ -519,7 +564,13 @@ fn follows_symlinks_only_when_the_target_is_a_regular_file() {
 #[test]
 fn selector_and_range_errors_are_explicit() {
     let dir = TempDir::new("selector_errors");
-    fs::write(dir.path().join("text.txt"), "first\nsecond\n").unwrap();
+    fs::write(
+        dir.path().join("text.txt"),
+        "first
+second
+",
+    )
+    .unwrap();
 
     let multiple = execute(
         dir.path(),
@@ -537,10 +588,7 @@ fn selector_and_range_errors_are_explicit() {
             "ender": {"line_nr": 1}
         }),
     );
-    let invalid_limit = execute(
-        dir.path(),
-        &json!({"path": "text.txt", "max_bytes": MAX_RETURN_BYTES + 1}),
-    );
+    let removed_budget_field = execute(dir.path(), &json!({"path": "text.txt", "max_bytes": 1}));
     let unsupported = execute(dir.path(), &json!({"path": "text.txt", "surprise": true}));
 
     assert!(multiple.contains("error: invalid_selector"), "{multiple}");
@@ -552,8 +600,12 @@ fn selector_and_range_errors_are_explicit() {
     );
     assert!(reversed.contains("error: range_before_start"), "{reversed}");
     assert!(
-        invalid_limit.contains("error: invalid_max_bytes"),
-        "{invalid_limit}"
+        removed_budget_field.contains("error: unsupported_input"),
+        "{removed_budget_field}"
+    );
+    assert!(
+        removed_budget_field.contains("max_bytes"),
+        "{removed_budget_field}"
     );
     assert!(
         unsupported.contains("error: unsupported_input"),
@@ -597,12 +649,22 @@ fn forward_read_retains_beginning_and_places_notice_after_content() {
     let dir = TempDir::new("forward_tail_option");
     fs::write(dir.path().join("large.txt"), "BEGIN alpha beta gamma END").unwrap();
 
-    let result = execute(dir.path(), &json!({"path": "large.txt", "max_bytes": 11}));
+    let outcome = execute_with_timeout_outcome_and_limit(
+        dir.path(),
+        &json!({"path": "large.txt"}),
+        DEFAULT_TIMEOUT,
+        11,
+    );
+    let result = outcome.text;
 
     assert!(result.contains("tail_out: false"), "{result}");
     assert!(result.contains("content_bytes: 11"), "{result}");
     assert!(
-        result.contains("content:\nBEGIN alpha\n!!!Too long,"),
+        result.contains(
+            "content:
+BEGIN alpha
+!!!Too long,"
+        ),
         "{result}"
     );
     assert!(result.contains("truncated after"), "{result}");
@@ -614,28 +676,40 @@ fn tail_read_retains_ending_and_places_notice_before_content() {
     let dir = TempDir::new("tail_option");
     fs::write(dir.path().join("large.txt"), "BEGIN alpha beta gamma END").unwrap();
 
-    let result = execute(
+    let outcome = execute_with_timeout_outcome_and_limit(
         dir.path(),
-        &json!({"path": "large.txt", "max_bytes": 9, "tail_out": true}),
+        &json!({"path": "large.txt", "tail_out": true}),
+        DEFAULT_TIMEOUT,
+        9,
     );
+    let result = outcome.text;
 
     assert!(result.contains("tail_out: true"), "{result}");
     assert!(result.contains("content_bytes: 9"), "{result}");
-    assert!(result.contains("content:\n!!!Too long,"), "{result}");
+    assert!(
+        result.contains(
+            "content:
+!!!Too long,"
+        ),
+        "{result}"
+    );
     assert!(result.contains("truncated before"), "{result}");
     assert!(result.ends_with("gamma END"), "{result}");
     assert!(!result.ends_with("BEGIN alpha"), "{result}");
 }
 
 #[test]
-fn tail_read_is_utf8_safe_and_never_exceeds_byte_budget() {
+fn tail_read_is_utf8_safe_and_never_exceeds_runtime_budget() {
     let dir = TempDir::new("tail_utf8");
     fs::write(dir.path().join("utf8.txt"), "甲乙丙丁").unwrap();
 
-    let result = execute(
+    let outcome = execute_with_timeout_outcome_and_limit(
         dir.path(),
-        &json!({"path": "utf8.txt", "max_bytes": 7, "tail_out": true}),
+        &json!({"path": "utf8.txt", "tail_out": true}),
+        DEFAULT_TIMEOUT,
+        7,
     );
+    let result = outcome.text;
 
     assert!(result.contains("content_bytes: 6"), "{result}");
     assert!(result.contains("limited: true"), "{result}");
@@ -652,16 +726,18 @@ fn tail_read_applies_to_the_selected_range_only() {
     )
     .unwrap();
 
-    let result = execute(
+    let outcome = execute_with_timeout_outcome_and_limit(
         dir.path(),
         &json!({
             "path": "selected.txt",
             "starter": {"match": "START"},
             "ender": {"match": "END"},
-            "max_bytes": 13,
             "tail_out": true
         }),
+        DEFAULT_TIMEOUT,
+        13,
     );
+    let result = outcome.text;
 
     assert!(result.contains("truncated before"), "{result}");
     assert!(result.ends_with("two three END"), "{result}");
@@ -741,19 +817,28 @@ fn content_heading_uses_lines_of_returned_truncated_content() {
     let dir = TempDir::new("content_heading_truncated");
     fs::write(
         dir.path().join("large.txt"),
-        "first\nsecond\nthird\nfourth\n",
+        "first
+second
+third
+fourth
+",
     )
     .unwrap();
 
-    let result = execute(
+    let outcome = execute_with_timeout_outcome_and_limit(
         dir.path(),
-        &json!({
-            "path": "large.txt",
-            "max_bytes": 12
-        }),
+        &json!({"path": "large.txt"}),
+        DEFAULT_TIMEOUT,
+        12,
     );
+    let result = outcome.text;
     assert!(
-        result.contains("large.txt, line [1, 2]:\ncontent:\nfirst\nsecond"),
+        result.contains(
+            "large.txt, line [1, 2]:
+content:
+first
+second"
+        ),
         "{result}"
     );
 }
@@ -800,4 +885,29 @@ fn matcher_heading_keeps_control_characters_on_one_line() {
         result.contains("matcher 'START\\t ... \\nEND' line is [2, 3]:"),
         "{result}"
     );
+}
+
+#[test]
+fn nonexistent_starter_line_reports_total_file_lines() {
+    let dir = TempDir::new("line_count_error");
+    for (text, count) in [
+        ("".to_owned(), 0),
+        ("one".to_owned(), 1),
+        ("one\n".to_owned(), 1),
+        ("one\r\ntwo\r\n".to_owned(), 2),
+        ("one\rtwo".to_owned(), 2),
+        ("line\n".repeat(73), 73),
+    ] {
+        fs::write(dir.path().join("input.txt"), text).unwrap();
+        let result = execute_outcome(
+            dir.path(),
+            &json!({"path":"input.txt", "starter":{"line_nr":100}}),
+        );
+        let evidence = result.readfile_result.unwrap();
+        assert_eq!(evidence.error_type.as_deref(), Some("SelectorNotFound"));
+        assert_eq!(
+            evidence.content,
+            format!("Starter line 100 does not exist. File has {count} lines.")
+        );
+    }
 }

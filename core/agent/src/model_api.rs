@@ -1,3 +1,4 @@
+use crate::reasoning::EffectiveReasoning;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -118,6 +119,8 @@ pub fn parse_openai_compatible_cache_mode(
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OpenAiCompatibleOptions {
+    pub catalog_id: Option<String>,
+    pub requirements: crate::model_requirements::EndpointRequirements,
     pub enable_thinking: Option<bool>,
     pub reasoning_effort: Option<String>,
     pub stream: bool,
@@ -170,8 +173,37 @@ pub struct ModelPromptBlock {
     pub cache: ModelCacheControl,
 }
 
+/// Whether the outgoing payload explicitly enables reasoning. Provider defaults
+/// without an explicit request are unknown and must not be advertised as enabled.
+pub fn request_uses_reasoning(body: &Value) -> bool {
+    if body.get("enable_thinking").and_then(Value::as_bool) == Some(false)
+        || body.pointer("/thinking/type").and_then(Value::as_str) == Some("disabled")
+    {
+        return false;
+    }
+    body.get("enable_thinking").and_then(Value::as_bool) == Some(true)
+        || matches!(
+            body.pointer("/thinking/type").and_then(Value::as_str),
+            Some("enabled" | "adaptive")
+        )
+        || [
+            body.get("reasoning_effort"),
+            body.pointer("/reasoning/effort"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .any(|effort| {
+            matches!(
+                effort,
+                "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+            )
+        })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedModelRequest {
+    pub critical_reasoning: bool,
     pub body: Value,
     pub prompt_cache_plan: Value,
     pub structured_output: StructuredOutputHint,
@@ -226,18 +258,29 @@ pub fn build_model_request_with_reasoning(
     structured_output: StructuredOutputHint,
     critical_reasoning: bool,
 ) -> Value {
+    let reasoning = crate::model_requirements::resolve_reasoning(config, critical_reasoning);
+    build_model_request_with_policy(config, blocks, structured_output, &reasoning)
+}
+
+/// Semantic entry point for callers that already resolved their reasoning policy.
+/// Legacy settings and scheduling flags are not interpreted by protocol adapters.
+pub fn build_model_request_with_policy(
+    config: &ModelServiceConfig,
+    blocks: &[ModelPromptBlock],
+    structured_output: StructuredOutputHint,
+    reasoning: &EffectiveReasoning,
+) -> Value {
     let mut body = match config.api_protocol {
         ApiProtocol::OpenAiCompatible => {
-            build_openai_compatible_request(config, blocks, structured_output, critical_reasoning)
+            build_openai_compatible_request(config, blocks, structured_output)
         }
-        ApiProtocol::OpenAiResponses => {
-            build_openai_responses_request(config, blocks, critical_reasoning)
-        }
+        ApiProtocol::OpenAiResponses => build_openai_responses_request(config, blocks),
         ApiProtocol::Anthropic => build_anthropic_request(config, blocks),
     };
     if let Some(object) = body.as_object_mut() {
         object.extend(config.request_fields.clone());
     }
+    crate::model_payload::apply_reasoning(config, &mut body, reasoning);
     body
 }
 
@@ -267,6 +310,7 @@ pub fn prepare_model_request_with_reasoning(
     }
     let cache_mark_count = count_cache_control_marks(&body);
     PreparedModelRequest {
+        critical_reasoning,
         body,
         prompt_cache_plan: prompt_cache_plan_audit(&prompt_blocks),
         structured_output,
@@ -490,9 +534,11 @@ fn apply_native_interaction(
                     .collect(),
             );
             body["tool_choice"] = json!(native_tool_choice_label(interaction.tool_choice));
-            body["parallel_tool_calls"] = json!(interaction.parallel_tool_calls);
+            if interaction.send_parallel_tool_calls {
+                body["parallel_tool_calls"] = json!(interaction.parallel_tool_calls);
+            }
             if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
-                append_openai_chat_exchanges(messages, interaction);
+                append_openai_chat_exchanges(config, messages, interaction);
             }
         }
         ApiProtocol::OpenAiResponses => {
@@ -510,7 +556,9 @@ fn apply_native_interaction(
                     .collect(),
             );
             body["tool_choice"] = json!(native_tool_choice_label(interaction.tool_choice));
-            body["parallel_tool_calls"] = json!(interaction.parallel_tool_calls);
+            if interaction.send_parallel_tool_calls {
+                body["parallel_tool_calls"] = json!(interaction.parallel_tool_calls);
+            }
             let mut input = match body.get("input") {
                 Some(Value::Array(items)) => items.clone(),
                 Some(Value::String(text)) => vec![json!({
@@ -533,10 +581,16 @@ fn apply_native_interaction(
                 .collect::<Vec<_>>();
             mark_anthropic_static_tool_prefix(&mut tools, interaction.static_tool_count);
             body["tools"] = Value::Array(tools);
-            body["tool_choice"] = json!({
-                "type": anthropic_tool_choice_label(interaction.tool_choice),
-                "disable_parallel_tool_use": !interaction.parallel_tool_calls,
-            });
+            body["tool_choice"] = if interaction.send_parallel_tool_calls {
+                json!({
+                    "type": anthropic_tool_choice_label(interaction.tool_choice),
+                    "disable_parallel_tool_use": !interaction.parallel_tool_calls,
+                })
+            } else {
+                json!({
+                    "type": anthropic_tool_choice_label(interaction.tool_choice),
+                })
+            };
             if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
                 append_anthropic_exchanges(messages, interaction);
             }
@@ -629,17 +683,38 @@ fn exchanges_for_delta<'a>(
         .filter(move |exchange| exchange.delta_id == delta_id)
 }
 
-fn openai_chat_exchange_messages(exchange: &crate::NativeExchange) -> Vec<Value> {
+fn openai_chat_exchange_messages(
+    config: &ModelServiceConfig,
+    exchange: &crate::NativeExchange,
+) -> Vec<Value> {
     let mut messages = vec![
         json!({"role":"assistant","content":optional_text(&exchange.assistant_text),"tool_calls":exchange.calls.iter().map(|call| json!({"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.raw_arguments}})).collect::<Vec<_>>()}),
     ];
+    if crate::model_catalog::uses_zhipu_chat(config) {
+        if let Some(metadata) = exchange
+            .calls
+            .first()
+            .and_then(|call| call.assistant_continuation.as_ref())
+        {
+            if crate::model_requirements::capabilities(config).map(|m| m.id.as_str())
+                == Some(metadata.catalog_id.as_str())
+                && config.model == metadata.model
+            {
+                messages[0]["reasoning_content"] = json!(metadata.reasoning_content);
+            }
+        }
+    }
     messages.extend(exchange.results.iter().map(
         |result| json!({"role":"tool","tool_call_id":result.call_id,"content":result.content}),
     ));
     messages
 }
 
-fn append_openai_chat_exchanges(messages: &mut Vec<Value>, interaction: &ModelInteractionRequest) {
+fn append_openai_chat_exchanges(
+    config: &ModelServiceConfig,
+    messages: &mut Vec<Value>,
+    interaction: &ModelInteractionRequest,
+) {
     let original = std::mem::take(messages);
     let mut ordered = Vec::new();
     let mut tail = Vec::new();
@@ -656,7 +731,7 @@ fn append_openai_chat_exchanges(messages: &mut Vec<Value>, interaction: &ModelIn
         ordered.push(message);
         if let Some(delta_id) = delta_id {
             for exchange in exchanges_for_delta(interaction, &delta_id) {
-                ordered.extend(openai_chat_exchange_messages(exchange));
+                ordered.extend(openai_chat_exchange_messages(config, exchange));
             }
         }
     }
@@ -817,6 +892,9 @@ pub fn validate_model_request_fields(fields: &BTreeMap<String, Value>) -> Result
         "response_format",
         "enable_thinking",
         "reasoning_effort",
+        "reasoning",
+        "thinking",
+        "output_config",
         "system",
     ];
     if fields.len() > 32 {
@@ -889,12 +967,17 @@ pub fn model_request_audit_event(
 }
 
 pub fn model_response_audit_event(status: u16, raw_body: &Value) -> Value {
-    let error_kind = if !(200..400).contains(&status) {
+    let stream_error = raw_body.get("stream_error");
+    let error_kind = if stream_error.is_some() {
+        "model_stream_error"
+    } else if !(200..400).contains(&status) {
         "http_error"
     } else {
         "http_success"
     };
-    let response = if status >= 400 {
+    let response = if let Some(error) = stream_error {
+        json!({ "error": redact_value(error) })
+    } else if status >= 400 {
         match raw_body.get("error") {
             Some(e) => json!({ "error": redact_value(e) }),
             None => json!({}),
@@ -957,11 +1040,26 @@ pub fn prompt_cache_plan_audit(blocks: &[PromptBlock]) -> Value {
     )
 }
 
+/// Validate protocol-level representability before HTTP. Model-specific support
+/// remains an upstream contract; do not guess capabilities from model names.
+pub fn validate_reasoning_wire(protocol: ApiProtocol, body: &Value) -> Result<(), String> {
+    if protocol == ApiProtocol::Anthropic {
+        if let Some(level) = body
+            .pointer("/output_config/effort")
+            .and_then(Value::as_str)
+        {
+            if !matches!(level, "low" | "medium" | "high" | "max") {
+                return Err("unsupported_reasoning_intensity: anthropic adaptive thinking accepts low, medium, high, max; no implicit downgrade".into());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn build_openai_compatible_request(
     config: &ModelServiceConfig,
     blocks: &[ModelPromptBlock],
     structured_output: StructuredOutputHint,
-    critical_reasoning: bool,
 ) -> Value {
     let messages = blocks
         .iter()
@@ -981,16 +1079,6 @@ fn build_openai_compatible_request(
         "messages": messages,
         "max_tokens": config.max_llm_output_tokens
     });
-    if let Some(enable_thinking) = config.openai_compatible.enable_thinking {
-        body["enable_thinking"] = json!(enable_thinking && critical_reasoning);
-    }
-    if let Some(reasoning_effort) = &config.openai_compatible.reasoning_effort {
-        if !critical_reasoning || reasoning_effort == REASONING_EFFORT_DISABLED {
-            body["thinking"] = json!({ "type": "disabled" });
-        } else {
-            body["reasoning_effort"] = json!(reasoning_effort);
-        }
-    }
     if config.openai_compatible.stream {
         body["stream"] = json!(true);
         body["stream_options"] = json!({"include_usage": true});
@@ -1002,7 +1090,6 @@ fn build_openai_compatible_request(
 fn build_openai_responses_request(
     config: &ModelServiceConfig,
     blocks: &[ModelPromptBlock],
-    critical_reasoning: bool,
 ) -> Value {
     let instructions = blocks
         .iter()
@@ -1022,13 +1109,8 @@ fn build_openai_responses_request(
         "input": input,
         "max_output_tokens": config.max_llm_output_tokens
     });
-    if let Some(reasoning_effort) = &config.openai_compatible.reasoning_effort {
-        let effort = if critical_reasoning && reasoning_effort != REASONING_EFFORT_DISABLED {
-            reasoning_effort.as_str()
-        } else {
-            "none"
-        };
-        body["reasoning"] = json!({ "effort": effort });
+    if config.openai_compatible.stream {
+        body["stream"] = json!(true);
     }
     body
 }
@@ -1316,7 +1398,7 @@ pub fn parse_model_response(
             )
         }
     };
-    let tool_calls = match parse_native_tool_calls(config.api_protocol, raw) {
+    let mut tool_calls = match parse_native_tool_calls(config.api_protocol, raw) {
         Ok(tool_calls) => tool_calls,
         Err(error) if truncated => {
             append_truncated_native_tool_context(&mut content, raw, config.api_protocol, &error);
@@ -1330,6 +1412,24 @@ pub fn parse_model_response(
             tool_calls.len(),
             config.interaction.max_tool_calls_per_response
         ));
+    }
+    if crate::model_catalog::uses_zhipu_chat(config) {
+        if let (Some(call), Some(reasoning)) = (
+            tool_calls.first_mut(),
+            raw.pointer("/choices/0/message/reasoning_content")
+                .and_then(Value::as_str),
+        ) {
+            if reasoning.len() > MAX_ASSISTANT_CONTINUATION_BYTES {
+                return Err("model_reasoning_continuation_too_large".into());
+            }
+            call.assistant_continuation = Some(crate::interaction::AssistantContinuation {
+                catalog_id: crate::model_requirements::capabilities(config)
+                    .map(|m| m.id.clone())
+                    .unwrap_or_default(),
+                model: config.model.clone(),
+                reasoning_content: reasoning.to_owned(),
+            });
+        }
     }
     Ok(LlmResponse {
         content,
@@ -1351,6 +1451,58 @@ pub fn interpret_model_http_response(
         && looks_like_sse(body_text)
     {
         return interpret_openai_compatible_sse(config, status, body_text);
+    }
+    if (200..300).contains(&status)
+        && config.api_protocol == ApiProtocol::OpenAiResponses
+        && looks_like_sse(body_text)
+    {
+        let mut decoder = crate::model_stream::OpenAiContentStream::default();
+        let mut terminal = None;
+        let mut protocol_failed = false;
+        let mut upstream_failure = None;
+        let decoded = decoder.push_events(body_text.as_bytes(), &mut |event| match event["type"]
+            .as_str()
+        {
+            Some("response.completed" | "response.incomplete") => {
+                let response = &event["response"];
+                let expected = if event["type"] == "response.completed" {
+                    "completed"
+                } else {
+                    "incomplete"
+                };
+                if terminal.is_some()
+                    || response["status"] != expected
+                    || !response["output"].is_array()
+                {
+                    protocol_failed = true;
+                } else {
+                    terminal = Some(response.clone());
+                }
+            }
+            Some("response.failed" | "error") if upstream_failure.is_none() => {
+                upstream_failure = Some(openai_responses_stream_failure_summary(event));
+            }
+            _ => {}
+        });
+        let raw_json = match (&terminal, &upstream_failure) {
+            (_, Some(failure)) => json!({"stream": true, "stream_error": failure}),
+            (Some(response), None) => response.clone(),
+            (None, None) => Value::Null,
+        };
+        let result = match (decoded, upstream_failure.as_ref()) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Some(failure)) => Err(openai_responses_stream_failure_message(failure)),
+            (Ok(_), None) if protocol_failed => Err("model_responses_stream_failed".into()),
+            (Ok(_), None) if raw_json.is_null() => {
+                Err("model_responses_stream_missing_terminal".into())
+            }
+            (Ok(_), None) => parse_model_response(config, &raw_json),
+        };
+        return ModelHttpResponseInterpretation {
+            status,
+            raw_json,
+            result,
+        };
     }
     let mut parsed_json = true;
     let raw_json: Value = serde_json::from_str(body_text).unwrap_or_else(|_| {
@@ -1377,6 +1529,58 @@ pub fn interpret_model_http_response(
         status,
         raw_json,
         result,
+    }
+}
+
+fn openai_responses_stream_failure_summary(event: &Value) -> Value {
+    let event_type = event
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let error = if event_type == "response.failed" {
+        event.pointer("/response/error").unwrap_or(&Value::Null)
+    } else {
+        event.get("error").unwrap_or(event)
+    };
+    let bounded = |value: Option<&str>| {
+        value
+            .map(str::to_string)
+            .map(sanitize_model_error_reason)
+            .filter(|value| !value.is_empty())
+    };
+    let response = event.get("response").unwrap_or(&Value::Null);
+    json!({
+        "event_type": event_type,
+        "response_id": bounded(response.get("id").and_then(Value::as_str)),
+        "response_status": bounded(response.get("status").and_then(Value::as_str)),
+        "code": bounded(error.get("code").and_then(Value::as_str)),
+        "type": bounded(error.get("type").and_then(Value::as_str)),
+        "param": bounded(error.get("param").and_then(Value::as_str)),
+        "message": bounded(error.get("message").and_then(Value::as_str)),
+    })
+}
+
+fn openai_responses_stream_failure_message(failure: &Value) -> String {
+    let mut details = Vec::new();
+    for field in [
+        "event_type",
+        "response_id",
+        "response_status",
+        "code",
+        "type",
+        "param",
+    ] {
+        if let Some(value) = failure.get(field).and_then(Value::as_str) {
+            details.push(format!("{field}={value}"));
+        }
+    }
+    if let Some(message) = failure.get("message").and_then(Value::as_str) {
+        details.push(format!("message={message}"));
+    }
+    if details.is_empty() {
+        "model_responses_stream_failed".into()
+    } else {
+        format!("model_responses_stream_failed: {}", details.join(" "))
     }
 }
 
@@ -1525,6 +1729,7 @@ fn parse_native_tool_calls(
                             return Err(format!("invalid_tool_call[{index}].input_must_be_object"));
                         }
                         Ok(NativeToolCall {
+                            assistant_continuation: None,
                             id,
                             name,
                             raw_arguments: serde_json::to_string(&arguments)
@@ -1561,6 +1766,7 @@ fn parse_string_arguments_tool_call(
         ));
     }
     Ok(NativeToolCall {
+        assistant_continuation: None,
         id,
         name,
         arguments,
@@ -1587,6 +1793,8 @@ fn looks_like_sse(body: &str) -> bool {
         .is_some_and(|line| line.starts_with("data:") || line.starts_with("event:"))
 }
 
+const MAX_ASSISTANT_CONTINUATION_BYTES: usize = 4 * 1024 * 1024;
+
 fn interpret_openai_compatible_sse(
     config: &ModelServiceConfig,
     status: u16,
@@ -1597,10 +1805,12 @@ fn interpret_openai_compatible_sse(
     let mut usage = Value::Null;
     let mut event_count = 0_u64;
     let mut reasoning_chunk_count = 0_u64;
+    let mut reasoning_content = String::new();
+    let preserve_reasoning = crate::model_catalog::uses_zhipu_chat(config);
     let mut parse_error = None;
     let mut streamed_calls: Vec<(String, String, String)> = Vec::new();
 
-    for line in body_text.lines() {
+    'events: for line in body_text.lines() {
         let line = line.trim_start();
         let Some(payload) = line.strip_prefix("data:").map(str::trim) else {
             continue;
@@ -1616,12 +1826,22 @@ fn interpret_openai_compatible_sse(
             }
         };
         event_count += 1;
-        if event
+        if let Some(text) = event
             .pointer("/choices/0/delta/reasoning_content")
             .and_then(Value::as_str)
-            .is_some_and(|text| !text.is_empty())
         {
-            reasoning_chunk_count += 1;
+            if !text.is_empty() {
+                reasoning_chunk_count += 1;
+            }
+            if preserve_reasoning {
+                if reasoning_content.len().saturating_add(text.len())
+                    > MAX_ASSISTANT_CONTINUATION_BYTES
+                {
+                    parse_error = Some("model_reasoning_continuation_too_large".into());
+                    break;
+                }
+                reasoning_content.push_str(text);
+            }
         }
         if let Some(text) = event
             .pointer("/choices/0/delta/content")
@@ -1639,6 +1859,10 @@ fn interpret_openai_compatible_sse(
                     .and_then(Value::as_u64)
                     .and_then(|value| usize::try_from(value).ok())
                     .unwrap_or(streamed_calls.len());
+                if index >= config.interaction.max_tool_calls_per_response {
+                    parse_error = Some("too_many_tool_calls: stream index exceeds limit".into());
+                    break 'events;
+                }
                 if streamed_calls.len() <= index {
                     streamed_calls
                         .resize_with(index + 1, || (String::new(), String::new(), String::new()));
@@ -1676,7 +1900,7 @@ fn interpret_openai_compatible_sse(
             })
         })
         .collect::<Vec<_>>();
-    let raw_json = json!({
+    let mut raw_json = json!({
         "stream": true,
         "stream_metadata": {
             "event_count": event_count,
@@ -1688,6 +1912,9 @@ fn interpret_openai_compatible_sse(
         }],
         "usage": usage,
     });
+    if preserve_reasoning {
+        raw_json["choices"][0]["message"]["reasoning_content"] = json!(reasoning_content);
+    }
     let result = match parse_error {
         Some(error) => Err(error),
         None if event_count == 0 => Err("empty_model_sse_response".to_string()),

@@ -251,6 +251,7 @@ export type SessionWorker = {
 
 export type ResponsePreview = {
   attempt: number;
+  timeline_seq?: number;
   revision: number;
   interruption?: string | null;
   response?: { attempt: number; revision: number; text: string; status: "streaming" | "intermediate" | "final" } | null;
@@ -277,12 +278,14 @@ export type WebTurnUserEntry = {
   worker_roles?: WorkerRole[];
   /** Legacy history compatibility. */ worker_role?: WorkerRole;
   created_at_ms: number;
+  timeline_seq?: number;
 };
 export type WebTurnEvent = {
   event_id: string;
   source: "core_topic" | "worker_activity" | string;
   payload: Record<string, unknown>;
   created_at_ms: number;
+  timeline_seq?: number;
 };
 
 export type Attachment = {
@@ -326,11 +329,16 @@ export type Activity = {
   tone: "thinking" | "action" | "notice" | "warning" | "error";
   title: string;
   detail?: string;
+  diagnostic?: string;
   code?: string;
   code_language?: string;
   tool_name?: string;
   tool_status?: string;
   tool_mode?: string;
+  memory_search?: import("./tool_presentation").MemorySearchPresentation;
+  self_tool?: import("./tool_presentation").SelfToolPresentation;
+  readfile?: import("./tool_presentation").ReadFilePresentation;
+  run_bash_edit?: import("./tool_presentation").RunBashEditPresentation;
   elapsed_ms?: number;
   timeout_ms?: number;
   loop_timeout_ms?: number;
@@ -340,11 +348,13 @@ export type Activity = {
   execution_order?: number;
   settled_order?: number;
   kind?:
-    | "context_compact"
+    | "context_compress"
     | "toolgen"
     | "free_talk"
     | "user_supplement"
-    | "memo_notice";
+    | "memo_notice"
+    | "reasoning_notice"
+    | "model_service_issue";
   toolgen_phase?: string;
   compact_phase?: "requested" | "completed";
   estimated_prompt_tokens?: number;
@@ -355,6 +365,7 @@ export type Activity = {
   native_before_tokens?: number;
   native_after_tokens?: number;
   createdAt: number;
+  timelineSeq?: number;
 };
 
 export type Decision = {
@@ -365,6 +376,8 @@ export type Decision = {
 };
 
 export type ModelEndpoint = {
+  requirements?: import("./model_endpoints").EndpointRequirements;
+  catalog_id?: string | null;
   id: string;
   name: string;
   model: string;
@@ -374,6 +387,7 @@ export type ModelEndpoint = {
   max_llm_input_tokens: number;
   max_llm_output_tokens: number;
   stream: boolean;
+  function_calling: boolean;
   api_key_configured: boolean;
   http_headers: Record<string, string>;
   request_fields: Record<string, unknown>;
@@ -439,6 +453,9 @@ export type ChatFavorite = {
   deleted?: boolean;
 };
 
+export type ModelToolResultBytes = 8192 | 10240 | 16384 | 20480 | 30720;
+export type ContextCompressThresholdPercent = 80 | 85 | 90 | 95 | 100;
+
 export type Snapshot = {
   server: {
     version: string;
@@ -448,6 +465,7 @@ export type Snapshot = {
     public_access: boolean;
     debug_mode: boolean;
     performance_trace: boolean;
+    restoring?: boolean;
     mem: {
       space: string;
       data_dir: string;
@@ -457,6 +475,8 @@ export type Snapshot = {
       temporary_capacity_bytes: number | null;
       conversation_capacity_bytes: number | null;
       claude_codex_tool_discovery: boolean;
+      model_tool_result_bytes: ModelToolResultBytes;
+      context_compress_threshold_percent: ContextCompressThresholdPercent;
     };
     runtime_options: Array<{
       key: string;
@@ -466,6 +486,8 @@ export type Snapshot = {
     session_env_defaults: Record<string, string>;
     workspace_dirs: string[];
     mcp_servers: McpServerReport[];
+    model_catalog?: import("./model_endpoints").CatalogModel[];
+    model_providers?: import("./model_endpoints").ProviderSpec[];
     model_endpoints: ModelEndpoint[];
   };
   sessions: Session[];
@@ -557,6 +579,8 @@ export type WireEvent =
       type: "core_topic";
       turn_id?: string | null;
       turn_event_id?: string | null;
+      timeline_seq?: number | null;
+      created_at_ms?: number | null;
       event: CoreTopicEvent;
     }
   | {
@@ -566,6 +590,8 @@ export type WireEvent =
       worker_id: string;
       turn_id?: string | null;
       turn_event_id?: string | null;
+      timeline_seq?: number | null;
+      created_at_ms?: number | null;
       event: Record<string, unknown>;
     }
   | {
@@ -621,10 +647,20 @@ export type WireEvent =
       temporary_capacity_bytes: number | null;
       conversation_capacity_bytes: number | null;
       claude_codex_tool_discovery: boolean;
+      model_tool_result_bytes: ModelToolResultBytes;
+      context_compress_threshold_percent: ContextCompressThresholdPercent;
     }
   | { type: "mem_temporary_items"; items: MemTemporaryItem[]; error?: string }
   | { type: "file_uploaded"; session_id: string; file: Attachment }
   | { type: "attachment_removed"; session_id: string; attachment_id: string }
+  | {
+      type: "turn_history_page";
+      session_id: string;
+      turn_id: string;
+      offset: number;
+      records: ChatHistoryRecord[];
+      next_offset: number | null;
+    }
   | {
       type: "history_page";
       session_id: string;
@@ -651,6 +687,8 @@ export type WireEvent =
       server_id: string;
       values: Record<string, string>;
     }
+  | { type: "model_endpoint_share_exported"; request_id: string; data: string }
+  | { type: "model_endpoint_share_imported"; request_id: string; name: string }
   | { type: "model_endpoints_updated"; endpoints: ModelEndpoint[] }
   | {
       type: "model_endpoint_import_scanned";
@@ -689,7 +727,7 @@ export type ClientCommand =
   | { type: "session_api_key_reveal"; session_id: string }
   | { type: "session_stop"; session_id: string }
   | { type: "session_clear_context"; session_id: string }
-  | { type: "session_request_context_compact"; session_id: string }
+  | { type: "session_request_context_compress"; session_id: string }
   | { type: "session_delete"; session_id: string }
   | {
       type: "chat_message_delete";
@@ -782,6 +820,12 @@ export type ClientCommand =
     }
   | { type: "attachment_remove"; session_id: string; attachment_id: string }
   | {
+      type: "turn_history_page";
+      session_id: string;
+      turn_id: string;
+      offset: number;
+    }
+  | {
       type: "history_page";
       session_id: string;
       before_cursor?: string | null;
@@ -820,11 +864,14 @@ export type ClientCommand =
         max_llm_input_tokens: number;
         max_llm_output_tokens: number;
         stream: boolean;
+        function_calling: boolean;
         api_key?: string;
         http_headers: Record<string, string>;
         request_fields: Record<string, unknown>;
         allow_cross_origin_redirects: boolean;
         private_ca_pem?: string;
+        requirements?: import("./model_endpoints").EndpointRequirements;
+  catalog_id?: string | null;
         reasoning_effort?: string | null;
       };
   }
@@ -840,6 +887,8 @@ export type ClientCommand =
       type: "model_endpoint_import_apply";
       candidate_ids: string[];
     }
+  | { type: "model_endpoint_share_export"; request_id: string; endpoint_id: string; basic: boolean; advanced: boolean; personal: boolean }
+  | { type: "model_endpoint_share_import"; request_id: string; data: string }
   | { type: "model_endpoint_secret_reveal"; endpoint_id: string }
   | { type: "mcp_server_upsert"; session_id: string; config: McpServerConfig }
   | { type: "mcp_server_delete"; server_id: string }
@@ -859,6 +908,11 @@ export type ClientCommand =
     }
   | { type: "mem_conversation_capacity_update"; max_bytes: number | null }
   | { type: "beta_claude_codex_tool_discovery_update"; enabled: boolean }
+  | { type: "system_model_tool_result_bytes_update"; max_bytes: ModelToolResultBytes }
+  | {
+      type: "system_context_compress_threshold_update";
+      percent: ContextCompressThresholdPercent;
+    }
   | { type: "mem_temporary_items_list" }
   | { type: "mem_temporary_items_delete"; ids: string[] }
   | {

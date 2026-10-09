@@ -93,6 +93,11 @@ The product Web host is split by internal responsibility under `src/server/`:
   accepted work from executing in the new space.
 - Per-session browser upload storage and attachment metadata. Uploaded bytes
   remain host-local; the host only contributes their paths as session context.
+- Atomic, single-use persistence of Core-owned dynamic prompt-context snapshots
+  during graceful runtime handoff. The Host stores/restores the opaque compound
+  snapshot and consumes it before import so a crash cannot replay an old
+  generation. Core defines whether a snapshot is empty; the Host must not drop
+  Native exchanges, memo state, or pending notices by inspecting text deltas.
 - Memory-space-scoped Worker Role library ownership. Roles and Role groups are
   shared by every Session in the active memory space, persisted atomically
   outside individual Session directories, and projected into snapshots and
@@ -100,6 +105,7 @@ The product Web host is split by internal responsibility under `src/server/`:
   During restore, legacy per-Session `worker_roles.json` arrays are merged by
   case-insensitive name; distinct ID collisions receive new IDs. Turn history
   continues to store immutable Role snapshots so past prompts remain readable.
+- MEM-owned System settings such as the validated per-tool model-visible result budget. The Host persists the exact allowed value, projects it in snapshots/events, applies it to new Core workers, and queues updates for existing workers without moving the actual result-envelope gate out of Core.
 - Host-only settings and UI command validation.
 - MCP configuration projection and Session enablement routing. Server
   definitions are persisted in the active mem, secrets remain server-side and
@@ -218,6 +224,55 @@ It must not contain:
 
 The Host projects the Session's durable model endpoint ID, not a browser-inferred
 configuration match. Endpoint edits update the complete route for idle bound
-Sessions; active Turns retain their route until the next new-Turn boundary.
-Restore and submission resolve the saved ID; deleted endpoints fail closed.
-Legacy migration requires a unique full configuration match, including secrets.
+Sessions. Selecting a different endpoint during an active Turn updates only the
+durable ID. The active Turn retains its complete start configuration across all
+model rounds; submission resolves the latest saved endpoint and applies its full
+configuration before the next new Turn/model request. Deleted endpoints fail
+closed. Legacy migration requires a unique full configuration match, including
+secrets and reasoning policy. The Host also persists the endpoint's Function calling preference
+and any Core-produced negative capability probe. A probe record is injected, replaced, or cleared
+only when its complete secret-free Core identity matches the currently bound endpoint, protocol,
+normalized base URL, model, and relevant reasoning options. Persistence must validate both the
+Session runtime snapshot that emitted the event and, while holding the MEM lock, an identity rebuilt
+from the current durable endpoint. A late event is discarded if either identity has drifted, so an
+endpoint edit cannot be overwritten by an older probe result. The Host may project exact catalog
+knowledge or an unknown value into Core, but it must not classify provider failures or invent a
+capability result.
+
+### Embedded Web build artifacts
+
+`build.rs` embeds the tracked `interfaces/web/dist` assets. Generated source must
+resolve original assets with compile-time `CARGO_MANIFEST_DIR`, not absolute paths
+from the worktree that ran the build script. Precompressed gzip files belong under
+Cargo `OUT_DIR/web-gzip` and are referenced through compile-time `OUT_DIR`; they
+must not depend on system temporary files surviving until a later compilation.
+`tests/embedded_assets_tests.rs` guards these paths and verifies the embedded HTML
+and its gzip representation against the current dist.
+
+### Prompt-context restart handoff
+
+A shutdown prompt snapshot is a bounded, single-use handoff, not a durable live
+checkpoint. Restore invalidates the file before importing it; abrupt termination
+then resumes without dynamic context rather than resurrecting pre-compaction
+history. Raw chat history is unaffected. Graceful shutdown exports only the
+Session's registered primary worker (the same owner used by restore), invalidates
+any previous snapshot before export, and reports export/write failures. Missing,
+oversized, or failed replacement snapshots must never silently reuse older state.
+
+### 模型白名单接入
+Web host 持久化接入点 catalog_id，公开 Core 的 model_catalog 投影，保存时调用 Core 准入检查，并向会话配置传递绑定。界面负责展示、交互和提前提示，不作为约束的唯一执行点。
+
+
+### Endpoint Base64 sharing adapter
+
+`server/model_endpoint_share.rs` owns the versioned `timem.endpoint` v1 wire
+adapter, category filtering and bounded Base64 parsing (256 KiB). It reuses the
+existing Host endpoint store and Core-backed configuration validation rather
+than introducing browser-side persistence or model policy. Imports always add a
+new ID, resolve name collisions and persist under one memory lock before
+publishing the redacted endpoint projection. Missing basic configuration is a
+fragment, not a valid new endpoint. API keys, headers and private CA are exported
+only on explicit personal-category selection. Custom fields and URLs can also
+contain secrets; Base64 is encoding, not encryption. Export responses are direct
+to the requesting authenticated socket, excluded from semantic replay and
+command-result caches. No payload is written to command tracing.

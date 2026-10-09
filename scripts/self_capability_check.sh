@@ -53,12 +53,14 @@ run_exact agent_core lib "" capability::tests::host_profile_without_bash_keeps_n
 run_dimension "long work / bounded context and resumable compaction"
 run_exact agent_core test core_tests long_context_forces_shrink_at_ninety_percent_window_with_compaction_instruction
 run_exact agent_core lib "" session_runtime::tests::session_turn_scratch_context_offload_records_id_and_continues
-run_exact agent_core lib "" prompt_component_tests::native_context_compact_persists_summary_after_discarding_all_old_deltas
+run_exact agent_core lib "" prompt_component_tests::native_context_compress_persists_summary_after_replacing_all_old_deltas
 
 run_dimension "runtime completeness / terminal ordering and late input ownership"
 run_exact agent_core lib "" session_runtime::tests::cancelled_turn_projection_has_one_token_and_authoritative_terminal_order
 run_exact agent_core lib "" shell_exec::tests::concurrent_refresh_delivers_each_terminal_update_exactly_once
 run_exact timem_session lib "" tests::worker_option_returns_late_supplement_after_preserving_the_first_final_answer
-run_exact timem lib "" server::tests::final_answer_is_preserved_before_unconsumed_supplement_starts_a_new_turn
+run_exact timem lib "" server::tests::normal_completion_hands_unconsumed_supplement_off_before_ordinary_queue
+run_exact timem lib "" server::tests::stopped_primary_turn_preserves_unconsumed_supplements_without_resubmitting
+run_exact timem lib "" server::tests::failed_unconsumed_handoff_preserves_final_answer_and_pending_supplement
 
 echo "self_capability_check: ok"

@@ -1,6 +1,6 @@
 {
   "name": "timem-web",
-  "version": "2.3.3",
+  "version": "2.4.0",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.7.0",
@@ -9,7 +9,7 @@
     "build": "tsc --noEmit && vite build",
     "test": "vitest run --exclude tests/performance_guard.test.ts",
     "test:watch": "vitest",
-    "test:browser": "node tests/browser/stop-ui-acceptance.mjs && node tests/browser/stream-preview-suite.mjs",
+    "test:browser": "node tests/browser/stop-ui-acceptance.mjs && node tests/browser/duplicate-history-acceptance.mjs && node tests/browser/stream-preview-suite.mjs",
     "test:ui:stop": "pnpm build && node tests/browser/stop-ui-acceptance.mjs",
     "test:ui:stream": "node tests/browser/stream-preview-suite.mjs"
   },

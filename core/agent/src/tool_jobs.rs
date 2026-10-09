@@ -123,8 +123,10 @@ impl FileToolJobStore {
             }
         };
         let pid = child.id();
+        let child_registration = crate::os::register_managed_child(pid);
         let supervisor_status_file = status_file.clone();
         thread::spawn(move || {
+            let _child_registration = child_registration;
             let status = child.wait();
             let rendered = match status {
                 Ok(status) => status

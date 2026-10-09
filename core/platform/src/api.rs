@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::sync::OnceLock;
 
 #[cfg(unix)]
@@ -298,6 +298,276 @@ pub fn graphical_session_available() -> bool {
     platform_graphical_session_available()
 }
 
+/// Process-wide orphan safety-net initialization state.
+///
+/// The safety net is optional: unsupported platforms and initialization
+/// failures must never block local command execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessSafetyNetStatus {
+    Active,
+    Unsupported,
+    InitializationFailed,
+}
+
+/// Starts the Runtime-wide orphan safety net at most once per process.
+///
+/// Linux installs the process as a child subreaper and runs the bounded
+/// fallback reaper. Other platforms report Unsupported. Failure never blocks
+/// local command execution; callers retain process-group/platform fallbacks.
+#[derive(Debug)]
+pub struct ProcessSafetyNetGuard {
+    status: ProcessSafetyNetStatus,
+}
+
+impl ProcessSafetyNetGuard {
+    pub fn status(&self) -> ProcessSafetyNetStatus {
+        self.status
+    }
+}
+
+impl Drop for ProcessSafetyNetGuard {
+    fn drop(&mut self) {
+        cleanup_process_safety_net();
+    }
+}
+
+pub fn ensure_process_safety_net() -> ProcessSafetyNetGuard {
+    static STATUS: OnceLock<ProcessSafetyNetStatus> = OnceLock::new();
+    let status = *STATUS.get_or_init(|| {
+        if !install_process_subreaper() {
+            return if cfg!(target_os = "linux") {
+                ProcessSafetyNetStatus::InitializationFailed
+            } else {
+                ProcessSafetyNetStatus::Unsupported
+            };
+        }
+        match std::thread::Builder::new()
+            .name("orphan-reaper".to_string())
+            .spawn(|| {
+                let mut reaper = FallbackProcessReaper::for_runtime();
+                loop {
+                    reaper.reap_adopted_zombies();
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+            }) {
+            Ok(_) => ProcessSafetyNetStatus::Active,
+            Err(_) => ProcessSafetyNetStatus::InitializationFailed,
+        }
+    });
+    ProcessSafetyNetGuard { status }
+}
+
+/// Best-effort removal of empty process-management facilities owned by this
+/// Runtime. Live or unrecognised scopes are preserved, and cleanup failure
+/// never changes command or shutdown behavior.
+pub fn cleanup_process_safety_net() {
+    #[cfg(target_os = "linux")]
+    crate::linux::cleanup_current_runtime_process_scope();
+}
+
+pub fn install_process_subreaper() -> bool {
+    #[cfg(unix)]
+    return crate::shared::install_process_subreaper();
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// Registers a direct child as owned by its `Child` supervisor. Keep the
+/// returned guard alive until that owner has completed `wait`.
+pub struct ManagedChildRegistration {
+    #[cfg(unix)]
+    _inner: crate::shared::ManagedChildRegistration,
+}
+
+pub fn register_managed_child(pid: u32) -> ManagedChildRegistration {
+    #[cfg(not(unix))]
+    let _ = pid;
+    ManagedChildRegistration {
+        #[cfg(unix)]
+        _inner: crate::shared::register_managed_child(pid),
+    }
+}
+
+/// Runs a synchronous command while reserving its child exit status for this
+/// owner, so the Runtime fallback reaper cannot consume it.
+pub fn command_status(command: &mut Command) -> std::io::Result<ExitStatus> {
+    let mut child = command.spawn()?;
+    let registration = register_managed_child(child.id());
+    let status = child.wait();
+    drop(registration);
+    status
+}
+
+/// Runs a synchronous command with captured output while reserving its child
+/// exit status for this owner.
+pub fn command_output(command: &mut Command) -> std::io::Result<Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = command.spawn()?;
+    let registration = register_managed_child(child.id());
+    let output = child.wait_with_output();
+    drop(registration);
+    output
+}
+
+/// Periodic, targeted reaper for dead descendants adopted by a Linux
+/// subreaper. It never waits on a registered managed child.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OrphanProcessEvent {
+    pub pid: u32,
+    pub process_name: String,
+    pub state: &'static str,
+}
+
+/// One bounded internal adoption or terminal transition from the Runtime
+/// fallback process supervisor. These transitions support diagnostics and
+/// tests; model-facing RuntimeInfo uses only current fallback snapshots.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FallbackProcessSnapshot {
+    pub pid: u32,
+    pub process_name: String,
+    pub zombie: bool,
+}
+
+/// Read-only diagnostic entry point; this does not establish task ownership.
+pub fn process_observation_note(pid: u32) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        format!("proc: /proc/{pid}; cgroup membership: /proc/{pid}/cgroup (observation only, not task ownership)")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        String::new()
+    }
+}
+
+/// Current descendants being watched by the Runtime fallback chain because
+/// no registered direct-child owner remains.
+pub fn fallback_process_snapshots() -> Vec<FallbackProcessSnapshot> {
+    #[cfg(unix)]
+    return crate::shared::fallback_process_snapshots()
+        .into_iter()
+        .map(|snapshot| FallbackProcessSnapshot {
+            pid: snapshot.pid,
+            process_name: snapshot.process_name,
+            zombie: snapshot.zombie,
+        })
+        .collect();
+    #[cfg(not(unix))]
+    Vec::new()
+}
+
+/// Current Runtime and Session aggregate process-observation scopes.
+/// Linux creates stable empty cgroup-v2 parent directories above per-Job
+/// leaves. Other platforms return `Ok(None)` until they provide an equivalent
+/// native read-only observation scope.
+pub fn process_aggregate_scope_snapshot(
+    session_id: &str,
+) -> std::io::Result<Option<crate::ProcessAggregateScopeSnapshot>> {
+    #[cfg(target_os = "linux")]
+    return crate::linux::process_aggregate_scope_snapshot(session_id).map(Some);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = session_id;
+        Ok(None)
+    }
+}
+
+/// Previous Runtime scopes for this exact Session that still contain live
+/// members. Empty stale directories are cleaned internally and not returned.
+pub fn stale_process_scope_snapshots(session_id: &str) -> Vec<crate::StaleProcessScopeSnapshot> {
+    #[cfg(target_os = "linux")]
+    return crate::linux::stale_process_scope_snapshots(session_id);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = session_id;
+        Vec::new()
+    }
+}
+
+pub fn take_orphan_process_events() -> Vec<OrphanProcessEvent> {
+    #[cfg(unix)]
+    return crate::shared::take_orphan_process_events()
+        .into_iter()
+        .map(|event| OrphanProcessEvent {
+            pid: event.pid,
+            process_name: event.process_name,
+            state: event.state,
+        })
+        .collect();
+    #[cfg(not(unix))]
+    Vec::new()
+}
+
+pub struct FallbackProcessReaper {
+    #[cfg(unix)]
+    inner: crate::shared::FallbackProcessReaper,
+}
+
+impl FallbackProcessReaper {
+    pub fn for_runtime() -> Self {
+        Self {
+            #[cfg(unix)]
+            inner: crate::shared::FallbackProcessReaper::new(),
+        }
+    }
+
+    pub fn reap_adopted_zombies(&mut self) -> usize {
+        #[cfg(unix)]
+        return self.inner.reap_once();
+        #[cfg(not(unix))]
+        0
+    }
+}
+
+/// Live orphaned descendants reparented to this runtime that escaped into a
+/// different session (for example via `setsid`). This is an observation API,
+/// not proof that a particular job owns the process.
+pub fn reparented_detached_child_pids() -> Vec<u32> {
+    #[cfg(unix)]
+    return crate::shared::reparented_detached_child_pids();
+    #[cfg(not(unix))]
+    {
+        Vec::new()
+    }
+}
+
+/// Reap a reparented orphan child that has been terminated. Without this the
+/// child remains a zombie, and kill(pid, 0) keeps reporting it as alive.
+/// Non-blocking reap attempt of a dead child (biological or subreaper-adopted).
+/// Returns true when reaped or not our child; false while it is terminating.
+pub fn try_reap_child_process(pid: u32) -> bool {
+    #[cfg(unix)]
+    return crate::shared::try_reap_child_process(pid);
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+pub fn reap_child_process(pid: u32) {
+    #[cfg(unix)]
+    crate::shared::reap_child_process(pid);
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+/// Contain a freshly spawned child in the runtime's OS-level containment
+/// (Windows job object; no-op returning true on Unix, where the subreaper
+/// safety net applies instead).
+pub fn contain_child_process(pid: u32) -> bool {
+    #[cfg(windows)]
+    return crate::windows::contain_process_in_runtime_job(pid);
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
 pub fn configure_child_process_group(command: &mut Command) {
     #[cfg(unix)]
     crate::shared::configure_child_process_group(command);
@@ -449,6 +719,123 @@ pub fn process_group_running(group_leader_pid: u32) -> bool {
     }
 }
 
+/// Local real filesystem mount points (data disks), excluding pseudo
+/// filesystems. Disk sampling uses this so writes to any data disk are
+/// covered, not only the working directory.
+pub fn local_filesystem_mount_points() -> Vec<std::path::PathBuf> {
+    #[cfg(unix)]
+    return crate::shared::local_filesystem_mount_points();
+    #[cfg(windows)]
+    return crate::windows::local_filesystem_mount_points();
+    #[cfg(not(any(unix, windows)))]
+    {
+        Vec::new()
+    }
+}
+
+/// Stable device identifier of the filesystem containing `path`, used to
+/// deduplicate paths on the same disk.
+pub fn filesystem_device_id(path: &std::path::Path) -> Option<u64> {
+    #[cfg(unix)]
+    return crate::shared::filesystem_device_id(path);
+    #[cfg(windows)]
+    return crate::windows::filesystem_device_id(path);
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// Filesystem usage for the filesystem containing `path`:
+/// (total_bytes, free_bytes). None when the stat call fails.
+pub fn filesystem_usage_bytes(path: &std::path::Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    return crate::shared::filesystem_usage_bytes(path);
+    #[cfg(windows)]
+    return crate::windows::filesystem_usage_bytes(path);
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+/// One successfully sampled filesystem, deduplicated by platform device identity.
+/// `path` is a diagnostic alias, not the identity used for comparisons.
+#[derive(Clone, Debug)]
+pub struct FilesystemUsage {
+    pub device_id: u64,
+    pub path: String,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+}
+
+/// Sample caller-provided working paths and local data mounts once per device.
+/// Unavailable paths are omitted (never interpreted as zero free bytes). A later
+/// alias may still supply a sample when an earlier usage query failed. Consumers
+/// must compare device membership/capacity before comparing aggregate byte totals.
+/// No polling, baseline, pressure threshold, or notification policy lives here.
+pub fn filesystem_usage_snapshot(working_paths: &[PathBuf]) -> Vec<FilesystemUsage> {
+    collect_filesystem_usage(
+        working_paths
+            .iter()
+            .cloned()
+            .chain(local_filesystem_mount_points()),
+        filesystem_device_id,
+        filesystem_usage_bytes,
+    )
+}
+
+fn collect_filesystem_usage(
+    paths: impl IntoIterator<Item = PathBuf>,
+    mut device_id: impl FnMut(&Path) -> Option<u64>,
+    mut usage_bytes: impl FnMut(&Path) -> Option<(u64, u64)>,
+) -> Vec<FilesystemUsage> {
+    let mut seen = std::collections::HashSet::new();
+    let mut sampled = Vec::new();
+    for path in paths {
+        let Some(device) = device_id(&path) else {
+            continue;
+        };
+        if seen.contains(&device) {
+            continue;
+        }
+        let Some((total, free)) = usage_bytes(&path) else {
+            continue;
+        };
+        seen.insert(device);
+        sampled.push(FilesystemUsage {
+            device_id: device,
+            path: path.display().to_string(),
+            total_bytes: total,
+            free_bytes: free,
+        });
+    }
+    sampled
+}
+
+#[cfg(test)]
+#[path = "../tests/unit/filesystem_snapshot_tests.rs"]
+mod filesystem_snapshot_tests;
+
+pub fn list_live_process_group_members(group_leader_pid: u32) -> Vec<u32> {
+    #[cfg(unix)]
+    return crate::shared::list_live_process_group_members(group_leader_pid);
+    #[cfg(windows)]
+    {
+        // Windows job containment reports the whole tree at shutdown; live
+        // member listing is a Unix /proc facility, so report none here.
+        let _ = group_leader_pid;
+        Vec::new()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = group_leader_pid;
+        Vec::new()
+    }
+}
+
 pub fn current_parent_pid() -> Option<u32> {
     #[cfg(unix)]
     {
@@ -478,7 +865,7 @@ fn uname_version() -> Option<String> {
 }
 
 pub(crate) fn command_first_line(program: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(program).args(args).output().ok()?;
+    let output = command_output(Command::new(program).args(args)).ok()?;
     if !output.status.success() {
         return None;
     }

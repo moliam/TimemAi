@@ -31,14 +31,13 @@ impl PromptComponentRole {
             PromptComponentRole::Assistant { .. } => match kind {
                 "free_talk" => "llm_free_talk".to_string(),
                 "llm_response_raw_xml" => "llm_response_raw_xml".to_string(),
-                "context_compaction_summary" => "context_compaction_summary".to_string(),
+                "context_compression_summary" => "context_compression_summary".to_string(),
                 _ => "llm_response".to_string(),
             },
             PromptComponentRole::System => match kind {
                 "response_repair" => "response_repair".to_string(),
-                "context_compacted" => "context_compacted".to_string(),
+                "context_compressed" => "context_compressed".to_string(),
                 "runtime_note"
-                | "turn_boundary"
                 | "user_interrupted_work"
                 | "turn_progress_reminder"
                 | "turn_time_reminder"

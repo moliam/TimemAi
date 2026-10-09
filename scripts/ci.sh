@@ -4,6 +4,15 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+if [[ "$(uname -s)" == "Linux" ]]; then
+  echo "== Linux cgroup delegation preflight =="
+  cgroup_path="$(awk -F: '$1 == "0" { print $3 }' /proc/self/cgroup)"
+  if [[ -z "$cgroup_path" || ! -w "/sys/fs/cgroup$cgroup_path" ]]; then
+    echo "error: Linux production CI requires a writable delegated cgroup-v2 subtree (Delegate=yes)." >&2
+    exit 1
+  fi
+fi
+
 echo "== shell scripts syntax =="
 bash -n install.sh uninstall.sh scripts/bootstrap_assistant_ui.sh scripts/clippy_check.sh scripts/install_logic_test.sh scripts/online_install_logic_test.sh scripts/sensitive_scan.sh scripts/test_contract_check.sh scripts/edge_regression.sh scripts/update_static_prompt_snapshot.sh scripts/kvc_replay_test.sh scripts/performance_guard.sh scripts/module_boundary_check.sh scripts/cross_host_resume_smoke.sh scripts/web_runtime_lifecycle_smoke.sh scripts/web_public_runtime_smoke.sh scripts/linux_web_platform_smoke.sh scripts/macos_web_platform_smoke.sh scripts/web_license_check.sh scripts/version_consistency_check.sh scripts/self_capability_check.sh scripts/turn_concurrency_stress.sh scripts/ci.sh
 python3 -m py_compile scripts/architecture_guard.py scripts/fake_openai_server.py scripts/web_ui_matrix_check.py scripts/runtime_io_guard.py
@@ -62,13 +71,32 @@ if [[ "$(uname -s)" == "Linux" ]]; then
   fi
   cargo test -p timem_platform --lib --locked "$linux_test_filter" -- --test-threads=1
 
+  echo "== Linux fallback process ownership tests =="
+  for test_name in \
+    linux_fallback_reaper_does_not_consume_registered_child_exit_status \
+    linux_fallback_registration_race_requires_stable_unowned_observations \
+    linux_fallback_lifecycle_is_adopted_active_then_exactly_reaped \
+    linux_managed_process_job_contains_and_kills_setsid_descendants
+  do
+    exact_test_name="$(sed -n 's/: test$//p' <<<"$platform_test_list" | grep -E "(^|::)${test_name}$" || true)"
+    exact_test_count="$(grep -c . <<<"$exact_test_name" || true)"
+    if [[ "$exact_test_count" -ne 1 ]]; then
+      echo "error: required Linux fallback ownership test must exist exactly once: $test_name (found $exact_test_count)" >&2
+      exit 1
+    fi
+    cargo test -p timem_platform --lib --locked \
+      "$exact_test_name" -- --exact --test-threads=1
+  done
+
   echo "== Linux run_bash supervision tests =="
   agent_test_list="$(cargo test -p agent_core --lib --locked -- --list)"
   for test_name in \
     shell_lifecycle_validation_rejects_unmanaged_background_without_wait \
-    shell_lifecycle_validation_rejects_explicit_detach \
+    shell_lifecycle_validation_allows_detach_keywords_under_os_containment \
+    completed_job_waits_for_its_owned_setsid_descendant \
+    command_action_timeout_kills_its_setsid_escapee_with_job_ownership \
     timeout_job_reports_pid_and_later_exit_update \
-    timed_out_job_remains_cancellable_after_launcher_exits \
+    timed_out_job_keeps_owned_setsid_descendant_until_explicit_cancellation \
     supervisor_waits_for_managed_process_group_after_launcher_exits \
     normal_bash_cancel_terminates_the_entire_process_group \
     session_turn_stop_cancels_parallel_bash_after_approval \

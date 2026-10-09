@@ -1,3 +1,4 @@
+import { memorySearchPresentation, readFilePresentation, runBashEditPresentation, selfToolPresentation } from "./tool_presentation";
 import {
   Activity,
   ChatHistoryRecord,
@@ -153,6 +154,30 @@ export function compareTurnTimelineItems(
     return left.type === "turn" ? -1 : 1;
   }
   return left.id.localeCompare(right.id);
+}
+
+export type TurnStreamOrderItem = {
+  timelineSeq?: number;
+  createdAt: number;
+  fallbackIndex: number;
+};
+
+/**
+ * New live Turn entries carry an authoritative sequence. Legacy restored
+ * entries do not; keep those in their stable timestamp order and place the
+ * sequenced live suffix after them during migration.
+ */
+export function compareTurnStreamItems(
+  left: TurnStreamOrderItem,
+  right: TurnStreamOrderItem,
+): number {
+  const leftSequenced = left.timelineSeq !== undefined;
+  const rightSequenced = right.timelineSeq !== undefined;
+  if (leftSequenced && rightSequenced) {
+    return left.timelineSeq! - right.timelineSeq! || left.fallbackIndex - right.fallbackIndex;
+  }
+  if (leftSequenced !== rightSequenced) return leftSequenced ? 1 : -1;
+  return left.createdAt - right.createdAt || left.fallbackIndex - right.fallbackIndex;
 }
 
 export function visibleRuntimeRestartMarkers(
@@ -506,6 +531,59 @@ export function turnElapsedMs(
   return Math.max(0, (endedAtMs ?? nowMs) - createdAtMs);
 }
 
+export type TurnWorkPhase = "model" | "local";
+
+export type TurnWorkPhaseBoundary = {
+  id: string;
+  startedAtMs?: number;
+};
+
+/**
+ * Return only the latest authoritative boundary for the current work segment.
+ * A model request starts the current model wait; a model response starts the
+ * current local-work segment. Before the first request, local work starts with
+ * the Turn itself. We compare timestamps explicitly rather than trusting event
+ * array order, so restored or paged history yields the same current boundary.
+ */
+export function turnWorkPhaseBoundary(
+  turn: WebTurn,
+  phase: TurnWorkPhase,
+): TurnWorkPhaseBoundary {
+  const laterEvent = (
+    candidate: WebTurn["events"][number],
+    current: WebTurn["events"][number] | undefined,
+  ) => {
+    if (!current) return true;
+    if (candidate.created_at_ms !== current.created_at_ms)
+      return candidate.created_at_ms > current.created_at_ms;
+    if (candidate.timeline_seq !== undefined && current.timeline_seq !== undefined)
+      return candidate.timeline_seq > current.timeline_seq;
+    return false;
+  };
+  let latestRequest: WebTurn["events"][number] | undefined;
+  let latestResponse: WebTurn["events"][number] | undefined;
+  for (const event of turn.events) {
+    if (event.source !== "worker_activity" || !Number.isFinite(event.created_at_ms))
+      continue;
+    if (event.payload.kind === "model_request" && laterEvent(event, latestRequest))
+      latestRequest = event;
+    if (event.payload.kind === "model_response" && laterEvent(event, latestResponse))
+      latestResponse = event;
+  }
+  if (phase === "model") {
+    return latestRequest
+      ? { id: latestRequest.event_id, startedAtMs: latestRequest.created_at_ms }
+      : { id: "pending:model" };
+  }
+  if (!latestRequest) {
+    return { id: `turn:${turn.turn_id}`, startedAtMs: turn.created_at_ms };
+  }
+  if (latestResponse && laterEvent(latestResponse, latestRequest)) {
+    return { id: latestResponse.event_id, startedAtMs: latestResponse.created_at_ms };
+  }
+  return { id: "pending:local" };
+}
+
 export function turnInteractionPhase(
   session: Session | undefined,
   localSubmitCommandId: string | undefined,
@@ -738,6 +816,7 @@ export function coalesceActionLifecycle(events: WebTurnEvent[]) {
     execution_order: (next as typeof visible[number]).execution_order ?? previous.execution_order,
     presentation_id: previous.presentation_id ?? previous.event_id,
     presentation_created_at_ms: previous.presentation_created_at_ms ?? previous.created_at_ms,
+    timeline_seq: previous.timeline_seq ?? next.timeline_seq,
   });
   const pendingStarts = new Map<string, number[]>();
   const pendingBackgroundFinishes = new Map<string, number[]>();
@@ -795,8 +874,15 @@ export function coalesceActionLifecycle(events: WebTurnEvent[]) {
       if (startIndex !== undefined) {
         const started = visible[startIndex];
         const elapsedMs = event.created_at_ms - started.created_at_ms;
+        // Prefer the authoritative elapsed_ms the host computed at the real
+        // finish timestamp; the local diff includes topic delivery delay.
+        const hostElapsed =
+          typeof (topicEvent.payload as { elapsed_ms?: unknown }).elapsed_ms ===
+          "number"
+            ? ((topicEvent.payload as { elapsed_ms: number }).elapsed_ms)
+            : elapsedMs;
         visible[startIndex] =
-          preservePresentation(started, elapsedMs >= 0 ? withActionElapsed(event, elapsedMs) : event);
+          preservePresentation(started, elapsedMs >= 0 ? withActionElapsed(event, hostElapsed) : event);
         if (status !== TOOL_STATUS_BACKGROUND_RUNNING) startIndexes?.shift();
       } else {
         // A trimmed history may no longer contain the action start. Only a
@@ -1081,19 +1167,50 @@ function isChatMessageHistoryRecord(
   );
 }
 
-function messagesFromHistoryRecords(
+function fnv1a32Hex(text: string): string {
+  // Mirrors the Rust implementation (fn history_message_id in
+  // applications/timem/src/server.rs) so both sides derive the same identity
+  // from the same history record.
+  const FNV_OFFSET_BASIS = 0x811c9dc5;
+  const FNV_PRIME = 0x01000193;
+  let hash = FNV_OFFSET_BASIS;
+  for (const byte of new TextEncoder().encode(text)) {
+    hash = Math.imul(hash ^ byte, FNV_PRIME) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+function historyMessageId(record: ChatMessageHistoryRecord): string {
+  // One Core Turn can record the initial task plus same-millisecond
+  // supplements (all role "user"); the legacy
+  // `history_msg_{turn}_{ms}_{role}` identity collided on those and duplicate
+  // ids crashed the assistant-ui message repository (whole-page blank).
+  // Including kind and a content digest keeps ids deterministic across
+  // restarts while separating every distinct entry.
+  return `history_msg_${record.turn_id}_${record.created_at_ms}_${record.role}_${record.kind ?? "none"}_${fnv1a32Hex(record.content)}`;
+}
+
+export function messagesFromHistoryRecords(
   records: ChatHistoryRecord[],
 ): ChatMessage[] {
+  const seenIds = new Set<string>();
   return records
     .filter(isChatMessageHistoryRecord)
     .sort((left, right) => left.created_at_ms - right.created_at_ms)
     .map((record) => ({
-      id: `history_msg_${record.turn_id}_${record.created_at_ms}_${record.role}`,
+      id: historyMessageId(record),
       role: record.role,
       text: record.content,
       created_at_ms: record.created_at_ms,
       kind: record.kind,
-    }));
+    }))
+    // Identical duplicated records must collapse to one message: assistant-ui
+    // message repositories treat duplicate ids as a fatal error.
+    .filter((message) => {
+      if (seenIds.has(message.id)) return false;
+      seenIds.add(message.id);
+      return true;
+    });
 }
 
 export function appendActivityToCurrentTurn(
@@ -1334,6 +1451,13 @@ function sessionContextUsageFloorMs(session: Session): number | undefined {
   return Math.max(restart, cleared);
 }
 
+const CORE_CONTEXT_COMPRESS_TOPIC = "core.context.compress";
+const LEGACY_CORE_CONTEXT_COMPACT_TOPIC = "core.context.compact";
+
+function isContextCompressTopic(name: string | undefined): boolean {
+  return name === CORE_CONTEXT_COMPRESS_TOPIC || name === LEGACY_CORE_CONTEXT_COMPACT_TOPIC;
+}
+
 function sessionRuntimeRestartAtMs(session: Session): number | undefined {
   return session.messages.reduce<number | undefined>(
     (latest, message) =>
@@ -1347,11 +1471,11 @@ function sessionRuntimeRestartAtMs(session: Session): number | undefined {
 }
 
 /**
- * True while a manual context-compaction request has been announced but no
- * completion notice has superseded it. Drives the "compacting..." menu item
+ * True while a manual context-compression request has been announced but no
+ * completion notice has superseded it. Drives the "compressing..." menu item
  * so the user cannot double-submit.
  */
-export function sessionContextCompactPending(session: Session): boolean {
+export function sessionContextCompressPending(session: Session): boolean {
   // Stale notices from before the latest runtime restart or context clear
   // do not describe the live compaction state; ignore them.
   const floorMs = sessionContextUsageFloorMs(session);
@@ -1362,7 +1486,7 @@ export function sessionContextCompactPending(session: Session): boolean {
       if (event.source !== "core_topic") continue;
       if (floorMs !== undefined && event.created_at_ms < floorMs) continue;
       const payload = event.payload as { topic?: { name?: string }; payload?: { phase?: string } };
-      if (payload.topic?.name !== "core.context.compact") continue;
+      if (!isContextCompressTopic(payload.topic?.name)) continue;
       const phase = payload.payload?.phase;
       if (event.created_at_ms >= pendingAtMs) {
         pending = phase === "requested";
@@ -1382,35 +1506,49 @@ export function sessionContextCompactPending(session: Session): boolean {
 export function sessionContextUsage(
   session: Session,
 ): import("./protocol").UsageStats | undefined {
-  const runtimeRestartAtMs = sessionContextUsageFloorMs(session);
+  const floorMs = sessionContextUsageFloorMs(session);
 
-  for (let index = session.turns.length - 1; index >= 0; index -= 1) {
-    const turn = session.turns[index];
+  for (let turnIndex = session.turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
+    const turn = session.turns[turnIndex];
     if (turn.state === "restored") continue;
 
-    // A restarted host restores historical turns for display, but Core starts
-    // with a fresh context. Only model responses emitted by the new runtime
-    // instance may refill the context meter.
-    const live = turnLiveUsageSince(turn, runtimeRestartAtMs);
-    if (live) return live.latest;
+    // Event order is the authoritative observation order inside a Turn. A
+    // completed compaction immediately replaces the previous prompt-token
+    // reading; a later model response may replace it again.
+    for (let eventIndex = turn.events.length - 1; eventIndex >= 0; eventIndex -= 1) {
+      const event = turn.events[eventIndex];
+      if (floorMs !== undefined && event.created_at_ms < floorMs) continue;
+      if (event.source === "worker_activity" && event.payload.kind === "model_response") {
+        const usage = event.payload.usage;
+        if (usage && typeof usage === "object")
+          return usage as import("./protocol").UsageStats;
+      }
+      if (event.source !== "core_topic") continue;
+      const topic = event.payload as {
+        topic?: { name?: string };
+        payload?: { phase?: string; estimated_after_tokens?: number };
+      };
+      const after = topic.payload?.estimated_after_tokens;
+      if (
+        isContextCompressTopic(topic.topic?.name) &&
+        topic.payload?.phase === "completed" &&
+        typeof after === "number" &&
+        Number.isFinite(after) &&
+        after >= 0
+      ) {
+        return { prompt_tokens: after };
+      }
+    }
 
-    // Completion telemetry has no independent timestamp. It is safe only when
-    // the whole turn began after the latest runtime restart boundary.
-    if (
-      runtimeRestartAtMs !== undefined &&
-      turn.created_at_ms < runtimeRestartAtMs
-    )
-      continue;
+    // Completion telemetry has no independent timestamp. Use it only when no
+    // timestamped observation in this Turn supersedes it and the Turn belongs
+    // to the live runtime context.
+    if (floorMs !== undefined && turn.created_at_ms < floorMs) continue;
     const latest = turn.completion?.latest_usage;
     if (latest) return latest;
   }
-  // No model usage from the new runtime instance yet. If the restart
-  // restored the persisted prompt context, show its token baseline so the
-  // meter reflects the live context instead of reading as 0.
   const restored = session.restored_context_prompt_tokens;
-  if (restored && restored > 0) {
-    return { prompt_tokens: restored };
-  }
+  if (restored && restored > 0) return { prompt_tokens: restored };
   return undefined;
 }
 
@@ -1450,8 +1588,80 @@ export function sessionRuntimeUsage(
   return found ? total : undefined;
 }
 
-export function sessionCacheHitPercent(session: Session): number | undefined {
+export function sessionCacheTokenTotals(session: Session): {
+  prompt_tokens: number;
+  completion_tokens: number;
+} {
   const usage = sessionRuntimeUsage(session);
+  return {
+    prompt_tokens: usage?.prompt_tokens ?? 0,
+    completion_tokens: usage?.completion_tokens ?? 0,
+  };
+}
+
+function sessionCacheRateUsage(
+  session: Session,
+): import("./protocol").UsageStats | undefined {
+  const runtimeRestartAtMs = sessionRuntimeRestartAtMs(session);
+  // Without an explicit restart boundary there is no cold-start request to
+  // exclude. Preserve the established aggregate, including completion-only
+  // snapshots that have no per-request events.
+  if (runtimeRestartAtMs === undefined) return sessionRuntimeUsage(session);
+
+  const usages: Array<{
+    createdAtMs: number;
+    eventId: string;
+    usage: import("./protocol").UsageStats;
+  }> = [];
+  for (const turn of session.turns) {
+    if (turn.state === "restored") continue;
+    for (const event of turn.events) {
+      if (
+        runtimeRestartAtMs !== undefined &&
+        event.created_at_ms < runtimeRestartAtMs
+      )
+        continue;
+      if (
+        event.source !== "worker_activity" ||
+        event.payload.kind !== "model_response"
+      )
+        continue;
+      const usage = event.payload.usage;
+      if (usage && typeof usage === "object")
+        usages.push({
+          createdAtMs: event.created_at_ms,
+          eventId: event.event_id,
+          usage: usage as import("./protocol").UsageStats,
+        });
+    }
+  }
+
+  // The first request after a runtime restart is a cold-cache bootstrap. It is
+  // useful for input/output accounting, but including it in the cache ratio
+  // permanently depresses the displayed rate even after every warm request is
+  // healthy. Exclude exactly that one request; keep all later requests and keep
+  // sessionRuntimeUsage() unchanged for token totals.
+  usages.sort(
+    (left, right) =>
+      left.createdAtMs - right.createdAtMs || left.eventId.localeCompare(right.eventId),
+  );
+  if (runtimeRestartAtMs !== undefined && usages.length > 0) usages.shift();
+  if (usages.length === 0) return undefined;
+
+  const total: import("./protocol").UsageStats = {};
+  for (const entry of usages) {
+    const usage = entry.usage;
+    for (const field of USAGE_FIELDS) {
+      const value = usage[field];
+      if (typeof value === "number" && Number.isFinite(value))
+        total[field] = (total[field] ?? 0) + value;
+    }
+  }
+  return total;
+}
+
+export function sessionCacheHitPercent(session: Session): number | undefined {
+  const usage = sessionCacheRateUsage(session);
   const promptTokens = usage?.prompt_tokens ?? 0;
   if (promptTokens <= 0) return undefined;
   return Math.min(
@@ -1949,6 +2159,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
       return null;
     case "core.action": {
       const action = label(payload.action) || "action";
+      if (action === "task_finished" || action === "turn_finished") return null;
       const status = label(payload.status) || label(payload.event) || "running";
       const statusText = humanizeToolStatus(status);
       const input =
@@ -1959,6 +2170,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         payload.kind && typeof payload.kind === "object"
           ? (payload.kind as Record<string, unknown>)
           : undefined;
+      const redactedInput = redactSensitiveToolValue("", input);
       const toolMode =
         typeof kind?.mode === "string"
           ? kind.mode
@@ -1984,6 +2196,10 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         tone: "action",
         title: `${toolActivityDisplayName(action, toolMode)} · ${statusText}`,
         tool_name: action,
+        memory_search: memorySearchPresentation(action, redactedInput),
+        self_tool: selfToolPresentation(action, redactedInput),
+        readfile: readFilePresentation(action, redactedInput),
+        run_bash_edit: runBashEditPresentation(action, redactedInput),
         tool_status: status,
         tool_mode: toolMode,
         elapsed_ms:
@@ -2009,14 +2225,15 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         createdAt: Date.now(),
       };
     }
-    case "core.context.compact": {
+    case CORE_CONTEXT_COMPRESS_TOPIC:
+    case LEGACY_CORE_CONTEXT_COMPACT_TOPIC: {
       if (payload.phase === "requested") {
         return {
           id: clientId(),
           sessionId: event.session_id,
           tone: "notice",
-          kind: "context_compact",
-          title: "Context compacting",
+          kind: "context_compress",
+          title: "Context compressing",
           compact_phase: "requested",
           estimated_prompt_tokens:
             typeof payload.estimated_prompt_tokens === "number"
@@ -2054,10 +2271,10 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         id: clientId(),
         sessionId: event.session_id,
         tone: "notice",
-        kind: "context_compact",
+        kind: "context_compress",
         compact_phase: "completed",
-        title: "Dynamic context compacted",
-        detail: `Dynamic context ${before ?? "?"} tokens → ${after ?? "?"} tokens`,
+        title: "Conversation compressed",
+        detail: `Conversation compression ${before ?? "?"} tokens → ${after ?? "?"} tokens`,
         before_tokens: before,
         after_tokens: after,
         text_before_tokens: textBefore,

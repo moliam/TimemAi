@@ -49,7 +49,10 @@ fn windows_local_command_catalog_is_powershell_specific() {
         .expect("run_powershell catalog section");
 
     assert!(section.contains("PowerShell"), "{section}");
-    assert!(section.contains("Get-ChildItem -Force"), "{section}");
+    assert!(
+        section.contains("Get-ChildItem -Recurse -File"),
+        "{section}"
+    );
     assert!(section.contains("Test-Path"), "{section}");
     for unix_only_text in [
         "run_bash",
@@ -218,9 +221,10 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
     assert!(rendered.contains("Read a bounded range from a normal text file"));
     assert!(!rendered.contains("Byte numbers address the original"));
     assert!(!rendered.contains("macOS and Linux"));
-    assert!(rendered.contains("Ask for path when you need to know where runtime resources are"));
-    assert!(rendered.contains("Use cwd without"));
-    assert!(rendered.contains("Ask for params when"));
+    assert!(rendered.contains("Prefer it over inferring runtime identity"));
+    assert!(rendered.contains("space_dir, memory_dir, sessions_dir"));
+    assert!(rendered.contains("type=params reports pid, model"));
+    assert!(rendered.contains("Use cwd without new_path"));
     assert!(rendered.contains("Allowed: `path`, `cwd`, `params`"));
     assert!(rendered.contains("`new_path`:"));
     assert!(rendered.contains("type=cwd"));
@@ -233,7 +237,8 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
     assert!(!rendered.contains("type=context"));
     assert!(!rendered.contains("context_offload"));
     assert!(!rendered.contains("when `` is"));
-    assert!(rendered.contains("**Result**"));
+    assert!(!rendered.contains("**Result**"));
+    assert!(rendered.contains("If args do not match this tool spec"));
     assert!(!rendered.contains("```"));
     assert!(!rendered.contains("**Example action**"));
     assert!(!rendered.contains("read_back_command"));
@@ -260,6 +265,28 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
 }
 
 #[test]
+fn description_only_contract_preserves_result_semantics_and_fails_closed() {
+    let registry =
+        CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
+    let rendered = registry.render_tool_catalog_markdown();
+    // Migrated result semantics live in description now.
+    assert!(rendered.contains("does not reinsert a verbose action result"));
+    assert!(rendered.contains("scratch_id for later memmgr scratch read"));
+    assert!(rendered.contains("memory_conflict means the durable row version changed"));
+    assert!(rendered.contains("read the row again with durable sql"));
+    assert!(rendered.contains("won't be killed automatically"));
+    // No tool catalog Usage/Result sections under the new contract.
+    assert!(!rendered.contains("**Usage**"));
+    assert!(!rendered.contains("**Result**"));
+    // Removed manifest prompt fields fail closed instead of being ignored.
+    let err = super::parse_tool_manifest(
+        "kind: tool\nid: legacy_field\nbinding_type: builtin\nbinding_name: readfile\nsummary: s\ndescription: |\n  d\nprompt_synopsis: |\n  {\"legacy_field\":{}}\ninput_properties:\n  path: string\nrequired:\n  - path\nexample_json: |\n  {\"legacy_field\":{\"path\":\"x\"}}\n",
+    )
+    .unwrap_err();
+    assert!(err.contains("removed_prompt_field"), "{err}");
+}
+
+#[test]
 fn readfile_synopsis_is_rendered_in_the_active_response_protocol() {
     let registry =
         CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
@@ -268,10 +295,11 @@ fn readfile_synopsis_is_rendered_in_the_active_response_protocol() {
     let markdown = registry.render_tool_catalog_markdown_for_protocol("Markdown");
     let xml = registry.render_tool_catalog_markdown_for_protocol("XML");
 
-    let json_action = r#"{"readfile":{"path":"src/main.rs","starter":{"line_nr":20},"ender":{"line_nr":80},"max_bytes":32768}}"#;
+    let json_action =
+        r#"{"readfile":{"path":"src/main.rs","starter":{"line_nr":20},"ender":{"line_nr":80}}}"#;
     assert!(json.contains(json_action), "{json}");
     assert!(markdown.contains(json_action), "{markdown}");
-    assert!(xml.contains("<readfile><path>src/main.rs</path><starter><line_nr>20</line_nr></starter><ender><line_nr>80</line_nr></ender><max_bytes>32768</max_bytes></readfile>"), "{xml}");
+    assert!(xml.contains("<readfile><path>src/main.rs</path><starter><line_nr>20</line_nr></starter><ender><line_nr>80</line_nr></ender></readfile>"), "{xml}");
     assert!(
         !json.contains("It is supported on macOS and Linux."),
         "{json}"
@@ -286,7 +314,7 @@ fn readfile_synopsis_is_rendered_in_the_active_response_protocol() {
         .and_then(|tail| tail.split("\n#### `").next())
         .expect("readfile catalog section");
     assert!(
-        readfile_catalog.contains("**Result**"),
+        !readfile_catalog.contains("**Result**"),
         "{readfile_catalog}"
     );
     assert!(
@@ -294,8 +322,16 @@ fn readfile_synopsis_is_rendered_in_the_active_response_protocol() {
         "{readfile_catalog}"
     );
     assert!(
+        readfile_catalog.contains("If args do not match this tool spec"),
+        "{readfile_catalog}"
+    );
+    assert!(
+        !readfile_catalog.contains("max_bytes"),
+        "{readfile_catalog}"
+    );
+    assert!(
         xml.contains(
-            "<run_bash><cmd>git status --short</cmd><timeout_ms>5000</timeout_ms></run_bash>"
+            "<run_bash><cmd>rg --files | wc -l</cmd><timeout_ms>5000</timeout_ms></run_bash>"
         ),
         "{xml}"
     );
@@ -350,6 +386,28 @@ fn registry_validates_required_input_fields_from_manifest() {
         .validate_action_input("readfile", &json_object([]))
         .unwrap_err()
         .contains("input.path_required"));
+    assert!(registry
+        .validate_action_input(
+            "readfile",
+            &json_object([
+                ("path", Value::String("notes.txt".to_string())),
+                ("max_bytes", Value::Number(1.into())),
+            ])
+        )
+        .unwrap_err()
+        .contains("input.max_bytes_unsupported"));
+    for field in ["discard", "throw", "remove"] {
+        let error = registry
+            .validate_action_input(
+                "context_compress",
+                &json_object([
+                    ("summary", Value::String("state".to_string())),
+                    (field, Value::Array(Vec::new())),
+                ]),
+            )
+            .unwrap_err();
+        assert_eq!(error, format!("input.{field}_unsupported"));
+    }
     assert!(registry
         .validate_action_input(
             "self_tool",
@@ -598,6 +656,17 @@ fn registry_derives_validation_rules_from_json_schema_idl() {
     let registry =
         CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
     let catalog = registry.tool_catalog_value();
+    let readfile = catalog
+        .get("readfile")
+        .and_then(Value::as_object)
+        .expect("readfile catalog entry");
+    assert!(
+        readfile["input_schema"]["properties"]
+            .as_object()
+            .is_some_and(|properties| !properties.contains_key("max_bytes")),
+        "{readfile:?}"
+    );
+
     let capmgr = catalog
         .get("capmgr")
         .and_then(Value::as_object)
@@ -709,8 +778,8 @@ fn run_bash_idl_uses_cmd_loop_cmd_without_removed_expect_fields() {
     }));
 
     let prompt = registry.render_tool_catalog_markdown();
-    assert!(prompt.contains(r#"{"run_bash":{"cmd":"git status --short","timeout_ms":5000}}"#));
-    assert!(prompt.contains(r#"{"run_bash":{"loop_cmd":"test -f build/done""#));
+    assert!(prompt.contains(r#"{"run_bash":{"cmd":"rg --files | wc -l","timeout_ms":5000}}"#));
+    assert!(prompt.contains("`loop_cmd`:"));
     assert!(prompt.contains("loop_timeout_ms"));
     assert!(prompt.contains("once_timeout_ms"));
     assert!(!prompt.contains("check_timeout_ms"));
@@ -734,12 +803,17 @@ fn capmgr_can_list_and_load_skill_content() {
     assert!(loaded.contains("# Release Quality Gate"));
     assert!(loaded.contains("Run the relevant local tests"));
 
+    let loaded_readfile = registry.load_text("tool", "readfile");
+    assert!(loaded_readfile.contains("kind: tool"));
+    assert!(loaded_readfile.contains("#### `readfile`"));
+    assert!(!loaded_readfile.contains("max_bytes"), "{loaded_readfile}");
+
     let loaded_tool = registry.load_text("tool", "run_bash");
     assert!(loaded_tool.contains("kind: tool"));
     assert!(loaded_tool.contains("manual:"));
     assert!(loaded_tool.contains("#### `run_bash`"));
     assert!(loaded_tool.contains("**Options**"));
-    assert!(loaded_tool.contains(r#"{"run_bash":{"cmd":"git status --short","timeout_ms":5000}}"#));
+    assert!(loaded_tool.contains(r#"{"run_bash":{"cmd":"rg --files | wc -l","timeout_ms":5000}}"#));
     assert!(!loaded_tool.contains("read_back_command"));
     assert!(!loaded_tool.contains("large_readback"));
     assert!(!loaded_tool.contains("expect_timeout_ms"));
@@ -1056,7 +1130,11 @@ example_json: |
 fn native_tool_schemas_use_gateway_compatible_single_value_enums() {
     let registry =
         CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
+    assert!(registry.contains_tool("context_compress"));
+    assert!(!registry.contains_tool("context_compact"));
     let tools = registry.native_tool_definitions();
+    assert!(tools.iter().any(|tool| tool.name == "context_compress"));
+    assert!(!tools.iter().any(|tool| tool.name == "context_compact"));
     for tool in &tools {
         let schema = serde_json::to_string(&tool.input_schema).unwrap();
         assert!(
@@ -1088,6 +1166,46 @@ fn native_tool_schemas_use_gateway_compatible_single_value_enums() {
 }
 
 #[test]
+fn context_compress_guidance_is_action_oriented_without_runtime_implementation_detail() {
+    let tools =
+        CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution())
+            .native_tool_definitions();
+    let compact = tools
+        .iter()
+        .find(|tool| tool.name == "context_compress")
+        .unwrap();
+
+    for guidance in [
+        "Read the whole live context",
+        "Resolve superseded or contradictory history",
+        "Use `keep` only when",
+        "Use `offload` only for",
+        "Before calling, check",
+        "continue from the checkpoint you created",
+    ] {
+        assert!(
+            compact.description.contains(guidance),
+            "{guidance}: {}",
+            compact.description
+        );
+    }
+    for internal_detail in [
+        "apply_prompt_shrink",
+        "telemetry",
+        "post-shrink live-ref diagnostics",
+        "re-injects one bounded",
+        "every other live delta is removed",
+        "full removed/offloaded id lists",
+    ] {
+        assert!(
+            !compact.description.contains(internal_detail),
+            "model-facing guidance leaked runtime implementation detail {internal_detail}: {}",
+            compact.description
+        );
+    }
+}
+
+#[test]
 fn native_schema_generation_avoids_redundant_required_any_expansion() {
     let tools =
         CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution())
@@ -1114,13 +1232,15 @@ fn native_schema_generation_avoids_redundant_required_any_expansion() {
 
     let compact = tools
         .iter()
-        .find(|tool| tool.name == "context_compact")
+        .find(|tool| tool.name == "context_compress")
         .unwrap();
-    assert!(compact.input_schema["allOf"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|rule| rule.get("anyOf").is_some()));
+    assert!(compact.input_schema.get("allOf").is_none());
+    assert_eq!(
+        compact.input_schema["required"],
+        serde_json::json!(["summary"])
+    );
+    assert!(compact.input_schema["properties"].get("discard").is_none());
+    assert_eq!(compact.input_schema["properties"]["keep"]["minItems"], 1);
 }
 
 #[test]
@@ -1145,9 +1265,17 @@ fn builtin_native_schemas_preserve_runtime_constraints_and_argument_examples() {
     assert_eq!(starter["oneOf"].as_array().unwrap().len(), 3);
     assert_eq!(starter["properties"]["line_nr"]["minimum"], 1);
     assert_eq!(starter["properties"]["byte_nr"]["minimum"], 0);
-    assert_eq!(
-        readfile.input_schema["properties"]["max_bytes"]["maximum"],
-        32768
+    assert!(
+        readfile.input_schema["properties"]
+            .get("max_bytes")
+            .is_none(),
+        "model-visible readfile schema must not expose the internal output budget: {}",
+        readfile.input_schema
+    );
+    assert!(
+        !readfile.description.contains("max_bytes"),
+        "{}",
+        readfile.description
     );
     assert!(readfile.description.contains("Valid argument examples:"));
     assert!(readfile.description.contains(r#""path":"src/main.rs""#));
@@ -1162,9 +1290,10 @@ fn builtin_native_schemas_preserve_runtime_constraints_and_argument_examples() {
 
     let compact = tools
         .iter()
-        .find(|tool| tool.name == "context_compact")
+        .find(|tool| tool.name == "context_compress")
         .unwrap();
-    assert_eq!(compact.input_schema["properties"]["discard"]["minItems"], 1);
+    assert_eq!(compact.input_schema["properties"]["keep"]["minItems"], 1);
+    assert!(compact.input_schema["properties"].get("discard").is_none());
 
     let memmgr = tools.iter().find(|tool| tool.name == "memmgr").unwrap();
     assert!(memmgr.input_schema["properties"]["op"]["enum"]

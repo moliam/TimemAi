@@ -20,7 +20,12 @@ fi
 
 for i in $(seq 1 "$ITERATIONS"); do
   echo "== edge regression iteration $i/$ITERATIONS: session runtime =="
-  cargo test -p timem_shell session_turn_ -- --nocapture
+  runtime_tests="$(cargo test -p agent_core --lib --locked session_turn_ -- --list)"
+  if ! grep -q "session_turn_.*: test$" <<<"$runtime_tests"; then
+    echo "error: no session runtime tests discovered" >&2
+    exit 1
+  fi
+  cargo test -p agent_core --lib --locked session_turn_ -- --nocapture
 
   echo "== edge regression iteration $i/$ITERATIONS: shrink core =="
   cargo test -p agent_core successful_prompt_shrink_invalidates_stale_observed_prompt_tokens -- --nocapture

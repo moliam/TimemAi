@@ -71,7 +71,7 @@ Both online and checkout flows are source builds. They require:
   manager.
 
 On macOS/Linux, if Rust/cargo is missing, `install.sh` installs the Rust toolchain
-with rustup. Cargo 1.78+ is required. To disable automatic Rust install/update:
+with rustup. Cargo 1.83+ is required. To disable automatic Rust install/update:
 
 ```bash
 TIMEM_SHELL_SKIP_RUST_INSTALL=1 ./install.sh
@@ -162,7 +162,7 @@ directory on every supported platform.
   model, base URL, auth token/API key, thinking budget and custom headers are
   mapped to an Anthropic endpoint.
 Reasoning effort semantics: the configured reasoning effort applies only to
-critical model requests (currently the forced context-compaction round); ordinary
+critical model requests (currently the forced context-compression round); ordinary
 requests send thinking disabled (`thinking: disabled` / `enable_thinking=false`
 / `reasoning.effort=none` per protocol) to save latency and cost.
 
@@ -281,9 +281,16 @@ export TIMEM_MODEL=...
 - `anthropic`
 
 `TIMEM_TOOL_CALL_MODE` chooses `auto`, `native`, or `inline` (default `auto`).
-Auto mode probes the configured gateway/model and falls back to inline when
-native tool calls are unsupported. `TIMEM_PARALLEL_TOOL_CALLS` accepts `auto`,
-`true`, or `false`; Timem sends the resolved parallel flag explicitly to the API.
+Auto mode probes an unknown compatible gateway/model and falls back to inline when
+native tool calls are unsupported. Endpoints already known to support native tools,
+including the OpenAI Responses protocol, skip that probe. `TIMEM_PARALLEL_TOOL_CALLS`
+accepts `auto`, `true`, or `false`. For known-native endpoints, `auto` optimistically
+enables provider-native parallel calls without an extra capability request; explicit
+`false` disables them. If an Auto request receives a non-transient 4xx that explicitly
+rejects only the provider's parallel-control field, Timem retries that formal request
+once with the field omitted, keeps native tools enabled, schedules sibling calls
+sequentially, and reuses that endpoint-specific result. Explicit `true` never silently
+downgrades.
 
 `TIMEM_RESPONSE_PROTOCOL` chooses the inline response format parsed by the local
 runtime. Supported values are `xml` and `json`; default is `xml`. Native mode
@@ -388,7 +395,7 @@ A direct setting change applies the new limit before reporting success. This kee
 large audit/history work off the listener-startup and chat-append paths. Temporary-data
 age cleanup covers:
 
-- raw-chat event kinds `action`, `action_result`, `context_compact`, and `repair`;
+- raw-chat event kinds `action`, `action_result`, `context_compress`, and `repair`;
 - finished shell-job records and their stdout/stderr/status files;
 - API audit events in `audit/api_audit.json` and its JSONL sidecar.
 

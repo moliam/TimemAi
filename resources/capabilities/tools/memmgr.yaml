@@ -6,25 +6,15 @@ summary: Unified local memory manager.
 description: |
   Unified local memory manager. Use type=durable for long-lived user facts,
   type=raw_chat for UI-visible chat transcript, type=scratch for temporary notes.
-prompt_synopsis: |
-  {"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories LIMIT 10","limit":10}}
-  {"memmgr":{"type":"raw_chat","op":"search","scope":"current_session","search_text":"text","limit":10}}
-  {"memmgr":{"type":"scratch","op":"read","id":"scratch_id"}}
-prompt_input: |
-  Always include type and op. Choose one synopsis line above and fill only the
-  arguments needed for that operation as fields in the tool input object. Use arrays
-  for params. Use sql for durable reads. Use search_text for raw_chat and
-  scratch search ops. Use sql and optional params for sql ops,
-  content for durable writes and scratch notes, id for read/update/delete, and
-  expected_version from a previous durable sql result before updating or
-  deleting an existing durable row. SQL ops are read-only and limited to
-  memories table inspection/search.
-prompt_result: |
-  Returns matching records, ids/versions for writes, conflict/error strings for
-  unsafe writes, scratch ids for notes.
-  memory_conflict means the durable row version changed; usually read the row
-  again with durable sql
-  before deciding whether to retry, merge, or report the conflict.
+  Always include type and op, then fill only the arguments that operation needs:
+  Use sql for durable reads (read-only, limited to memories table
+  inspection/search, optional params); search_text for raw_chat and scratch
+  search ops; content for durable writes and scratch notes; id for
+  read/update/delete; and expected_version from a previous durable sql result
+  before updating or deleting an existing durable row.
+  Writes return ids/versions; unsafe writes return conflict or error strings.
+  memory_conflict means the durable row version changed: read the row again
+  with durable sql before deciding whether to retry, merge, or report the conflict.
 input_schema: |
   {
     "type": "object",
@@ -88,7 +78,7 @@ example_json: |
       "type": "durable",
       "op": "sql",
       "sql": "SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5",
-      "params": ["%project codename%"],
+      "params": ["%memory-topic%"],
       "limit": 5
     }
   }
