@@ -131,3 +131,14 @@ model waiting keeps its existing star identity. System notices use their own hal
 contract. An in-progress context-compression notice is one concise status line
 (“Conversation compressing...” / “对话压缩中...”), without a duplicate category
 title and detail; completed notices retain their compression metrics.
+
+Browser acceptance startup evidence lives in `tests/browser/browser-startup.mjs`,
+not the application bundle. It preserves the 12-second startup gate and records
+bounded stderr and HTTP probe timing/status. Linux failure diagnostics read only
+the spawned Chrome PID's counters and at most 16 thread wait locations, plus
+system pressure counters; they never inspect command lines or environments.
+Unavailable diagnostic files must not replace the original startup failure.
+Failure evidence has a separate 250 ms wait cap; this is not extra startup time
+and does not cancel an outstanding kernel read. Counters are a single cumulative
+snapshot, not interval deltas or proof of a blocking cause. HTTP readiness still
+depends on response headers, without waiting for body cancellation.
