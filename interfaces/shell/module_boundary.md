@@ -135,6 +135,35 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   keep-waiting/stop-waiting menu and returns the user's decision through the
   core host-decision channel; core owns the process lifecycle, action result,
   and any follow-up `user_supplement`.
+- `timem attach` host discovery. An explicit `--space` remains a directed
+  single-MEM lookup. Without it, Shell may read the user-level Web-instance
+  registry exposed through `timem_in_process::agent_api`, but registry records
+  are untrusted, token-free indexes: Shell must re-read the selected MEM's
+  authoritative `web_instance.json`, require exact PID/start identity, require
+  a healthy loopback Host, and obtain the token only from that lease. Zero
+  validated instances falls back to the default MEM; one connects directly;
+  multiple instances are presented before the Session selector. Discovery is
+  read-only and never deletes stale registrations.
+- Session UI selection for both native `timem --shell` and `timem attach`.
+  Explicit `--ui-mode ordinary|stream` overrides non-empty `TIMEM_UI_MODE`;
+  otherwise an interactive terminal prompts, while non-interactive execution
+  remains Ordinary and `--once-json` is always Ordinary. Attach performs this
+  selection only after the Host and Session are selected. Ordinary preserves
+  the existing integrated Thought / Action bytes and cancellation behavior.
+  A Host-provided restored-session `restart_cwd_decision` replaces the normal
+  attach prompt until resolved: Shell renders only the authoritative available
+  directory choices, sends `session_restart_cwd_resolve`, blocks supplements and
+  unrelated commands locally, and restores normal input only after Host
+  confirmation. If the choices cannot be reloaded, Shell keeps an interactive
+  recovery prompt that can retry the authoritative read or detach safely; it
+  never guesses a directory or leaves the user at a non-interactive error card.
+  Stream may replace revisioned `core.model.preview` content in place and render
+  structured `core.action` lifecycle as live rows; terminal tool outcomes fold
+  into compact success/failure counts while running/background work stays
+  visible. Snapshot and live events share one reducer, are filtered to the
+  active Turn, and a terminal Turn flushes its summary once. Shell must not
+  infer tool completion from display text or implement interactive click-based
+  folding semantics.
 - Local host concerns such as where this shell process stores history or audit
   files.
 - Shell participation in core-owned Session persistence. Shell may choose the

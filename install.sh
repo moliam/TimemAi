@@ -17,7 +17,7 @@ COMMAND_NAME="timem"
 WEB_ALIAS_NAME="timem-web"
 OLD_BIN_NAME="timem-native-rs"
 OLD_WRAPPER_NAME="timem-shell"
-MIN_RUST_VERSION="1.78.0"
+MIN_RUST_VERSION="1.83.0"
 
 cd "$ROOT_DIR"
 
@@ -217,7 +217,7 @@ ensure_rust() {
   fi
 
   if command -v rustup >/dev/null 2>&1; then
-    echo "Updating Rust toolchain with rustup; Cargo >= $MIN_RUST_VERSION is required for Cargo.lock v4..."
+    echo "Updating Rust toolchain with rustup; Cargo >= $MIN_RUST_VERSION is required..."
     rustup update stable
     rustup default stable
   elif command -v curl >/dev/null 2>&1; then

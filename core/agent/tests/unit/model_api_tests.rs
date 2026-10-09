@@ -1,4 +1,5 @@
 use super::*;
+use crate::reasoning::{ReasoningDemand, ReasoningPreference};
 use crate::{NativeExchange, NativeToolChoice, NativeToolResult, ToolCallMode};
 
 fn config(api_protocol: ApiProtocol) -> ModelServiceConfig {
@@ -223,6 +224,8 @@ fn openai_compatible_request_supports_official_thinking_stream_options() {
     let mut config = config(ApiProtocol::OpenAiCompatible);
     config.model = "ZHIPU/GLM-5.2".to_string();
     config.openai_compatible = OpenAiCompatibleOptions {
+        requirements: Default::default(),
+        catalog_id: None,
         enable_thinking: Some(true),
         reasoning_effort: Some("max".to_string()),
         stream: true,
@@ -378,8 +381,8 @@ fn openai_compatible_reasoning_effort_disabled_turns_thinking_off() {
         StructuredOutputHint::None,
     );
 
-    assert_eq!(body["thinking"]["type"], "disabled");
-    assert!(body.get("reasoning_effort").is_none());
+    assert_eq!(body["reasoning_effort"], "none");
+    assert!(body.get("thinking").is_none());
 }
 
 #[test]
@@ -408,6 +411,8 @@ fn openai_responses_request_carries_reasoning_effort_only_for_critical_requests(
 fn ordinary_requests_disable_reasoning_by_default() {
     let mut config = config(ApiProtocol::OpenAiCompatible);
     config.openai_compatible = OpenAiCompatibleOptions {
+        requirements: Default::default(),
+        catalog_id: None,
         enable_thinking: Some(true),
         reasoning_effort: Some("high".to_string()),
         stream: false,
@@ -422,8 +427,8 @@ fn ordinary_requests_disable_reasoning_by_default() {
     let ordinary =
         build_model_request_with_reasoning(&config, blocks, StructuredOutputHint::None, false);
     assert_eq!(ordinary["enable_thinking"], false);
-    assert_eq!(ordinary["thinking"]["type"], "disabled");
-    assert!(ordinary.get("reasoning_effort").is_none());
+    assert_eq!(ordinary["reasoning_effort"], "none");
+    assert!(ordinary.get("thinking").is_none());
 
     let critical =
         build_model_request_with_reasoning(&config, blocks, StructuredOutputHint::None, true);
@@ -1076,6 +1081,7 @@ fn native_request() -> ModelInteractionRequest {
         native_exchanges: Vec::new(),
         resolved_mode: ToolCallMode::Native,
         parallel_tool_calls: true,
+        send_parallel_tool_calls: true,
         tool_choice: NativeToolChoice::Auto,
         critical_reasoning: false,
     }
@@ -1094,6 +1100,7 @@ What is in this screenshot?"
         native_exchanges: Vec::new(),
         resolved_mode,
         parallel_tool_calls: false,
+        send_parallel_tool_calls: true,
         tool_choice: NativeToolChoice::Auto,
         critical_reasoning: false,
     }
@@ -1159,6 +1166,7 @@ fn attached_images_append_after_native_history_without_touching_cache_marks() {
         delta_id: "pd_1".to_string(),
         assistant_text: "looking".to_string(),
         calls: vec![NativeToolCall {
+            assistant_continuation: None,
             id: "call_1".to_string(),
             name: "count_lines".to_string(),
             arguments: json!({}),
@@ -1288,6 +1296,37 @@ fn native_tool_wires_are_provider_specific_and_parallel_is_explicit() {
 }
 
 #[test]
+fn native_parallel_control_can_be_omitted_without_disabling_tools() {
+    let mut request = native_request();
+    request.parallel_tool_calls = false;
+    request.send_parallel_tool_calls = false;
+
+    for protocol in [ApiProtocol::OpenAiCompatible, ApiProtocol::OpenAiResponses] {
+        let body = prepare_model_interaction_http_request(&config(protocol), &request)
+            .model_request
+            .body;
+        assert!(
+            body.get("parallel_tool_calls").is_none(),
+            "{protocol:?}: {body}"
+        );
+        assert!(body["tools"].is_array(), "{protocol:?}: {body}");
+        assert!(!body["tools"].as_array().unwrap().is_empty());
+    }
+
+    let body = prepare_model_interaction_http_request(&config(ApiProtocol::Anthropic), &request)
+        .model_request
+        .body;
+    assert!(
+        body["tool_choice"]
+            .get("disable_parallel_tool_use")
+            .is_none(),
+        "{body}"
+    );
+    assert!(body["tools"].is_array());
+    assert!(!body["tools"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn builtin_tool_schemas_render_per_protocol_without_weakening_registry_validation() {
     let registry = crate::capability::CapabilityRegistry::builtin_for_host(
         crate::capability::CapabilityHostProfile::with_local_command_execution(),
@@ -1308,6 +1347,7 @@ fn builtin_tool_schemas_render_per_protocol_without_weakening_registry_validatio
         native_exchanges: Vec::new(),
         resolved_mode: ToolCallMode::Native,
         parallel_tool_calls: true,
+        send_parallel_tool_calls: true,
         tool_choice: NativeToolChoice::Auto,
         critical_reasoning: false,
     };
@@ -1554,6 +1594,79 @@ fn openai_compatible_sse_assembles_parallel_tool_arguments_by_index() {
 }
 
 #[test]
+fn native_exchange_can_be_owned_by_a_visible_delta_without_text_slices() {
+    let rendered_prompt = concat!(
+        "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n",
+        "[BEGIN DELTA delta_id: pd_1, time_ms: 1]\n\n## USER\nQ1\n",
+        "[BEGIN DELTA delta_id: pd_2, time_ms: 2]\n",
+        "[BEGIN DELTA delta_id: pd_3, time_ms: 3]\n\n",
+        "Continue the work and express thought in the user's language.  Use tools smartly. When all work is genuinely done, call the task_finished tool with the complete final answer as its summary:"
+    )
+    .to_string();
+    let exchange = |delta_id: &str, call_id: &str, result: &str| NativeExchange {
+        delta_id: delta_id.to_string(),
+        assistant_text: format!("work {call_id}"),
+        calls: vec![NativeToolCall {
+            assistant_continuation: None,
+            id: call_id.to_string(),
+            name: "demo".to_string(),
+            arguments: json!({"id": call_id}),
+            raw_arguments: format!(r#"{{"id":"{call_id}"}}"#),
+        }],
+        results: vec![NativeToolResult {
+            call_id: call_id.to_string(),
+            name: "demo".to_string(),
+            content: result.to_string(),
+            is_error: false,
+        }],
+    };
+    let request = ModelInteractionRequest {
+        images: Vec::new(),
+        rendered_prompt,
+        static_tool_count: 0,
+        tools: Vec::new(),
+        native_exchanges: vec![
+            exchange("pd_2", "call_empty_delta_1", "R1"),
+            exchange("pd_3", "call_empty_delta_2", "R2"),
+        ],
+        resolved_mode: ToolCallMode::Native,
+        parallel_tool_calls: false,
+        send_parallel_tool_calls: true,
+        tool_choice: NativeToolChoice::Auto,
+        critical_reasoning: false,
+    };
+
+    for protocol in [
+        ApiProtocol::OpenAiCompatible,
+        ApiProtocol::OpenAiResponses,
+        ApiProtocol::Anthropic,
+    ] {
+        let body = prepare_model_interaction_http_request(&config(protocol), &request)
+            .model_request
+            .body;
+        let text = body.to_string();
+        assert!(text.contains("delta_id: pd_2"), "{protocol:?}: {text}");
+        assert!(text.contains("delta_id: pd_3"), "{protocol:?}: {text}");
+        assert!(
+            text.find("delta_id: pd_2").unwrap() < text.find("call_empty_delta_1").unwrap(),
+            "{protocol:?}: {text}"
+        );
+        assert!(
+            text.find("R1").unwrap() < text.find("delta_id: pd_3").unwrap(),
+            "{protocol:?}: {text}"
+        );
+        assert!(
+            text.find("delta_id: pd_3").unwrap() < text.find("call_empty_delta_2").unwrap(),
+            "{protocol:?}: {text}"
+        );
+        assert!(
+            text.find("R2").unwrap() < text.find("Continue the work").unwrap(),
+            "{protocol:?}: {text}"
+        );
+    }
+}
+
+#[test]
 fn native_exchanges_follow_owning_delta_order_for_all_providers() {
     let rendered_prompt = concat!(
         "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n",
@@ -1565,6 +1678,7 @@ fn native_exchanges_follow_owning_delta_order_for_all_providers() {
         delta_id: delta_id.to_string(),
         assistant_text: format!("work {call_id}"),
         calls: vec![NativeToolCall {
+            assistant_continuation: None,
             id: call_id.to_string(),
             name: "demo".to_string(),
             arguments: json!({"id": call_id}),
@@ -1588,6 +1702,7 @@ fn native_exchanges_follow_owning_delta_order_for_all_providers() {
         ],
         resolved_mode: ToolCallMode::Native,
         parallel_tool_calls: false,
+        send_parallel_tool_calls: true,
         tool_choice: NativeToolChoice::Auto,
         critical_reasoning: false,
     };
@@ -1617,4 +1732,733 @@ fn native_exchanges_follow_owning_delta_order_for_all_providers() {
             "{protocol:?}: {text}"
         );
     }
+}
+
+#[test]
+fn reasoning_indicator_follows_explicit_outgoing_request_fields() {
+    for body in [
+        json!({}),
+        json!({"enable_thinking": false}),
+        json!({"reasoning": {"effort": "none"}}),
+        json!({"reasoning_effort": "disabled"}),
+        json!({"thinking": {"type": "disabled"}, "reasoning_effort": "high"}),
+    ] {
+        assert!(!request_uses_reasoning(&body), "{body}");
+    }
+    for body in [
+        json!({"enable_thinking": true}),
+        json!({"reasoning_effort": "high"}),
+        json!({"reasoning_effort": "max"}),
+        json!({"reasoning": {"effort": "low"}}),
+        json!({"thinking": {"type": "adaptive"}}),
+        json!({"thinking": {"type": "enabled"}}),
+    ] {
+        assert!(request_uses_reasoning(&body), "{body}");
+    }
+}
+
+#[test]
+fn only_threshold_compression_reasoning_reaches_http_payload() {
+    let root = std::env::temp_dir().join(crate::unique_id("reasoning_payload"));
+    let mut core = crate::AgentCore::new(
+        "static",
+        crate::CoreProfile {
+            model: "test".into(),
+        },
+        &root,
+    );
+    let mut cfg = config(ApiProtocol::OpenAiCompatible);
+    cfg.openai_compatible.reasoning_effort = Some("medium".into());
+
+    for request_number in 1..=70 {
+        let base = core.render_prompt();
+        let prompt = core.build_model_request_prompt(&base);
+        let request = core.model_interaction_request(prompt);
+        let body = crate::prepare_model_interaction_http_request(&cfg, &request)
+            .model_request
+            .body;
+        assert_eq!(body["reasoning_effort"], "none", "request {request_number}");
+        assert!(body.get("thinking").is_none());
+    }
+
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "small active context".to_string(),
+    )]);
+    core.request_manual_context_compress();
+    let prompt = core.build_next_prompt();
+    let request = core.model_interaction_request(prompt);
+    let body = crate::prepare_model_interaction_http_request(&cfg, &request)
+        .model_request
+        .body;
+    assert_eq!(body["reasoning_effort"], "none");
+
+    core.clear_dynamic_context();
+    core.set_max_llm_input_tokens(3_000);
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "threshold context ".repeat(1_000),
+    )]);
+    core.append_in_turn_shrink_review_if_needed();
+    let prompt = core.build_next_prompt();
+    let request = core.model_interaction_request(prompt);
+    let body = crate::prepare_model_interaction_http_request(&cfg, &request)
+        .model_request
+        .body;
+    assert_eq!(body["reasoning_effort"], "medium");
+    assert!(body.get("thinking").is_none());
+
+    drop(core);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn chat_reasoning_wire_effort_respects_user_selection_and_disable() {
+    for selected in [
+        "minimal", "low", "medium", "high", "xhigh", "max", "disabled",
+    ] {
+        for critical in [false, true] {
+            let mut config = config(ApiProtocol::OpenAiCompatible);
+            config.openai_compatible.reasoning_effort = Some(selected.into());
+            config.openai_compatible.enable_thinking = Some(true);
+            let prepared = prepare_model_request_with_reasoning(&config, "hello", critical);
+            let expected = if critical && selected != "disabled" {
+                selected
+            } else {
+                "none"
+            };
+            assert_eq!(
+                prepared.body["reasoning_effort"], expected,
+                "selected={selected}, critical={critical}"
+            );
+            assert!(prepared.body.get("thinking").is_none());
+            assert_eq!(prepared.body["enable_thinking"], expected != "none");
+            assert_eq!(request_uses_reasoning(&prepared.body), expected != "none");
+        }
+    }
+    let config = config(ApiProtocol::OpenAiCompatible);
+    for critical in [false, true] {
+        let prepared = prepare_model_request_with_reasoning(&config, "hello", critical);
+        assert!(prepared.body.get("reasoning_effort").is_none());
+        assert!(prepared.body.get("thinking").is_none());
+    }
+}
+
+#[test]
+fn semantic_reasoning_policy_maps_to_every_protocol() {
+    use crate::reasoning::EffectiveReasoning;
+    for protocol in [
+        ApiProtocol::OpenAiCompatible,
+        ApiProtocol::OpenAiResponses,
+        ApiProtocol::Anthropic,
+    ] {
+        for policy in [
+            EffectiveReasoning::Unspecified,
+            EffectiveReasoning::Disabled,
+            EffectiveReasoning::Enabled {
+                intensity: Some("high".into()),
+            },
+            EffectiveReasoning::Enabled { intensity: None },
+        ] {
+            let cfg = config(protocol);
+            let body =
+                build_model_request_with_policy(&cfg, &[], StructuredOutputHint::None, &policy);
+            match (&policy, protocol) {
+                (EffectiveReasoning::Unspecified, _) => {
+                    for key in [
+                        "thinking",
+                        "reasoning",
+                        "reasoning_effort",
+                        "output_config",
+                        "enable_thinking",
+                    ] {
+                        assert!(body.get(key).is_none());
+                    }
+                }
+                (EffectiveReasoning::Disabled, ApiProtocol::OpenAiCompatible) => {
+                    assert_eq!(body["reasoning_effort"], "none")
+                }
+                (EffectiveReasoning::Disabled, ApiProtocol::OpenAiResponses) => {
+                    assert_eq!(body["reasoning"]["effort"], "none")
+                }
+                (EffectiveReasoning::Disabled, ApiProtocol::Anthropic) => {
+                    assert_eq!(body["thinking"]["type"], "disabled");
+                    assert!(body.get("output_config").is_none());
+                }
+                (EffectiveReasoning::Enabled { intensity }, ApiProtocol::OpenAiCompatible) => {
+                    if let Some(level) = intensity {
+                        assert_eq!(body["reasoning_effort"], level.as_str());
+                    } else {
+                        assert_eq!(body["enable_thinking"], true);
+                    }
+                }
+                (EffectiveReasoning::Enabled { intensity }, ApiProtocol::OpenAiResponses) => {
+                    if let Some(level) = intensity {
+                        assert_eq!(body["reasoning"]["effort"], level.as_str());
+                    } else {
+                        assert_eq!(body["reasoning"], json!({}));
+                    }
+                }
+                (EffectiveReasoning::Enabled { intensity }, ApiProtocol::Anthropic) => {
+                    assert_eq!(body["thinking"]["type"], "adaptive");
+                    if let Some(level) = intensity {
+                        assert_eq!(body["output_config"]["effort"], level.as_str());
+                    } else {
+                        assert!(body.get("output_config").is_none());
+                    }
+                }
+            }
+            if protocol != ApiProtocol::OpenAiCompatible {
+                assert!(body.get("reasoning_effort").is_none());
+                assert!(body.get("enable_thinking").is_none());
+            }
+            if protocol != ApiProtocol::Anthropic {
+                assert!(body.get("thinking").is_none());
+                assert!(body.get("output_config").is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn legacy_preferences_resolve_before_all_protocol_adapters() {
+    for protocol in [
+        ApiProtocol::OpenAiCompatible,
+        ApiProtocol::OpenAiResponses,
+        ApiProtocol::Anthropic,
+    ] {
+        for enabled in [None, Some(false), Some(true)] {
+            for level in [None, Some("disabled"), Some("none"), Some("high")] {
+                for critical in [false, true] {
+                    let mut cfg = config(protocol);
+                    cfg.openai_compatible.enable_thinking = enabled;
+                    cfg.openai_compatible.reasoning_effort = level.map(str::to_owned);
+                    let prepared = prepare_model_request_with_reasoning(&cfg, "hello", critical);
+                    let policy =
+                        ReasoningPreference::from_legacy(enabled, level).resolve(if critical {
+                            ReasoningDemand::Required
+                        } else {
+                            ReasoningDemand::Ordinary
+                        });
+                    let expected = build_model_request_with_policy(
+                        &cfg,
+                        &model_prompt_blocks(&plan_prompt_cache("hello")),
+                        plan_structured_output(&cfg),
+                        &policy,
+                    );
+                    assert_eq!(prepared.body, expected);
+                    if enabled == Some(false)
+                        || matches!(level, Some("disabled" | "none"))
+                        || !critical
+                    {
+                        assert!(!request_uses_reasoning(&prepared.body));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn custom_fields_cannot_override_reasoning_policy() {
+    for field in ["reasoning", "thinking", "output_config"] {
+        let fields = BTreeMap::from([(field.into(), json!({}))]);
+        assert!(validate_model_request_fields(&fields).is_err());
+    }
+}
+
+#[test]
+fn anthropic_unsupported_intensity_is_rejected_without_downgrade() {
+    for level in [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "provider-level",
+    ] {
+        let body = build_model_request_with_policy(
+            &config(ApiProtocol::Anthropic),
+            &[],
+            StructuredOutputHint::None,
+            &EffectiveReasoning::Enabled {
+                intensity: Some(level.into()),
+            },
+        );
+        assert_eq!(body["output_config"]["effort"], level);
+        assert_eq!(
+            validate_reasoning_wire(ApiProtocol::Anthropic, &body).is_ok(),
+            matches!(level, "low" | "medium" | "high" | "max")
+        );
+    }
+}
+
+#[test]
+fn catalog_request_payload_obeys_each_enabled_protocol_and_effort() {
+    for model in crate::model_catalog::models() {
+        for profile in &model.protocols {
+            if profile.disabled_reason.is_some() {
+                continue;
+            }
+            for effort in &model.efforts {
+                if profile
+                    .fixed_effort
+                    .as_ref()
+                    .is_some_and(|fixed| fixed != effort)
+                {
+                    continue;
+                }
+                let mut cfg = config(parse_api_protocol(&profile.protocol).unwrap());
+                cfg.model = model.model.clone();
+                cfg.max_llm_output_tokens = 8000;
+                cfg.openai_compatible.catalog_id = Some(model.id.clone());
+                cfg.openai_compatible.reasoning_effort = Some(effort.clone());
+                cfg.request_fields
+                    .insert("vendor_options".into(), json!({"flag":true}));
+                let body = build_model_request(&cfg, &[], StructuredOutputHint::None);
+                let (path, output) = if cfg.api_protocol == ApiProtocol::OpenAiResponses {
+                    ("/reasoning/effort", "max_output_tokens")
+                } else {
+                    ("/reasoning_effort", "max_tokens")
+                };
+                assert_eq!(
+                    body.pointer(path).and_then(Value::as_str),
+                    Some(effort.as_str()),
+                    "{}",
+                    model.id
+                );
+                assert_eq!(body[output], 8000);
+                assert_eq!(body["model"], model.model);
+                assert_eq!(body["vendor_options"], json!({"flag":true}));
+                assert!(body.get("catalog_id").is_none());
+                crate::model_catalog::validate_request(&cfg, &body).unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn catalog_request_rejects_forbidden_wire_effort_and_budget() {
+    let mut cfg = config(ApiProtocol::OpenAiCompatible);
+    cfg.model = "gpt-6-sol".into();
+    cfg.openai_compatible.catalog_id = Some("openai/gpt-6-sol".into());
+    cfg.openai_compatible.reasoning_effort = Some("high".into());
+    let body = build_model_request(&cfg, &[], StructuredOutputHint::None);
+    assert!(crate::model_catalog::validate_request(&cfg, &body).is_err());
+    cfg.openai_compatible.reasoning_effort = Some("none".into());
+    cfg.max_llm_output_tokens = 128001;
+    let body = build_model_request(&cfg, &[], StructuredOutputHint::None);
+    assert!(crate::model_catalog::validate_request(&cfg, &body).is_err());
+    cfg.openai_compatible.catalog_id = None;
+    assert!(crate::model_catalog::validate_request(&cfg, &body).is_ok());
+}
+
+#[test]
+fn catalog_final_wire_rejects_model_or_output_tampering() {
+    let mut cfg = config(ApiProtocol::OpenAiResponses);
+    cfg.model = "gpt-6-astra".into();
+    cfg.openai_compatible.catalog_id = Some("openai/gpt-6-astra".into());
+    cfg.openai_compatible.reasoning_effort = Some("high".into());
+    let body = build_model_request(&cfg, &[], StructuredOutputHint::None);
+    crate::model_catalog::validate_request(&cfg, &body).unwrap();
+    let mut wrong = body.clone();
+    wrong["max_output_tokens"] = json!(999999);
+    assert!(crate::model_catalog::validate_request(&cfg, &wrong).is_err());
+    let mut wrong = body;
+    wrong["model"] = json!("other-model");
+    assert!(crate::model_catalog::validate_request(&cfg, &wrong).is_err());
+}
+
+#[test]
+fn responses_stream_terminal_parses_text_tools_usage_and_incomplete() {
+    let mut cfg = config(ApiProtocol::OpenAiResponses);
+    cfg.openai_compatible.stream = true;
+    let request = build_model_request(&cfg, &[], StructuredOutputHint::None);
+    assert_eq!(request["stream"], true);
+    assert!(request.get("stream_options").is_none());
+    let response = json!({"model":"test-model","status":"completed","output":[
+        {"type":"message","content":[{"type":"output_text","text":"你好"}]},
+        {"type":"function_call","call_id":"call_1","name":"readfile","arguments":"{\"path\":\"a\"}"}],
+        "usage":{"input_tokens":12,"output_tokens":7,"total_tokens":19}});
+    let wire = format!(
+        "event: response.output_text.delta\ndata: {}\n\nevent: response.completed\ndata: {}\n\n",
+        json!({"type":"response.output_text.delta","delta":"你好"}),
+        json!({"type":"response.completed","response":response})
+    );
+    let parsed = interpret_model_http_response(&cfg, 200, &wire, "")
+        .result
+        .unwrap();
+    assert_eq!(parsed.content, "你好");
+    assert_eq!(parsed.tool_calls.len(), 1);
+    assert_eq!(parsed.usage.total_tokens, 19);
+    assert!(!parsed.truncated);
+    let wire = format!(
+        "data: {}\n\n",
+        json!({"type":"response.incomplete","response":{"model":"test-model","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[]}})
+    );
+    assert!(
+        interpret_model_http_response(&cfg, 200, &wire, "")
+            .result
+            .unwrap()
+            .truncated
+    );
+    for wire in [
+        "data: {bad}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+        "data: {\"type\":\"response.failed\"}\n\n",
+    ] {
+        assert!(interpret_model_http_response(&cfg, 200, wire, "")
+            .result
+            .is_err());
+    }
+}
+
+#[test]
+fn responses_stream_failure_preserves_bounded_sanitized_diagnostics() {
+    let cfg = config(ApiProtocol::OpenAiResponses);
+    let wire = format!(
+        "data: {}\n\n",
+        json!({
+            "type": "response.failed",
+            "response": {
+                "id": "resp_123",
+                "status": "failed",
+                "error": {
+                    "code": "server_error",
+                    "type": "upstream_error",
+                    "param": "input",
+                    "message": format!("temporary failure sk-sensitive-token {}", "x".repeat(400)),
+                },
+                "metadata": {"private": "must-not-be-retained"},
+            },
+        })
+    );
+
+    let interpreted = interpret_model_http_response(&cfg, 200, &wire, "");
+    let error = interpreted.result.unwrap_err();
+    assert!(
+        error.starts_with("model_responses_stream_failed:"),
+        "{error}"
+    );
+    assert!(error.contains("event_type=response.failed"), "{error}");
+    assert!(error.contains("response_id=resp_123"), "{error}");
+    assert!(error.contains("response_status=failed"), "{error}");
+    assert!(error.contains("code=server_error"), "{error}");
+    assert!(error.contains("type=upstream_error"), "{error}");
+    assert!(
+        error.contains("message=temporary failure ***REDACTED***"),
+        "{error}"
+    );
+    assert!(error.ends_with('…'), "{error}");
+    assert!(!error.contains("sk-sensitive-token"));
+    assert!(error.chars().count() < 600, "{error}");
+
+    assert_eq!(interpreted.raw_json["stream"], true);
+    assert_eq!(
+        interpreted.raw_json["stream_error"]["event_type"],
+        "response.failed"
+    );
+    assert_eq!(interpreted.raw_json["stream_error"]["code"], "server_error");
+    let retained_message = interpreted.raw_json["stream_error"]["message"]
+        .as_str()
+        .unwrap();
+    assert!(retained_message.starts_with("temporary failure ***REDACTED*** "));
+    assert!(retained_message.ends_with('…'));
+    assert_eq!(retained_message.chars().count(), 241);
+    let retained = interpreted.raw_json.to_string();
+    assert!(!retained.contains("must-not-be-retained"));
+    assert!(!retained.contains("sk-sensitive-token"));
+
+    let audit = model_response_audit_event(200, &interpreted.raw_json);
+    assert_eq!(audit["error_kind"], "model_stream_error");
+    assert_eq!(audit["response"]["error"]["code"], "server_error");
+    assert!(!audit.to_string().contains("must-not-be-retained"));
+}
+
+#[test]
+fn responses_stream_top_level_error_event_preserves_code_and_message() {
+    let cfg = config(ApiProtocol::OpenAiResponses);
+    let wire = concat!(
+        "data: {\"type\":\"error\",\"code\":\"rate_limit_exceeded\",",
+        "\"message\":\"try later\",\"param\":null}\n\n"
+    );
+
+    let interpreted = interpret_model_http_response(&cfg, 200, wire, "");
+    let error = interpreted.result.unwrap_err();
+    assert!(error.contains("event_type=error"), "{error}");
+    assert!(error.contains("code=rate_limit_exceeded"), "{error}");
+    assert!(error.contains("message=try later"), "{error}");
+    assert_eq!(
+        interpreted.raw_json["stream_error"]["code"],
+        "rate_limit_exceeded"
+    );
+}
+
+fn zhipu_config(suffix: &str) -> ModelServiceConfig {
+    let mut cfg = config(ApiProtocol::OpenAiCompatible);
+    cfg.model = format!("glm-{suffix}");
+    cfg.openai_compatible.catalog_id = Some(format!("z-glm{suffix}"));
+    cfg.openai_compatible.stream = true;
+    cfg
+}
+
+#[test]
+fn zhipu_reasoning_defaults_disable_and_final_wire_guards() {
+    for suffix in ["5.2", "5.3", "5.3-flash"] {
+        let mut cfg = zhipu_config(suffix);
+        let body = build_model_request(&cfg, &[], StructuredOutputHint::None);
+        assert_eq!(body["reasoning_effort"], "max");
+        assert_eq!(
+            body["thinking"],
+            json!({"type":"enabled","clear_thinking":true})
+        );
+        assert!(body.get("enable_thinking").is_none());
+        assert!(body.get("stream_options").is_none());
+        crate::model_catalog::validate_request(&cfg, &body).unwrap();
+        for patch in [
+            json!({"type":"disabled","clear_thinking":true}),
+            json!({"type":"enabled","clear_thinking":false}),
+            json!({"type":"enabled"}),
+        ] {
+            let mut wrong = body.clone();
+            wrong["thinking"] = patch;
+            assert!(crate::model_catalog::validate_request(&cfg, &wrong).is_err());
+        }
+        for field in ["enable_thinking", "stream_options"] {
+            let mut wrong = body.clone();
+            wrong[field] = json!(true);
+            assert!(crate::model_catalog::validate_request(&cfg, &wrong).is_err());
+        }
+        cfg.openai_compatible.enable_thinking = Some(false);
+        let body = build_model_request(&cfg, &[], StructuredOutputHint::None);
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert_eq!(
+            crate::model_catalog::validate_request(&cfg, &body).is_ok(),
+            suffix == "5.2"
+        );
+        cfg.openai_compatible.enable_thinking = None;
+        for effort in ["none", "disabled", "minimal", "medium", "xhigh", "unknown"] {
+            cfg.openai_compatible.reasoning_effort = Some(effort.into());
+            let body = build_model_request(&cfg, &[], StructuredOutputHint::None);
+            assert_eq!(
+                crate::model_catalog::validate_request(&cfg, &body).is_ok(),
+                suffix == "5.2" && matches!(effort, "none" | "disabled")
+            );
+        }
+    }
+}
+
+#[test]
+fn zhipu_native_reasoning_roundtrip_json_and_sse_stays_out_of_public_text() {
+    use std::fmt::Write as _;
+    for suffix in ["5.2", "5.3", "5.3-flash"] {
+        let cfg = zhipu_config(suffix);
+        let tool = json!({"id":"call_1","type":"function","function":{"name":"readfile","arguments":"{\"path\":\"fixture\"}"}});
+        let raw = json!({"choices":[{"message":{"content":"可见正文","reasoning_content":"opaque 片段\n unchanged", "tool_calls":[tool]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":20,"completion_tokens":10,"total_tokens":30}});
+        let mut chunk = tool.clone();
+        chunk["index"] = json!(0);
+        let sse = [
+            json!({"choices":[{"delta":{"reasoning_content":"opaque 片段\n"}}]}),
+            json!({"choices":[{"delta":{"reasoning_content":" unchanged", "content":"可见正文","tool_calls":[chunk]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":20,"completion_tokens":10,"total_tokens":30}}),
+        ].iter().fold(String::new(), |mut stream, event| {
+            write!(stream, "data: {event}\n\n").unwrap();
+            stream
+        }) + "data: [DONE]\n\n";
+        for wire in [raw.to_string(), sse] {
+            let response = interpret_model_http_response(&cfg, 200, &wire, "")
+                .result
+                .unwrap();
+            assert_eq!(response.content, "可见正文");
+            assert_eq!(response.usage.total_tokens, 30);
+            assert_eq!(response.tool_calls[0].arguments, json!({"path":"fixture"}));
+            let metadata = response.tool_calls[0]
+                .assistant_continuation
+                .as_ref()
+                .unwrap();
+            assert_eq!(metadata.reasoning_content, "opaque 片段\n unchanged");
+            let mut request = native_request();
+            request.rendered_prompt =
+                "[BEGIN DELTA delta_id: pd_1, time_ms: 1]\n\n## USER\nfixture".into();
+            let exchange = NativeExchange {
+                delta_id: "pd_1".into(),
+                assistant_text: response.content,
+                calls: response.tool_calls,
+                results: vec![NativeToolResult {
+                    call_id: "call_1".into(),
+                    name: "readfile".into(),
+                    content: "fixture-result".into(),
+                    is_error: false,
+                }],
+            };
+            // Persistence roundtrip retains metadata, old records remain readable.
+            request.native_exchanges =
+                vec![serde_json::from_value(serde_json::to_value(exchange).unwrap()).unwrap()];
+            let body = prepare_model_interaction_http_request(&cfg, &request)
+                .model_request
+                .body;
+            crate::model_catalog::validate_request(&cfg, &body).unwrap();
+            let messages = body["messages"].as_array().unwrap();
+            let assistant = messages
+                .iter()
+                .position(|m| m["role"] == "assistant")
+                .unwrap();
+            assert_eq!(
+                messages[assistant]["reasoning_content"],
+                "opaque 片段\n unchanged"
+            );
+            assert_eq!(messages[assistant]["content"], "可见正文");
+            assert_eq!(messages[assistant + 1]["role"], "tool");
+            assert_eq!(messages[assistant + 1]["content"], "fixture-result");
+            for other in [
+                config(ApiProtocol::OpenAiCompatible),
+                zhipu_config("different-model"),
+                zhipu_config(if suffix == "5.2" { "5.3" } else { "5.2" }),
+            ] {
+                let body = prepare_model_interaction_http_request(&other, &request)
+                    .model_request
+                    .body;
+                assert!(!body.to_string().contains("opaque 片段"));
+            }
+        }
+    }
+    let legacy: NativeToolCall = serde_json::from_value(
+        json!({"id":"old","name":"readfile","arguments":{},"raw_arguments":"{}"}),
+    )
+    .unwrap();
+    assert!(legacy.assistant_continuation.is_none());
+    assert!(serde_json::to_value(legacy)
+        .unwrap()
+        .get("assistant_continuation")
+        .is_none());
+}
+
+#[test]
+fn zhipu_stream_rejects_oversized_continuation_and_tool_index() {
+    let cfg = zhipu_config("5.3");
+    for delta in [
+        json!({"reasoning_content":"x".repeat(MAX_ASSISTANT_CONTINUATION_BYTES + 1)}),
+        json!({"tool_calls":[{"index":u64::MAX}]}),
+    ] {
+        let wire = format!("data: {}\n\n", json!({"choices":[{"delta":delta}]}));
+        assert!(interpret_model_http_response(&cfg, 200, &wire, "")
+            .result
+            .is_err());
+    }
+}
+
+#[test]
+fn demand_v1_daily_adaptive_mapping_and_final_wire_validation() {
+    use crate::model_requirements::{reasoning_upgrade, validate_config, EndpointRequirements};
+    for provider in ["openai", "zhipu"] {
+        for protocol in [ApiProtocol::OpenAiCompatible, ApiProtocol::OpenAiResponses] {
+            if provider == "zhipu" && protocol == ApiProtocol::OpenAiResponses {
+                continue;
+            }
+            let mut cfg = if provider == "zhipu" {
+                zhipu_config("5.3")
+            } else {
+                config(protocol)
+            };
+            cfg.openai_compatible.catalog_id = None;
+            cfg.openai_compatible.requirements = EndpointRequirements {
+                version: 1,
+                provider: Some(provider.into()),
+                allowed_reasoning: Some(vec!["low".into(), "high".into(), "max".into()]),
+                adaptive_reasoning: Some(true),
+                ..Default::default()
+            };
+            cfg.openai_compatible.reasoning_effort = Some("low".into());
+            validate_config(&cfg).unwrap();
+            for (critical, expected) in [(false, "low"), (true, "high")] {
+                let body = build_model_request_with_reasoning(
+                    &cfg,
+                    &[],
+                    StructuredOutputHint::None,
+                    critical,
+                );
+                crate::model_payload::validate_request(&cfg, &body, critical).unwrap();
+                let path = if protocol == ApiProtocol::OpenAiResponses {
+                    "/reasoning/effort"
+                } else {
+                    "/reasoning_effort"
+                };
+                assert_eq!(body.pointer(path).and_then(Value::as_str), Some(expected));
+                assert!(body.get("enable_thinking").is_none());
+                if provider == "zhipu" {
+                    assert_eq!(
+                        body["thinking"],
+                        json!({"type":"enabled", "clear_thinking":true})
+                    );
+                }
+                let mut wrong = body.clone();
+                *wrong.pointer_mut(path).unwrap() = json!("max"); // valid enum, wrong demand
+                assert!(crate::model_payload::validate_request(&cfg, &wrong, critical).is_err());
+            }
+            let upgrade = reasoning_upgrade(&cfg, true).unwrap();
+            assert_eq!(
+                (upgrade.from.as_str(), upgrade.to.as_str()),
+                ("low", "high")
+            );
+            assert!(reasoning_upgrade(&cfg, false).is_none());
+            cfg.openai_compatible.requirements.adaptive_reasoning = Some(false);
+            assert!(reasoning_upgrade(&cfg, true).is_none());
+            cfg.openai_compatible.requirements.allowed_reasoning = Some(vec!["high".into()]);
+            assert!(validate_config(&cfg).is_err());
+        }
+    }
+}
+
+#[test]
+fn demand_v1_identity_is_independent_of_template_and_url() {
+    let mut cfg = zhipu_config("5.3");
+    cfg.openai_compatible.requirements.version = 1;
+    assert_eq!(crate::model_requirements::provider(&cfg), None);
+    cfg.openai_compatible.requirements.provider = Some("zhipu".into());
+    cfg.openai_compatible.catalog_id = Some("openai/gpt-6-astra".into());
+    cfg.base_url = "https://proxy.invalid/custom".into();
+    assert!(crate::model_catalog::uses_zhipu_chat(&cfg));
+    crate::model_requirements::validate_config(&cfg).unwrap();
+    cfg.model = "not-declared".into();
+    assert!(crate::model_requirements::validate_config(&cfg).is_err());
+    cfg.openai_compatible.requirements.provider = Some("openai".into());
+    crate::model_requirements::validate_config(&cfg).unwrap();
+}
+
+#[test]
+fn demand_v1_rejects_excluded_default_and_unsupported_provider_protocol() {
+    let mut cfg = zhipu_config("5.3");
+    cfg.openai_compatible.reasoning_effort = None;
+    cfg.openai_compatible.requirements =
+        serde_json::from_value(json!({"version":1,"provider":"zhipu","allowed_reasoning":["low"]}))
+            .unwrap();
+    assert_eq!(
+        crate::model_requirements::validate_config(&cfg).unwrap_err(),
+        "daily_reasoning_not_in_allowed_set"
+    );
+    cfg.openai_compatible.requirements.allowed_reasoning = None;
+    // Zhipu Responses is admitted per-model by the catalog profiles; the
+    // provider table only excludes Anthropic adapters.
+    cfg.api_protocol = ApiProtocol::OpenAiResponses;
+    crate::model_requirements::validate_config(&cfg).unwrap();
+    cfg.api_protocol = ApiProtocol::Anthropic;
+    assert_eq!(
+        crate::model_requirements::validate_config(&cfg).unwrap_err(),
+        "provider_protocol_adapter_not_implemented"
+    );
+}
+
+#[test]
+fn clearing_endpoint_preferences_removes_stale_disable_and_effort() {
+    let mut options = crate::OpenAiCompatibleOptions {
+        enable_thinking: Some(false),
+        reasoning_effort: Some("max".into()),
+        ..Default::default()
+    };
+    for key in ["TIMEM_ENABLE_THINKING", "TIMEM_REASONING_EFFORT"] {
+        crate::model_service_config::apply_openai_compatible_env_value(&mut options, key, "")
+            .unwrap();
+    }
+    assert_eq!(options.enable_thinking, None);
+    assert_eq!(options.reasoning_effort, None);
 }

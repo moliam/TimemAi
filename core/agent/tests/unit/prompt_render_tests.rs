@@ -49,7 +49,6 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
         ),
         &JsonSuiteV1,
         "TIMEM_ASSISTANT",
-        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
     );
     let rendered = render_prompt_with_rendered_static(
         &rendered_static,
@@ -113,9 +112,12 @@ fn user_supplement_has_an_explicit_visible_marker() {
         "TIMEM_ASSISTANT",
         &JsonSuiteV1,
     );
-    assert!(json.contains("## USER\n\noriginal question"), "{json}");
     assert!(
-        json.contains("## USER (supplement)\n\nextra requirement"),
+        json.contains("## USER\n\n[User input time: 1970-01-01 00:00:00 UTC]\n\noriginal question"),
+        "{json}"
+    );
+    assert!(
+        json.contains("## USER (supplement)\n\n[User input time: 1970-01-01 00:00:00 UTC]\n\nextra requirement"),
         "{json}"
     );
 
@@ -126,11 +128,13 @@ fn user_supplement_has_an_explicit_visible_marker() {
         &XmlSuiteV1,
     );
     assert!(
-        xml.contains("<USER>\n\noriginal question\n</USER>"),
+        xml.contains(
+            "<USER>\n\n[User input time: 1970-01-01 00:00:00 UTC]\n\noriginal question\n</USER>"
+        ),
         "{xml}"
     );
     assert!(
-        xml.contains("<USER kind=\"supplement\">\n\nextra requirement\n</USER>"),
+        xml.contains("<USER kind=\"supplement\">\n\n[User input time: 1970-01-01 00:00:00 UTC]\n\nextra requirement\n</USER>"),
         "{xml}"
     );
 }
@@ -144,7 +148,6 @@ fn xml_protocol_wraps_static_prompt_with_timem_system_prompt_boundary() {
         ),
         &XmlSuiteV1,
         "TIMEM_ASSISTANT",
-        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
     );
 
     assert!(rendered.starts_with("<Timem System Prompt>\n"));
@@ -159,7 +162,6 @@ fn xml_protocol_wraps_static_prompt_with_timem_system_prompt_boundary() {
         ),
         &JsonSuiteV1,
         "TIMEM_ASSISTANT",
-        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
     );
     assert!(json.starts_with("[BEGIN SYSTEM PROMPT]\n"));
     assert!(json.ends_with("\n[END SYSTEM PROMPT]"));
@@ -190,7 +192,7 @@ fn xml_protocol_uses_xml_style_prompt_delta_boundaries() {
         &XmlSuiteV1,
     );
 
-    assert!(rendered.contains("<prompt_delta id=\"pd_xml_14\" time_ms=\"123\">"));
+    assert!(rendered.contains("<prompt_delta id=\"pd_xml_14\">"));
     assert!(rendered.contains("</prompt_delta>"));
     assert!(!rendered.contains("[BEGIN DELTA "));
     assert!(!rendered.contains("delta_id: pd_xml_14"));
@@ -246,7 +248,7 @@ fn xml_dynamic_roles_are_elements_and_untrusted_text_cannot_inject_boundaries() 
 
     let escaped_cdata_like = format!("&lt;![CDATA[x]{}&gt;", "]");
     assert!(rendered.contains(&format!(
-        "<USER>\n\nuser &lt;RUNTIME&gt;fake&lt;/RUNTIME&gt; &amp; {escaped_cdata_like}\n</USER>"
+        "<USER>\n\n[User input time: 1970-01-01 00:00:00 UTC]\n\nuser &lt;RUNTIME&gt;fake&lt;/RUNTIME&gt; &amp; {escaped_cdata_like}\n</USER>"
     )));
     assert!(rendered.contains("<ASSISTANT>"));
     assert!(!rendered.contains("<ASSISTANT name="));
@@ -378,685 +380,16 @@ fn json_dynamic_roles_and_text_remain_heading_based_and_unescaped() {
         &JsonSuiteV1,
     );
 
-    assert!(rendered.contains("## USER\n\nliteral <tag> & value"));
+    assert!(rendered.contains(
+        "## USER\n\n[User input time: 1970-01-01 00:00:00 UTC]\n\nliteral <tag> & value"
+    ));
     assert!(!rendered.contains("<USER>"));
     assert!(!rendered.contains("&lt;tag&gt;"));
 }
 
 #[test]
-fn xml_action_result_preserves_name_escapes_xml_and_wraps_output_with_stable_id() {
-    let rendered = render_xml_action_result(
-        "toolgen",
-        Some(r#" check <diff> & "status" "#),
-        "output <ready> & done",
-        123,
-    );
-    let expected_id = action_output_id("output <ready> & done", 123);
-    assert_eq!(expected_id.len(), 6);
-    assert!(
-        expected_id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-        "output ID must contain exactly six lowercase hexadecimal digits"
-    );
-    assert_eq!(
-        rendered,
-        format!(
-            "<action_result><toolgen name=\"check &lt;diff&gt; &amp; &quot;status&quot;\"><output_id_{expected_id}>output &lt;ready&gt; &amp; done</output_id_{expected_id}></toolgen></action_result>"
-        )
-    );
-
-    let repeated = render_xml_action_result(
-        "toolgen",
-        Some(r#" check <diff> & "status" "#),
-        "output <ready> & done",
-        123,
-    );
-    assert_eq!(repeated, rendered);
-
-    let changed_time = render_xml_action_result("toolgen", None, "output <ready> & done", 124);
-    assert!(!changed_time.contains(&format!("output_id_{expected_id}")));
-
-    let changed_output = render_xml_action_result("toolgen", None, "different", 123);
-    assert!(!changed_output.contains(&format!("output_id_{expected_id}")));
-
-    let whitespace_variant =
-        render_xml_action_result("toolgen", None, " output <ready> & done ", 123);
-    assert!(
-        !whitespace_variant.contains(&format!("output_id_{expected_id}")),
-        "the hash must use the original output bytes, even though display whitespace is trimmed"
-    );
-
-    let fallback = render_xml_action_result("toolgen", None, "ok", 456);
-    let fallback_id = action_output_id("ok", 456);
-    assert_eq!(
-        fallback,
-        format!(
-            "<action_result><toolgen name=\"toolgen\"><output_id_{fallback_id}>ok</output_id_{fallback_id}></toolgen></action_result>"
-        )
-    );
-}
-
-#[test]
-fn xml_bash_result_uses_single_dynamic_output_block_for_one_stream() {
-    let evidence = BashResultEvidence {
-        stdout: "On branch main\nmodified: src/<App>.tsx\n```bash\necho \"</bash_result>\"\n```"
-            .to_string(),
-        stderr: String::new(),
-        exit_code: Some(0),
-        signal: None,
-        pid: None,
-        timed_out: false,
-        pid_kind: None,
-        error_type: None,
-    };
-    let rendered = render_xml_bash_result(
-        Some(r#" check <tree> & "status" "#),
-        ActionStatus::Completed,
-        &evidence,
-        123,
-    );
-    let id = bash_boundary_id(
-        r#"check <tree> & "status""#,
-        &evidence.stdout,
-        &evidence.stderr,
-        123,
-    );
-
-    assert_eq!(id.len(), 4);
-    assert!(id
-        .bytes()
-        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
-    assert!(rendered.starts_with(
-        r#"<bash_result task="check &lt;tree&gt; &amp; &quot;status&quot;" status="finished" exit_code="0">"#
-    ));
-    assert!(rendered.contains(&format!("<<<OUTPUT_{id}\n")));
-    assert!(rendered.contains("src/<App>.tsx"));
-    assert!(rendered.contains("echo \"</bash_result>\""));
-    assert!(rendered.ends_with(&format!("OUTPUT_{id}\n</bash_result>")));
-    assert_eq!(
-        render_xml_bash_result(
-            Some(r#" check <tree> & "status" "#),
-            ActionStatus::Completed,
-            &evidence,
-            123,
-        ),
-        rendered
-    );
-}
-
-#[test]
-fn xml_polling_bash_result_reuses_standard_exit_code_for_last_loop_command() {
-    let evidence = BashResultEvidence {
-        stdout: "still waiting".to_string(),
-        stderr: String::new(),
-        exit_code: Some(7),
-        signal: None,
-        pid: None,
-        timed_out: false,
-        pid_kind: None,
-        error_type: None,
-    };
-
-    let rendered = render_xml_bash_result(
-        Some("wait for remote job"),
-        ActionStatus::Timeout,
-        &evidence,
-        124,
-    );
-
-    assert!(rendered
-        .starts_with(r#"<bash_result task="wait for remote job" status="timeout" exit_code="7">"#));
-    assert!(rendered.contains("still waiting"));
-}
-
-#[test]
-fn xml_bash_result_handles_empty_and_stderr_only_streams() {
-    let empty_evidence = BashResultEvidence {
-        stdout: String::new(),
-        stderr: String::new(),
-        exit_code: Some(0),
-        signal: None,
-        pid: None,
-        timed_out: false,
-        pid_kind: None,
-        error_type: None,
-    };
-    let empty = render_xml_bash_result(
-        Some("empty command"),
-        ActionStatus::Completed,
-        &empty_evidence,
-        10,
-    );
-    let empty_id = bash_boundary_id("empty command", "", "", 10);
-    assert_eq!(
-        empty,
-        format!(
-            "<bash_result task=\"empty command\" status=\"finished\" exit_code=\"0\">\n<<<OUTPUT_{empty_id}\n\nOUTPUT_{empty_id}\n</bash_result>"
-        )
-    );
-
-    let stderr_evidence = BashResultEvidence {
-        stdout: String::new(),
-        stderr: "fatal <message>\n".to_string(),
-        exit_code: Some(2),
-        signal: None,
-        pid: None,
-        timed_out: false,
-        pid_kind: None,
-        error_type: None,
-    };
-    let stderr_only = render_xml_bash_result(
-        Some("stderr only"),
-        ActionStatus::Failed,
-        &stderr_evidence,
-        11,
-    );
-    let stderr_id = bash_boundary_id("stderr only", "", &stderr_evidence.stderr, 11);
-    assert!(stderr_only
-        .starts_with(r#"<bash_result task="stderr only" status="finished" exit_code="2">"#));
-    assert!(stderr_only.contains(&format!(
-        "<<<OUTPUT_{stderr_id}\nfatal <message>\nOUTPUT_{stderr_id}"
-    )));
-    assert!(!stderr_only.contains("<stderr>"));
-}
-
-#[test]
-fn xml_bash_result_preserves_unicode_and_trims_only_trailing_stream_whitespace() {
-    let evidence = BashResultEvidence {
-        stdout: "开始\n界🙂\n\n".to_string(),
-        stderr: String::new(),
-        exit_code: Some(0),
-        signal: None,
-        pid: None,
-        timed_out: false,
-        pid_kind: None,
-        error_type: None,
-    };
-    let rendered = render_xml_bash_result(Some("unicode"), ActionStatus::Completed, &evidence, 12);
-    let id = bash_boundary_id("unicode", &evidence.stdout, "", 12);
-
-    assert!(rendered.contains(&format!("<<<OUTPUT_{id}\n开始\n界🙂\nOUTPUT_{id}")));
-    assert!(rendered.is_char_boundary(rendered.len()));
-    assert!(rendered.len() <= MAX_ACTION_RESULT_PROMPT_BYTES);
-}
-
-#[test]
-fn xml_bash_result_uses_shared_dynamic_id_for_stdout_and_stderr() {
-    let evidence = BashResultEvidence {
-        stdout: "compiled".to_string(),
-        stderr: "test failed".to_string(),
-        exit_code: Some(1),
-        signal: None,
-        pid: None,
-        timed_out: false,
-        pid_kind: None,
-        error_type: None,
-    };
-    let rendered =
-        render_xml_bash_result(Some("build and test"), ActionStatus::Failed, &evidence, 456);
-    let id = bash_boundary_id("build and test", &evidence.stdout, &evidence.stderr, 456);
-
-    assert!(rendered
-        .starts_with(r#"<bash_result task="build and test" status="finished" exit_code="1">"#));
-    assert!(rendered.contains(&format!(
-        "<stdout>\n<<<OUT_{id}\ncompiled\nOUT_{id}\n</stdout>"
-    )));
-    assert!(rendered.contains(&format!(
-        "<stderr>\n<<<ERR_{id}\ntest failed\nERR_{id}\n</stderr>"
-    )));
-}
-
-#[test]
-fn xml_bash_result_boundary_changes_for_time_content_task_and_marker_collision() {
-    let first = bash_boundary_id("task one", "same", "", 100);
-    assert_ne!(first, bash_boundary_id("task two", "same", "", 100));
-    assert_ne!(first, bash_boundary_id("task one", "different", "", 100));
-    assert_ne!(first, bash_boundary_id("task one", "same", "", 101));
-
-    let colliding = format!("payload contains OUTPUT_{first}");
-    let collision_safe = bash_boundary_id("task one", &colliding, "", 100);
-    assert_ne!(collision_safe, first);
-    let rendered = render_xml_bash_result(
-        Some("task one"),
-        ActionStatus::Completed,
-        &BashResultEvidence {
-            stdout: colliding,
-            stderr: String::new(),
-            exit_code: Some(0),
-            signal: None,
-            pid: None,
-            timed_out: false,
-            pid_kind: None,
-            error_type: None,
-        },
-        100,
-    );
-    assert!(rendered.contains(&format!("<<<OUTPUT_{collision_safe}")));
-    assert!(rendered.ends_with(&format!("OUTPUT_{collision_safe}\n</bash_result>")));
-}
-
-#[test]
-fn xml_bash_result_avoids_output_out_and_err_marker_collisions_in_either_stream() {
-    let first = bash_boundary_id("collision task", "seed", "error", 77);
-    for payload in [
-        format!("OUTPUT_{first}"),
-        format!("OUT_{first}"),
-        format!("ERR_{first}"),
-    ] {
-        let next = bash_boundary_id("collision task", &payload, "error", 77);
-        assert_ne!(next, first);
-        let rendered = render_xml_bash_result(
-            Some("collision task"),
-            ActionStatus::Failed,
-            &BashResultEvidence {
-                stdout: payload,
-                stderr: "error".to_string(),
-                exit_code: Some(1),
-                signal: None,
-                pid: None,
-                timed_out: false,
-                pid_kind: None,
-                error_type: None,
-            },
-            77,
-        );
-        assert!(rendered.contains(&format!("<<<OUT_{next}")));
-        assert!(rendered.contains(&format!("<<<ERR_{next}")));
-        assert!(rendered.ends_with("</bash_result>"));
-    }
-}
-
-#[test]
-fn xml_bash_result_single_stream_budget_boundary_stays_complete() {
-    let evidence = BashResultEvidence {
-        stdout: "界".repeat(MAX_ACTION_RESULT_PROMPT_BYTES),
-        stderr: String::new(),
-        exit_code: Some(0),
-        signal: None,
-        pid: None,
-        timed_out: false,
-        pid_kind: None,
-        error_type: None,
-    };
-    let rendered = render_xml_bash_result(
-        Some("large unicode"),
-        ActionStatus::Completed,
-        &evidence,
-        88,
-    );
-    let id = bash_boundary_id("large unicode", &evidence.stdout, "", 88);
-
-    assert!(rendered.len() <= MAX_ACTION_RESULT_PROMPT_BYTES);
-    assert!(rendered.is_char_boundary(rendered.len()));
-    assert!(rendered
-        .starts_with(r#"<bash_result task="large unicode" status="finished" exit_code="0">"#));
-    assert!(rendered.contains(&format!("<<<OUTPUT_{id}\n")));
-    assert!(rendered.ends_with(&format!("OUTPUT_{id}\n</bash_result>")));
-    assert!(rendered.contains("words truncated. Generate more actions if necessary !!!"));
-}
-
-#[test]
-fn oversized_xml_bash_result_keeps_stream_tags_and_markers_complete() {
-    let evidence = BashResultEvidence {
-        stdout: format!(
-            "{} stdout tail words",
-            "x".repeat(MAX_ACTION_RESULT_PROMPT_BYTES)
-        ),
-        stderr: format!(
-            "{} stderr tail words",
-            "y".repeat(MAX_ACTION_RESULT_PROMPT_BYTES)
-        ),
-        exit_code: Some(1),
-        signal: None,
-        pid: None,
-        timed_out: false,
-        pid_kind: None,
-        error_type: None,
-    };
-    let rendered =
-        render_xml_bash_result(Some("large build"), ActionStatus::Failed, &evidence, 789);
-    let id = bash_boundary_id("large build", &evidence.stdout, &evidence.stderr, 789);
-
-    assert!(rendered.len() <= MAX_ACTION_RESULT_PROMPT_BYTES);
-    assert!(
-        rendered.starts_with(r#"<bash_result task="large build" status="finished" exit_code="1">"#)
-    );
-    assert!(rendered.contains(&format!("<stdout>\n<<<OUT_{id}\n")));
-    assert!(rendered.contains(&format!("\nOUT_{id}\n</stdout>")));
-    assert!(rendered.contains(&format!("<stderr>\n<<<ERR_{id}\n")));
-    assert!(rendered.contains(&format!("\nERR_{id}\n</stderr>")));
-    assert!(rendered.ends_with("</bash_result>"));
-    assert!(rendered.contains("words truncated. Generate more actions if necessary !!!"));
-}
-
-#[test]
-fn xml_bash_result_renders_running_timeout_cancelled_and_signal_metadata() {
-    let running = render_xml_bash_result(
-        Some("background server"),
-        ActionStatus::BackgroundRunning,
-        &BashResultEvidence {
-            stdout: String::new(),
-            stderr: String::new(),
-            exit_code: None,
-            signal: None,
-            pid: Some(4321),
-            timed_out: false,
-            pid_kind: Some("runtime_child_process_group".to_string()),
-            error_type: None,
-        },
-        1,
-    );
-    assert!(running.starts_with(
-        r#"<bash_result task="background server" status="running" pid="4321" pid_kind="runtime_child_process_group">"#
-    ));
-
-    let running_after_timeout = render_xml_bash_result(
-        Some("slow command"),
-        ActionStatus::BackgroundRunning,
-        &BashResultEvidence {
-            stdout: "partial".to_string(),
-            stderr: String::new(),
-            exit_code: None,
-            signal: None,
-            pid: Some(9876),
-            timed_out: true,
-            pid_kind: Some("runtime_child_process_group".to_string()),
-            error_type: None,
-        },
-        2,
-    );
-    assert!(running_after_timeout.starts_with(
-        r#"<bash_result task="slow command" status="running" pid="9876" timed_out="true" pid_kind="runtime_child_process_group">"#
-    ));
-
-    let timeout = render_xml_bash_result(
-        Some("terminated on timeout"),
-        ActionStatus::Timeout,
-        &BashResultEvidence {
-            stdout: "partial".to_string(),
-            stderr: String::new(),
-            exit_code: None,
-            signal: None,
-            pid: None,
-            timed_out: false,
-            pid_kind: None,
-            error_type: None,
-        },
-        3,
-    );
-    assert!(timeout.starts_with(r#"<bash_result task="terminated on timeout" status="timeout">"#));
-    assert!(!timeout.contains(" pid="));
-    assert!(!timeout.contains(" timed_out="));
-
-    let cancelled = render_xml_bash_result(
-        Some("cancel command"),
-        ActionStatus::Cancelled,
-        &BashResultEvidence {
-            stdout: String::new(),
-            stderr: "cancelled".to_string(),
-            exit_code: None,
-            signal: None,
-            pid: None,
-            timed_out: false,
-            pid_kind: None,
-            error_type: Some("Cancelled".to_string()),
-        },
-        3,
-    );
-    assert!(cancelled.starts_with(
-        r#"<bash_result task="cancel command" status="finished" error_type="Cancelled">"#
-    ));
-
-    let signal = render_xml_bash_result(
-        Some("crash command"),
-        ActionStatus::Failed,
-        &BashResultEvidence {
-            stdout: String::new(),
-            stderr: String::new(),
-            exit_code: None,
-            signal: Some(11),
-            pid: None,
-            timed_out: false,
-            pid_kind: None,
-            error_type: None,
-        },
-        4,
-    );
-    assert!(
-        signal.starts_with(r#"<bash_result task="crash command" status="finished" signal="11">"#)
-    );
-}
-
-#[test]
-fn xml_bash_result_escapes_error_type_without_changing_finished_lifecycle() {
-    let rendered = render_xml_bash_result(
-        Some("invalid input"),
-        ActionStatus::Failed,
-        &BashResultEvidence {
-            stdout: String::new(),
-            stderr: "not executed".to_string(),
-            exit_code: None,
-            signal: None,
-            pid: None,
-            timed_out: false,
-            pid_kind: None,
-            error_type: Some(r#"Invalid<&"'"#.to_string()),
-        },
-        5,
-    );
-
-    assert!(rendered.starts_with(
-        r#"<bash_result task="invalid input" status="finished" error_type="Invalid&lt;&amp;&quot;&apos;">"#
-    ));
-    assert!(!rendered.contains(r#"status="error""#));
-    assert!(!rendered.contains(r#"status="cancelled""#));
-}
-
-#[test]
-fn xml_readfile_result_renders_structured_metadata_and_opaque_unicode_content() {
-    let evidence = ReadfileResultEvidence {
-        path: r#"/tmp/<notes>&".txt"#.to_string(),
-        matcher: Some(r#"START <tag> ... END & "done""#.to_string()),
-        start_line: Some(2),
-        end_line: Some(4),
-        total_lines: Some(5),
-        encoding: Some("UTF-8".to_string()),
-        file_bytes: Some(30),
-        content_bytes: Some(16),
-        limited: Some(false),
-        tail_out: Some(true),
-        content: "START\n中🙂\nEND <raw>".to_string(),
-        error_type: None,
-    };
-    let rendered = render_xml_readfile_result(
-        Some(r#" read <source> & "notes" "#),
-        ActionStatus::Completed,
-        &evidence,
-        101,
-    );
-
-    assert!(rendered.starts_with(
-        r#"<readfile_result task="read &lt;source&gt; &amp; &quot;notes&quot;" path="/tmp/&lt;notes&gt;&amp;&quot;.txt" matcher="START &lt;tag&gt; ... END &amp; &quot;done&quot;" lines="2-4" total_lines="5" encoding="UTF-8" file_bytes="30" content_bytes="16" truncated="false" tail_out="true" status="finished">"#
-    ));
-    assert!(rendered.contains("START\n中🙂\nEND <raw>"));
-    assert!(rendered.contains("<<<CONTENT_"));
-    assert!(rendered.ends_with("</readfile_result>"));
-    assert!(!rendered.contains("<action_result>"));
-}
-
-#[test]
-fn xml_specialized_results_use_lifecycle_status_and_structured_error_markers() {
-    let failed = render_xml_readfile_result(
-        Some("missing file"),
-        ActionStatus::Failed,
-        &ReadfileResultEvidence {
-            path: "missing.txt".to_string(),
-            matcher: None,
-            start_line: None,
-            end_line: None,
-            total_lines: None,
-            encoding: None,
-            file_bytes: None,
-            content_bytes: None,
-            limited: None,
-            tail_out: None,
-            content: "path_not_found".to_string(),
-            error_type: Some(r#"Not<Found>&"'"#.to_string()),
-        },
-        102,
-    );
-    assert!(failed.starts_with(
-        r#"<readfile_result task="missing file" path="missing.txt" status="finished" error_type="Not&lt;Found&gt;&amp;&quot;&apos;">"#
-    ));
-    assert!(failed.contains("<<<ERROR_"));
-    assert!(!failed.contains(r#"status="error""#));
-
-    let timeout = render_xml_readfile_result(
-        Some("slow file"),
-        ActionStatus::Timeout,
-        &ReadfileResultEvidence {
-            path: "slow.txt".to_string(),
-            matcher: None,
-            start_line: None,
-            end_line: None,
-            total_lines: None,
-            encoding: None,
-            file_bytes: None,
-            content_bytes: None,
-            limited: None,
-            tail_out: None,
-            content: "read timed out".to_string(),
-            error_type: None,
-        },
-        103,
-    );
-    assert!(timeout
-        .starts_with(r#"<readfile_result task="slow file" path="slow.txt" status="timeout">"#));
-    assert!(timeout.contains("<<<ERROR_"));
-
-    let running = render_xml_self_tool_result(
-        Some("inspect runtime"),
-        ActionStatus::BackgroundRunning,
-        &SelfToolResultEvidence {
-            self_type: "params".to_string(),
-            cwd: None,
-            content: "still collecting".to_string(),
-            error_type: None,
-        },
-        104,
-    );
-    assert!(running.starts_with(
-        r#"<self_tool_result task="inspect runtime" type="params" status="running">"#
-    ));
-    assert!(running.contains("<<<CONTENT_"));
-}
-
-#[test]
-fn xml_memmgr_and_self_tool_results_escape_attributes_and_preserve_body() {
-    let memmgr = render_xml_memmgr_result(
-        Some(r#" remember <item> & "version" "#),
-        ActionStatus::Failed,
-        &MemmgrResultEvidence {
-            memory_type: r#"durable<&""#.to_string(),
-            op: "update>'".to_string(),
-            content: "memory_conflict id=<raw>".to_string(),
-            error_type: Some("MemoryConflict".to_string()),
-        },
-        105,
-    );
-    assert!(memmgr.starts_with(
-        r#"<memmgr_result task="remember &lt;item&gt; &amp; &quot;version&quot;" type="durable&lt;&amp;&quot;" op="update&gt;&apos;" status="finished" error_type="MemoryConflict">"#
-    ));
-    assert!(memmgr.contains("memory_conflict id=<raw>"));
-    assert!(memmgr.contains("<<<ERROR_"));
-    assert!(memmgr.ends_with("</memmgr_result>"));
-
-    let self_tool = render_xml_self_tool_result(
-        Some("change cwd"),
-        ActionStatus::Completed,
-        &SelfToolResultEvidence {
-            self_type: r#"cwd<&""#.to_string(),
-            cwd: Some(r#"/tmp/<work>&"dir""#.to_string()),
-            content: "CWD changed to: /tmp/<work>".to_string(),
-            error_type: None,
-        },
-        106,
-    );
-    assert!(self_tool.starts_with(
-        r#"<self_tool_result task="change cwd" type="cwd&lt;&amp;&quot;" cwd="/tmp/&lt;work&gt;&amp;&quot;dir&quot;" status="finished">"#
-    ));
-    assert!(self_tool.contains("<<<CONTENT_"));
-    assert!(self_tool.ends_with("</self_tool_result>"));
-}
-
-#[test]
-fn xml_specialized_result_boundary_avoids_collisions_and_keeps_large_wrapper_complete() {
-    let seed = specialized_boundary_id(
-        "memmgr_result",
-        "search",
-        r#" type="raw_chat" op="search" status="finished""#,
-        "seed",
-        107,
-    );
-    let content = format!(
-        "payload CONTENT_{seed} ERROR_{seed}\n{}界 tail",
-        "x".repeat(MAX_ACTION_RESULT_PROMPT_BYTES)
-    );
-    let evidence = MemmgrResultEvidence {
-        memory_type: "raw_chat".to_string(),
-        op: "search".to_string(),
-        content,
-        error_type: None,
-    };
-    let rendered =
-        render_xml_memmgr_result(Some("search"), ActionStatus::Completed, &evidence, 107);
-
-    assert!(rendered.len() <= MAX_ACTION_RESULT_PROMPT_BYTES);
-    assert!(rendered.is_char_boundary(rendered.len()));
-    assert!(rendered.starts_with(
-        r#"<memmgr_result task="search" type="raw_chat" op="search" status="finished">"#
-    ));
-    assert!(rendered.contains("<<<CONTENT_"));
-    assert!(!rendered.contains(&format!("<<<CONTENT_{seed}\n")));
-    assert!(rendered.ends_with("</memmgr_result>"));
-    assert!(rendered.contains("words truncated. Generate more actions if necessary !!!"));
-}
-
-#[test]
-fn oversized_xml_action_result_is_truncated_inside_output_id_envelope() {
-    let result = format!(
-        "{}界 <tag> & tail words",
-        "&".repeat(MAX_ACTION_RESULT_PROMPT_BYTES)
-    );
-    let rendered = render_xml_action_result(
-        "toolgen",
-        Some(r#"inspect <large> & "escaped" output"#),
-        &result,
-        789,
-    );
-    let output_id = action_output_id(&result, 789);
-
-    assert!(rendered.len() <= MAX_ACTION_RESULT_PROMPT_BYTES);
-    assert!(rendered.starts_with(&format!(
-        r#"<action_result><toolgen name="inspect &lt;large&gt; &amp; &quot;escaped&quot; output"><output_id_{output_id}>"#
-    )));
-    assert!(rendered.ends_with(&format!(
-        "</output_id_{output_id}></toolgen></action_result>"
-    )));
-    assert!(rendered.contains("words truncated. Generate more actions if necessary !!!"));
-    assert!(!rendered.contains("<tag>"));
-    assert!(!rendered.contains(" & tail"));
-    assert_eq!(
-        truncate_action_result_for_prompt(&rendered),
-        rendered,
-        "generic action-result truncation must not cut the XML/output-ID wrapper"
-    );
-}
-
-#[test]
 fn action_result_truncation_is_byte_safe_and_reports_omitted_words() {
-    assert_eq!(MAX_ACTION_RESULT_PROMPT_BYTES, 32 * 1024);
+    assert_eq!(MAX_ACTION_RESULT_PROMPT_BYTES, 30 * 1024);
     let input = format!(
         "{} alpha beta gamma",
         "x".repeat(MAX_ACTION_RESULT_PROMPT_BYTES - 1)
@@ -1073,6 +406,43 @@ fn action_result_truncation_is_byte_safe_and_reports_omitted_words() {
     assert!(unicode_truncated.is_char_boundary(unicode_truncated.len()));
     assert!(unicode_truncated
         .ends_with("!!!Too long, 2 words truncated. Generate more actions if necessary !!!"));
+}
+
+#[test]
+fn prompt_renderer_preserves_structured_action_result_envelopes() {
+    let envelope = serde_json::to_string(&serde_json::json!({
+        "action_result": {
+            "tool_call_id": "call_large",
+            "runtime_metadata": {"status": "completed"},
+            "tool_output": {
+                "content": "x".repeat(MAX_ACTION_RESULT_PROMPT_BYTES - 512)
+            }
+        }
+    }))
+    .unwrap();
+    let delta = PromptDelta {
+        delta_id: "pd_structured_action".to_string(),
+        time_ms: 1,
+        hidden_slice_ids: Vec::new(),
+        slices: vec![PromptSlice {
+            delta_id: "pd_structured_action".to_string(),
+            slice_id: "ps_structured_action_s001".to_string(),
+            component_id: String::new(),
+            prompt_type: "result_of_llm_action".to_string(),
+            time_ms: 1,
+            text: envelope.clone(),
+            slice_index: 1,
+            slice_count: 1,
+        }],
+    };
+    let rendered = render_prompt_with_rendered_static(
+        "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]",
+        &[delta],
+        "Ai7",
+        &JsonSuiteV1,
+    );
+    assert!(rendered.contains(&envelope));
+    assert!(!rendered.contains("words truncated. Generate more actions if necessary !!!"));
 }
 
 #[test]
@@ -1136,6 +506,28 @@ fn formatted_response_trailer_is_protocol_neutral_and_does_not_repeat_the_shape(
 }
 
 #[test]
+fn higher_reasoning_intensity_trailer_replaces_the_normal_response_trailer() {
+    let prompt = format!("body\n\n{RESPONSE_TRAILER}");
+    let upgraded = apply_reasoning_intensity_upgrade_trailer(&prompt);
+    assert_eq!(
+        upgraded,
+        format!("body\n\n{REASONING_INTENSITY_UPGRADE_TRAILER}")
+    );
+    assert!(upgraded.contains("stronger reasoning than the normal H0 baseline"));
+    assert!(upgraded.contains("direction and methodology"));
+    assert!(upgraded.contains("correct possible mistakes or weak assumptions"));
+}
+
+#[test]
+fn higher_reasoning_intensity_native_trailer_preserves_finish_protocol() {
+    let prompt = format!("body\n\n{NATIVE_RESPONSE_TRAILER}");
+    let upgraded = apply_reasoning_intensity_upgrade_trailer(&prompt);
+    assert!(upgraded.ends_with(NATIVE_REASONING_INTENSITY_UPGRADE_TRAILER));
+    assert!(upgraded.contains("stronger reasoning than the normal H0 baseline"));
+    assert!(upgraded.contains("call the task_finished tool"));
+}
+
+#[test]
 fn formatted_response_trailer_parser_ignores_unrecognized_trailing_text() {
     let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n\nunrecognized trailing text";
     let (prefix, trailer) = split_formatted_response_trailer(prompt);
@@ -1153,7 +545,6 @@ fn prompt_renderer_replaces_current_protocol_language() {
         ),
         &JsonSuiteV1,
         "Ai7",
-        "startup",
     );
     let xml = render_static_prompt(
         template,
@@ -1162,7 +553,6 @@ fn prompt_renderer_replaces_current_protocol_language() {
         ),
         &XmlSuiteV1,
         "Ai7",
-        "startup",
     );
 
     assert!(json.contains("Return JSON"));
@@ -1181,7 +571,6 @@ fn prompt_renderer_injects_only_the_active_protocol_context_structure() {
         ),
         &JsonSuiteV1,
         "Ai7",
-        "startup",
     );
     let xml = render_static_prompt(
         template,
@@ -1190,7 +579,6 @@ fn prompt_renderer_injects_only_the_active_protocol_context_structure() {
         ),
         &XmlSuiteV1,
         "Ai7",
-        "startup",
     );
 
     assert!(json.contains("[BEGIN DELTA "));
@@ -1211,7 +599,6 @@ fn prompt_renderer_injects_only_the_active_protocol_delta_example() {
         ),
         &JsonSuiteV1,
         "Ai7",
-        "startup",
     );
     let xml = render_static_prompt(
         template,
@@ -1220,11 +607,10 @@ fn prompt_renderer_injects_only_the_active_protocol_delta_example() {
         ),
         &XmlSuiteV1,
         "Ai7",
-        "startup",
     );
 
-    assert!(json.contains("[BEGIN DELTA delta_id: pd_1, time_ms: 123]"));
-    assert!(json.contains("[BEGIN TURN turn_id: turn_1]"));
+    assert!(json.contains("[BEGIN DELTA delta_id: pd_1]"));
+    assert!(!json.contains("BEGIN TURN"));
     assert!(!json.contains("[END DELTA]"));
     assert!(!json.contains("<prompt_delta "));
     assert!(!json.contains("</prompt_delta>"));
@@ -1237,8 +623,8 @@ fn prompt_renderer_injects_only_the_active_protocol_delta_example() {
     assert!(json.contains("your response in this round"));
     assert!(!json.contains("this whole xml-root is your response"));
 
-    assert!(xml.contains(r#"<prompt_delta id="pd_1" time_ms="123">"#));
-    assert!(xml.contains("[BEGIN TURN turn_id: turn_1]"));
+    assert!(xml.contains(r#"<prompt_delta id="pd_1">"#));
+    assert!(!xml.contains("BEGIN TURN"));
     assert!(xml.contains("</prompt_delta>"));
     assert!(!xml.contains("[BEGIN DELTA "));
     assert!(!xml.contains("[END DELTA]"));
@@ -1273,7 +659,6 @@ fn prompt_renderer_uses_protocol_native_tool_synopses() {
         ),
         &XmlSuiteV1,
         "Ai7",
-        "startup",
     );
     let json = render_static_prompt(
         template,
@@ -1282,7 +667,6 @@ fn prompt_renderer_uses_protocol_native_tool_synopses() {
         ),
         &JsonSuiteV1,
         "Ai7",
-        "startup",
     );
 
     assert!(xml.contains("`<readfile><path>src/main.rs</path>"), "{xml}");
@@ -1294,6 +678,34 @@ fn prompt_renderer_uses_protocol_native_tool_synopses() {
 }
 
 #[test]
+fn empty_delta_boundary_is_visible_only_in_native_mode() {
+    let delta = PromptDelta {
+        delta_id: "pd_empty_native_owner".to_string(),
+        time_ms: 42,
+        slices: Vec::new(),
+        hidden_slice_ids: Vec::new(),
+    };
+
+    let native = render_prompt_with_rendered_static_for_mode(
+        "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]",
+        std::slice::from_ref(&delta),
+        "TIMEM_ASSISTANT",
+        &JsonSuiteV1,
+        ToolCallMode::Native,
+    );
+    let inline = render_prompt_with_rendered_static_for_mode(
+        "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]",
+        &[delta],
+        "TIMEM_ASSISTANT",
+        &JsonSuiteV1,
+        ToolCallMode::Inline,
+    );
+
+    assert!(native.contains("[BEGIN DELTA delta_id: pd_empty_native_owner]"));
+    assert!(!inline.contains("pd_empty_native_owner"));
+}
+
+#[test]
 fn native_prompt_encourages_progress_updates_without_changing_finalization_semantics() {
     let rendered = render_static_prompt_for_mode(
         "{{RESPONSE_MODE_INSTRUCTION}}",
@@ -1302,7 +714,6 @@ fn native_prompt_encourages_progress_updates_without_changing_finalization_seman
         ),
         &JsonSuiteV1,
         "Ai7",
-        "startup",
         ToolCallMode::Native,
     );
 
@@ -1327,7 +738,6 @@ fn native_prompt_contains_builtin_descriptions_without_schemas_or_dynamic_tools(
         ),
         &JsonSuiteV1,
         "Ai7",
-        "startup",
         ToolCallMode::Native,
     );
 
@@ -1340,10 +750,6 @@ fn native_prompt_contains_builtin_descriptions_without_schemas_or_dynamic_tools(
         rendered.contains(
             "One response can reasonably contain multiple tool calls for better performance."
         ),
-        "{rendered}"
-    );
-    assert!(
-        !rendered.to_ascii_lowercase().contains("native"),
         "{rendered}"
     );
     assert!(
@@ -1367,7 +773,6 @@ fn prompt_renderer_replaces_assistant_id() {
         ),
         &JsonSuiteV1,
         "Ai7",
-        "startup",
     );
     assert!(rendered.contains("YOUR ID is: Ai7"));
     assert!(rendered.contains("## Ai7"));
@@ -1376,7 +781,7 @@ fn prompt_renderer_replaces_assistant_id() {
 }
 
 #[test]
-fn prompt_renderer_replaces_startup_stamp() {
+fn prompt_renderer_keeps_startup_stamp_placeholder_as_plain_text() {
     let rendered = render_static_prompt(
         "## TIMESTAMP\n{{STARTUP_STAMP}}",
         &CapabilityRegistry::builtin_for_host(
@@ -1384,15 +789,13 @@ fn prompt_renderer_replaces_startup_stamp() {
         ),
         &JsonSuiteV1,
         "Ai7",
-        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
     );
 
-    assert!(rendered.contains("## TIMESTAMP\n2026-08-17 12:34:56 local_time, weekday=周一/Monday"));
-    assert!(!rendered.contains("{{STARTUP_STAMP}}"));
+    assert!(rendered.contains("{{STARTUP_STAMP}}"));
 }
 
 #[test]
-fn context_compaction_summary_has_an_explicit_assistant_heading() {
+fn context_compression_summary_has_an_explicit_assistant_heading() {
     let delta = PromptDelta {
         delta_id: "pd_compact_summary".to_string(),
         time_ms: 123,
@@ -1401,7 +804,7 @@ fn context_compaction_summary_has_an_explicit_assistant_heading() {
             delta_id: "pd_compact_summary".to_string(),
             slice_id: "ps_compact_summary_s001".to_string(),
             component_id: "component_compact_summary".to_string(),
-            prompt_type: "context_compaction_summary".to_string(),
+            prompt_type: "context_compression_summary".to_string(),
             time_ms: 123,
             text: "keep active task state".to_string(),
             slice_index: 1,
@@ -1415,7 +818,6 @@ fn context_compaction_summary_has_an_explicit_assistant_heading() {
         ),
         &JsonSuiteV1,
         "TIMEM_ASSISTANT",
-        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
     );
     let rendered = render_prompt_with_rendered_static(
         &rendered_static,
@@ -1425,11 +827,11 @@ fn context_compaction_summary_has_an_explicit_assistant_heading() {
     );
 
     assert!(rendered
-        .contains("## TIMEM_ASSISTANT (context compaction summary)\n\nkeep active task state"));
+        .contains("## TIMEM_ASSISTANT (context compression summary)\n\nkeep active task state"));
 }
 
 #[test]
-fn xml_context_compaction_summary_uses_an_assistant_kind_attribute() {
+fn xml_context_compression_summary_uses_an_assistant_kind_attribute() {
     let delta = PromptDelta {
         delta_id: "pd_xml_compact_summary".to_string(),
         time_ms: 123,
@@ -1438,7 +840,7 @@ fn xml_context_compaction_summary_uses_an_assistant_kind_attribute() {
             delta_id: "pd_xml_compact_summary".to_string(),
             slice_id: "ps_xml_compact_summary_s001".to_string(),
             component_id: "component_xml_compact_summary".to_string(),
-            prompt_type: "context_compaction_summary".to_string(),
+            prompt_type: "context_compression_summary".to_string(),
             time_ms: 123,
             text: "keep active task state".to_string(),
             slice_index: 1,
@@ -1452,7 +854,6 @@ fn xml_context_compaction_summary_uses_an_assistant_kind_attribute() {
         ),
         &XmlSuiteV1,
         "TIMEM_ASSISTANT",
-        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
     );
     let rendered = render_prompt_with_rendered_static(
         &rendered_static,
@@ -1462,7 +863,7 @@ fn xml_context_compaction_summary_uses_an_assistant_kind_attribute() {
     );
 
     assert!(rendered.contains(
-        "<ASSISTANT kind=\"context_compaction_summary\">\n\nkeep active task state\n</ASSISTANT>"
+        "<ASSISTANT kind=\"context_compression_summary\">\n\nkeep active task state\n</ASSISTANT>"
     ));
 }
 
@@ -1493,7 +894,6 @@ fn prompt_serialization_is_byte_stable_and_append_only_before_trailer() {
         ),
         &XmlSuiteV1,
         "TIMEM_ASSISTANT",
-        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
     );
     let first_deltas = vec![
         delta("pd_1", 100, "user_question", "first question"),
@@ -1537,4 +937,53 @@ fn prompt_serialization_is_byte_stable_and_append_only_before_trailer() {
     );
     assert!(appended_prefix.contains("pd_3"));
     assert!(appended_prefix.contains("second question"));
+}
+
+#[test]
+fn input_time_is_semantic_not_a_transport_role_and_uses_slice_time() {
+    for suite in [&JsonSuiteV1 as &dyn ResponseProtocolSuite, &XmlSuiteV1] {
+        for (kind, text, expected) in [
+            ("user_question", "hello", true),
+            ("user_supplement", "more", true),
+            ("user_question", "  ", false),
+            ("user_resume_directly", "", false),
+            ("runtime_note", "notice", false),
+            ("result_of_llm_action", "result", false),
+            ("user_supplement_context", "context", false),
+        ] {
+            let delta = PromptDelta {
+                delta_id: "pd_input_time".into(),
+                time_ms: 999999,
+                hidden_slice_ids: vec![],
+                slices: vec![PromptSlice {
+                    delta_id: "pd_input_time".into(),
+                    slice_id: "s1".into(),
+                    component_id: "c1".into(),
+                    prompt_type: kind.into(),
+                    time_ms: 1000,
+                    text: text.into(),
+                    slice_index: 1,
+                    slice_count: 1,
+                }],
+            };
+            let mut rendered = String::new();
+            append_rendered_deltas_for_mode(
+                &mut rendered,
+                &[delta],
+                "TIMEM_ASSISTANT",
+                suite,
+                ToolCallMode::Native,
+            );
+            assert_eq!(
+                rendered.contains("[User input time: 1970-01-01 00:00:01 UTC]"),
+                expected,
+                "{kind}: {rendered}"
+            );
+            assert!(!rendered.contains("time_ms"));
+            assert_eq!(
+                suite.prompt_boundaries().parse_delta_id(rendered.trim()),
+                Some("pd_input_time".into())
+            );
+        }
+    }
 }

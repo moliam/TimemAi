@@ -1,5 +1,47 @@
 # Changelog
 
+## [2.4.0] - 2026-10-09
+
+### Added
+
+- Configurable, persisted context-compression thresholds and manual Web context
+  compression with live status; complete prompt-context restore and safer
+  supplement handoff.
+- Multi-instance `timem attach`, selectable streaming terminal Sessions, and
+  interactive working-directory recovery.
+- Endpoint-sharing controls, persistent native-tool capability negotiation,
+  provider-aware protocol admission, and runtime resource observations.
+
+### Performance
+
+- Immutable caching and precompressed gzip for hashed Web assets; lazy-loaded
+  Markdown plugins and progressive newest-first Session restoration.
+- Bounded runtime observation, debug/history, terminal, and endpoint-sharing hot
+  paths; ordered browser event batching with suspended-frame fallback.
+- Healthy native HTTP connection reuse with failed-transport retirement.
+
+### Fixed
+
+- Command stdin backpressure now shares the execution deadline with process
+  waiting; concurrent output draining, partial-write handling, EOF, and bounded
+  failure diagnostics prevent deadlocks and false success.
+- Bounded post-exit output capture, macOS process-group liveness/cancellation,
+  safe filesystem sampling, and cross-platform process lifecycle regressions.
+- Restored history identity collisions and stalled browser outline geometry.
+
+### Removed
+
+- Standalone Terminal-Bench evaluation tooling from the product repository;
+  product regression tests and performance gates are retained.
+
+### Compatibility
+
+- macOS cleanup is conditional on descendants remaining in the managed process
+  group; deliberately escaped processes are outside that guarantee.
+- Context-tool integrations must use the current `context_compress` schema.
+- See [2.4.0 release notes](docs/release-notes-v2.4.0.md) for the full highlights,
+  upgrade guidance, and platform boundaries.
+
 ## [2.3.3] - 2026-09-29
 
 ### Added
@@ -25,7 +67,7 @@
 
 ### Added
 
-- Emit a `core.context.compact` `phase=requested` topic when the forced
+- Emit a `core.context.compress` `phase=requested` topic when the forced
   shrink threshold is crossed; the WebUI shows a live compacting notice with
   an indeterminate meter, and the completed notice includes percent-off.
 
@@ -98,7 +140,7 @@
   a compact clear action at the end of the ctx line.
 - Apply endpoint reasoning effort only to critical model requests; add an Off
   option.
-- Align the context_compact checklist with the runtime prompt.
+- Align the context_compress checklist with the runtime prompt.
 
 ### Fixed
 

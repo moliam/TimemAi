@@ -12,6 +12,16 @@ Both interfaces use the same Core runtime and persisted data. Installer-created
 
 ![Timem Web UI](docs/assets/timem-web.png)
 
+## 2.4 highlights
+
+- Long-running work: manual/configurable context compression and safer Session handoff.
+- Multi-instance terminal attach, progressive Session restore, and endpoint sharing.
+- Faster Web loading through immutable asset caching, gzip, and lazy Markdown plugins.
+- Cross-platform command input deadlines, bounded output capture, and clearer cleanup limits.
+
+See the [2.4.0 release notes](docs/release-notes-v2.4.0.md) for functionality,
+performance changes, and upgrade guidance.
+
 ## Install or update
 
 Use the same command for both the first installation and future updates.

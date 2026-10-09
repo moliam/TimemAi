@@ -13,7 +13,7 @@ export function ToolResultStatusSetting() {
 export function StreamUiModeSetting() {
   const active = useStreamUiMode();
   useT();
-  return <section className="settings-group toolgen-beta-card"><div className="settings-group-heading"><div>
-    <strong>{t("beta.streamUiTitle")}</strong><p>{t("beta.streamUiDesc")}</p>
-    </div><button type="button" role="switch" className="settings-feature-switch" aria-label={t("beta.streamUiAria")} aria-checked={active} onClick={() => setStreamUiMode(!active)}><span className="settings-feature-switch-thumb" /></button></div></section>;
+  return <section className="settings-group system-feature-card"><div className="settings-group-heading"><div>
+    <strong>{t("system.streamUiTitle")}</strong><p>{t("system.streamUiDesc")}</p>
+    </div><button type="button" role="switch" className="settings-feature-switch" aria-label={t("system.streamUiAria")} aria-checked={active} onClick={() => setStreamUiMode(!active)}><span className="settings-feature-switch-thumb" /></button></div></section>;
 }

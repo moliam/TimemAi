@@ -43,6 +43,8 @@ describe("production wire delivery contract", () => {
   });
 
   it.each([
+    { type: "model_endpoint_share_exported", request_id: "share", data: "c2VjcmV0" },
+    { type: "model_endpoint_share_imported", request_id: "share", name: "mygpt1" },
     { type: "command_ack", command_id: "cmd-a", status: "committed" },
     { type: "host_error", message: "query_failed" },
     { type: "runtime_notice", session_id: "session-a", level: "warning", title: "Runtime warning", message: "persist_failed" },

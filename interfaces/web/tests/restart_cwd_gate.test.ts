@@ -47,7 +47,10 @@ describe("restart working-directory gate", () => {
     expect(source).toMatch(/<\/button>[\s\S]*t\("restartGate.toNewRuntime"\)[\s\S]*<code[\s\S]*{decision.runtime_cwd}/);
     expect(source).toMatch(/<\/button>[\s\S]*t\("restartGate.inOldSession"\)[\s\S]*<code[\s\S]*{decision.session_cwd}/);
     expect(styles).toMatch(/\.restart-cwd-option code \{[\s\S]*font-family: var\(--ui-font\);[\s\S]*overflow-wrap: anywhere;[\s\S]*word-break: break-word;[\s\S]*white-space: normal;/);
-    expect(styles).not.toMatch(/\.restart-cwd-option code \{[\s\S]*(SFMono|Cascadia Code|Consolas|monospace)/);
+    const pathRule = styles.match(/\.restart-cwd-option code \{([^}]*)\}/)?.[1];
+    expect(pathRule).toBeDefined();
+    expect(pathRule).toContain("font-family: var(--ui-font)");
+    expect(pathRule).not.toMatch(/SFMono|Cascadia Code|Consolas|monospace/);
   });
 
   it("uses compact project-styled buttons and puts long mobile paths on their own line", () => {

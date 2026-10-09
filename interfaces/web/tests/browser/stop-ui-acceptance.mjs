@@ -1,3 +1,4 @@
+import { createStartupDiagnostics } from "./browser-startup.mjs";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
@@ -30,7 +31,7 @@ async function waitFor(check, message, timeout = 10000) {
     try { if (await check()) return; } catch {}
     await sleep(40);
   }
-  throw new Error(message);
+  throw new Error(typeof message === "function" ? await message() : message);
 }
 
 const worker = (state) => ({
@@ -295,18 +296,17 @@ async function startBrowser(url) {
     "--disable-background-networking", "--disable-component-update", "--disable-sync",
     "--window-size=1440,1000", "about:blank",
   ], { stdio: ["ignore", "ignore", "pipe"] });
-  let chromeError = "";
-  child.stderr.on("data", (chunk) => { chromeError += String(chunk); });
+  const startup = createStartupDiagnostics(child, chrome);
 
   try {
     let port = null;
     await waitFor(async () => {
-      if (child.exitCode !== null) return false;
+      if (startup.stopped()) return false;
       port = await readDevToolsPort(profile);
+      startup.port(port);
       if (port === null) return false;
-      try { return (await fetch(`http://127.0.0.1:${port}/json/version`)).ok; }
-      catch { return false; }
-    }, `Chrome DevTools did not start: ${chromeError}`, 12000);
+      return startup.probe(`http://127.0.0.1:${port}/json/version`);
+    }, () => startup.failure(), 12000);
 
     const target = await (await fetch(
       `http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`,
@@ -428,11 +428,11 @@ async function main() {
         const entry = document.querySelector('.turn-user-entry');
         const range = document.createRange();
         if (${JSON.stringify(mode)} === 'boundary') {
-          range.setStart(entry.querySelector('p').firstChild, 0);
+          range.setStart(entry.querySelector('.user-plain-text').firstChild, 0);
           range.setEnd(document.querySelector('.turn-assistant-frame'), 0);
         } else if (${JSON.stringify(mode)} === 'node') range.selectNode(entry);
         else if (${JSON.stringify(mode)} === 'text') {
-          const text = entry.querySelector('p').firstChild;
+          const text = entry.querySelector('.user-plain-text').firstChild;
           range.setStart(text, 0); range.setEnd(text, 4);
         } else range.selectNodeContents(entry);
         const selection = window.getSelection();
@@ -445,10 +445,30 @@ async function main() {
       await browser.evaluate(`(() => {
         const textarea = document.querySelector('textarea[aria-label="Message Timem"]');
         textarea.focus(); textarea.select();
+        window.acceptancePasteTrace = [];
+        window.acceptancePasteObserver = event => {
+          window.acceptancePasteTrace.push({
+            type: event.type, inputType: event.inputType, trusted: event.isTrusted,
+            value: textarea.value, focused: document.activeElement === textarea,
+          });
+          window.acceptancePasteTrace = window.acceptancePasteTrace.slice(-8);
+        };
+        textarea.addEventListener('paste', window.acceptancePasteObserver);
+        textarea.addEventListener('input', window.acceptancePasteObserver);
       })()`);
       await browser.call("Input.dispatchKeyEvent", {type:"keyDown", key:"v", code:"KeyV", modifiers:4, commands:["paste"]});
       await browser.call("Input.dispatchKeyEvent", {type:"keyUp", key:"v", code:"KeyV", modifiers:4});
-      assert(await browser.evaluate(`document.querySelector('textarea[aria-label="Message Timem"]').value === ${JSON.stringify(copied)}`), "paste changed user bubble text");
+      const pasted = await browser.evaluate(`(() => {
+        const textarea = document.querySelector('textarea[aria-label="Message Timem"]');
+        const result = { value: textarea.value, focused: document.activeElement === textarea,
+          visibility: document.visibilityState, trace: window.acceptancePasteTrace };
+        textarea.removeEventListener('paste', window.acceptancePasteObserver);
+        textarea.removeEventListener('input', window.acceptancePasteObserver);
+        delete window.acceptancePasteObserver;
+        delete window.acceptancePasteTrace;
+        return result;
+      })()`);
+      assert(pasted.value === copied, `user bubble ${mode} paste mismatch: expected=${JSON.stringify(copied)} actual=${JSON.stringify(pasted)}`);
     }
     await browser.evaluate(`(() => {
       const textarea = document.querySelector('textarea[aria-label="Message Timem"]');

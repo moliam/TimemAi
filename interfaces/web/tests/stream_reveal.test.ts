@@ -46,14 +46,14 @@ describe("stream reveal integration", () => {
     expect(mainSource).toContain("useState(() => !streamUiMode && isWorking)");
     expect(mainSource).not.toContain("stream-reading-hold");
     expect(mainSource).not.toContain("stream-thought-card");
-    expect(mainSource).toContain('className={`stream-working-trailer${waitingModel || preview?.response?.status === "streaming" ? " model-waiting" : " tool-active"}`}');
+    expect(mainSource).toContain('className={`stream-working-trailer${modelPhase ? " model-waiting" : " tool-active"}`}');
     expect(mainSource).toContain('turnProjection?.projection.state === "active" &&');
     expect(mainSource).toContain('turnProjection.projection.activity.kind === "waiting_model"');
     expect(mainSource).not.toContain('token.turn_id === turn.turn_id');
     expect(mainSource).toContain('previous.turnProjection !== next.turnProjection');
     expect(mainSource).not.toContain("isStreamToolRunning");
     expect(mainSource).toContain('const previewText = intermediate ? ""');
-    expect(mainSource).toContain("activity.detail && <MarkdownContent text={activity.detail}");
+    expect(mainSource).toContain("activity.detail && <UserText text={activity.detail}");
   });
 
   it("collapses completed and interrupted work independently of stream mode", () => {
@@ -150,12 +150,30 @@ describe("splitMarkdownBlocks incremental stability", () => {
    const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
    expect(css).not.toContain("stream-caret-pulse");
    expect(mainSource).toContain('<StreamProcess closing={turn.state !== "working"}');
-   expect(mainSource).toContain('className="stream-working-dot"');
+   expect(mainSource).toContain('className="stream-working-wrench"');
+    // Model waiting/streaming keeps the breathing star; local work uses a
+    // side-to-side wrench so the phases differ by shape AND color.
+    expect(mainSource).toContain('className="stream-working-star"');
+    expect(mainSource).toContain('>✦</span>');
+    expect(mainSource).toContain('const phaseBoundary = turnWorkPhaseBoundary(turn, phase)');
+    expect(mainSource).toContain('const phaseTimerKey = `${phase}:${phaseBoundary.id}`');
+    expect(mainSource).toContain('key={phaseTimerKey}');
+    expect(mainSource).toContain('hideBeforeMs={1_000}');
+    expect(mainSource).toContain('className="stream-working-current"');
+    expect(mainSource).toContain('className="stream-working-total"');
+    expect(mainSource).toContain('<Clock8 size={12} />');
+    expect(mainSource).toContain('createdAtMs={turn.created_at_ms} liveFormat className="stream-working-turn-elapsed"');
+    expect(css).toContain('.stream-working-star {');
+    expect(css).toMatch(/\.stream-working-star \{[^}]*animation: stream-working-grow/);
     expect(css).toContain('.stream-working-trailer.tool-active { color: #f1c56f; }');
     expect(css).toContain('.stream-working-trailer.model-waiting { color: #3485dc; }');
     expect(css).toContain(':root[data-theme="light"] .stream-working-trailer.tool-active { color: #b07f2e; }');
     expect(css).toContain(':root[data-theme="light"] .stream-working-trailer.model-waiting { color: #286a9b; }');
-    expect(css).toMatch(/\.stream-working-dot \{[^}]*transition: background-color \.5s ease/);
+    expect(css).toMatch(/\.stream-working-trailer \{[^}]*justify-content: space-between/);
+    expect(css).toContain('.stream-working-total { gap: 6px; margin-left: auto; color: #77857e; }');
+    expect(css).toMatch(/\.stream-working-wrench \{[^}]*animation: stream-working-wrench-sway/);
+    expect(css).toContain("@keyframes stream-working-wrench-sway");
+    expect(css).toMatch(/prefers-reduced-motion: reduce[\s\S]*\.stream-working-wrench \{ animation: none/);
  });
 
  it("bounds repeated stream rendering and interaction listeners", () => {
@@ -167,7 +185,7 @@ describe("splitMarkdownBlocks incremental stability", () => {
    expect(mainSource).toContain("superseded || handoffIds.has(activity.id)");
    expect(mainSource).not.toContain("setMergeReady");
    expect(mainSource).toContain("const open = expanded || interactionHeld");
-   expect(mainSource).toContain('className="stream-tool-command-preview"');
+   expect(mainSource).toContain('className="stream-tool-command-preview tool-invocation-preview"');
  });
 
 it("animates growing merged counts without remounting the toggle", () => {

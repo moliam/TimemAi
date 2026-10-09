@@ -26,6 +26,7 @@ import {
   clearDecisionsForWorker,
   coalesceActionLifecycle,
   compareTurnTimelineItems,
+  compareTurnStreamItems,
   composerPrimaryAction,
   composerSendDecision,
   decisionKey,
@@ -39,6 +40,7 @@ import {
   hasOnlyFreeTalkActivity,
   manualToolGenCommand,
   MAX_CLIENT_TURNS,
+  messagesFromHistoryRecords,
   MAX_RENDERED_MESSAGES,
   normalizeCopiedUserMessageText,
   prependHistoryRecords,
@@ -53,8 +55,9 @@ import {
   resolveActiveSessionId,
   runtimeConnectionLabel,
   sessionCacheHitPercent,
+  sessionCacheTokenTotals,
   sessionContextUsage,
-  sessionContextCompactPending,
+  sessionContextCompressPending,
   sessionCreateDecision,
   sessionInteractionLockReason,
   sessionRenameDecision,
@@ -424,6 +427,45 @@ describe("web topic view model", () => {
       ),
     ).toBe(false);
     expect(hasOnlyFreeTalkActivity(freeTalk ? [freeTalk] : [], 1)).toBe(false);
+  });
+
+  it("omits completion control actions from live and restored activity", () => {
+    for (const action of ["task_finished", "turn_finished"]) {
+      for (const event of ["start", "execution_start", "finish"]) {
+        expect(
+          activityFromTopic(
+            topic("core.action", {
+              action,
+              event,
+              status: event === "finish" ? "completed" : "running",
+              input: { summary: "Final answer" },
+            }),
+          ),
+        ).toBeNull();
+      }
+    }
+
+    const start = actionEvent(
+      "1000",
+      "start",
+      "running",
+      { summary: "Final answer" },
+      "finish-control",
+    );
+    const finish = actionEvent(
+      "2000",
+      "finish",
+      "completed",
+      { summary: "Final answer" },
+      "finish-control",
+    );
+    for (const event of [start, finish]) {
+      (event.payload as unknown as CoreTopicEvent).payload.action = "task_finished";
+    }
+    const [restored] = coalesceActionLifecycle([start, finish]);
+    expect(
+      activityFromTopic(restored.payload as unknown as CoreTopicEvent),
+    ).toBeNull();
   });
 
   it("maps core.memo lifecycle ops to memo notice activities", () => {
@@ -1217,6 +1259,39 @@ describe("web topic view model", () => {
     expect(
       composerSendDecision(working, "", false, false, [], false, true, true),
     ).toEqual({ kind: "skip", reason: "direct_resume_requires_idle" });
+    const queued = {
+      ...idle,
+      state: "ready" as const,
+      message_queue: {
+        ...idle.message_queue,
+        items: [{
+          command_id: "queued-task",
+          enqueue_seq: 1,
+          payload: {
+            turn_id: "queued-turn",
+            created_at_ms: 1,
+            text: "queued task",
+            attachments: [],
+            worker_roles: [],
+          },
+        }],
+      },
+    };
+    expect(
+      composerSendDecision(queued, "", false, false, [], false, true, true),
+    ).toEqual({
+      kind: "send",
+      text: "",
+      clearDraftOnSuccess: true,
+      command: {
+        type: "turn_submit",
+        session_id: "session_1",
+        text: "",
+        input_kind: "resume_directly",
+        attachment_ids: [],
+      },
+    });
+
     expect(
       composerSendDecision(
         idle,
@@ -1433,6 +1508,28 @@ describe("web topic view model", () => {
       "…/timem_shell",
     );
     expect(workspacePathLabel("timem_shell")).toBe("timem_shell");
+  });
+
+  it("orders live Turn stream items by authoritative sequence and legacy items stably", () => {
+    const sequenced = [
+      { id: "supplement", timelineSeq: 2, createdAt: 100, fallbackIndex: 2 },
+      { id: "preview", timelineSeq: 1, createdAt: 300, fallbackIndex: 1 },
+      { id: "task", timelineSeq: 0, createdAt: 200, fallbackIndex: 0 },
+    ].sort(compareTurnStreamItems);
+    expect(sequenced.map((item) => item.id)).toEqual(["task", "preview", "supplement"]);
+
+    const legacy = [
+      { id: "later", createdAt: 20, fallbackIndex: 1 },
+      { id: "first", createdAt: 10, fallbackIndex: 0 },
+      { id: "same-time", createdAt: 20, fallbackIndex: 2 },
+    ].sort(compareTurnStreamItems);
+    expect(legacy.map((item) => item.id)).toEqual(["first", "later", "same-time"]);
+
+    const mixed = [
+      { id: "live", timelineSeq: 0, createdAt: 1, fallbackIndex: 1 },
+      { id: "restored", createdAt: 999, fallbackIndex: 0 },
+    ].sort(compareTurnStreamItems);
+    expect(mixed.map((item) => item.id)).toEqual(["restored", "live"]);
   });
 
   it("preserves presentation identity and order while keeping authoritative event timestamps", () => {
@@ -1729,10 +1826,10 @@ describe("web topic view model", () => {
         role: "system",
         turn_id: "turn_compacted",
         created_at_ms: 20,
-        kind: "context_compact",
+        kind: "context_compress",
         content: "compacted",
         source: "core_topic",
-        payload: topic("core.context.compact", {
+        payload: topic("core.context.compress", {
           estimated_before_tokens: 180000,
           estimated_after_tokens: 20000,
         }),
@@ -1757,7 +1854,7 @@ describe("web topic view model", () => {
       "failed",
     );
     expect((visible[1].payload.topic as Record<string, unknown>).name).toBe(
-      "core.context.compact",
+      "core.context.compress",
     );
   });
 
@@ -2139,6 +2236,100 @@ describe("web topic view model", () => {
       kind: "runtime_restart",
       created_at_ms: 30,
     });
+  });
+
+
+  it("separates same-millisecond task and supplement history messages into unique ids", () => {
+    const records: ChatHistoryRecord[] = [
+      {
+        type: "message",
+        role: "user",
+        turn_id: "web_turn_1",
+        created_at_ms: 1791125099126,
+        kind: "task",
+        content: "first task",
+      },
+      {
+        type: "message",
+        role: "user",
+        turn_id: "web_turn_1",
+        created_at_ms: 1791125099126,
+        kind: "supplement",
+        content: "supplement while working",
+      },
+    ];
+
+    const restored = prependHistoryRecords(session("session_1"), records);
+    expect(restored.messages.map((message) => message.text)).toEqual([
+      "first task",
+      "supplement while working",
+    ]);
+    const ids = new Set(restored.messages.map((message) => message.id));
+    expect(ids.size).toBe(2);
+    // Duplicate ids crash assistant-ui message repositories with a fatal
+    // React error (whole-page blank); every loaded history page must keep
+    // every id unique even when (turn, millisecond, role) collide.
+    expect(
+      new Set(messagesFromHistoryRecords(records).map((message) => message.id))
+          .size,
+    ).toBe(2);
+  });
+
+  it("derives the same history message id formula as the Rust host", () => {
+    // Locked to the mirrored implementations in
+    // applications/timem/src/server.rs (history_message_id + fnv1a32_hex).
+    // FNV-1a("first task") = fe687892, FNV-1a("supplement while working")
+    // = 8e15f2ec; changing either side silently diverges restored ids.
+    const records: ChatHistoryRecord[] = [
+      {
+        type: "message",
+        role: "user",
+        turn_id: "turn_1",
+        created_at_ms: 1791125099126,
+        kind: "task",
+        content: "first task",
+      },
+      {
+        type: "message",
+        role: "assistant",
+        turn_id: "turn_1",
+        created_at_ms: 1791125099127,
+        content: "answer",
+      },
+    ];
+    expect(
+      messagesFromHistoryRecords(records).map((message) => message.id),
+    ).toEqual([
+      "history_msg_turn_1_1791125099126_user_task_fe687892",
+      "history_msg_turn_1_1791125099127_assistant_none_" +
+        (() => {
+          const FNV_OFFSET_BASIS = 0x811c9dc5;
+          const FNV_PRIME = 0x01000193;
+          let hash = FNV_OFFSET_BASIS;
+          for (const byte of new TextEncoder().encode("answer")) {
+            hash = Math.imul(hash ^ byte, FNV_PRIME) >>> 0;
+          }
+          return hash.toString(16).padStart(8, "0");
+        })(),
+    ]);
+  });
+
+  it("collapses identical duplicated history records into one message", () => {
+    const duplicate = {
+      type: "message",
+      role: "user",
+      turn_id: "turn_dup",
+      created_at_ms: 42,
+      kind: "task",
+      content: "same text",
+    } as const;
+    const records: ChatHistoryRecord[] = [duplicate, duplicate, duplicate];
+
+    const restored = prependHistoryRecords(session("session_1"), records);
+    expect(restored.messages).toHaveLength(1);
+    expect(
+      messagesFromHistoryRecords(records).map((message) => message.id),
+    ).toHaveLength(1);
   });
 
   it("shows only the latest restart marker when repeated restarts contain no work", () => {
@@ -2664,6 +2855,63 @@ describe("web topic view model", () => {
     expect(sessionContextUsage(session("session_2"))).toBeUndefined();
   });
 
+  it("refreshes context usage immediately after completed compaction and accepts later model usage", () => {
+    const current = session("session_compacted_context");
+    const activeTurn = turn("active", "working");
+    activeTurn.events = [
+      {
+        event_id: "usage_before",
+        source: "worker_activity",
+        created_at_ms: 10,
+        payload: { kind: "model_response", usage: { prompt_tokens: 116_000, completion_tokens: 40 } },
+      },
+      {
+        event_id: "compact_done",
+        source: "core_topic",
+        created_at_ms: 20,
+        payload: topic("core.context.compress", {
+          phase: "completed",
+          estimated_before_tokens: 116_000,
+          estimated_after_tokens: 19_000,
+        }),
+      },
+    ];
+    current.turns = [activeTurn];
+    expect(sessionContextUsage(current)).toEqual({ prompt_tokens: 19_000 });
+
+    activeTurn.events.push({
+      event_id: "usage_after",
+      source: "worker_activity",
+      created_at_ms: 30,
+      payload: { kind: "model_response", usage: { prompt_tokens: 21_000, completion_tokens: 12 } },
+    });
+    expect(sessionContextUsage(current)).toEqual({ prompt_tokens: 21_000, completion_tokens: 12 });
+  });
+
+  it("ignores requested or stale compaction when deriving live context usage", () => {
+    const current = session("session_pending_compact_context");
+    const activeTurn = turn("active", "working");
+    activeTurn.events = [
+      {
+        event_id: "usage",
+        source: "worker_activity",
+        created_at_ms: 10,
+        payload: { kind: "model_response", usage: { prompt_tokens: 42_000 } },
+      },
+      {
+        event_id: "compact_requested",
+        source: "core_topic",
+        created_at_ms: 20,
+        payload: topic("core.context.compress", {
+          phase: "requested",
+          estimated_after_tokens: 1,
+        }),
+      },
+    ];
+    current.turns = [activeTurn];
+    expect(sessionContextUsage(current)).toEqual({ prompt_tokens: 42_000 });
+  });
+
   it("aggregates this runtime instance cache hit rate per session without double counting completion", () => {
     const current = session("session_cache");
     const first = turn("first", "finished");
@@ -2704,7 +2952,7 @@ describe("web topic view model", () => {
     expect(sessionCacheHitPercent(session("other_session"))).toBeUndefined();
   });
 
-  it("resets session cache hit rate at the latest runtime restart boundary", () => {
+  it("excludes exactly the first cold model request after the latest runtime restart", () => {
     const restarted = session("session_cache_restarted");
     restarted.messages = [
       {
@@ -2728,36 +2976,51 @@ describe("web topic view model", () => {
         },
       },
     ];
-    oldTurn.completion = {
-      stats: { prompt_tokens: 10_000, cached_tokens: 9_000 },
-    };
     restarted.turns = [oldTurn];
     expect(sessionCacheHitPercent(restarted)).toBeUndefined();
 
     const resumed = turn("resumed", "working");
     resumed.created_at_ms = 150;
+    // Deliberately store events out of order: "first" is chronological,
+    // not whichever array element happens to arrive first in a snapshot.
     resumed.events = [
       {
-        event_id: "restored_usage",
+        event_id: "warm_usage_2",
         source: "worker_activity",
-        created_at_ms: 180,
+        created_at_ms: 240,
         payload: {
           kind: "model_response",
-          usage: { prompt_tokens: 20_000, cached_tokens: 18_000 },
+          usage: { prompt_tokens: 5_000, cached_tokens: 4_500 },
         },
       },
       {
-        event_id: "runtime_usage",
+        event_id: "cold_usage",
         source: "worker_activity",
         created_at_ms: 220,
         payload: {
           kind: "model_response",
-          usage: { prompt_tokens: 5_000, cached_tokens: 2_000 },
+          usage: { prompt_tokens: 20_000, cached_tokens: 0 },
+        },
+      },
+      {
+        event_id: "warm_usage_1",
+        source: "worker_activity",
+        created_at_ms: 230,
+        payload: {
+          kind: "model_response",
+          usage: { prompt_tokens: 10_000, cached_tokens: 9_000 },
         },
       },
     ];
     restarted.turns.push(resumed);
-    expect(sessionCacheHitPercent(restarted)).toBeCloseTo(40, 8);
+
+    expect(sessionCacheHitPercent(restarted)).toBeCloseTo(90, 8);
+    // Cold-start exclusion affects only the percentage. Token totals still
+    // include every request in the live runtime instance.
+    expect(sessionCacheTokenTotals(restarted)).toEqual({
+      prompt_tokens: 35_000,
+      completion_tokens: 0,
+    });
   });
 
   it("resets session context usage at the latest runtime restart boundary", () => {
@@ -3101,9 +3364,25 @@ describe("web topic view model", () => {
     ).toBeNull();
   });
 
-  it("keeps context compaction as a typed system activity with token metrics", () => {
-    const activity = activityFromTopic(
+  it("reads the legacy persisted context topic without making it canonical", () => {
+    const legacy = activityFromTopic(
       topic("core.context.compact", {
+        phase: "completed",
+        estimated_before_tokens: 40_000,
+        estimated_after_tokens: 8_000,
+      }),
+    );
+    expect(legacy).toMatchObject({
+      kind: "context_compress",
+      compact_phase: "completed",
+      before_tokens: 40_000,
+      after_tokens: 8_000,
+    });
+  });
+
+  it("keeps context compression as a typed system activity with token metrics", () => {
+    const activity = activityFromTopic(
+      topic("core.context.compress", {
         estimated_before_tokens: 82_000,
         estimated_after_tokens: 14_000,
         estimated_text_before_tokens: 12_000,
@@ -3113,9 +3392,9 @@ describe("web topic view model", () => {
       }),
     );
     expect(activity).toMatchObject({
-      kind: "context_compact",
+      kind: "context_compress",
       tone: "notice",
-      title: "Dynamic context compacted",
+      title: "Conversation compressed",
       before_tokens: 82_000,
       after_tokens: 14_000,
       text_before_tokens: 12_000,
@@ -3127,31 +3406,31 @@ describe("web topic view model", () => {
 
   it("maps the forced-compaction request into a compacting activity", () => {
     const activity = activityFromTopic(
-      topic("core.context.compact", {
+      topic("core.context.compress", {
         phase: "requested",
         estimated_prompt_tokens: 95_000,
         force_shrink_threshold_tokens: 90_000,
       }),
     );
     expect(activity).toMatchObject({
-      kind: "context_compact",
+      kind: "context_compress",
       tone: "notice",
       compact_phase: "requested",
       estimated_prompt_tokens: 95_000,
-      title: "Context compacting",
+      title: "Context compressing",
     });
   });
 
   it("marks completed compaction with an explicit phase", () => {
     const activity = activityFromTopic(
-      topic("core.context.compact", {
+      topic("core.context.compress", {
         phase: "completed",
         estimated_before_tokens: 82_000,
         estimated_after_tokens: 14_000,
       }),
     );
     expect(activity).toMatchObject({
-      kind: "context_compact",
+      kind: "context_compress",
       compact_phase: "completed",
       before_tokens: 82_000,
       after_tokens: 14_000,
@@ -3420,6 +3699,47 @@ describe("web topic view model", () => {
     });
   });
 
+  it("keeps host elapsed for a background job settled by a later finish topic", () => {
+    // start -> finish(background_running) at +1s -> real exit at +3s, but the
+    // exit topic is only delivered at +7s with authoritative elapsed_ms=3025.
+    const start = actionEvent("1000", "start", "running", { cmd: "sleep 3 && echo done", background: true }, "bg-settle");
+    const bg = actionEvent("2000", "finish", "background_running", { cmd: "sleep 3 && echo done", background: true }, "bg-settle");
+    const finish = actionEvent("8000", "finish", "completed", { cmd: "sleep 3 && echo done", background: true }, "bg-settle");
+    (finish.payload as unknown as CoreTopicEvent).payload.elapsed_ms = 3025;
+    const [completed] = coalesceActionLifecycle([start, bg, finish]);
+    const completedTopic = completed.payload as unknown as CoreTopicEvent;
+    expect(completedTopic.payload.elapsed_ms).toBe(3025);
+    expect(activityFromTopic(completedTopic)).toMatchObject({ elapsed_ms: 3025 });
+  });
+
+  it("prefers host-reported elapsed_ms over locally derived delivery delay", () => {
+    const start = actionEvent(
+      "1000",
+      "start",
+      "running",
+      { cmd: "sleep 3 && echo done", background: true },
+      "bg-elapsed",
+    );
+    // The finish topic arrives 8s after start (delivery delay), but the host
+    // recorded the real finish timestamp: 3s of actual execution time.
+    const finish = actionEvent(
+      "8000",
+      "finish",
+      "completed",
+      { cmd: "sleep 3 && echo done", background: true },
+      "bg-elapsed",
+    );
+    const finishTopic = finish.payload as unknown as CoreTopicEvent;
+    (finishTopic.payload as Record<string, unknown>).elapsed_ms = 3025;
+    const [completed] = coalesceActionLifecycle([start, finish]);
+    const completedTopic = completed.payload as unknown as CoreTopicEvent;
+
+    expect(completedTopic.payload.elapsed_ms).toBe(3025);
+    expect(activityFromTopic(completedTopic)).toMatchObject({
+      elapsed_ms: 3025,
+    });
+  });
+
   it("keeps Poll mode and final duration after action lifecycle coalescing", () => {
     const start = actionEvent(
       "1000",
@@ -3462,6 +3782,7 @@ describe("web topic view model", () => {
       tone: "action",
       title: "MemMgr · running",
       tool_name: "memmgr",
+      memory_search: { kind: "sql", source: "durable" },
       detail: 'type="durable" op="sql" sql="SELECT id, content FROM memories"',
     });
   });
@@ -3487,6 +3808,21 @@ describe("web topic view model", () => {
     expect(activity?.detail).toContain('api_key="****"');
     expect(activity?.detail).not.toContain("top-secret");
     expect(activity?.detail).not.toContain("other-secret");
+  });
+
+  it("keeps readable self_tool presentation separate from complete details", () => {
+    const activity = activityFromTopic(
+      topic("core.action", {
+        action: "self_tool",
+        status: "running",
+        input: { type: "cwd", new_path: "/work/project" },
+      }),
+    );
+    expect(activity).toMatchObject({
+      tool_name: "self_tool",
+      self_tool: { kind: "change_cwd", path: "/work/project" },
+      detail: 'type="cwd" new_path="/work/project"',
+    });
   });
 
   it("applies a structured cwd update only to the matching session", () => {
@@ -4398,12 +4734,12 @@ describe("boundSessionHistory message ordering", () => {
   });
 });
 
-describe("sessionContextCompactPending", () => {
+describe("sessionContextCompressPending", () => {
   const compactEvent = (phase: string, atMs: number) => ({
     event_id: `evt_${phase}_${atMs}`,
     source: "core_topic",
     payload: {
-      topic: { name: "core.context.compact" },
+      topic: { name: "core.context.compress" },
       payload: { phase },
     },
     created_at_ms: atMs,
@@ -4412,13 +4748,13 @@ describe("sessionContextCompactPending", () => {
   it("reports pending between requested and completed in the live runtime", () => {
     const t = { ...turn("turn_c"), events: [compactEvent("requested", 100)] };
     const target = { ...session("session_1"), turns: [t] };
-    expect(sessionContextCompactPending(target)).toBe(true);
+    expect(sessionContextCompressPending(target)).toBe(true);
 
     const done = {
       ...turn("turn_c"),
       events: [compactEvent("requested", 100), compactEvent("completed", 200)],
     };
-    expect(sessionContextCompactPending({ ...session("session_1"), turns: [done] })).toBe(false);
+    expect(sessionContextCompressPending({ ...session("session_1"), turns: [done] })).toBe(false);
   });
 
   it("falls back to not pending when the hosting turn finished without completion notice", () => {
@@ -4427,7 +4763,7 @@ describe("sessionContextCompactPending", () => {
       events: [compactEvent("requested", 100)],
       completion: { stop_reason: "CancelledByUser" },
     } as unknown as WebTurn;
-    expect(sessionContextCompactPending({ ...session("session_1"), turns: [t] })).toBe(false);
+    expect(sessionContextCompressPending({ ...session("session_1"), turns: [t] })).toBe(false);
   });
 
   it("ignores stale requested notices from before the latest runtime restart", () => {
@@ -4445,6 +4781,6 @@ describe("sessionContextCompactPending", () => {
       ],
       turns: [stale],
     };
-    expect(sessionContextCompactPending(target)).toBe(false);
+    expect(sessionContextCompressPending(target)).toBe(false);
   });
 });

@@ -17,6 +17,8 @@ use std::hash::{BuildHasher, Hash, Hasher};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+const CAPABILITY_NEGATIVE_REPROBE_ROUND_INTERVAL: u32 = 10;
+
 struct TimeReminderSchedule {
     interval: Duration,
     last_emitted_period: u64,
@@ -288,6 +290,78 @@ fn run_session_turn_with_model_client_and_focus_interval(
     )
 }
 
+fn negotiate_interaction_for_turn(
+    model_client: &mut dyn ModelClient,
+    config: &mut ModelServiceConfig,
+    audit_file: &Path,
+    ui: &mut dyn TurnUi,
+    session: &str,
+    force_probe: bool,
+) -> crate::NegotiationOutcome {
+    let identity = crate::capability_probe_identity(config);
+    let ui_cell = std::cell::RefCell::new(ui);
+    let outcome = crate::negotiation::negotiate_interaction_outcome_with_observer(
+        model_client,
+        config,
+        audit_file,
+        &mut || ui_cell.borrow_mut().is_cancel_requested(),
+        force_probe,
+        &mut || {
+            ui_cell.borrow_mut().on_core_topic_events(&[
+                crate::capability_negotiation_topic_event(
+                    session,
+                    "probing",
+                    identity.as_ref(),
+                    None,
+                    None,
+                ),
+            ]);
+        },
+    );
+    let ui = ui_cell.into_inner();
+    if outcome.profile.source == crate::CapabilityProbeSource::Cache {
+        ui.on_core_topic_events(&[crate::capability_negotiation_topic_event(
+            session,
+            "cache_hit",
+            identity.as_ref(),
+            Some(&outcome.profile),
+            Some(&outcome.profile.reason),
+        )]);
+    }
+    ui.on_core_topic_events(&[crate::capability_negotiation_topic_event(
+        session,
+        "completed",
+        identity.as_ref(),
+        Some(&outcome.profile),
+        Some(&outcome.profile.reason),
+    )]);
+    if let Some(record) = outcome.persisted_probe.as_ref() {
+        config.interaction.persisted_capability_probe = Some(record.clone());
+        ui.on_persisted_capability_probe(&record.identity, Some(record));
+    }
+    outcome
+}
+
+// `% == 0` is deliberate: `is_multiple_of` is stable only from Rust 1.87,
+// above the installer-declared MSRV (1.83).
+#[allow(unknown_lints)] // MSRV Clippy predates this lint.
+#[allow(clippy::manual_is_multiple_of)]
+fn should_reprobe_negative_capability(
+    config: &ModelServiceConfig,
+    profile: &crate::InteractionProfile,
+    round: u32,
+) -> bool {
+    config.interaction.tool_call_mode == crate::ToolCallMode::Auto
+        && config.interaction.native_tools_supported.is_none()
+        && config.api_protocol != crate::ApiProtocol::OpenAiResponses
+        && profile.resolved_mode == crate::ToolCallMode::Inline
+        && round > 0
+        && (round - 1) % CAPABILITY_NEGATIVE_REPROBE_ROUND_INTERVAL == 0
+}
+
+// This internal orchestration boundary deliberately keeps the turn-owned services
+// explicit; grouping them would obscure borrowing and lifecycle ownership.
+#[allow(clippy::too_many_arguments)]
 fn run_session_turn_with_model_client_and_reminder_override(
     core: &mut AgentCore,
     config: &mut ModelServiceConfig,
@@ -320,10 +394,15 @@ fn run_session_turn_with_model_client_and_reminder_override(
         &turn_id,
         effective_input,
     );
-    let profile =
-        crate::negotiate_interaction(model_client, config, request.audit_file, &mut || {
-            ui.is_cancel_requested()
-        });
+    let mut profile = negotiate_interaction_for_turn(
+        model_client,
+        config,
+        request.audit_file,
+        ui,
+        request.session,
+        false,
+    )
+    .profile;
     core.set_interaction_profile(&profile);
     ui.on_interaction_profile(&profile);
     let start = Instant::now();
@@ -338,6 +417,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
         core.begin_turn(request.input, additional_context)
     };
     let mut rounds = 0u32;
+    let mut reminders_evaluated_after_round = None;
     let mut model_wait_this_turn = Duration::ZERO;
     let mut latest_usage: Option<UsageStats> = None;
 
@@ -345,30 +425,35 @@ fn run_session_turn_with_model_client_and_reminder_override(
         if take_cancel_request(ui, &mut turn_projection) {
             break cancelled_turn_parts();
         }
-        // Forced-compaction request notices ride the earliest loop iteration
-        // after the threshold crossing so live UI can show "compacting...".
-        if let Some((estimated_prompt_tokens, force_threshold)) =
+        // Forced-compaction notices ride the earliest loop iteration after a
+        // threshold crossing or provider-usage quality follow-up so live UI can
+        // show "compacting..." without conflating the two diagnostic reasons.
+        if let Some((estimated_prompt_tokens, force_threshold, quality_target)) =
             core.take_pending_compact_request_notice()
         {
-            ui.on_core_topic_events(&[crate::host::context_compact_requested_topic_event(
+            ui.on_core_topic_events(&[crate::host::context_compress_requested_topic_event(
                 request.session,
                 estimated_prompt_tokens,
                 force_threshold,
+                quality_target,
             )]);
         }
-        if ui.take_manual_context_compact_request() {
-            core.request_manual_context_compact();
+        if matches!(step, CoreStep::NeedModel { .. }) && ui.take_manual_context_compress_request() {
+            core.request_manual_context_compress();
         }
         match step {
             CoreStep::NeedModel { ref prompt, .. } => {
                 if ui.apply_pending_runtime_updates(core, config) {
                     core.set_response_protocol(config.response_protocol);
-                    let profile = crate::negotiate_interaction(
+                    profile = negotiate_interaction_for_turn(
                         model_client,
                         config,
                         request.audit_file,
-                        &mut || ui.is_cancel_requested(),
-                    );
+                        ui,
+                        request.session,
+                        false,
+                    )
+                    .profile;
                     core.set_interaction_profile(&profile);
                     ui.on_interaction_profile(&profile);
                     step = CoreStep::NeedModel {
@@ -380,6 +465,11 @@ fn run_session_turn_with_model_client_and_reminder_override(
                 let supplements = normalize_user_supplements_with_context(
                     ui.drain_user_supplements_with_context(),
                 );
+                // Draining the mailbox can turn a compact marker into a request
+                // without returning any user text. Consume it before dispatch.
+                if ui.take_manual_context_compress_request() {
+                    core.request_manual_context_compress();
+                }
                 if !supplements.is_empty() {
                     if let Some(next_step) = core.append_user_supplements_with_context_and_audit(
                         supplements,
@@ -394,7 +484,12 @@ fn run_session_turn_with_model_client_and_reminder_override(
                 // Reminders guide an already-running model turn. Never inject one
                 // before the first model request, even when runtime preparation
                 // has already crossed a time boundary.
-                if rounds > 0 {
+                if rounds > 0 && reminders_evaluated_after_round != Some(rounds) {
+                    // Evaluate once per dispatch boundary, not once per prompt
+                    // rebuild. Slow host work must not accumulate time reminders
+                    // before the same model request can leave this loop.
+                    reminders_evaluated_after_round = Some(rounds);
+                    let mut injected = false;
                     if let Some(reminder) = progress_reminder.take_due() {
                         core.submit_prompt_component(
                             PromptComponentRole::system(),
@@ -402,11 +497,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
                             reminder,
                             "turn_runtime",
                         );
-                        step = CoreStep::NeedModel {
-                            prompt: core.build_next_prompt(),
-                            rounds_remaining: core.remaining_rounds(),
-                        };
-                        continue;
+                        injected = true;
                     }
                     let active_elapsed = start.elapsed().saturating_sub(user_wait_this_turn);
                     let time_reminders = reminders.take_due_time(active_elapsed);
@@ -419,11 +510,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
                                 "turn_runtime",
                             );
                         }
-                        step = CoreStep::NeedModel {
-                            prompt: core.build_next_prompt(),
-                            rounds_remaining: core.remaining_rounds(),
-                        };
-                        continue;
+                        injected = true;
                     }
                     let round_reminders = reminders.take_due_rounds(rounds);
                     if !round_reminders.is_empty() {
@@ -435,6 +522,9 @@ fn run_session_turn_with_model_client_and_reminder_override(
                                 "turn_runtime",
                             );
                         }
+                        injected = true;
+                    }
+                    if injected {
                         step = CoreStep::NeedModel {
                             prompt: core.build_next_prompt(),
                             rounds_remaining: core.remaining_rounds(),
@@ -443,11 +533,42 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     }
                 }
                 rounds += 1;
+                if should_reprobe_negative_capability(config, &profile, rounds) {
+                    let identity = crate::capability_probe_identity(config);
+                    ui.on_core_topic_events(&[crate::capability_negotiation_topic_event(
+                        request.session,
+                        "retrying",
+                        identity.as_ref(),
+                        Some(&profile),
+                        Some("periodic_negative_capability_reprobe"),
+                    )]);
+                    let outcome = negotiate_interaction_for_turn(
+                        model_client,
+                        config,
+                        request.audit_file,
+                        ui,
+                        request.session,
+                        true,
+                    );
+                    if outcome.profile.resolved_mode == crate::ToolCallMode::Native
+                        && outcome.persisted_probe.is_none()
+                    {
+                        if let Some(identity) = identity.as_ref() {
+                            ui.on_persisted_capability_probe(identity, None);
+                        }
+                        config.interaction.persisted_capability_probe = None;
+                    }
+                    profile = outcome.profile;
+                    core.set_interaction_profile(&profile);
+                    ui.on_interaction_profile(&profile);
+                }
                 let mut action_runtime = TurnActionRuntime::new(ui);
                 let prompt =
                     core.build_model_request_prompt_with_runtime(prompt, &mut action_runtime);
                 let mut interaction_request = core.model_interaction_request(prompt);
                 interaction_request.images = request.images.to_vec();
+                let reasoning_upgrade =
+                    apply_higher_than_h0_trailer(config, &mut interaction_request);
                 let api_payload =
                     crate::prepare_model_interaction_http_request(config, &interaction_request)
                         .model_request
@@ -456,8 +577,9 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     ui,
                     turn_projection.set_activity(TurnActivity::WaitingModel { round: rounds }),
                 );
+                ui.on_reasoning_upgrade(reasoning_upgrade);
                 ui.on_model_api_request(rounds, &interaction_request, &api_payload);
-                match call_model_with_system_retries(
+                let model_call = call_model_with_system_retries(
                     model_client,
                     config,
                     &interaction_request,
@@ -467,7 +589,8 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     request.session,
                     &turn_id,
                     &mut response_preview,
-                ) {
+                );
+                match model_call {
                     Ok(response) => {
                         publish_turn_projection(
                             ui,
@@ -478,6 +601,28 @@ fn run_session_turn_with_model_client_and_reminder_override(
                         );
                         if take_cancel_request(ui, &mut turn_projection) {
                             break cancelled_turn_parts();
+                        }
+                        if response.parallel_tool_control_omitted {
+                            profile.parallel_supported = false;
+                            profile.parallel_enabled = false;
+                            profile.source = crate::CapabilityProbeSource::Fallback;
+                            profile.reason =
+                                crate::negotiation::PARALLEL_CONTROL_UNSUPPORTED_REASON.to_string();
+                            profile.observed_tool_calls = response.response.tool_calls.len();
+                            core.set_interaction_profile(&profile);
+                            ui.on_interaction_profile(&profile);
+                            if let Some(identity) = crate::capability_probe_identity(config) {
+                                let record = crate::PersistedCapabilityProbe {
+                                    identity: identity.clone(),
+                                    native_supported: true,
+                                    parallel_supported: false,
+                                    observed_tool_calls: profile.observed_tool_calls,
+                                    reason: profile.reason.clone(),
+                                };
+                                config.interaction.persisted_capability_probe =
+                                    Some(record.clone());
+                                ui.on_persisted_capability_probe(&identity, Some(&record));
+                            }
                         }
                         latest_usage = Some(response.response.usage.clone());
                         if !core.should_suppress_model_response(&response.response) {
@@ -738,6 +883,18 @@ fn run_session_turn_with_model_client_and_reminder_override(
         core.mark_user_interrupted_work();
     }
     let mut action_runtime = TurnActionRuntime::new(ui);
+    if outcome.stop_reason == Some(TurnStopReason::CancelledByUser) {
+        // A user stop abandons the turn's authority: the memo must not
+        // outlive it as stale state. Close it on runtime authority so the
+        // next turn starts clean and can recreate it from the new input.
+        if let Some(_memo) = core.force_close_memo_on_interrupt() {
+            action_runtime.on_core_topic_events(&[crate::host::memo_topic_event_with_op(
+                request.session.to_string(),
+                None,
+                "force_deleted",
+            )]);
+        }
+    }
     outcome =
         outcome.with_running_jobs(core.consume_completed_shell_jobs_for_session_with_runtime(
             request.session,
@@ -834,6 +991,10 @@ impl<'a> TurnActionRuntime<'a> {
 }
 
 impl ActionRuntime for TurnActionRuntime<'_> {
+    fn take_model_tool_result_bytes_update(&mut self) -> Option<usize> {
+        self.ui.take_model_tool_result_bytes_update()
+    }
+
     fn on_model_response_validated(&mut self, accepted: bool, final_response: bool) {
         if let Some((preview, session, turn_id)) = self.preview.as_mut() {
             preview.validated(accepted, final_response);
@@ -889,6 +1050,8 @@ fn call_model_with_system_retries(
     let retry_policy = model_system_retry_policy();
     let mut total_model_wait = Duration::ZERO;
     let mut total_retry_wait = Duration::ZERO;
+    let mut effective_request = request.clone();
+    let mut parallel_tool_control_omitted = false;
     for attempt in 0..=retry_policy.max_attempts {
         let model_wait_start = Instant::now();
         preview.begin();
@@ -898,7 +1061,7 @@ fn call_model_with_system_retries(
         let mut preview_error = false;
         let result = model_client.call_model_interaction_streaming(
             config,
-            request,
+            &effective_request,
             audit_file,
             &mut || shared_ui.borrow_mut().is_cancel_requested(),
             &mut |event| {
@@ -913,9 +1076,12 @@ fn call_model_with_system_retries(
                 };
                 let content = event
                     .pointer("/choices/0/delta/content")
+                    .or_else(|| {
+                        (event["type"] == "response.output_text.delta").then(|| &event["delta"])
+                    })
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("");
-                let parsed = if request.is_native() {
+                let parsed = if effective_request.is_native() {
                     emit(PublicTextTarget::Response, content);
                     Ok(())
                 } else if config.response_protocol
@@ -974,9 +1140,23 @@ fn call_model_with_system_retries(
                     response,
                     model_wait: total_model_wait,
                     retry_wait: total_retry_wait,
+                    parallel_tool_control_omitted,
                 });
             }
             Err(err) => {
+                if !parallel_tool_control_omitted
+                    && effective_request.is_native()
+                    && effective_request.send_parallel_tool_calls
+                    && config.interaction.parallel_tool_calls == crate::ParallelToolCalls::Auto
+                    && crate::retry_policy::is_explicit_parallel_tool_control_unsupported(&err)
+                {
+                    // Retry the same formal round once with only the optional
+                    // provider control field omitted. Native tools remain on.
+                    effective_request.send_parallel_tool_calls = false;
+                    effective_request.parallel_tool_calls = false;
+                    parallel_tool_control_omitted = true;
+                    continue;
+                }
                 if let Some(profiler) = profiler.as_deref_mut() {
                     profiler.record_model_wait(&config.model, &UsageStats::zero(), model_wait);
                 }
@@ -1074,6 +1254,19 @@ fn turn_stop_parts(
     Option<(UsageStats, Option<UsageStats>, Option<String>, String)>,
 ) {
     (String::new(), Some(stop.into_stopped_turn()), None)
+}
+
+fn apply_higher_than_h0_trailer(
+    config: &ModelServiceConfig,
+    request: &mut crate::ModelInteractionRequest,
+) -> Option<crate::model_requirements::ReasoningUpgrade> {
+    let upgrade = crate::model_requirements::reasoning_upgrade(config, request.critical_reasoning);
+    if upgrade.is_some() {
+        request.rendered_prompt = crate::prompt_render::apply_reasoning_intensity_upgrade_trailer(
+            &request.rendered_prompt,
+        );
+    }
+    upgrade
 }
 
 fn epoch_millis() -> u128 {

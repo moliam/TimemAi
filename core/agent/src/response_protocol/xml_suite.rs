@@ -1,5 +1,5 @@
 use super::{
-    ParsedAction, ParsedActionGroup, ParsedContextCompact, ParsedEnvelope, PromptBoundarySpec,
+    ParsedAction, ParsedActionGroup, ParsedContextCompress, ParsedEnvelope, PromptBoundarySpec,
     ResponseProtocolSuite, XML_PROMPT_BOUNDARIES,
 };
 use crate::capability::CapabilityRegistry;
@@ -124,8 +124,8 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
 
     let continue_work = final_answer.trim().is_empty();
 
-    let context_compacts = if repair_issue.is_none() {
-        parse_context_compacts_from_fields(&response, &mut repair_issue)
+    let context_compresses = if repair_issue.is_none() {
+        parse_context_compresses_from_fields(&response, capabilities, &mut repair_issue)
     } else {
         Vec::new()
     };
@@ -145,7 +145,7 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
     if repair_issue.is_none()
         && continue_work
         && next_actions.is_empty()
-        && context_compacts.is_empty()
+        && context_compresses.is_empty()
     {
         repair_issue = Some("next_actions_required_when_status_working".to_string());
     }
@@ -157,7 +157,7 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
         thought_keep_in_context,
         next_actions,
         action_groups,
-        context_compacts,
+        context_compresses,
         memory_candidates: vec![],
         accepted_response: Some(protocol_text.clone()),
         // A complete recovered response is already the canonical replay value.
@@ -296,7 +296,7 @@ struct ResponseFields {
     toolgen_retrospect: String,
     final_answer: String,
     actions_xml: Vec<String>,
-    context_compacts: Vec<ContextCompactFields>,
+    context_compresses: Vec<ContextCompressFields>,
     has_status: bool,
     has_finish_confirm: bool,
     finish_confirm_valid: bool,
@@ -305,10 +305,11 @@ struct ResponseFields {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct ContextCompactFields {
-    discard: String,
+struct ContextCompressFields {
+    keep: String,
     offload: String,
     summary: String,
+    field_names: Vec<String>,
 }
 
 fn parse_response_fields(text: &str) -> Option<ResponseFields> {
@@ -359,7 +360,7 @@ fn scan_response_body(body: &str) -> ResponseFields {
         "free_talk",
         "finish_confirm",
         "actions",
-        "context_compact",
+        "context_compress",
         "toolgen_retrospect",
         "final_answer",
         "status",
@@ -429,7 +430,7 @@ fn scan_response_body(body: &str) -> ResponseFields {
 
         let close_start = if matches!(tag, "final_answer" | "toolgen_retrospect") {
             find_last_close_tag(body, open_end + 1, tag)
-        } else if matches!(tag, "actions" | "context_compact") {
+        } else if matches!(tag, "actions" | "context_compress") {
             find_close_tag_outside_cdata(body, open_end + 1, tag)
         } else {
             find_close_tag(body, open_end + 1, tag)
@@ -465,10 +466,10 @@ fn scan_response_body(body: &str) -> ResponseFields {
             "status" => {
                 fields.has_status = true;
             }
-            "context_compact" => {
+            "context_compress" => {
                 fields
-                    .context_compacts
-                    .push(parse_context_compact_fields(inner));
+                    .context_compresses
+                    .push(parse_context_compress_fields(inner));
             }
             "actions" => fields.actions_xml.push(inner.to_string()),
             _ => {}
@@ -495,12 +496,65 @@ fn scan_response_body(body: &str) -> ResponseFields {
     fields
 }
 
-fn parse_context_compact_fields(body: &str) -> ContextCompactFields {
-    ContextCompactFields {
-        discard: extract_tag_text(body, "discard", false).unwrap_or_default(),
+fn parse_context_compress_fields(body: &str) -> ContextCompressFields {
+    ContextCompressFields {
+        keep: extract_tag_text(body, "keep", false).unwrap_or_default(),
         offload: extract_tag_text(body, "offload", false).unwrap_or_default(),
         summary: extract_tag_text(body, "summary", true).unwrap_or_default(),
+        field_names: context_compress_field_names(body),
     }
+}
+
+fn context_compress_field_names(body: &str) -> Vec<String> {
+    let mut field_names = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < body.len() {
+        while body
+            .as_bytes()
+            .get(cursor)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            cursor += 1;
+        }
+        if cursor >= body.len() {
+            break;
+        }
+        if !body[cursor..].starts_with('<') {
+            cursor += body[cursor..].find('<').unwrap_or(body.len() - cursor);
+            continue;
+        }
+        if body[cursor..].starts_with("<![CDATA[") {
+            let Some(end) = body[cursor + "<![CDATA[".len()..].find("]]>") else {
+                break;
+            };
+            cursor += "<![CDATA[".len() + end + "]]>".len();
+            continue;
+        }
+        if body[cursor..].starts_with("</") {
+            break;
+        }
+
+        let open_start = cursor;
+        cursor += 1;
+        let Some(name) = parse_xml_name(body, &mut cursor) else {
+            break;
+        };
+        let Some(open_end) = find_tag_end(body, open_start) else {
+            break;
+        };
+        let self_closing = is_self_closing_start_tag(&body[open_start..=open_end]);
+        let next_cursor = if self_closing {
+            open_end + 1
+        } else {
+            let Some(close_start) = find_close_tag_outside_cdata(body, open_end + 1, &name) else {
+                break;
+            };
+            close_start + close_tag_len(&name)
+        };
+        field_names.push(name);
+        cursor = next_cursor;
+    }
+    field_names
 }
 
 fn extract_tag_text(body: &str, tag: &str, use_last_close: bool) -> Option<String> {
@@ -567,7 +621,7 @@ fn malformed_xml_response(issue: &str) -> ParsedEnvelope {
         thought_keep_in_context: false,
         next_actions: vec![],
         action_groups: vec![],
-        context_compacts: vec![],
+        context_compresses: vec![],
         memory_candidates: vec![],
         accepted_response: None,
         runtime_note: None,
@@ -778,12 +832,12 @@ fn parse_xml_tool_action(
             return Err(format!("{label}.input.{}_duplicate", child.name));
         }
         let schema = capabilities.tool_input_property_schema(&element.name, &child.name);
-        let value = if element.name == "context_compact"
-            && crate::context_compact::is_delta_list_field(&child.name)
+        let value = if element.name == "context_compress"
+            && crate::context_compress::is_delta_list_field(&child.name)
             && child.children.is_empty()
             && child.attributes.is_empty()
         {
-            crate::context_compact::inline_xml_delta_list(&child.text)
+            crate::context_compress::inline_xml_delta_list(&child.text)
         } else {
             xml_element_value(child, schema, label)?
         };
@@ -1333,33 +1387,48 @@ fn expect_xml(body: &str, cursor: &mut usize, expected: &str, issue: &str) -> Re
     }
 }
 
-fn parse_context_compacts_from_fields(
+fn parse_context_compresses_from_fields(
     response: &ResponseFields,
+    capabilities: &CapabilityRegistry,
     repair_issue: &mut Option<String>,
-) -> Vec<ParsedContextCompact> {
+) -> Vec<ParsedContextCompress> {
     let mut compacts = Vec::new();
-    for (idx, item) in response.context_compacts.iter().enumerate() {
-        let discard_delta_ids = split_id_list(&item.discard);
+    for (idx, item) in response.context_compresses.iter().enumerate() {
+        if let Some(field) = item
+            .field_names
+            .iter()
+            .find(|field| !capabilities.tool_input_property_declared("context_compress", field))
+        {
+            if repair_issue.is_none() {
+                *repair_issue = Some(format!("context_compress[{idx}].input.{field}_unsupported"));
+            }
+            break;
+        }
+        let keep_delta_ids = split_id_list(&item.keep);
         let offload_delta_ids = split_id_list(&item.offload);
-        let mut delta_ids = discard_delta_ids.clone();
+        if let Some(id) = keep_delta_ids
+            .iter()
+            .find(|id| offload_delta_ids.contains(id))
+        {
+            if repair_issue.is_none() {
+                *repair_issue = Some(format!("context_compress[{idx}].keep_offload_overlap:{id}"));
+            }
+            break;
+        }
+        let mut delta_ids = keep_delta_ids.clone();
         delta_ids.extend(offload_delta_ids.iter().cloned());
         delta_ids.sort();
         delta_ids.dedup();
         let summary = item.summary.trim().to_string();
-        if delta_ids.is_empty() {
-            if repair_issue.is_none() {
-                *repair_issue = Some(format!("context_compact[{idx}].ids_required"));
-            }
-            break;
-        }
         if summary.is_empty() {
             if repair_issue.is_none() {
-                *repair_issue = Some(format!("context_compact[{idx}].summary_required"));
+                *repair_issue = Some(format!("context_compress[{idx}].summary_required"));
             }
             break;
         }
-        compacts.push(ParsedContextCompact {
-            discard_delta_ids,
+        compacts.push(ParsedContextCompress {
+            call_id: super::generated_inline_tool_call_id(),
+            keep_delta_ids,
             offload_delta_ids,
             delta_ids,
             slice_ids: Vec::new(),
@@ -1386,11 +1455,11 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
         "truncated_model_output" => {
             "检查到刚刚的输出被 max output token 截断。上一次已收到的截断回复和原生工具参数片段已附在上下文中，请不要再次生成同样长的整段内容。请继续使用 XML response protocol，把工作拆成小块：本次只生成一个较小、完整的 <actions>、<free_talk> 或 <final_answer>，拿到结果后再继续下一小块；长报告可分段写入文件，最后给出简短总结和路径。"
         }
-        "context_compact_must_be_first" => {
-            "检查到 <context_compact> 不是 <actions> 中的第一个 capability。请把它移到所有其他工具之前；后续工具可以保留，它们只会在压缩成功后执行。"
+        "context_compress_must_be_first" => {
+            "检查到 <context_compress> 不是 <actions> 中的第一个 capability。请把它移到所有其他工具之前；后续工具可以保留，它们只会在压缩成功后执行。"
         }
-        "context_compact_only_once" => {
-            "检查到本次响应包含多个 <context_compact>。每次响应最多调用一次，并将它放在 <actions> 的第一个位置。"
+        "context_compress_only_once" => {
+            "检查到本次响应包含多个 <context_compress>。每次响应最多调用一次，并将它放在 <actions> 的第一个位置。"
         }
         "external_tool_call_protocol" => {
             "检查到刚刚的输出用了外部 tool_call/function_call 格式。请使用 XML-native actions：<ASSISTANT><actions><tool_id><argument>value</argument></tool_id></actions></ASSISTANT>；并行工具放入 <parallel>。"
@@ -1447,10 +1516,10 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
             "A response field opening tag is malformed. Rewrite that field with a complete opening tag, matching closing tag, and no broken attributes."
         }
         "xml_tags_out_of_order" => {
-            "The XML tags are out of order. Inside <ASSISTANT>, put optional <free_talk> first, optional <finish_confirm> next, then exactly one of <actions>, <context_compact>, or <final_answer>. A final answer requires <finish_confirm>."
+            "The XML tags are out of order. Inside <ASSISTANT>, put optional <free_talk> first, optional <finish_confirm> next, then exactly one of <actions>, <context_compress>, or <final_answer>. A final answer requires <finish_confirm>."
         }
         "state_branch_must_choose_one" => {
-            "The response selected more than one state branch. Inside <ASSISTANT>, use exactly one of <actions>, <context_compact>, or <final_answer>."
+            "The response selected more than one state branch. Inside <ASSISTANT>, use exactly one of <actions>, <context_compress>, or <final_answer>."
         }
         issue if issue.ends_with(".actions_required") => {
             "The <actions> or <parallel> element is empty. Add at least one concrete tool element from the capability catalog."
@@ -1491,11 +1560,13 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
         issue if issue.contains(".input.") => {
             "The XML tool arguments do not satisfy the capability schema. Correct the named attribute or child element; arrays use <item> children and objects use field-name children."
         }
-        issue if issue.starts_with("context_compact[") && issue.ends_with(".ids_required") => {
-            "The <context_compact> block must contain at least one non-empty <discard> or <offload> delta-id list, followed by <summary>."
+        issue if issue.starts_with("context_compress[")
+            && issue.contains(".keep_offload_overlap:") =>
+        {
+            "The same delta id cannot appear in both <keep> and <offload>. Keep it verbatim or save it to scratch before removal, not both."
         }
-        issue if issue.starts_with("context_compact[") && issue.ends_with(".summary_required") => {
-            "The <context_compact> block is missing a non-empty <summary> describing the essential retained task state."
+        issue if issue.starts_with("context_compress[") && issue.ends_with(".summary_required") => {
+            "The <context_compress> block is missing a non-empty <summary> describing the essential retained task state."
         }
         _ => {
             "Use one XML <ASSISTANT>. If tools are needed, write XML-native <actions> with exact tool-id elements; if the current request is complete, write <final_answer>."
@@ -1531,8 +1602,8 @@ pub fn xml_repair_instruction_for_response(issue: &str, raw_response: &str) -> S
         .unwrap_or(false);
     let branch = if protocol_text.contains("<actions") {
         "<actions>...</actions>"
-    } else if protocol_text.contains("<context_compact") {
-        "<context_compact>...</context_compact>"
+    } else if protocol_text.contains("<context_compress") {
+        "<context_compress>...</context_compress>"
     } else if protocol_text.contains("<final_answer") {
         "<final_answer>...</final_answer>"
     } else {

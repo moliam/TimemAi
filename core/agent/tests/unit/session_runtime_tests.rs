@@ -2,23 +2,63 @@ use super::*;
 use crate::{
     ApprovalRequest, BashApprovalMode, CapabilityRegistry, CoreActionKind, CoreProfile,
     CoreTopicEvent, FinishedTurnProjection, HostDecision, NoopTurnUi, OutputExpansionRequest,
-    TurnInputAdmission, TurnStopDetail, TurnStopReason, CORE_TOPIC_CONTEXT_COMPACT,
+    TurnInputAdmission, TurnStopDetail, TurnStopReason, CORE_TOPIC_CONTEXT_COMPRESS,
 };
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::{fs, thread};
 
 fn tmp_dir(name: &str) -> std::path::PathBuf {
-    let mut dir = std::env::temp_dir();
-    dir.push(format!(
-        "timem_session_runtime_{}_{}_{}",
-        name,
-        std::process::id(),
-        epoch_millis()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+    // Time and PID alone can collide between parallel tests. Exclusive
+    // creation reserves the path; never delete a directory owned by another
+    // fixture (including one left by an earlier process with the same PID).
+    for _ in 0..128 {
+        let dir = std::env::temp_dir().join(format!(
+            "timem_session_runtime_{}_{}_{}_{}",
+            name,
+            std::process::id(),
+            epoch_millis(),
+            NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::create_dir(&dir) {
+            Ok(()) => return dir,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("cannot create test directory {}: {error}", dir.display()),
+        }
+    }
+    panic!("could not reserve a unique test directory for {name}");
+}
+
+#[test]
+fn same_named_test_directories_are_isolated_and_preserve_existing_files() {
+    let mut directories = Vec::new();
+    let mut collision = None;
+    for _ in 0..64 {
+        let dir = tmp_dir("directory_isolation");
+        if directories.contains(&dir) {
+            collision = Some(dir);
+            break;
+        }
+        fs::write(dir.join("sentinel"), "must survive another fixture").unwrap();
+        directories.push(dir);
+    }
+    let preserved = directories.iter().all(|dir| {
+        fs::read_to_string(dir.join("sentinel"))
+            .is_ok_and(|value| value == "must survive another fixture")
+    });
+    for dir in &directories {
+        let _ = fs::remove_dir_all(dir);
+    }
+    assert!(
+        collision.is_none(),
+        "same-name fixture reused and erased {collision:?}"
+    );
+    assert!(
+        preserved,
+        "allocating a fixture must not erase another fixture's files"
+    );
 }
 
 fn test_core(
@@ -54,6 +94,84 @@ fn test_config() -> ModelServiceConfig {
         response_protocol: crate::ResponseProtocolKind::Json,
         openai_compatible: crate::OpenAiCompatibleOptions::default(),
         http_transport: Default::default(),
+    }
+}
+
+#[test]
+fn higher_than_h0_trailer_is_injected_only_for_a_real_reasoning_upgrade() {
+    use crate::model_requirements::EndpointRequirements;
+
+    let mut config = test_config();
+    config.openai_compatible.requirements = EndpointRequirements {
+        version: 1,
+        provider: Some("openai".into()),
+        allowed_reasoning: Some(vec!["low".into(), "high".into(), "max".into()]),
+        adaptive_reasoning: Some(true),
+        ..Default::default()
+    };
+    config.openai_compatible.reasoning_effort = Some("low".into());
+
+    let base = format!("body\n\n{}", crate::prompt_render::RESPONSE_TRAILER);
+    let mut h0_request = crate::ModelInteractionRequest::inline(base.clone());
+    h0_request.critical_reasoning = false;
+    assert_eq!(apply_higher_than_h0_trailer(&config, &mut h0_request), None);
+    assert_eq!(h0_request.rendered_prompt, base);
+
+    let mut upgraded_request = crate::ModelInteractionRequest::inline(base.clone());
+    upgraded_request.critical_reasoning = true;
+    let upgrade = apply_higher_than_h0_trailer(&config, &mut upgraded_request).unwrap();
+    assert_eq!(
+        (upgrade.from.as_str(), upgrade.to.as_str()),
+        ("low", "high")
+    );
+    assert!(upgraded_request
+        .rendered_prompt
+        .ends_with(crate::prompt_render::REASONING_INTENSITY_UPGRADE_TRAILER));
+
+    config.openai_compatible.requirements.adaptive_reasoning = Some(false);
+    let mut non_upgraded_critical = crate::ModelInteractionRequest::inline(base.clone());
+    non_upgraded_critical.critical_reasoning = true;
+    assert_eq!(
+        apply_higher_than_h0_trailer(&config, &mut non_upgraded_critical),
+        None
+    );
+    assert_eq!(non_upgraded_critical.rendered_prompt, base);
+}
+
+#[test]
+fn higher_than_h0_trailer_preserves_context_compression_protocol() {
+    use crate::model_requirements::EndpointRequirements;
+
+    let mut config = test_config();
+    config.openai_compatible.requirements = EndpointRequirements {
+        version: 1,
+        provider: Some("openai".into()),
+        allowed_reasoning: Some(vec!["low".into(), "high".into(), "max".into()]),
+        adaptive_reasoning: Some(true),
+        ..Default::default()
+    };
+    config.openai_compatible.reasoning_effort = Some("low".into());
+
+    for (source, expected) in [
+        (
+            crate::prompt_render::CONTEXT_COMPRESS_REQUIRED_TRAILER,
+            crate::prompt_render::REASONING_UPGRADED_CONTEXT_COMPRESS_TRAILER,
+        ),
+        (
+            crate::prompt_render::MANUAL_CONTEXT_COMPRESS_TRAILER,
+            crate::prompt_render::REASONING_UPGRADED_MANUAL_CONTEXT_COMPRESS_TRAILER,
+        ),
+    ] {
+        let mut request = crate::ModelInteractionRequest::inline(format!("body\n\n{source}"));
+        request.critical_reasoning = true;
+        assert!(apply_higher_than_h0_trailer(&config, &mut request).is_some());
+        let (body, trailer) =
+            crate::prompt_render::split_formatted_response_trailer(&request.rendered_prompt);
+        assert_eq!(body, "body");
+        assert_eq!(trailer.as_deref(), Some(expected));
+        assert!(request
+            .rendered_prompt
+            .ends_with("Your tool calls must start with context_compress:"));
     }
 }
 
@@ -268,6 +386,14 @@ impl TurnUi for DelayBeforeFirstModelUi {
     }
 }
 
+// A file becomes visible before shell redirection finishes writing it. These
+// fixtures publish one newline-terminated record; cancellation must not kill
+// the writer between creating the file and completing that record.
+#[cfg(unix)]
+fn ready_record_complete(path: &Path) -> bool {
+    fs::read(path).is_ok_and(|record| record.len() > 1 && record.ends_with(b"\n"))
+}
+
 #[cfg(unix)]
 struct CancelWhenFilesReadyUi {
     started: Instant,
@@ -278,7 +404,9 @@ struct CancelWhenFilesReadyUi {
 #[cfg(unix)]
 impl TurnUi for CancelWhenFilesReadyUi {
     fn is_cancel_requested(&mut self) -> bool {
-        self.ready_files.iter().all(|path| path.is_file())
+        self.ready_files
+            .iter()
+            .all(|path| ready_record_complete(path))
             || self.started.elapsed() >= self.hard_timeout
     }
 }
@@ -294,7 +422,9 @@ struct ApproveAndCancelAfterDelayUi {
 #[cfg(unix)]
 impl TurnUi for ApproveAndCancelAfterDelayUi {
     fn is_cancel_requested(&mut self) -> bool {
-        self.ready_files.iter().all(|path| path.is_file())
+        self.ready_files
+            .iter()
+            .all(|path| ready_record_complete(path))
             || self.started.elapsed() >= self.hard_timeout
     }
 
@@ -307,6 +437,41 @@ impl TurnUi for ApproveAndCancelAfterDelayUi {
             other => other.safe_default().into(),
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn cancellation_fixture_waits_for_complete_ready_records() {
+    let dir = tmp_dir("cancel_ready_records");
+    let paths = [dir.join("child.pid"), dir.join("other.ready")];
+    let mut direct = CancelWhenFilesReadyUi {
+        started: Instant::now(),
+        ready_files: paths.clone(),
+        hard_timeout: Duration::from_secs(30),
+    };
+    let mut approval = ApproveAndCancelAfterDelayUi {
+        started: Instant::now(),
+        ready_files: paths.clone(),
+        hard_timeout: Duration::from_secs(30),
+        approvals: 0,
+    };
+    let mut observations = Vec::new();
+    observations.push((direct.is_cancel_requested(), approval.is_cancel_requested()));
+    // Redirection creates the destination before echo writes the PID.
+    fs::write(&paths[0], "").unwrap();
+    fs::write(&paths[1], "uploaded\n").unwrap();
+    observations.push((direct.is_cancel_requested(), approval.is_cancel_requested()));
+    fs::write(&paths[0], "123").unwrap();
+    observations.push((direct.is_cancel_requested(), approval.is_cancel_requested()));
+    fs::write(&paths[0], "12345\n").unwrap();
+    observations.push((direct.is_cancel_requested(), approval.is_cancel_requested()));
+    fs::remove_dir_all(dir).unwrap();
+
+    assert_eq!(
+        observations,
+        [(false, false), (false, false), (false, false), (true, true)],
+        "cancellation must wait for the complete newline-terminated record, not file creation"
+    );
 }
 
 impl PollingReplayModel {
@@ -496,7 +661,32 @@ impl TurnUi for SupplementAndExpansionUi {
     }
 }
 
-#[cfg(unix)]
+/// Simulates a restart followed by the user immediately clicking manual
+/// context compression: the direct-resume turn starts while the Host has
+/// already set the manual-compact flag.
+struct ManualCompactOnceUi {
+    requested: bool,
+    topics: Vec<CoreTopicEvent>,
+}
+
+impl ManualCompactOnceUi {
+    fn new() -> Self {
+        Self {
+            requested: true,
+            topics: Vec::new(),
+        }
+    }
+}
+
+impl TurnUi for ManualCompactOnceUi {
+    fn take_manual_context_compress_request(&mut self) -> bool {
+        std::mem::replace(&mut self.requested, false)
+    }
+    fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
+        self.topics.extend_from_slice(events);
+    }
+}
+
 #[test]
 fn every_model_request_lists_still_running_commands_with_the_creating_tool_call_id() {
     let dir = tmp_dir("still_running_model_prompt");
@@ -536,33 +726,33 @@ fn every_model_request_lists_still_running_commands_with_the_creating_tool_call_
 
     assert_eq!(outcome.text, "background task started");
     assert_eq!(model.prompts.len(), 2);
-    assert!(!model.prompts[0].contains("### STILL RUNNING"));
+    assert!(!model.prompts[0].contains("#### jobmanager"));
     let second = &model.prompts[1];
-    assert!(second.contains("still running cmds:"), "{second}");
-    assert!(second.contains("### STILL RUNNING"), "{second}");
+    assert!(second.contains("### RUNTIME_INFO"), "{second}");
+    assert!(second.contains("#### jobmanager"), "{second}");
     assert!(
-        second.contains("| pid | created by tool_call id | command |"),
+        second.contains("| pid | elapsed | created by tool_call id | command | notes |"),
         "{second}"
     );
     assert!(second.contains("`sleep 30`"), "{second}");
     let call_id = second
         .lines()
         .find(|line| line.starts_with("| ") && line.contains('`'))
-        .and_then(|line| line.split('`').nth(1))
+        .and_then(|line| line.split('`').nth(3))
         .expect("tool call id in still-running table");
     assert_eq!(call_id.len(), 6, "{second}");
     assert!(call_id.chars().all(|ch| ch.is_ascii_hexdigit()), "{second}");
     assert!(
-        second.contains(&format!("tool_call_id: {call_id}")),
+        second.contains(&format!(r#""tool_call_id":"{call_id}""#)),
         "{second}"
     );
     assert!(
         second.contains(&format!("- {call_id}: run_bash")),
         "{second}"
     );
-    assert_eq!(second.matches("### STILL RUNNING").count(), 1, "{second}");
+    assert_eq!(second.matches("#### jobmanager").count(), 1, "{second}");
     assert_eq!(
-        core.render_prompt().matches("### STILL RUNNING").count(),
+        core.render_prompt().matches("#### jobmanager").count(),
         0,
         "the reminder is request-scoped and must not accumulate in prompt history"
     );
@@ -1083,6 +1273,92 @@ fn session_turn_injects_due_focus_reminder_before_the_next_model_request() {
 }
 
 #[test]
+fn reminder_rebuild_crossing_time_boundary_does_not_repeat_before_dispatch() {
+    const ROUND_TIP: &str = "unique-round-dispatch-marker";
+    const TIP: &str = "unique-reminder-dispatch-marker";
+    struct SlowReminderRebuildUi {
+        delayed: bool,
+    }
+    impl TurnUi for SlowReminderRebuildUi {
+        fn apply_pending_runtime_updates(
+            &mut self,
+            core: &mut AgentCore,
+            _config: &mut ModelServiceConfig,
+        ) -> bool {
+            if !self.delayed && core.render_prompt().contains(TIP) {
+                self.delayed = true;
+                // Simulate scheduler/UI work crossing another reminder period
+                // after injection but before this request is dispatched.
+                thread::sleep(Duration::from_millis(150));
+            }
+            false
+        }
+    }
+    let dir = tmp_dir("reminder_slow_rebuild");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    core.set_reminder_tips_config(crate::ReminderTipsConfig {
+        schedules: vec![
+            crate::ReminderScheduleConfig {
+                every_minutes: Some(1),
+                every_rounds: None,
+                tips: vec![TIP.into()],
+            },
+            crate::ReminderScheduleConfig {
+                every_minutes: None,
+                every_rounds: Some(1),
+                tips: vec![ROUND_TIP.into()],
+            },
+        ],
+    });
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    let mut model = DelayedFirstReplayModel::new(
+        Duration::from_millis(150),
+        [
+            Ok(llm("not protocol compliant", 1_000, false)),
+            Ok(llm("not protocol compliant again", 1_050, false)),
+            Ok(llm(
+                r#"{"status":"ALL_FINISHED","final_answer":"done"}"#,
+                1_100,
+                false,
+            )),
+        ],
+    );
+    let mut ui = SlowReminderRebuildUi { delayed: false };
+    let outcome = run_session_turn_with_model_client_and_focus_interval(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "test reminder dispatch",
+            session: "slow_reminder",
+            audit_file: &audit,
+            runtime: "test_runtime",
+            run_bash_target: "test_target",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+        Duration::from_millis(100),
+    );
+    assert_eq!(outcome.text, "done");
+    assert!(
+        ui.delayed,
+        "negative control must cross a post-injection boundary"
+    );
+    assert_eq!(model.inner.prompts.len(), 3);
+    assert!(!model.inner.prompts[0].contains(TIP));
+    assert_eq!(model.inner.prompts[1].matches(TIP).count(), 1);
+    assert_eq!(model.inner.prompts[1].matches(ROUND_TIP).count(), 1);
+    // Both schedules were included in the second request. A real dispatch
+    // rearms evaluation: the crossed time period and next round reach request 3.
+    assert_eq!(model.inner.prompts[2].matches(TIP).count(), 2);
+    assert_eq!(model.inner.prompts[2].matches(ROUND_TIP).count(), 2);
+}
+
+#[test]
 fn session_turn_retries_transient_model_api_errors_and_reports_status() {
     let dir = tmp_dir("retry_transient_model_api_error");
     let audit = dir.join("audit.json");
@@ -1091,7 +1367,7 @@ fn session_turn_retries_transient_model_api_errors_and_reports_status() {
     let mut config = test_config();
     let mut ui = RetryRecordingUi::default();
     let mut model = ReplayModel::new([
-        Err("model_http_500: upstream overloaded".to_string()),
+        Err("model_responses_stream_failed: event_type=error code=server_is_overloaded type=error message=Our servers are currently overloaded. Please try again later.".to_string()),
         Err("model_request_error: stage=response_headers error sending request for url (https://example.invalid/v1/chat/completions): connection error: unexpected end of file".to_string()),
         Ok(llm(
             r#"{"status":"ALL_FINISHED","final_answer":"重试后成功。"}"#,
@@ -1123,7 +1399,7 @@ fn session_turn_retries_transient_model_api_errors_and_reports_status() {
     assert_eq!(ui.retries[0].0, 1);
     assert_eq!(ui.retries[0].1, crate::DEFAULT_MODEL_SYSTEM_ERROR_RETRIES);
     assert_eq!(ui.retries[0].2, Duration::ZERO);
-    assert!(ui.retries[0].3.contains("model_http_500"));
+    assert!(ui.retries[0].3.contains("server_is_overloaded"));
     assert!(ui.retries[1].3.contains("unexpected end of file"));
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "model_retry"), 2);
@@ -1317,7 +1593,7 @@ fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
             false,
         )),
         Ok(llm(
-            r#"{"context_compact":{"discard":["pd_1","pd_2","pd_3"],"summary":"保留用户要求和大输出已被预算保护的信息。"}}"#,
+            r#"{"context_compress":{"summary":"保留用户要求和大输出已被预算保护的信息。"}}"#,
             2_800,
             false,
         )),
@@ -1349,9 +1625,9 @@ fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
     assert_eq!(model.prompts.len(), 3);
     assert!(model.prompts[1].contains("Your action's output is too large:"));
     assert!(model.prompts[1]
-        .ends_with("Context is too long. Your tool calls must start with context_compact:"));
-    assert!(model.prompts[2].contains("context compacted successfully."));
-    assert!(model.prompts[1].contains("optimize your action or compact context"));
+        .ends_with("[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"));
+    assert!(model.prompts[2].contains("context compressed successfully."));
+    assert!(model.prompts[1].contains("optimize your action or compress context"));
     assert!(!model.prompts[1].contains(&"0".repeat(1_000)));
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -1704,7 +1980,8 @@ discard-after"#,
     assert!(!model.prompts[1].contains("&lt;ASSISTANT&gt;"));
     assert!(!model.prompts[1].contains("<free_talk>search memory</free_talk>"));
     assert!(!model.prompts[1].contains("discard-after"));
-    assert!(model.prompts[1].contains(r#"<memmgr_result task=""#));
+    assert!(model.prompts[1].contains(r#""memory_type":"raw_chat""#));
+    assert!(model.prompts[1].contains(r#""operation":"search""#));
     assert!(!model.prompts[1].contains("ERROR: The previous XML response had content outside"));
     assert!(!model.prompts[1].contains("begin exactly with <ASSISTANT>"));
 
@@ -2206,8 +2483,13 @@ fn session_turn_run_bash_poll_mode_waits_until_check_succeeds() {
         "poll action should emit a finish/completed topic"
     );
     assert_eq!(model.prompts.len(), 2);
-    assert!(model.prompts[1].contains("Action result: run_bash"));
-    assert!(model.prompts[1].contains("Polling state: finished"));
+    assert!(model.prompts[1].contains(r#""status":"completed""#));
+    assert!(model.prompts[1].contains(r#""exit_code":0"#));
+    assert!(model.prompts[1].contains(r#""polling_state":"finished""#));
+    assert!(model.prompts[1].contains(r#""success_condition":"loop_cmd exit code 0""#));
+    assert!(model.prompts[1].contains(
+        r#""exit_code_semantics":"exit_code belongs to the last loop_cmd execution, not automatically to the waited task""#
+    ));
 }
 
 #[cfg(unix)]
@@ -2256,23 +2538,18 @@ fn session_turn_long_running_command_hands_status_to_next_model_round() {
     assert_eq!(model.prompts.len(), 2);
     let follow_up = &model.prompts[1];
     assert!(
-        follow_up.contains("LONG_RUNNING_COMMAND_STATUS"),
+        follow_up.contains(r#""status":"background_running""#),
         "{follow_up}"
     );
+    assert!(
+        !follow_up.contains("model_decision_required"),
+        "{follow_up}"
+    );
+    assert!(!follow_up.contains("model_decision"), "{follow_up}");
+    assert!(!follow_up.contains("process_containment"), "{follow_up}");
+    assert!(!follow_up.contains("process group only"), "{follow_up}");
+    assert!(follow_up.contains(r#""pid":"#), "{follow_up}");
     assert!(follow_up.contains(command), "{follow_up}");
-    assert!(follow_up.contains("PID:"), "{follow_up}");
-    assert!(follow_up.contains("Elapsed:"), "{follow_up}");
-    assert!(follow_up.contains("Status: still running"), "{follow_up}");
-    assert!(
-        follow_up.contains(
-            "Decide whether to wait, inspect, terminate, or take another appropriate action"
-        ),
-        "{follow_up}"
-    );
-    assert!(
-        follow_up.contains("Reflect and avoid long running ineffective actions if possible"),
-        "{follow_up}"
-    );
     assert!(
         !follow_up.contains("user cancels the command"),
         "{follow_up}"
@@ -2334,13 +2611,17 @@ fn sequential_group_with_long_timeout_command_hands_status_to_model() {
     let follow_up = &model.prompts[1];
     assert!(follow_up.contains("quick"), "{follow_up}");
     assert!(
-        follow_up.contains("LONG_RUNNING_COMMAND_STATUS"),
+        follow_up.contains(r#""status":"background_running""#),
         "{follow_up}"
     );
+    assert!(
+        !follow_up.contains("model_decision_required"),
+        "{follow_up}"
+    );
+    assert!(!follow_up.contains("model_decision"), "{follow_up}");
+    assert!(!follow_up.contains("process_containment"), "{follow_up}");
+    assert!(!follow_up.contains("process group only"), "{follow_up}");
     assert!(follow_up.contains("sleep 2; printf late"), "{follow_up}");
-    assert!(follow_up.contains("PID:"), "{follow_up}");
-    assert!(follow_up.contains("Elapsed:"), "{follow_up}");
-    assert!(follow_up.contains("Status: still running"), "{follow_up}");
     assert!(
         !follow_up.contains("user cancels the command"),
         "{follow_up}"
@@ -2408,6 +2689,17 @@ fn session_turn_executes_parallel_action_group_before_next_group() {
 #[cfg(unix)]
 #[test]
 fn session_turn_cancels_parallel_long_running_bash_actions() {
+    check_parallel_bash_cancellation(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn session_turn_cancellation_waits_for_delayed_pid_publication() {
+    check_parallel_bash_cancellation(true);
+}
+
+#[cfg(unix)]
+fn check_parallel_bash_cancellation(delay_pid_write: bool) {
     let dir = tmp_dir("cancel_parallel_bash_session");
     let audit = dir.join("audit.json");
     let pid_a = dir.join("child_a.pid");
@@ -2422,14 +2714,20 @@ fn session_turn_cancels_parallel_long_running_bash_actions() {
         ready_files: [pid_a.clone(), pid_b.clone()],
         hard_timeout: Duration::from_secs(30),
     };
-    let command_a = format!(
-        "tail -f /dev/null & echo $! > {}; wait",
-        shell_quote(&pid_a)
-    );
-    let command_b = format!(
-        "tail -f /dev/null & echo $! > {}; wait",
-        shell_quote(&pid_b)
-    );
+    let command = |path: &Path| {
+        if delay_pid_write {
+            // The redirection opens an empty PID file before the delay. A
+            // file-exists readiness check cancels here and kills its writer.
+            format!(
+                "tail -f /dev/null & child=$!; {{ sleep 0.15; printf '%s\\n' \"$child\"; }} > {}; wait",
+                shell_quote(path)
+            )
+        } else {
+            format!("tail -f /dev/null & echo $! > {}; wait", shell_quote(path))
+        }
+    };
+    let command_a = command(&pid_a);
+    let command_b = command(&pid_b);
     let response = format!(
         r#"{{"working_still_action":[[
   {{"run_bash":{{"cmd":{},"timeout_ms":60000}}}},
@@ -2495,7 +2793,7 @@ fn session_turn_stop_after_one_parallel_action_completed_cancels_the_running_act
         ready_files: [completed_marker.clone(), running_pid.clone()],
         hard_timeout: Duration::from_secs(30),
     };
-    let completed_command = format!("printf uploaded > {}", shell_quote(&completed_marker));
+    let completed_command = format!("printf 'uploaded\\n' > {}", shell_quote(&completed_marker));
     let running_command = format!(
         "tail -f /dev/null & echo $! > {}; wait",
         shell_quote(&running_pid)
@@ -2676,7 +2974,7 @@ fn session_turn_parallel_group_spawns_bash_while_running_builtin_actions_in_orde
         .unwrap();
     let results = &second_parts.new_delta[results_start..];
     let first_bash = results.find("group_a").unwrap();
-    let builtin = results.find("Action result: memmgr").unwrap();
+    let builtin = results.find(r#""operation":"sql""#).unwrap();
     let second_bash = results.find("group_b").unwrap();
     assert!(first_bash < builtin);
     assert!(builtin < second_bash);
@@ -2813,27 +3111,28 @@ fn session_turn_parallel_group_collects_approvals_then_spawns_bash_concurrently(
     let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
     let results_start = second_parts
         .new_delta
-        .find("Action result: run_bash")
+        .find("The following are results")
         .unwrap();
     let results = &second_parts.new_delta[results_start..];
-    let mut bash_results = results.match_indices("Action result: run_bash");
-    let first_bash = bash_results.next().expect("first run_bash result").0;
-    let second_bash = bash_results.next().expect("second run_bash result").0;
-    assert!(
-        bash_results.next().is_none(),
-        "expected exactly two run_bash results: {results}"
-    );
+    let first_bash = results
+        .find(r#""stdout":"approved_a""#)
+        .expect("first Bash output");
     let builtin = results
-        .find("Action result: memmgr")
+        .find(r#""memory_type":"durable""#)
         .expect("memmgr result");
+    let second_bash = results
+        .find(r#""stdout":"approved_b""#)
+        .expect("second Bash output");
     assert!(first_bash < builtin, "{results}");
     assert!(builtin < second_bash, "{results}");
-    assert!(
-        results[first_bash..builtin].contains("approved_a"),
+    assert!(!results.contains("Command:"), "{results}");
+    assert_eq!(
+        results
+            .matches(r#""approval_status":"approved_by_user""#)
+            .count(),
+        2,
         "{results}"
     );
-    assert!(results[second_bash..].contains("approved_b"), "{results}");
-    assert!(!results.contains("Command:"), "{results}");
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "user_approval"), 2);
     let _ = std::fs::remove_dir_all(dir);
@@ -3057,7 +3356,7 @@ fn user_supplement_dispatch_timeout_prompt_includes_still_running_work() {
         dispatched.contains("USER_SUPPLEMENT_ACTION_DISPATCH_TIMEOUT"),
         "{dispatched}"
     );
-    assert!(dispatched.contains("### STILL RUNNING"), "{dispatched}");
+    assert!(dispatched.contains("#### jobmanager"), "{dispatched}");
     assert!(dispatched.contains("`sleep 30`"), "{dispatched}");
     assert!(
         dispatched.contains("补充：根据后台任务状态继续"),
@@ -3287,7 +3586,8 @@ fn session_turn_preserves_incremental_prompt_cache_plan_across_rounds() {
     assert!(second_parts.old_deltas.contains("帮我看看最近 scratch"));
     assert!(second_parts
         .new_delta
-        .contains(r#"<memmgr_result task="search recent scratch notes" type="scratch" op="search" status="finished">"#));
+        .contains(r#""memory_type":"scratch""#));
+    assert!(second_parts.new_delta.contains(r#""operation":"search""#));
     assert!(second_parts.new_delta.contains("查询 scratch 后继续。"));
     let second_blocks = crate::plan_incremental_cache(second_parts);
     assert_eq!(second_blocks.len(), 3);
@@ -3350,7 +3650,10 @@ fn session_turn_preserves_cache_plan_with_json_response_protocol() {
         .static_prompt
         .contains("Always use exactly one top-level JSON object."));
     assert!(second_parts.old_deltas.contains("帮我看看最近 scratch"));
-    assert!(second_parts.new_delta.contains("Action result: memmgr"));
+    assert!(second_parts
+        .new_delta
+        .contains(r#""memory_type":"scratch""#));
+    assert!(second_parts.new_delta.contains(r#""operation":"search""#));
     let second_blocks = crate::plan_incremental_cache(second_parts);
     assert_eq!(second_blocks.len(), 3);
     assert_eq!(second_blocks[0].cache, crate::CacheControl::Ephemeral);
@@ -3419,7 +3722,8 @@ fn session_turn_preserves_cache_plan_with_xml_response_protocol() {
     assert!(second_parts.old_deltas.contains("帮我看看最近 scratch"));
     assert!(second_parts
         .new_delta
-        .contains(r#"<memmgr_result task="search recent scratch notes" type="scratch" op="search" status="finished">"#));
+        .contains(r#""memory_type":"scratch""#));
+    assert!(second_parts.new_delta.contains(r#""operation":"search""#));
     let second_blocks = crate::plan_incremental_cache(second_parts);
     assert_eq!(second_blocks.len(), 3);
     assert_eq!(second_blocks[0].cache, crate::CacheControl::Ephemeral);
@@ -3686,34 +3990,28 @@ impl ModelClient for ShrinkReplayModel {
     ) -> Result<LlmResponse, String> {
         self.prompts.push(prompt.to_string());
         if self.prompts.len() == 1 {
-            assert!(prompt.contains("mode=force_shrink_required"));
-            assert!(prompt.contains(
-                "TIPS: You can update your job list plan, steer and optimize your work based on the above work."
+            assert!(prompt
+                .contains("Please compress it now (see the `context_compress` tool description)"));
+            assert!(!prompt.contains("Long-context maintenance:"));
+            return Ok(llm(
+                r#"{"free_talk":"","context_compress":{"summary":"discard stale context and keep current task state"}}"#,
+                13_253,
+                false,
             ));
-            let mut delta_ids = prompt_field_values(prompt, "delta_id");
-            delta_ids.sort();
-            delta_ids.dedup();
-            assert!(!delta_ids.is_empty());
-            let content = format!(
-                r#"{{"free_talk":"","context_compact":{{"discard":{},"summary":"discard stale context and keep current task state"}}}}"#,
-                serde_json::to_string(&delta_ids).unwrap()
-            );
-            return Ok(llm(content, 13_253, false));
         }
         assert_eq!(self.prompts.len(), 2);
-        assert!(prompt.contains("context compacted successfully."));
+        assert!(prompt.contains("context compressed successfully."));
         assert!(prompt.contains("CWD: "));
-        assert!(!prompt.contains("Action result: context_compact"));
+        assert!(!prompt.contains("Action result: context_compress"));
         assert_eq!(
             prompt
                 .matches("discard stale context and keep current task state")
                 .count(),
             1
         );
-        assert!(!prompt.contains("mode=force_shrink_required"));
-        assert!(!prompt.contains(
-            "TIPS: You can update your job list plan, steer and optimize your work based on the above work."
-        ));
+        assert!(!prompt
+            .contains("Please compress it now (see the `context_compress` tool description)"));
+        assert!(!prompt.contains("Long-context maintenance:"));
         Ok(llm(
             r#"{"status":"ALL_FINISHED","final_answer":"压缩已完成，可以继续对话。"}"#,
             1_200,
@@ -4379,7 +4677,8 @@ fn session_turn_forced_shrink_runs_to_final_without_repeated_shrink() {
         model
             .prompts
             .iter()
-            .filter(|prompt| prompt.contains("mode=force_shrink_required"))
+            .filter(|prompt| prompt
+                .contains("Please compress it now (see the `context_compress` tool description)"))
             .count(),
         1
     );
@@ -4732,8 +5031,9 @@ fn session_turn_bash_approval_executes_action_then_finishes_with_audit() {
     assert_eq!(ui.approval_requests, 1);
     assert_eq!(std::fs::read_to_string(&output_file).unwrap(), "approved");
     assert_eq!(model.prompts.len(), 2);
-    assert!(model.prompts[1].contains("Action result: run_bash"));
-    assert!(model.prompts[1].contains("Exit code: 0"));
+    assert!(model.prompts[1].contains(r#""status":"completed""#));
+    assert!(model.prompts[1].contains(r#""exit_code":0"#));
+    assert!(model.prompts[1].contains(r#""approval_status":"approved_by_user""#));
     let events = read_audit_events(&audit);
     let approval = audit_event(&events, "user_approval").unwrap();
     assert_eq!(approval["approved"], true);
@@ -4827,7 +5127,8 @@ fn session_turn_cancelled_user_approval_resumes_ui_before_continuing() {
     assert_eq!(ui.resume_count, 1);
     assert!(!output_file.exists());
     assert_eq!(model.prompts.len(), 2);
-    assert!(model.prompts[1].contains("status: denied_by_user"));
+    assert!(model.prompts[1].contains(r#""approval_status":"denied_by_user""#));
+    assert!(model.prompts[1].contains(r#""status":"failed""#));
     let events = read_audit_events(&audit);
     let approval = audit_event(&events, "user_approval").unwrap();
     assert_eq!(approval["approved"], false);
@@ -4963,16 +5264,19 @@ impl ModelClient for ScratchOffloadReplayModel {
             delta_ids.dedup();
             assert!(!delta_ids.is_empty());
             let content = format!(
-                r#"{{"free_talk":"","context_compact":{{"offload":{},"summary":"offload old context and keep the current task active"}}}}"#,
+                r#"{{"free_talk":"","context_compress":{{"offload":{},"summary":"offload old context and keep the current task active"}}}}"#,
                 serde_json::to_string(&delta_ids).unwrap()
             );
             return Ok(llm(content, 4_000, false));
         }
         assert_eq!(self.prompts.len(), 2);
-        assert!(prompt.contains("context compacted successfully."));
+        assert!(prompt.contains("context compressed successfully."));
         assert!(prompt.contains("CWD: "));
-        assert!(!prompt.contains("Action result: context_compact"));
-        assert!(!prompt.contains("scratch_id:"));
+        assert!(!prompt.contains("Action result: context_compress"));
+        assert!(prompt.contains("Context offload saved."), "{prompt}");
+        assert!(prompt.contains("scratch_id:"), "{prompt}");
+        assert!(!prompt.contains("tool_call_id"), "{prompt}");
+        assert!(!prompt.contains(r#""action_result""#), "{prompt}");
         Ok(llm(
             r#"{"status":"ALL_FINISHED","final_answer":"scratch 已记录，可以继续。"}"#,
             4_100,
@@ -5014,7 +5318,7 @@ fn session_turn_scratch_context_offload_records_id_and_continues() {
     assert_eq!(model.prompts.len(), 2);
     let scratch_text = std::fs::read_to_string(dir.join("scratch_notes.jsonl")).unwrap();
     assert!(scratch_text.contains(r#""scratch_type":"context_offload""#));
-    assert!(scratch_text.contains(r#""label":"context compact offload""#));
+    assert!(scratch_text.contains(r#""label":"context compress offload""#));
     assert!(scratch_text.contains("extra context that should be offloaded"));
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "turn_final"), 1);
@@ -5048,15 +5352,8 @@ impl ModelClient for CompactThenFinishModel {
         self.prompts.push(prompt.to_string());
         self.calls += 1;
         if self.calls == 1 {
-            let delta_id = prompt_field_values(prompt, "delta_id")
-                .into_iter()
-                .next()
-                .expect("delta id in first prompt");
             Ok(llm(
-                format!(
-                    r#"{{"free_talk":"整理旧上下文。","context_compact":{{"discard":[{}],"summary":"保留当前任务目标和下一步。"}}}}"#,
-                    serde_json::to_string(&delta_id).unwrap()
-                ),
+                r#"{"free_talk":"整理旧上下文。","context_compress":{"summary":"保留当前任务目标和下一步。"}}"#,
                 3_000,
                 false,
             ))
@@ -5071,8 +5368,8 @@ impl ModelClient for CompactThenFinishModel {
 }
 
 #[test]
-fn session_turn_context_compact_emits_structured_topic() {
-    let dir = tmp_dir("context_compact_topic");
+fn session_turn_context_compress_emits_structured_topic() {
+    let dir = tmp_dir("context_compress_topic");
     let audit = dir.join("audit.json");
     let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
@@ -5104,9 +5401,9 @@ fn session_turn_context_compact_emits_structured_topic() {
     let compact = ui
         .events
         .iter()
-        .find(|event| event.topic.name == CORE_TOPIC_CONTEXT_COMPACT)
-        .and_then(CoreTopicEvent::as_context_compact)
-        .expect("context compact topic");
+        .find(|event| event.topic.name == CORE_TOPIC_CONTEXT_COMPRESS)
+        .and_then(CoreTopicEvent::as_context_compress)
+        .expect("context compress topic");
     assert!(compact.estimated_before_tokens > compact.estimated_after_tokens);
     assert_eq!(compact.discarded_delta_ids.len(), 1);
     assert!(compact.offloaded_delta_ids.is_empty());
@@ -5159,9 +5456,8 @@ impl ModelClient for StoryReplayModel {
                 false,
             )),
             5 => {
-                assert!(prompt.contains("Action result: memmgr"));
-                assert!(prompt.contains("type: durable"));
-                assert!(prompt.contains("op: insert"));
+                assert!(prompt.contains(r#""memory_type":"durable""#));
+                assert!(prompt.contains(r#""operation":"upsert""#));
                 assert!(prompt.contains("project_code"));
                 Ok(llm(
                     r#"{"status":"ALL_FINISHED","final_answer":"已记录测试项目代号。"}"#,
@@ -5170,28 +5466,30 @@ impl ModelClient for StoryReplayModel {
                 ))
             }
             6 => {
-                assert!(prompt.contains("mode=force_shrink_required"));
+                assert!(prompt.contains(
+                    "Please compress it now (see the `context_compress` tool description)"
+                ));
+                assert!(!prompt.contains("Long-context maintenance:"));
                 let mut delta_ids = prompt_field_values(prompt, "delta_id");
                 delta_ids.sort();
                 delta_ids.dedup();
                 let content = format!(
-                    r#"{{"context_compact":{{"offload":{},"summary":"offload the long context and retain the memory lookup task"}}}}"#,
+                    r#"{{"context_compress":{{"offload":{},"summary":"offload the long context and retain the memory lookup task"}}}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 Ok(llm(content, 7_500, false))
             }
             7 => {
-                assert!(prompt.contains("context compacted successfully."));
+                assert!(prompt.contains("context compressed successfully."));
                 Ok(llm(
                     r#"{"free_talk":"","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试项目代号%"],"limit":5}}]}"#,
-                    2_500,
+                    1_900,
                     false,
                 ))
             }
             8 => {
-                assert!(prompt.contains("Action result: memmgr"));
-                assert!(prompt.contains("type: durable"));
-                assert!(prompt.contains("op: sql"));
+                assert!(prompt.contains(r#""memory_type":"durable""#));
+                assert!(prompt.contains(r#""operation":"sql""#));
                 assert!(prompt.contains("测试项目代号是 OMEGA-7"));
                 Ok(llm(
                     r#"{"status":"ALL_FINISHED","final_answer":"测试项目代号是 OMEGA-7。"}"#,
@@ -5200,19 +5498,21 @@ impl ModelClient for StoryReplayModel {
                 ))
             }
             9 => {
-                assert!(prompt.contains("mode=force_shrink_required"));
-                let mut delta_ids = prompt_field_values(prompt, "delta_id");
-                delta_ids.sort();
-                delta_ids.dedup();
-                let content = format!(
-                    r#"{{"context_compact":{{"discard":{},"summary":"keep active task state after the memory lookup"}}}}"#,
-                    serde_json::to_string(&delta_ids).unwrap()
-                );
-                Ok(llm(content, 7_650, false))
+                assert!(prompt.contains(
+                    "Please compress it now (see the `context_compress` tool description)"
+                ));
+                assert!(!prompt.contains("Long-context maintenance:"));
+                Ok(llm(
+                    r#"{"context_compress":{"summary":"keep active task state after the memory lookup"}}"#,
+                    7_650,
+                    false,
+                ))
             }
             10 => {
-                assert!(prompt.contains("context compacted successfully."));
-                assert!(!prompt.contains("mode=force_shrink_required"));
+                assert!(prompt.contains("context compressed successfully."));
+                assert!(!prompt.contains(
+                    "Please compress it now (see the `context_compress` tool description)"
+                ));
                 Ok(llm(
                     r#"{"status":"ALL_FINISHED","final_answer":"上下文已转存并压缩，可以继续。"}"#,
                     2_000,
@@ -5286,17 +5586,18 @@ fn session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rend
         model
             .prompts
             .iter()
-            .filter(|prompt| prompt.contains("mode=force_shrink_required"))
+            .filter(|prompt| prompt
+                .contains("Please compress it now (see the `context_compress` tool description)"))
             .count()
             >= 1,
-        "story should force shrink through context compact"
+        "story should force shrink through context compress"
     );
 
     let memory_text = std::fs::read_to_string(dir.join("memory.jsonl")).unwrap();
     assert!(memory_text.contains("测试项目代号是 OMEGA-7"));
     let scratch_text = std::fs::read_to_string(dir.join("scratch_notes.jsonl")).unwrap();
     assert!(scratch_text.contains(r#""scratch_type":"context_offload""#));
-    assert!(scratch_text.contains(r#""label":"context compact offload""#));
+    assert!(scratch_text.contains(r#""label":"context compress offload""#));
 
     let action_topics: Vec<_> = ui
         .events
@@ -5379,6 +5680,7 @@ impl ModelClient for TruncatedNativeRecoveryModel {
         {
             return Ok(LlmResponse {
                 tool_calls: vec![crate::NativeToolCall {
+                    assistant_continuation: None,
                     id: "probe_0".to_string(),
                     name: "timem_capability_probe".to_string(),
                     arguments: serde_json::json!({"slot": 1}),
@@ -5427,6 +5729,7 @@ impl ModelClient for TruncatedNativeRecoveryModel {
                 }
                 Ok(LlmResponse {
                     tool_calls: vec![crate::NativeToolCall {
+                        assistant_continuation: None,
                         id: "call_small_step".to_string(),
                         name: "run_bash".to_string(),
                         arguments: serde_json::json!({"cmd": "printf 'recovered_value=42\\n'"}),
@@ -5454,6 +5757,7 @@ impl ModelClient for TruncatedNativeRecoveryModel {
                 }
                 Ok(LlmResponse {
                     tool_calls: vec![crate::NativeToolCall {
+                        assistant_continuation: None,
                         id: "call_finish_3".to_string(),
                         name: "task_finished".to_string(),
                         arguments: serde_json::json!({"summary": "恢复成功，分块执行得到正确结果：42。"}),
@@ -5561,6 +5865,7 @@ impl ModelClient for NativeRoundTripModel {
             return Ok(LlmResponse {
                 tool_calls: (0..count)
                     .map(|index| crate::NativeToolCall {
+                        assistant_continuation: None,
                         id: format!("probe_{index}"),
                         name: "timem_capability_probe".to_string(),
                         arguments: serde_json::json!({"slot": index + 1}),
@@ -5596,6 +5901,7 @@ impl ModelClient for NativeRoundTripModel {
         if self.business_calls == 1 {
             return Ok(LlmResponse {
                 tool_calls: vec![crate::NativeToolCall {
+                    assistant_continuation: None,
                     id: "call_count".to_string(),
                     name: "run_bash".to_string(),
                     arguments: serde_json::json!({"cmd": "printf 'Rust 42\\n'"}),
@@ -5615,7 +5921,9 @@ impl ModelClient for NativeRoundTripModel {
                     .contains("Rust 42");
         } else {
             self.observed_previous_turn_tool_history = request.native_exchanges.len() == 2
-                && request.native_exchanges[0].delta_id == "pd_1"
+                && request.native_exchanges[0].delta_id == "pd_2"
+                && request.native_exchanges[1].delta_id == "pd_3"
+                && request.native_exchanges[0].delta_id != request.native_exchanges[1].delta_id
                 && request.native_exchanges[0].calls[0].id == "call_count"
                 && request.native_exchanges[0].results[0]
                     .content
@@ -5630,6 +5938,7 @@ impl ModelClient for NativeRoundTripModel {
         };
         Ok(LlmResponse {
             tool_calls: vec![crate::NativeToolCall {
+                assistant_continuation: None,
                 id: format!("call_finish_{}", self.business_calls),
                 name: "task_finished".to_string(),
                 arguments: serde_json::json!({"summary": summary}),
@@ -5845,6 +6154,98 @@ fn memo_finish_guard_blocks_consecutive_finishes_then_allows_through() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
+#[test]
+fn memo_forcibly_closed_when_user_stops_turn() {
+    let dir = tmp_dir("memo_stop_close");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    struct CancelWhenReadyUi {
+        ready: std::path::PathBuf,
+        hard_timeout: Duration,
+    }
+    impl TurnUi for CancelWhenReadyUi {
+        fn is_cancel_requested(&mut self) -> bool {
+            self.ready.is_file() || self.hard_timeout < Duration::from_millis(0)
+        }
+    }
+    // First round creates the memo and starts a long command that records
+    // readiness; the UI cancels once the command is running, so the turn
+    // stops with CancelledByUser AFTER the memo exists.
+    let ready = dir.join("memo_stop_ready");
+    let cmd = format!("echo 3660445 > {}; sleep 5", shell_quote(&ready));
+    let mut model = ReplayModel::new(vec![Ok(llm(
+        format!(
+            r#"{{"free_talk":"记下。","working_still_action":[{{"memo":{{"op":"create","text":"会被中断的目标"}}}},{{"run_bash":{{"cmd":{},"timeout_ms":30000}}}}]}}"#,
+            serde_json::to_string(&cmd).unwrap()
+        ),
+        1_000,
+        false,
+    ))]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "长任务请求",
+            session: "memo_stop_close_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut CancelWhenReadyUi {
+            ready: ready.clone(),
+            hard_timeout: Duration::from_secs(30),
+        },
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.stop_reason, Some(TurnStopReason::CancelledByUser));
+    // User stop must forcibly close the memo on runtime authority.
+    assert_eq!(core.active_memo(), None);
+
+    // The next turn's context carries the one-shot interrupted-memo notice
+    // telling the model to recreate the memo if the new input needs it.
+    let mut model2 = ReplayModel::new(vec![Ok(llm(
+        r#"{"status":"ALL_FINISHED","final_answer":"好的"}"#,
+        2_000,
+        false,
+    ))]);
+    let outcome2 = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "新指令",
+            session: "memo_stop_close_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model2,
+    );
+    assert_eq!(outcome2.text, "好的");
+    assert!(
+        model2.prompts[0].contains(
+            "User interrupted the previous work and the runtime forcibly deleted its active memo"
+        ),
+        "next turn must carry the interrupted-memo notice"
+    );
+    assert!(
+        model2.prompts[0].contains("Recreate the memo if necessary based on the user's new input."),
+        "notice must instruct memo recreation from the new input"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn memo_forcibly_closed_when_finish_exhausts_guard_budget() {
     let dir = tmp_dir("memo_force_close");
@@ -5934,6 +6335,42 @@ fn memo_forcibly_closed_when_finish_exhausts_guard_budget() {
 }
 
 #[test]
+fn restart_leaves_memo_inactive_and_finish_unguarded() {
+    let dir = tmp_dir("memo_restart_inactive");
+    let audit = dir.join("audit.json");
+    // Simulate a runtime restart: a fresh Core with no memo hydrated. By
+    // design the memo turns inactive; the finish guard has no object to
+    // protect, so the first finish attempt ends the turn directly.
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    let mut model = ReplayModel::new(vec![Ok(llm(
+        r#"{"status":"ALL_FINISHED","final_answer":"直接结束"}"#,
+        1_000,
+        false,
+    ))]);
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "重启后的新请求",
+            session: "memo_restart_inactive_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+    assert_eq!(core.active_memo(), None);
+    assert_eq!(outcome.text, "直接结束");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn memo_finish_guard_recharges_after_working_round() {
     let dir = tmp_dir("memo_guard_recharge");
     let audit = dir.join("audit.json");
@@ -6006,7 +6443,7 @@ fn memo_finish_guard_recharges_after_working_round() {
 }
 
 #[test]
-fn memo_survives_context_compaction_and_rides_next_prompt() {
+fn memo_survives_context_compression_and_rides_next_prompt() {
     let dir = tmp_dir("memo_compact");
     let audit = dir.join("audit.json");
     let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
@@ -6032,20 +6469,11 @@ fn memo_survives_context_compaction_and_rides_next_prompt() {
                     1_000,
                     false,
                 )),
-                2 => {
-                    let delta_id = prompt_field_values(prompt, "delta_id")
-                        .into_iter()
-                        .next()
-                        .expect("delta id in prompt");
-                    Ok(llm(
-                        format!(
-                            r#"{{"free_talk":"整理上下文。","context_compact":{{"discard":[{}],"summary":"保留任务目标。"}}}}"#,
-                            serde_json::to_string(&delta_id).unwrap()
-                        ),
-                        3_000,
-                        false,
-                    ))
-                }
+                2 => Ok(llm(
+                    r#"{"free_talk":"整理上下文。","context_compress":{"summary":"保留任务目标。"}}"#,
+                    3_000,
+                    false,
+                )),
                 3 => Ok(llm(
                     r#"{"free_talk":"删除 memo。","working_still_action":[{"memo":{"op":"delete"}}]}"#,
                     1_200,
@@ -6096,4 +6524,658 @@ fn memo_survives_context_compaction_and_rides_next_prompt() {
         "memo must ride the post-compaction prompt"
     );
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn direct_resume_turn_injects_restart_notice_into_first_model_request() {
+    let dir = tmp_dir("resume_notice_injection");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    let mut model = ReplayModel::new([Ok(llm(
+        r#"{"status":"ALL_FINISHED","final_answer":"resumed"}"#,
+        1_000,
+        false,
+    ))]);
+    // A resume notice as the Host would render it after a restart.
+    let notice = "Runtime restarted at 2026-09-29 14:25:05 (local time). Previous runtime/job state may be stale.\nCurrent cwd: /work/project";
+
+    let outcome = run_direct_resume_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(notice),
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "resumed");
+    assert_eq!(
+        model.prompts.len(),
+        1,
+        "the turn must finish in one request"
+    );
+    let prompt = &model.prompts[0];
+    assert!(
+        prompt.contains("Runtime restarted at 2026-09-29 14:25:05"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("Current cwd: /work/project"), "{prompt}");
+    assert!(prompt.contains(crate::DIRECT_RESUME_USER_INPUT), "{prompt}");
+    assert!(!prompt.contains("context compression"), "{prompt}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn restart_then_manual_compact_leads_with_notice_and_compact_trailer() {
+    let dir = tmp_dir("restart_then_manual_compact");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    // First request must lead with context_compress; the reply performs it,
+    // then a final answer closes the turn.
+    let mut model = ReplayModel::new([
+        Ok(llm(
+            r#"{"working_still_action":{"context_compress":{"summary":"restart compact summary"}}}"#,
+            1_000,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"compacted after restart"}"#,
+            800,
+            false,
+        )),
+    ]);
+    let notice = "Runtime restarted at 2026-09-29 14:25:05 (local time). Previous runtime/job state may be stale.\nPrevious active memo is deleted by runtime: { finish the feature }.\nCurrent cwd: /work/project";
+    let mut ui = ManualCompactOnceUi::new();
+
+    let outcome = run_direct_resume_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(notice),
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "compacted after restart");
+    assert_eq!(model.prompts.len(), 2);
+    // The very first model request carries BOTH the restart context (with
+    // memo state) and the manual-compaction trailer.
+    let first = &model.prompts[0];
+    assert!(
+        first.contains("Runtime restarted at 2026-09-29 14:25:05"),
+        "{first}"
+    );
+    assert!(
+        first.contains("Previous active memo is deleted by runtime: { finish the feature }"),
+        "{first}"
+    );
+    assert!(
+        first.contains("User manually requests context compression."),
+        "{first}"
+    );
+    // After a successful compaction the manual wording must clear.
+    let second = &model.prompts[1];
+    assert!(
+        !second.contains("User manually requests context compression."),
+        "{second}"
+    );
+    assert!(second.contains("restart compact summary"), "{second}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn mailbox_only_manual_compact_is_consumed_before_model_dispatch() {
+    struct MailboxCompactUi {
+        queued: bool,
+        requested: bool,
+    }
+    impl TurnUi for MailboxCompactUi {
+        fn drain_user_supplements_with_context(&mut self) -> Vec<UserSupplement> {
+            if self.queued {
+                self.queued = false;
+                self.requested = true;
+            }
+            Vec::new()
+        }
+        fn take_manual_context_compress_request(&mut self) -> bool {
+            std::mem::take(&mut self.requested)
+        }
+    }
+    let dir = tmp_dir("mailbox_only_manual_compact");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    let mut model = ReplayModel::new([
+        Ok(llm(
+            r#"{"working_still_action":{"context_compress":{"summary":"compacted"}}}"#,
+            1000,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"done"}"#,
+            800,
+            false,
+        )),
+    ]);
+    let mut ui = MailboxCompactUi {
+        queued: true,
+        requested: false,
+    };
+    let outcome = run_direct_resume_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+    assert_eq!(outcome.text, "done");
+    assert!(model.prompts[0].contains("User manually requests context compression."));
+    let _ = fs::remove_dir_all(dir);
+}
+
+struct CapabilityProbeTimingModel {
+    probing_visible: std::rc::Rc<std::cell::Cell<bool>>,
+    calls: usize,
+}
+
+impl ModelClient for CapabilityProbeTimingModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        Err("unexpected_inline_capability_probe_call".to_string())
+    }
+
+    fn call_model_interaction(
+        &mut self,
+        config: &ModelServiceConfig,
+        request: &ModelInteractionRequest,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        assert!(
+            self.probing_visible.get(),
+            "probing topic must be emitted before the provider probe starts"
+        );
+        self.calls += 1;
+        let count = usize::from(request.parallel_tool_calls) + 1;
+        Ok(LlmResponse {
+            tool_calls: (0..count)
+                .map(|index| crate::NativeToolCall {
+                    assistant_continuation: None,
+                    id: format!("probe_{index}"),
+                    name: "timem_capability_probe".to_string(),
+                    arguments: serde_json::json!({"slot": index + 1}),
+                    raw_arguments: format!("{{\"slot\":{}}}", index + 1),
+                })
+                .collect(),
+            content: String::new(),
+            model_name: config.model.clone(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        })
+    }
+}
+
+struct CapabilityProbeTimingUi {
+    probing_visible: std::rc::Rc<std::cell::Cell<bool>>,
+    phases: Vec<String>,
+    persisted: Vec<crate::PersistedCapabilityProbe>,
+}
+
+impl TurnUi for CapabilityProbeTimingUi {
+    fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
+        for event in events {
+            if let Some(phase) = event.payload["phase"].as_str() {
+                self.phases.push(phase.to_string());
+                if phase == "probing" {
+                    self.probing_visible.set(true);
+                }
+            }
+        }
+    }
+
+    fn on_persisted_capability_probe(
+        &mut self,
+        _identity: &crate::CapabilityProbeIdentity,
+        record: Option<&crate::PersistedCapabilityProbe>,
+    ) {
+        if let Some(record) = record {
+            self.persisted.push(record.clone());
+        }
+    }
+}
+
+#[test]
+fn capability_probe_topics_are_live_and_durable_result_updates_current_config() {
+    let dir = tmp_dir("capability_probe_topic_timing");
+    let audit = dir.join("audit.json");
+    let mut config = test_config();
+    config.model = format!("capability-probe-timing-{}", epoch_millis());
+    config.interaction.tool_call_mode = crate::ToolCallMode::Auto;
+    config.interaction.parallel_tool_calls = crate::ParallelToolCalls::Auto;
+    config.interaction.native_tools_supported = None;
+    config.interaction.capability_probe_endpoint_id =
+        Some(format!("endpoint-capability-timing-{}", epoch_millis()));
+    let probing_visible = std::rc::Rc::new(std::cell::Cell::new(false));
+    let mut model = CapabilityProbeTimingModel {
+        probing_visible: probing_visible.clone(),
+        calls: 0,
+    };
+    let mut ui = CapabilityProbeTimingUi {
+        probing_visible,
+        phases: Vec::new(),
+        persisted: Vec::new(),
+    };
+
+    let outcome = negotiate_interaction_for_turn(
+        &mut model,
+        &mut config,
+        &audit,
+        &mut ui,
+        "capability_probe_timing_session",
+        false,
+    );
+
+    assert_eq!(model.calls, 2);
+    assert_eq!(ui.phases, ["probing", "completed"]);
+    let persisted = outcome.persisted_probe.expect("durable probe result");
+    assert!(persisted.native_supported);
+    assert!(persisted.parallel_supported);
+    assert_eq!(ui.persisted.as_slice(), std::slice::from_ref(&persisted));
+    assert_eq!(
+        config.interaction.persisted_capability_probe,
+        Some(persisted)
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn negative_capability_reprobe_uses_first_and_every_tenth_formal_round_only() {
+    let mut config = test_config();
+    config.interaction.tool_call_mode = crate::ToolCallMode::Auto;
+    config.interaction.native_tools_supported = None;
+    config.api_protocol = crate::ApiProtocol::OpenAiCompatible;
+    let mut profile = crate::InteractionProfile {
+        api_protocol: "openai-compatible".to_string(),
+        model: "negative-capability-boundary".to_string(),
+        gateway: "https://example.test/v1".to_string(),
+        requested_mode: crate::ToolCallMode::Auto,
+        resolved_mode: crate::ToolCallMode::Inline,
+        active_prompt_protocol: "inline_xml".to_string(),
+        parallel_supported: false,
+        parallel_enabled: false,
+        source: crate::CapabilityProbeSource::Cache,
+        reason: "persisted_explicit_native_tools_unsupported".to_string(),
+        probe_latency_ms: None,
+        observed_tool_calls: 0,
+    };
+
+    for round in [1, 11, 21] {
+        assert!(
+            should_reprobe_negative_capability(&config, &profile, round),
+            "round {round} must force a negative capability reprobe"
+        );
+    }
+    for round in [0, 2, 10, 12, 20, 22] {
+        assert!(
+            !should_reprobe_negative_capability(&config, &profile, round),
+            "round {round} must not force a negative capability reprobe"
+        );
+    }
+
+    for known in [Some(true), Some(false)] {
+        config.interaction.native_tools_supported = known;
+        assert!(!should_reprobe_negative_capability(&config, &profile, 1));
+    }
+    config.interaction.native_tools_supported = None;
+
+    for mode in [crate::ToolCallMode::Native, crate::ToolCallMode::Inline] {
+        config.interaction.tool_call_mode = mode;
+        assert!(!should_reprobe_negative_capability(&config, &profile, 1));
+    }
+    config.interaction.tool_call_mode = crate::ToolCallMode::Auto;
+
+    config.api_protocol = crate::ApiProtocol::OpenAiResponses;
+    assert!(!should_reprobe_negative_capability(&config, &profile, 1));
+    config.api_protocol = crate::ApiProtocol::OpenAiCompatible;
+
+    profile.resolved_mode = crate::ToolCallMode::Native;
+    assert!(!should_reprobe_negative_capability(&config, &profile, 1));
+}
+
+#[cfg(unix)]
+struct ParallelControlFallbackModel {
+    marker: std::path::PathBuf,
+    calls: Vec<(bool, bool)>,
+    saw_sequential_results: bool,
+}
+
+#[cfg(unix)]
+impl ModelClient for ParallelControlFallbackModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        Err("unexpected_inline_model_call".to_string())
+    }
+
+    fn call_model_interaction(
+        &mut self,
+        config: &ModelServiceConfig,
+        request: &ModelInteractionRequest,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.calls.push((
+            request.send_parallel_tool_calls,
+            request.parallel_tool_calls,
+        ));
+        match self.calls.len() {
+            1 => Err("model_http_400: unknown parameter: parallel_tool_calls".to_string()),
+            2 => {
+                assert!(!request.send_parallel_tool_calls);
+                assert!(!request.parallel_tool_calls);
+                let marker = self.marker.display().to_string();
+                Ok(LlmResponse {
+                    tool_calls: vec![
+                        crate::NativeToolCall {
+                            assistant_continuation: None,
+                            id: "call_create_marker".to_string(),
+                            name: "run_bash".to_string(),
+                            arguments: serde_json::json!({
+                                "cmd": format!("sleep 1; printf ready > '{}'", marker),
+                                "edit": marker,
+                                "timeout_ms": 3000
+                            }),
+                            raw_arguments: String::new(),
+                        },
+                        crate::NativeToolCall {
+                            assistant_continuation: None,
+                            id: "call_observe_marker".to_string(),
+                            name: "run_bash".to_string(),
+                            arguments: serde_json::json!({
+                                "cmd": format!("test -f '{}' && printf observed", self.marker.display()),
+                                "timeout_ms": 3000
+                            }),
+                            raw_arguments: String::new(),
+                        },
+                    ],
+                    content: String::new(),
+                    model_name: config.model.clone(),
+                    usage: usage(100, 10),
+                    truncated: false,
+                })
+            }
+            3 => {
+                assert!(!request.send_parallel_tool_calls);
+                assert!(!request.parallel_tool_calls);
+                self.saw_sequential_results = request.native_exchanges.iter().any(|exchange| {
+                    let created = exchange
+                        .results
+                        .iter()
+                        .any(|result| result.call_id == "call_create_marker" && !result.is_error);
+                    let observed = exchange.results.iter().any(|result| {
+                        result.call_id == "call_observe_marker"
+                            && !result.is_error
+                            && result.content.contains("observed")
+                    });
+                    created && observed
+                });
+                if !self.saw_sequential_results {
+                    return Err("missing_sequential_tool_results".to_string());
+                }
+                Ok(LlmResponse {
+                    tool_calls: vec![crate::NativeToolCall {
+                        assistant_continuation: None,
+                        id: "call_finish_fallback".to_string(),
+                        name: "task_finished".to_string(),
+                        arguments: serde_json::json!({
+                            "summary": "并行控制降级后按顺序执行成功。"
+                        }),
+                        raw_arguments: String::new(),
+                    }],
+                    content: String::new(),
+                    model_name: config.model.clone(),
+                    usage: usage(120, 10),
+                    truncated: false,
+                })
+            }
+            4 => {
+                // The next user turn must reuse the exact persisted fallback and
+                // must not pay another rejected request.
+                assert!(!request.send_parallel_tool_calls);
+                assert!(!request.parallel_tool_calls);
+                Ok(LlmResponse {
+                    tool_calls: vec![crate::NativeToolCall {
+                        assistant_continuation: None,
+                        id: "call_finish_cached_fallback".to_string(),
+                        name: "task_finished".to_string(),
+                        arguments: serde_json::json!({
+                            "summary": "下一轮直接复用降级结论。"
+                        }),
+                        raw_arguments: String::new(),
+                    }],
+                    content: String::new(),
+                    model_name: config.model.clone(),
+                    usage: usage(130, 10),
+                    truncated: false,
+                })
+            }
+            _ => Err("unexpected_extra_model_call".to_string()),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct ParallelControlFallbackUi {
+    profiles: Vec<crate::InteractionProfile>,
+    persisted: Vec<crate::PersistedCapabilityProbe>,
+}
+
+#[cfg(unix)]
+impl TurnUi for ParallelControlFallbackUi {
+    fn on_interaction_profile(&mut self, profile: &crate::InteractionProfile) {
+        self.profiles.push(profile.clone());
+    }
+
+    fn on_persisted_capability_probe(
+        &mut self,
+        _identity: &crate::CapabilityProbeIdentity,
+        record: Option<&crate::PersistedCapabilityProbe>,
+    ) {
+        if let Some(record) = record {
+            self.persisted.push(record.clone());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn auto_parallel_control_rejection_retries_once_schedules_sequentially_and_is_reused() {
+    let dir = tmp_dir("parallel_control_fallback");
+    let audit = dir.join("audit.json");
+    let marker = dir.join("ordered.marker");
+    let mut core = test_core(
+        include_str!("../../../../resources/system_prompt/system_prompt.md"),
+        test_profile(),
+        &dir,
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let mut config = test_config();
+    config.api_protocol = crate::ApiProtocol::OpenAiResponses;
+    config.model = format!("parallel-control-fallback-{}", epoch_millis());
+    config.interaction.tool_call_mode = crate::ToolCallMode::Auto;
+    config.interaction.parallel_tool_calls = crate::ParallelToolCalls::Auto;
+    config.interaction.native_tools_supported = Some(true);
+    config.interaction.capability_probe_endpoint_id =
+        Some(format!("parallel-control-fallback-{}", epoch_millis()));
+    let mut model = ParallelControlFallbackModel {
+        marker,
+        calls: Vec::new(),
+        saw_sequential_results: false,
+    };
+    let mut ui = ParallelControlFallbackUi::default();
+
+    let first = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "执行两个有先后依赖的工具",
+            session: "parallel_control_fallback_session",
+            audit_file: &audit,
+            runtime: "test",
+            run_bash_target: "test_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(first.text, "并行控制降级后按顺序执行成功。");
+    assert!(model.saw_sequential_results);
+    assert_eq!(
+        model.calls,
+        vec![(true, true), (false, false), (false, false)]
+    );
+    let persisted = config
+        .interaction
+        .persisted_capability_probe
+        .as_ref()
+        .expect("fallback must be persisted");
+    assert!(persisted.native_supported);
+    assert!(!persisted.parallel_supported);
+    assert_eq!(
+        persisted.reason,
+        crate::negotiation::PARALLEL_CONTROL_UNSUPPORTED_REASON
+    );
+    assert_eq!(ui.persisted.as_slice(), std::slice::from_ref(persisted));
+    assert!(ui.profiles.iter().any(|profile| {
+        profile.reason == crate::negotiation::PARALLEL_CONTROL_UNSUPPORTED_REASON
+            && profile.resolved_mode == crate::ToolCallMode::Native
+            && !profile.parallel_enabled
+    }));
+
+    let second = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "确认下一轮不重复失败",
+            session: "parallel_control_fallback_session",
+            audit_file: &audit,
+            runtime: "test",
+            run_bash_target: "test_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(second.text, "下一轮直接复用降级结论。");
+    assert_eq!(model.calls.len(), 4);
+    assert_eq!(model.calls[3], (false, false));
+    let _ = fs::remove_dir_all(dir);
+}
+
+struct ParallelControlNoFallbackModel {
+    calls: Vec<(bool, bool)>,
+}
+
+impl ModelClient for ParallelControlNoFallbackModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        Err("unexpected_inline_model_call".to_string())
+    }
+
+    fn call_model_interaction(
+        &mut self,
+        _config: &ModelServiceConfig,
+        request: &ModelInteractionRequest,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.calls.push((
+            request.send_parallel_tool_calls,
+            request.parallel_tool_calls,
+        ));
+        Err("model_http_400: unknown parameter: parallel_tool_calls".to_string())
+    }
+}
+
+#[test]
+fn explicit_parallel_enabled_does_not_silently_downgrade() {
+    let dir = tmp_dir("parallel_control_explicit_enabled");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    config.api_protocol = crate::ApiProtocol::OpenAiResponses;
+    config.interaction.tool_call_mode = crate::ToolCallMode::Auto;
+    config.interaction.parallel_tool_calls = crate::ParallelToolCalls::Enabled;
+    config.interaction.native_tools_supported = Some(true);
+    let mut model = ParallelControlNoFallbackModel { calls: Vec::new() };
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "不要静默降级",
+            session: "parallel_control_explicit_enabled_session",
+            audit_file: &audit,
+            runtime: "test",
+            run_bash_target: "test_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(model.calls, vec![(true, true)]);
+    assert_eq!(outcome.stop_reason, Some(crate::TurnStopReason::ModelError));
+    assert!(config.interaction.persisted_capability_probe.is_none());
+    let _ = fs::remove_dir_all(dir);
 }

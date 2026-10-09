@@ -1,3 +1,4 @@
+import { createStartupDiagnostics } from "./browser-startup.mjs";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
@@ -26,11 +27,12 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
 async function waitFor(check, message, timeout = 10000) {
   const deadline = Date.now() + timeout;
+  let lastError;
   while (Date.now() < deadline) {
-    try { if (await check()) return; } catch {}
+    try { if (await check()) return; } catch (error) { lastError = error; }
     await sleep(40);
   }
-  throw new Error(message);
+  throw new Error(typeof message === "function" ? await message() : message, lastError ? { cause: lastError } : undefined);
 }
 
 async function waitForSubtreeIdle(browser, selector, message, timeout = 10000) {
@@ -179,6 +181,13 @@ async function startHost() {
     let peer;
     peer = makePeer(socket, (command) => {
       commands.push(command);
+      if (command.type === "turn_history_page") {
+        const records = authoritativeSession.historyRecords ?? [];
+        const end = Math.min(command.offset + 16, records.length);
+        peer.send({ type: "turn_history_page", session_id: command.session_id, turn_id: command.turn_id,
+          offset: command.offset, records: records.slice(command.offset, end), next_offset: end < records.length ? end : null });
+        return;
+      }
       if (!command.command_id) return;
       peer.send({ type: "command_ack", command_id: command.command_id, status: "accepted" });
       if (command.type === "turn_submit" && authoritativeSession.state === "working") {
@@ -240,7 +249,12 @@ async function startHost() {
     url: `http://127.0.0.1:${server.address().port}/`, commands,
     send(event) {
       eventSequence += 1;
-      const envelope = { type: "semantic_event", event_seq: eventSequence, event };
+      // Hello is a connection-level snapshot, never a nested semantic event.
+      // Nesting it makes the client correctly reject it and reconnect; tests
+      // would then advance via reloads instead of exercising live updates.
+      const envelope = event.type === "hello"
+        ? { ...event, event_cursor: eventSequence, event_replay_floor: 0 }
+        : { type: "semantic_event", event_seq: eventSequence, event };
       for (const peer of peers) peer.send(envelope);
     },
     getSession() { return authoritativeSession; },
@@ -307,18 +321,17 @@ async function startBrowser(url) {
     "--disable-background-networking", "--disable-component-update", "--disable-sync",
     "--window-size=1440,1000", "about:blank",
   ], { stdio: ["ignore", "ignore", "pipe"] });
-  let chromeError = "";
-  child.stderr.on("data", (chunk) => { chromeError += String(chunk); });
+  const startup = createStartupDiagnostics(child, chrome);
 
   try {
     let port = null;
     await waitFor(async () => {
-      if (child.exitCode !== null) return false;
+      if (startup.stopped()) return false;
       port = await readDevToolsPort(profile);
+      startup.port(port);
       if (port === null) return false;
-      try { return (await fetch(`http://127.0.0.1:${port}/json/version`)).ok; }
-      catch { return false; }
-    }, `Chrome DevTools did not start: ${chromeError}`, 12000);
+      return startup.probe(`http://127.0.0.1:${port}/json/version`);
+    }, () => startup.failure(), 12000);
 
     const target = await (await fetch(
       `http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`,
@@ -331,8 +344,13 @@ async function startBrowser(url) {
     });
     let sequence = 0;
     const requests = new Map();
+    const pageErrors = [];
     socket.addEventListener("message", ({ data }) => {
       const message = JSON.parse(String(data));
+      if (message.method === "Runtime.exceptionThrown") {
+        pageErrors.push(message.params.exceptionDetails);
+        if (pageErrors.length > 8) pageErrors.shift();
+      }
       if (!message.id || !requests.has(message.id)) return;
       const { resolve, reject } = requests.get(message.id);
       requests.delete(message.id);
@@ -345,17 +363,22 @@ async function startBrowser(url) {
       socket.send(JSON.stringify({ id, method, params }));
     });
     await call("Runtime.enable"); await call("Page.enable");
+    // Visual assertions require an active page. Headless Chrome can leave this
+    // CDP-created target hidden, freezing its animation timeline at zero even
+    // while Runtime.evaluate and network replies continue to work.
+    await call("Emulation.setFocusEmulationEnabled", { enabled: true });
     // Pin the media preference so assertions cannot inherit the host OS
     // accessibility setting (the macOS 26 runner image enables system
     // Reduce Motion, which silently disabled every entrance animation).
     await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
     const evaluate = async (expression) => {
       const result = await call("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
-      if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
+      if (result.exceptionDetails) throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text);
       return result.result.value;
     };
     return {
       call, evaluate,
+      diagnostics: () => ({ pageErrors, chromeError: startup.stderr() }),
       async close() {
         socket.close();
         await stopBrowserProcess(child, profile);
@@ -425,9 +448,9 @@ async function main() {
       event_id: id, source: "core_topic", created_at_ms: time,
       payload: { session_id: "session-1", state: { name: "running" }, topic: { name: "core.model.response", attributes: {} }, payload: { free_talk: text } },
     });
-    const toolEvent = (id, time) => ({
+    const toolEvent = (id, time, action = "run_bash", cmd = `echo ${id}`) => ({
       event_id: id, source: "core_topic", created_at_ms: time,
-      payload: { session_id: "session-1", state: { name: "running" }, topic: { name: "core.action", attributes: {} }, payload: { action: id, status: "completed", input: { cmd: "echo hello" } } },
+      payload: { session_id: "session-1", state: { name: "running" }, topic: { name: "core.action", attributes: {} }, payload: { action, action_id: id, status: "completed", input: { cmd } } },
     });
     const setRound = async (events, text, working = true) => {
       const base = host.getSession();
@@ -440,21 +463,113 @@ async function main() {
       await browser.call("Page.reload", { ignoreCache: true });
       await waitFor(() => contains("body", "Long task"), "round snapshot missing");
     };
+    // Real incremental wire metadata must survive a full-turn update in between.
+    const oldThought = { ...thoughtEvent("ordered-old", "ORDER_OLD", 1), timeline_seq: 1 };
+    const ordered = makeSession({ turns: [{ ...turn("turn-1"), events: [oldThought],
+      user_entries: [{ kind: "task", text: "Long task", created_at_ms: 0, timeline_seq: 0 },
+        { kind: "supplement", text: "ORDER_SUPPLEMENT", created_at_ms: 2, timeline_seq: 2 }] }] });
+    host.setSession(ordered);
+    await browser.call("Page.reload", { ignoreCache: true });
+    await waitFor(() => contains("body", "ORDER_OLD"), "ordered snapshot missing");
+    const newer = thoughtEvent("ordered-new", "ORDER_NEW", 3);
+    host.send({ type: "core_topic", session_id: "session-1", turn_id: "turn-1",
+      turn_event_id: newer.event_id, timeline_seq: 3, created_at_ms: 3, event: newer.payload });
+    await waitFor(() => contains("body", "ORDER_NEW"), "incremental thought missing");
+    assert(await browser.evaluate(`(() => { const text = document.querySelector('.turn-stream-tools').textContent;
+      return text.indexOf('ORDER_OLD') < text.indexOf('ORDER_SUPPLEMENT') && text.indexOf('ORDER_SUPPLEMENT') < text.indexOf('ORDER_NEW'); })()`), "incremental wire moved new thought before snapshot items");
+    const completeEvents = Array.from({length: 80}, (_, i) => i % 2
+      ? toolEvent(`archive-tool-${i}`, i + 1) : thoughtEvent(`archive-${i}`, `ARCHIVE_PROGRESS_${i}`, i + 1));
+    const historyRecords = completeEvents.map(event => ({ type: "event", role: "system", turn_id: "turn-1",
+      created_at_ms: event.created_at_ms, kind: "runtime_notice", content: "", source: event.source, payload: event.payload }));
+    host.setSession(makeSession({ state: "ready", active_turn_id: null, historyRecords,
+      turns: [{ ...turn("turn-1"), state: "completed", events: completeEvents.slice(-40), final_answer: "ARCHIVE_DONE" }] }));
+    for (let reload = 0; reload < 2; reload++) {
+      await browser.call("Page.reload", { ignoreCache: true });
+      await waitFor(() => contains("body", "ARCHIVE_DONE"), `archive snapshot missing (reload ${reload + 1})`);
+      // Host replies must progress even when the browser suspends animation
+      // frames (hidden tabs and headless display-link failures). Keep the
+      // existing deadline and verify all five pages, not just the snapshot.
+      if (reload === 0) await browser.evaluate(`
+        window.acceptanceRequestAnimationFrame = window.requestAnimationFrame;
+        window.requestAnimationFrame = () => 0;
+      `);
+      await browser.evaluate(`document.querySelector('[aria-label="Show work details"]').click()`);
+      await waitFor(() => contains("body", "ARCHIVE_PROGRESS_0"), "paged archive lost first thought");
+      await waitFor(() => contains("body", "archive-tool-1"), "paged archive lost first tool");
+      assert(await contains("body", "ARCHIVE_PROGRESS_78"), "paged archive lost last thought");
+      assert(await contains("body", "archive-tool-79"), "paged archive lost last tool");
+      if (reload === 0) await browser.evaluate(`
+        window.requestAnimationFrame = window.acceptanceRequestAnimationFrame;
+        delete window.acceptanceRequestAnimationFrame;
+      `);
+    }
+    console.log("PASS Chrome wire ordering and paged archive recovery after reload");
+    host.setSession(makeSession());
+    // Reasoning is an explicit Host request fact, shared by both render modes.
+    for (const streamMode of [false, true]) {
+      await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", ${JSON.stringify(String(streamMode))})`);
+      await setRound([{event_id: "reasoning-request", source: "worker_activity", created_at_ms: 1,
+        payload: {kind: "reasoning_upgrade", from: "low", to: "high"}}], "");
+      await waitFor(() => browser.evaluate(`!!document.querySelector('.reasoning-notice svg.lucide-infinity')`), "reasoning icon missing in mode " + streamMode);
+      assert(await browser.evaluate(`!!document.querySelector('.reasoning-notice').textContent.trim()`), "reasoning label missing");
+      await setRound([{event_id: "plain-request", source: "worker_activity", created_at_ms: 1,
+        payload: {kind: "model_request", round: 2, reasoning_enabled: false}}], "");
+      assert(await browser.evaluate(`!document.querySelector('.reasoning-notice')`), "disabled reasoning must not render");
+    }
+    const reasoningEvent = { event_id: 'reasoning-enabled', source: 'worker_activity', created_at_ms: 1,
+      payload: { kind: 'reasoning_upgrade', from: 'low', to: 'high' } };
+    await setRound([reasoningEvent], 'Reasoning indicator check');
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.reasoning-notice .lucide-infinity')`), 'enabled reasoning indicator missing');
+    assert(await browser.evaluate(`getComputedStyle(document.querySelector('.reasoning-notice .lucide-infinity')).strokeWidth === '1.5px'`), 'reasoning icon stroke inconsistent');
+    await setRound([{ ...reasoningEvent, payload: { kind: 'model_request', reasoning_enabled: false } }], 'No reasoning');
+    assert(await browser.evaluate(`!document.querySelector('.reasoning-notice')`), 'disabled reasoning must not show an indicator');
     // Lifecycle projections update the same DOM row, not a newly entering command.
     const lifecycle = (id, phase, status, time) => {
-      const event = toolEvent(id, time);
+      const event = toolEvent(id, time, "run_bash", "echo hello");
       Object.assign(event.payload.payload, { action: "run_bash", action_id: "stable-action", event: phase, status });
       return event;
     };
     const actionEvents = [thoughtEvent("stable-thought", "Stable thought", 1), lifecycle("start", "start", "running", 2)];
     await setRound(actionEvents, "Stable thought");
     await waitFor(() => contains(".stream-tool-row", "Bash"), "initial action missing");
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-elapsed .time-flip-digit')`), "live elapsed flip cells missing");
+    await waitFor(() => browser.evaluate(`(() => {
+      const outgoing = document.querySelector('.stream-tool-elapsed .time-flip-digit-out');
+      const incoming = document.querySelector('.stream-tool-elapsed .time-flip-digit-in');
+      if (!outgoing || !incoming) return false;
+      const oldStyle = getComputedStyle(outgoing);
+      const newStyle = getComputedStyle(incoming);
+      const cellStyle = getComputedStyle(outgoing.closest('.time-flip-digit'));
+      const oldRect = outgoing.getBoundingClientRect();
+      const newRect = incoming.getBoundingClientRect();
+      return oldStyle.animationName === 'time-digit-roll-out' &&
+        newStyle.animationName === 'time-digit-roll-in' &&
+        oldStyle.opacity === '1' && newStyle.opacity === '1' &&
+        cellStyle.overflow === 'hidden' && cellStyle.contain.includes('paint') &&
+        Math.abs(newRect.bottom - oldRect.top) < .75;
+    })()`), "live elapsed digits must roll edge-to-edge without cross-fade or overlap", 3000);
+    const elapsedBeforeReducedMotion = await browser.evaluate(`document.querySelector('.stream-tool-elapsed').getAttribute('aria-label')`);
+    await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+    await waitFor(() => browser.evaluate(`document.querySelector('.stream-tool-elapsed').getAttribute('aria-label') !== ${JSON.stringify(elapsedBeforeReducedMotion)}`), "reduced-motion elapsed value did not advance", 3000);
+    assert(await browser.evaluate(`(() => {
+      const outgoing = document.querySelector('.stream-tool-elapsed .time-flip-digit-out');
+      const incoming = document.querySelector('.stream-tool-elapsed .time-flip-digit-in');
+      return !!outgoing && !!incoming &&
+        getComputedStyle(outgoing).animationName === 'none' &&
+        getComputedStyle(incoming).animationName === 'none';
+    })()`), "reduced motion must disable live elapsed digit animation");
+    await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
+    assert(await browser.evaluate(`(() => {
+      const icon = document.querySelector('.stream-tool-row .bash-tool-icon svg.lucide-square-terminal');
+      return !!icon && getComputedStyle(icon).strokeWidth === '1.5px'
+        && document.querySelector('.bash-tool-icon .sr-only')?.textContent === 'Bash';
+    })()`), "Bash must render an accessible terminal glyph with a 25% thinner stroke");
     await browser.evaluate(`window.actionRow = document.querySelector('.stream-tool-row'); window.actionCommand = document.querySelector('.stream-tool-command'); window.actionHead = document.querySelector('.stream-tool-head'); true;`);
     assert(await browser.evaluate(`!document.querySelector('.stream-tool-fold.expanded') && document.querySelector('.stream-tool-command-preview').textContent === 'echo hello' && document.querySelector('.stream-tool-toggle').getAttribute('aria-expanded') === 'false'`), "running tool must default to one-line closed summary");
     await browser.evaluate(`document.querySelector('.stream-tool-toggle').click()`);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-fold.expanded')`), "running command cannot expand");
     await waitForSubtreeIdle(browser, ".stream-tool-fold", "row expansion animation did not settle before capture");
-    await browser.evaluate(`window.toolHeight = document.querySelector('.stream-tool-row').getBoundingClientRect().height; true`);
+    await browser.evaluate(`window.toolGeometry = (()=>{const q=s=>{const e=document.querySelector(s),r=e.getBoundingClientRect(),c=getComputedStyle(e);return {h:r.height,mt:c.marginTop,mb:c.marginBottom,pt:c.paddingTop,pb:c.paddingBottom,font:c.font,line:c.lineHeight}};return {row:q('.stream-tool-row'),head:q('.stream-tool-head'),fold:q('.stream-tool-fold'),command:q('.stream-tool-command'),status:q('.stream-tool-status-slot')}})(); window.toolHeight=window.toolGeometry.row.h; true`);
     for (const [phase, status, time] of [["execution_start", "running", 3], ["finish", "background_running", 4], ["finish", "completed", 5]]) {
       actionEvents.push(lifecycle(`update-${time}`, phase, status, time));
       const base = host.getSession();
@@ -462,28 +577,29 @@ async function main() {
       host.setSession(updated);
       host.send({ type: "hello", snapshot: makeSnapshot(updated) });
       if (status === "running") {
-        await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-dot') && !document.querySelector('.stream-tool-status')?.textContent`), "running must use dot without redundant text");
+        await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-dot') && !document.querySelector('.tool-failure-icon')`), "running must use dot without a terminal icon");
+      } else if (status === "background_running") {
+        await waitFor(() => contains(".stream-tool-background", "(bg)"), `${status}: status not delivered`);
       } else {
-        await waitFor(() => contains(status === "background_running" ? ".stream-tool-background" : ".stream-tool-status", status === "background_running" ? "(bg)" : status === "completed" ? "✓" : status), `${status}: status not delivered`);
+        await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-status-slot') && !document.querySelector('.tool-failure-icon') && document.querySelector('.stream-tool-head > b') === document.querySelector('.stream-tool-head')?.firstElementChild`), "completed tool must remove its running marker and keep the native tool icon first");
       }
       assert(await browser.evaluate(`window.actionRow === document.querySelector('.stream-tool-row') && window.actionCommand === document.querySelector('.stream-tool-command') && window.actionHead === document.querySelector('.stream-tool-head')`), `${status}: action DOM remounted`);
       assert(await browser.evaluate(`document.querySelectorAll('.stream-tool-row').length === 1`), "status update duplicated action");
       assert(await browser.evaluate(`!!document.querySelector('.stream-tool-dot') === ${status === "running" || status === "background_running"}`), `${status}: tool dot visibility incorrect`);
-      assert(await browser.evaluate(`(() => {
-        const slot = document.querySelector('.stream-tool-status-slot');
-        const marker = slot.querySelector('.stream-tool-dot') || slot.querySelector('.stream-tool-status');
-        const name = slot.nextElementSibling;
-        const a = slot.getBoundingClientRect(), b = marker.getBoundingClientRect();
-        return name.tagName === 'B' && a.right <= name.getBoundingClientRect().left && Math.abs((a.left + a.right - b.left - b.right) / 2) < 1;
-      })()`), `${status}: status must stay centered before the tool name`);
-
-      if (status === "completed") {
-        await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-status[role="status"] .action-status-changed')`), "status-only highlight missing");
+      if (status === "running" || status === "background_running") {
+        assert(await browser.evaluate(`(() => {
+          const slot = document.querySelector('.stream-tool-status-slot');
+          const marker = slot.querySelector('.stream-tool-dot');
+          const name = slot.nextElementSibling;
+          const a = slot.getBoundingClientRect(), b = marker.getBoundingClientRect();
+          return name.tagName === 'B' && a.right <= name.getBoundingClientRect().left && Math.abs((a.left + a.right - b.left - b.right) / 2) < 1;
+        })()`), `${status}: running dot must stay centered before the tool name`);
       }
     }
-    await waitFor(() => contains(".stream-tool-status", "✓"), "terminal status missing");
+    await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-status-slot') && !document.querySelector('.tool-failure-icon') && !document.querySelector('.stream-tool-head')?.textContent.includes('✓')`), "completed tool did not settle to its native icon");
     await sleep(700);
-    assert(await browser.evaluate(`!!document.querySelector('.stream-tool-fold.expanded') && Math.abs(document.querySelector('.stream-tool-row').getBoundingClientRect().height - window.toolHeight) < 1 && !document.querySelector('.stream-tool-merged-item.merged')`), "completion changed user expansion or geometry before AI reply");
+    const completionGeometry = await browser.evaluate(`({expanded:!!document.querySelector('.stream-tool-fold.expanded'),height:document.querySelector('.stream-tool-row').getBoundingClientRect().height,before:window.toolHeight,merged:!!document.querySelector('.stream-tool-merged-item.merged'),head:document.querySelector('.stream-tool-head').getBoundingClientRect().height,status:document.querySelector('.stream-tool-status-slot')?.getBoundingClientRect().height ?? 0,beforeGeometry:window.toolGeometry})`);
+    assert(completionGeometry.expanded && Math.abs(completionGeometry.height - completionGeometry.before) < 1 && !completionGeometry.merged, "completion changed user expansion or geometry before AI reply: "+JSON.stringify(completionGeometry));
     // Same-round serial execution advances logical order without any AI text.
     const serialStart = lifecycle("serial-start", "execution_start", "running", 6);
     serialStart.payload.payload.action_id = "serial-b";
@@ -507,11 +623,13 @@ async function main() {
     }
     for (const width of [1440, 390]) {
       await browser.call("Emulation.setDeviceMetricsOverride", {width, height:1000, deviceScaleFactor:1, mobile:false});
-      assert(await browser.evaluate(`(() => {
-        const summary = document.querySelector('.stream-tool-run-toggle > svg');
-        const live = document.querySelector('.stream-tool-row.running .stream-tool-toggle > svg');
-        return !!summary && !!live && Math.abs(summary.getBoundingClientRect().left - live.getBoundingClientRect().left) < 1;
-      })()`), `collapsed summary and live tool must be peers at ${width}px`);
+      const alignment = await browser.evaluate(`(() => {
+        const summary = document.querySelector('.stream-tool-run-toggle .stream-tool-run-sign');
+        const live = document.querySelector('.stream-tool-row.running .stream-tool-status-slot');
+        const a=summary?.getBoundingClientRect(),b=live?.getBoundingClientRect();
+        return {ok:!!a&&!!b&&Math.abs(a.left-b.left)<1,summary:a&&{left:a.left,width:a.width},live:b&&{left:b.left,width:b.width}};
+      })()`);
+      assert(alignment.ok, `collapsed summary and live tool must be peers at ${width}px: ${JSON.stringify(alignment)}`);
     }
     await browser.call("Emulation.clearDeviceMetricsOverride");
 
@@ -519,7 +637,7 @@ async function main() {
     serialFinish.payload.payload.action_id = "serial-b";
     const serialDone = { ...serial, turns: serial.turns.map(t => ({ ...t, events: [...actionEvents, serialStart, serialFinish] })) };
     host.setSession(serialDone); host.send({ type: "hello", snapshot: makeSnapshot(serialDone) });
-    await waitFor(() => contains(".stream-tool-status", "✗"), "serial B finish missing");
+    await waitFor(() => browser.evaluate(`document.querySelectorAll('.stream-tool-row .tool-failure-icon .lucide-circle-x').length===1 && !document.querySelector('.stream-tool-status')`), "serial B must use one CircleX without an extra verdict");
     assert(await browser.evaluate(`document.querySelectorAll('.stream-tool-merged-item.merged').length === 1`), "B completion must not fold B");
     await setRound(actionEvents, "Stable thought");
     await browser.evaluate(`document.querySelector('.stream-tool-toggle').click()`);
@@ -557,17 +675,17 @@ async function main() {
       const sessionAnim = sessionIcon ? getComputedStyle(sessionIcon) : null;
       const sessionDot = sessionIcon ? sessionIcon.getBoundingClientRect() : null;
       const workerStatic = [...document.querySelectorAll('.worker-working-icon')].every(node => getComputedStyle(node).animationName === 'none');
-      const pulse = document.querySelector('.turn-assistant-frame.working .working-chip .pulse, .stream-working-dot');
-      const pulseAnim = pulse ? getComputedStyle(pulse) : null;
+      const localWrench = document.querySelector('.stream-working-wrench');
+      const wrenchAnim = localWrench ? getComputedStyle(localWrench) : null;
       return !!sessionAnim && sessionAnim.animationName === 'stream-working-grow' &&
         parseFloat(sessionAnim.animationDuration) === 1.2 &&
-        !!sessionDot &&
-        workerStatic && !!pulseAnim && pulseAnim.animationName === sessionAnim.animationName &&
-        pulseAnim.animationDuration === sessionAnim.animationDuration;
-    })()`), "sidebar session cue must breathe in sync with the chat pulse while workers stay static");
+        !!sessionDot && workerStatic && !!wrenchAnim &&
+        wrenchAnim.animationName === 'stream-working-wrench-sway' &&
+        parseFloat(wrenchAnim.animationDuration) === 1;
+    })()`), "sidebar session cue must keep breathing, local work must sway a wrench, and workers must stay static");
     assert(await browser.evaluate(`['.user-message-navigation button', '.session-group-heading', '.final-answer-outline-toggle'].every(selector => [...document.querySelectorAll(selector)].every(node => getComputedStyle(node).backdropFilter === 'none'))`), "scroll overlays must not sample blurred backdrops");
     await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
-    assert(await browser.evaluate(`['.stream-tool-head', '.stream-tool-command', '.stream-tool-dot'].every(selector => { const node = document.querySelector(selector); return !node || getComputedStyle(node).animationName === 'none'; })`), "reduced motion must disable tool entrance");
+    assert(await browser.evaluate(`['.stream-tool-head', '.stream-tool-command', '.stream-tool-dot', '.stream-working-wrench'].every(selector => { const node = document.querySelector(selector); return !node || getComputedStyle(node).animationName === 'none'; })`), "reduced motion must disable tool entrance");
     await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] } );
     await waitFor(() => contains(".turn-stream-tools .user-supplement", "Chronological supplement"), "live supplement missing");
     assert(await browser.evaluate(`(() => {
@@ -647,7 +765,7 @@ async function main() {
     await waitFor(() => contains(".turn-stream-tools", "Prior thought archived"), "prior thought disappeared");
     for (const status of ["completed", "failed", "timeout", "cancelled", "cancelled_by_user", "running", "background_running"]) {
       for (const name of ["run_bash", "readfile"]) {
-        const event = toolEvent(name, 6);
+        const event = toolEvent(name, 6, name);
         event.payload.payload.status = status;
         host.setSession({ ...interimSession, turns: [{ ...turn("turn-1"), events: [event] }] });
         await browser.call("Page.reload", { ignoreCache: true });
@@ -657,7 +775,7 @@ async function main() {
           assert(await browser.evaluate(`document.querySelector('.stream-tool-dot').getAnimations().length === 0`), `${name}/${status}: running dot must stay static without pulsing`);
         }
         if (status === "running" || status === "background_running") {
-          assert(await browser.evaluate(`![...document.querySelectorAll('.stream-tool-status')].some(node => /running/i.test(node.textContent)) && !!document.querySelector('.stream-tool-status-slot[aria-label]')`), "running text must be omitted visually but retained accessibly");
+          assert(await browser.evaluate(`!document.querySelector('.tool-failure-icon') && !!document.querySelector('.stream-tool-status-slot[aria-label]')`), "running state must be represented only by the accessible dot slot");
         }
       }
     }
@@ -673,7 +791,10 @@ async function main() {
     host.setSession(next);
     await browser.call("Page.reload", { ignoreCache: true });
     await waitFor(() => contains(".stream-thought-text", "Next thought focus"), "active fixture not restored");
-    assert(await browser.evaluate(`!getComputedStyle(document.querySelector('.stream-tool-command')).fontFamily.match(/monospace|Consolas|SFMono/i)`), "command still uses console font");
+    assert(await browser.evaluate(`(() => {
+      const style = getComputedStyle(document.querySelector('.stream-tool-command'));
+      return style.fontFamily.includes('IBM Plex Mono') && Math.abs(parseFloat(style.fontSize) - 12) < .01;
+    })()`), "stream command must use IBM Plex Mono at the half-pixel-increased size");
     for (const size of ["12px", "16px"]) {
       assert(await browser.evaluate(`(() => {
         document.documentElement.style.setProperty('--content-size', ${JSON.stringify(size)});
@@ -718,6 +839,20 @@ async function main() {
       await waitFor(() => browser.evaluate(`!document.querySelector('.stream-continuous-process') && !!document.querySelector('.collapsed-work')`), "process not archived after transition");
       assert(await browser.evaluate(`!document.querySelector('.stream-working-trailer')`), "terminal trailer still visible");
     }
+    // Simulate a late size notification after the synchronous reduced-motion
+    // archive. Final-answer position must not depend on that notification.
+    const resizeControl = await browser.call("Page.addScriptToEvaluateOnNewDocument", {source: `
+      const NativeResizeObserver = window.ResizeObserver;
+      window.ResizeObserver = class extends NativeResizeObserver {
+        constructor(callback) {
+          super((entries, observer) => {
+            if (entries.some(entry => entry.target.matches('.turn-interaction'))) {
+              setTimeout(() => callback(entries, observer), 500);
+            } else callback(entries, observer);
+          });
+        }
+      };
+    `});
     // A tall process must not leave stale scroll space after final-answer handoff.
     for (const reducedMotion of [false, true]) {
     await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: reducedMotion ? "reduce" : "no-preference" }] });
@@ -729,6 +864,12 @@ async function main() {
       const current = host.getSession();
       const finalText = Array.from({length: 8}, (_, i) => `## Final section ${i}\n\n${"Final answer reading text. ".repeat(20)}\n\n`).join("");
       const done = {...current, state:"ready", active_turn_id:null, turns:current.turns.map(t => ({...t, state:"finished", final_answer:finalText}))};
+      // Non-stream work collapse must repair the portaled outline even when
+      // no display frames arrive. Keep the same 300ms geometry deadline.
+      if (!streamMode) await browser.evaluate(`
+        window.acceptanceRequestAnimationFrame = window.requestAnimationFrame;
+        window.requestAnimationFrame = () => 0;
+      `);
       host.setSession(done); host.send({type:"hello", snapshot:makeSnapshot(done)});
       await waitFor(() => browser.evaluate(`!!document.querySelector('.turn-final-delivery') && !document.querySelector('.stream-continuous-process')`), "large process did not archive");
       await sleep(300);
@@ -736,12 +877,20 @@ async function main() {
         const viewport = document.querySelector('.chat-scroll');
         const answer = document.querySelector('.turn-final-delivery').getBoundingClientRect();
         const view = viewport.getBoundingClientRect();
-        return { visible: answer.bottom > view.top && answer.top < view.bottom, trailing: viewport.scrollHeight - (answer.bottom - view.top + viewport.scrollTop), top: viewport.scrollTop };
+        return { visible: answer.bottom > view.top && answer.top < view.bottom, trailing: viewport.scrollHeight - (answer.bottom - view.top + viewport.scrollTop), top: viewport.scrollTop,
+          answer: {top:answer.top,bottom:answer.bottom,height:answer.height}, viewport: {top:view.top,bottom:view.bottom,height:viewport.clientHeight,scrollHeight:viewport.scrollHeight},
+          outlines: [...viewport.querySelectorAll('.final-answer-outline')].map(e => ({className:e.className,style:e.getAttribute('style'),top:e.getBoundingClientRect().top,height:e.getBoundingClientRect().height})),
+          animations: document.getAnimations().map(a => ({state:a.playState,time:a.currentTime,target:a.effect?.target?.className})) };
       })()`);
-      assert(geometry.visible && geometry.trailing < 150, `${streamMode}: archive left blank viewport/stale scroll space: ${JSON.stringify(geometry)}`);
+      assert(geometry.visible && geometry.trailing < 150, `stream=${streamMode} reducedMotion=${reducedMotion}: archive left blank viewport/stale scroll space: ${JSON.stringify(geometry)}`);
+      if (!streamMode) await browser.evaluate(`
+        window.requestAnimationFrame = window.acceptanceRequestAnimationFrame;
+        delete window.acceptanceRequestAnimationFrame;
+      `);
     }
     }
     await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] } );
+    await browser.call("Page.removeScriptToEvaluateOnNewDocument", {identifier:resizeControl.identifier});
     console.log("PASS Chrome large-tool handoff: final answer visible without stale scroll space in both UI and motion modes");
     await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", "true")`);
     // Visual interaction contracts, beyond node identity.
@@ -806,6 +955,7 @@ async function main() {
     // Real browser hot path: repeated increments, bounded layout/CPU, stable DOM.
     await browser.call("Performance.enable");
     const countMetrics = async () => Object.fromEntries((await browser.call("Performance.getMetrics")).metrics.map(m => [m.name, m.value]));
+    const countConnectionsBefore = host.getConnectionCount();
     const countBefore = await countMetrics();
     const growingEvents = [...longEvents, toolEvent("adjacent-c", 5)];
     for (let i = 4; i <= 23; i++) {
@@ -816,7 +966,9 @@ async function main() {
     }
     await waitForSubtreeIdle(browser, ".stream-tool-count", "count animation did not settle before metrics");
     const countAfter = await countMetrics();
-    const countCost = Object.fromEntries(["TaskDuration", "LayoutCount", "RecalcStyleCount"].map(k => [k, countAfter[k] - countBefore[k]]));
+    assert(host.getConnectionCount() === countConnectionsBefore,
+      `count updates reconnected instead of updating live: ${countConnectionsBefore} -> ${host.getConnectionCount()}`);
+    const countCost = Object.fromEntries(["TaskDuration", "ScriptDuration", "LayoutDuration", "RecalcStyleDuration", "DevToolsCommandDuration", "LayoutCount", "RecalcStyleCount"].map(k => [k, countAfter[k] - countBefore[k]]));
     assert(countCost.TaskDuration < 4, `count main-thread budget exceeded: ${JSON.stringify(countCost)}`);
     assert(countCost.LayoutCount < 500, `count layout budget exceeded: ${JSON.stringify(countCost)}`);
     assert(await browser.evaluate(`window.countToggle === document.querySelector('.stream-tool-run-toggle') && window.countRows.every((row, i) => row === document.querySelectorAll('.stream-tool-row')[i]) && document.querySelectorAll('.stream-tool-count').length === 1 && document.querySelectorAll('.stream-tool-merged-item.merged').length === 23 && document.querySelector('.stream-tool-count').getAnimations().length === 0`), "burst leaked count nodes, remounted rows, or reopened archive");
@@ -843,6 +995,40 @@ async function main() {
     host.send({type:"hello", snapshot:makeSnapshot(batchCalls)});
     await waitForSubtreeIdle(browser, ".stream-tool-count", "batch replay animation did not settle");
     assert(await browser.evaluate(`window.countAnimations === ${beforeBatchAnimations + 1} && window.countToggle === document.querySelector('.stream-tool-run-toggle') && document.querySelectorAll('.stream-tool-merged-item.merged').length === 26 && document.querySelector('.stream-tool-count').getAnimations().length === 0`), "mixed batch replay animated, remounted toggle, or reopened history");
+    assert(await browser.evaluate(`(async () => {
+      await document.fonts.load('300 12px "IBM Plex Mono"');
+      const node = document.querySelector('.stream-tool-count');
+      if (!node) return false;
+      const style = getComputedStyle(node);
+      const contentSize = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--content-size'));
+      return [...document.fonts].some(font => font.family.includes('IBM Plex Mono') && font.status === 'loaded')
+        && style.fontFamily.includes('IBM Plex Mono') && style.fontWeight === '300'
+        && Math.abs(parseFloat(style.fontSize) - contentSize * .888889) < .1;
+    })()`), "tool count must load local IBM Plex Mono 300 and scale with chat text");
+    assert(await browser.evaluate(`(() => {
+      const root = document.documentElement;
+      const keys = ['userFont', 'agentFont', 'userChineseFont', 'agentChineseFont', 'userBold', 'agentBold'];
+      const previous = keys.map(key => root.dataset[key]);
+      try {
+        for (const font of ['sans', 'serif', 'mono']) {
+          for (const chinese of ['heiti', 'kaiti', 'songti']) {
+            root.dataset.userFont = root.dataset.agentFont = font;
+            root.dataset.userChineseFont = root.dataset.agentChineseFont = chinese;
+            root.dataset.userBold = root.dataset.agentBold = 'true';
+            for (const node of document.querySelectorAll('.stream-tool-count')) {
+              const style = getComputedStyle(node);
+              if (!style.fontFamily.startsWith('"IBM Plex Mono"') || style.fontWeight !== '300') return false;
+            }
+          }
+        }
+        return document.querySelectorAll('.stream-tool-count').length > 0;
+      } finally {
+        keys.forEach((key, index) => {
+          if (previous[index] === undefined) delete root.dataset[key];
+          else root.dataset[key] = previous[index];
+        });
+      }
+    })()`), "chat font and bold preferences must not override the tool count font");
     console.log("PASS Chrome count feedback: exact labels, repeat increments, duplicate suppression, stable nodes, reduced motion");
     await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click(); document.querySelector('.stream-tool-toggle').click();`);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-fold.expanded')`), "output did not open");
@@ -865,7 +1051,12 @@ async function main() {
       return item.getBoundingClientRect().height < 1 && getComputedStyle(item).opacity === '0';
     })()`), "retired tools must fold away completely with no visible summary bar");
     await waitFor(() => browser.evaluate(`document.querySelectorAll('.stream-tool-merged-item.merged').length === 2`), "failed call not merged with adjacent success");
-    assert(await browser.evaluate(`document.querySelector('.stream-tool-run-toggle > span')?.textContent === '工具' && [...document.querySelector('.stream-tool-run-toggle').querySelectorAll('span')].every(n => getComputedStyle(n).fontWeight === '400')`), "tools label and counts must use normal weight");
+    assert(await browser.evaluate(`(() => {
+      const toggle = document.querySelector('.stream-tool-run-toggle');
+      const spans = [...toggle.querySelectorAll('span')];
+      const hasLabel = spans.some(span => span.textContent === '工具');
+      return hasLabel && spans.every(span => getComputedStyle(span).fontWeight === (span.classList.contains('stream-tool-count') ? '300' : '400'));
+    })()`), "tools label must retain normal weight while counts use light weight");
     await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click()`);
     await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-merged-item.merged')`), "merged failure rows cannot reopen");
     for (const width of [390, 768]) {
@@ -873,24 +1064,46 @@ async function main() {
       assert(await browser.evaluate(`document.documentElement.scrollWidth <= window.innerWidth + 1`), `horizontal overflow at ${width}px`);
     }
     await browser.call("Emulation.clearDeviceMetricsOverride");
-    assert(await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').getAttribute('aria-expanded') === 'true' && !!document.querySelector('.stream-tool-run-toggle > svg.lucide-minus')`), "expanded tools must display minus");
+    assert(await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').getAttribute('aria-expanded') === 'true' && !!document.querySelector('.stream-tool-run-toggle .stream-tool-run-sign svg.lucide-minus')`), "expanded tools must display minus");
     await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click()`);
-    assert(await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').getAttribute('aria-expanded') === 'false' && !!document.querySelector('.stream-tool-run-toggle > svg.lucide-plus')`), "collapsed tools must display plus");
+    assert(await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').getAttribute('aria-expanded') === 'false' && !!document.querySelector('.stream-tool-run-toggle .stream-tool-run-sign svg.lucide-plus')`), "collapsed tools must display plus");
     await browser.evaluate(`localStorage.setItem("timem-web-tool-result-status-v1", "false"); window.dispatchEvent(new StorageEvent("storage", {key:"timem-web-tool-result-status-v1"}));`);
     // Collapsed groups now show a bare xN count (no result verdicts).
     await waitFor(() => contains(".stream-tool-run-toggle", "x2"), "neutral folded count missing");
-    assert(await browser.evaluate(`[...document.querySelectorAll('.stream-tool-status')].every(n => n.textContent === '已完成' && n.getAttribute('aria-label') === '已完成')`), "neutral rows leaked success/failure visually or accessibly");
+    assert(await browser.evaluate(`document.querySelectorAll('.stream-tool-status').length===0 && document.querySelectorAll('.tool-failure-icon .lucide-circle-x').length===1`), "row identity icons changed when aggregate result labels were hidden");
     await browser.evaluate(`localStorage.setItem("timem-web-tool-result-status-v1", "true"); window.dispatchEvent(new StorageEvent("storage", {key:"timem-web-tool-result-status-v1"}));`);
     // Result preference updates mounted row status; the collapsed toggle
     // stays a bare xN count under the new collapsed-state contract.
     await waitFor(() => contains(".stream-tool-run-toggle", "x2"), "result preference did not update mounted rows");
-    assert(await browser.evaluate(`[...document.querySelectorAll(".stream-tool-status")].some(n => n.textContent === "✓" || n.textContent === "✗")`), "result preference did not restore row verdicts");
+    assert(await browser.evaluate(`document.querySelectorAll('.stream-tool-status').length===0 && document.querySelectorAll('.tool-failure-icon .lucide-circle-x').length===1`), "result preference introduced a redundant row verdict");
     console.log("PASS Chrome visual interaction: stable completed groups, selection protection, failure toggle, 390/768px overflow");
     console.log("PASS Chrome continuous stream: multi-round DOM stability, completed adjacency merge/reopen, terminal animation and interruption archive");
     console.log("PASS Chrome interim continuity: deduplicated deliveries, earlier thought/answers retained, reload and typography");
     console.log("PASS Chrome work collapse: both modes, completion/interruption, reload, manual expansion");
     console.log("PASS Chrome round continuity: earlier thoughts/tools retained, no working archive, terminal trailer removed");
     console.log("PASS Chrome provisional UI: default off, midstream enable, response/chat updates, network interruption, reload snapshot, retraction");
+  } catch (error) {
+    // Keep the original failure. A fixture-only snapshot cannot expose user
+    // data; bounded diagnostics distinguish rendering errors from reconnects.
+    let timer;
+    const page = await Promise.race([
+      browser.evaluate(`({readyState: document.readyState, url: location.href,
+        visibility: document.visibilityState, focus: document.hasFocus(),
+        animations: document.querySelector('.stream-tool-fold')?.getAnimations().map(a => ({
+          state: a.playState, time: a.currentTime, timeline: a.timeline?.currentTime,
+          property: a.transitionProperty,
+        })), text: document.body?.innerText.slice(0, 4096)})`).catch(error => ({ error: String(error) })),
+      new Promise(resolve => { timer = setTimeout(() => resolve({error: "diagnostic timeout"}), 2000); }),
+    ]);
+    clearTimeout(timer);
+    console.error("STREAM_PREVIEW_FAILURE", JSON.stringify({
+      page, ...browser.diagnostics(), connections: host.getConnectionCount(),
+      session: {state: host.getSession().state, turns: host.getSession().turns.map(turn => ({
+        id: turn.turn_id, state: turn.state, final_answer: turn.final_answer,
+      }))},
+      recentCommands: host.commands.slice(-8).map(command => command.type),
+    }));
+    throw error;
   } finally { await browser.close(); await host.close(); }
 }
 await main();

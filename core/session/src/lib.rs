@@ -289,6 +289,10 @@ pub enum CoreSessionWorkerEvent {
     /// but must not rewrite it from worker/topic arrival order.
     TurnProjection(agent_core::TurnProjection),
     Topics(Vec<CoreTopicEvent>),
+    CapabilityProbePersistence {
+        identity: agent_core::CapabilityProbeIdentity,
+        record: Option<agent_core::PersistedCapabilityProbe>,
+    },
     ModelRequest {
         round: u32,
         emitted_at_ms: u128,
@@ -297,6 +301,7 @@ pub enum CoreSessionWorkerEvent {
         interaction_request: Option<Box<agent_core::ModelInteractionRequest>>,
         api_payload: Option<Box<serde_json::Value>>,
     },
+    ReasoningUpgrade(agent_core::model_requirements::ReasoningUpgrade),
     ModelRequestCompleted {
         latency: Duration,
     },
@@ -321,7 +326,7 @@ pub enum CoreSessionWorkerEvent {
         error: String,
     },
     UnconsumedSupplements {
-        supplements: Vec<String>,
+        supplements: Vec<UnconsumedSupplement>,
     },
     TurnFinished {
         outcome: TurnOutcome,
@@ -358,6 +363,7 @@ enum CoreSessionWorkerCommand {
     RuntimeConfigUpdated,
     MaxRoundsUpdated,
     InterfacePreferencesUpdated,
+    ModelToolResultBytesUpdated,
     UpdateApiKey {
         api_key: String,
     },
@@ -369,6 +375,10 @@ enum CoreSessionWorkerCommand {
     },
     UpdateModelHttpTransport {
         options: agent_core::ModelHttpTransportOptions,
+    },
+    ReplaceModelServiceConfig {
+        config: Box<ModelServiceConfig>,
+        result_tx: Sender<Result<(), String>>,
     },
     UpdateMcp {
         base_capabilities: agent_core::capability::CapabilityRegistry,
@@ -393,6 +403,26 @@ enum CoreSessionWorkerCommand {
     Shutdown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UnconsumedSupplement {
+    #[serde(default)]
+    pub manual_context_compress: bool,
+    pub text: String,
+    pub additional_context: Option<String>,
+    pub command_id: Option<String>,
+}
+
+impl From<QueuedSupplement> for UnconsumedSupplement {
+    fn from(supplement: QueuedSupplement) -> Self {
+        Self {
+            text: supplement.text,
+            additional_context: supplement.additional_context,
+            command_id: supplement.command_id,
+            manual_context_compress: supplement.manual_context_compress,
+        }
+    }
+}
+
 #[derive(Default)]
 struct SupplementMailbox {
     accepting: bool,
@@ -401,18 +431,18 @@ struct SupplementMailbox {
 
 /// A manual compaction request should not wait behind long local work as
 /// long as a normal supplement: 10s is enough for a user-visible hint.
-const MANUAL_CONTEXT_COMPACT_DISPATCH_TIMEOUT: Duration = Duration::from_secs(10);
+const MANUAL_CONTEXT_COMPRESS_DISPATCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct QueuedSupplement {
     text: String,
     additional_context: Option<String>,
     command_id: Option<String>,
     queued_at: Instant,
-    /// Manual context-compaction request normalized onto the supplement
+    /// Manual context-compression request normalized onto the supplement
     /// shuttle: it rides the dispatch timeout to force the next model
     /// dispatch, then flips the manual compact flag instead of becoming
     /// prompt text.
-    manual_context_compact: bool,
+    manual_context_compress: bool,
 }
 
 enum PendingRuntimeUpdate {
@@ -426,6 +456,8 @@ enum PendingRuntimeUpdate {
     },
     MaxRounds(u32),
     ClaudeCodexToolDiscovery(bool),
+    ModelToolResultBytes(usize),
+    ContextCompressThresholdPercent(u8),
 }
 
 const CORE_COMMAND_ID_CAPACITY: usize = 1_024;
@@ -661,7 +693,7 @@ impl CoreSessionWorkerHandle {
                         additional_context: supplement.additional_context,
                         command_id,
                         queued_at: Instant::now(),
-                        manual_context_compact: false,
+                        manual_context_compress: false,
                     })
                     .collect(),
                 direct_resume,
@@ -734,7 +766,7 @@ impl CoreSessionWorkerHandle {
                     additional_context: None,
                     command_id: None,
                     queued_at: Instant::now(),
-                    manual_context_compact: false,
+                    manual_context_compress: false,
                 });
                 true
             })
@@ -765,7 +797,7 @@ impl CoreSessionWorkerHandle {
             additional_context: None,
             command_id: None,
             queued_at: Instant::now(),
-            manual_context_compact: false,
+            manual_context_compress: false,
         });
         Ok(true)
     }
@@ -826,7 +858,7 @@ impl CoreSessionWorkerHandle {
             additional_context,
             command_id,
             queued_at: Instant::now(),
-            manual_context_compact: false,
+            manual_context_compress: false,
         });
         Ok(true)
     }
@@ -835,17 +867,17 @@ impl CoreSessionWorkerHandle {
         let _ = self.try_add_user_supplement(supplement);
     }
 
-    /// User-initiated context compaction; effective even mid-turn because the
+    /// User-initiated context compression; effective even mid-turn because the
     /// turn loop polls this flag between model requests.
-    pub fn request_manual_context_compact(&self) -> Result<(), String> {
+    pub fn request_manual_context_compress(&self) -> Result<(), String> {
         self.manual_compact_requested.store(true, Ordering::SeqCst);
         Ok(())
     }
 
-    /// Queues a manual context-compaction request as a mailbox marker so a
+    /// Queues a manual context-compression request as a mailbox marker so a
     /// busy turn forces the next model dispatch after the compact dispatch
     /// timeout instead of waiting for the current local work to finish.
-    pub fn queue_manual_context_compact(&self) -> Result<bool, String> {
+    pub fn queue_manual_context_compress(&self) -> Result<bool, String> {
         let mut mailbox = self
             .supplement_mailbox
             .lock()
@@ -858,7 +890,7 @@ impl CoreSessionWorkerHandle {
             additional_context: None,
             command_id: None,
             queued_at: Instant::now(),
-            manual_context_compact: true,
+            manual_context_compress: true,
         });
         Ok(true)
     }
@@ -1029,6 +1061,28 @@ impl CoreSessionWorkerHandle {
         )
     }
 
+    pub fn update_model_tool_result_bytes(&self, max_bytes: usize) -> Result<(), String> {
+        agent_core::validate_model_tool_result_bytes(max_bytes)?;
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        self.enqueue_runtime_update(
+            PendingRuntimeUpdate::ModelToolResultBytes(max_bytes),
+            CoreSessionWorkerCommand::ModelToolResultBytesUpdated,
+        )
+    }
+
+    pub fn update_context_compress_threshold_percent(&self, percent: u8) -> Result<(), String> {
+        agent_core::validate_context_compress_threshold_percent(percent)?;
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        self.enqueue_runtime_update(
+            PendingRuntimeUpdate::ContextCompressThresholdPercent(percent),
+            CoreSessionWorkerCommand::RuntimeConfigUpdated,
+        )
+    }
+
     pub fn update_claude_codex_tool_discovery(&self, enabled: bool) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
@@ -1099,6 +1153,25 @@ impl CoreSessionWorkerHandle {
         self.command_tx
             .send(CoreSessionWorkerCommand::UpdateRequestFields { request_fields })
             .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    /// Replaces the complete model-service request configuration as one worker
+    /// command. The response channel is a barrier: after this returns, every
+    /// subsequently queued turn observes the new snapshot.
+    pub fn replace_model_service_config(&self, config: ModelServiceConfig) -> Result<(), String> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        let (result_tx, result_rx) = mpsc::channel();
+        self.command_tx
+            .send(CoreSessionWorkerCommand::ReplaceModelServiceConfig {
+                config: Box::new(config),
+                result_tx,
+            })
+            .map_err(|_| "core_session_worker_stopped".to_string())?;
+        result_rx
+            .recv()
+            .map_err(|_| "core_session_worker_stopped".to_string())?
     }
 
     pub fn update_mcp(
@@ -1705,6 +1778,19 @@ impl CoreSessionWorker {
                 interaction_profile: None,
             };
 
+            let context_id = identity.context_id.clone();
+            let worker_id = identity.worker_id.clone();
+            // Event-driven shell-job exit push: the supervisor thread of a
+            // background job publishes the finish topic immediately, so the
+            // stream UI stops timing without waiting for worker harvest
+            // (model-request prompt build or the idle 100ms poll).
+            let exit_event_tx = event_tx.clone();
+            core.set_shell_job_exit_listener(move |update| {
+                let event = agent_core::running_shell_job_exit_topic_event(update)
+                    .with_worker_scope(&context_id, &worker_id);
+                let _ = exit_event_tx.send(CoreSessionWorkerEvent::Topics(vec![event]));
+            });
+
             let mut has_running_shell_jobs = false;
             loop {
                 let command = if has_running_shell_jobs {
@@ -1737,10 +1823,12 @@ impl CoreSessionWorker {
                     | CoreSessionWorkerCommand::RuntimeConfigUpdated
                     | CoreSessionWorkerCommand::MaxRoundsUpdated
                     | CoreSessionWorkerCommand::InterfacePreferencesUpdated
+                    | CoreSessionWorkerCommand::ModelToolResultBytesUpdated
                     | CoreSessionWorkerCommand::UpdateApiKey { .. }
                     | CoreSessionWorkerCommand::UpdateHttpHeaders { .. }
                     | CoreSessionWorkerCommand::UpdateRequestFields { .. }
                     | CoreSessionWorkerCommand::UpdateModelHttpTransport { .. }
+                    | CoreSessionWorkerCommand::ReplaceModelServiceConfig { .. }
                     | CoreSessionWorkerCommand::UpdateMcp { .. }
                     | CoreSessionWorkerCommand::ExportContext { .. }
                     | CoreSessionWorkerCommand::ClearContext
@@ -1828,14 +1916,11 @@ impl CoreSessionWorker {
                                     // A structured stop is a hard boundary. Web-style turn UIs
                                     // also treat a visible final answer as a boundary so a late
                                     // supplement cannot create a second answer in the same turn.
-                                    let supplements = ui.close_supplements_for_main_context();
+                                    let supplements = ui.close_supplements_for_host_handoff();
                                     if !supplements.is_empty() {
                                         let _ = event_tx.send(
                                             CoreSessionWorkerEvent::UnconsumedSupplements {
-                                                supplements: supplements
-                                                    .into_iter()
-                                                    .map(|supplement| supplement.text)
-                                                    .collect(),
+                                                supplements,
                                             },
                                         );
                                     }
@@ -1993,6 +2078,11 @@ impl CoreSessionWorker {
                     | CoreSessionWorkerCommand::InterfacePreferencesUpdated => {
                         ui.apply_pending_runtime_updates(&mut core, &mut config);
                     }
+                    CoreSessionWorkerCommand::ModelToolResultBytesUpdated => {
+                        if let Some(max_bytes) = ui.take_model_tool_result_bytes_update() {
+                            let _ = core.set_model_tool_result_bytes(max_bytes);
+                        }
+                    }
                     CoreSessionWorkerCommand::UpdateApiKey { api_key } => {
                         config.api_key = api_key;
                         core.notify_runtime_config_changed();
@@ -2008,6 +2098,13 @@ impl CoreSessionWorker {
                     CoreSessionWorkerCommand::UpdateModelHttpTransport { options } => {
                         config.http_transport = options;
                         core.notify_runtime_config_changed();
+                    }
+                    CoreSessionWorkerCommand::ReplaceModelServiceConfig {
+                        config: replacement,
+                        result_tx,
+                    } => {
+                        replace_worker_model_service_config(&mut core, &mut config, *replacement);
+                        let _ = result_tx.send(Ok(()));
                     }
                     CoreSessionWorkerCommand::UpdateMcp {
                         base_capabilities,
@@ -2202,16 +2299,11 @@ impl<M: ModelClient> ToolGenRunner<'_, M> {
                 model_client,
             );
             if current.stop_summary.is_some() || !ui.continue_supplements_after_final_answer {
-                let supplements = ui.close_supplements_for_main_context();
+                let supplements = ui.close_supplements_for_host_handoff();
                 if !supplements.is_empty() {
                     let _ = ui
                         .event_tx
-                        .send(CoreSessionWorkerEvent::UnconsumedSupplements {
-                            supplements: supplements
-                                .into_iter()
-                                .map(|supplement| supplement.text)
-                                .collect(),
-                        });
+                        .send(CoreSessionWorkerEvent::UnconsumedSupplements { supplements });
                 }
                 break current;
             }
@@ -2300,6 +2392,82 @@ fn toolgen_failure_detail(outcome: &TurnOutcome) -> Option<String> {
     })
 }
 
+fn replace_worker_model_service_config(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    replacement: ModelServiceConfig,
+) {
+    *config = replacement;
+    core.set_max_llm_input_tokens(config.max_llm_input_tokens);
+    core.set_response_protocol(config.response_protocol);
+
+    let requirements = serde_json::to_string(&config.openai_compatible.requirements)
+        .expect("model endpoint requirements serialize");
+    let runtime_params = [
+        ("TIMEM_MODEL", config.model.clone()),
+        (
+            "TIMEM_API_PROTOCOL",
+            config.api_protocol.label().to_string(),
+        ),
+        (
+            "TIMEM_RESPONSE_PROTOCOL",
+            config.response_protocol.name().to_string(),
+        ),
+        ("TIMEM_BASE_URL", config.base_url.clone()),
+        ("TIMEM_TIMEOUT", config.timeout_secs.to_string()),
+        (
+            "TIMEM_MAX_LLM_INPUT",
+            config.max_llm_input_tokens.to_string(),
+        ),
+        (
+            "TIMEM_MAX_LLM_OUTPUT",
+            config.max_llm_output_tokens.to_string(),
+        ),
+        (
+            "TIMEM_MODEL_CATALOG_ID",
+            config
+                .openai_compatible
+                .catalog_id
+                .clone()
+                .unwrap_or_default(),
+        ),
+        ("TIMEM_MODEL_REQUIREMENTS", requirements),
+        (
+            "TIMEM_ENABLE_THINKING",
+            config
+                .openai_compatible
+                .enable_thinking
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        ),
+        (
+            "TIMEM_REASONING_EFFORT",
+            config
+                .openai_compatible
+                .reasoning_effort
+                .clone()
+                .unwrap_or_default(),
+        ),
+        ("TIMEM_STREAM", config.openai_compatible.stream.to_string()),
+        (
+            "TIMEM_OPENAI_CACHE_MODE",
+            config.openai_compatible.cache_mode.label().to_string(),
+        ),
+        (
+            "TIMEM_TOOL_CALL_MODE",
+            config.interaction.tool_call_mode.label().to_string(),
+        ),
+        (
+            "TIMEM_PARALLEL_TOOL_CALLS",
+            config.interaction.parallel_tool_calls.label().to_string(),
+        ),
+    ];
+    for (key, value) in runtime_params {
+        core.set_self_tool_runtime_param(key, value);
+    }
+    core.notify_runtime_config_changed();
+}
+
 fn apply_worker_runtime_update(
     core: &mut AgentCore,
     config: &mut ModelServiceConfig,
@@ -2378,8 +2546,31 @@ fn apply_worker_runtime_update(
         PendingRuntimeUpdate::ClaudeCodexToolDiscovery(enabled) => {
             core.set_claude_codex_tool_discovery(enabled);
         }
+        PendingRuntimeUpdate::ModelToolResultBytes(max_bytes) => {
+            let _ = core.set_model_tool_result_bytes(max_bytes);
+        }
+        PendingRuntimeUpdate::ContextCompressThresholdPercent(percent) => {
+            let _ = core.set_context_compress_threshold_percent(percent);
+        }
     }
     core.notify_runtime_config_changed();
+}
+
+impl WorkerTurnUi {
+    fn take_model_tool_result_bytes_update(&mut self) -> Option<usize> {
+        let Ok(mut updates) = self.pending_runtime_updates.lock() else {
+            return None;
+        };
+        let mut newest = None;
+        updates.retain(|update| match update {
+            PendingRuntimeUpdate::ModelToolResultBytes(max_bytes) => {
+                newest = Some(*max_bytes);
+                false
+            }
+            _ => true,
+        });
+        newest
+    }
 }
 
 impl TurnUi for WorkerTurnUi {
@@ -2394,16 +2585,28 @@ impl TurnUi for WorkerTurnUi {
         core: &mut AgentCore,
         config: &mut ModelServiceConfig,
     ) -> bool {
-        let updates = self
-            .pending_runtime_updates
-            .lock()
-            .map(|mut updates| std::mem::take(&mut *updates))
-            .unwrap_or_default();
+        let updates =
+            self.pending_runtime_updates
+                .lock()
+                .map(|mut updates| {
+                    let (deferred, applicable) = std::mem::take(&mut *updates)
+                        .into_iter()
+                        .partition(|update| {
+                            matches!(update, PendingRuntimeUpdate::ModelToolResultBytes(_))
+                        });
+                    *updates = deferred;
+                    applicable
+                })
+                .unwrap_or_default();
         let changed = !updates.is_empty();
         for update in updates {
             apply_worker_runtime_update(core, config, update);
         }
         changed
+    }
+
+    fn take_model_tool_result_bytes_update(&mut self) -> Option<usize> {
+        WorkerTurnUi::take_model_tool_result_bytes_update(self)
     }
 
     fn is_cancel_requested(&mut self) -> bool {
@@ -2414,7 +2617,7 @@ impl TurnUi for WorkerTurnUi {
         self.cancel_requested.swap(false, Ordering::SeqCst)
     }
 
-    fn take_manual_context_compact_request(&mut self) -> bool {
+    fn take_manual_context_compress_request(&mut self) -> bool {
         self.manual_compact_requested.swap(false, Ordering::SeqCst)
     }
 
@@ -2440,8 +2643,8 @@ impl TurnUi for WorkerTurnUi {
         let timeout = self.supplement_mailbox.lock().ok().and_then(|mailbox| {
             let oldest = mailbox.queue.first()?;
             let waited = oldest.queued_at.elapsed();
-            let threshold = if oldest.manual_context_compact {
-                MANUAL_CONTEXT_COMPACT_DISPATCH_TIMEOUT
+            let threshold = if oldest.manual_context_compress {
+                MANUAL_CONTEXT_COMPRESS_DISPATCH_TIMEOUT
             } else {
                 self.user_supplement_model_dispatch_timeout
             };
@@ -2471,6 +2674,17 @@ impl TurnUi for WorkerTurnUi {
         });
     }
 
+    fn on_reasoning_upgrade(
+        &mut self,
+        upgrade: Option<agent_core::model_requirements::ReasoningUpgrade>,
+    ) {
+        if let Some(upgrade) = upgrade {
+            let _ = self
+                .event_tx
+                .send(CoreSessionWorkerEvent::ReasoningUpgrade(upgrade));
+        }
+    }
+
     fn on_model_request_completed(&mut self, latency: Duration) {
         let _ = self
             .event_tx
@@ -2485,6 +2699,19 @@ impl TurnUi for WorkerTurnUi {
 
     fn on_interaction_profile(&mut self, profile: &agent_core::InteractionProfile) {
         self.interaction_profile = Some(profile.clone());
+    }
+
+    fn on_persisted_capability_probe(
+        &mut self,
+        identity: &agent_core::CapabilityProbeIdentity,
+        record: Option<&agent_core::PersistedCapabilityProbe>,
+    ) {
+        let _ = self
+            .event_tx
+            .send(CoreSessionWorkerEvent::CapabilityProbePersistence {
+                identity: identity.clone(),
+                record: record.cloned(),
+            });
     }
 
     fn on_model_interaction_response(&mut self, round: u32, response: &agent_core::LlmResponse) {
@@ -2614,7 +2841,7 @@ impl WorkerTurnUi {
             if let Some(command_id) = queued.command_id {
                 publish_command_accepted(&self.event_tx, &self.command_ids, command_id);
             }
-            if queued.manual_context_compact {
+            if queued.manual_context_compress {
                 self.manual_compact_requested.store(true, Ordering::SeqCst);
                 continue;
             }
@@ -2640,15 +2867,37 @@ impl WorkerTurnUi {
             .unwrap_or_default()
     }
 
-    fn close_supplements_for_main_context(&mut self) -> Vec<agent_core::UserSupplement> {
+    fn close_supplements_for_host_handoff(&mut self) -> Vec<UnconsumedSupplement> {
         self.supplement_dispatch_timeout = None;
-        self.supplement_mailbox
+        let queued = self
+            .supplement_mailbox
             .lock()
             .map(|mut mailbox| {
                 mailbox.accepting = false;
-                self.accept_queued_supplements(std::mem::take(&mut mailbox.queue))
+                std::mem::take(&mut mailbox.queue)
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        let mut supplements = Vec::new();
+        let mut compact = self.manual_compact_requested.swap(false, Ordering::SeqCst);
+        for queued in queued {
+            if let Some(command_id) = queued.command_id.as_ref() {
+                publish_command_accepted(&self.event_tx, &self.command_ids, command_id.clone());
+            }
+            if queued.manual_context_compress {
+                compact = true;
+                continue;
+            }
+            supplements.push(UnconsumedSupplement::from(queued));
+        }
+        if compact {
+            supplements.push(UnconsumedSupplement {
+                text: String::new(),
+                additional_context: None,
+                command_id: None,
+                manual_context_compress: true,
+            });
+        }
+        supplements
     }
 
     fn begin_toolgen_run(&mut self, tool_count: usize) {

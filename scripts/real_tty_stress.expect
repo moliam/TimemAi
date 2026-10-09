@@ -82,6 +82,9 @@ expect {
 
 spawn env \
     TIMEM_API_KEY=dummy \
+    TIMEM_UI_MODE=ordinary \
+    TIMEM_TOOL_CALL_MODE=inline \
+    TIMEM_RESPONSE_PROTOCOL=xml \
     TIMEM_API_PROTOCOL=openai-compatible \
     TIMEM_BASE_URL=http://127.0.0.1:$port/v1 \
     TIMEM_MODEL=fake-stress-model \
@@ -133,10 +136,13 @@ expect {
     }
     -re "STRESS_OK" {
         append output $expect_out(buffer)
-        wait_prompt
+        # The running-turn supplement itself contains STRESS_OK and is echoed
+        # by the shell. Only accept this marker after the command action has
+        # rendered; otherwise keep waiting for the authoritative final answer.
         if {!$saw_action_render && [string first "STRESS_ACTION_DONE" $output] < 0} {
-            error "stress scenario did not render command action"
+            exp_continue
         }
+        wait_prompt
         if {[info exists env(TIMEM_RUNTIME_IO_END_FILE)] && $env(TIMEM_RUNTIME_IO_END_FILE) ne ""} {
             close [open $env(TIMEM_RUNTIME_IO_END_FILE) "w"]
         }

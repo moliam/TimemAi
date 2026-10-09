@@ -43,6 +43,15 @@ describe("i18n catalogs", () => {
     expect(t("common.cancel")).toBe("取消");
   });
 
+  it("uses one concise conversation-compression status line", () => {
+    setLocale("zh");
+    expect(t("context.compressing")).toBe("对话压缩中...");
+    expect(t("context.compressing")).not.toContain("上下文");
+    setLocale("en");
+    expect(t("context.compressing")).toBe("Conversation compressing...");
+    setLocale("zh");
+  });
+
   it("use a deterministic default locale in non-browser tests", () => {
     expect(["zh", "en"]).toContain(getLocale());
   });

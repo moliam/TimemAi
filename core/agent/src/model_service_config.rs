@@ -131,6 +131,7 @@ fn model_service_config_from_sources_with_key_policy(
     env: &HashMap<String, String>,
     require_api_key: bool,
 ) -> Result<ModelServiceConfig, String> {
+    crate::model_catalog::ensure_loaded()?;
     let api_protocol = source
         .api_protocol
         .clone()
@@ -212,6 +213,7 @@ fn model_service_config_from_sources_with_key_policy(
         Some(value) => Some(value),
         None => env
             .get("TIMEM_ENABLE_THINKING")
+            .filter(|value| !value.trim().is_empty())
             .map(|value| parse_bool_env("TIMEM_ENABLE_THINKING", value))
             .transpose()?,
     };
@@ -219,6 +221,7 @@ fn model_service_config_from_sources_with_key_policy(
         .reasoning_effort
         .clone()
         .or_else(|| env.get("TIMEM_REASONING_EFFORT").cloned())
+        .filter(|value| !value.trim().is_empty())
         .map(|value| validate_reasoning_effort(&value))
         .transpose()?;
     let stream = match source.stream {
@@ -268,6 +271,14 @@ fn model_service_config_from_sources_with_key_policy(
             ..crate::InteractionConfig::default()
         },
         openai_compatible: OpenAiCompatibleOptions {
+            catalog_id: env
+                .get("TIMEM_MODEL_CATALOG_ID")
+                .and_then(|v| crate::model_catalog::known_id(v)),
+            requirements: parse_requirements(
+                env.get("TIMEM_MODEL_REQUIREMENTS")
+                    .map(String::as_str)
+                    .unwrap_or(""),
+            )?,
             enable_thinking,
             reasoning_effort,
             stream,
@@ -318,11 +329,25 @@ pub fn apply_openai_compatible_env_value(
     value: &str,
 ) -> Result<bool, String> {
     match key {
+        "TIMEM_MODEL_REQUIREMENTS" => {
+            options.requirements = parse_requirements(value)?;
+        }
+        "TIMEM_MODEL_CATALOG_ID" => {
+            options.catalog_id = crate::model_catalog::known_id(value);
+        }
         "TIMEM_ENABLE_THINKING" => {
-            options.enable_thinking = Some(parse_bool_env(key, value)?);
+            options.enable_thinking = if value.trim().is_empty() {
+                None
+            } else {
+                Some(parse_bool_env(key, value)?)
+            };
         }
         "TIMEM_REASONING_EFFORT" => {
-            options.reasoning_effort = Some(validate_reasoning_effort(value)?);
+            options.reasoning_effort = if value.trim().is_empty() {
+                None
+            } else {
+                Some(validate_reasoning_effort(value)?)
+            };
         }
         "TIMEM_STREAM" => {
             options.stream = parse_bool_env(key, value)?;
@@ -380,3 +405,18 @@ pub fn validate_api_key(api_key: &str) -> Result<(), String> {
 #[cfg(test)]
 #[path = "../tests/unit/model_service_config_tests.rs"]
 mod tests;
+
+fn parse_requirements(
+    value: &str,
+) -> Result<crate::model_requirements::EndpointRequirements, String> {
+    if value.trim().is_empty() {
+        return Ok(Default::default());
+    }
+    if value.len() > 8192 {
+        return Err("model_requirements_too_large".into());
+    }
+    let requirements: crate::model_requirements::EndpointRequirements =
+        serde_json::from_str(value).map_err(|e| format!("invalid_model_requirements:{e}"))?;
+    requirements.validate()?;
+    Ok(requirements)
+}

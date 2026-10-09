@@ -31,6 +31,8 @@ fn retryable_model_system_errors_cover_network_and_transient_http() {
         "model_http_429: rate limit",
         "model_http_500: upstream overloaded",
         "model_http_503",
+        "model_responses_stream_failed: event_type=error code=server_is_overloaded type=error message=Our servers are currently overloaded. Please try again later.",
+        "model_responses_stream_failed: event_type=response.failed code=rate_limit_exceeded type=server_error message=retry later",
     ] {
         assert!(is_retryable_model_system_error(error), "{error}");
     }
@@ -53,11 +55,76 @@ fn non_retryable_model_errors_do_not_waste_rounds() {
         "model_internal_error: reentrant model HTTP call",
         "model_request_too_large: request body exceeds limit",
         "model_redirect_blocked: cross-origin redirect",
+        "model_responses_stream_failed: event_type=response.failed code=invalid_request_error type=invalid_request_error message=bad tools",
+        "model_responses_stream_failed",
         "invalid_json",
         "status_required",
         "next_actions[0].args_required",
     ] {
         assert!(!is_retryable_model_system_error(error), "{error}");
+    }
+}
+
+#[test]
+fn explicit_native_tool_rejection_requires_status_field_and_rejection_signal() {
+    for error in [
+        "model_http_400: unknown parameter: tools",
+        "model_http_400: tool_choice is not supported for this model",
+        "model_http_404: functions are not allowed by this endpoint",
+        "model_http_422: extra inputs are not permitted: parallel_tool_calls",
+    ] {
+        assert!(is_explicit_native_tools_unsupported(error), "{error}");
+    }
+    for error in [
+        "cancelled_by_user",
+        "model_network_error: tools connection reset",
+        "model_http_500: tools unsupported upstream",
+        "model_http_401: tools are not permitted without authentication",
+        "model_http_403: tools are not allowed for this account",
+        "model_http_408: unknown parameter tools",
+        "model_http_409: tools not supported while deployment starts",
+        "model_http_413: tools request body too large",
+        "model_http_425: tools unsupported before deployment is ready",
+        "model_http_429: tools are not allowed over quota",
+        "model_http_400: invalid model",
+        "model_http_400: invalid parameter: tools",
+        "model_http_400: tools must be a non-empty array",
+    ] {
+        assert!(!is_explicit_native_tools_unsupported(error), "{error}");
+    }
+}
+
+#[test]
+fn parallel_control_rejection_requires_exact_field_non_transient_4xx_and_rejection_signal() {
+    for error in [
+        "model_http_400: unknown parameter: parallel_tool_calls",
+        "model_http_404: disable_parallel_tool_use is not supported by this endpoint",
+        "model_http_422: extra inputs are not permitted: parallel_tool_calls",
+    ] {
+        assert!(
+            is_explicit_parallel_tool_control_unsupported(error),
+            "{error}"
+        );
+    }
+    for error in [
+        "cancelled_by_user",
+        "model_network_error: parallel_tool_calls connection reset",
+        "model_http_500: parallel_tool_calls unsupported upstream",
+        "model_http_401: parallel_tool_calls not permitted without authentication",
+        "model_http_403: disable_parallel_tool_use is not allowed for this account",
+        "model_http_408: unknown parameter parallel_tool_calls",
+        "model_http_409: parallel_tool_calls not supported while deployment starts",
+        "model_http_413: parallel_tool_calls payload too large",
+        "model_http_425: parallel_tool_calls unsupported before deployment is ready",
+        "model_http_429: parallel_tool_calls not allowed over quota",
+        "model_http_400: invalid model",
+        "model_http_400: invalid parameter: parallel_tool_calls",
+        "model_http_400: tools are not supported",
+    ] {
+        assert!(
+            !is_explicit_parallel_tool_control_unsupported(error),
+            "{error}"
+        );
     }
 }
 

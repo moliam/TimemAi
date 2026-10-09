@@ -47,6 +47,14 @@ describe("fixed composer scroll ownership", () => {
     );
   });
 
+  it("uses the formal interface font for the CWD and debug paths", () => {
+    expect(source).toContain('className="composer-cwd-inline"');
+    expect(source).toContain('className="composer-cwd-inline composer-debug-inline composer-debug-link"');
+    const pathRule = styles.match(/\.composer-cwd-inline span \{([^}]*)\}/)?.[1];
+    expect(pathRule).toContain("font-family: var(--ui-font)");
+    expect(pathRule).not.toMatch(/SFMono|Consolas|monospace/);
+  });
+
   it("keeps multiline wheel handling attached across conditional composer remounts", () => {
     const attachment = source.slice(
       source.indexOf("const attachComposerTextarea = useCallback"),

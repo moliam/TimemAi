@@ -16,9 +16,14 @@ use std::fmt;
 ///
 /// Authentication remains product policy and is intentionally not handled here.
 pub fn apply_browser_security_headers(response: &mut Response) {
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    // Handlers may opt a response into caching (e.g. content-hashed static
+    // assets with immutable long-lived caching); never clobber an explicit
+    // handler-provided policy, mirroring the CSP rule below.
+    if !response.headers().contains_key(header::CACHE_CONTROL) {
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
     // Handlers may set a page-specific CSP (e.g. debug pages allowing inline
     // scripts); never clobber an explicit handler-provided policy.
     if !response

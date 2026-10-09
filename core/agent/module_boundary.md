@@ -13,6 +13,7 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
 ## Belongs here
 
 - Protocol-neutral runtime data structures and algorithms.
+- `command_output` owns bounded retention and post-exit drain policy for finite command bindings and tool self-tests. Platform owns interruptible pipe reads; capture deadlines do not establish descendant ownership. Finite command bindings drain output before nonblocking stdin delivery and apply one execution deadline to input backpressure and process waiting. Input setup, write failure, or exit before complete delivery cannot be reported as success; no detached writer thread is created. Command-binding timeouts and input failures retain bounded captured stdout/stderr when available, or report capture failure separately, without replacing the timeout outcome or extending execution deadlines.
 - The authoritative per-Session Turn Gate and minimal Turn reducer: durable
   `TurnId`, monotonic `TurnEpoch`, exact `TurnToken` validation, Active-Turn
   ownership, stop intent, immutable terminal outcome, and rejection of stale or
@@ -41,10 +42,25 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   response parsing, and audit redaction metadata. Hosts should not rebuild
   model API protocol details, execute model HTTP, or reinterpret model HTTP
   response semantics.
+- Native HTTP uses a cached current-thread runtime and connection pool. Transport
+  errors, cancellation, and incomplete/invalid streams retire that runtime and
+  cancel its async connection tasks before returning, so rejected bodies cannot
+  leave unread sockets retained while the runtime is idle. Successful complete
+  responses retain keep-alive reuse; a subsequent request rebuilds a retired
+  transport. Shutdown does not wait for already-running blocking DNS work.
 - Model retry policy, retry decision data, and model-call outcome accounting.
   Model service I/O belongs behind the core/model service boundary. Hosts may surface
   waiting/cancellation UX, but should not redefine retryability or retry
   metadata.
+- Native function-call capability negotiation. Core owns the strict endpoint/model identity,
+  process cache, persisted-result validation, probe request and result classification, periodic
+  re-probe of durable negative results, and `core.model.capability_negotiation` topics. Only an
+  explicit provider rejection of native/function tools may become a durable unsupported result;
+  authentication, rate limiting, cancellation, transport/5xx/generic errors, and successful
+  responses without the requested probe calls remain inconclusive and keep the Native path.
+  Formal model-request failures are not capability evidence and must not trigger an Inline
+  fallback. Hosts may supply catalog knowledge and persist/clear exact Core records, but must not
+  reinterpret these semantics.
 - Capability and tool registries, including validation data loaded from
   resources.
 - MCP client transport, server discovery, namespaced dynamic tool registration,
@@ -52,9 +68,16 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   parses the registered action name and JSON arguments, while the MCP server is
   authoritative for its full JSON Schema validation. MCP failures are bounded
   action evidence, never response-protocol repair; failed transports are evicted
-  so a late response or dead connection cannot contaminate later calls. Applying a host-requested MCP update
-  compares complete tool definitions and submits one `SYSTEM` capability-change
-  component only when the model-visible capability set actually changed.
+  so a late response or dead connection cannot contaminate later calls. Current
+  MCP definitions come from the capability registry on every request: Native
+  mode sends them through provider API tools, while Inline mode renders one
+  request-level current-capabilities section outside prompt deltas. Historical
+  `mcp_capability_catalog` slices are suppressed during restore so stale schemas
+  cannot compete with current registry state. Applying a host-requested MCP
+  update compares complete tool definitions and submits one concise `SYSTEM`
+  capability-change component only when the model-visible capability set
+  actually changed; that notification never copies full schemas or instruction
+  bodies.
 - Built-in action dispatch by registered action/binding name. Core may route a
   manifest-backed builtin action to its callback through
   `resources/capabilities/tools/registry.rs`, but concrete option parsing and
@@ -95,7 +118,11 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
 - Active-turn reminders. Core evaluates the host-loaded, user-global reminder
   schedules independently for active-time and completed-round intervals, then
   submits each due random selection as a SYSTEM component before the next model
-  request. Selecting `NONE` consumes that interval without prompt injection.
+  request. Each post-round dispatch boundary evaluates progress, time, and round
+  schedules once, batching all due components into one prompt rebuild. Re-entering
+  that boundary for host updates must not inject another period before dispatch;
+  the next actual model round rearms evaluation. The first request has no reminder.
+  Selecting `NONE` consumes that interval without prompt injection.
   Host-decision wait time is excluded, long blocking calls are not interrupted,
   and missed time intervals collapse rather than building a stale backlog.
 - Host-decision results once chosen by the UI, such as applying user approval
@@ -118,9 +145,36 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   structured turn input. Core consumes these values when assembling model
   context; reusable runtime loops should not hard-code a terminal host identity.
 - Memory, scratch, raw chat, context shrink/compact, and conflict handling.
-  A successful compact re-injects one bounded RUNTIME snapshot of currently
-  applied MCP actions when any are active; pending host configuration and MCP
-  secrets are never included.
+  Model-visible compression guidance must tell the model what to inspect,
+  preserve, summarize, select, and verify. It may state observable consequences
+  needed to make a safe choice, but must not explain Core's deletion algorithm,
+  telemetry, prompt-rewrite sequence, or reinjection implementation; those
+  details belong in this boundary document, code comments, and tests.
+  Context compression is retain-by-exception: only deltas explicitly named in
+  `keep` remain verbatim; every other live delta is removed after useful state
+  is extracted into the authoritative summary. Optional `offload` ids are saved
+  to scratch before removal and may not overlap `keep`; missing keep/offload ids
+  fail closed. Successful compaction action results stay minimal: the next model prompt gets
+  completion status and only actionable follow-up data such as an offload
+  `scratch_id`, never the full discarded/offloaded delta-id lists, shrink
+  counters, or post-shrink live-ref diagnostics. Detailed ids and token
+  accounting remain available to structured host topics; failed compaction may
+  include missing ids and current live refs so the model can repair its call.
+  Current MCP schemas are request-level capability state rather than prompt
+  history: they have no delta id, are not selectable by `keep`/`offload`, and
+  remain available after compression without reinjection. The full rendered
+  prompt estimator includes the Inline MCP section, while the dynamic-history
+  estimator excludes it because compression cannot remove it. Across successive
+  successful compactions, every
+  assistant-authored replacement summary remains authoritative, while only the
+  latest runtime CWD/memo success confirmation stays model-visible.
+- Dynamic prompt-context snapshots and reset semantics. Core owns the complete
+  consistency unit: rendered deltas, Native exchanges, prompt-token baseline,
+  active memo, and pending runtime-authority memo notices. Import replaces the
+  entire prior unit, including when the imported snapshot is empty; clear drops
+  every model-visible and one-shot pending component so the next turn is fresh.
+  Core also owns whether this compound snapshot is empty. Hosts may atomically
+  persist, consume, and restore it, but must not infer emptiness from one field.
 - Cross-host Session persistence schemas. Core owns `StoredSession`,
   `ChatHistoryRecord`, history paging, and resume-notice format so Shell, Web,
   iOS, and future hosts share one JSONL history contract. The first resume
@@ -141,6 +195,8 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   `core.toolgen` lifecycle topics.
   ToolGen failure must not replace a successful source-turn result. Hosts own
   the manual trigger and repository presentation, not candidate validation.
+- The single model-visible tool-result gate. Core validates the supported per-tool result budgets, defaults each AgentCore to 16 KiB, and bounds the complete structured action-result envelope while preserving valid JSON and head/tail retention semantics; Hosts may configure the value but may not recreate the gate.
+- Disk-pressure observation gates, comparable-sample baselines, thresholds and model notices. Filesystem discovery, device identity, deduplication and usage sampling are owned by `core/platform::filesystem_usage_snapshot`; Agent supplies only working paths and consumes platform-neutral snapshots.
 - Local tool execution abstractions that return structured action evidence.
 - Registered command-tool foreground/background execution semantics. Core owns
   background job ids, persisted status/output files, polling, cancellation,
@@ -376,3 +432,35 @@ an explicitly test-only hook needed for private white-box access.
 Session metadata also preserves an optional `model_endpoint_id` for stable
 host-managed endpoint selection. Old records deserialize without this field;
 secrets remain in owner-protected configuration, never in the binding ID.
+
+## Reasoning policy boundary
+
+`reasoning.rs` owns protocol-independent preference, per-request demand and effective
+policy. Version 0 retains legacy ordinary/required behavior; version 1 uses daily H0
+and optional critical-call H1 within the model-ordered allowed subset. Unknown
+capabilities never invent an ordering. Explicit adaptive disable is retained.
+Existing persisted `OpenAiCompatibleOptions` reasoning fields are a compatibility
+input, not independent policy authority in each adapter. `model_api` resolves them
+once through `model_requirements`; `model_payload` maps the effective policy to
+Chat Completions, Responses or the legacy Anthropic path.
+Callers may also supply `EffectiveReasoning` to `build_model_request_with_policy`.
+Protocol adapters must not reinterpret scheduling flags or downgrade intensity.
+Anthropic uses adaptive thinking and output effort, not invented token budgets;
+unsupported protocol-level effort is rejected before HTTP. Model-specific adaptive
+support is validated upstream (no model-name heuristics or silent legacy fallback). A model-facing reasoning trailer is injected only when the resolved request policy is a real increase above the normal H0 baseline; a critical scheduling flag or enabled thinking alone is insufficient. The trailer asks the model to use the stronger pass for direction, methodology, and corrective reflection while preserving the active response/compaction protocol.
+
+### 模型白名单接入
+`model_catalog` 负责内置/启动目录 JSON 描述、UI 无关投影、默认值、native-safe 约束及预算准入。`model_requirements` 以显式供应商+模型匹配能力并解析本次需求，模板 ID 仅为建议来源（v0 保留绑定兼容）。`model_payload` 选择描述中已注册的适配器并做最终字段一致性校验。配置不能执行脚本或任意 JSON path；新增同协议模型只需描述文件，新 wire 行为必须实现并测试处理器。详见 `docs/model-endpoint-architecture.md`。
+
+### Responses SSE
+Responses 复用有界 SSE 分帧与 HTTP 取消/超时传输。会话预览只接收 response.output_text.delta，忽略 reasoning 与函数参数增量；权威结果必须来自 response.completed 或 response.incomplete 的完整 response，复用非流式的文本、函数调用、用量解析。缺失/重复/结构错误的结束事件或 error/response.failed 均拒绝作为成功结果。函数调用不从未完成参数增量执行。
+
+### Zhipu catalog adapter
+
+Built-in model profiles select a typed reasoning adapter in Core. Zhipu Chat
+profiles map thinking fields and enforce final-wire consistency before I/O.
+Assistant reasoning continuation is bounded opaque metadata carried on the first
+native call of an exchange, not tool arguments or public assistant text. It is
+replayed only for the same capability descriptor and model (not the editable template source); absent legacy metadata is
+valid. Cross-turn preserved thinking is not promised across context compression.
+See `docs/zhipu-model-catalog.md` for scope, evidence and tests.

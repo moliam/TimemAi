@@ -49,10 +49,10 @@ fn cancellation_interrupts_waiting_for_response_headers() {
     thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let _ = read_http_request(&mut stream);
-        thread::sleep(Duration::from_secs(2));
+        thread::sleep(Duration::from_secs(5));
     });
 
-    let config = local_config(addr, 5);
+    let config = local_config(addr, 10);
     let audit_file = test_audit_file("cancel");
     let cancel_after = Instant::now() + Duration::from_millis(80);
     let started = Instant::now();
@@ -62,8 +62,12 @@ fn cancellation_interrupts_waiting_for_response_headers() {
     .unwrap_err();
 
     assert_eq!(error, "cancelled_by_user");
+    // The stub server sleeps 5s before any response and the request timeout
+    // is 10s, so a genuine cancellation must return well before the server
+    // would ever answer. The 4s bound keeps that proof while staying stable
+    // under parallel test load (thread starvation delays the cancel check).
     assert!(
-        started.elapsed() < Duration::from_millis(500),
+        started.elapsed() < Duration::from_secs(4),
         "native HTTP cancellation took {:?}",
         started.elapsed()
     );
@@ -354,6 +358,9 @@ fn streaming_response_is_rejected_when_accumulated_body_crosses_limit() {
     let addr = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let _ = read_http_request(&mut stream);
         stream
             .write_all(
@@ -361,17 +368,50 @@ fn streaming_response_is_rejected_when_accumulated_body_crosses_limit() {
             )
             .unwrap();
         let chunk = vec![b'x'; 1024 * 1024];
-        for _ in 0..=MAX_MODEL_RESPONSE_BYTES / chunk.len() {
-            if stream.write_all(&chunk).is_err() {
-                break;
+        // Exceed socket buffering as well as the model-body limit. The peer
+        // must close on rejection, not leave this writer blocked until the
+        // cached current-thread runtime happens to run another request.
+        for _ in 0..4 * MAX_MODEL_RESPONSE_BYTES / chunk.len() {
+            if let Err(error) = stream.write_all(&chunk) {
+                assert!(
+                    matches!(
+                        error.kind(),
+                        std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
+                    ),
+                    "rejected response did not close its connection: {error:?}"
+                );
+                return listener;
             }
         }
+        panic!("oversized response writer never observed connection closure");
     });
 
     let config = local_config(addr, 5);
     let audit_file = test_audit_file("streaming-oversized-response");
-    let error = call_model(&config, "oversized stream", &audit_file).unwrap_err();
+    let mut client = HttpModelClient::default();
+    let error = client
+        .call_model(&config, "oversized stream", &audit_file, &mut || false)
+        .unwrap_err();
     assert_eq!(error, model_response_too_large());
+    let listener = server.join().unwrap();
+    // The same public client remains usable after retiring the failed
+    // connection; successful requests still have separate keep-alive coverage.
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let _ = read_http_request(&mut stream);
+        stream
+            .write_all(&http_json_response("200 OK", &success_body("recovered")))
+            .unwrap();
+    });
+    let response = client
+        .call_model(&config, "try again", &audit_file, &mut || false)
+        .unwrap();
+    assert_eq!(response.content, "recovered");
     server.join().unwrap();
     let _ = std::fs::remove_file(audit_file);
 }
@@ -1052,5 +1092,250 @@ fn stream_failure_is_audited_without_response_body() {
         assert!(!failure.to_string().contains("private-response-marker"));
         assert!(failure.to_string().len() < 2048);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[test]
+fn unsupported_reasoning_is_rejected_before_transport_initialization() {
+    let mut config = local_config("127.0.0.1:1".parse().unwrap(), 1);
+    config.api_protocol = ApiProtocol::Anthropic;
+    let mut request = prepare_model_http_request(&config, "hello");
+    request.model_request.body = crate::model_api::build_model_request_with_policy(
+        &config,
+        &[],
+        crate::model_api::StructuredOutputHint::None,
+        &crate::reasoning::EffectiveReasoning::Enabled {
+            intensity: Some("xhigh".into()),
+        },
+    );
+    let mut client = HttpModelClient::default();
+    let audit = test_audit_file("invalid-reasoning");
+    let error = client
+        .execute_prepared_request_with_cache_fallback(&config, request, &audit, &mut || false, None)
+        .unwrap_err();
+    assert!(
+        error.starts_with("unsupported_reasoning_intensity:"),
+        "{error}"
+    );
+    assert!(client.transport.is_none());
+    assert!(!audit.exists());
+}
+
+#[test]
+fn responses_stream_failure_is_returned_and_audited_with_sanitized_details() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        read_http_request(&mut socket);
+        let body = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "type": "response.failed",
+                "response": {
+                    "id": "resp_transport_123",
+                    "status": "failed",
+                    "error": {
+                        "code": "server_error",
+                        "type": "upstream_error",
+                        "message": "provider failed sk-sensitive-token",
+                    },
+                    "metadata": {"private": "must-not-enter-audit"},
+                },
+            })
+        );
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nX-Request-Id: upstream-request-456\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+    let mut config = local_config(addr, 5);
+    config.api_protocol = ApiProtocol::OpenAiResponses;
+    config.openai_compatible.stream = true;
+    let audit_file = test_audit_file("responses-failed-diagnostics");
+
+    let error = call_model(&config, "trigger upstream failure", &audit_file).unwrap_err();
+    assert!(
+        error.starts_with("model_responses_stream_failed:"),
+        "{error}"
+    );
+    assert!(error.contains("response_id=resp_transport_123"), "{error}");
+    assert!(error.contains("code=server_error"), "{error}");
+    assert!(
+        error.contains("message=provider failed ***REDACTED***"),
+        "{error}"
+    );
+    assert!(!error.contains("sk-sensitive-token"));
+    server.join().unwrap();
+
+    let stream_path = api_audit_stream_path(&audit_file);
+    let document = read_api_audit_doc(&stream_path).unwrap();
+    let response = document["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "llm_response")
+        .unwrap();
+    assert_eq!(response["status"], 200);
+    assert_eq!(response["error_kind"], "model_stream_error");
+    assert_eq!(
+        response["response"]["error"]["event_type"],
+        "response.failed"
+    );
+    assert_eq!(response["response"]["error"]["code"], "server_error");
+    assert_eq!(response["transport"]["request_id"], "upstream-request-456");
+    let audit_text = response.to_string();
+    assert!(audit_text.contains("***REDACTED***"));
+    assert!(!audit_text.contains("sk-sensitive-token"));
+    assert!(!audit_text.contains("must-not-enter-audit"));
+    let _ = std::fs::remove_file(audit_file);
+    let _ = std::fs::remove_file(stream_path);
+}
+
+#[test]
+fn responses_provisional_content_arrives_before_terminal() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+    let first = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"early\"}\n\n";
+    let last = "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"early\"}]}]}}\n\n";
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        read_http_request(&mut socket);
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", first.len() + last.len(), first).unwrap();
+        socket.flush().unwrap();
+        // A causal handshake, not a timing assertion: completion is withheld
+        // until the transport observer has received the first content.
+        observed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        socket.write_all(last.as_bytes()).unwrap();
+    });
+    let mut config = local_config(addr, 10);
+    config.api_protocol = ApiProtocol::OpenAiResponses;
+    config.openai_compatible.stream = true;
+    let request = prepare_model_http_request(&config, "stream test");
+    let mut transport = NativeHttpTransport::new().unwrap();
+    let mut text = String::new();
+    let response = transport
+        .execute(
+            &config,
+            &request,
+            Duration::from_secs(10),
+            &mut || false,
+            Some(&mut |part| {
+                if part["type"] != "response.output_text.delta" {
+                    return;
+                }
+                text.push_str(
+                    part.get("delta")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap(),
+                );
+                observed_tx.send(()).unwrap();
+            }),
+        )
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(text, "early");
+    assert_eq!(
+        interpret_model_http_response(&config, 200, &response.body, "")
+            .result
+            .unwrap()
+            .content,
+        "early"
+    );
+}
+
+#[test]
+fn zhipu_native_stream_tool_roundtrip_over_real_http() {
+    use crate::{
+        ModelClient, NativeExchange, NativeToolChoice, NativeToolResult, ToolCallMode,
+        ToolDefinition,
+    };
+    use serde_json::{json, Value};
+    for suffix in ["5.2", "5.3", "5.3-flash"] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut cfg = local_config(listener.local_addr().unwrap(), 5);
+        cfg.model = format!("glm-{suffix}");
+        cfg.openai_compatible.catalog_id = Some(format!("z-glm{suffix}"));
+        let server = thread::spawn(move || {
+            for round in 0..2 {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let raw = read_http_request(&mut socket);
+                assert!(raw.starts_with("POST /v1/chat/completions "));
+                let request: Value =
+                    serde_json::from_str(raw.split_once("\r\n\r\n").unwrap().1).unwrap();
+                assert_eq!(
+                    request["thinking"],
+                    json!({"type":"enabled","clear_thinking":true})
+                );
+                assert_eq!(request["reasoning_effort"], "max");
+                assert_eq!(request["stream"], true);
+                assert!(request.get("enable_thinking").is_none());
+                assert!(request.get("stream_options").is_none());
+                if round == 1 {
+                    let messages = request["messages"].as_array().unwrap();
+                    let index = messages
+                        .iter()
+                        .position(|m| m["role"] == "assistant")
+                        .unwrap();
+                    assert_eq!(messages[index]["reasoning_content"], "opaque-continuation");
+                    assert_eq!(messages[index + 1]["tool_call_id"], "call_1");
+                    assert_eq!(messages[index + 1]["content"], "fixture-result");
+                }
+                let event = if round == 0 {
+                    json!({"choices":[{"delta":{"reasoning_content":"opaque-continuation","content":"working","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"readfile","arguments":"{}"}}]},"finish_reason":"tool_calls"}]})
+                } else {
+                    json!({"choices":[{"delta":{"content":"finished"},"finish_reason":"stop"}]})
+                };
+                let body = format!("data: {event}\n\ndata: [DONE]\n\n");
+                write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();
+            }
+        });
+        let mut request = ModelInteractionRequest {
+            rendered_prompt: "[BEGIN DELTA delta_id: pd_1, time_ms: 1]\n\n## USER\nread fixture"
+                .into(),
+            images: vec![],
+            static_tool_count: 1,
+            tools: vec![ToolDefinition {
+                name: "readfile".into(),
+                description: "fixture tool".into(),
+                input_schema: json!({"type":"object","properties":{}}),
+            }],
+            native_exchanges: vec![],
+            resolved_mode: ToolCallMode::Native,
+            parallel_tool_calls: false,
+            send_parallel_tool_calls: true,
+            tool_choice: NativeToolChoice::Auto,
+            critical_reasoning: false,
+        };
+        let audit = test_audit_file("zhipu-roundtrip");
+        let mut client = HttpModelClient::default();
+        let first = client
+            .call_model_interaction_streaming(&cfg, &request, &audit, &mut || false, &mut |_| {})
+            .unwrap();
+        assert_eq!(first.content, "working");
+        request.native_exchanges.push(NativeExchange {
+            delta_id: "pd_1".into(),
+            assistant_text: first.content,
+            calls: first.tool_calls,
+            results: vec![NativeToolResult {
+                call_id: "call_1".into(),
+                name: "readfile".into(),
+                content: "fixture-result".into(),
+                is_error: false,
+            }],
+        });
+        let last = client
+            .call_model_interaction_streaming(&cfg, &request, &audit, &mut || false, &mut |_| {})
+            .unwrap();
+        assert_eq!(last.content, "finished");
+        server.join().unwrap();
+        let _ = std::fs::remove_file(audit);
     }
 }

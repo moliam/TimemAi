@@ -2,7 +2,7 @@ use crate::response_protocol::ParsedAction;
 use crate::{
     ActionExecution, ActionOutcome, ActionRuntime, ActionStatus, AgentCore, ApprovalRequest,
     BashApprovalMode, BashResultEvidence, LongRunningCommandStatus, PendingApproval,
-    PendingApprovedAction,
+    PendingApprovedAction, StreamCaptureTruncation,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -16,6 +16,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(all(test, unix))]
 static SHELL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const LONG_RUNNING_COMMAND_PROMPT_AFTER: Duration = Duration::from_secs(60);
+/// Default total polling wait budget (loop_timeout_ms) when loop_cmd is present.
+const DEFAULT_LOOP_TIMEOUT_MS: i64 = 60_000;
 
 pub(crate) fn is_local_shell_action(action: &str) -> bool {
     matches!(action, "run_bash" | "run_powershell")
@@ -41,11 +43,15 @@ pub struct RunningShellJob {
     pub session_id: String,
     pub turn_id: String,
     pub created_at_ms: i64,
+    pub notes: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellJobExitUpdate {
     pub pid: u32,
+    /// Whether a finish topic for this job was already published through the
+    /// manager's exit listener, so later consumption must not duplicate it.
+    pub topic_published: bool,
     pub tool_call_id: String,
     pub kind: String,
     pub command: String,
@@ -55,8 +61,11 @@ pub struct ShellJobExitUpdate {
     pub created_at_ms: i64,
     pub elapsed_ms: i64,
     pub status: String,
+    pub capture_error: Option<String>,
     pub stdout: String,
     pub stderr: String,
+    pub stdout_truncation: Option<StreamCaptureTruncation>,
+    pub stderr_truncation: Option<StreamCaptureTruncation>,
     pub output: String,
 }
 
@@ -86,6 +95,7 @@ struct BoundedShellOutput {
     bytes: std::collections::VecDeque<u8>,
     retain_tail: bool,
     truncated: bool,
+    original_bytes: usize,
 }
 
 impl BoundedShellOutput {
@@ -94,9 +104,11 @@ impl BoundedShellOutput {
             bytes: std::collections::VecDeque::with_capacity(SHELL_OUTPUT_LIMIT_BYTES),
             retain_tail,
             truncated: false,
+            original_bytes: 0,
         }
     }
     fn push(&mut self, chunk: &[u8]) {
+        self.original_bytes = self.original_bytes.saturating_add(chunk.len());
         if self.retain_tail {
             if chunk.len() >= SHELL_OUTPUT_LIMIT_BYTES {
                 self.bytes.clear();
@@ -124,18 +136,23 @@ impl BoundedShellOutput {
             self.truncated = self.truncated || chunk.len() > remaining;
         }
     }
-    fn text(&self) -> String {
+    fn snapshot(&self) -> ShellOutputSnapshot {
         let bytes = self.bytes.iter().copied().collect::<Vec<_>>();
-        let text = String::from_utf8_lossy(&bytes);
-        if !self.truncated {
-            return text.into_owned();
-        }
-        if self.retain_tail {
-            format!("[output truncated; retained last {SHELL_OUTPUT_LIMIT_BYTES} bytes]\n{text}")
-        } else {
-            format!("{text}\n[output truncated; retained first {SHELL_OUTPUT_LIMIT_BYTES} bytes]")
+        ShellOutputSnapshot {
+            text: String::from_utf8_lossy(&bytes).into_owned(),
+            truncation: self.truncated.then_some(StreamCaptureTruncation {
+                original_bytes: self.original_bytes,
+                retained_bytes: bytes.len(),
+                retained: if self.retain_tail { "tail" } else { "head" },
+            }),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct ShellOutputSnapshot {
+    text: String,
+    truncation: Option<StreamCaptureTruncation>,
 }
 
 type SharedShellOutput = Arc<Mutex<BoundedShellOutput>>;
@@ -150,9 +167,15 @@ enum ShellJobDelivery {
 #[derive(Debug, Clone)]
 struct FinishedShellJob {
     completion_sequence: u64,
+    /// Wall-clock timestamp (ms) captured by the supervisor thread the moment
+    /// the child actually exited, so later delivery does not inflate elapsed.
+    finished_at_ms: i64,
     status: String,
+    capture_error: Option<String>,
     stdout: String,
     stderr: String,
+    stdout_truncation: Option<StreamCaptureTruncation>,
+    stderr_truncation: Option<StreamCaptureTruncation>,
     output: String,
 }
 
@@ -166,6 +189,9 @@ enum ShellJobLifecycle {
 struct ShellJobState {
     delivery: ShellJobDelivery,
     lifecycle: ShellJobLifecycle,
+    /// Whether a terminal update for this job has already been published
+    /// through the manager's exit listener.
+    exit_published: bool,
 }
 
 #[derive(Debug)]
@@ -184,6 +210,8 @@ struct ManagedShellJob {
     changed: Condvar,
     supervisor: Mutex<Option<thread::JoinHandle<()>>>,
     completion_publication: Arc<Mutex<u64>>,
+    exit_hooks: Arc<Mutex<ShellJobManagerExitHooks>>,
+    process_job: Option<crate::os::ManagedProcessJob>,
 }
 
 impl ManagedShellJob {
@@ -197,19 +225,25 @@ impl ManagedShellJob {
             session_id: self.session_id.clone(),
             turn_id: self.turn_id.clone(),
             created_at_ms: self.created_at_ms,
+            notes: self
+                .process_job
+                .as_ref()
+                .and_then(|job| job.observation_note())
+                .unwrap_or_else(|| crate::os::process_observation_note(self.pid)),
         }
     }
 
-    fn partial_streams(&self) -> (String, String) {
+    fn partial_streams(&self) -> (ShellOutputSnapshot, ShellOutputSnapshot) {
         (
-            shell_output_text(&self.stdout),
-            shell_output_text(&self.stderr),
+            shell_output_snapshot(&self.stdout),
+            shell_output_snapshot(&self.stderr),
         )
     }
 
     fn exit_update(&self, finished: &FinishedShellJob) -> ShellJobExitUpdate {
         ShellJobExitUpdate {
             pid: self.pid,
+            topic_published: false,
             tool_call_id: self.tool_call_id.clone(),
             kind: self.kind.clone(),
             command: self.command.clone(),
@@ -217,16 +251,30 @@ impl ManagedShellJob {
             session_id: self.session_id.clone(),
             turn_id: self.turn_id.clone(),
             created_at_ms: self.created_at_ms,
-            elapsed_ms: now_ms().saturating_sub(self.created_at_ms),
+            elapsed_ms: finished
+                .finished_at_ms
+                .saturating_sub(self.created_at_ms)
+                .max(0),
             status: finished.status.clone(),
+            capture_error: finished.capture_error.clone(),
             stdout: finished.stdout.clone(),
             stderr: finished.stderr.clone(),
+            stdout_truncation: finished.stdout_truncation.clone(),
+            stderr_truncation: finished.stderr_truncation.clone(),
             output: finished.output.clone(),
         }
     }
 
     fn signal(&self) {
-        crate::os::terminate_process_group(self.pid);
+        if self
+            .process_job
+            .as_ref()
+            .is_none_or(|process_job| process_job.kill_all().is_err())
+        {
+            // Explicit degraded mode, or best-effort fallback if the native Job backend
+            // control file becomes unavailable after spawn.
+            crate::os::terminate_process_group(self.pid);
+        }
     }
 
     fn join_supervisor(&self) {
@@ -241,10 +289,37 @@ impl ManagedShellJob {
     }
 }
 
-#[derive(Debug)]
+type ShellJobExitListener = Arc<dyn Fn(&ShellJobExitUpdate) + Send + Sync>;
+
+#[derive(Default)]
+pub(crate) struct ShellJobManagerExitHooks {
+    /// Optional event-driven callback invoked once per job, immediately when
+    /// the job's supervisor observes the exit.
+    exit_listener: Option<ShellJobExitListener>,
+}
+
 struct ShellJobManagerState {
     jobs: Mutex<HashMap<u32, Arc<ManagedShellJob>>>,
     completion_publication: Arc<Mutex<u64>>,
+    exit_hooks: Arc<Mutex<ShellJobManagerExitHooks>>,
+}
+
+impl std::fmt::Debug for ShellJobManagerExitHooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShellJobManagerExitHooks")
+            .field("exit_listener", &self.exit_listener.is_some())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ShellJobManagerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShellJobManagerState")
+            .field("jobs", &self.jobs)
+            .field("completion_publication", &self.completion_publication)
+            .field("exit_hooks", &self.exit_hooks)
+            .finish()
+    }
 }
 
 impl Drop for ShellJobManagerState {
@@ -269,6 +344,7 @@ impl Drop for ShellJobManagerState {
 pub struct ShellJobManager {
     state: Arc<ShellJobManagerState>,
     long_running_prompt_after: Duration,
+    force_process_group_fallback: bool,
 }
 
 impl ShellJobManager {
@@ -278,14 +354,21 @@ impl ShellJobManager {
             state: Arc::new(ShellJobManagerState {
                 jobs: Mutex::new(HashMap::new()),
                 completion_publication: Arc::new(Mutex::new(0)),
+                exit_hooks: Arc::new(Mutex::new(ShellJobManagerExitHooks::default())),
             }),
             long_running_prompt_after: LONG_RUNNING_COMMAND_PROMPT_AFTER,
+            force_process_group_fallback: false,
         }
     }
 
     #[cfg(all(test, unix))]
     pub(crate) fn set_long_running_prompt_after_for_tests(&mut self, duration: Duration) {
         self.long_running_prompt_after = duration.max(Duration::from_millis(1));
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn force_process_group_fallback_for_tests(&mut self) {
+        self.force_process_group_fallback = true;
     }
 
     pub fn spawn_background(
@@ -353,6 +436,8 @@ impl ShellJobManager {
         .with_bash_result(BashResultEvidence {
             stdout: String::new(),
             stderr: String::new(),
+            stdout_truncation: None,
+            stderr_truncation: None,
             exit_code: None,
             signal: None,
             pid: Some(job.pid),
@@ -360,6 +445,25 @@ impl ShellJobManager {
             pid_kind: Some(runtime_child_pid_kind().to_string()),
             error_type: None,
         })
+    }
+
+    fn select_process_job(
+        result: std::io::Result<crate::os::ManagedProcessJob>,
+    ) -> Option<crate::os::ManagedProcessJob> {
+        result.ok()
+    }
+
+    fn configured_shell_command(clean: &str, cwd: &Path) -> std::io::Result<Command> {
+        let mut command =
+            crate::os::command_for_local_shell(clean).map_err(std::io::Error::other)?;
+        configure_run_bash_environment(&mut command);
+        command
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        crate::os::configure_child_process_group(&mut command);
+        Ok(command)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -374,17 +478,43 @@ impl ShellJobManager {
         tail_out: bool,
         delivery: ShellJobDelivery,
     ) -> std::io::Result<Arc<ManagedShellJob>> {
-        let mut command =
-            crate::os::command_for_local_shell(clean).map_err(std::io::Error::other)?;
-        configure_run_bash_environment(&mut command);
-        command
-            .current_dir(cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        crate::os::configure_child_process_group(&mut command);
-        let mut child = command.spawn()?;
+        let mut command = Self::configured_shell_command(clean, cwd)?;
+        let mut process_job = if self.force_process_group_fallback {
+            None
+        } else {
+            Self::select_process_job(crate::os::ManagedProcessJob::create_for_session(session_id))
+        };
+        if process_job
+            .as_ref()
+            .is_some_and(|job| job.configure_command(&mut command).is_err())
+        {
+            process_job = None;
+            command = Self::configured_shell_command(clean, cwd)?;
+        }
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(_) if process_job.is_some() => {
+                // The cgroup may become unavailable between setup and pre_exec.
+                // No user code ran when pre_exec failed, so retry once without
+                // exact containment instead of making the optional mechanism
+                // block command execution.
+                process_job = None;
+                Self::configured_shell_command(clean, cwd)?.spawn()?
+            }
+            Err(error) => return Err(error),
+        };
         let pid = child.id();
+        let child_registration = crate::os::register_managed_child(pid);
+        // OS-level containment: on Windows the child joins the runtime's
+        // kill-on-close job object. On Unix this is a no-op: exact ownership
+        // requires the native Job backend; subreaping alone is not containment.
+        if !crate::os::contain_child_process(pid) {
+            terminate_process(pid);
+            let _ = child.wait();
+            return Err(std::io::Error::other(
+                "spawned process could not be contained by the runtime job",
+            ));
+        }
         if !is_runtime_child_pid(pid) {
             terminate_process(pid);
             let _ = child.wait();
@@ -416,13 +546,17 @@ impl ShellJobManager {
             state: Mutex::new(ShellJobState {
                 delivery,
                 lifecycle: ShellJobLifecycle::Running,
+                exit_published: false,
             }),
             changed: Condvar::new(),
             supervisor: Mutex::new(None),
             completion_publication: Arc::clone(&self.state.completion_publication),
+            exit_hooks: Arc::clone(&self.state.exit_hooks),
+            process_job,
         });
         let supervised = Arc::clone(&job);
         let supervisor = thread::spawn(move || {
+            let _child_registration = child_registration;
             supervise_shell_job(supervised, child, stdout_drain, stderr_drain)
         });
         *job.supervisor
@@ -689,7 +823,9 @@ impl ShellJobManager {
                 }
                 (ShellJobDelivery::Background, ShellJobLifecycle::Finished(finished)) => {
                     let completion_sequence = finished.completion_sequence;
-                    let update = job.exit_update(finished);
+                    let topic_published = state.exit_published;
+                    let mut update = job.exit_update(finished);
+                    update.topic_published = topic_published;
                     state.delivery = ShellJobDelivery::Delivered;
                     exited.push((completion_sequence, update));
                     remove.push(Arc::clone(&job));
@@ -728,6 +864,18 @@ impl ShellJobManager {
         out.push('\n');
         out.push_str(LONG_RUNNING_ACTION_GUIDANCE);
         Some(out)
+    }
+
+    /// Registers a callback invoked exactly once per managed job, immediately
+    /// when its supervisor observes the exit, from the supervisor thread.
+    /// The callback must be cheap and must not touch job state back.
+    pub fn set_exit_listener(
+        &self,
+        listener: impl Fn(&ShellJobExitUpdate) + Send + Sync + 'static,
+    ) {
+        if let Ok(mut hooks) = self.state.exit_hooks.lock() {
+            hooks.exit_listener = Some(Arc::new(listener));
+        }
     }
 
     #[cfg(all(test, unix))]
@@ -821,10 +969,13 @@ fn running_output_for_job(
         command: command.to_string(),
         status: None,
         signal: None,
-        output: combined_shell_output(&stdout, &stderr),
-        stdout,
-        stderr,
+        output: combined_shell_output(&stdout.text, &stderr.text),
+        stdout: stdout.text,
+        stderr: stderr.text,
+        stdout_truncation: stdout.truncation,
+        stderr_truncation: stderr.truncation,
         error: Some(error),
+        job_management: None,
         tail_out,
     }
 }
@@ -842,7 +993,10 @@ fn finished_output(
         output: finished.output.clone(),
         stdout: finished.stdout.clone(),
         stderr: finished.stderr.clone(),
-        error: None,
+        stdout_truncation: finished.stdout_truncation.clone(),
+        stderr_truncation: finished.stderr_truncation.clone(),
+        error: finished.capture_error.clone(),
+        job_management: None,
         tail_out,
     }
 }
@@ -863,84 +1017,155 @@ fn cleanup_legacy_shell_job_artifacts(memory_dir: &Path) {
     }
 }
 
-fn spawn_output_drain<R: std::io::Read + Send + 'static>(
-    mut reader: R,
+/// Readers continue while the owned scope is active. Once it is empty (or
+/// execution has been cancelled), EOF gets a bounded grace period. This is an
+/// output deadline, never evidence for attributing or killing a pipe holder.
+struct ShellOutputDrain {
+    deadline: Arc<Mutex<Option<Instant>>>,
+    thread: thread::JoinHandle<bool>,
+}
+
+fn spawn_output_drain(
+    reader: impl Into<crate::os::ChildOutputPipe>,
     output: SharedShellOutput,
-) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
+) -> ShellOutputDrain {
+    let mut reader = reader.into();
+    let deadline = Arc::new(Mutex::new(None::<Instant>));
+    let stop = Arc::clone(&deadline);
+    let thread = thread::spawn(move || {
         let mut chunk = [0_u8; 8192];
         loop {
-            match std::io::Read::read(&mut reader, &mut chunk) {
-                Ok(0) | Err(_) => break,
-                Ok(read) => {
+            if stop.lock().map_or(true, |deadline| {
+                deadline.is_some_and(|deadline| Instant::now() >= deadline)
+            }) {
+                return false;
+            }
+            match reader.read_with_timeout(&mut chunk, Duration::from_millis(20)) {
+                Ok(Some(0)) => return true,
+                Err(_) => return false,
+                Ok(None) => continue,
+                Ok(Some(read)) => {
                     if let Ok(mut output) = output.lock() {
                         output.push(&chunk[..read]);
                     } else {
-                        break;
+                        return false;
                     }
                 }
             }
         }
-    })
+    });
+    ShellOutputDrain { deadline, thread }
 }
 
-fn join_output_drains(
-    stdout: Option<thread::JoinHandle<()>>,
-    stderr: Option<thread::JoinHandle<()>>,
-) {
-    if let Some(stdout) = stdout {
-        let _ = stdout.join();
+/// Returns false if either pipe failed or did not reach EOF. Both readers are
+/// joined, including on failure; no detached blocked reader survives shutdown.
+fn join_output_drains(stdout: Option<ShellOutputDrain>, stderr: Option<ShellOutputDrain>) -> bool {
+    let deadline = Instant::now() + Duration::from_millis(250);
+    for drain in [&stdout, &stderr].into_iter().flatten() {
+        if let Ok(mut stop) = drain.deadline.lock() {
+            *stop = Some(deadline);
+        }
     }
-    if let Some(stderr) = stderr {
-        let _ = stderr.join();
+    let mut complete = true;
+    for drain in [stdout, stderr].into_iter().flatten() {
+        complete &= drain.thread.join().unwrap_or(false);
     }
+    complete
 }
 
-fn shell_output_text(output: &SharedShellOutput) -> String {
+fn shell_output_snapshot(output: &SharedShellOutput) -> ShellOutputSnapshot {
     output
         .lock()
-        .map(|output| output.text())
-        .unwrap_or_default()
+        .map(|output| output.snapshot())
+        .unwrap_or(ShellOutputSnapshot {
+            text: String::new(),
+            truncation: None,
+        })
 }
 
 fn supervise_shell_job(
     job: Arc<ManagedShellJob>,
     mut child: Child,
-    stdout_drain: Option<thread::JoinHandle<()>>,
-    stderr_drain: Option<thread::JoinHandle<()>>,
+    stdout_drain: Option<ShellOutputDrain>,
+    stderr_drain: Option<ShellOutputDrain>,
 ) {
     let status = match child.wait() {
         Ok(status) => {
             if exit_signal(&status).is_some() {
-                crate::os::kill_process_group(job.pid);
+                job.signal();
             }
             exit_status_text(&status)
         }
         Err(_) => {
-            crate::os::kill_process_group(job.pid);
+            job.signal();
             "unknown".to_string()
         }
     };
-    join_output_drains(stdout_drain, stderr_drain);
-    while crate::os::process_group_running(job.pid) {
-        thread::sleep(Duration::from_millis(20));
+    if let Some(process_job) = &job.process_job {
+        loop {
+            match process_job.is_empty() {
+                Ok(true) => break,
+                Ok(false) => thread::sleep(Duration::from_millis(20)),
+                Err(_) => {
+                    job.signal();
+                    break;
+                }
+            }
+        }
+    } else {
+        while crate::os::process_group_running(job.pid) {
+            thread::sleep(Duration::from_millis(20));
+        }
     }
-    let stdout = shell_output_text(&job.stdout);
-    let stderr = shell_output_text(&job.stderr);
+    // Drain threads run concurrently while descendants are alive, preventing
+    // pipe backpressure. Join only after kernel ownership reports no members.
+    let capture_complete = join_output_drains(stdout_drain, stderr_drain);
+    // A terminal update is published only after the kernel reports this job's
+    // native Job empty. In degraded mode, only process-group membership is known.
+    let stdout = shell_output_snapshot(&job.stdout);
+    let stderr = shell_output_snapshot(&job.stderr);
     let Ok(mut publication_sequence) = job.completion_publication.lock() else {
         return;
     };
     *publication_sequence = publication_sequence.saturating_add(1);
+    let finished_at_ms = now_ms();
     let finished = FinishedShellJob {
         completion_sequence: *publication_sequence,
+        finished_at_ms,
         status,
-        output: normalized_shell_output(&combined_shell_output(&stdout, &stderr)),
-        stdout,
-        stderr,
+        capture_error: (!capture_complete).then(|| "output_capture_incomplete".to_string()),
+        output: normalized_shell_output(&combined_shell_output(&stdout.text, &stderr.text)),
+        stdout: stdout.text,
+        stderr: stderr.text,
+        stdout_truncation: stdout.truncation,
+        stderr_truncation: stderr.truncation,
     };
+    let listener = job
+        .exit_hooks
+        .lock()
+        .ok()
+        .and_then(|hooks| hooks.exit_listener.clone());
+    let mut exit_update = None;
     if let Ok(mut state) = job.state.lock() {
         state.lifecycle = ShellJobLifecycle::Finished(finished);
+        let publish_topic = matches!(state.delivery, ShellJobDelivery::Background)
+            && listener.is_some()
+            && !state.exit_published;
+        if publish_topic {
+            state.exit_published = true;
+            match &state.lifecycle {
+                ShellJobLifecycle::Finished(finished) => {
+                    let mut update = job.exit_update(finished);
+                    update.topic_published = true;
+                    exit_update = Some(update);
+                }
+                ShellJobLifecycle::Running => unreachable!(),
+            }
+        }
         job.changed.notify_all();
+    }
+    if let (Some(listener), Some(update)) = (listener, exit_update) {
+        listener(&update);
     }
 }
 
@@ -1001,17 +1226,9 @@ fn validate_powershell_request(command: &str) -> Result<(), String> {
 #[cfg(windows)]
 fn validate_powershell_lifecycle(command: &str, background: bool) -> Result<(), String> {
     let normalized = command.to_ascii_lowercase().replace('`', "");
-    if normalized.contains("start-process") && !normalized.contains("-wait") {
-        return Err(if background {
-            "explicit_process_detach"
-        } else {
-            "unmanaged_background_process"
-        }
-        .to_string());
-    }
-    if normalized.contains("cmd.exe /c start") || normalized.contains("cmd /c start") {
-        return Err("explicit_process_detach".to_string());
-    }
+    // No detach keyword checks: escaped processes are contained by the
+    // kill-on-close job object, not by semantic scanning.
+    let _ = (normalized, background);
     Ok(())
 }
 
@@ -1020,7 +1237,7 @@ pub fn validate_bash_request(command: &str) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err("command_required".to_string());
     }
-    validate_bash_safety(trimmed)?;
+    validate_bash_safety(strip_heredoc_bodies(trimmed).as_str())?;
     Ok(())
 }
 
@@ -1080,17 +1297,129 @@ fn validate_bash_safety(command: &str) -> Result<(), String> {
 
 #[cfg(not(windows))]
 fn validate_bash_lifecycle(command: &str, background: bool) -> Result<(), String> {
-    if !background && contains_unmanaged_shell_background(command) && !contains_shell_wait(command)
+    let scanned = strip_heredoc_bodies(command);
+    if !background
+        && contains_unmanaged_shell_background(scanned.as_str())
+        && !contains_shell_wait(scanned.as_str())
     {
         return Err("unmanaged_background_process".to_string());
     }
-    if contains_explicit_process_detach(command) {
-        return Err("explicit_process_detach".to_string());
-    }
-    for script in nested_shell_scripts(command) {
-        validate_bash_lifecycle(&script, background)?;
+    // Deliberately no keyword blacklist here: `setsid`-style escapes are
+    // contained by OS-level mechanisms (child subreaper adoption on Linux,
+    // kill-on-close job objects on Windows), not by semantic scanning.
+    for script in nested_shell_scripts(scanned.as_str()) {
+        validate_bash_lifecycle(script.as_str(), background)?;
     }
     Ok(())
+}
+
+/// Replaces heredoc bodies with spaces so safety/lifecycle scans treat them
+/// as data, not shell syntax. A heredoc body may legitimately contain
+/// ampersands, quotes, or words like `setsid` that must not trip the
+/// background/detach detectors. Bodies are bounded by the terminator word,
+/// so removal is finite even for unterminated bodies.
+fn strip_heredoc_bodies(command: &str) -> String {
+    let chars: Vec<char> = command.chars().collect();
+    let mut out = String::with_capacity(command.len());
+    let mut index = 0_usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !in_single {
+            escaped = true;
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        if ch == '\'' && !in_double {
+            in_single = !in_single;
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        if ch == '"' && !in_single {
+            in_double = !in_double;
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        if ch == '<' && !in_single && !in_double && chars.get(index + 1).copied() == Some('<') {
+            // A here-string (`<<<`) feeds a single word, not a heredoc body;
+            // it must not be treated as one, or the delimiter scan would
+            // swallow the rest of the command and bypass lifecycle checks.
+            if chars.get(index + 2).copied() == Some('<') {
+                out.push_str("<<<");
+                index += 3;
+                continue;
+            }
+            let mut cursor = index + 2;
+            let strip_tabs = chars.get(cursor).copied() == Some('-');
+            if strip_tabs {
+                cursor += 1;
+            }
+            let delimiter_start = cursor;
+            while cursor < chars.len() && !chars[cursor].is_whitespace() && chars[cursor] != ';' {
+                cursor += 1;
+            }
+            if cursor > delimiter_start {
+                // The delimiter word may be quoted (<<'EOF', <<"EOF"); the
+                // terminating line always uses the bare word, so strip quotes.
+                let raw: String = chars[delimiter_start..cursor].iter().collect();
+                let delimiter = raw
+                    .strip_prefix('\'')
+                    .and_then(|r| r.strip_suffix('\''))
+                    .or_else(|| raw.strip_prefix('"').and_then(|r| r.strip_suffix('"')))
+                    .map(str::to_string)
+                    .unwrap_or(raw);
+                out.push('<');
+                out.push('<');
+                if strip_tabs {
+                    out.push('-');
+                }
+                out.push_str(delimiter.as_str());
+                index = cursor;
+                let mut line_start = index;
+                let mut body_end = chars.len();
+                while line_start < chars.len() {
+                    let mut probe = line_start;
+                    if strip_tabs {
+                        while probe < chars.len() && chars[probe] == '\t' {
+                            probe += 1;
+                        }
+                    }
+                    let delimiter_len = delimiter.chars().count();
+                    let candidate: String = chars[probe..(probe + delimiter_len).min(chars.len())]
+                        .iter()
+                        .collect();
+                    let after = chars.get(probe + delimiter_len);
+                    if candidate == delimiter && after.is_none_or(|c| c.is_whitespace()) {
+                        body_end = line_start;
+                        break;
+                    }
+                    match chars[line_start..].iter().position(|c| *c == '\n') {
+                        Some(offset) => line_start += offset + 1,
+                        None => break,
+                    }
+                }
+                for ch in chars[index..body_end].iter() {
+                    out.push(if ch.is_whitespace() { *ch } else { ' ' });
+                }
+                index = body_end;
+                continue;
+            }
+        }
+        out.push(ch);
+        index += 1;
+    }
+    out
 }
 
 #[cfg(not(windows))]
@@ -1163,37 +1492,6 @@ fn contains_shell_wait(command: &str) -> bool {
 }
 
 #[cfg(not(windows))]
-fn contains_explicit_process_detach(command: &str) -> bool {
-    let words = shell_words_for_safety_scan(command);
-    let mut index = 0;
-    while index < words.len() {
-        if !is_command_separator(&words[index]) {
-            index += 1;
-            continue;
-        }
-        index += 1;
-        let Some(executable) = shell_executable_index(&words, index) else {
-            continue;
-        };
-        let executable_name = shell_command_basename(&words[executable]);
-        if matches!(
-            executable_name,
-            "setsid" | "disown" | "daemon" | "daemonize" | "start-stop-daemon"
-        ) {
-            return true;
-        }
-        if is_shell_interpreter(executable_name)
-            && nested_shell_script(&words, executable + 1)
-                .is_some_and(contains_explicit_process_detach)
-        {
-            return true;
-        }
-        index = executable + 1;
-    }
-    false
-}
-
-#[cfg(not(windows))]
 fn nested_shell_scripts(command: &str) -> Vec<String> {
     let words = shell_words_for_safety_scan(command);
     let mut scripts = Vec::new();
@@ -1210,6 +1508,11 @@ fn nested_shell_scripts(command: &str) -> Vec<String> {
         if is_shell_interpreter(shell_command_basename(&words[executable])) {
             if let Some(script) = nested_shell_script(&words, executable + 1) {
                 scripts.push(script.to_string());
+            }
+        }
+        if shell_command_basename(&words[executable]) == "eval" {
+            if let Some(script) = eval_script(&words, executable + 1) {
+                scripts.push(script);
             }
         }
         index = executable + 1;
@@ -1241,6 +1544,21 @@ fn nested_shell_script(words: &[String], mut index: usize) -> Option<&str> {
         index += 1;
     }
     None
+}
+
+#[cfg(not(windows))]
+fn eval_script(words: &[String], mut index: usize) -> Option<String> {
+    // `eval` re-parses its concatenated arguments as a shell script; surface
+    // them as one string so the same lifecycle scans apply.
+    let mut script = String::new();
+    while index < words.len() && !is_command_separator(&words[index]) {
+        if !script.is_empty() {
+            script.push(' ');
+        }
+        script.push_str(words[index].as_str());
+        index += 1;
+    }
+    (!script.is_empty()).then_some(script)
 }
 
 #[cfg(not(windows))]
@@ -1346,8 +1664,22 @@ fn shell_words_for_safety_scan(command: &str) -> Vec<String> {
                     }
                 }
             }
-            ' ' | '\t' | '\n' if !in_single && !in_double => {
+            '`' if !in_single && !in_double => {
+                // Command-substitution boundaries delimit a nested command;
+                // treating them as separators keeps `setsid true` inside a
+                // substitution visible to the lifecycle/detach scans.
                 push_shell_word(&mut words, &mut current);
+                push_separator(&mut words);
+            }
+            ' ' | '\t' if !in_single && !in_double => {
+                push_shell_word(&mut words, &mut current);
+            }
+            '\n' if !in_single && !in_double => {
+                // A newline starts a new command like ';' does; treating it as
+                // a command separator prevents newline-separated detach or
+                // background launches from bypassing the lifecycle scan.
+                push_shell_word(&mut words, &mut current);
+                push_separator(&mut words);
             }
             ';' if !in_single && !in_double => {
                 push_shell_word(&mut words, &mut current);
@@ -1384,7 +1716,9 @@ fn push_separator(words: &mut Vec<String>) {
 }
 
 fn is_command_separator(word: &str) -> bool {
-    matches!(word, ";" | "then" | "do" | "else")
+    // `{` and `}` delimit brace command groups, so a standalone brace starts
+    // or ends a command just like `;` does for the lifecycle scans.
+    matches!(word, ";" | "{" | "}" | "then" | "do" | "else")
 }
 
 fn is_assignment_word(word: &str) -> bool {
@@ -1542,12 +1876,18 @@ pub(crate) fn execute_run_bash_action(
     let timeout_ms = if is_regular_command {
         action.timeout_ms_i64(5000)
     } else {
-        action.input_i64("loop_timeout_ms").unwrap_or(600_000)
+        action
+            .input_i64("loop_timeout_ms")
+            .unwrap_or(DEFAULT_LOOP_TIMEOUT_MS)
     };
     let session_id = core.current_session_id();
     let turn_id = core.current_action_turn_id();
     let cwd = core.current_prompt_cwd().to_path_buf();
-    let tail_out = action.input_bool("tail_out");
+    let tail_out = action
+        .raw_input
+        .get("tail_out")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
     let edited_files = action.input_list("edit");
     let tool_call_id = action.call_id.as_str();
     execute_run_bash_with_tail(
@@ -1665,7 +2005,7 @@ pub(crate) fn execute_run_bash_with_tail(
         ));
     }
     if !background && is_regular_command && contains_long_local_shell_sleep(command_to_run) {
-        let reason = "The command contains a long sleep in normal mode. Use loop_cmd with interval_ms to poll external status, or background=true for long local work that should continue across turns.";
+        let reason = "The command contains a long sleep in normal mode. Use loop_cmd with interval_ms to poll external status, or background=true for long local work that should continue across turns. If the `sleep N` text is only data inside a script or fixture, put it inside a quoted string or a heredoc (<<'EOF') body and retry.";
         return ActionExecution::Completed(bash_finished_error_outcome(
             bash_action_not_executed(Some(command_to_run), reason),
             "InvalidInput",
@@ -1829,29 +2169,25 @@ pub(crate) fn execute_approved_bash_with_tail(
     let clean = command.trim();
     if let Err(reason) = validate_local_shell_request(clean) {
         let message = bash_validation_message(&reason);
-        let mut outcome = bash_finished_error_outcome(
+        let outcome = bash_finished_error_outcome(
             bash_action_not_executed(Some(clean), message),
             "InvalidInput",
             message,
         );
-        outcome.text.push_str(&format!(
-            "\napproval_id: {}\napproval_status: approved_by_user",
-            request.approval_id
-        ));
-        return outcome;
+        return outcome
+            .with_runtime_metadata("approval_id", request.approval_id.clone())
+            .with_runtime_metadata("approval_status", "approved_by_user");
     }
     if let Err(reason) = validate_local_shell_lifecycle(clean, background) {
         let message = bash_validation_message(&reason);
-        let mut outcome = bash_finished_error_outcome(
+        let outcome = bash_finished_error_outcome(
             bash_action_not_executed(Some(clean), message),
             "InvalidInput",
             message,
         );
-        outcome.text.push_str(&format!(
-            "\napproval_id: {}\napproval_status: approved_by_user",
-            request.approval_id
-        ));
-        return outcome;
+        return outcome
+            .with_runtime_metadata("approval_id", request.approval_id.clone())
+            .with_runtime_metadata("approval_status", "approved_by_user");
     }
     let mut outcome = if background {
         shell_jobs.spawn_background_outcome(clean, cwd, session_id, turn_id, tool_call_id, tail_out)
@@ -1877,12 +2213,10 @@ pub(crate) fn execute_approved_bash_with_tail(
             runtime,
         )
     };
-    outcome.text.push_str(&format!(
-        "\napproval_id: {}\napproval_status: approved_by_user",
-        request.approval_id
-    ));
     append_edited_files_note(&mut outcome.text, edited_files);
     outcome
+        .with_runtime_metadata("approval_id", request.approval_id.clone())
+        .with_runtime_metadata("approval_status", "approved_by_user")
 }
 
 pub fn execute_one_bash(command: &str, timeout_ms: i64, runtime: &mut dyn ActionRuntime) -> String {
@@ -2101,20 +2435,35 @@ fn polling_result(
         "cancelled" | "dispatch_timeout_interrupted" => ActionStatus::Cancelled,
         _ => ActionStatus::Failed,
     };
-    ActionOutcome::new(status, out).with_bash_result(BashResultEvidence {
-        stdout: stdout.to_string(),
-        stderr: stderr.to_string(),
-        exit_code: last_status,
-        signal: last_signal,
-        pid: None,
-        timed_out: false,
-        pid_kind: None,
-        error_type: match state {
-            "cancelled" | "dispatch_timeout_interrupted" => Some("Cancelled".to_string()),
-            "not_executed" => Some("InvalidInput".to_string()),
-            _ => None,
-        },
-    })
+    let mut outcome = ActionOutcome::new(status, out)
+        .with_runtime_metadata("polling_state", state)
+        .with_runtime_metadata("polling_attempts", attempts)
+        .with_runtime_metadata("polling_elapsed_ms", elapsed.as_millis() as u64)
+        .with_runtime_metadata("success_condition", "loop_cmd exit code 0")
+        .with_runtime_metadata(
+            "exit_code_semantics",
+            "exit_code belongs to the last loop_cmd execution, not automatically to the waited task",
+        )
+        .with_bash_result(BashResultEvidence {
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+            stdout_truncation: None,
+            stderr_truncation: None,
+            exit_code: last_status,
+            signal: last_signal,
+            pid: None,
+            timed_out: false,
+            pid_kind: None,
+            error_type: match state {
+                "cancelled" | "dispatch_timeout_interrupted" => Some("Cancelled".to_string()),
+                "not_executed" => Some("InvalidInput".to_string()),
+                _ => None,
+            },
+        });
+    if let Some(error) = error {
+        outcome = outcome.with_runtime_metadata("last_execution_problem", error);
+    }
+    outcome
 }
 
 fn sleep_cancelable(duration: Duration, cancelled: &mut impl FnMut() -> bool) {
@@ -2173,36 +2522,32 @@ fn contains_long_powershell_sleep(command: &str) -> bool {
 
 #[cfg(not(windows))]
 fn contains_long_normal_sleep(command: &str) -> bool {
-    let tokens = shell_words_for_sleep_scan(command);
-    tokens.windows(2).any(|pair| {
-        pair[0] == "sleep" && sleep_arg_seconds(&pair[1]).is_some_and(|seconds| seconds >= 30.0)
-    })
-}
-
-#[cfg(not(windows))]
-fn shell_words_for_sleep_scan(command: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut in_single = false;
-    let mut in_double = false;
-    for ch in command.chars() {
-        match ch {
-            '\'' if !in_double => in_single = !in_single,
-            '"' if !in_single => in_double = !in_double,
-            ' ' | '\t' | '\n' | ';' | '&' | '|' | '(' | ')' if !in_single && !in_double => {
-                if !current.is_empty() {
-                    words.push(std::mem::take(&mut current));
-                }
-            }
-            _ => current.push(ch),
+    // Heredoc bodies and quoted strings are data, not commands: sample
+    // command text inside a script or heredoc must not trip the sleep scan.
+    // Scan word segments and only accept `sleep` in executable position.
+    let words = shell_words_for_safety_scan(strip_heredoc_bodies(command).as_str());
+    let mut index = 0;
+    while index < words.len() {
+        if !is_command_separator(&words[index]) {
+            index += 1;
+            continue;
         }
+        index += 1;
+        let Some(executable) = shell_executable_index(&words, index) else {
+            continue;
+        };
+        if words[executable] == "sleep"
+            && words
+                .get(executable + 1)
+                .and_then(|arg| sleep_arg_seconds(arg))
+                .is_some_and(|seconds| seconds >= 30.0)
+        {
+            return true;
+        }
+        index = executable + 1;
     }
-    if !current.is_empty() {
-        words.push(current);
-    }
-    words
+    false
 }
-
 #[cfg(not(windows))]
 fn sleep_arg_seconds(arg: &str) -> Option<f64> {
     let clean = arg.trim();
@@ -2225,8 +2570,11 @@ pub struct BashCommandOutput {
     pub signal: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+    pub stdout_truncation: Option<StreamCaptureTruncation>,
+    pub stderr_truncation: Option<StreamCaptureTruncation>,
     pub output: String,
     pub error: Option<String>,
+    pub job_management: Option<String>,
     pub tail_out: bool,
 }
 
@@ -2263,6 +2611,8 @@ impl BashCommandOutput {
         ActionOutcome::new(status, text).with_bash_result(BashResultEvidence {
             stdout: self.stdout.clone(),
             stderr: self.stderr.clone(),
+            stdout_truncation: self.stdout_truncation.clone(),
+            stderr_truncation: self.stderr_truncation.clone(),
             exit_code: self.status,
             signal: self.signal,
             pid,
@@ -2278,6 +2628,9 @@ impl BashCommandOutput {
 
     fn render_action_result(&self, action_name: &str) -> String {
         if let Some(error) = &self.error {
+            if error == "output_capture_incomplete" {
+                return format!("Action result: {action_name}\n{}\nLauncher exit code: {:?}; signal: {:?}\nCaptured output:\n{}", bash_runtime_error_message(error), self.status, self.signal, self.output);
+            }
             if let Some(details) = error.strip_prefix("long_running_still_running:") {
                 let (pid, elapsed_ms) = details.split_once(':').unwrap_or((details, "unknown"));
                 let mut out = format!(
@@ -2363,6 +2716,7 @@ fn execute_one_bash_structured_with_prompt_after(
         Ok(child) => child,
         Err(_) => return bash_error(command, "command_failed"),
     };
+    let _child_registration = crate::os::register_managed_child(child.id());
     let stdout = Arc::new(Mutex::new(BoundedShellOutput::new(false)));
     let stderr = Arc::new(Mutex::new(BoundedShellOutput::new(false)));
     let stdout_drain = child
@@ -2412,17 +2766,20 @@ fn execute_one_bash_structured_with_prompt_after(
             }
         }
     };
-    join_output_drains(stdout_drain, stderr_drain);
-    let stdout = shell_output_text(&stdout);
-    let stderr = shell_output_text(&stderr);
+    let capture_complete = join_output_drains(stdout_drain, stderr_drain);
+    let stdout = shell_output_snapshot(&stdout);
+    let stderr = shell_output_snapshot(&stderr);
     BashCommandOutput {
         command: command.to_string(),
         status: exit_status.code(),
         signal: exit_signal(&exit_status),
-        output: combined_shell_output(&stdout, &stderr),
-        stdout,
-        stderr,
-        error: None,
+        output: combined_shell_output(&stdout.text, &stderr.text),
+        stdout: stdout.text,
+        stderr: stderr.text,
+        stdout_truncation: stdout.truncation,
+        stderr_truncation: stderr.truncation,
+        error: (!capture_complete).then(|| "output_capture_incomplete".to_string()),
+        job_management: None,
         tail_out: false,
     }
 }
@@ -2451,6 +2808,7 @@ fn bash_error_type(error: &str) -> Option<&'static str> {
         "cancelled" | "cancelled_by_user" => Some("Cancelled"),
         "invalid_timeout" => Some("InvalidInput"),
         "command_failed" => Some("SpawnFailed"),
+        "output_capture_incomplete" => Some("OutputCaptureIncomplete"),
         _ if error.starts_with("timeout_still_running:")
             || error.starts_with("long_running_still_running:") =>
         {
@@ -2469,6 +2827,8 @@ fn bash_finished_error_outcome(
     ActionOutcome::failed(text).with_bash_result(BashResultEvidence {
         stdout: String::new(),
         stderr: error_message.into(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         exit_code: None,
         signal: None,
         pid: None,
@@ -2504,8 +2864,11 @@ fn bash_error(command: &str, error: &str) -> BashCommandOutput {
         signal: None,
         stdout: String::new(),
         stderr: diagnostic.clone(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output: diagnostic,
         error: Some(error.to_string()),
+        job_management: None,
         tail_out: false,
     }
 }
@@ -2528,10 +2891,7 @@ fn bash_validation_message(reason: &str) -> &'static str {
             "The local command was blocked by Timem safety policy because it may recursively delete the filesystem root."
         }
         "unmanaged_background_process" => {
-            "检测到命令可能创建脱离 Runtime 管理的后台进程。请改用当前平台命令工具的 background=true。"
-        }
-        "explicit_process_detach" => {
-            "检测到命令可能创建脱离 Runtime 管理的后台进程。请改用当前平台命令工具的 background=true，并移除 setsid、disown 或 daemon 等主动脱离方式。"
+            "检测到命令可能创建脱离 Runtime 管理的后台进程（未加 wait 的 `&` 后台启动）。请改用当前平台命令工具的 background=true；若 `&` 只是数据/样例文本，请放入引号字符串或 heredoc（<<'EOF'）正文中后重试。"
         }
         _ => "The local command request did not pass runtime validation.",
     }
@@ -2539,6 +2899,7 @@ fn bash_validation_message(reason: &str) -> &'static str {
 
 fn bash_runtime_error_message(error: &str) -> &'static str {
     match error {
+        "output_capture_incomplete" => "output_capture_incomplete: output capture failed or did not reach EOF after the managed scope ended. Captured output is partial; processes outside the managed scope may still be running.",
         "timeout" => {
             "Timem stopped waiting because the configured timeout was reached. This message does not by itself mean the process was killed. For long local work, use background=true; for waiting on external state, use loop_cmd with interval_ms."
         }

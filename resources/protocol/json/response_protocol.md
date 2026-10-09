@@ -28,15 +28,15 @@ Examples below are format examples ONLY:
   }
 }
 
-## -------- Example: finish one user's task, compact context --------
+## -------- Example: finish one user's task, compress context --------
 
 {
   "free_talk": "刚刚已经完成了任务 A，总结如下。现在继续进行工作 B，但由于上下文太长且混杂，我先压缩一下。",
   "working_still_action": {
-    "context_compact": {
-      "discard": ["pd_1"],
+    "context_compress": {
+      "keep": ["pd_4"],
       "offload": ["pd_2"],
-      "summary": "This is the summary...."
+      "summary": "Dense authoritative checkpoint containing everything needed to continue...."
     }
   }
 }

@@ -94,6 +94,7 @@ fn forced_compaction_preserves_native_history_and_restricts_model_request() {
         delta_id: "pd_1".to_string(),
         assistant_text: "old tool work".to_string(),
         calls: vec![NativeToolCall {
+            assistant_continuation: None,
             id: "call_old".to_string(),
             name: "readfile".to_string(),
             arguments: serde_json::json!({"path":"large.txt"}),
@@ -110,21 +111,25 @@ fn forced_compaction_preserves_native_history_and_restricts_model_request() {
 
     core.append_in_turn_shrink_review_if_needed();
 
-    assert!(core.context_compact_required);
+    assert!(core.context_compress_required);
     assert_eq!(core.native_exchanges.len(), 1);
     assert_eq!(core.native_exchanges[0].delta_id, "pd_1");
     let prompt = core.render_prompt();
     assert!(!prompt.contains("old tool work"));
-    assert!(prompt.contains("mode=force_shrink_required"));
+    // Compaction policy lives in the context_compress capability description;
+    // Core adds only the short mandatory-call trailer to the request.
+    assert!(!prompt.contains("Long-context maintenance:"));
     let request_prompt = core.build_model_request_prompt(&prompt);
+    assert!(!request_prompt.contains("Long-context maintenance:"));
+    assert!(!request_prompt.contains("[BEGIN THRESHOLD COMPRESSION GUIDANCE]"));
     assert!(request_prompt
-        .ends_with("Context is too long. Your tool calls must start with context_compact:"));
+        .ends_with("[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"));
     let request = core.model_interaction_request(request_prompt);
     assert_eq!(request.tool_choice, NativeToolChoice::Required);
     assert!(request
         .tools
         .iter()
-        .any(|tool| tool.name == "context_compact"));
+        .any(|tool| tool.name == "context_compress"));
     assert!(request.tools.iter().any(|tool| tool.name == "readfile"));
 }
 
@@ -153,6 +158,7 @@ fn native_final_keeps_structured_tool_history_before_final_replay() {
         delta_id: "pd_1".to_string(),
         assistant_text: "I will inspect it.".to_string(),
         calls: vec![NativeToolCall {
+            assistant_continuation: None,
             id: "call_read".to_string(),
             name: "readfile".to_string(),
             arguments: serde_json::json!({"path":"README.md"}),
@@ -179,6 +185,7 @@ fn native_final_keeps_structured_tool_history_before_final_replay() {
     let step = core.apply_model_response(LlmResponse {
         content: String::new(),
         tool_calls: vec![crate::NativeToolCall {
+            assistant_continuation: None,
             id: "call_finish".to_string(),
             name: "task_finished".to_string(),
             arguments: serde_json::json!({"summary": "Final answer based on PROJECT-EVIDENCE-42"}),
@@ -189,7 +196,15 @@ fn native_final_keeps_structured_tool_history_before_final_replay() {
         truncated: false,
     });
 
-    assert!(matches!(step, CoreStep::Final(_)));
+    let final_turn = match step {
+        CoreStep::Final(final_turn) => final_turn,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        final_turn.final_answer,
+        "Final answer based on PROJECT-EVIDENCE-42"
+    );
+    assert_eq!(final_turn.stats.tool_calls, 0);
     assert_eq!(core.native_exchanges.len(), 2);
     assert_eq!(core.native_exchanges[0].delta_id, "pd_1");
     let prompt = core.build_next_prompt();
@@ -226,6 +241,55 @@ fn native_final_keeps_structured_tool_history_before_final_replay() {
 }
 
 #[test]
+fn task_finished_does_not_add_to_an_ordinary_tool_call_count() {
+    let mut core = test_core("task_finished_tool_call_count");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "inspect runtime then finish".to_string(),
+    )]);
+
+    let arguments = serde_json::json!({"type": "cwd"});
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
+            id: "call_cwd".to_string(),
+            name: "self_tool".to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+    assert_eq!(core.current_stats.tool_calls, 1);
+
+    let arguments = serde_json::json!({"summary": "Runtime inspected."});
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
+            id: "call_finish".to_string(),
+            name: "task_finished".to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let final_turn = match step {
+        CoreStep::Final(final_turn) => final_turn,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(final_turn.final_answer, "Runtime inspected.");
+    assert_eq!(final_turn.stats.tool_calls, 1);
+    assert_eq!(core.native_exchanges.len(), 2);
+}
+
+#[test]
 fn dynamic_context_estimate_and_shrink_stats_include_native_exchanges() {
     let mut core = test_core("native_dynamic_token_estimate");
     core.append_delta(vec![(
@@ -236,6 +300,7 @@ fn dynamic_context_estimate_and_shrink_stats_include_native_exchanges() {
         delta_id: "pd_1".to_string(),
         assistant_text: "inspect the large result".to_string(),
         calls: vec![NativeToolCall {
+            assistant_continuation: None,
             id: "call_large".to_string(),
             name: "readfile".to_string(),
             arguments: serde_json::json!({"path":"large.txt"}),
@@ -257,11 +322,7 @@ fn dynamic_context_estimate_and_shrink_stats_include_native_exchanges() {
         before.total_tokens()
     );
 
-    let result = core.apply_prompt_shrink(
-        "context compacted successfully.",
-        &["pd_1".to_string()],
-        &[],
-    );
+    let result = core.apply_prompt_shrink(&["pd_1".to_string()], &[]);
 
     assert_eq!(core.dynamic_context_summary().estimated_tokens, 0);
     assert_eq!(core.current_stats.shrunk_tokens, before.total_tokens());
@@ -274,6 +335,7 @@ fn dynamic_context_estimate_and_shrink_stats_include_native_exchanges() {
 #[test]
 fn native_exchange_is_discarded_with_its_owning_delta() {
     let mut core = test_core("native_delta_discard");
+    core.set_interaction_profile(&native_test_profile());
     core.append_delta(vec![("user_question".to_string(), "Q1".to_string())]);
     core.append_delta(vec![("user_question".to_string(), "Q2".to_string())]);
     for (delta_id, call_id) in [("pd_1", "call_1"), ("pd_2", "call_2")] {
@@ -281,6 +343,7 @@ fn native_exchange_is_discarded_with_its_owning_delta() {
             delta_id: delta_id.to_string(),
             assistant_text: format!("work {call_id}"),
             calls: vec![NativeToolCall {
+                assistant_continuation: None,
                 id: call_id.to_string(),
                 name: "readfile".to_string(),
                 arguments: serde_json::json!({"path": format!("{call_id}.txt")}),
@@ -294,12 +357,15 @@ fn native_exchange_is_discarded_with_its_owning_delta() {
             }],
         });
     }
-    let result = core.apply_prompt_shrink(
-        "context compacted successfully.",
-        &["pd_1".to_string()],
-        &[],
-    );
-    assert!(result.contains("context compacted successfully."));
+    // A native-only owner remains visible and addressable even when it has no
+    // text slices; discarding that id removes the complete structured exchange.
+    core.deltas[0].slices.clear();
+    let prompt = core.render_prompt();
+    assert!(prompt.contains("[BEGIN DELTA delta_id: pd_1]"), "{prompt}");
+
+    let result = core.apply_prompt_shrink(&["pd_1".to_string()], &[]);
+    assert!(result.contains("removed_delta_count: 1"));
+    assert!(!core.render_prompt().contains("delta_id: pd_1"));
     assert_eq!(core.native_exchanges.len(), 1);
     assert_eq!(core.native_exchanges[0].delta_id, "pd_2");
     assert_eq!(core.native_exchanges[0].calls[0].id, "call_2");
@@ -313,6 +379,7 @@ fn native_exchange_is_included_when_owning_delta_is_offloaded() {
         delta_id: "pd_1".to_string(),
         assistant_text: "inspect evidence".to_string(),
         calls: vec![NativeToolCall {
+            assistant_continuation: None,
             id: "call_1".to_string(),
             name: "readfile".to_string(),
             arguments: serde_json::json!({"path":"evidence.txt"}),
@@ -338,7 +405,7 @@ fn native_exchange_is_included_when_owning_delta_is_offloaded() {
 fn forced_compaction_ignores_non_compact_output_then_unlocks_after_success() {
     let mut core = test_core("forced_compaction_ignore");
     core.set_response_protocol(ResponseProtocolKind::Json);
-    core.context_compact_required = true;
+    core.context_compress_required = true;
     core.append_delta(vec![(
         "user_question".to_string(),
         "active task".to_string(),
@@ -356,17 +423,11 @@ fn forced_compaction_ignores_non_compact_output_then_unlocks_after_success() {
     assert!(matches!(ignored, CoreStep::NeedModel { .. }));
     assert_eq!(core.current_round, round_before);
     assert_eq!(core.render_prompt(), before);
-    assert!(core.context_compact_required);
+    assert!(core.context_compress_required);
 
-    let ids = core
-        .deltas
-        .iter()
-        .map(|delta| delta.delta_id.clone())
-        .collect::<Vec<_>>();
     let completed = core.apply_model_response(LlmResponse {
         content: serde_json::json!({
-            "context_compact": {
-                "discard": ids,
+            "context_compress": {
                 "summary": "keep active task and continue"
             }
         })
@@ -377,11 +438,433 @@ fn forced_compaction_ignores_non_compact_output_then_unlocks_after_success() {
         truncated: false,
     });
     assert!(matches!(completed, CoreStep::NeedModel { .. }));
-    assert!(!core.context_compact_required);
+    assert!(!core.context_compress_required);
 }
 
 #[test]
-fn native_context_compact_persists_summary_after_discarding_all_old_deltas() {
+fn context_compress_threshold_percent_accepts_only_authoritative_options() {
+    let mut core = test_core("context_compress_threshold_options");
+    assert_eq!(core.context_compress_threshold_percent(), 90);
+    for percent in CONTEXT_COMPRESS_THRESHOLD_PERCENT_OPTIONS {
+        core.set_context_compress_threshold_percent(percent)
+            .unwrap();
+        assert_eq!(core.context_compress_threshold_percent(), percent);
+    }
+    assert_eq!(
+        core.set_context_compress_threshold_percent(89),
+        Err("context_compress_threshold_percent_invalid".to_string())
+    );
+    assert_eq!(core.context_compress_threshold_percent(), 100);
+}
+
+#[test]
+fn poor_threshold_compression_forces_one_followup_then_latches_exhausted() {
+    let mut core = test_core("threshold_compaction_bounded_followup");
+    core.set_max_llm_input_tokens(4_000);
+
+    assert_eq!(
+        core.threshold_compaction_quality_note(false, 3_601, 1_001),
+        (false, None)
+    );
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::Available
+    );
+
+    assert_eq!(
+        core.threshold_compaction_quality_note(true, 3_601, 1_001),
+        (true, None)
+    );
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::FollowupPending
+    );
+
+    let (force_followup, warning) = core.threshold_compaction_quality_note(true, 3_601, 1_001);
+    assert!(!force_followup);
+    let warning = warning.expect("second poor result must explain bounded give-up");
+    assert!(warning.starts_with("**WARN**:"), "{warning}");
+    assert!(warning.contains("91% -> 26%"), "{warning}");
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::Exhausted
+    );
+
+    core.context_compress_required = false;
+    core.threshold_compaction_reasoning_required = false;
+    core.last_observed_prompt_tokens = 3_700;
+    core.append_delta(vec![("user_question".to_string(), "active".to_string())]);
+    core.append_in_turn_shrink_review_if_needed();
+    assert!(
+        !core.context_compress_required,
+        "an exhausted above-threshold cycle must not restart itself"
+    );
+
+    core.last_observed_prompt_tokens = 0;
+    core.clear_dynamic_context();
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::Available
+    );
+}
+
+#[test]
+fn successful_threshold_compression_schedules_only_one_forced_followup() {
+    let mut core = test_core("threshold_compaction_followup_in_prompt");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    core.set_max_llm_input_tokens(4_000);
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "retained active context ".repeat(700),
+    )]);
+    assert!(core.dynamic_context_estimated_tokens() > core.max_llm_input_tokens / 4);
+
+    let retained_id = core.deltas[0].delta_id.clone();
+    let run_poor_compact = |core: &mut AgentCore, label: &str| {
+        core.append_delta(vec![(
+            "runtime_note".to_string(),
+            format!("discardable context for {label}"),
+        )]);
+        core.context_compress_required = true;
+        core.threshold_compaction_reasoning_required = true;
+        core.manual_compact_trailer_pending = false;
+        core.apply_model_response(LlmResponse {
+            content: serde_json::json!({
+                "context_compress": {
+                    "keep": [retained_id.clone()],
+                    "summary": format!("retain active state after {label}")
+                }
+            })
+            .to_string(),
+            tool_calls: Vec::new(),
+            model_name: "test".to_string(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        })
+    };
+
+    let first = run_poor_compact(&mut core, "first threshold");
+    assert!(matches!(first, CoreStep::NeedModel { .. }));
+    assert!(core.context_compress_required);
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::FollowupPending
+    );
+
+    let second = run_poor_compact(&mut core, "forced followup");
+    let CoreStep::NeedModel { prompt, .. } = second else {
+        panic!("second compact must continue")
+    };
+    assert!(!core.context_compress_required);
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::Exhausted
+    );
+    assert_eq!(prompt.matches("**WARN**:").count(), 1, "{prompt}");
+
+    core.append_in_turn_shrink_review_if_needed();
+    assert!(!core.context_compress_required);
+}
+
+#[test]
+fn successful_threshold_compression_arms_provider_usage_verification() {
+    let mut core = test_core("threshold_compaction_provider_verification_arm");
+    core.set_interaction_profile(&native_test_profile());
+    core.set_max_llm_input_tokens(4_000);
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "discard this old context ".repeat(700),
+    )]);
+    let arguments = serde_json::json!({
+        "summary": "retain only the active task"
+    });
+    core.context_compress_required = true;
+    core.threshold_compaction_reasoning_required = true;
+
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
+            id: "call_compact_for_verification".to_string(),
+            name: "context_compress".to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+    assert!(!core.context_compress_required);
+    assert_eq!(
+        core.post_compaction_verification,
+        Some(PostCompactionVerification::Initial)
+    );
+}
+
+#[test]
+fn provider_usage_verification_schedules_followup_without_dropping_response() {
+    let mut core = test_core("provider_verification_keeps_response");
+    core.set_interaction_profile(&native_test_profile());
+    core.set_max_llm_input_tokens(4_000);
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "continue after compression".to_string(),
+    )]);
+    core.post_compaction_verification = Some(PostCompactionVerification::Initial);
+    let arguments = serde_json::json!({"type": "cwd"});
+
+    let step = core.apply_model_response(LlmResponse {
+        content: "checking the current directory".to_string(),
+        tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
+            id: "call_after_verified_compact".to_string(),
+            name: "self_tool".to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats {
+            llm_calls: 1,
+            prompt_tokens: 1_200,
+            total_tokens: 1_200,
+            ..UsageStats::zero()
+        },
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("the accepted post-compaction tool response must continue")
+    };
+
+    assert_eq!(core.native_exchanges.len(), 1, "tool response was dropped");
+    assert_eq!(
+        core.native_exchanges[0].calls[0].id,
+        "call_after_verified_compact"
+    );
+    assert!(core.context_compress_required);
+    assert!(core.threshold_compaction_reasoning_required);
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::FollowupPending
+    );
+    assert_eq!(
+        core.take_pending_compact_request_notice(),
+        Some((1_200, 3_600, Some(1_000)))
+    );
+    let request_prompt = core.build_model_request_prompt(&prompt);
+    assert!(request_prompt.ends_with(crate::prompt_render::CONTEXT_COMPRESS_REQUIRED_TRAILER));
+}
+
+#[test]
+fn provider_usage_after_forced_followup_warns_and_does_not_loop() {
+    let mut core = test_core("provider_verification_followup_exhausted");
+    core.set_interaction_profile(&native_test_profile());
+    core.set_max_llm_input_tokens(4_000);
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "continue after the forced followup".to_string(),
+    )]);
+    core.threshold_compaction_followup_state = ThresholdCompactionFollowupState::FollowupPending;
+    core.post_compaction_verification = Some(PostCompactionVerification::Followup);
+    let arguments = serde_json::json!({"type": "params"});
+
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
+            id: "call_after_forced_followup".to_string(),
+            name: "self_tool".to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats {
+            llm_calls: 1,
+            prompt_tokens: 3_700,
+            total_tokens: 3_700,
+            ..UsageStats::zero()
+        },
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("the accepted verification response must continue")
+    };
+
+    assert_eq!(core.native_exchanges.len(), 1, "tool response was dropped");
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::Exhausted
+    );
+    assert!(!core.context_compress_required);
+    assert!(core.take_pending_compact_request_notice().is_none());
+    assert!(prompt.contains("provider-reported prompt usage remains at 93%"));
+    assert!(!core
+        .build_model_request_prompt(&prompt)
+        .contains(crate::prompt_render::CONTEXT_COMPRESS_REQUIRED_TRAILER));
+}
+
+#[test]
+fn new_explicit_compaction_supersedes_pending_provider_verification() {
+    let mut core = test_core("new_compact_supersedes_provider_verification");
+    core.set_interaction_profile(&native_test_profile());
+    core.set_max_llm_input_tokens(4_000);
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "old context".repeat(200),
+    )]);
+    core.post_compaction_verification = Some(PostCompactionVerification::Initial);
+    core.request_manual_context_compress();
+    let arguments = serde_json::json!({
+        "summary": "manual replacement summary"
+    });
+
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
+            id: "call_manual_compact_supersedes".to_string(),
+            name: "context_compress".to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats {
+            llm_calls: 1,
+            prompt_tokens: 3_700,
+            total_tokens: 3_700,
+            ..UsageStats::zero()
+        },
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("manual compaction should continue")
+    };
+
+    assert!(prompt.contains("manual replacement summary"));
+    assert!(core.post_compaction_verification.is_none());
+    assert!(!core.context_compress_required);
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::Available
+    );
+    assert!(core.take_pending_compact_request_notice().is_none());
+}
+
+#[test]
+fn missing_provider_usage_keeps_post_compaction_verification_pending() {
+    let mut core = test_core("provider_verification_usage_unavailable");
+    core.set_max_llm_input_tokens(4_000);
+    core.post_compaction_verification = Some(PostCompactionVerification::Initial);
+
+    assert_eq!(core.verify_post_compaction_provider_usage(0), None);
+    assert_eq!(
+        core.post_compaction_verification,
+        Some(PostCompactionVerification::Initial)
+    );
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::Available
+    );
+    assert!(!core.context_compress_required);
+}
+
+#[test]
+fn provider_usage_at_target_completes_verification_without_followup() {
+    let mut core = test_core("provider_verification_target_met");
+    core.set_max_llm_input_tokens(4_000);
+    core.threshold_compaction_followup_state = ThresholdCompactionFollowupState::FollowupPending;
+    core.post_compaction_verification = Some(PostCompactionVerification::Followup);
+
+    assert_eq!(core.verify_post_compaction_provider_usage(1_000), None);
+    assert_eq!(
+        core.threshold_compaction_followup_state,
+        ThresholdCompactionFollowupState::Available
+    );
+    assert!(core.post_compaction_verification.is_none());
+    assert!(!core.context_compress_required);
+}
+
+#[test]
+fn clear_dynamic_context_removes_native_history_and_pending_context_notices() {
+    let mut core = test_core("clear_native_dynamic_context");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "old context".to_string(),
+    )]);
+    core.native_exchanges.push(NativeExchange {
+        delta_id: core.deltas[0].delta_id.clone(),
+        assistant_text: "old native exchange".to_string(),
+        calls: vec![NativeToolCall {
+            assistant_continuation: None,
+            id: "old_call".to_string(),
+            name: "self_tool".to_string(),
+            arguments: serde_json::json!({"type":"cwd"}),
+            raw_arguments: r#"{"type":"cwd"}"#.to_string(),
+        }],
+        results: vec![NativeToolResult {
+            call_id: "old_call".to_string(),
+            name: "self_tool".to_string(),
+            content: "old result".to_string(),
+            is_error: false,
+        }],
+    });
+    core.pending_forcible_memo_note = Some("old forced memo".to_string());
+    core.pending_interrupted_memo_note = Some("old interrupted memo".to_string());
+
+    core.clear_dynamic_context();
+
+    assert!(core.deltas.is_empty());
+    assert!(core.native_exchanges.is_empty());
+    assert!(core.pending_forcible_memo_note.is_none());
+    assert!(core.pending_interrupted_memo_note.is_none());
+    assert_eq!(core.dynamic_context_estimated_tokens(), 0);
+    let prompt = match core.begin_turn("fresh task", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected fresh model request, got {other:?}"),
+    };
+    let request = core.model_interaction_request(prompt.clone());
+    assert!(request.native_exchanges.is_empty());
+    assert!(!prompt.contains("old forced memo"));
+    assert!(!prompt.contains("old interrupted memo"));
+}
+
+#[test]
+fn importing_empty_dynamic_context_replaces_existing_state() {
+    let mut core = test_core("import_empty_dynamic_context");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "old context".to_string(),
+    )]);
+    core.native_exchanges.push(NativeExchange {
+        delta_id: core.deltas[0].delta_id.clone(),
+        assistant_text: "old native exchange".to_string(),
+        calls: Vec::new(),
+        results: Vec::new(),
+    });
+    core.pending_forcible_memo_note = Some("old memo note".to_string());
+
+    core.import_dynamic_context(DynamicContextSnapshot {
+        deltas: Vec::new(),
+        native_exchanges: Vec::new(),
+        last_observed_prompt_tokens: 0,
+        active_memo: None,
+        pending_forcible_memo_note: None,
+        pending_interrupted_memo_note: None,
+    });
+
+    let snapshot = core.export_dynamic_context();
+    assert!(snapshot.deltas.is_empty());
+    assert!(snapshot.native_exchanges.is_empty());
+    assert_eq!(snapshot.last_observed_prompt_tokens, 0);
+    assert!(snapshot.pending_forcible_memo_note.is_none());
+    assert_eq!(core.dynamic_context_estimated_tokens(), 0);
+}
+
+#[test]
+fn native_context_compress_persists_summary_after_replacing_all_old_deltas() {
     let mut core = test_core("native_compact_summary_all");
     core.set_response_protocol(ResponseProtocolKind::Json);
     core.set_interaction_profile(&InteractionProfile {
@@ -405,15 +888,15 @@ fn native_context_compact_persists_summary_after_discarding_all_old_deltas() {
     let old_delta_id = core.deltas[0].delta_id.clone();
     let summary = "NATIVE COMPACT SUMMARY MUST SURVIVE";
     let arguments = serde_json::json!({
-        "discard": [old_delta_id],
         "summary": summary,
     });
 
     let step = core.apply_model_response(LlmResponse {
         content: String::new(),
         tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
             id: "call_compact_all".to_string(),
-            name: "context_compact".to_string(),
+            name: "context_compress".to_string(),
             raw_arguments: arguments.to_string(),
             arguments,
         }],
@@ -422,13 +905,13 @@ fn native_context_compact_persists_summary_after_discarding_all_old_deltas() {
         truncated: false,
     });
     let CoreStep::NeedModel { prompt, .. } = step else {
-        panic!("native context compact should continue with a model request")
+        panic!("native context compress should continue with a model request")
     };
 
     assert!(!prompt.contains("OLD NATIVE CONTEXT"));
     assert_eq!(prompt.matches(summary).count(), 1);
-    assert!(prompt.contains("## TIMEM_ASSISTANT (context compaction summary)"));
-    assert!(prompt.contains("context compacted successfully."));
+    assert!(prompt.contains("## TIMEM_ASSISTANT (context compression summary)"));
+    assert!(prompt.contains("context compressed successfully."));
     assert_eq!(core.deltas.len(), 1, "summary must live in a fresh delta");
     assert_ne!(core.deltas[0].delta_id, old_delta_id);
     assert!(core.native_exchanges.is_empty());
@@ -439,7 +922,50 @@ fn native_context_compact_persists_summary_after_discarding_all_old_deltas() {
 }
 
 #[test]
-fn native_context_compact_summary_does_not_depend_on_discarded_owning_delta() {
+fn native_context_compress_rejects_all_undeclared_fields_uniformly() {
+    for field in ["discard", "throw", "remove"] {
+        let mut core = test_core(&format!("native_compact_undeclared_{field}"));
+        core.set_interaction_profile(&native_test_profile());
+        core.append_delta(vec![(
+            "user_question".to_string(),
+            "ORIGINAL CONTEXT MUST REMAIN".to_string(),
+        )]);
+        let mut arguments = serde_json::json!({"summary": "MUST NOT APPLY"});
+        arguments[field] = serde_json::json!(["pd_1"]);
+
+        let step = core.apply_model_response(LlmResponse {
+            content: String::new(),
+            tool_calls: vec![NativeToolCall {
+                assistant_continuation: None,
+                id: format!("call_compact_undeclared_{field}"),
+                name: "context_compress".to_string(),
+                raw_arguments: arguments.to_string(),
+                arguments,
+            }],
+            model_name: "test".to_string(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        });
+        let CoreStep::NeedModel { prompt, .. } = step else {
+            panic!("undeclared context_compress field should request repair")
+        };
+        assert!(
+            prompt.contains(&format!("context_compress.input.{field}_unsupported")),
+            "field={field} prompt={prompt}"
+        );
+        assert!(
+            prompt.contains("ORIGINAL CONTEXT MUST REMAIN"),
+            "field={field}"
+        );
+        assert!(
+            !prompt.contains("context compressed successfully."),
+            "field={field}"
+        );
+    }
+}
+
+#[test]
+fn native_context_compress_summary_does_not_depend_on_removed_owning_delta() {
     let mut core = test_core("native_compact_summary_owner");
     core.set_response_protocol(ResponseProtocolKind::Json);
     core.set_interaction_profile(&InteractionProfile {
@@ -461,18 +987,20 @@ fn native_context_compact_summary_does_not_depend_on_discarded_owning_delta() {
         "result_of_llm_action".to_string(),
         "DISCARD OWNING DELTA".to_string(),
     )]);
+    let keep_delta_id = core.deltas[0].delta_id.clone();
     let owning_delta_id = core.deltas[1].delta_id.clone();
     let summary = "SUMMARY HAS AN INDEPENDENT NEW OWNER";
     let arguments = serde_json::json!({
-        "discard": [owning_delta_id],
+        "keep": [keep_delta_id],
         "summary": summary,
     });
 
     let step = core.apply_model_response(LlmResponse {
         content: String::new(),
         tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
             id: "call_compact_owner".to_string(),
-            name: "context_compact".to_string(),
+            name: "context_compress".to_string(),
             raw_arguments: arguments.to_string(),
             arguments,
         }],
@@ -481,13 +1009,13 @@ fn native_context_compact_summary_does_not_depend_on_discarded_owning_delta() {
         truncated: false,
     });
     let CoreStep::NeedModel { prompt, .. } = step else {
-        panic!("native context compact should continue with a model request")
+        panic!("native context compress should continue with a model request")
     };
 
     assert!(prompt.contains("KEEP ME"));
     assert!(!prompt.contains("DISCARD OWNING DELTA"));
     assert_eq!(prompt.matches(summary).count(), 1);
-    assert!(prompt.contains("## TIMEM_ASSISTANT (context compaction summary)"));
+    assert!(prompt.contains("## TIMEM_ASSISTANT (context compression summary)"));
     assert!(core
         .deltas
         .iter()
@@ -499,6 +1027,110 @@ fn native_context_compact_summary_does_not_depend_on_discarded_owning_delta() {
     let request = core.model_interaction_request(next_prompt);
     assert_eq!(request.rendered_prompt.matches(summary).count(), 1);
     assert!(request.native_exchanges.is_empty());
+}
+
+#[test]
+fn historical_wording_change_case_keep_semantics_eliminates_stale_raw_history() {
+    fn seed_historical_case(core: &mut AgentCore) -> String {
+        let stages = [
+            (
+                "user_question",
+                "HIST_ORIGINAL_REQUEST 这句话改一下：[Context threshold WARN] Context is too long.",
+            ),
+            (
+                "context_compression_summary",
+                "HIST_WEAK_SUMMARY 用户要求改写上下文警告文案。",
+            ),
+            (
+                "llm_free_talk",
+                "HIST_STALE_SUGGESTIONS 改写建议如下：1. 简洁版；2. 指令明确版；3. 自然流畅版。",
+            ),
+            ("user_question", "HIST_OPTION_SELECTION 第1个"),
+            (
+                "llm_free_talk",
+                "HIST_STALE_ACK 好的，选定第 1 个：[Context WARN] Context near limit.",
+            ),
+            ("user_question", "HIST_ACTIVE_CHECK 修改了吗？"),
+        ];
+        for (prompt_type, text) in stages {
+            core.append_delta(vec![(prompt_type.to_string(), text.to_string())]);
+        }
+        core.deltas[0].delta_id.clone()
+    }
+
+    const AUTHORITATIVE_SUMMARY: &str = "用户已选择简洁版警告文案，但截至当前源码尚未修改。下一步是在仓库中定位旧文案，同步修改源码和测试，然后运行相关测试验证。";
+    const RAW_MARKERS: [&str; 6] = [
+        "HIST_ORIGINAL_REQUEST",
+        "HIST_WEAK_SUMMARY",
+        "HIST_STALE_SUGGESTIONS",
+        "HIST_OPTION_SELECTION",
+        "HIST_STALE_ACK",
+        "HIST_ACTIVE_CHECK",
+    ];
+
+    // Reconstruct the legacy selective-discard outcome with the same removal
+    // primitive used by the old integration: the model names one obvious stale
+    // delta, while every omitted delta remains verbatim beside the new summary.
+    let mut legacy = test_core("historical_weak_compaction_legacy_baseline");
+    let selected_discard = seed_historical_case(&mut legacy);
+    legacy.apply_prompt_shrink(&[selected_discard], &[]);
+    legacy.append_delta(vec![(
+        "context_compression_summary".to_string(),
+        AUTHORITATIVE_SUMMARY.to_string(),
+    )]);
+    let legacy_prompt = legacy.render_prompt();
+    let legacy_noise_count = RAW_MARKERS
+        .iter()
+        .filter(|marker| legacy_prompt.contains(**marker))
+        .count();
+    let legacy_tokens = legacy.dynamic_context_token_estimate().total_tokens();
+
+    // Exercise the new contract through the real response parser and
+    // AgentCore::apply_model_response integration point. Omitting keep means
+    // the summary replaces every prior live delta.
+    let mut keep_contract = test_core("historical_weak_compaction_keep_contract");
+    keep_contract.set_response_protocol(ResponseProtocolKind::Json);
+    seed_historical_case(&mut keep_contract);
+    let step = keep_contract.apply_model_response(LlmResponse {
+        content: serde_json::json!({
+            "context_compress": {"summary": AUTHORITATIVE_SUMMARY}
+        })
+        .to_string(),
+        tool_calls: Vec::new(),
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel {
+        prompt: keep_prompt,
+        ..
+    } = step
+    else {
+        panic!("summary-only context compression must continue")
+    };
+    let keep_noise_count = RAW_MARKERS
+        .iter()
+        .filter(|marker| keep_prompt.contains(**marker))
+        .count();
+    let keep_tokens = keep_contract
+        .dynamic_context_token_estimate()
+        .total_tokens();
+
+    eprintln!(
+        "historical context compression A/B: legacy_noise={legacy_noise_count}, keep_noise={keep_noise_count}, legacy_tokens={legacy_tokens}, keep_tokens={keep_tokens}, legacy_deltas={}, keep_deltas={}",
+        legacy.deltas.len(),
+        keep_contract.deltas.len()
+    );
+    assert_eq!(legacy_noise_count, 5, "{legacy_prompt}");
+    assert_eq!(keep_noise_count, 0, "{keep_prompt}");
+    assert_eq!(keep_prompt.matches(AUTHORITATIVE_SUMMARY).count(), 1);
+    assert!(keep_prompt.contains("context compressed successfully."));
+    assert_eq!(keep_contract.deltas.len(), 1);
+    assert!(legacy.deltas.len() > keep_contract.deltas.len());
+    assert!(
+        keep_tokens < legacy_tokens,
+        "keep contract should reduce historical noise: legacy={legacy_tokens}, keep={keep_tokens}"
+    );
 }
 
 fn native_test_profile() -> InteractionProfile {
@@ -519,16 +1151,292 @@ fn native_test_profile() -> InteractionProfile {
 }
 
 #[test]
-fn native_context_compact_first_then_executes_later_call_with_correct_id() {
+fn each_native_model_interaction_owns_a_distinct_visible_delta() {
+    let mut core = test_core("native_interaction_delta_boundary");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "inspect in two rounds".to_string(),
+    )]);
+
+    for (call_id, self_type) in [("call_round_1", "cwd"), ("call_round_2", "params")] {
+        let arguments = serde_json::json!({"type": self_type});
+        let step = core.apply_model_response(LlmResponse {
+            content: String::new(),
+            tool_calls: vec![NativeToolCall {
+                assistant_continuation: None,
+                id: call_id.to_string(),
+                name: "self_tool".to_string(),
+                raw_arguments: arguments.to_string(),
+                arguments,
+            }],
+            model_name: "test".to_string(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        });
+        assert!(matches!(step, CoreStep::NeedModel { .. }));
+    }
+
+    assert_eq!(
+        core.deltas
+            .iter()
+            .map(|delta| delta.delta_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pd_1", "pd_2", "pd_3"]
+    );
+    assert_eq!(
+        core.native_exchanges
+            .iter()
+            .map(|exchange| exchange.delta_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pd_2", "pd_3"]
+    );
+    assert!(core.deltas[1].slices.is_empty());
+    assert!(core.deltas[2].slices.is_empty());
+
+    let prompt = core.render_prompt();
+    assert!(prompt.contains("[BEGIN DELTA delta_id: pd_2"), "{prompt}");
+    assert!(prompt.contains("[BEGIN DELTA delta_id: pd_3"), "{prompt}");
+    let request = core.model_interaction_request(prompt);
+    assert_eq!(request.native_exchanges.len(), 2);
+    assert_eq!(request.native_exchanges[0].calls[0].id, "call_round_1");
+    assert_eq!(request.native_exchanges[1].calls[0].id, "call_round_2");
+}
+
+#[test]
+fn native_approval_resume_keeps_exchange_on_the_interaction_delta() {
+    // Approval is denied, so neither shell is executed. Exercise both host
+    // profiles on every OS instead of leaving this contract to platform CI.
+    for (host, shell) in [
+        (
+            crate::capability::CapabilityHostProfile::unix_with_local_command_execution(),
+            "run_bash",
+        ),
+        (
+            crate::capability::CapabilityHostProfile::windows_with_local_command_execution(),
+            "run_powershell",
+        ),
+    ] {
+        assert_native_approval_interaction_delta(host, shell);
+    }
+}
+
+fn assert_native_approval_interaction_delta(
+    host: crate::capability::CapabilityHostProfile,
+    shell: &str,
+) {
+    let mut core = test_core(&format!("native_approval_interaction_delta_{shell}"));
+    core.set_capability_registry(CapabilityRegistry::builtin_for_host(host));
+    assert!(core.capabilities.contains_tool(shell));
+    core.set_interaction_profile(&native_test_profile());
+    core.set_bash_approval_mode(BashApprovalMode::Ask);
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "request a command that needs approval".to_string(),
+    )]);
+    let arguments = serde_json::json!({"cmd": "rm timem_native_approval_probe"});
+
+    let approval = match core.apply_model_response(LlmResponse {
+        content: "waiting for approval".to_string(),
+        tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
+            id: "call_needs_approval".to_string(),
+            name: shell.to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    }) {
+        CoreStep::NeedsUserApproval { request } => request,
+        other => panic!("expected approval boundary, got {other:?}"),
+    };
+
+    assert_eq!(
+        core.deltas
+            .iter()
+            .map(|delta| delta.delta_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pd_1", "pd_2"]
+    );
+    assert!(core.deltas[1].slices.is_empty());
+    assert!(core.native_exchanges.is_empty());
+    assert_eq!(
+        core.pending_native_exchange
+            .as_ref()
+            .map(|pending| pending.0.as_str()),
+        Some("pd_2")
+    );
+
+    let resumed = core.resolve_user_approval(&approval.approval_id, false);
+    assert!(matches!(resumed, CoreStep::NeedModel { .. }));
+    assert!(core.pending_native_exchange.is_none());
+    assert_eq!(core.deltas.len(), 2);
+    assert_eq!(core.native_exchanges.len(), 1);
+    assert_eq!(core.native_exchanges[0].delta_id, "pd_2");
+    assert_eq!(core.native_exchanges[0].calls[0].id, "call_needs_approval");
+    assert_eq!(
+        core.native_exchanges[0].results[0].call_id,
+        "call_needs_approval"
+    );
+
+    let next_arguments = serde_json::json!({"type": "cwd"});
+    let next = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
+            id: "call_after_approval".to_string(),
+            name: "self_tool".to_string(),
+            raw_arguments: next_arguments.to_string(),
+            arguments: next_arguments,
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    assert!(matches!(next, CoreStep::NeedModel { .. }));
+    assert_eq!(core.native_exchanges.len(), 2);
+    assert_eq!(core.native_exchanges[1].delta_id, "pd_3");
+    assert_eq!(core.native_exchanges[1].calls[0].id, "call_after_approval");
+}
+
+#[test]
+fn boundary_only_native_interaction_can_be_offloaded_with_its_exchange() {
+    let mut core = test_core("native_boundary_only_offload");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "collect evidence for offload".to_string(),
+    )]);
+    let arguments = serde_json::json!({"type": "cwd"});
+
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![NativeToolCall {
+            assistant_continuation: None,
+            id: "call_boundary_offload".to_string(),
+            name: "self_tool".to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+    assert!(core.deltas[1].slices.is_empty());
+    assert_eq!(core.native_exchanges[0].delta_id, "pd_2");
+
+    let offload = core
+        .collect_prompt_context_for_scratch(&["pd_2".to_string()], &[])
+        .expect("boundary-only owning delta should be offloadable");
+    assert_eq!(offload.delta_ids, vec!["pd_2"]);
+    assert!(offload.content.contains("call_boundary_offload"));
+    assert!(offload.content.contains("self_tool"));
+    assert!(offload.content.contains("tool_output"));
+}
+
+#[test]
+fn native_model_interaction_delta_is_an_independent_compaction_unit() {
+    let mut core = test_core("native_interaction_compaction_unit");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "inspect in two discardable rounds".to_string(),
+    )]);
+
+    for (call_id, self_type) in [("call_discard_me", "cwd"), ("call_keep_me", "params")] {
+        let arguments = serde_json::json!({"type": self_type});
+        let step = core.apply_model_response(LlmResponse {
+            content: String::new(),
+            tool_calls: vec![NativeToolCall {
+                assistant_continuation: None,
+                id: call_id.to_string(),
+                name: "self_tool".to_string(),
+                raw_arguments: arguments.to_string(),
+                arguments,
+            }],
+            model_name: "test".to_string(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        });
+        assert!(matches!(step, CoreStep::NeedModel { .. }));
+    }
+
+    let removed = core.apply_prompt_shrink(&["pd_2".to_string()], &[]);
+    assert!(removed.contains("removed_delta_count: 1"));
+    assert_eq!(
+        core.deltas
+            .iter()
+            .map(|delta| delta.delta_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["pd_1", "pd_3"]
+    );
+    assert_eq!(core.native_exchanges.len(), 1);
+    assert_eq!(core.native_exchanges[0].delta_id, "pd_3");
+    assert_eq!(core.native_exchanges[0].calls[0].id, "call_keep_me");
+
+    let prompt = core.render_prompt();
+    assert!(!prompt.contains("[BEGIN DELTA delta_id: pd_2"));
+    assert!(prompt.contains("[BEGIN DELTA delta_id: pd_3"));
+    let request = core.model_interaction_request(prompt);
+    assert_eq!(request.native_exchanges.len(), 1);
+    assert_eq!(request.native_exchanges[0].calls[0].id, "call_keep_me");
+}
+
+#[test]
+fn parallel_native_calls_share_one_model_interaction_delta() {
+    let mut core = test_core("parallel_native_interaction_delta");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "inspect paths and params".to_string(),
+    )]);
+    let cwd_arguments = serde_json::json!({"type": "cwd"});
+    let params_arguments = serde_json::json!({"type": "params"});
+
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![
+            NativeToolCall {
+                assistant_continuation: None,
+                id: "call_parallel_cwd".to_string(),
+                name: "self_tool".to_string(),
+                raw_arguments: cwd_arguments.to_string(),
+                arguments: cwd_arguments,
+            },
+            NativeToolCall {
+                assistant_continuation: None,
+                id: "call_parallel_params".to_string(),
+                name: "self_tool".to_string(),
+                raw_arguments: params_arguments.to_string(),
+                arguments: params_arguments,
+            },
+        ],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+
+    assert_eq!(core.deltas.len(), 2);
+    assert_eq!(core.native_exchanges.len(), 1);
+    assert_eq!(core.native_exchanges[0].delta_id, "pd_2");
+    assert_eq!(core.native_exchanges[0].calls.len(), 2);
+    let prompt = core.render_prompt();
+    assert_eq!(prompt.matches("[BEGIN DELTA delta_id: pd_2").count(), 1);
+}
+
+#[test]
+fn native_context_compress_first_then_executes_later_call_with_correct_id() {
     let mut core = test_core("native_compact_then_call");
     core.set_interaction_profile(&native_test_profile());
     core.append_delta(vec![(
         "user_question".to_string(),
         "OLD CONTEXT TO DISCARD".to_string(),
     )]);
-    let old_delta_id = core.deltas[0].delta_id.clone();
     let compact_arguments = serde_json::json!({
-        "discard": [old_delta_id],
         "summary": "KEEP ACTIVE STATE",
     });
     let cwd_arguments = serde_json::json!({"type": "cwd"});
@@ -537,12 +1445,14 @@ fn native_context_compact_first_then_executes_later_call_with_correct_id() {
         content: "compacting before continuing".to_string(),
         tool_calls: vec![
             NativeToolCall {
+                assistant_continuation: None,
                 id: "call_compact_first".to_string(),
-                name: "context_compact".to_string(),
+                name: "context_compress".to_string(),
                 raw_arguments: compact_arguments.to_string(),
                 arguments: compact_arguments,
             },
             NativeToolCall {
+                assistant_continuation: None,
                 id: "call_after_compact".to_string(),
                 name: "self_tool".to_string(),
                 raw_arguments: cwd_arguments.to_string(),
@@ -570,17 +1480,79 @@ fn native_context_compact_first_then_executes_later_call_with_correct_id() {
 }
 
 #[test]
-fn native_context_compact_after_another_call_is_rejected() {
+fn context_compress_success_hides_ref_details_and_preserves_surviving_exchanges() {
+    for native in [false, true] {
+        for remove_all in [false, true] {
+            let mut core = test_core(&format!("compact_live_refs_{native}_{remove_all}"));
+            core.set_response_protocol(ResponseProtocolKind::Json);
+            if native {
+                core.set_interaction_profile(&native_test_profile());
+            }
+            for id in ["pd_1", "pd_2"] {
+                core.append_delta(vec![("user_question".to_string(), id.to_string())]);
+                core.native_exchanges.push(NativeExchange {
+                    delta_id: id.to_string(),
+                    assistant_text: "previous work".to_string(),
+                    calls: Vec::new(),
+                    results: Vec::new(),
+                });
+            }
+            let arguments = if remove_all {
+                serde_json::json!({
+                    "summary": "Retain active task state",
+                })
+            } else {
+                serde_json::json!({
+                    "keep": ["pd_2"],
+                    "summary": "Retain active task state",
+                })
+            };
+            let step = core.apply_model_response(LlmResponse {
+                content: if native {
+                    String::new()
+                } else {
+                    serde_json::json!({"context_compress": arguments}).to_string()
+                },
+                tool_calls: if native {
+                    vec![NativeToolCall {
+                        assistant_continuation: None,
+                        id: "call_compact".to_string(),
+                        name: "context_compress".to_string(),
+                        raw_arguments: arguments.to_string(),
+                        arguments,
+                    }]
+                } else {
+                    Vec::new()
+                },
+                model_name: "test".to_string(),
+                usage: UsageStats::zero(),
+                truncated: false,
+            });
+            let CoreStep::NeedModel { prompt, .. } = step else {
+                panic!("compaction should continue");
+            };
+            assert!(
+                prompt.contains("context compressed successfully."),
+                "{prompt}"
+            );
+            assert!(!prompt.contains("current_live_delta_refs:"), "{prompt}");
+            assert!(!prompt.contains("missing_ids: none"), "{prompt}");
+            assert!(!prompt.contains(r#""discarded_delta_ids""#), "{prompt}");
+            assert_eq!(core.native_exchanges.len(), usize::from(!remove_all));
+        }
+    }
+}
+
+#[test]
+fn native_context_compress_after_another_call_is_rejected() {
     let mut core = test_core("native_compact_not_first");
     core.set_interaction_profile(&native_test_profile());
     core.append_delta(vec![(
         "user_question".to_string(),
         "KEEP OLD STATE".to_string(),
     )]);
-    let old_delta_id = core.deltas[0].delta_id.clone();
     let cwd_arguments = serde_json::json!({"type": "cwd"});
     let compact_arguments = serde_json::json!({
-        "discard": [old_delta_id],
         "summary": "SHOULD NOT APPLY",
     });
 
@@ -588,14 +1560,16 @@ fn native_context_compact_after_another_call_is_rejected() {
         content: String::new(),
         tool_calls: vec![
             NativeToolCall {
+                assistant_continuation: None,
                 id: "call_before_compact".to_string(),
                 name: "self_tool".to_string(),
                 raw_arguments: cwd_arguments.to_string(),
                 arguments: cwd_arguments,
             },
             NativeToolCall {
+                assistant_continuation: None,
                 id: "call_compact_second".to_string(),
-                name: "context_compact".to_string(),
+                name: "context_compress".to_string(),
                 raw_arguments: compact_arguments.to_string(),
                 arguments: compact_arguments,
             },
@@ -605,25 +1579,73 @@ fn native_context_compact_after_another_call_is_rejected() {
         truncated: false,
     });
     let CoreStep::NeedModel { prompt, .. } = step else {
-        panic!("non-first context_compact should request protocol repair")
+        panic!("non-first context_compress should request protocol repair")
     };
 
-    assert!(prompt.contains("context_compact_must_be_first"));
+    assert!(prompt.contains("context_compress_must_be_first"));
     assert!(prompt.contains("KEEP OLD STATE"));
     assert!(!prompt.contains("SHOULD NOT APPLY"));
     assert!(core.native_exchanges.is_empty());
 }
 
 #[test]
-fn failed_context_compact_blocks_later_native_calls() {
-    let mut core = test_core("native_compact_failure_barrier");
+fn missing_keep_refs_fail_closed_and_block_later_calls() {
+    let mut core = test_core("native_compact_stale_refs_idempotent");
     core.set_interaction_profile(&native_test_profile());
     core.append_delta(vec![(
         "user_question".to_string(),
         "ACTIVE STATE".to_string(),
     )]);
     let compact_arguments = serde_json::json!({
-        "discard": ["pd_missing"],
+        "keep": ["pd_missing"],
+        "summary": "MISSING KEEP MUST FAIL CLOSED",
+    });
+    let cwd_arguments = serde_json::json!({"type": "cwd"});
+
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![
+            NativeToolCall {
+                assistant_continuation: None,
+                id: "call_stale_compact".to_string(),
+                name: "context_compress".to_string(),
+                raw_arguments: compact_arguments.to_string(),
+                arguments: compact_arguments,
+            },
+            NativeToolCall {
+                assistant_continuation: None,
+                id: "call_may_run".to_string(),
+                name: "self_tool".to_string(),
+                raw_arguments: cwd_arguments.to_string(),
+                arguments: cwd_arguments,
+            },
+        ],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("failed compact should request another model response")
+    };
+
+    assert!(prompt.contains("invalid_prompt_refs"));
+    assert!(!prompt.contains("context compressed successfully."));
+    assert!(prompt.contains("pd_missing"));
+    assert!(prompt.contains("current_live_delta_refs:"));
+    assert!(prompt.contains("ACTIVE STATE"));
+    assert!(!prompt.contains(r#""tool_call_id":"call_may_run""#));
+}
+
+#[test]
+fn prompt_zero_compact_still_fails_closed_and_blocks_later_native_calls() {
+    let mut core = test_core("native_compact_prompt_zero_barrier");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "ACTIVE STATE".to_string(),
+    )]);
+    let compact_arguments = serde_json::json!({
+        "keep": ["prompt_0"],
         "summary": "INVALID COMPACT",
     });
     let cwd_arguments = serde_json::json!({"type": "cwd"});
@@ -632,12 +1654,14 @@ fn failed_context_compact_blocks_later_native_calls() {
         content: String::new(),
         tool_calls: vec![
             NativeToolCall {
+                assistant_continuation: None,
                 id: "call_bad_compact".to_string(),
-                name: "context_compact".to_string(),
+                name: "context_compress".to_string(),
                 raw_arguments: compact_arguments.to_string(),
                 arguments: compact_arguments,
             },
             NativeToolCall {
+                assistant_continuation: None,
                 id: "call_must_not_run".to_string(),
                 name: "self_tool".to_string(),
                 raw_arguments: cwd_arguments.to_string(),
@@ -649,11 +1673,14 @@ fn failed_context_compact_blocks_later_native_calls() {
         truncated: false,
     });
     let CoreStep::NeedModel { prompt, .. } = step else {
-        panic!("failed context_compact should continue without executing later calls")
+        panic!("failed context_compress should continue without executing later calls")
     };
 
-    assert!(prompt.contains("error: invalid_prompt_refs"));
-    assert!(!prompt.contains("Action result: self_tool"));
+    assert!(prompt.contains(r#""status":"failed""#));
+    assert!(prompt.contains(r#""error_type":"InvalidPromptRefs""#));
+    assert!(prompt.contains(r#""missing_ids":["prompt_0"]"#));
+    assert!(prompt.contains("current_live_delta_refs:"));
+    assert!(!prompt.contains(r#""tool_call_id":"call_must_not_run""#));
     assert!(prompt.contains("ACTIVE STATE"));
     assert!(core.native_exchanges.is_empty());
 }
@@ -930,68 +1957,6 @@ fn completed_background_bash_emits_terminal_topic_for_original_action() {
     assert_eq!(terminal.payload["turn_id"], core.current_action_turn_id());
 }
 
-fn native_profile() -> InteractionProfile {
-    InteractionProfile {
-        api_protocol: "openai_compatible".to_string(),
-        model: "test".to_string(),
-        gateway: "test".to_string(),
-        requested_mode: ToolCallMode::Native,
-        resolved_mode: ToolCallMode::Native,
-        active_prompt_protocol: "json".to_string(),
-        parallel_supported: true,
-        parallel_enabled: true,
-        source: CapabilityProbeSource::Explicit,
-        reason: "test".to_string(),
-        probe_latency_ms: None,
-        observed_tool_calls: 1,
-    }
-}
-
-#[test]
-fn shrink_review_delta_refs_count_native_tool_exchanges() {
-    let mut core = test_core("shrink_refs_tool_exchanges");
-    core.set_interaction_profile(&native_profile());
-    core.set_max_llm_input_tokens(3_000);
-    let _ = core.begin_turn("seed", None);
-    // A native tool-call round with a large result registers a native
-    // exchange owned by its delta; the delta itself has little/no text.
-    let step = core.apply_model_response(LlmResponse {
-        content: String::new(),
-        tool_calls: vec![crate::NativeToolCall {
-            id: "call_read".to_string(),
-            name: "readfile".to_string(),
-            arguments: serde_json::json!({"path": "big.txt"}),
-            raw_arguments: r#"{"path":"big.txt"}"#.to_string(),
-        }],
-        model_name: "test".to_string(),
-        usage: UsageStats {
-            prompt_tokens: 2_700,
-            ..UsageStats::zero()
-        },
-        truncated: false,
-    });
-    assert!(matches!(step, CoreStep::NeedModel { .. }));
-    // Feed the (large) tool result to complete the exchange.
-    let step = core.apply_model_response(LlmResponse {
-        content: String::new(),
-        tool_calls: Vec::new(),
-        model_name: "test".to_string(),
-        usage: UsageStats::zero(),
-        truncated: false,
-    });
-    let prompt = match step {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(prompt.contains("Long-context maintenance:"), "{prompt}");
-    assert!(prompt.contains("mode=force_shrink_required"), "{prompt}");
-    // The delta owning the tool exchange must appear in the refs list with
-    // its tool_exchanges contribution spelled out, not as a tiny text-only
-    // estimate the model would never pick for compaction.
-    assert!(prompt.contains("(text "), "{prompt}");
-    assert!(prompt.contains("+ tool_exchanges "), "{prompt}");
-}
-
 fn test_core(name: &str) -> AgentCore {
     let dir = std::env::temp_dir().join(format!(
         "timem_prompt_component_test_{}_{}",
@@ -1048,7 +2013,7 @@ fn build_next_prompt_orders_pending_components_without_role_merging() {
     let prompt = core.build_next_prompt();
     let system_first = prompt.find("<RUNTIME>\n\nAction result: run_bash").unwrap();
     let action_result = prompt.find("Action result: run_bash").unwrap();
-    let user = prompt.find("<USER>\n\nnew input").unwrap();
+    let user = prompt.find("\n\nnew input").unwrap();
     let system_second = prompt.find("<RUNTIME>\n\nfound something new").unwrap();
     let assistant = prompt.find("<ASSISTANT>\n\nassistant note").unwrap();
 
@@ -1084,6 +2049,97 @@ fn common_prompt_component_ingress_marks_every_truncated_action_result() {
 }
 
 #[test]
+fn structured_action_result_ingress_preserves_complete_json_envelope() {
+    let mut core = test_core("structured_action_result_ingress");
+    let content = "x".repeat(prompt_render::MAX_ACTION_RESULT_PROMPT_BYTES - 512);
+    let envelope = serde_json::to_string(&json!({
+        "action_result": {
+            "tool_call_id": "large_call",
+            "runtime_metadata": {
+                "status": "completed",
+                "truncation": {
+                    "content": {
+                        "model_result_budget": {
+                            "truncated": true,
+                            "retained": "head"
+                        }
+                    }
+                }
+            },
+            "tool_output": {"content": content}
+        }
+    }))
+    .unwrap();
+    assert!(envelope.len() <= prompt_render::MAX_ACTION_RESULT_PROMPT_BYTES);
+    core.submit_prompt_component(
+        PromptComponentRole::system(),
+        "action_result",
+        envelope.clone(),
+        "readfile",
+    );
+    let prompt = core.build_next_prompt();
+    assert!(!prompt.contains("words truncated. Generate more actions if necessary !!!"));
+    let rendered = prompt
+        .lines()
+        .find(|line| line.trim_start().starts_with(r#"{"action_result":"#))
+        .expect("structured action result line");
+    let parsed =
+        serde_json::from_str::<serde_json::Value>(rendered.trim()).expect("complete JSON envelope");
+    assert_eq!(parsed["action_result"]["tool_call_id"], "large_call");
+    assert_eq!(
+        parsed["action_result"]["tool_output"]["content"]
+            .as_str()
+            .map(str::len),
+        Some(content.len())
+    );
+}
+
+#[test]
+fn model_tool_result_budget_defaults_to_16k_and_accepts_only_system_choices() {
+    let mut core = test_core("model_tool_result_budget_choices");
+    assert_eq!(core.model_tool_result_bytes(), 16 * 1024);
+
+    for max_bytes in [8, 10, 16, 20, 30].map(|kib| kib * 1024) {
+        core.set_model_tool_result_bytes(max_bytes)
+            .expect("documented system choice should be accepted");
+        assert_eq!(core.model_tool_result_bytes(), max_bytes);
+    }
+
+    for invalid in [0, 9 * 1024, 32 * 1024] {
+        assert_eq!(
+            core.set_model_tool_result_bytes(invalid).unwrap_err(),
+            "model_tool_result_bytes_invalid"
+        );
+    }
+}
+
+#[test]
+fn selected_model_tool_result_budget_bounds_complete_action_envelope() {
+    let action = ParsedAction {
+        action: "readfile".to_string(),
+        name: None,
+        call_id: "budgeted_readfile".to_string(),
+        raw_input: json!({"path": "large.txt"}),
+    };
+    let outcome = ActionOutcome::completed("x".repeat(64 * 1024));
+    let mut core = test_core("selected_model_tool_result_budget");
+
+    for max_bytes in [8, 10, 16, 20, 30].map(|kib| kib * 1024) {
+        core.set_model_tool_result_bytes(max_bytes).unwrap();
+        let envelope = core.format_action_outcome(&action, &outcome);
+        assert!(
+            envelope.len() <= max_bytes,
+            "{} byte envelope exceeded {} byte setting",
+            envelope.len(),
+            max_bytes
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&envelope).expect("budgeting must preserve valid JSON");
+        assert_eq!(parsed["action_result"]["tool_call_id"], "budgeted_readfile");
+    }
+}
+
+#[test]
 fn model_result_gate_uses_each_actions_tail_out_policy() {
     let mut core = test_core("tail_result_gate");
     core.set_response_protocol(ResponseProtocolKind::Json);
@@ -1099,9 +2155,18 @@ fn model_result_gate_uses_each_actions_tail_out_policy() {
         },
         &outcome,
     );
-    assert!(head.contains("BEGIN_MARKER"));
-    assert!(!head.contains("END_MARKER"));
-    assert!(head.contains("words truncated."));
+    let head: serde_json::Value = serde_json::from_str(&head).expect("valid head envelope");
+    assert!(head["action_result"]["tool_output"]["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("BEGIN_MARKER")));
+    assert!(!head["action_result"]["tool_output"]["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("END_MARKER")));
+    assert_eq!(
+        head["action_result"]["runtime_metadata"]["truncation"]["content"]["model_result_budget"]
+            ["retained"],
+        "head"
+    );
 
     let tail = core.format_action_outcome(
         &ParsedAction {
@@ -1112,18 +2177,133 @@ fn model_result_gate_uses_each_actions_tail_out_policy() {
         },
         &outcome,
     );
-    assert!(!tail.contains("BEGIN_MARKER"));
-    assert!(tail.contains("END_MARKER"));
-    assert!(tail.contains("!!!Too long,"));
-    assert!(tail.contains("truncated before"));
-    assert!(
-        head.len() <= tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES + 64,
-        "tool-call correlation metadata stays bounded"
+    let tail: serde_json::Value = serde_json::from_str(&tail).expect("valid tail envelope");
+    assert!(!tail["action_result"]["tool_output"]["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("BEGIN_MARKER")));
+    assert!(tail["action_result"]["tool_output"]["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("END_MARKER")));
+    assert_eq!(
+        tail["action_result"]["runtime_metadata"]["truncation"]["content"]["model_result_budget"]
+            ["retained"],
+        "tail"
     );
-    assert!(
-        tail.len() <= tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES + 64,
-        "tool-call correlation metadata stays bounded"
+    let default_shell = core.format_action_outcome(
+        &ParsedAction {
+            action: "run_bash".to_string(),
+            name: None,
+            call_id: "default_shell".to_string(),
+            raw_input: json!({}),
+        },
+        &outcome,
     );
+    let default_shell: serde_json::Value =
+        serde_json::from_str(&default_shell).expect("valid default shell envelope");
+    assert!(!default_shell["action_result"]["tool_output"]["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("BEGIN_MARKER")));
+    assert!(default_shell["action_result"]["tool_output"]["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("END_MARKER")));
+    assert_eq!(
+        default_shell["action_result"]["runtime_metadata"]["truncation"]["content"]
+            ["model_result_budget"]["retained"],
+        "tail"
+    );
+
+    let default_readfile = core.format_action_outcome(
+        &ParsedAction {
+            action: "readfile".to_string(),
+            name: None,
+            call_id: "default_readfile".to_string(),
+            raw_input: json!({}),
+        },
+        &outcome,
+    );
+    let default_readfile: serde_json::Value =
+        serde_json::from_str(&default_readfile).expect("valid default readfile envelope");
+    assert!(default_readfile["action_result"]["tool_output"]["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("BEGIN_MARKER")));
+    assert!(!default_readfile["action_result"]["tool_output"]["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("END_MARKER")));
+    assert_eq!(
+        default_readfile["action_result"]["runtime_metadata"]["truncation"]["content"]
+            ["model_result_budget"]["retained"],
+        "head"
+    );
+
+    assert!(!head.to_string().contains("!!!Too long"));
+    assert!(!tail.to_string().contains("!!!Too long"));
+}
+
+#[test]
+fn readfile_envelope_keeps_content_pure_and_reports_only_actual_truncation() {
+    let action = ParsedAction {
+        action: "readfile".to_string(),
+        name: None,
+        call_id: "readfile_limited".to_string(),
+        raw_input: json!({"path": "large.txt"}),
+    };
+    let limited = ActionOutcome::completed("legacy rendered text with a truncation notice")
+        .with_readfile_result(ReadfileResultEvidence {
+            path: "/tmp/large.txt".to_string(),
+            matcher: None,
+            start_line: Some(1),
+            end_line: Some(1),
+            total_lines: Some(1),
+            encoding: Some("UTF-8".to_string()),
+            file_bytes: Some(100),
+            content_bytes: Some(4),
+            limited: Some(true),
+            tail_out: Some(false),
+            content: "PURE".to_string(),
+            error_type: None,
+        });
+    let mut core = test_core("readfile_pure_limited");
+    let limited: serde_json::Value =
+        serde_json::from_str(&core.format_action_outcome(&action, &limited))
+            .expect("valid limited readfile envelope");
+    assert_eq!(
+        limited["action_result"]["tool_output"],
+        json!({"content": "PURE"})
+    );
+    assert_eq!(
+        limited["action_result"]["runtime_metadata"]["truncation"]["content"]["tool_selection"]
+            ["retained"],
+        "head"
+    );
+    assert!(!limited["action_result"]["tool_output"]
+        .to_string()
+        .contains("truncation"));
+
+    let complete =
+        ActionOutcome::completed("unused").with_readfile_result(ReadfileResultEvidence {
+            path: "/tmp/small.txt".to_string(),
+            matcher: None,
+            start_line: Some(1),
+            end_line: Some(1),
+            total_lines: Some(1),
+            encoding: Some("UTF-8".to_string()),
+            file_bytes: Some(4),
+            content_bytes: Some(4),
+            limited: Some(false),
+            tail_out: Some(false),
+            content: "PURE".to_string(),
+            error_type: None,
+        });
+    let complete: serde_json::Value =
+        serde_json::from_str(&core.format_action_outcome(&action, &complete))
+            .expect("valid complete readfile envelope");
+    assert_eq!(
+        complete["action_result"]["tool_output"],
+        json!({"content": "PURE"})
+    );
+    assert!(complete["action_result"]["runtime_metadata"]
+        .get("truncation")
+        .is_none());
 }
 
 #[test]
@@ -1134,6 +2314,8 @@ fn xml_model_result_gate_retains_tail_inside_a_complete_envelope() {
     let outcome = ActionOutcome::completed("unused").with_bash_result(BashResultEvidence {
         stdout: raw,
         stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         exit_code: Some(0),
         signal: None,
         pid: None,
@@ -1151,15 +2333,21 @@ fn xml_model_result_gate_retains_tail_inside_a_complete_envelope() {
         &outcome,
     );
 
-    assert!(result.contains("<bash_result "));
-    assert!(result.ends_with("</bash_result>"));
-    assert!(result.contains("truncated before"));
-    assert!(!result.contains("BEGIN_MARKER"));
-    assert!(result.contains("END_MARKER"));
-    assert!(
-        result.len() <= tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES + 64,
-        "tool-call correlation metadata stays bounded"
+    let result: serde_json::Value =
+        serde_json::from_str(&result).expect("XML response mode still uses JSON result envelope");
+    assert_eq!(result["action_result"]["tool_call_id"], "test_call");
+    assert!(!result["action_result"]["tool_output"]["stdout"]
+        .as_str()
+        .is_some_and(|content| content.contains("BEGIN_MARKER")));
+    assert!(result["action_result"]["tool_output"]["stdout"]
+        .as_str()
+        .is_some_and(|content| content.contains("END_MARKER")));
+    assert_eq!(
+        result["action_result"]["runtime_metadata"]["truncation"]["stdout"]["model_result_budget"]
+            ["retained"],
+        "tail"
     );
+    assert!(!result.to_string().contains("!!!Too long"));
 }
 
 #[test]
@@ -1225,7 +2413,7 @@ fn sudden_large_action_output_is_replaced_before_crossing_safety_limit() {
     assert!(rejected);
     assert!(!prompt.contains(oversized_marker));
     assert!(prompt.contains("Your action's output is too large:"));
-    assert!(prompt.contains("You need to optimize your action or compact context."));
+    assert!(prompt.contains("You need to optimize your action or compress context."));
     assert!(!prompt.contains("I inspected the output."));
 }
 
@@ -1427,6 +2615,8 @@ fn action_topic_pid_requires_managed_running_bash_evidence() {
     managed.bash_result = Some(BashResultEvidence {
         stdout: String::new(),
         stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         exit_code: None,
         signal: None,
         pid: Some(49189),
@@ -1496,7 +2686,15 @@ fn mcp_capability_update_is_injected_only_when_tool_content_changes() {
     )
     .unwrap();
     assert!(core.pending_prompt_components.is_empty());
-    assert_eq!(core.deltas.len(), 1);
+    assert!(core.deltas.is_empty());
+    let initial_prompt = core.build_next_prompt();
+    assert_eq!(
+        initial_prompt
+            .matches("## Current MCP Capabilities")
+            .count(),
+        1
+    );
+    assert_eq!(initial_prompt.matches("mcp_test__echo").count(), 3);
 
     assert!(!core
         .apply_mcp_update(
@@ -1507,7 +2705,7 @@ fn mcp_capability_update_is_injected_only_when_tool_content_changes() {
         )
         .unwrap());
     assert!(core.pending_prompt_components.is_empty());
-    assert_eq!(core.deltas.len(), 1);
+    assert!(core.deltas.is_empty());
 
     assert!(core
         .apply_mcp_update(
@@ -1525,6 +2723,20 @@ fn mcp_capability_update_is_injected_only_when_tool_content_changes() {
     assert!(prompt.contains("<RUNTIME>"));
     assert!(prompt.contains("MCP update: newly available actions: mcp_test__search."));
     assert!(prompt.contains("MCP update: updated action definitions: mcp_test__echo."));
+    let update_slice = core
+        .deltas
+        .iter()
+        .flat_map(|delta| delta.slices.iter())
+        .rev()
+        .find(|slice| slice.prompt_type == "mcp_capability_update")
+        .expect("MCP update slice");
+    assert!(!update_slice.text.contains("Updated description"));
+    assert!(!update_slice.text.contains("Search description"));
+    assert!(!update_slice.text.contains("input_schema"));
+    assert!(core.deltas.iter().all(|delta| delta
+        .slices
+        .iter()
+        .all(|slice| slice.prompt_type != "mcp_capability_catalog")));
 
     assert!(core
         .apply_mcp_update(
@@ -1613,7 +2825,18 @@ fn mcp_server_instructions_are_persistent_and_model_visible_changes_append_updat
     assert!(initial_prompt
         .contains("MCP update: MCP Filesystem MCP (filesystem) IS ENABLED by user !!!"));
     assert!(initial_prompt.contains("Read metadata before modifying a file."));
-    assert!(initial_prompt.contains("\"server_instructions\""));
+    assert_eq!(
+        initial_prompt
+            .matches("### MCP server-wide instructions")
+            .count(),
+        1
+    );
+    assert_eq!(
+        initial_prompt
+            .matches("## Current MCP Capabilities")
+            .count(),
+        1
+    );
     let initial_delta_count = core.deltas.len();
 
     assert!(core
@@ -1633,6 +2856,13 @@ fn mcp_server_instructions_are_persistent_and_model_visible_changes_append_updat
     assert!(updated_prompt
         .contains("MCP update: instructions for MCP Filesystem MCP (filesystem) ARE UPDATED."));
     assert!(updated_prompt.contains("Preserve file metadata after every modification."));
+    let instruction_update = &core.deltas.last().expect("instruction update delta").slices[0].text;
+    assert!(!instruction_update.contains("Preserve file metadata after every modification."));
+    assert!(!instruction_update.contains("Read metadata before modifying a file."));
+    assert_eq!(
+        core.deltas.last().unwrap().slices[0].prompt_type,
+        "mcp_capability_update"
+    );
 
     assert!(core
         .apply_mcp_update_with_instructions(
@@ -1661,16 +2891,14 @@ fn multiple_successful_compacts_emit_one_minimal_runtime_confirmation() {
     .unwrap();
     core.append_delta(vec![("user_question".to_string(), "old one".to_string())]);
     core.append_delta(vec![("user_question".to_string(), "old two".to_string())]);
-    let first_id = core.deltas[0].delta_id.clone();
-    let second_id = core.deltas[1].delta_id.clone();
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: serde_json::json!({
             "free_talk": "compact both",
-            "context_compact": [
-                { "discard": [first_id], "summary": "first summary" },
-                { "discard": [second_id], "summary": "second summary" }
+            "context_compress": [
+                { "summary": "first summary" },
+                { "summary": "second summary" }
             ]
         })
         .to_string(),
@@ -1679,27 +2907,243 @@ fn multiple_successful_compacts_emit_one_minimal_runtime_confirmation() {
         truncated: false,
     });
     let CoreStep::NeedModel { prompt, .. } = step else {
-        panic!("context compact should continue with a model request")
+        panic!("context compress should continue with a model request")
     };
-    assert_eq!(prompt.matches("context compacted successfully.").count(), 1);
+    assert_eq!(
+        prompt.matches("context compressed successfully.").count(),
+        1
+    );
     assert_eq!(
         prompt
-            .matches("context compacted successfully.\nCWD: ")
+            .matches("context compressed successfully.\nCWD: ")
             .count(),
         1
     );
-    assert!(!prompt.contains("Active MCP capabilities after context compaction"));
-    assert!(!prompt.contains("Action result: context_compact"));
+    assert!(!prompt.contains("Active MCP capabilities after context compression"));
+    assert!(!prompt.contains(r#""action_result":"#), "{prompt}");
+    assert!(!prompt.contains(r#""status":"completed""#), "{prompt}");
+    assert!(!prompt.contains(r#""discarded_delta_ids""#));
     assert!(!prompt.contains("removed_delta_count:"));
+    assert!(!prompt.contains("current_live_delta_refs:"));
     assert!(!prompt.contains("scratch_id:"));
+    assert_eq!(prompt.matches("## Current MCP Capabilities").count(), 1);
+    assert_eq!(prompt.matches("mcp_test__echo").count(), 3, "{prompt}");
+    assert!(core.deltas.iter().all(|delta| delta
+        .slices
+        .iter()
+        .all(|slice| slice.prompt_type != "mcp_capability_catalog")));
+}
+
+#[test]
+fn legacy_mcp_catalog_delta_is_suppressed_in_favor_of_current_registry_state() {
+    let mut core = test_core("legacy_mcp_catalog_suppressed");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    core.configure_mcp(
+        CapabilityRegistry::builtin(),
+        mcp::McpRuntime::default(),
+        Vec::new(),
+        vec![test_mcp_tool("mcp_test__current", "Current definition")],
+    )
+    .unwrap();
+    core.append_delta(vec![(
+        "mcp_capability_catalog".to_string(),
+        "STALE_MCP_CATALOG mcp_test__obsolete".to_string(),
+    )]);
+
+    let prompt = core.build_next_prompt();
+    assert_eq!(prompt.matches("## Current MCP Capabilities").count(), 1);
+    assert!(prompt.contains("mcp_test__current"), "{prompt}");
+    assert!(!prompt.contains("STALE_MCP_CATALOG"), "{prompt}");
+    assert!(!prompt.contains("mcp_test__obsolete"), "{prompt}");
+}
+
+#[test]
+fn request_level_mcp_counts_in_full_prompt_but_not_dynamic_history() {
+    let mut core = test_core("request_level_mcp_token_accounting");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    let dynamic_before = core.dynamic_context_token_estimate();
+    let prompt_before = estimate_prompt_tokens(&core.render_prompt());
+
+    core.configure_mcp(
+        CapabilityRegistry::builtin(),
+        mcp::McpRuntime::default(),
+        Vec::new(),
+        vec![test_mcp_tool(
+            "mcp_test__large_schema",
+            &"schema description ".repeat(200),
+        )],
+    )
+    .unwrap();
+
+    let dynamic_after = core.dynamic_context_token_estimate();
+    let prompt_after = estimate_prompt_tokens(&core.render_prompt());
+    assert_eq!(dynamic_after, dynamic_before);
+    assert!(
+        prompt_after > prompt_before,
+        "{prompt_before} -> {prompt_after}"
+    );
+}
+
+#[test]
+fn later_successful_compact_retires_previous_runtime_confirmation() {
+    let mut core = test_core("successive_compact_confirmation");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "first stale context".to_string(),
+    )]);
+    let first = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: serde_json::json!({
+            "context_compress": {
+                "summary": "FIRST AUTHORITATIVE SUMMARY"
+            }
+        })
+        .to_string(),
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = first else {
+        panic!("first compact should continue with a model request")
+    };
+    assert_eq!(
+        prompt.matches("context compressed successfully.").count(),
+        1
+    );
+    assert!(prompt.contains("FIRST AUTHORITATIVE SUMMARY"));
+
+    let first_summary_id = core.deltas.last().unwrap().delta_id.clone();
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "second stale context".to_string(),
+    )]);
+    let second = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: serde_json::json!({
+            "context_compress": {
+                "keep": [first_summary_id],
+                "summary": "SECOND AUTHORITATIVE SUMMARY"
+            }
+        })
+        .to_string(),
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = second else {
+        panic!("second compact should continue with a model request")
+    };
+
+    assert_eq!(
+        prompt.matches("context compressed successfully.").count(),
+        1,
+        "only the latest runtime confirmation should remain visible: {prompt}"
+    );
+    assert!(prompt.contains("FIRST AUTHORITATIVE SUMMARY"));
+    assert!(prompt.contains("SECOND AUTHORITATIVE SUMMARY"));
+}
+
+#[test]
+fn later_compact_does_not_hide_summary_that_quotes_runtime_confirmation() {
+    let mut core = test_core("compact_summary_quotes_runtime_confirmation");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "first stale context".to_string(),
+    )]);
+    let first_summary =
+        "AUTHORITATIVE SUMMARY: the prior runtime said context compressed successfully. KEEP THIS";
+
+    let first = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: serde_json::json!({
+            "context_compress": {
+                "summary": first_summary
+            }
+        })
+        .to_string(),
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    assert!(matches!(first, CoreStep::NeedModel { .. }));
+
+    let first_summary_id = core.deltas.last().unwrap().delta_id.clone();
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "second stale context".to_string(),
+    )]);
+    let second = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: serde_json::json!({
+            "context_compress": {
+                "keep": [first_summary_id],
+                "summary": "SECOND AUTHORITATIVE SUMMARY"
+            }
+        })
+        .to_string(),
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = second else {
+        panic!("second compact should continue with a model request")
+    };
+
+    assert!(
+        prompt.contains(first_summary),
+        "assistant summary text must not be retired by runtime-marker cleanup: {prompt}"
+    );
     assert_eq!(
         prompt
-            .matches("MCP update: the following MCP capabilities are enabled")
+            .matches("context compressed successfully.\nCWD: ")
             .count(),
         1,
-        "compacting the active catalog must persist exactly one replacement catalog: {prompt}"
+        "only one structured runtime confirmation should remain: {prompt}"
     );
-    assert!(prompt.contains("mcp_test__echo"));
+}
+
+#[test]
+fn successful_compact_removes_many_deltas_without_enumerating_ids() {
+    let mut core = test_core("compact_result_stays_small");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    for index in 0..96 {
+        core.append_delta(vec![(
+            "user_question".to_string(),
+            format!("stale compact payload {index}"),
+        )]);
+    }
+    let last_discarded = core.deltas.last().unwrap().delta_id.clone();
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: serde_json::json!({
+            "context_compress": {
+                "summary": "Only the active compacted state remains."
+            }
+        })
+        .to_string(),
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("context compress should continue with a model request")
+    };
+
+    assert!(
+        prompt.contains("context compressed successfully."),
+        "{prompt}"
+    );
+    assert!(!prompt.contains(r#""action_result":"#), "{prompt}");
+    assert!(!prompt.contains(r#""status":"completed""#), "{prompt}");
+    assert!(!prompt.contains(r#""discarded_delta_ids""#), "{prompt}");
+    assert!(!prompt.contains(r#""offloaded_delta_ids""#), "{prompt}");
+    assert!(!prompt.contains("removed_delta_count:"), "{prompt}");
+    assert!(!prompt.contains("current_live_delta_refs:"), "{prompt}");
+    assert!(!prompt.contains(&last_discarded), "{prompt}");
+    assert!(!prompt.contains("stale compact payload"), "{prompt}");
 }
 
 #[test]
@@ -1739,18 +3183,20 @@ fn workspace_instance_lock_is_exclusive_per_mem_and_reopens_after_release() {
 }
 
 #[test]
-fn prompt_marks_logical_turns_independently_from_deltas() {
+fn prompt_omits_internal_turn_markers_and_preserves_order() {
     let mut core = test_core("explicit_turn_boundaries");
 
     let first = match core.begin_turn("first question", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    let first_marker = first
-        .rfind("[BEGIN TURN turn_id: action_turn_")
-        .expect("first turn marker");
-    let first_question = first.rfind("first question").expect("first question");
-    assert!(first_marker < first_question, "{first}");
+    let first_id = core
+        .current_action_turn_id
+        .clone()
+        .expect("internal turn ID");
+    assert!(!first.contains("BEGIN TURN"));
+    assert!(!first.contains(&first_id));
+    assert!(first.contains("first question"));
 
     let supplemented = core
         .append_user_supplement("same-turn supplement")
@@ -1759,11 +3205,8 @@ fn prompt_marks_logical_turns_independently_from_deltas() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert_eq!(
-        supplemented.matches("[BEGIN TURN turn_id:").count(),
-        1,
-        "a supplement must not open another turn: {supplemented}"
-    );
+    assert!(!supplemented.contains("BEGIN TURN"));
+    assert_eq!(core.current_action_turn_id.as_ref(), Some(&first_id));
     assert!(supplemented.contains("same-turn supplement"));
 
     core.defer_next_turn_slices(vec![(
@@ -1774,20 +3217,18 @@ fn prompt_marks_logical_turns_independently_from_deltas() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert_eq!(
-        second.matches("[BEGIN TURN turn_id:").count(),
-        2,
-        "{second}"
-    );
+    let second_id = core
+        .current_action_turn_id
+        .as_ref()
+        .expect("next internal turn ID");
+    assert_ne!(second_id, &first_id);
+    assert!(!second.contains("BEGIN TURN"));
+    assert!(!second.contains(second_id));
     let deferred = second
         .rfind("deferred previous answer")
         .expect("deferred previous answer");
-    let second_marker = second
-        .rfind("[BEGIN TURN turn_id: action_turn_")
-        .expect("second turn marker");
     let second_question = second.rfind("second question").expect("second question");
-    assert!(deferred < second_marker, "{second}");
-    assert!(second_marker < second_question, "{second}");
+    assert!(deferred < second_question, "{second}");
 }
 
 #[test]
@@ -2189,13 +3630,15 @@ fn controlled_job_snapshot(pid: u32) -> RunningShellJob {
         cwd: "/tmp".to_string(),
         session_id: "test_session".to_string(),
         turn_id: "test_turn".to_string(),
-        created_at_ms: 1,
+        created_at_ms: crate::now_ms(),
+        notes: String::new(),
     }
 }
 
 fn controlled_job_exit(pid: u32) -> ShellJobExitUpdate {
     ShellJobExitUpdate {
         pid,
+        topic_published: false,
         tool_call_id: format!("call_{pid}"),
         kind: "test".to_string(),
         command: format!("job-{pid}"),
@@ -2205,8 +3648,11 @@ fn controlled_job_exit(pid: u32) -> ShellJobExitUpdate {
         created_at_ms: 1,
         elapsed_ms: 25,
         status: "0".to_string(),
+        capture_error: None,
         stdout: format!("stdout-{pid}"),
         stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output: format!("output-{pid}"),
     }
 }
@@ -2216,30 +3662,6 @@ fn controlled_request_base() -> String {
         "BASE_TOOL_RESULT: finished normally\n\n{}",
         prompt_render::RESPONSE_TRAILER
     )
-}
-
-#[test]
-fn still_running_table_includes_bounded_escaped_original_command() {
-    let core = test_core("running_command_context");
-    let mut job = controlled_job_snapshot(77);
-    job.tool_call_id = "call|`77".to_string();
-    job.command = format!("printf 'a|b'\nprintf `date`; {}", "x".repeat(600));
-
-    let context = core
-        .still_running_cmds_context_from(vec![job])
-        .expect("running context");
-
-    assert!(
-        context.contains("| pid | created by tool_call id | command |"),
-        "{context}"
-    );
-    assert!(context.contains(r#"`call\|\`77`"#), "{context}");
-    assert!(
-        context.contains(r#"`printf 'a\|b' printf \`date\`;"#),
-        "{context}"
-    );
-    assert!(context.contains('…'), "{context}");
-    assert!(!context.contains("\nprintf"), "{context}");
 }
 
 #[test]
@@ -2256,10 +3678,33 @@ fn model_prompt_job_finished_before_first_scan_has_only_exit_update() {
         prompt.contains("BASE_TOOL_RESULT: finished normally"),
         "{prompt}"
     );
-    assert!(!prompt.contains("### STILL RUNNING"), "{prompt}");
+    // Other tests' adopted orphans may legitimately add ORPHAN_PROCESS, so
+    // assert no running-table rows instead of the whole section's absence.
+    assert!(
+        !prompt.contains("| pid | created by tool_call id"),
+        "{prompt}"
+    );
     assert_eq!(prompt.matches("RUNNING_JOB_UPDATE").count(), 1, "{prompt}");
     assert!(prompt.contains("Exit status: 0"), "{prompt}");
     assert!(prompt.contains("output-101"), "{prompt}");
+}
+
+#[test]
+fn model_prompt_job_started_between_scans_is_reported_as_still_running() {
+    let mut core = test_core("job_started_between_scans");
+    let prompt = core.build_model_request_prompt_from_job_snapshots(
+        &controlled_request_base(),
+        None,
+        (Vec::new(), Vec::new()),
+        || (vec![controlled_job_snapshot(151)], Vec::new()),
+    );
+
+    assert!(prompt.contains("#### jobmanager"), "{prompt}");
+    assert!(
+        prompt.contains("| 151 | `0.0s` | `call_151` | `job-151` |  |"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("RUNNING_JOB_UPDATE"), "{prompt}");
 }
 
 #[test]
@@ -2273,16 +3718,18 @@ fn model_prompt_job_finished_between_scans_orders_running_before_exit() {
     );
 
     let tool = prompt.find("BASE_TOOL_RESULT: finished normally").unwrap();
-    let running = prompt.find("### STILL RUNNING").unwrap();
+    let running = prompt.find("#### jobmanager").unwrap();
     let exit = prompt.find("RUNNING_JOB_UPDATE").unwrap();
     assert!(tool < running && running < exit, "{prompt}");
-    assert_eq!(prompt.matches("### STILL RUNNING").count(), 1, "{prompt}");
+    assert_eq!(prompt.matches("#### jobmanager").count(), 1, "{prompt}");
     assert!(
-        prompt.contains("| pid | created by tool_call id | command |"),
+        prompt.contains("| pid | elapsed | created by tool_call id | command | notes |"),
         "{prompt}"
     );
     assert!(
-        prompt.contains("| 202 | `call_202` | `job-202` |"),
+        prompt.lines().any(|line| {
+            line.starts_with("| 202 | `") && line.ends_with("` | `call_202` | `job-202` |  |")
+        }),
         "{prompt}"
     );
     assert_eq!(prompt.matches("RUNNING_JOB_UPDATE").count(), 1, "{prompt}");
@@ -2300,7 +3747,7 @@ fn model_prompt_job_finished_after_final_scan_moves_exit_to_next_request() {
         (vec![controlled_job_snapshot(303)], Vec::new()),
         || (Vec::new(), Vec::new()),
     );
-    assert!(first.contains("### STILL RUNNING"), "{first}");
+    assert!(first.contains("#### jobmanager"), "{first}");
     assert!(!first.contains("RUNNING_JOB_UPDATE"), "{first}");
 
     let second = core.build_model_request_prompt_from_job_snapshots(
@@ -2309,7 +3756,9 @@ fn model_prompt_job_finished_after_final_scan_moves_exit_to_next_request() {
         (Vec::new(), vec![controlled_job_exit(303)]),
         || (Vec::new(), Vec::new()),
     );
-    assert!(!second.contains("### STILL RUNNING"), "{second}");
+    // Other tests' adopted orphans may legitimately add ORPHAN_PROCESS, so
+    // assert this job's running-table row is gone, not the whole section.
+    assert!(!second.contains("| 303 |"), "{second}");
     assert_eq!(second.matches("RUNNING_JOB_UPDATE").count(), 1, "{second}");
     assert!(second.contains("Exit status: 0"), "{second}");
     assert!(second.contains("output-303"), "{second}");
@@ -2403,7 +3852,7 @@ fn literal_resume_text_stays_user_authored() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("## USER\n\nuser resume directly"));
+    assert!(prompt.contains("\n\nuser resume directly"));
     assert!(!prompt.contains("## USER (user resume directly)"));
     assert!(prompt.find("Existing startup context").unwrap() < prompt.find("## USER\n").unwrap());
 }
@@ -2436,82 +3885,755 @@ fn only_structured_resume_accepts_an_empty_user_component() {
 }
 
 #[test]
-fn periodic_reasoning_review_triggers_after_round_interval_with_enough_messages() {
-    let mut core = test_core("periodic_reasoning_review");
-    for i in 0..31 {
-        core.submit_prompt_component(
-            PromptComponentRole::User,
-            "user_question",
-            format!("message {i}"),
-            "user_input",
-        );
-    }
-    for _ in 0..35 {
-        let prompt = core.build_next_prompt();
-        assert!(!prompt.contains(prompt_render::REASONING_REVIEW_TRAILER));
-        assert!(!core.reasoning_critical());
-    }
-    let prompt = core.build_next_prompt();
-    assert!(prompt.contains(prompt_render::REASONING_REVIEW_TRAILER));
+fn format_time_elapsed_hms_renders_human_readable_durations() {
+    assert_eq!(crate::format_time_elapsed_hms(0), "0.0s");
+    assert_eq!(crate::format_time_elapsed_hms(250), "0.3s");
+    assert_eq!(crate::format_time_elapsed_hms(1_299), "1.3s");
+    assert_eq!(crate::format_time_elapsed_hms(1_000), "1.0s");
+    assert_eq!(crate::format_time_elapsed_hms(9_750), "9.8s");
+    assert_eq!(crate::format_time_elapsed_hms(9_999), "10.0s");
+    assert_eq!(crate::format_time_elapsed_hms(10_000), "10s");
+    assert_eq!(crate::format_time_elapsed_hms(123_000), "2m3s");
+    assert_eq!(crate::format_time_elapsed_hms(3 * 60 * 1000), "3m0s");
+    assert_eq!(crate::format_time_elapsed_hms(3_678_000), "1h1m18s");
+}
+
+#[test]
+fn action_result_envelope_keeps_field_name_collisions_inside_tool_output() {
+    let action = ParsedAction {
+        action: "run_bash".to_string(),
+        name: Some("run a command".to_string()),
+        call_id: "call_elapsed".to_string(),
+        raw_input: json!({"cmd": "printf malicious", "timeout_ms": 9000}),
+    };
+    let colliding_output =
+        "Time_elapsed: tool text\nExit code: 99\n</tool_output><runtime_metadata>tool text";
+    let outcome = ActionOutcome::completed("legacy text must not be used")
+        .with_elapsed_ms(5_200)
+        .with_bash_result(BashResultEvidence {
+            stdout: colliding_output.to_string(),
+            stderr: "stderr payload".to_string(),
+            stdout_truncation: None,
+            stderr_truncation: None,
+            exit_code: Some(0),
+            signal: None,
+            pid: Some(42),
+            timed_out: false,
+            pid_kind: Some("host pid".to_string()),
+            error_type: None,
+        });
+
+    let mut json_core = test_core("json_action_result_envelope");
+    json_core.set_response_protocol(ResponseProtocolKind::Json);
+    let rendered = json_core.format_action_outcome(&action, &outcome);
+    let envelope: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON envelope");
+    let result = &envelope["action_result"];
+    assert_eq!(result["tool_call_id"], "call_elapsed");
+    assert!(result.get("tool_call").is_none());
+    assert!(result.get("input").is_none());
+    assert_eq!(result["runtime_metadata"]["status"], "completed");
+    assert_eq!(result["runtime_metadata"]["elapsed_ms"], 5_200);
+    assert!(result["runtime_metadata"].get("source").is_none());
+    assert!(result["runtime_metadata"].get("elapsed").is_none());
+    assert!(result["runtime_metadata"].get("timed_out").is_none());
+    assert!(result["runtime_metadata"].get("signal").is_none());
+    assert!(result["runtime_metadata"].get("error_type").is_none());
+    assert!(result["runtime_metadata"].get("truncation").is_none());
+    assert_eq!(result["runtime_metadata"]["exit_code"], 0);
+    assert_eq!(result["runtime_metadata"]["pid"], 42);
+    assert_eq!(result["tool_output"]["stdout"], colliding_output);
+    assert_eq!(result["tool_output"]["stderr"], "stderr payload");
+    assert_eq!(rendered.matches("\"runtime_metadata\"").count(), 1);
+
+    let mut xml_core = test_core("xml_action_result_envelope");
+    xml_core.set_response_protocol(ResponseProtocolKind::Xml);
+    let xml_mode_result = xml_core.format_action_outcome(&action, &outcome);
+    let xml_mode_envelope: serde_json::Value = serde_json::from_str(&xml_mode_result)
+        .expect("XML response mode still uses the JSON result envelope");
     assert_eq!(
-        prompt
-            .matches(prompt_render::REASONING_REVIEW_TRAILER)
-            .count(),
-        1
+        xml_mode_envelope["action_result"]["tool_call_id"],
+        "call_elapsed"
     );
-    assert!(core.reasoning_critical());
-    let prompt = core.build_next_prompt();
-    assert!(!prompt.contains(prompt_render::REASONING_REVIEW_TRAILER));
-    assert!(!core.reasoning_critical());
+    assert_eq!(
+        xml_mode_envelope["action_result"]["tool_output"]["stdout"],
+        colliding_output
+    );
+    assert_eq!(
+        xml_mode_envelope["action_result"]["runtime_metadata"]["exit_code"],
+        0
+    );
 }
 
 #[test]
-fn periodic_reasoning_review_requires_enough_messages() {
-    let mut core = test_core("periodic_reasoning_few_messages");
-    for i in 0..10 {
-        core.submit_prompt_component(
-            PromptComponentRole::User,
-            "user_question",
-            format!("message {i}"),
-            "user_input",
-        );
-    }
-    for _ in 0..40 {
-        let prompt = core.build_next_prompt();
-        assert!(!prompt.contains(prompt_render::REASONING_REVIEW_TRAILER));
-    }
-    assert!(!core.reasoning_critical());
+fn action_result_without_elapsed_omits_elapsed_runtime_fields() {
+    let action = ParsedAction {
+        action: "memo".to_string(),
+        name: None,
+        call_id: "call_no_elapsed".to_string(),
+        raw_input: json!({"op": "delete"}),
+    };
+    let outcome = ActionOutcome::completed("memo deleted");
+    let mut core = test_core("action_result_without_elapsed");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    let rendered = core.format_action_outcome(&action, &outcome);
+    let envelope: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON envelope");
+    let metadata = envelope["action_result"]["runtime_metadata"]
+        .as_object()
+        .expect("metadata object");
+    assert_eq!(metadata.get("status"), Some(&json!("completed")));
+    assert!(!metadata.contains_key("elapsed"));
+    assert!(!metadata.contains_key("elapsed_ms"));
+    assert!(!metadata.contains_key("source"));
+    assert!(!metadata.contains_key("truncation"));
 }
 
 #[test]
-fn incremental_message_count_matches_full_recomputation() {
-    let mut core = test_core("incremental_message_count");
-    for i in 0..6 {
-        core.submit_prompt_component(
-            PromptComponentRole::User,
-            "user_question",
-            format!("u{i}"),
-            "user_input",
-        );
-        core.submit_prompt_component(
-            PromptComponentRole::system(),
-            "result_of_llm_action",
-            format!("action {i}"),
-            "previous_model_response",
+fn action_result_emits_truncation_metadata_only_when_truncation_occurs() {
+    let action = ParsedAction {
+        action: "run_bash".to_string(),
+        name: None,
+        call_id: "call_sparse_truncation".to_string(),
+        raw_input: json!({"cmd": "printf ok"}),
+    };
+    let small = ActionOutcome::completed("unused").with_bash_result(BashResultEvidence {
+        stdout: "ok".to_string(),
+        stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
+        exit_code: Some(0),
+        signal: None,
+        pid: None,
+        timed_out: false,
+        pid_kind: None,
+        error_type: None,
+    });
+    let mut core = test_core("sparse_truncation_metadata");
+    let small: serde_json::Value =
+        serde_json::from_str(&core.format_action_outcome(&action, &small))
+            .expect("valid small result envelope");
+    let small_result = &small["action_result"];
+    assert_eq!(small_result["tool_output"], json!({"stdout": "ok"}));
+    assert!(small_result["runtime_metadata"].get("truncation").is_none());
+    assert!(small_result["runtime_metadata"].get("timed_out").is_none());
+    assert!(small_result["runtime_metadata"].get("signal").is_none());
+
+    let captured = ActionOutcome::completed("unused").with_bash_result(BashResultEvidence {
+        stdout: "tail".to_string(),
+        stderr: String::new(),
+        stdout_truncation: Some(crate::StreamCaptureTruncation {
+            original_bytes: 100_000,
+            retained_bytes: 4,
+            retained: "tail",
+        }),
+        stderr_truncation: None,
+        exit_code: Some(0),
+        signal: None,
+        pid: None,
+        timed_out: false,
+        pid_kind: None,
+        error_type: None,
+    });
+    let captured: serde_json::Value =
+        serde_json::from_str(&core.format_action_outcome(&action, &captured))
+            .expect("valid captured result envelope");
+    assert_eq!(
+        captured["action_result"]["tool_output"],
+        json!({"stdout": "tail"})
+    );
+    assert_eq!(
+        captured["action_result"]["runtime_metadata"]["truncation"]["stdout"]["execution_capture"],
+        json!({
+            "truncated": true,
+            "retained": "tail",
+            "original_bytes": 100_000,
+            "retained_bytes": 4,
+        })
+    );
+}
+
+#[test]
+fn time_elapsed_trailer_marks_unfinished_long_running_jobs() {
+    let mut outcome = crate::ActionOutcome::completed("Action result: run_bash\nok");
+    assert!(!outcome.still_running());
+    outcome.elapsed_ms = Some(2_000);
+    // Completed actions never carry the long-running reminder.
+    let trailer = match outcome.still_running() {
+        true => "long",
+        false => "short",
+    };
+    assert_eq!(trailer, "short");
+
+    let mut running = crate::ActionOutcome::timeout("Action result: run_bash\nstill running");
+    assert!(running.still_running());
+    running.elapsed_ms = Some(4 * 60 * 1000);
+    assert!(running.elapsed_ms >= Some(3 * 60 * 1000));
+}
+
+#[test]
+fn long_running_progress_check_is_inside_still_running_runtime_info() {
+    let mut core = test_core("long_running_progress_check");
+    let base = controlled_request_base();
+
+    let mut over_three_minutes = controlled_job_snapshot(404);
+    over_three_minutes.created_at_ms = crate::now_ms() - 3 * 60 * 1000 - 1;
+    let prompt = core.build_model_request_prompt_from_job_snapshots(
+        &base,
+        None,
+        (vec![over_three_minutes], Vec::new()),
+        || (Vec::new(), Vec::new()),
+    );
+    let jobmanager = prompt.find("#### jobmanager").expect("jobmanager field");
+    let reminder = prompt
+        .find("need to check whether long running job is making progress")
+        .expect("long-running progress reminder");
+    assert!(jobmanager < reminder, "{prompt}");
+
+    let mut under_three_minutes = controlled_job_snapshot(406);
+    under_three_minutes.created_at_ms = crate::now_ms() - 3 * 60 * 1000 + 1_000;
+    let prompt = core.build_model_request_prompt_from_job_snapshots(
+        &base,
+        None,
+        (vec![under_three_minutes], Vec::new()),
+        || (Vec::new(), Vec::new()),
+    );
+    assert!(prompt.contains("#### jobmanager"), "{prompt}");
+    assert!(
+        !prompt.contains("need to check whether long running job is making progress"),
+        "{prompt}"
+    );
+
+    let prompt = core.build_model_request_prompt_from_job_snapshots(
+        &base,
+        None,
+        (Vec::new(), Vec::new()),
+        || (Vec::new(), Vec::new()),
+    );
+    assert_eq!(prompt, base);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn model_prompt_reports_setsid_escaped_process_as_runtime_info() {
+    use std::process::{Command, Stdio};
+    // Without the subreaper the orphan would go to init and stay invisible.
+    assert!(crate::os::install_process_subreaper());
+    // A tool job that exits while its setsid --fork descendant survives it.
+    let mut wrapper = Command::new("setsid")
+        .arg("--fork")
+        .arg("bash")
+        .arg("-c")
+        .arg("i=0; while [ $i -lt 400 ]; do i=$((i+1)); sleep 0.1; done")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn setsid");
+    let _ = wrapper.wait();
+
+    let self_pid = std::process::id();
+    let stat_ppid = |pid: u32| -> Option<u32> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let rest = stat.rsplit(')').next()?;
+        rest.split_whitespace().nth(1)?.parse().ok()
+    };
+    let mut escapee = None;
+    for _ in 0..100 {
+        if let Some(pid) = crate::os::reparented_detached_child_pids()
+            .iter()
+            .find(|pid| stat_ppid(**pid) == Some(self_pid))
+        {
+            escapee = Some(*pid);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let escapee = escapee.expect("expected an adopted escapee pid");
+
+    let inputs = crate::runtime_info::RuntimeInfoInputs {
+        fallback_processes: vec![crate::runtime_info::FallbackProcessSnapshot {
+            notes: crate::os::process_observation_note(escapee),
+            pid: escapee,
+            process_name: "bash".to_string(),
+            zombie: false,
+        }],
+        ..Default::default()
+    };
+    let mut registry = crate::runtime_info::RuntimeInfoRegistry::new();
+    registry.register(crate::runtime_info::RuntimeInfoReporter {
+        name: "jobmanager",
+        report: crate::runtime_info::jobmanager_report,
+    });
+    let out = registry.render(&inputs).expect("expected RUNTIME_INFO");
+    assert!(out.starts_with("### RUNTIME_INFO"), "{out}");
+    assert!(out.contains("unowned child processes"), "{out}");
+    assert!(out.contains("`active`"), "{out}");
+    assert!(out.contains(&escapee.to_string()), "{out}");
+
+    // Cleanup: terminate the escapee, then close.
+    unsafe {
+        libc::kill(escapee as i32, libc::SIGKILL);
+    }
+    let _ = crate::os::try_reap_child_process(escapee);
+    assert!(crate::os::reparented_detached_child_pids()
+        .iter()
+        .all(|pid| *pid != escapee));
+}
+
+#[cfg(unix)]
+#[test]
+fn model_prompt_reports_sigkilled_job_in_runtime_info_sysstat() {
+    // Real process killed by SIGKILL: the exit update must reach the
+    // model as a sysstat JOB_KILLED field inside RUNTIME_INFO, because the
+    // job's own output cannot explain the kill.
+    use std::process::{Command, Stdio};
+    let mut core = test_core("runtime_info_sigkill");
+    let child = Command::new("bash")
+        .arg("-c")
+        .arg("echo start; kill -9 $$")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn");
+    let output = child.wait_with_output().expect("wait");
+    let status = if output.status.success() {
+        format!("exit code: {}", output.status.code().unwrap_or(0))
+    } else {
+        use std::os::unix::process::ExitStatusExt;
+        format!("signal: {}", output.status.signal().unwrap_or(0))
+    };
+    let mut update = controlled_job_exit(777);
+    update.status = status;
+    let prompt = core.build_model_request_prompt_from_job_snapshots(
+        &controlled_request_base(),
+        None,
+        (Vec::new(), vec![update]),
+        || (Vec::new(), Vec::new()),
+    );
+    assert!(prompt.contains("### RUNTIME_INFO"), "{prompt}");
+    assert!(prompt.contains("#### sysstat"), "{prompt}");
+    assert!(prompt.contains("JOB_KILLED"), "{prompt}");
+    assert!(prompt.contains("pid=777"), "{prompt}");
+}
+
+#[test]
+fn disk_pressure_sampling_is_lazy_on_model_request_hot_path() {
+    let mut core = test_core("disk_lazy_sampling");
+    core.disk_free_override = Some((5 * 1024 * 1024 * 1024, 10 * 1024 * 1024 * 1024));
+    let request = |core: &mut crate::AgentCore| {
+        core.build_model_request_prompt_from_job_snapshots(
+            &controlled_request_base(),
+            None,
+            (Vec::new(), Vec::new()),
+            || (Vec::new(), Vec::new()),
+        )
+    };
+    for observation in 1..10 {
+        request(&mut core);
+        assert_eq!(
+            core.disk_sample_count, 0,
+            "observation {observation} must not sample before the count gate"
         );
     }
-    core.flush_pending_prompt_components();
-    core.recount_context_message_elements_for_test();
-    let incremental = core.context_message_elements_for_test();
-    assert_eq!(incremental, 6, "non-message slices must not be counted");
-    // A second recount after more message writes stays consistent.
-    core.submit_prompt_component(
-        PromptComponentRole::assistant("Timem"),
-        "llm_response",
-        "assistant reply",
-        "previous_model_response",
+    request(&mut core);
+    assert_eq!(
+        core.disk_sample_count, 1,
+        "the tenth observation must take exactly one sample"
     );
+}
+
+#[test]
+fn disk_pressure_notice_rides_runtime_info_after_window_with_stub_sample() {
+    // Disk sampling cannot be controlled on a real filesystem, so the stub
+    // override drives the tracker. The constructor already seeded the
+    // baseline from the real disk, so testing uses window-stable stub
+    // levels: a stable level may rebase once at most, then stay quiet.
+    let mut core = test_core("runtime_info_disk_stub");
+    // 10GB disk with 5GB free; threshold = min(200MB, 8% * 10GB) = 200MB.
+    let cap: u64 = 10 * 1024 * 1024 * 1024;
+    let base: u64 = 5 * 1024 * 1024 * 1024;
+    let dropped = base - 300 * 1024 * 1024;
+    let request = |core: &mut crate::AgentCore| {
+        core.build_model_request_prompt_from_job_snapshots(
+            &controlled_request_base(),
+            None,
+            (Vec::new(), Vec::new()),
+            || (Vec::new(), Vec::new()),
+        )
+    };
+    // Windows 1-2 at the stable stub level: whatever rebase happened due
+    // to the startup-seeded baseline, at most one notice may appear and
+    // afterwards it must stay quiet at that level.
+    core.disk_free_override = Some((base, cap));
+    let mut notices = 0;
+    for _ in 0..20 {
+        if request(&mut core).contains("DISK_PRESSURE") {
+            notices += 1;
+        }
+    }
+    assert!(
+        notices <= 1,
+        "stable level must not repeatedly alert: {notices}"
+    );
+    // Window 3: 300MB drop (above the 200MB threshold) triggers and is
+    // delivered through RUNTIME_INFO or the persisted component.
+    core.disk_free_override = Some((dropped, cap));
+    let mut delivered = false;
+    for _ in 0..10 {
+        if request(&mut core).contains("DISK_PRESSURE") {
+            delivered = true;
+        }
+    }
+    assert!(
+        delivered,
+        "expected the DISK_PRESSURE notice to be delivered"
+    );
+    // Window 4: same dropped level: baseline was refreshed, no retrigger.
+    let prompt = request(&mut core);
+    assert!(!prompt.contains("DISK_PRESSURE"), "{prompt}");
+}
+
+#[test]
+fn filesystems_for_info_deduplicates_same_device() {
+    // Two paths on the same filesystem must sample once; the device id is
+    // the dedup key, so a second path on the same disk is skipped.
+    let same_dir = std::path::Path::new("/tmp");
+    let a = same_dir.join(format!("a-{}", std::process::id()));
+    let b = same_dir.join(format!("b-{}", std::process::id()));
+    std::fs::create_dir_all(&a).ok();
+    std::fs::create_dir_all(&b).ok();
+    let dev_a = crate::os::filesystem_device_id(&a);
+    let dev_b = crate::os::filesystem_device_id(&b);
+    assert_eq!(dev_a, dev_b, "same parent dir must share a device id");
+
+    let running = vec![crate::runtime_info::RunningJobSnapshot {
+        pid: 1,
+        tool_call_id: "c".into(),
+        command: "true".into(),
+        cwd: a.display().to_string(),
+        created_at_ms: 0,
+        elapsed_ms: 0,
+        notes: String::new(),
+    }];
+    // filesystems_for_info samples cwd of running jobs; a and b are on the
+    // same device, so even if both were sampled only one entry remains.
+    let sampled = crate::AgentCore::filesystems_for_info(&running);
+    // Whichever path won the dedup, the /tmp device must appear exactly
+    // once across all sampled entries (not once per sampled path on it).
+    let same_disk_count = sampled
+        .iter()
+        .filter(|fs| {
+            std::path::Path::new(&fs.path)
+                .canonicalize()
+                .ok()
+                .and_then(|p| crate::os::filesystem_device_id(&p))
+                == dev_a
+        })
+        .count();
+    assert_eq!(same_disk_count, 1, "sampled: {:?}", sampled);
+    std::fs::remove_dir_all(&a).ok();
+    std::fs::remove_dir_all(&b).ok();
+}
+
+#[test]
+fn disk_pressure_startup_baseline_removes_blind_window_e2e() {
+    // The constructor seeds the baseline from the real disk sample, so the
+    // very first sampling window after startup can trigger. The stub
+    // override only controls the sample values from now on.
+    let mut core = test_core("disk_startup_baseline");
+    // Read the real startup baseline instead of assuming the test host has
+    // more than an arbitrary amount of free space. Then simulate a 201MB
+    // first-window drop, just above the capped 200MB threshold. Without
+    // startup seeding this window would only establish a baseline and stay
+    // silent.
+    let startup_free = core
+        .disk_pressure
+        .baseline()
+        .expect("constructor must seed a baseline on the test host");
+    let drop = 201 * 1024 * 1024;
+    assert!(
+        startup_free > drop,
+        "test host must have enough free space for the pressure delta"
+    );
+    let capacity = startup_free.saturating_mul(2).max(10 * 1024 * 1024 * 1024);
+    core.disk_free_override = Some((startup_free - drop, capacity));
+    let mut delivered = false;
+    for _ in 0..10 {
+        let prompt = core.build_model_request_prompt_from_job_snapshots(
+            &controlled_request_base(),
+            None,
+            (Vec::new(), Vec::new()),
+            || (Vec::new(), Vec::new()),
+        );
+        if prompt.contains("DISK_PRESSURE") {
+            delivered = true;
+        }
+    }
+    assert!(
+        delivered,
+        "first window after startup must be able to trigger"
+    );
+}
+
+#[test]
+fn killed_background_job_emits_persistent_job_killed_notice() {
+    // The async exit-listener path (submit_running_job_updates) never passes
+    // through the request-building snapshots, so a SIGKILL exit must be
+    // captured there too, as a persistent component the next request sees.
+    let mut core = test_core("job_killed_async_path");
+    let mut update = controlled_job_exit(606);
+    update.status = "signal: 9 (SIGKILL)".to_string();
+    core.submit_running_job_updates(vec![update], true);
     core.flush_pending_prompt_components();
-    core.recount_context_message_elements_for_test();
-    assert_eq!(core.context_message_elements_for_test(), incremental + 1);
+    let prompt = core.render_prompt();
+    assert!(prompt.contains("JOB_KILLED"), "{prompt}");
+    assert!(prompt.contains("pid=606"), "{prompt}");
+    assert!(prompt.contains("SIGKILL"), "{prompt}");
+}
+
+#[test]
+fn normal_background_exit_does_not_emit_job_killed() {
+    let mut core = test_core("job_normal_async_path");
+    core.submit_running_job_updates(vec![controlled_job_exit(707)], true);
+    let prompt = core.build_model_request_prompt_from_job_snapshots(
+        &controlled_request_base(),
+        None,
+        (Vec::new(), Vec::new()),
+        || (Vec::new(), Vec::new()),
+    );
+    assert!(!prompt.contains("JOB_KILLED"), "{prompt}");
+}
+
+#[test]
+fn aggregate_process_scope_is_one_shot_and_rearmed_after_compaction() {
+    let mut core = test_core("aggregate_process_scope_prompt");
+    core.current_session_id = Some("session-a".to_string());
+    core.process_scope_snapshot_override = Some(crate::os::ProcessAggregateScopeSnapshot {
+        runtime_observation_note: "cgroup: /sys/fs/cgroup/timem.jobs/runtime-test".into(),
+        session_observation_note: "cgroup: /sys/fs/cgroup/timem.jobs/runtime-test/session-opaque"
+            .into(),
+    });
+
+    let first = core.build_next_prompt();
+    assert_eq!(
+        first.matches("PROCESS_AGGREGATE_SCOPES:").count(),
+        1,
+        "{first}"
+    );
+    assert!(first.contains("Runtime process scope: cgroup: /sys/fs/cgroup/timem.jobs/runtime-test"));
+    assert!(first.contains("Current Session process scope: cgroup: /sys/fs/cgroup/timem.jobs/runtime-test/session-opaque"));
+    assert!(
+        !first.contains("session-a"),
+        "raw Session id leaked: {first}"
+    );
+
+    let second = core.build_next_prompt();
+    assert_eq!(
+        second.matches("PROCESS_AGGREGATE_SCOPES:").count(),
+        1,
+        "{second}"
+    );
+
+    assert!(core.deltas.iter().any(|delta| {
+        prompt_render::render_delta_slices(delta)
+            .iter()
+            .any(|slice| slice.text.contains("PROCESS_AGGREGATE_SCOPES:"))
+    }));
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    let arguments = serde_json::json!({
+        "summary": "Keep active work",
+    });
+    let step = core.apply_model_response(LlmResponse {
+        content: serde_json::json!({"context_compress": arguments}).to_string(),
+        tool_calls: Vec::new(),
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("successful compaction must continue")
+    };
+    assert_eq!(
+        prompt.matches("PROCESS_AGGREGATE_SCOPES:").count(),
+        1,
+        "{prompt}"
+    );
+    assert!(prompt.contains("runtime-test/session-opaque"), "{prompt}");
+}
+
+#[test]
+fn process_decision_reports_preserve_observation_paths() {
+    use crate::runtime_info::*;
+    let report = jobmanager_report(&RuntimeInfoInputs {
+        running: vec![RunningJobSnapshot {
+            pid: 42,
+            tool_call_id: "call".into(),
+            command: "work".into(),
+            cwd: "/tmp".into(),
+            created_at_ms: 0,
+            elapsed_ms: 200_000,
+            notes: "cgroup: /sys/fs/cgroup/job-test".into(),
+        }],
+        stale_process_scopes: vec![StaleProcessScopeSnapshot {
+            owner_pid: 7,
+            notes: "cgroup: /sys/fs/cgroup/stale-test".into(),
+        }],
+        fallback_processes: vec![FallbackProcessSnapshot {
+            pid: 9,
+            process_name: "worker".into(),
+            zombie: false,
+            notes: "cgroup membership: /proc/9/cgroup".into(),
+        }],
+        ..Default::default()
+    })
+    .unwrap();
+    for path in [
+        "/sys/fs/cgroup/job-test",
+        "/sys/fs/cgroup/stale-test",
+        "/proc/9/cgroup",
+    ] {
+        assert!(report.contains(path), "{report}");
+    }
+}
+
+#[test]
+fn compression_prompts_use_h1_only_for_threshold_triggered_requests() {
+    let mut threshold = test_core("threshold_compression_reasoning_guidance");
+    threshold.set_max_llm_input_tokens(3_000);
+    threshold.append_delta(vec![(
+        "user_question".to_string(),
+        "threshold context ".repeat(1_000),
+    )]);
+    threshold.append_in_turn_shrink_review_if_needed();
+    for _ in 0..2 {
+        let prompt = threshold.build_next_prompt();
+        assert!(threshold.reasoning_critical());
+        assert_eq!(prompt.matches("Use this reasoning pass").count(), 1);
+        assert!(
+            prompt.contains("Please compress it now (see the `context_compress` tool description)")
+        );
+        assert!(prompt.contains("Your tool calls must start with context_compress:"));
+        assert!(!prompt.contains("User manually requests context compression"));
+    }
+
+    let mut manual = test_core("manual_compression_h0_guidance");
+    manual.append_delta(vec![(
+        "user_question".to_string(),
+        "small active context".to_string(),
+    )]);
+    manual.request_manual_context_compress();
+    for _ in 0..2 {
+        let prompt = manual.build_next_prompt();
+        assert!(!manual.reasoning_critical());
+        assert!(!prompt.contains("Use this reasoning pass"));
+        assert!(prompt.contains("User manually requests context compression"));
+        assert!(
+            prompt.contains("Please compress it now (see the `context_compress` tool description)")
+        );
+        assert!(prompt.contains("Your tool calls must start with context_compress:"));
+    }
+}
+
+#[test]
+fn ordinary_rounds_and_manual_compression_stay_h0_until_threshold_crossing() {
+    let mut ordinary = test_core("ordinary_reasoning_dispatch");
+    for request in 1..=70 {
+        let base = ordinary.render_prompt();
+        let prompt = ordinary.build_model_request_prompt(&base);
+        let interaction = ordinary.model_interaction_request(prompt);
+        assert!(!interaction.critical_reasoning, "request {request}");
+    }
+
+    let mut manual = test_core("manual_reasoning_dispatch");
+    manual.append_delta(vec![(
+        "user_question".to_string(),
+        "small active context".to_string(),
+    )]);
+    manual.request_manual_context_compress();
+    let prompt = manual.build_next_prompt();
+    assert!(!manual.model_interaction_request(prompt).critical_reasoning);
+
+    let mut manual_then_threshold = test_core("manual_then_threshold_reasoning_dispatch");
+    manual_then_threshold.set_max_llm_input_tokens(3_000);
+    manual_then_threshold.append_delta(vec![(
+        "user_question".to_string(),
+        "small active context".to_string(),
+    )]);
+    manual_then_threshold.request_manual_context_compress();
+    assert!(!manual_then_threshold.reasoning_critical());
+    manual_then_threshold.append_delta(vec![(
+        "user_supplement".to_string(),
+        "threshold context ".repeat(1_000),
+    )]);
+    manual_then_threshold.append_in_turn_shrink_review_if_needed();
+    let prompt = manual_then_threshold.build_next_prompt();
+    assert!(prompt.contains("User manually requests context compression"));
+    assert!(
+        manual_then_threshold
+            .model_interaction_request(prompt)
+            .critical_reasoning
+    );
+
+    let mut threshold = test_core("threshold_reasoning_dispatch");
+    threshold.set_max_llm_input_tokens(3_000);
+    threshold.append_delta(vec![(
+        "user_question".to_string(),
+        "threshold context ".repeat(1_000),
+    )]);
+    threshold.append_in_turn_shrink_review_if_needed();
+    let prompt = threshold.build_next_prompt();
+    assert!(
+        threshold
+            .model_interaction_request(prompt)
+            .critical_reasoning
+    );
+}
+
+#[test]
+fn dynamic_context_estimate_counts_tool_only_deltas_and_excludes_orphans() {
+    let mut core = test_core("native_tool_only_token_estimate");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "small text delta".to_string(),
+    )]);
+    core.native_exchanges.push(NativeExchange {
+        delta_id: "pd_1".to_string(),
+        assistant_text: "inspect the large result".to_string(),
+        calls: vec![NativeToolCall {
+            assistant_continuation: None,
+            id: "call_large".to_string(),
+            name: "readfile".to_string(),
+            arguments: serde_json::json!({"path":"large.txt"}),
+            raw_arguments: r#"{"path":"large.txt"}"#.to_string(),
+        }],
+        results: vec![NativeToolResult {
+            call_id: "call_large".to_string(),
+            name: "readfile".to_string(),
+            content: "NATIVE-EVIDENCE-".repeat(1_000),
+            is_error: false,
+        }],
+    });
+
+    core.deltas[0].slices.clear();
+    let expected_native = estimate_native_exchange_tokens(&core.native_exchanges[0]);
+    let mut orphan = core.native_exchanges[0].clone();
+    orphan.delta_id = "pd_absent".into();
+    core.native_exchanges.push(orphan);
+    let before = core.dynamic_context_token_estimate();
+    assert_eq!(before.visible_delta_count, 1);
+    assert_eq!(before.native_tokens, expected_native);
+    assert_eq!(before.text_tokens, 0);
+    assert!(before.native_tokens > before.text_tokens);
+    assert_eq!(
+        core.dynamic_context_summary().estimated_tokens,
+        before.total_tokens()
+    );
+
+    let result = core.apply_prompt_shrink(&["pd_1".to_string()], &[]);
+
+    assert_eq!(core.dynamic_context_summary().estimated_tokens, 0);
+    assert_eq!(core.current_stats.shrunk_tokens, before.total_tokens());
+    assert!(result.contains(&format!(
+        "shrunk_tokens_estimate: {}",
+        before.total_tokens()
+    )));
 }

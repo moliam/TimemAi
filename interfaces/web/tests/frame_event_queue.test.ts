@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createFrameEventQueue } from "../src/frame_event_queue";
 
 function manualFrames() {
@@ -23,6 +23,51 @@ function manualFrames() {
 }
 
 describe("frame event queue", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("drains in order with bounded batches when animation frames never fire", () => {
+    const frames = manualFrames();
+    const batches: number[][] = [];
+    const queue = createFrameEventQueue<number>({
+      consume: (items) => batches.push([...items]),
+      schedule: frames.schedule,
+      cancel: frames.cancel,
+      now: () => 0,
+      maxBatch: 2,
+    });
+    [1, 2, 3, 4, 5].forEach((item) => queue.enqueue(item));
+    vi.advanceTimersByTime(100);
+    expect(batches).toEqual([[1, 2]]);
+    vi.advanceTimersByTime(200);
+    expect(batches).toEqual([[1, 2], [3, 4], [5]]);
+    expect(queue.pending()).toBe(0);
+    expect(frames.size()).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("cancels the fallback when a frame wins or the queue is disposed", () => {
+    const frames = manualFrames();
+    const consumed: number[] = [];
+    const queue = createFrameEventQueue<number>({
+      consume: (items) => consumed.push(...items),
+      schedule: frames.schedule,
+      cancel: frames.cancel,
+    });
+    queue.enqueue(1);
+    expect(vi.getTimerCount()).toBe(1);
+    frames.runOne();
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(100);
+    expect(consumed).toEqual([1]);
+    queue.enqueue(2);
+    queue.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(100);
+    expect(consumed).toEqual([1]);
+    expect(frames.size()).toBe(0);
+  });
+
   it("preserves order and drains a flood over bounded animation frames", () => {
     const frames = manualFrames();
     const consumed: number[] = [];
@@ -63,6 +108,7 @@ describe("frame event queue", () => {
     expect(queue.pending()).toBe(2);
     frames.runOne();
     expect(batches.flat()).toEqual([1, 2, 3, 4]);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("flushes live progress immediately without reordering earlier events", () => {
@@ -81,6 +127,7 @@ describe("frame event queue", () => {
     ]);
     expect(frames.size()).toBe(1);
     expect(queue.pending()).toBe(7);
+    expect(vi.getTimerCount()).toBe(1);
     expect(frames.runOne()).toBe(true);
     expect(batches).toEqual([
       Array.from({ length: 24 }, (_, index) => index + 1),

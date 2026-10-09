@@ -114,17 +114,130 @@ fn foreground_large_stdout_and_stderr_are_drained_without_deadlock_and_bounded()
     );
     let result = execute_one_bash_structured(&command, Path::new("."), 10_000, &mut runtime);
     assert_eq!(result.status, Some(0));
-    assert!(result.stdout.contains("retained first"));
-    assert!(result.stderr.contains("retained first"));
-    assert!(result.stdout.len() <= SHELL_OUTPUT_LIMIT_BYTES + 100);
-    assert!(result.stderr.len() <= SHELL_OUTPUT_LIMIT_BYTES + 100);
+    assert_eq!(result.stdout.len(), SHELL_OUTPUT_LIMIT_BYTES);
+    assert_eq!(result.stderr.len(), SHELL_OUTPUT_LIMIT_BYTES);
+    assert!(result.stdout.bytes().all(|byte| byte == b'o'));
+    assert!(result.stderr.bytes().all(|byte| byte == b'e'));
+    assert!(!result.stdout.contains("truncated"));
+    assert!(!result.stderr.contains("truncated"));
+    assert_eq!(
+        result.stdout_truncation,
+        Some(StreamCaptureTruncation {
+            original_bytes: SHELL_OUTPUT_LIMIT_BYTES + 65536,
+            retained_bytes: SHELL_OUTPUT_LIMIT_BYTES,
+            retained: "head",
+        })
+    );
+    assert_eq!(
+        result.stderr_truncation,
+        Some(StreamCaptureTruncation {
+            original_bytes: SHELL_OUTPUT_LIMIT_BYTES + 65536,
+            retained_bytes: SHELL_OUTPUT_LIMIT_BYTES,
+            retained: "head",
+        })
+    );
+}
+
+#[test]
+fn unavailable_exact_process_backend_always_degrades_without_blocking() {
+    for kind in [
+        std::io::ErrorKind::Unsupported,
+        std::io::ErrorKind::PermissionDenied,
+        std::io::ErrorKind::NotFound,
+        std::io::ErrorKind::Other,
+    ] {
+        let result = ShellJobManager::select_process_job(Err(std::io::Error::new(
+            kind,
+            "optional exact backend unavailable",
+        )));
+        assert!(result.is_none(), "{kind:?} must use process-group fallback");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn forced_process_group_fallback_supports_foreground_background_timeout_and_cancel() {
+    let dir = tmp_memory_dir("forced_process_group_fallback");
+    let mut store = ShellJobManager::new(&dir);
+    store.force_process_group_fallback_for_tests();
+
+    let foreground = store.run_with_timeout(
+        "printf fallback_foreground",
+        &dir,
+        5000,
+        "fallback-session",
+        "foreground-turn",
+        &mut NeverCancelRuntime,
+    );
+    assert!(foreground.contains("fallback_foreground"), "{foreground}");
+    assert!(!foreground.contains("cgroup"), "{foreground}");
+    assert!(!foreground.contains("containment"), "{foreground}");
+
+    let background = store.spawn_background(
+        "sleep 1; printf fallback_background",
+        &dir,
+        "fallback-session",
+        "background-turn",
+    );
+    assert!(
+        background.contains("now keeps running in background"),
+        "{background}"
+    );
+    assert!(!background.contains("cgroup"), "{background}");
+    assert!(!background.contains("containment"), "{background}");
+
+    let timeout = store.run_with_timeout(
+        "sleep 1; printf fallback_timeout",
+        &dir,
+        50,
+        "fallback-session",
+        "timeout-turn",
+        &mut NeverCancelRuntime,
+    );
+    assert!(timeout.contains("still running"), "{timeout}");
+    assert!(!timeout.contains("cgroup"), "{timeout}");
+    assert!(!timeout.contains("containment"), "{timeout}");
+
+    let child_pid_file = dir.join("fallback-child.pid");
+    let command = format!(
+        "bash -c 'trap \"\" TERM; tail -f /dev/null' & echo $! > {}; wait",
+        shell_quote_path(&child_pid_file)
+    );
+    let cancelled = store.run_with_timeout(
+        &command,
+        &dir,
+        60_000,
+        "fallback-cancel-session",
+        "cancel-turn",
+        &mut CancelAfterFileRuntime {
+            path: child_pid_file.clone(),
+        },
+    );
+    assert!(cancelled.contains("cancelled"), "{cancelled}");
+    let child_pid = fs::read_to_string(&child_pid_file)
+        .expect("fallback child pid")
+        .trim()
+        .parse::<u32>()
+        .expect("numeric fallback child pid");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while process_running(child_pid) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !process_running(child_pid),
+        "fallback descendant survived cancellation"
+    );
+
+    store.terminate_owned_running();
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
 fn manager_drop_terminates_unfinished_process_group() {
     let dir = tmp_memory_dir("drop_cleanup");
     let pid = {
-        let store = ShellJobManager::new(&dir);
+        let mut store = ShellJobManager::new(&dir);
+        store.force_process_group_fallback_for_tests();
         let started = store.spawn_background("sleep 30", &dir, "drop", "turn");
         started
             .lines()
@@ -156,10 +269,15 @@ fn synthetic_managed_job(delivery: ShellJobDelivery) -> ManagedShellJob {
         state: Mutex::new(ShellJobState {
             delivery,
             lifecycle: ShellJobLifecycle::Running,
+            exit_published: false,
         }),
         changed: Condvar::new(),
         supervisor: Mutex::new(None),
         completion_publication: Arc::new(Mutex::new(0)),
+        exit_hooks: Arc::new(Mutex::new(
+            crate::shell_exec::ShellJobManagerExitHooks::default(),
+        )),
+        process_job: None,
     }
 }
 
@@ -178,9 +296,13 @@ fn completion_and_timeout_handoff_have_one_state_lock_winner() {
     let finished = synthetic_managed_job(ShellJobDelivery::Direct);
     finished.state.lock().unwrap().lifecycle = ShellJobLifecycle::Finished(FinishedShellJob {
         completion_sequence: 1,
+        finished_at_ms: now_ms(),
         status: "0".to_string(),
+        capture_error: None,
         stdout: "done".to_string(),
         stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output: "done".to_string(),
     });
     let DirectJobDecision::Finished(result) = promote_or_take_direct_result(&finished) else {
@@ -251,6 +373,43 @@ fn consumed_background_completion_is_removed_from_the_manager_index() {
         .consume_completed_for_session("bg-session")
         .1
         .is_empty());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn background_exit_elapsed_reflects_finish_time_not_delivery_time() {
+    let dir = tmp_memory_dir("elapsed_finish_time");
+    let store = ShellJobManager::new(&dir);
+    let _ = store.spawn_background("sleep 0.2", &dir, "elapsed-session", "elapsed-turn");
+
+    // Let the command finish, then deliberately delay the delivery/consume
+    // step far beyond the command's real runtime. The reported elapsed_ms
+    // must be measured against the supervisor's observed finish timestamp,
+    // not the moment this consume call happens.
+    thread::sleep(Duration::from_millis(900));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let update = loop {
+        let (_, updates) = store.consume_completed_for_session("elapsed-session");
+        if let Some(update) = updates.into_iter().next() {
+            break update;
+        }
+        assert!(Instant::now() < deadline, "background job did not finish");
+        thread::sleep(Duration::from_millis(10));
+    };
+
+    assert_eq!(update.status, "0");
+    // Real runtime is ~200ms; delivery happens >=900ms after spawn. The old
+    // bug computed elapsed at delivery time, so anything >=900ms proves it.
+    assert!(
+        update.elapsed_ms < 900,
+        "elapsed_ms={} includes delivery delay; it must reflect actual finish time",
+        update.elapsed_ms
+    );
+    assert!(
+        update.elapsed_ms >= 150,
+        "elapsed_ms={} below real runtime",
+        update.elapsed_ms
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -557,8 +716,11 @@ fn bash_command_outcomes_keep_lifecycle_separate_from_result_metadata() {
         signal: None,
         stdout: String::new(),
         stderr: "diagnostic".to_string(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output: "stderr: diagnostic".to_string(),
         error: None,
+        job_management: None,
         tail_out: false,
     }
     .to_action_outcome("run_bash");
@@ -574,8 +736,11 @@ fn bash_command_outcomes_keep_lifecycle_separate_from_result_metadata() {
         signal: Some(11),
         stdout: String::new(),
         stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output: "<no output>".to_string(),
         error: None,
+        job_management: None,
         tail_out: false,
     }
     .to_action_outcome("run_bash");
@@ -609,8 +774,11 @@ fn bash_command_outcomes_keep_lifecycle_separate_from_result_metadata() {
         signal: None,
         stdout: "partial".to_string(),
         stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output: "partial".to_string(),
         error: Some("timeout_still_running:4321".to_string()),
+        job_management: Some("exact".to_string()),
         tail_out: false,
     }
     .to_action_outcome("run_bash");
@@ -636,8 +804,11 @@ fn bash_command_outcomes_keep_lifecycle_separate_from_result_metadata() {
         signal: None,
         stdout: String::new(),
         stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output: String::new(),
         error: Some("long_running_still_running:9876:5000".to_string()),
+        job_management: Some("exact".to_string()),
         tail_out: false,
     }
     .to_action_outcome("run_bash");
@@ -710,8 +881,11 @@ fn run_bash_action_results_do_not_repeat_command_text() {
         signal: None,
         stdout: String::new(),
         stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output: "unique_command_marker".to_string(),
         error: None,
+        job_management: None,
         tail_out: false,
     }
     .to_action_result("run_bash");
@@ -726,8 +900,11 @@ fn run_bash_action_results_do_not_repeat_command_text() {
         signal: None,
         stdout: String::new(),
         stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output: "<no output>".to_string(),
         error: None,
+        job_management: None,
         tail_out: false,
     }
     .to_action_result("run_bash");
@@ -740,8 +917,11 @@ fn run_bash_action_results_do_not_repeat_command_text() {
         signal: None,
         stdout: String::new(),
         stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output: String::new(),
         error: Some("timeout_still_running:12345".to_string()),
+        job_management: Some("exact".to_string()),
         tail_out: false,
     }
     .to_action_result("run_bash");
@@ -761,8 +941,11 @@ fn bash_result_builder_preserves_raw_output_for_the_model_result_gate() {
         signal: None,
         stdout: String::new(),
         stderr: String::new(),
+        stdout_truncation: None,
+        stderr_truncation: None,
         output,
         error: None,
+        job_management: None,
         tail_out: false,
     }
     .to_action_result("run_bash");
@@ -940,6 +1123,60 @@ fn normal_run_bash_rejects_long_sleep_commands() {
         ActionExecution::NeedsApproval(_) => {
             panic!("long sleep should be rejected before approval")
         }
+    }
+}
+
+#[test]
+fn sleep_scan_treats_heredoc_and_quoted_text_as_data() {
+    // Sample command text embedded in a quoted heredoc body must not trip
+    // the long-sleep scan; a real executable long sleep still must.
+    let store = ShellJobManager::new(&tmp_memory_dir("sleep_scan_data"));
+    let cwd = tmp_cwd("sleep_scan_data");
+    let fixture = "cat > /tmp/t.rs <<'EOF'\nassert!(validate(\"sleep 30 &\").is_err());\nEOF";
+    let result = execute_run_bash(
+        fixture,
+        &cwd,
+        false,
+        5000,
+        None,
+        5000,
+        BashApprovalMode::Approve,
+        &store,
+        "session_a",
+        "turn_a",
+        true,
+        &mut NeverCancelRuntime,
+    );
+    match result {
+        ActionExecution::Completed(outcome) => {
+            assert_ne!(outcome.status, ActionStatus::Failed, "{}", outcome.text);
+        }
+        ActionExecution::NeedsApproval(_) => panic!("fixture write should pass the sleep scan"),
+    }
+    // A real long sleep in executable position is still rejected.
+    let rejected = execute_run_bash(
+        "echo start; sleep 45",
+        &cwd,
+        false,
+        5000,
+        None,
+        5000,
+        BashApprovalMode::Approve,
+        &store,
+        "session_a",
+        "turn_a",
+        true,
+        &mut NeverCancelRuntime,
+    );
+    match rejected {
+        ActionExecution::Completed(outcome) => {
+            assert!(
+                outcome.text.contains("long sleep in normal mode"),
+                "{}",
+                outcome.text
+            );
+        }
+        ActionExecution::NeedsApproval(_) => panic!("long sleep should be rejected"),
     }
 }
 
@@ -1205,6 +1442,8 @@ fn background_job_reports_pid_and_running_list_until_exit() {
         started.contains("now keeps running in background"),
         "{started}"
     );
+    assert!(!started.contains("Process containment:"), "{started}");
+    assert!(!started.contains("cgroup v2"), "{started}");
     let pid = started
         .lines()
         .find_map(|line| line.strip_prefix("pid="))
@@ -1215,6 +1454,20 @@ fn background_job_reports_pid_and_running_list_until_exit() {
     assert_eq!(running.len(), 1);
     assert_eq!(running[0].pid, pid);
     assert_eq!(running[0].kind, "background");
+    #[cfg(target_os = "linux")]
+    {
+        let notes = &running[0].notes;
+        assert!(
+            notes.starts_with("cgroup: ") || notes.contains(&format!("/proc/{pid}/cgroup")),
+            "{notes}"
+        );
+        if let Some(path) = notes.strip_prefix("cgroup: ") {
+            assert!(
+                std::path::Path::new(path).join("cgroup.procs").is_file(),
+                "{notes}"
+            );
+        }
+    }
 
     let mut running = Vec::new();
     let mut updates = Vec::new();
@@ -1253,6 +1506,8 @@ fn timeout_job_reports_pid_and_later_exit_update() {
     assert!(result.contains("timeout, but is still running"), "{result}");
     assert!(result.contains("process was not killed"), "{result}");
     assert!(result.contains("no final exit code yet"), "{result}");
+    assert!(!result.contains("Process containment:"), "{result}");
+    assert!(!result.contains("cgroup v2"), "{result}");
     let pid = result
         .lines()
         .find_map(|line| line.strip_prefix("pid="))
@@ -1286,14 +1541,14 @@ fn timeout_job_reports_pid_and_later_exit_update() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
-fn timed_out_job_remains_cancellable_after_launcher_exits() {
-    let dir = tmp_memory_dir("timeout_group_cancel_after_launcher");
+fn timed_out_job_keeps_owned_setsid_descendant_until_explicit_cancellation() {
+    let dir = tmp_memory_dir("timeout_cgroup_cancel_after_launcher");
     let store = ShellJobManager::new(&dir);
     let descendant_pid_file = dir.join("descendant.pid");
     let command = format!(
-        r#"tail -f /dev/null & child=$!; printf '%s' "$child" > {}; exit 0"#,
+        r#"setsid --fork sh -c 'printf %s $$ > {}; sleep 60'; exit 0"#,
         shell_quote_path(&descendant_pid_file)
     );
     let mut runtime = NeverCancelRuntime;
@@ -1301,43 +1556,53 @@ fn timed_out_job_remains_cancellable_after_launcher_exits() {
         &command,
         &dir,
         100,
-        "timeout-group-session",
-        "timeout-group-turn",
+        "timeout-cgroup-session",
+        "timeout-cgroup-turn",
         &mut runtime,
     );
     assert!(result.contains("timeout, but is still running"), "{result}");
-    let leader_pid = result
-        .lines()
-        .find_map(|line| line.strip_prefix("pid="))
-        .and_then(|rest| rest.split(',').next())
-        .and_then(|pid| pid.parse::<u32>().ok())
-        .expect("managed group leader pid");
     let descendant_pid = fs::read_to_string(&descendant_pid_file)
-        .expect("descendant pid file")
+        .expect("setsid descendant pid file")
         .trim()
         .parse::<u32>()
         .expect("numeric descendant pid");
+    let still_executing = |pid: u32| {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| stat.rsplit_once(") ").map(|(_, tail)| tail.to_string()))
+            .and_then(|tail| tail.split_whitespace().next().map(str::to_string))
+            .is_some_and(|state| state != "Z" && state != "X")
+    };
 
-    assert!(crate::os::process_group_running(leader_pid));
-    assert!(process_running(descendant_pid));
+    assert!(
+        still_executing(descendant_pid),
+        "timeout must hand off, not kill owned setsid descendant {descendant_pid}"
+    );
     assert_eq!(
         store
-            .cancel_unfinished_for_session("timeout-group-session")
+            .cancel_unfinished_for_session("timeout-cgroup-session")
             .len(),
         1
     );
 
     let deadline = Instant::now() + Duration::from_secs(3);
-    while process_running(descendant_pid) && Instant::now() < deadline {
+    while still_executing(descendant_pid) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(20));
     }
     assert!(
-        !process_running(descendant_pid),
-        "descendant {descendant_pid} survived timeout-job cancellation"
+        !still_executing(descendant_pid),
+        "owned setsid descendant {descendant_pid} survived explicit cancellation"
     );
-    assert!(!crate::os::process_group_running(leader_pid));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !store
+        .query_running_for_session("timeout-cgroup-session")
+        .is_empty()
+        && Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(20));
+    }
     assert!(store
-        .query_running_for_session("timeout-group-session")
+        .query_running_for_session("timeout-cgroup-session")
         .is_empty());
     let _ = fs::remove_dir_all(&dir);
 }
@@ -1612,6 +1877,136 @@ fn bash_validation_rejects_empty_and_allows_long_commands() {
 }
 
 #[test]
+fn shell_lifecycle_validation_ignores_heredoc_body_content() {
+    // Heredoc bodies are data, not shell syntax: ampersands, quotes, and
+    // detach keywords inside the body must not trip the scanners.
+    assert!(validate_bash_lifecycle(
+        "cat > /tmp/t.py <<'EOF'\ns = &format!(\"{stamp}\")\nsetsid & sleep 30\nEOF\necho done",
+        false
+    )
+    .is_ok());
+    assert!(
+        validate_bash_request("cat > /tmp/t.py <<'EOF'\ns = &format!(\"{stamp}\")\nEOF").is_ok()
+    );
+    // <<- variant with tab-indented terminator.
+    assert!(validate_bash_lifecycle(
+        "cat <<-EOF\n\tdata with & and setsid text\n\tEOF\necho ok",
+        false
+    )
+    .is_ok());
+    // A real background launch after a heredoc is still rejected.
+    assert_eq!(
+        validate_bash_lifecycle("cat <<'EOF'\nbody\nEOF\nsleep 30 &", false),
+        Err("unmanaged_background_process".to_string())
+    );
+    // Detach keywords are no longer rejected: OS-level containment
+    // (subreaper/job object) covers escapees; semantic scanning is guidance.
+    assert!(validate_bash_lifecycle(
+        "cat <<'EOF'\nmentions setsid in body\nEOF\nsetsid sleep 30",
+        true
+    )
+    .is_ok());
+
+    // Here-strings (`<<<`) feed one word; they must not be mistaken for
+    // heredocs, which previously swallowed the rest of the command.
+    assert!(validate_bash_lifecycle("cat <<< \"x\"; echo ok", false).is_ok());
+    assert!(validate_bash_lifecycle("cat <<< x; setsid true", false).is_ok());
+    assert!(validate_bash_lifecycle("grep a <<< \"b\" && disown", false).is_ok());
+
+    // Backtick substitution, brace groups, and `eval` parse correctly:
+    // unmanaged background inside them is still rejected, while detach
+    // keywords themselves are guidance, not rejections.
+    assert!(validate_bash_lifecycle("echo `setsid true`; echo after", false).is_ok());
+    assert!(validate_bash_lifecycle("echo `date`", false).is_ok());
+    assert!(validate_bash_lifecycle("{ setsid true; }; echo after", false).is_ok());
+    assert_eq!(
+        validate_bash_lifecycle("{ sleep 30 & }; echo after", false),
+        Err("unmanaged_background_process".to_string())
+    );
+    assert!(validate_bash_lifecycle("{ echo grouped; }", false).is_ok());
+    assert!(validate_bash_lifecycle("eval 'setsid true'; echo after", false).is_ok());
+    assert_eq!(
+        validate_bash_lifecycle("eval \"sleep 30 &\"; echo after", false),
+        Err("unmanaged_background_process".to_string())
+    );
+    assert!(validate_bash_lifecycle("eval 'echo safe'", false).is_ok());
+}
+
+#[test]
+fn shell_lifecycle_validation_allows_detach_keywords_under_os_containment() {
+    // Detach keywords are no longer semantically blocked: escaped processes
+    // are contained by OS mechanisms (per-Job cgroup v2 on Linux and the
+    // platform job mechanism on Windows), not by keyword rejection.
+    for command in [
+        "setsid sleep 30",
+        "command setsid sleep 30",
+        "nohup setsid sleep 30",
+        "env FOO=bar setsid sleep 30",
+        "sudo -n -- setsid sleep 30",
+        "disown",
+        "daemon server",
+        "/usr/bin/setsid sleep 30",
+        "bash -c 'setsid sleep 30'",
+        "/bin/sh -c '/usr/bin/setsid sleep 30'",
+        "env FOO=bar bash -lc 'nohup setsid sleep 30'",
+    ] {
+        assert!(validate_bash_lifecycle(command, true).is_ok(), "{command}");
+    }
+    // But an unmanaged `&` background launch still fails lifecycle checks.
+    assert_eq!(
+        validate_bash_lifecycle("setsid sleep 30 &", false),
+        Err("unmanaged_background_process".to_string())
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn completed_job_waits_for_its_owned_setsid_descendant() {
+    let store = ShellJobManager::new(&tmp_memory_dir("setsid_completion_ownership"));
+    let cwd = tmp_cwd("setsid_completion_ownership");
+    let marker = cwd.join("descendant.pid");
+    let command = format!(
+        "setsid --fork sh -c 'echo $$ > {m}; sleep 0.3' >/dev/null 2>&1",
+        m = marker.display()
+    );
+    let started = Instant::now();
+    let result = execute_run_bash(
+        &command,
+        &cwd,
+        false,
+        5000,
+        None,
+        5000,
+        BashApprovalMode::Approve,
+        &store,
+        "session_a",
+        "turn_a",
+        true,
+        &mut NeverCancelRuntime,
+    );
+    let ActionExecution::Completed(outcome) = result else {
+        panic!("setsid command must complete under per-job containment");
+    };
+    assert_ne!(outcome.status, ActionStatus::Failed, "{}", outcome.text);
+    assert!(
+        started.elapsed() >= Duration::from_millis(250),
+        "job completed before its owned setsid descendant"
+    );
+    let descendant_pid: u32 = std::fs::read_to_string(&marker)
+        .expect("descendant marker")
+        .trim()
+        .parse()
+        .expect("descendant pid");
+    let executing = std::fs::read_to_string(format!("/proc/{descendant_pid}/stat"))
+        .ok()
+        .and_then(|stat| stat.rsplit_once(") ").map(|(_, tail)| tail.to_string()))
+        .and_then(|tail| tail.split_whitespace().next().map(str::to_string))
+        .is_some_and(|state| state != "Z" && state != "X");
+    assert!(!executing, "terminal result preceded owned descendant exit");
+    let _ = std::fs::remove_file(&marker);
+}
+
+#[test]
 fn shell_lifecycle_validation_rejects_unmanaged_background_without_wait() {
     for command in [
         "sleep 30 &",
@@ -1635,29 +2030,6 @@ fn shell_lifecycle_validation_rejects_unmanaged_background_without_wait() {
     assert!(
         validate_bash_lifecycle(r#"bash -c 'sleep 0.1 & child=$!; wait "$child"'"#, false).is_ok()
     );
-}
-
-#[test]
-fn shell_lifecycle_validation_rejects_explicit_detach() {
-    for command in [
-        "setsid sleep 30",
-        "command setsid sleep 30",
-        "nohup setsid sleep 30",
-        "env FOO=bar setsid sleep 30",
-        "sudo -n -- setsid sleep 30",
-        "disown",
-        "daemon server",
-        "/usr/bin/setsid sleep 30",
-        "bash -c 'setsid sleep 30'",
-        "/bin/sh -c '/usr/bin/setsid sleep 30'",
-        "env FOO=bar bash -lc 'nohup setsid sleep 30'",
-    ] {
-        assert_eq!(
-            validate_bash_lifecycle(command, true),
-            Err("explicit_process_detach".to_string()),
-            "{command}"
-        );
-    }
 }
 
 #[test]
@@ -1876,10 +2248,9 @@ fn approved_bash_rechecks_safety_before_execution() {
         "{}",
         result.text
     );
-    assert!(
-        result.text.contains("approval_status: approved_by_user"),
-        "{}",
-        result.text
+    assert_eq!(
+        result.runtime_metadata.get("approval_status"),
+        Some(&serde_json::json!("approved_by_user"))
     );
     assert!(
         !marker.exists(),
@@ -1915,6 +2286,57 @@ fn run_bash_allows_safe_tmp_delete() {
             assert!(!target.exists(), "safe temp dir should be removable");
         }
         other => panic!("expected safe command to run, got {other:?}"),
+    }
+}
+
+#[test]
+fn run_bash_action_defaults_capture_to_tail_and_false_overrides_to_head() {
+    let command = format!(
+        "printf BEGIN_MARKER; head -c {} /dev/zero | tr '\\0' x; printf END_MARKER",
+        SHELL_OUTPUT_LIMIT_BYTES + 4096
+    );
+    for (tail_out, expected_retained, expected_marker, absent_marker) in [
+        (None, "tail", "END_MARKER", "BEGIN_MARKER"),
+        (Some(false), "head", "BEGIN_MARKER", "END_MARKER"),
+    ] {
+        let memory_dir = tmp_memory_dir("run_bash_capture_default");
+        let mut core = AgentCore::new(
+            "static prompt\n{{RESPONSE_PROTOCOL_SECTION}}\n{{TOOL_CATALOG}}\n",
+            crate::CoreProfile {
+                model: "test".to_string(),
+            },
+            memory_dir,
+        );
+        core.set_capability_registry(crate::CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ));
+        core.set_bash_approval_mode(BashApprovalMode::Approve);
+        let mut raw_input = serde_json::json!({"cmd": command, "timeout_ms": 10_000});
+        if let Some(tail_out) = tail_out {
+            raw_input["tail_out"] = serde_json::json!(tail_out);
+        }
+        let action = ParsedAction {
+            action: "run_bash".to_string(),
+            name: None,
+            call_id: "capture_default".to_string(),
+            raw_input,
+        };
+        let ActionExecution::Completed(outcome) =
+            execute_run_bash_action(&mut core, &action, &mut NeverCancelRuntime)
+        else {
+            panic!("approve mode should execute directly");
+        };
+        let evidence = outcome.bash_result.expect("structured shell evidence");
+        assert!(evidence.stdout.contains(expected_marker));
+        assert!(!evidence.stdout.contains(absent_marker));
+        assert!(!evidence.stdout.contains("truncated"));
+        assert_eq!(
+            evidence
+                .stdout_truncation
+                .as_ref()
+                .map(|value| value.retained),
+            Some(expected_retained)
+        );
     }
 }
 
@@ -2015,10 +2437,22 @@ fn background_tail_out_retains_bounded_tail_until_exit_refresh() {
         assert!(wait_started.elapsed() < Duration::from_secs(5));
         thread::sleep(Duration::from_millis(20));
     };
-    assert!(update.stdout.len() <= SHELL_OUTPUT_LIMIT_BYTES + 100);
-    assert!(update.stdout.contains("retained last"), "{}", update.stdout);
+    assert_eq!(update.stdout.len(), SHELL_OUTPUT_LIMIT_BYTES);
+    assert!(!update.stdout.contains("truncated"), "{}", update.stdout);
     assert!(update.stdout.contains("END_MARKER"), "{}", update.stdout);
     assert!(!update.stdout.contains("BEGIN_MARKER"), "{}", update.stdout);
+    assert_eq!(
+        update.stdout_truncation,
+        Some(StreamCaptureTruncation {
+            original_bytes: "BEGIN_MARKER".len()
+                + SHELL_OUTPUT_LIMIT_BYTES
+                + 4096
+                + "END_MARKER".len(),
+            retained_bytes: SHELL_OUTPUT_LIMIT_BYTES,
+            retained: "tail",
+        })
+    );
+    assert!(update.stderr_truncation.is_none());
     let (_, repeated) = store.consume_completed_for_session("session_tail_background");
     assert!(repeated.is_empty(), "exit notification must be one-shot");
     let _ = std::fs::remove_dir_all(dir);
@@ -2119,4 +2553,303 @@ fn edited_files_declaration_reaches_outcome_and_pending_approval() {
         .audit_input("approval_x", "risk", "reason")["edit"]
         .is_array());
     let _ = std::fs::remove_dir_all(cwd);
+}
+
+#[test]
+fn exit_listener_fires_once_with_terminal_update_for_background_jobs() {
+    let dir = tmp_memory_dir("exit_listener_once");
+    let store = ShellJobManager::new(&dir);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<ShellJobExitUpdate>::new()));
+    let hook_seen = std::sync::Arc::clone(&seen);
+    store.set_exit_listener(move |update| hook_seen.lock().unwrap().push(update.clone()));
+    store.spawn_background("printf hi", &dir, "listener_sess", "turn_l");
+    let (running, updates) = store.consume_completed_for_session("listener_sess");
+    // Race: consume may run before or after exit; retry until finished.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut updates = updates;
+    let mut running = running;
+    while updates.is_empty() && deadline > std::time::Instant::now() {
+        let (r, u) = store.consume_completed_for_session("listener_sess");
+        running = r;
+        updates = u;
+        if updates.is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    assert!(!running.is_empty() || !updates.is_empty());
+    let fired = seen.lock().unwrap();
+    assert_eq!(
+        fired.len(),
+        1,
+        "listener must fire exactly once per background job"
+    );
+    assert_eq!(fired[0].status, "0");
+    assert!(fired[0].elapsed_ms >= 0);
+    assert!(
+        fired[0].topic_published,
+        "listener update must be marked published"
+    );
+    // Consumed update must be flagged so topic emission can skip duplicates.
+    if let Some(update) = updates.first() {
+        assert!(update.topic_published);
+    }
+    let _ = store.terminate_owned_running();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn exit_listener_not_fired_for_direct_jobs() {
+    let dir = tmp_memory_dir("exit_listener_direct");
+    let store = ShellJobManager::new(&dir);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(0usize));
+    let hook_seen = std::sync::Arc::clone(&seen);
+    store.set_exit_listener(move |_update| {
+        *hook_seen.lock().unwrap() += 1;
+    });
+    let _ = store.run_with_timeout(
+        "printf direct",
+        &dir,
+        5_000,
+        "listener_sess",
+        "turn_d",
+        &mut NeverCancelRuntime,
+    );
+    let fired = *seen.lock().unwrap();
+    assert_eq!(
+        fired, 0,
+        "direct (non-background) jobs must not publish through the exit listener"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_cancel_older_term_resistant_job_publishes_one_killed_update() {
+    struct Children(Vec<std::process::Child>);
+    impl Drop for Children {
+        fn drop(&mut self) {
+            for child in &mut self.0 {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+    let dir = tmp_memory_dir("macos_older_cancel");
+    let store = ShellJobManager::new(&dir);
+    let started = store.spawn_background(
+        "trap '' TERM; printf ready > ready; exec /bin/sleep 20",
+        &dir,
+        "older-session",
+        "turn",
+    );
+    assert!(
+        started.contains("now keeps running in background"),
+        "{started}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while fs::read_to_string(dir.join("ready")).ok().as_deref() != Some("ready") {
+        assert!(
+            Instant::now() < deadline,
+            "child did not install TERM disposition"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let pid = store.query_running_for_session("older-session")[0].pid;
+    let mut newer = Children(Vec::new());
+    for _ in 0..100 {
+        newer
+            .0
+            .push(Command::new("/bin/sleep").arg("20").spawn().unwrap());
+    }
+    assert_eq!(
+        store.cancel_unfinished_for_session("older-session").len(),
+        1
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let updates = loop {
+        let (_, updates) = store.consume_completed_for_session("older-session");
+        if !updates.is_empty() {
+            break updates;
+        }
+        assert!(Instant::now() < deadline, "cancel failed to converge");
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].status, "signal:9");
+    assert!(!crate::os::process_running(pid));
+    assert!(store.query_running_for_session("older-session").is_empty());
+    assert!(store
+        .consume_completed_for_session("older-session")
+        .1
+        .is_empty());
+    // Unrelated newer children must not be collateral cancellation targets.
+    assert!(newer
+        .0
+        .iter_mut()
+        .all(|child| child.try_wait().unwrap().is_none()));
+    drop(newer);
+    drop(store);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+struct EscapedPipeFixture(
+    PathBuf,
+    crate::escaped_pipe_fixture::NativeEscapedPipeFixture,
+);
+
+#[cfg(target_os = "macos")]
+impl EscapedPipeFixture {
+    fn new(name: &str) -> Self {
+        let dir = tmp_memory_dir(name);
+        let native = crate::escaped_pipe_fixture::NativeEscapedPipeFixture::new(&dir);
+        Self(dir, native)
+    }
+
+    fn command(&self, keep_launcher: bool) -> String {
+        self.1.command(keep_launcher)
+    }
+
+    fn wait_ready(&self, store: &ShellJobManager) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !self.1.path().join("ready").exists() {
+            if Instant::now() >= deadline {
+                let jobs = store.state.jobs.lock().unwrap();
+                let diagnostics = jobs
+                    .values()
+                    .map(|job| {
+                        format!(
+                            "pid={} state={:?} stdout={:?} stderr={:?}",
+                            job.pid,
+                            job.state.lock().unwrap(),
+                            shell_output_snapshot(&job.stdout).text,
+                            shell_output_snapshot(&job.stderr).text
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                panic!(
+                    "fixture did not escape: phase={:?}; jobs={diagnostics:?}",
+                    fs::read_to_string(self.1.path().join("phase"))
+                );
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for EscapedPipeFixture {
+    fn drop(&mut self) {
+        self.1.release();
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_escaped_pipe_holder_does_not_block_job_completion() {
+    let fixture = EscapedPipeFixture::new("escaped_pipe_completion");
+    let store = ShellJobManager::new(&fixture.0);
+    let started = Instant::now();
+    let result = store.run_with_timeout(
+        &fixture.command(false),
+        &fixture.0,
+        3000,
+        "escaped",
+        "turn",
+        &mut NeverCancelRuntime,
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "pipe holder delayed completion: {result}"
+    );
+    assert!(
+        result.contains("output_capture_incomplete"),
+        "missing explicit capture failure: {result}"
+    );
+    assert!(result.contains("captured"), "lost partial output: {result}");
+    assert!(store.query_running_for_session("escaped").is_empty());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_escaped_pipe_holder_does_not_block_cancel_or_duplicate_update() {
+    let fixture = EscapedPipeFixture::new("escaped_pipe_cancel");
+    let store = ShellJobManager::new(&fixture.0);
+    let started = store.spawn_background(&fixture.command(true), &fixture.0, "escaped", "turn");
+    assert!(started.contains("now keeps running"), "{started}");
+    fixture.wait_ready(&store);
+    let started = Instant::now();
+    assert_eq!(store.cancel_unfinished_for_session("escaped").len(), 1);
+    let update = loop {
+        let (_, updates) = store.consume_completed_for_session("escaped");
+        if let Some(update) = updates.into_iter().next() {
+            break update;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "cancel blocked by escaped pipe"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(
+        update.capture_error.as_deref(),
+        Some("output_capture_incomplete")
+    );
+    assert!(update.status.starts_with("signal:"), "{}", update.status);
+    assert!(store.consume_completed_for_session("escaped").1.is_empty());
+    // Capture failure must not be presented as a successful background action.
+    let event = crate::running_shell_job_exit_topic_event(&update);
+    assert_eq!(event.payload["status"], "failed");
+    assert_eq!(event.payload["capture_error"], "output_capture_incomplete");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_escaped_pipe_holder_does_not_block_manager_drop() {
+    let fixture = EscapedPipeFixture::new("escaped_pipe_drop");
+    let store = ShellJobManager::new(&fixture.0);
+    let started = store.spawn_background(&fixture.command(true), &fixture.0, "escaped", "turn");
+    assert!(started.contains("now keeps running"), "{started}");
+    fixture.wait_ready(&store);
+    let started = Instant::now();
+    drop(store);
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "shutdown blocked by escaped pipe"
+    );
+}
+
+#[test]
+fn incomplete_capture_preserves_launcher_exit_without_reporting_success() {
+    let finished = FinishedShellJob {
+        completion_sequence: 1,
+        finished_at_ms: now_ms(),
+        status: "0".to_string(),
+        capture_error: Some("output_capture_incomplete".to_string()),
+        stdout: "partial stdout".to_string(),
+        stderr: "partial stderr".to_string(),
+        stdout_truncation: None,
+        stderr_truncation: None,
+        output: "partial stdout\nstderr: partial stderr".to_string(),
+    };
+    let output = finished_output("echo", false, &finished);
+    assert_eq!(output.status, Some(0));
+    assert_eq!(output.error.as_deref(), Some("output_capture_incomplete"));
+    let outcome = output.to_action_outcome("run_bash");
+    assert_eq!(outcome.status, ActionStatus::Failed);
+    assert_eq!(
+        bash_error_type("output_capture_incomplete"),
+        Some("OutputCaptureIncomplete")
+    );
+    assert!(outcome.text.contains("partial stdout"));
+    let job = synthetic_managed_job(ShellJobDelivery::Background);
+    let update = job.exit_update(&finished);
+    assert_eq!(update.stdout, "partial stdout");
+    assert_eq!(update.stderr, "partial stderr");
+    assert_eq!(update.status, "0");
+    let event = crate::running_shell_job_exit_topic_event(&update);
+    assert_eq!(event.payload["status"], "failed");
+    assert_eq!(event.payload["exit_status"], "0");
+    assert_eq!(event.payload["capture_error"], "output_capture_incomplete");
 }

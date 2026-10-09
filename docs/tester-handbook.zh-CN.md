@@ -261,11 +261,11 @@ TIMEM_EDGE_ITERATIONS=5 scripts/edge_regression.sh
 
 覆盖：
 
-- Prompt delta/slice 顺序、隐藏、discard、offload。
+- Prompt delta/slice 顺序、隐藏、keep、offload，以及未列入 keep 的 delta 被移出活跃上下文。
 - 空上下文、单 delta、多 slice、原生 exchange 和文本混合。
 - 强制压缩阈值前后，尤其阈值 - 1、阈值、阈值 + 1。
 - 静态提示占主导、动态内容无法继续缩小时，不无限请求压缩。
-- compact 引用不存在、引用重复、同时 discard/offload、只 offload。
+- compact 的 keep/offload 引用不存在或重复、keep/offload 重叠、仅 summary 全量替换，以及旧 prune/discard 字段被拒绝。
 - 压缩后当前问题、关键 action 证据和活跃能力仍保留。
 - KV-cache 标记稳定；当前 continuation trailer 不被误缓存。
 - 审计中只保留必要摘要/hash，不泄露完整 prompt。

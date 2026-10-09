@@ -1,7 +1,7 @@
 use serde_json::Value;
 
 use super::{
-    ParsedContextCompact, ParsedEnvelope, PromptBoundarySpec, ResponseProtocolSuite,
+    ParsedContextCompress, ParsedEnvelope, PromptBoundarySpec, ResponseProtocolSuite,
     BRACKETED_PROMPT_BOUNDARIES,
 };
 use crate::capability::CapabilityRegistry;
@@ -76,7 +76,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
                 thought_keep_in_context: false,
                 next_actions: vec![],
                 action_groups: vec![],
-                context_compacts: vec![],
+                context_compresses: vec![],
                 accepted_response: None,
                 memory_candidates: vec![],
                 runtime_note: None,
@@ -94,7 +94,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
             thought_keep_in_context: false,
             next_actions: vec![],
             action_groups: vec![],
-            context_compacts: vec![],
+            context_compresses: vec![],
             accepted_response: None,
             memory_candidates: vec![],
             runtime_note: None,
@@ -148,7 +148,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
     }
     let thought_keep_in_context = !thought.is_empty();
     let runtime_note: Option<String> = None;
-    let context_compacts = parse_context_compacts(&value, &mut repair_issue);
+    let context_compresses = parse_context_compresses(&value, capabilities, &mut repair_issue);
 
     let mut next_actions = Vec::new();
     let mut action_groups = Vec::new();
@@ -220,7 +220,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
     if repair_issue.is_none()
         && continue_work
         && next_actions.is_empty()
-        && context_compacts.is_empty()
+        && context_compresses.is_empty()
     {
         repair_issue = Some("next_actions_required_when_status_working".to_string());
     }
@@ -232,7 +232,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
         thought_keep_in_context,
         next_actions,
         action_groups,
-        context_compacts,
+        context_compresses,
         memory_candidates,
         accepted_response: None,
         runtime_note,
@@ -241,11 +241,12 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
     }
 }
 
-fn parse_context_compacts(
+fn parse_context_compresses(
     value: &Value,
+    capabilities: &CapabilityRegistry,
     repair_issue: &mut Option<String>,
-) -> Vec<ParsedContextCompact> {
-    let Some(raw) = value.get("context_compact") else {
+) -> Vec<ParsedContextCompress> {
+    let Some(raw) = value.get("context_compress") else {
         return Vec::new();
     };
     let items = if let Some(array) = raw.as_array() {
@@ -257,19 +258,37 @@ fn parse_context_compacts(
     for (idx, item) in items.iter().enumerate() {
         let Some(object) = item.as_object() else {
             if repair_issue.is_none() {
-                *repair_issue = Some(format!("context_compact[{idx}].must_be_object"));
+                *repair_issue = Some(format!("context_compress[{idx}].must_be_object"));
             }
             break;
         };
-        let discard_delta_ids = object
-            .get("discard")
+        if let Some(field) = object
+            .keys()
+            .find(|field| !capabilities.tool_input_property_declared("context_compress", field))
+        {
+            if repair_issue.is_none() {
+                *repair_issue = Some(format!("context_compress[{idx}].input.{field}_unsupported"));
+            }
+            break;
+        }
+        let keep_delta_ids = object
+            .get("keep")
             .map(super::json_string_list)
             .unwrap_or_default();
         let offload_delta_ids = object
             .get("offload")
             .map(super::json_string_list)
             .unwrap_or_default();
-        let mut delta_ids = discard_delta_ids.clone();
+        if let Some(id) = keep_delta_ids
+            .iter()
+            .find(|id| offload_delta_ids.contains(id))
+        {
+            if repair_issue.is_none() {
+                *repair_issue = Some(format!("context_compress[{idx}].keep_offload_overlap:{id}"));
+            }
+            break;
+        }
+        let mut delta_ids = keep_delta_ids.clone();
         delta_ids.extend(offload_delta_ids.iter().cloned());
         delta_ids.sort();
         delta_ids.dedup();
@@ -279,20 +298,15 @@ fn parse_context_compacts(
             .unwrap_or("")
             .trim()
             .to_string();
-        if delta_ids.is_empty() {
-            if repair_issue.is_none() {
-                *repair_issue = Some(format!("context_compact[{idx}].ids_required"));
-            }
-            break;
-        }
         if summary.is_empty() {
             if repair_issue.is_none() {
-                *repair_issue = Some(format!("context_compact[{idx}].summary_required"));
+                *repair_issue = Some(format!("context_compress[{idx}].summary_required"));
             }
             break;
         }
-        compacts.push(ParsedContextCompact {
-            discard_delta_ids,
+        compacts.push(ParsedContextCompress {
+            call_id: super::generated_inline_tool_call_id(),
+            keep_delta_ids,
             offload_delta_ids,
             delta_ids,
             slice_ids: Vec::new(),
@@ -320,7 +334,7 @@ fn is_allowed_response_top_level_key(key: &str) -> bool {
             | "working_still_action"
             | "free_talk"
             | "memory_candidates"
-            | "context_compact"
+            | "context_compress"
     )
 }
 
@@ -335,11 +349,11 @@ pub fn protocol_repair_instruction(issue: &str) -> &'static str {
         "truncated_model_output" => {
             "检查到刚刚的输出被 max output token 截断，未形成完整 JSON。上一次已收到的截断回复和原生工具参数片段已附在上下文中，请不要再次生成同样长的整段内容。把工作拆成小块：本次只生成一个较小、完整的步骤或工具调用，拿到结果后再继续下一小块；如果是长报告，可分段写入文件，最后只在 final_answer 中给出简短总结和路径。Return exactly one valid JSON object. Do not use markdown fences."
         }
-        "context_compact_must_be_first" => {
-            "检查到 context_compact 不是本次响应的第一个工具调用。请把 context_compact 放在所有其他 capability calls 之前；后续 calls 可以保留，它们只会在压缩成功后执行。Return exactly one valid JSON object. Do not use markdown fences."
+        "context_compress_must_be_first" => {
+            "检查到 context_compress 不是本次响应的第一个工具调用。请把 context_compress 放在所有其他 capability calls 之前；后续 calls 可以保留，它们只会在压缩成功后执行。Return exactly one valid JSON object. Do not use markdown fences."
         }
-        "context_compact_only_once" => {
-            "检查到本次响应包含多个 context_compact。每次响应最多调用一次 context_compact，并将它放在第一个位置；后续可以继续提供其他 capability calls。Return exactly one valid JSON object. Do not use markdown fences."
+        "context_compress_only_once" => {
+            "检查到本次响应包含多个 context_compress。每次响应最多调用一次 context_compress，并将它放在第一个位置；后续可以继续提供其他 capability calls。Return exactly one valid JSON object. Do not use markdown fences."
         }
         "final_answer_requires_status_finished" => {
             "检查到刚刚的输出格式有点问题：你提供了 final_answer，但缺少 status:\"ALL_FINISHED\"。如果所有用户的 open/pending 请求已经完成，请同时提供 status:\"ALL_FINISHED\" 和 final_answer；这不会关闭 Timem session。如果仍需要 runtime 继续工作，请去掉 final_answer，并提供 working_still_action。Return exactly one valid JSON object. Do not use markdown fences."
@@ -352,6 +366,12 @@ pub fn protocol_repair_instruction(issue: &str) -> &'static str {
         }
         "next_actions_required_when_status_working" => {
             "检查到刚刚的输出格式有点问题：status:\"working\" 表示还需要 runtime 继续执行动作，因此必须提供 working_still_action。如果所有用户的 open/pending 请求已经完成，请改用 status:\"ALL_FINISHED\" 和 final_answer。Return exactly one valid JSON object. Do not use markdown fences."
+        }
+        issue if issue.starts_with("context_compress")
+            && issue.contains(".input.")
+            && issue.ends_with("_unsupported") =>
+        {
+            "context_compress 包含当前 tool schema 未定义的参数。请仅使用当前 schema 中定义的参数。Return exactly one valid JSON object. Do not use markdown fences."
         }
         _ => {
             "Return exactly one valid JSON object. Omitted status defaults to working; include working_still_action when working. Use status:\"ALL_FINISHED\" together with final_answer when all user's open and pending requests are complete. Do not use markdown fences."
@@ -370,11 +390,11 @@ pub fn protocol_repair_reason(issue: &str) -> &'static str {
         "truncated_model_output" => {
             "The model output stopped before a complete response_v1 JSON object was produced."
         }
-        "context_compact_must_be_first" => {
-            "The response included context_compact after another capability call, but context compaction must be the first action."
+        "context_compress_must_be_first" => {
+            "The response included context_compress after another capability call, but context compression must be the first action."
         }
-        "context_compact_only_once" => {
-            "The response included more than one context_compact call."
+        "context_compress_only_once" => {
+            "The response included more than one context_compress call."
         }
         "invalid_json" => "The previous model response could not be parsed as one JSON object.",
         "root_must_be_json_object" => {

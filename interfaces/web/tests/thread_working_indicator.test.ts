@@ -35,9 +35,9 @@ describe("thread working indicator", () => {
     const arc = rule(".thread-working-arc");
     const stroke = rule(".thread-working-arc circle");
 
-    expect(source).toContain('<circle cx="12" cy="12" r="9" pathLength="100" />');
+    expect(source).toContain('<circle cx="12" cy="12" r="11" pathLength="100" />');
     expect(arc).toContain("animation: thread-working-spin 1.8s linear infinite");
-    expect(stroke).toContain("stroke-width: 3");
+    expect(stroke).toContain("stroke-width: 1.5");
     expect(stroke).toContain("stroke-linecap: round");
     expect(stroke).toContain("stroke-dasharray: 18 82");
     expect(stroke).toContain("fill: none");
@@ -45,7 +45,26 @@ describe("thread working indicator", () => {
 
   it("keeps reduced-motion users free from the arc animation", () => {
     expect(styles).toMatch(
-      /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.thread-working-away\.is-working \.thread-working-arc \{ animation: none; \}/,
+      /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.thread-working-away\.is-working \.thread-working-arc \{ animation: none; transition: none; \}/,
     );
+  });
+
+  it("keeps the active memo icon larger and above the subdued rotating arc", () => {
+    const mark = rule(".thread-working-mark");
+    const arc = rule(".thread-working-arc");
+    const memoArc = rule(".thread-working-mark:has(.thread-working-pin) .thread-working-arc");
+    const pin = rule(".thread-working-pin");
+
+    expect(source).toContain("ClipboardCheck,");
+    expect(source).toContain("return <ClipboardCheck size={size} />;");
+    expect(source).toContain('<MemoIcon size={16.8} />');
+    expect(source.match(/<MemoIcon size=\{13\} \/>/g)).toHaveLength(2);
+    expect(mark).toContain("isolation: isolate");
+    expect(arc).toContain("z-index: 0");
+    expect(memoArc).toContain("opacity: .62");
+    expect(pin).toContain("z-index: 1");
+    expect(pin).toContain("opacity: 1");
+    expect(source).not.toContain("<StickyNote");
+    expect(source).not.toContain("<Pin size={13}");
   });
 });

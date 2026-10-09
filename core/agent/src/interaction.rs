@@ -83,11 +83,44 @@ pub fn parse_parallel_tool_calls(value: &str) -> Result<ParallelToolCalls, Strin
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityProbeIdentity {
+    /// Stable, host-owned endpoint identity. It scopes otherwise identical
+    /// endpoint definitions without exposing credentials to Core or topics.
+    pub endpoint_id: String,
+    pub api_protocol: String,
+    pub gateway: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_thinking: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedCapabilityProbe {
+    pub identity: CapabilityProbeIdentity,
+    pub native_supported: bool,
+    pub parallel_supported: bool,
+    pub observed_tool_calls: usize,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InteractionConfig {
     pub tool_call_mode: ToolCallMode,
     pub parallel_tool_calls: ParallelToolCalls,
     pub max_tool_calls_per_response: usize,
+    /// Catalog/host knowledge for native function calling. `Some(true)` means
+    /// supported, `Some(false)` means explicitly unsupported, and `None` means
+    /// an ordinary chat endpoint whose capability must be probed.
+    pub native_tools_supported: Option<bool>,
+    /// Host-projected stable endpoint identity used only for strict capability
+    /// cache matching. API keys and other secrets must never be placed here.
+    pub capability_probe_endpoint_id: Option<String>,
+    /// Host-loaded durable probe result. Core validates the complete identity
+    /// before use and ignores stale or mismatched records.
+    pub persisted_capability_probe: Option<PersistedCapabilityProbe>,
 }
 
 impl Default for InteractionConfig {
@@ -99,6 +132,9 @@ impl Default for InteractionConfig {
             tool_call_mode: ToolCallMode::Inline,
             parallel_tool_calls: ParallelToolCalls::Auto,
             max_tool_calls_per_response: DEFAULT_MAX_TOOL_CALLS_PER_RESPONSE,
+            native_tools_supported: Some(true),
+            capability_probe_endpoint_id: None,
+            persisted_capability_probe: None,
         }
     }
 }
@@ -110,8 +146,20 @@ pub struct ToolDefinition {
     pub input_schema: Value,
 }
 
+/// Opaque assistant-message metadata carried on the first call of an exchange.
+/// It is not tool input or visible assistant text. Identity prevents replay to a
+/// different endpoint template after a model switch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AssistantContinuation {
+    pub catalog_id: String,
+    pub model: String,
+    pub reasoning_content: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NativeToolCall {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_continuation: Option<AssistantContinuation>,
     pub id: String,
     pub name: String,
     pub arguments: Value,
@@ -153,10 +201,14 @@ pub struct ModelInteractionRequest {
     pub native_exchanges: Vec<NativeExchange>,
     pub resolved_mode: ToolCallMode,
     pub parallel_tool_calls: bool,
+    /// Whether the provider request should carry its parallel-tool control field.
+    /// Auto fallback may omit that field for older compatible gateways while
+    /// keeping native tool calling enabled.
+    pub send_parallel_tool_calls: bool,
     pub tool_choice: NativeToolChoice,
-    /// Marks a critical request (currently: forced context compaction).
-    /// The endpoint's reasoning effort applies only to critical requests;
-    /// ordinary requests disable thinking to save latency and cost.
+    /// Core scheduling signal for an automatic threshold-triggered context
+    /// compaction. Requirements v1 applies H0 normally and may boost this call;
+    /// manual compaction remains at H0. v0 retains legacy behavior.
     pub critical_reasoning: bool,
 }
 
@@ -170,6 +222,7 @@ impl ModelInteractionRequest {
             native_exchanges: Vec::new(),
             resolved_mode: ToolCallMode::Inline,
             parallel_tool_calls: false,
+            send_parallel_tool_calls: false,
             tool_choice: NativeToolChoice::Auto,
             critical_reasoning: false,
         }

@@ -48,6 +48,10 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, _format, *_args):
         return
 
+    def delay_response(self):
+        print("fake_model_response_waiting", flush=True)
+        time.sleep(self.response_delay)
+
     def do_POST(self):
         length = int(self.headers.get("content-length", "0"))
         try:
@@ -56,12 +60,27 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(400, {"error": "invalid_json"})
             return
 
+        tools = body.get("tools") or []
+        if tools and not self.path.rstrip("/").endswith("/responses"):
+            print(f"native_channel_request:{self.scenario}:{len(tools)}", flush=True)
+            native_prompt = extract_prompt(body)
+            if self.capture_prompt_file:
+                with open(self.capture_prompt_file, "a", encoding="utf-8") as capture:
+                    capture.write(native_prompt)
+                    capture.write("\n---TIMEM_FAKE_MODEL_REQUEST---\n")
+            # Native tool-call channel: a plain-text reply can no longer finish
+            # a turn, so every scenario must end with a real task_finished call.
+            self.send_native_tool_response(body, prompt_text=native_prompt)
+            return
+
         prompt = extract_prompt(body)
         if self.capture_prompt_file:
             with open(self.capture_prompt_file, "a", encoding="utf-8") as capture:
                 capture.write(prompt)
                 capture.write("\n---TIMEM_FAKE_MODEL_REQUEST---\n")
-        if self.scenario == "toolgen":
+        if self.scenario == "contract":
+            content = contract_scenario_response(prompt)
+        elif self.scenario == "toolgen":
             content = toolgen_scenario_response(prompt)
         elif "CROSS_HOST_RESUME_SMOKE" in prompt:
             content = (
@@ -76,7 +95,7 @@ class Handler(BaseHTTPRequestHandler):
                 "</ASSISTANT>"
             )
         elif "TTY_STRESS" in prompt:
-            time.sleep(self.response_delay)
+            self.delay_response()
             content = tty_stress_scenario_response()
         elif "Q2：最终答案只输出 SUPPLEMENT_OK。" in prompt:
             content = (
@@ -91,7 +110,7 @@ class Handler(BaseHTTPRequestHandler):
                 "</ASSISTANT>"
             )
         else:
-            time.sleep(self.response_delay)
+            self.delay_response()
             content = (
                 "<ASSISTANT>"
                 "<final_answer>NO_SUPPLEMENT</final_answer>"
@@ -99,6 +118,78 @@ class Handler(BaseHTTPRequestHandler):
             )
 
         self.send_model_response(prompt, content)
+
+    def send_native_tool_response(self, body, prompt_text):
+        """Answer the native tool-call channel with real tool_calls.
+
+        First round runs the scenario's action (when it has one); once a
+        role=tool result is visible in the messages, finish with task_finished.
+        """
+        saw_tool_result = any(
+            isinstance(item, dict) and item.get("role") == "tool"
+            for item in body.get("messages", [])
+        )
+
+        def tool_call(name, arguments):
+            return {
+                "id": f"call_{name}",
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }
+
+        if self.scenario == "contract":
+            if saw_tool_result:
+                call = tool_call(
+                    "task_finished", {"summary": "CONTRACT_E2E_OK"}
+                )
+            else:
+                call = tool_call(
+                    "run_bash",
+                    {"cmd": "printf CONTRACT_E2E_ACTION_DONE", "timeout_ms": 5000},
+                )
+        elif "TTY_STRESS" in prompt_text and "STRESS_ACTION_DONE" in prompt_text:
+            call = tool_call("task_finished", {"summary": "STRESS_OK"})
+        elif "TTY_STRESS" in prompt_text:
+            self.delay_response()
+            call = tool_call(
+                "run_bash",
+                {
+                    "cmd": (
+                        "printf 'STRESS_ACTION_DONE\\n'; sleep 1; "
+                        "printf 'long-output-abcdefghij0123456789\\n'"
+                    ),
+                    "timeout_ms": 5000,
+                },
+            )
+        elif "CROSS_HOST_RESUME_SMOKE" in prompt_text:
+            call = tool_call("task_finished", {"summary": "CROSS_HOST_RESUME_OK"})
+        elif "SUPPLEMENT_OK" in prompt_text:
+            call = tool_call("task_finished", {"summary": "SUPPLEMENT_OK"})
+        else:
+            self.delay_response()
+            call = tool_call("task_finished", {"summary": "NO_SUPPLEMENT"})
+
+        prompt_text_len = len(prompt_text or "")
+        self.send_json(
+            200,
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [call],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": max(1, prompt_text_len // 4),
+                    "completion_tokens": 8,
+                    "total_tokens": max(2, prompt_text_len // 4 + 8),
+                },
+            },
+        )
 
     def send_model_response(self, prompt, content):
         content = confirm_xml_final(content)
@@ -185,6 +276,24 @@ def xml_action(payload, free_talk):
         "</ASSISTANT>"
     )
 
+
+
+def contract_scenario_response(prompt):
+    """Drive a real tool roundtrip under the description+schema catalog contract.
+
+    Round 1 runs a real run_bash action; round 2 ends the turn with a real
+    task_finished action, because a plain-text final answer no longer ends a
+    turn when the model adapter exposes native tool calls.
+    """
+    if "Action result: run_bash" in prompt and "CONTRACT_E2E_ACTION_DONE" in prompt:
+        return xml_action(
+            {"task_finished": {"summary": "CONTRACT_E2E_OK"}},
+            "Tool roundtrip verified under the new tool catalog contract.",
+        )
+    return xml_action(
+        {"run_bash": {"cmd": "printf CONTRACT_E2E_ACTION_DONE", "timeout_ms": 5000}},
+        "Running a real run_bash action through the rendered tool catalog.",
+    )
 
 
 def tty_stress_scenario_response():
@@ -319,6 +428,29 @@ def self_test():
     assert "toolgen_retrospect" in finished and "final_answer" in finished
     failed = toolgen_scenario_response(toolgen_prompt + "\nFORCE_TOOLGEN_PROTOCOL_FAILURE")
     assert failed == "ToolGen fixture intentionally returned a non-protocol response."
+    # Native requests must retain the same initial-response delay as the
+    # text channel, otherwise Ctrl+C tests race an already finished turn.
+    from unittest.mock import patch
+
+    handler = object.__new__(Handler)
+    handler.response_delay = 2.5
+    handler.scenario = "default"
+    replies = []
+    handler.send_json = lambda status, body: replies.append((status, body))
+    for prompt, expected_delay in [
+        ("initial question", True),
+        ("TTY_STRESS", True),
+        ("TTY_STRESS STRESS_ACTION_DONE", False),
+        ("Q2：最终答案只输出 SUPPLEMENT_OK。", False),
+        ("CROSS_HOST_RESUME_SMOKE", False),
+    ]:
+        with patch.object(time, "sleep") as delay:
+            handler.send_native_tool_response({}, prompt)
+            if expected_delay:
+                delay.assert_called_once_with(2.5)
+            else:
+                delay.assert_not_called()
+    assert len(replies) == 5 and all(status == 200 for status, _ in replies)
     print("fake_model_server_toolgen_scenario: ok")
 
 
@@ -339,7 +471,9 @@ def main():
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--delay", type=float, default=2.0)
     parser.add_argument("--capture-prompt-file")
-    parser.add_argument("--scenario", choices=("default", "toolgen"), default="default")
+    parser.add_argument(
+        "--scenario", choices=("default", "toolgen", "contract"), default="default"
+    )
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:

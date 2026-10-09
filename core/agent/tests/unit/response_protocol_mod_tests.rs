@@ -64,6 +64,19 @@ fn actions_without_protocol_metadata(actions: &[ParsedAction]) -> Vec<ParsedActi
         .collect()
 }
 
+fn compacts_without_protocol_metadata(
+    compacts: &[ParsedContextCompress],
+) -> Vec<ParsedContextCompress> {
+    compacts
+        .iter()
+        .cloned()
+        .map(|mut compact| {
+            compact.call_id.clear();
+            compact
+        })
+        .collect()
+}
+
 fn groups_without_protocol_metadata(groups: &[ParsedActionGroup]) -> Vec<ParsedActionGroup> {
     groups
         .iter()
@@ -95,7 +108,10 @@ fn assert_protocols_equivalent(json_raw: &str, xml_raw: &str) {
         groups_without_protocol_metadata(&xml.action_groups),
         groups_without_protocol_metadata(&json.action_groups)
     );
-    assert_eq!(xml.context_compacts, json.context_compacts);
+    assert_eq!(
+        compacts_without_protocol_metadata(&xml.context_compresses),
+        compacts_without_protocol_metadata(&json.context_compresses)
+    );
 }
 
 #[test]
@@ -122,8 +138,8 @@ fn json_xml_protocols_treat_protocol_language_inside_final_text_as_text() {
 #[test]
 fn json_xml_protocols_parse_readfile_selector_objects() {
     assert_protocols_equivalent(
-        r#"{"free_talk":"reading","working_still_action":{"readfile":{"path":"src/main.rs","encoding":"utf-8","starter":{"line_nr":20},"ender":{"match":"fn main"},"max_bytes":8192}}}"#,
-        "\x3cASSISTANT>\x3cfree_talk>reading\x3c/free_talk>\x3cactions>\x3creadfile name=\"read main source range\" encoding=\"utf-8\" max_bytes=\"8192\">\x3cpath>src/main.rs\x3c/path>\x3cstarter>\x3cline_nr>20\x3c/line_nr>\x3c/starter>\x3cender>\x3cmatch>fn main\x3c/match>\x3c/ender>\x3c/readfile>\x3c/actions>\x3c/ASSISTANT>",
+        r#"{"free_talk":"reading","working_still_action":{"readfile":{"path":"src/main.rs","encoding":"utf-8","starter":{"line_nr":20},"ender":{"match":"fn main"}}}}"#,
+        "\x3cASSISTANT>\x3cfree_talk>reading\x3c/free_talk>\x3cactions>\x3creadfile name=\"read main source range\" encoding=\"utf-8\">\x3cpath>src/main.rs\x3c/path>\x3cstarter>\x3cline_nr>20\x3c/line_nr>\x3c/starter>\x3cender>\x3cmatch>fn main\x3c/match>\x3c/ender>\x3c/readfile>\x3c/actions>\x3c/ASSISTANT>",
     );
 }
 
@@ -172,10 +188,10 @@ fn json_xml_protocols_parse_complex_actions_with_protocol_like_string_args() {
 }
 
 #[test]
-fn json_xml_protocols_parse_same_context_compact() {
+fn json_xml_protocols_parse_same_context_compress() {
     assert_protocols_equivalent(
-        r#"{"free_talk":"compact","context_compact":{"discard":["pd_a"],"offload":["pd_b"],"summary":"keep state"}}"#,
-        "\x3cASSISTANT>\x3cfree_talk>compact\x3c/free_talk>\x3ccontext_compact>\x3cdiscard>pd_a\x3c/discard>\x3coffload>pd_b\x3c/offload>\x3csummary>keep state\x3c/summary>\x3c/context_compact>\x3c/ASSISTANT>",
+        r#"{"free_talk":"compact","context_compress":{"keep":["pd_a"],"offload":["pd_b"],"summary":"keep state"}}"#,
+        "\x3cASSISTANT>\x3cfree_talk>compact\x3c/free_talk>\x3ccontext_compress>\x3ckeep>pd_a\x3c/keep>\x3coffload>pd_b\x3c/offload>\x3csummary>keep state\x3c/summary>\x3c/context_compress>\x3c/ASSISTANT>",
     );
 }
 
