@@ -5748,7 +5748,13 @@ Runtime tool_call ids:",
     ) -> Option<String> {
         let kind = kind.into();
         let mut content = content.into();
-        if role.prompt_type_hint(&kind) == "result_of_llm_action"
+        let is_result_class = role.prompt_type_hint(&kind) == "result_of_llm_action";
+        // Runtime sideband kinds (job exits, disk pressure, config notices,
+        // host supplement context) render as runtime_note now, but they
+        // previously rode the result_of_llm_action fallback and are not all
+        // bounded upstream (host-provided supplement context). Keep the byte
+        // gate for them so the move cannot regress unbounded ingress.
+        if (is_result_class || prompt_components::is_runtime_sideband_kind(&kind))
             && !prompt_render::is_structured_action_result_envelope(&content)
         {
             // Defensive ingress for legacy/internal producers that do not originate
