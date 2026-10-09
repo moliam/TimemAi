@@ -6,6 +6,7 @@ low-level process primitives shared across Timem hosts.
 ## Layout
 
 - `src/api.rs`: general stable, UI-neutral platform API consumed by Core, including filesystem usage snapshots (local mount discovery, platform device identity, per-device deduplication and unavailable-path handling).
+- `src/child_input.rs`: exclusively owned nonblocking child stdin; reports backpressure and errors without choosing deadlines or creating writer threads.
 - `src/child_output.rs`: exclusively owned child stdout/stderr pipes with bounded, interruptible reads; no job attribution or deadline policy.
 - `src/process_job.rs`: platform-neutral per-Job process-management facade and internal backend contract.
 - `src/shared.rs`: Unix primitives shared by macOS and Linux.
@@ -40,3 +41,20 @@ These mechanisms are complementary and must remain separate:
 - subreaper/orphan fallback: adopts and finally `waitpid`s descendants whose normal parent chain disappeared, preventing zombies and exposing genuinely unowned processes. It never infers Job ownership from timing; a platform Job backend remains authoritative for attribution.
 
 Killing a Job does not reap Unix child exit records, and reaping a child does not establish or control Job membership. Combining these responsibilities would either lose exit status or risk signalling unrelated work.
+
+## macOS conditional cleanup contract
+
+- Finite command cleanup supports the direct child and descendants that remain
+  in its managed process group. This is ordinary command lifecycle management,
+  not a security boundary against code deliberately escaping that group.
+- Descendants using `setsid`, changing process groups, or delegating work to an
+  external service are outside this cleanup guarantee. No privileged service
+  or host reconfiguration is required by this supported mode.
+- Bounded pipe capture prevents an escaped pipe holder from indefinitely
+  delaying the caller. An incomplete-capture error is evidence about output,
+  not proof that all descendants have terminated. An escapee that closes the
+  pipes may not be detected; successful command exit is not a process-tree
+  emptiness certificate.
+- Do not kill guessed PIDs or unrelated processes to approximate stronger
+  ownership. Stronger containment, if added later, requires a separate explicit
+  platform contract and native verification.
