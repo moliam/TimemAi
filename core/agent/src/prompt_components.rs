@@ -41,13 +41,45 @@ impl PromptComponentRole {
                 | "user_interrupted_work"
                 | "turn_progress_reminder"
                 | "turn_time_reminder"
-                | "turn_round_reminder" => "runtime_note".to_string(),
+                | "turn_round_reminder"
+                | "running_job_update"
+                | "job_killed"
+                | "disk_pressure"
+                | "runtime_config_changed"
+                | "user_supplement_context"
+                | "user_supplement_action_dispatch_timeout"
+                | "memo_interrupted_deleted"
+                | "memo_forcibly_deleted" => "runtime_note".to_string(),
                 "mcp_capability_catalog" => "mcp_capability_catalog".to_string(),
                 "mcp_capability_update" => "mcp_capability_update".to_string(),
                 _ => "result_of_llm_action".to_string(),
             },
         }
     }
+}
+
+/// System-side runtime sideband kinds: runtime narration about the world
+/// (job exits, disk pressure, config changes, host-supplied supplement
+/// context, memo deletions), not results of model actions. They render as
+/// `runtime_note` so the action-result heading stays reserved for real
+/// model action results.
+pub(crate) const RUNTIME_SIDEBAND_KINDS: [&str; 8] = [
+    "running_job_update",
+    "job_killed",
+    "disk_pressure",
+    "runtime_config_changed",
+    "user_supplement_context",
+    "user_supplement_action_dispatch_timeout",
+    "memo_interrupted_deleted",
+    "memo_forcibly_deleted",
+];
+
+/// True for sideband kinds that must keep the tool-result byte gate at
+/// ingress: they previously rode the `result_of_llm_action` fallback, and
+/// their producers (notably host-provided supplement context) are not all
+/// guaranteed bounded upstream.
+pub(crate) fn is_runtime_sideband_kind(kind: &str) -> bool {
+    RUNTIME_SIDEBAND_KINDS.contains(&kind)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
