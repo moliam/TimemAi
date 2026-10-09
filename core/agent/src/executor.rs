@@ -164,8 +164,7 @@ fn execute_command_action_outcome_with_process_job(
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= timeout => {
                 terminate_command_process(&mut child, process_job.as_ref());
-                let _ = output.finish();
-                return ActionOutcome::timeout(format!("Action result: {action}\nerror: timeout"));
+                return render_command_timeout(action, output.finish());
             }
             Ok(None) => thread::sleep(COMMAND_POLL_INTERVAL),
             Err(err) => {
@@ -197,6 +196,39 @@ fn execute_command_action_outcome_with_process_job(
         &String::from_utf8_lossy(&stdout),
         &String::from_utf8_lossy(&stderr),
     )
+}
+
+fn render_command_timeout(
+    action: &str,
+    capture: Result<(Vec<u8>, Vec<u8>), String>,
+) -> ActionOutcome {
+    let mut text = format!("Action result: {action}\nerror: timeout");
+    match capture {
+        Ok((stdout, stderr)) => {
+            let stdout = String::from_utf8_lossy(&stdout);
+            let stderr = String::from_utf8_lossy(&stderr);
+            let streams = [("stdout", stdout.trim()), ("stderr", stderr.trim())];
+            let count = streams
+                .iter()
+                .filter(|(_, value)| !value.is_empty())
+                .count();
+            let mut partial = String::new();
+            for (name, value) in streams {
+                if !value.is_empty() {
+                    partial.push_str(&format!(
+                        "\npartial_{name}: {}",
+                        compact_text(value, 4000 / count)
+                    ));
+                }
+            }
+            if !partial.is_empty() {
+                text.push('\n');
+                text.push_str(&compact_text(&partial, 4000));
+            }
+        }
+        Err(error) => text.push_str(&format!("\ncapture_error: {}", compact_text(&error, 1000))),
+    }
+    ActionOutcome::timeout(text)
 }
 
 fn render_command_output(

@@ -222,38 +222,56 @@ fn command_action_timeout_terminates_descendant_process_group() {
         .trim()
         .parse()
         .unwrap();
-    // `kill(pid, 0)` also succeeds for zombies: the test process is the
-    // installed subreaper, so the SIGKILLed descendant may linger as an
-    // unreaped zombie child. A zombie state means the kill worked.
-    //
-    // Nested-runtime note (Timem developing Timem): when this test runs
-    // under an outer Timem instance, the subreaper that adopts the orphaned
-    // descendant can be the OUTER runtime process, not this test binary. The
-    // zombie is then reparented outside our process tree and never reaped by
-    // us, so `kill(pid, 0)` stays "alive" forever at every inner level.
-    // Judging by /proc/<pid>/stat state (Z) instead of signal probing keeps
-    // this assertion correct for any level of nesting.
-    let zombie_or_gone = |pid: i32| match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(stat) => stat
-            .rsplit(')')
-            .next()
-            .unwrap_or("")
-            .trim_start()
-            .starts_with('Z'),
-        Err(_) => true,
-    };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while unsafe { libc::kill(child_pid, 0) } == 0
-        && !zombie_or_gone(child_pid)
-        && std::time::Instant::now() < deadline
-    {
-        std::thread::sleep(std::time::Duration::from_millis(20));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while command_test_process_is_executing(child_pid) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
     }
     assert!(
-        unsafe { libc::kill(child_pid, 0) } != 0 || zombie_or_gone(child_pid),
+        !command_test_process_is_executing(child_pid),
         "descendant process {child_pid} survived command timeout"
     );
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+fn command_test_process_is_executing(pid: i32) -> bool {
+    assert!(pid > 0, "process probe requires a positive PID");
+    // Zombies may belong to an outer runtime's subreaper. They are no longer
+    // executable, but kill(pid, 0) still succeeds. Use the native ps on both
+    // macOS and Linux; a missing /proc must never imply successful cleanup.
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-o", "stat=", "-p"])
+        .arg(pid.to_string())
+        .output()
+        .expect("native process-state query must be available");
+    let state = String::from_utf8_lossy(&output.stdout);
+    let state = state.trim();
+    if output.status.success() && !state.is_empty() {
+        return !state.starts_with('Z');
+    }
+    // ps may race with exit. Only ESRCH establishes absence; permission and
+    // query errors must not turn into a successful cleanup assertion.
+    let result = unsafe { libc::kill(pid, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(unix)]
+#[test]
+fn command_cleanup_probe_distinguishes_live_and_reaped_processes() {
+    let mut child = std::process::Command::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let pid = child.id() as i32;
+    let live = command_test_process_is_executing(pid);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let reaped = command_test_process_is_executing(pid);
+    assert!(
+        live,
+        "a live process must not be accepted as already cleaned up"
+    );
+    assert!(!reaped, "a reaped process must be reported as gone");
 }
 
 #[cfg(unix)]
@@ -266,6 +284,78 @@ fn command_action_timeout_is_bounded() {
 
     assert!(result.contains("error: timeout"));
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn command_action_timeout_retains_captured_stdout_and_stderr() {
+    let dir = temp_case_dir("timeout_output");
+    let script = dir.join("timeout.sh");
+    fs::write(
+        &script,
+        "#!/bin/sh\nprintf 'stdout-before-timeout\\n'\nprintf 'stderr-before-timeout\\n' >&2\nexec sleep 30\n",
+    )
+    .unwrap();
+
+    let started = Instant::now();
+    let outcome = execute_command_action_outcome("timeout_output", &script, &json!({}), 1000);
+    let elapsed = started.elapsed();
+    let _ = fs::remove_dir_all(&dir);
+
+    assert_eq!(
+        outcome.status,
+        crate::ActionStatus::Timeout,
+        "{}",
+        outcome.text
+    );
+    assert!(elapsed < Duration::from_secs(3), "timeout took {elapsed:?}");
+    assert!(outcome.text.contains("error: timeout"), "{}", outcome.text);
+    assert!(
+        outcome.text.contains("stdout-before-timeout"),
+        "{}",
+        outcome.text
+    );
+    assert!(
+        outcome.text.contains("stderr-before-timeout"),
+        "{}",
+        outcome.text
+    );
+    assert!(!outcome.text.contains("status: 0"), "{}", outcome.text);
+}
+
+#[test]
+fn command_timeout_evidence_is_bounded_and_never_overrides_timeout() {
+    let outcome = render_command_timeout("bounded", Ok((vec![b'x'; 65536], vec![b'y'; 65536])));
+    assert_eq!(outcome.status, crate::ActionStatus::Timeout);
+    assert!(outcome.text.contains("partial_stdout: "));
+    assert!(outcome.text.contains("partial_stderr: "));
+    assert!(outcome.text.chars().count() < 4200);
+    assert!(!outcome.text.contains("status: 0"));
+
+    for (stdout, stderr) in [
+        ("中".repeat(8192).into_bytes(), Vec::new()),
+        (Vec::new(), "文".repeat(8192).into_bytes()),
+        (
+            "中".repeat(8192).into_bytes(),
+            "文".repeat(8192).into_bytes(),
+        ),
+        (b" \n\t".to_vec(), Vec::new()),
+    ] {
+        let bounded = render_command_timeout("unicode", Ok((stdout, stderr)));
+        assert_eq!(bounded.status, crate::ActionStatus::Timeout);
+        assert!(bounded.text.chars().count() < 4200);
+        assert!(!bounded.text.contains('�'));
+    }
+
+    let failed = render_command_timeout("failed_capture", Err("output_capture_incomplete".into()));
+    assert_eq!(failed.status, crate::ActionStatus::Timeout);
+    assert!(failed.text.contains("error: timeout"));
+    assert!(failed
+        .text
+        .contains("capture_error: output_capture_incomplete"));
+
+    let empty = render_command_timeout("empty", Ok((Vec::new(), Vec::new())));
+    assert_eq!(empty.text, "Action result: empty\nerror: timeout");
 }
 
 fn temp_case_dir(name: &str) -> PathBuf {
