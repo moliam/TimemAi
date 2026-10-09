@@ -1,3 +1,4 @@
+import { createStartupDiagnostics } from "./browser-startup.mjs";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
@@ -30,7 +31,7 @@ async function waitFor(check, message, timeout = 10000) {
     try { if (await check()) return; } catch {}
     await sleep(40);
   }
-  throw new Error(typeof message === "function" ? message() : message);
+  throw new Error(typeof message === "function" ? await message() : message);
 }
 
 async function waitForSubtreeIdle(browser, selector, message, timeout = 10000) {
@@ -314,21 +315,17 @@ async function startBrowser(url) {
     "--disable-background-networking", "--disable-component-update", "--disable-sync",
     "--window-size=1440,1000", "about:blank",
   ], { stdio: ["ignore", "ignore", "pipe"] });
-  let chromeError = "";
-  let spawnError = null;
-  let probeError = null;
-  child.on("error", (error) => { spawnError = error.message; });
-  child.stderr.on("data", (chunk) => { chromeError = (chromeError + String(chunk)).slice(-8192); });
+  const startup = createStartupDiagnostics(child, chrome);
 
   try {
     let port = null;
     await waitFor(async () => {
-      if (spawnError || child.exitCode !== null || child.signalCode !== null) return false;
+      if (startup.stopped()) return false;
       port = await readDevToolsPort(profile);
+      startup.port(port);
       if (port === null) return false;
-      try { return (await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(1000) })).ok; }
-      catch (error) { probeError = error.message; return false; }
-    }, () => `Chrome DevTools did not start: ${JSON.stringify({ executable: chrome, pid: child.pid, exitCode: child.exitCode, signalCode: child.signalCode, spawnError, port, probeError, stderr: chromeError })}`, 12000);
+      return startup.probe(`http://127.0.0.1:${port}/json/version`);
+    }, () => startup.failure(), 12000);
 
     const target = await (await fetch(
       `http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`,
