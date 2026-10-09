@@ -13,7 +13,7 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
 ## Belongs here
 
 - Protocol-neutral runtime data structures and algorithms.
-- `command_output` owns bounded retention and post-exit drain policy for finite command bindings and tool self-tests. Platform owns interruptible pipe reads; capture deadlines do not establish descendant ownership.
+- `command_output` owns bounded retention and post-exit drain policy for finite command bindings and tool self-tests. Platform owns interruptible pipe reads; capture deadlines do not establish descendant ownership. Command-binding timeouts retain bounded captured stdout/stderr when available, or report capture failure separately, without replacing the timeout outcome or extending execution deadlines.
 - The authoritative per-Session Turn Gate and minimal Turn reducer: durable
   `TurnId`, monotonic `TurnEpoch`, exact `TurnToken` validation, Active-Turn
   ownership, stop intent, immutable terminal outcome, and rejection of stale or

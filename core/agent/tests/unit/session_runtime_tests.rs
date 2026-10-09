@@ -9,16 +9,56 @@ use std::collections::VecDeque;
 use std::{fs, thread};
 
 fn tmp_dir(name: &str) -> std::path::PathBuf {
-    let mut dir = std::env::temp_dir();
-    dir.push(format!(
-        "timem_session_runtime_{}_{}_{}",
-        name,
-        std::process::id(),
-        epoch_millis()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+    // Time and PID alone can collide between parallel tests. Exclusive
+    // creation reserves the path; never delete a directory owned by another
+    // fixture (including one left by an earlier process with the same PID).
+    for _ in 0..128 {
+        let dir = std::env::temp_dir().join(format!(
+            "timem_session_runtime_{}_{}_{}_{}",
+            name,
+            std::process::id(),
+            epoch_millis(),
+            NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::create_dir(&dir) {
+            Ok(()) => return dir,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => panic!("cannot create test directory {}: {error}", dir.display()),
+        }
+    }
+    panic!("could not reserve a unique test directory for {name}");
+}
+
+#[test]
+fn same_named_test_directories_are_isolated_and_preserve_existing_files() {
+    let mut directories = Vec::new();
+    let mut collision = None;
+    for _ in 0..64 {
+        let dir = tmp_dir("directory_isolation");
+        if directories.contains(&dir) {
+            collision = Some(dir);
+            break;
+        }
+        fs::write(dir.join("sentinel"), "must survive another fixture").unwrap();
+        directories.push(dir);
+    }
+    let preserved = directories.iter().all(|dir| {
+        fs::read_to_string(dir.join("sentinel"))
+            .is_ok_and(|value| value == "must survive another fixture")
+    });
+    for dir in &directories {
+        let _ = fs::remove_dir_all(dir);
+    }
+    assert!(
+        collision.is_none(),
+        "same-name fixture reused and erased {collision:?}"
+    );
+    assert!(
+        preserved,
+        "allocating a fixture must not erase another fixture's files"
+    );
 }
 
 fn test_core(
@@ -346,6 +386,14 @@ impl TurnUi for DelayBeforeFirstModelUi {
     }
 }
 
+// A file becomes visible before shell redirection finishes writing it. These
+// fixtures publish one newline-terminated record; cancellation must not kill
+// the writer between creating the file and completing that record.
+#[cfg(unix)]
+fn ready_record_complete(path: &Path) -> bool {
+    fs::read(path).is_ok_and(|record| record.len() > 1 && record.ends_with(b"\n"))
+}
+
 #[cfg(unix)]
 struct CancelWhenFilesReadyUi {
     started: Instant,
@@ -356,7 +404,9 @@ struct CancelWhenFilesReadyUi {
 #[cfg(unix)]
 impl TurnUi for CancelWhenFilesReadyUi {
     fn is_cancel_requested(&mut self) -> bool {
-        self.ready_files.iter().all(|path| path.is_file())
+        self.ready_files
+            .iter()
+            .all(|path| ready_record_complete(path))
             || self.started.elapsed() >= self.hard_timeout
     }
 }
@@ -372,7 +422,9 @@ struct ApproveAndCancelAfterDelayUi {
 #[cfg(unix)]
 impl TurnUi for ApproveAndCancelAfterDelayUi {
     fn is_cancel_requested(&mut self) -> bool {
-        self.ready_files.iter().all(|path| path.is_file())
+        self.ready_files
+            .iter()
+            .all(|path| ready_record_complete(path))
             || self.started.elapsed() >= self.hard_timeout
     }
 
@@ -385,6 +437,41 @@ impl TurnUi for ApproveAndCancelAfterDelayUi {
             other => other.safe_default().into(),
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn cancellation_fixture_waits_for_complete_ready_records() {
+    let dir = tmp_dir("cancel_ready_records");
+    let paths = [dir.join("child.pid"), dir.join("other.ready")];
+    let mut direct = CancelWhenFilesReadyUi {
+        started: Instant::now(),
+        ready_files: paths.clone(),
+        hard_timeout: Duration::from_secs(30),
+    };
+    let mut approval = ApproveAndCancelAfterDelayUi {
+        started: Instant::now(),
+        ready_files: paths.clone(),
+        hard_timeout: Duration::from_secs(30),
+        approvals: 0,
+    };
+    let mut observations = Vec::new();
+    observations.push((direct.is_cancel_requested(), approval.is_cancel_requested()));
+    // Redirection creates the destination before echo writes the PID.
+    fs::write(&paths[0], "").unwrap();
+    fs::write(&paths[1], "uploaded\n").unwrap();
+    observations.push((direct.is_cancel_requested(), approval.is_cancel_requested()));
+    fs::write(&paths[0], "123").unwrap();
+    observations.push((direct.is_cancel_requested(), approval.is_cancel_requested()));
+    fs::write(&paths[0], "12345\n").unwrap();
+    observations.push((direct.is_cancel_requested(), approval.is_cancel_requested()));
+    fs::remove_dir_all(dir).unwrap();
+
+    assert_eq!(
+        observations,
+        [(false, false), (false, false), (false, false), (true, true)],
+        "cancellation must wait for the complete newline-terminated record, not file creation"
+    );
 }
 
 impl PollingReplayModel {
@@ -2516,6 +2603,17 @@ fn session_turn_executes_parallel_action_group_before_next_group() {
 #[cfg(unix)]
 #[test]
 fn session_turn_cancels_parallel_long_running_bash_actions() {
+    check_parallel_bash_cancellation(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn session_turn_cancellation_waits_for_delayed_pid_publication() {
+    check_parallel_bash_cancellation(true);
+}
+
+#[cfg(unix)]
+fn check_parallel_bash_cancellation(delay_pid_write: bool) {
     let dir = tmp_dir("cancel_parallel_bash_session");
     let audit = dir.join("audit.json");
     let pid_a = dir.join("child_a.pid");
@@ -2530,14 +2628,20 @@ fn session_turn_cancels_parallel_long_running_bash_actions() {
         ready_files: [pid_a.clone(), pid_b.clone()],
         hard_timeout: Duration::from_secs(30),
     };
-    let command_a = format!(
-        "tail -f /dev/null & echo $! > {}; wait",
-        shell_quote(&pid_a)
-    );
-    let command_b = format!(
-        "tail -f /dev/null & echo $! > {}; wait",
-        shell_quote(&pid_b)
-    );
+    let command = |path: &Path| {
+        if delay_pid_write {
+            // The redirection opens an empty PID file before the delay. A
+            // file-exists readiness check cancels here and kills its writer.
+            format!(
+                "tail -f /dev/null & child=$!; {{ sleep 0.15; printf '%s\\n' \"$child\"; }} > {}; wait",
+                shell_quote(path)
+            )
+        } else {
+            format!("tail -f /dev/null & echo $! > {}; wait", shell_quote(path))
+        }
+    };
+    let command_a = command(&pid_a);
+    let command_b = command(&pid_b);
     let response = format!(
         r#"{{"working_still_action":[[
   {{"run_bash":{{"cmd":{},"timeout_ms":60000}}}},
@@ -2603,7 +2707,7 @@ fn session_turn_stop_after_one_parallel_action_completed_cancels_the_running_act
         ready_files: [completed_marker.clone(), running_pid.clone()],
         hard_timeout: Duration::from_secs(30),
     };
-    let completed_command = format!("printf uploaded > {}", shell_quote(&completed_marker));
+    let completed_command = format!("printf 'uploaded\\n' > {}", shell_quote(&completed_marker));
     let running_command = format!(
         "tail -f /dev/null & echo $! > {}; wait",
         shell_quote(&running_pid)
