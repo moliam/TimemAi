@@ -6339,7 +6339,24 @@ fn restore_stored_session(
         None,
         true,
     )?;
-    restore_prompt_context_snapshot(state, &stored.session_id)?;
+    // A snapshot handoff is best-effort: unreadable/oversized/corrupt data
+    // must degrade to a history-only restore instead of blocking the session
+    // from being usable at all. Snapshot consumption semantics stay inside
+    // restore_prompt_context_snapshot (fail-closed deletion before import).
+    if let Err(error) = restore_prompt_context_snapshot(state, &stored.session_id) {
+        state.runtime_log.record(
+            "session_restore_context_snapshot_failed",
+            json!({
+                "session_id": stored.session_id,
+                "reason": error,
+                "action": "history_only_restore",
+            }),
+        );
+        eprintln!(
+            "[timem_web_warning] prompt_context_restore_degraded session_id={:?} reason={error}",
+            stored.session_id
+        );
+    }
     persist_restored_session_runtime_cache(state, &stored)?;
     // A missing preset stays explicitly bound and fails closed at submission.
     // Do not discard restored history just because an endpoint was deleted.
