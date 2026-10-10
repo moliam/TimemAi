@@ -6527,6 +6527,171 @@ fn restore_prompt_context_on_startup_off_keeps_snapshot_without_importing() {
 }
 
 #[test]
+fn restore_prompt_context_on_startup_covers_off_on_off_toggle_cycle() {
+    let state = routing_test_state();
+    let id = register_real_worker(&state, "handoff-toggle");
+    let handle = session_worker_handle(&state, &id, None).unwrap();
+    let path = current_session_store(&state)
+        .unwrap()
+        .prompt_context_path_for_session(&id);
+
+    // Phase 1 (off): a shutdown snapshot exists; a restart must not import
+    // it and must keep it on disk.
+    write_prompt_context_snapshot(&state, &id, &context_handoff_fixture("pd_toggle_1")).unwrap();
+    restore_prompt_context_snapshot(&state, &id).unwrap();
+    assert!(path.exists(), "off keeps the first snapshot");
+    assert!(handle
+        .export_dynamic_context()
+        .unwrap()
+        .unwrap()
+        .deltas
+        .is_empty());
+
+    // Phase 2 (on): the next restart imports and consumes the snapshot.
+    state
+        .mem
+        .lock()
+        .unwrap()
+        .settings
+        .restore_prompt_context_on_startup = true;
+    restore_prompt_context_snapshot(&state, &id).unwrap();
+    assert!(!path.exists(), "on consumes the first snapshot");
+    assert_eq!(
+        handle.export_dynamic_context().unwrap().unwrap().deltas,
+        context_handoff_fixture("pd_toggle_1").deltas
+    );
+
+    // Phase 3: keep working under on, then the next shutdown writes a fresh
+    // snapshot; toggling back to off must make the next restart skip the new
+    // snapshot (kept on disk) without touching the imported context.
+    handle
+        .import_dynamic_context(context_handoff_fixture("pd_toggle_2"))
+        .unwrap();
+    persist_prompt_context_snapshots(&state, &state.manager.lock().unwrap()).unwrap();
+    assert!(path.exists(), "shutdown snapshot writing is never gated");
+    handle.clear_dynamic_context().unwrap();
+    state
+        .mem
+        .lock()
+        .unwrap()
+        .settings
+        .restore_prompt_context_on_startup = false;
+    restore_prompt_context_snapshot(&state, &id).unwrap();
+    assert!(path.exists(), "off keeps the second snapshot");
+    assert!(
+        handle
+            .export_dynamic_context()
+            .unwrap()
+            .unwrap()
+            .deltas
+            .is_empty(),
+        "off restart must not resurrect any imported context"
+    );
+
+    // Phase 4: re-enabling later still restores the kept second snapshot.
+    state
+        .mem
+        .lock()
+        .unwrap()
+        .settings
+        .restore_prompt_context_on_startup = true;
+    restore_prompt_context_snapshot(&state, &id).unwrap();
+    assert!(!path.exists());
+    assert_eq!(
+        handle.export_dynamic_context().unwrap().unwrap().deltas,
+        context_handoff_fixture("pd_toggle_2").deltas
+    );
+
+    std::mem::take(&mut *state.manager.lock().unwrap())
+        .shutdown_all_detached()
+        .unwrap();
+    std::fs::remove_dir_all(&state.template.data_dir).unwrap();
+}
+
+#[test]
+fn corrupt_snapshot_degrades_to_history_only_restore_without_blocking_session() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("corrupt_snapshot_restore"));
+    let data_dir = root.join("data");
+    let space = "corrupt_snapshot_mem";
+    let workspace = root.join("workspace");
+    let runtime_log_path = root.join("runtime.log");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    set_test_mem(&state, data_dir.clone(), space);
+    let mut template = (*state.template).clone();
+    template.current_dir = workspace.clone();
+    template.workspace_dirs = vec![workspace.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template);
+    state.runtime_log = RuntimeLog::with_path_and_limit(runtime_log_path.clone(), 64 * 1024);
+    state.sessions.lock().unwrap().clear();
+    state
+        .mem
+        .lock()
+        .unwrap()
+        .settings
+        .restore_prompt_context_on_startup = true;
+
+    let store = current_session_store(&state).unwrap();
+    let session_id = "session_corrupt_snapshot";
+    let history_path = store.history_path_for_session(session_id);
+    store
+        .append_history_record(
+            session_id,
+            &ChatHistoryRecord::Message {
+                role: ChatHistoryRole::User,
+                turn_id: "turn_before_corruption".to_string(),
+                created_at_ms: 1,
+                kind: Some("task".to_string()),
+                command_id: None,
+                delivery_state: None,
+                content: "history survives unreadable snapshot".to_string(),
+            },
+        )
+        .unwrap();
+    store
+        .upsert_session(&StoredSession {
+            model_endpoint_id: None,
+            session_id: session_id.to_string(),
+            display_name: "Corrupt snapshot session".to_string(),
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            current_dir: workspace.display().to_string(),
+            profile: StoredSessionProfile::default(),
+            env: BTreeMap::new(),
+            env_overrides: None,
+            mcp_server_ids: Vec::new(),
+            state: StoredSessionState::Ready,
+            last_turn_id: Some("turn_before_corruption".to_string()),
+            raw_chat_history_path: history_path.display().to_string(),
+            group_id: None,
+            ordinal: 0,
+        })
+        .unwrap();
+
+    // Simulate an unreadable snapshot payload at the exact handoff path.
+    let snapshot_path = store.prompt_context_path_for_session(session_id);
+    std::fs::create_dir_all(snapshot_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(&snapshot_path).unwrap();
+
+    // The restore must succeed (history-only) instead of failing the session.
+    assert_eq!(restore_stored_sessions(&state).unwrap(), 1);
+    let diagnostic = std::fs::read_to_string(&runtime_log_path).unwrap();
+    assert!(diagnostic.contains("session_restore_context_snapshot_failed"));
+    assert!(diagnostic.contains("prompt_context_read_failed"));
+    let sessions = state.sessions.lock().unwrap();
+    let session = sessions.get(session_id).unwrap();
+    assert_eq!(
+        session.messages[0].text,
+        "history survives unreadable snapshot"
+    );
+    drop(sessions);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn claude_codex_tool_discovery_setting_is_authoritative_and_mem_persistent() {
     let state = routing_test_state();
     assert!(
