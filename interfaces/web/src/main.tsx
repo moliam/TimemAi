@@ -725,6 +725,8 @@ function TimemApp() {
     useState(false);
   const [pendingContextCompressThreshold, setPendingContextCompressThreshold] =
     useState(false);
+  const [pendingRestorePromptContext, setPendingRestorePromptContext] =
+    useState(false);
   const [rejectedSubmitCommandIds, setRejectedSubmitCommandIds] = useState<
     Set<string>
   >(() => new Set());
@@ -1068,6 +1070,7 @@ function TimemApp() {
       !pendingClaudeCodexToolDiscovery &&
       !pendingModelToolResultBytes &&
       !pendingContextCompressThreshold &&
+      !pendingRestorePromptContext &&
       !favoriteCapacityUpdating &&
       !pendingMemSwitch &&
       !memTemporaryItemsDeleting
@@ -1083,6 +1086,7 @@ function TimemApp() {
     pendingMemConversationCapacity,
     pendingMemRetention,
     pendingMemSwitch,
+    pendingRestorePromptContext,
   ]);
   const refreshMemTemporaryItems = useCallback(() => {
     setMemTemporaryItemsLoading(true);
@@ -1283,6 +1287,25 @@ function TimemApp() {
         reportUiError(
           "System setting failed",
           "Reconnect to Timem Web before changing the context compression threshold.",
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand],
+  );
+  const saveRestorePromptContextOnStartup = useCallback(
+    (enabled: boolean) => {
+      setPendingRestorePromptContext(true);
+      if (
+        !sendCommand({
+          type: "system_restore_prompt_context_on_startup_update",
+          enabled,
+        })
+      ) {
+        setPendingRestorePromptContext(false);
+        reportUiError(
+          "System setting failed",
+          "Reconnect to Timem Web before changing the startup context restore preference.",
           "system",
         );
       }
@@ -1510,6 +1533,7 @@ function TimemApp() {
     setPendingClaudeCodexToolDiscovery(false);
     setPendingModelToolResultBytes(false);
     setPendingContextCompressThreshold(false);
+    setPendingRestorePromptContext(false);
     setMemSwitchCandidate(null);
   }, [interruptEndpointShare]);
 
@@ -1805,6 +1829,8 @@ function TimemApp() {
             setPendingModelToolResultBytes(false);
           if (completed?.type === "system_context_compress_threshold_update")
             setPendingContextCompressThreshold(false);
+          if (completed?.type === "system_restore_prompt_context_on_startup_update")
+            setPendingRestorePromptContext(false);
           const memSwitchNeedsConfirmation =
             completed?.type === "mem_switch" &&
             !completed.stop_running &&
@@ -1917,6 +1943,7 @@ function TimemApp() {
         setPendingClaudeCodexToolDiscovery(false);
         setPendingModelToolResultBytes(false);
         setPendingContextCompressThreshold(false);
+        setPendingRestorePromptContext(false);
         setServer((current) =>
           current
             ? {
@@ -1932,6 +1959,8 @@ function TimemApp() {
                   model_tool_result_bytes: event.model_tool_result_bytes,
                   context_compress_threshold_percent:
                     event.context_compress_threshold_percent,
+                  restore_prompt_context_on_startup:
+                    event.restore_prompt_context_on_startup,
                 },
               }
             : current,
@@ -4818,6 +4847,11 @@ function TimemApp() {
               }
               contextCompressThresholdPending={pendingContextCompressThreshold}
               onContextCompressThresholdChange={saveContextCompressThreshold}
+              restorePromptContextOnStartup={
+                server?.mem?.restore_prompt_context_on_startup ?? false
+              }
+              restorePromptContextPending={pendingRestorePromptContext}
+              onRestorePromptContextChange={saveRestorePromptContextOnStartup}
               claudeCodexToolDiscoveryEnabled={
                 server?.mem?.claude_codex_tool_discovery ?? false
               }
@@ -13049,6 +13083,9 @@ type SettingsCenterProps = {
   onContextCompressThresholdChange: (
     percent: ContextCompressThresholdPercent,
   ) => void;
+  restorePromptContextOnStartup: boolean;
+  restorePromptContextPending: boolean;
+  onRestorePromptContextChange: (enabled: boolean) => void;
   claudeCodexToolDiscoveryEnabled: boolean;
   claudeCodexToolDiscoveryPending: boolean;
   onClaudeCodexToolDiscoveryChange: (enabled: boolean) => void;
@@ -13116,6 +13153,9 @@ const SettingsCenter = memo(function SettingsCenter(
     contextCompressThresholdPercent,
     contextCompressThresholdPending,
     onContextCompressThresholdChange,
+    restorePromptContextOnStartup,
+    restorePromptContextPending,
+    onRestorePromptContextChange,
     claudeCodexToolDiscoveryEnabled,
     claudeCodexToolDiscoveryPending,
     onClaudeCodexToolDiscoveryChange,
@@ -13183,6 +13223,7 @@ const SettingsCenter = memo(function SettingsCenter(
     conversationCapacityPending ||
     modelToolResultBytesPending ||
     contextCompressThresholdPending ||
+    restorePromptContextPending ||
     claudeCodexToolDiscoveryPending ||
     favoriteCapacityPending ||
     switchPending ||
@@ -13622,6 +13663,32 @@ const SettingsCenter = memo(function SettingsCenter(
                     ))}
                   </div>
                   {contextCompressThresholdPending && (
+                    <small className="system-setting-status" role="status" aria-live="polite">
+                      {t("system.saving")}
+                    </small>
+                  )}
+                </section>
+                <section className="settings-group system-restore-prompt-context">
+                  <div className="settings-group-heading">
+                    <div>
+                      <strong>{t("system.restorePromptContextTitle")}</strong>
+                      <p>{t("system.restorePromptContextDesc")}</p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      className="settings-feature-switch"
+                      aria-checked={restorePromptContextOnStartup}
+                      aria-label={t("system.restorePromptContextAria")}
+                      disabled={restorePromptContextPending || !connected}
+                      onClick={() =>
+                        onRestorePromptContextChange(!restorePromptContextOnStartup)
+                      }
+                    >
+                      <span className="settings-feature-switch-thumb" />
+                    </button>
+                  </div>
+                  {restorePromptContextPending && (
                     <small className="system-setting-status" role="status" aria-live="polite">
                       {t("system.saving")}
                     </small>

@@ -477,6 +477,7 @@ export type Snapshot = {
       claude_codex_tool_discovery: boolean;
       model_tool_result_bytes: ModelToolResultBytes;
       context_compress_threshold_percent: ContextCompressThresholdPercent;
+      restore_prompt_context_on_startup: boolean;
     };
     runtime_options: Array<{
       key: string;
@@ -649,6 +650,7 @@ export type WireEvent =
       claude_codex_tool_discovery: boolean;
       model_tool_result_bytes: ModelToolResultBytes;
       context_compress_threshold_percent: ContextCompressThresholdPercent;
+      restore_prompt_context_on_startup: boolean;
     }
   | { type: "mem_temporary_items"; items: MemTemporaryItem[]; error?: string }
   | { type: "file_uploaded"; session_id: string; file: Attachment }
@@ -913,6 +915,7 @@ export type ClientCommand =
       type: "system_context_compress_threshold_update";
       percent: ContextCompressThresholdPercent;
     }
+  | { type: "system_restore_prompt_context_on_startup_update"; enabled: boolean }
   | { type: "mem_temporary_items_list" }
   | { type: "mem_temporary_items_delete"; ids: string[] }
   | {
