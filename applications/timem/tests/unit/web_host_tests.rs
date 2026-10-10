@@ -6414,6 +6414,119 @@ fn context_compress_threshold_is_authoritative_mem_persistent_and_validated() {
 }
 
 #[test]
+fn restore_prompt_context_on_startup_defaults_off_and_persists_via_command() {
+    let state = routing_test_state();
+    // The default must be opt-in: legacy behavior restores nothing.
+    assert!(
+        !state
+            .mem
+            .lock()
+            .unwrap()
+            .settings
+            .restore_prompt_context_on_startup
+    );
+    assert!(
+        !snapshot_for(&state, TEST_PORT)
+            .server
+            .mem
+            .restore_prompt_context_on_startup
+    );
+
+    let command = ClientCommand::SystemRestorePromptContextOnStartupUpdate { enabled: true };
+    assert_eq!(command.mutation_lane().as_deref(), Some("global"));
+    assert!(command.uses_global_mutation_barrier());
+    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+    let event = handle_command(&state, TEST_PORT, command).unwrap().unwrap();
+    let WireEvent::MemSettingsUpdated {
+        restore_prompt_context_on_startup,
+        ..
+    } = event
+    else {
+        panic!("expected authoritative MEM settings event")
+    };
+    assert!(restore_prompt_context_on_startup);
+    assert!(
+        state
+            .mem
+            .lock()
+            .unwrap()
+            .settings
+            .restore_prompt_context_on_startup
+    );
+    assert!(
+        load_web_mem_settings(&memory_dir, false)
+            .unwrap()
+            .restore_prompt_context_on_startup
+    );
+    assert!(
+        snapshot_for(&state, TEST_PORT)
+            .server
+            .mem
+            .restore_prompt_context_on_startup
+    );
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SystemRestorePromptContextOnStartupUpdate { enabled: false },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::MemSettingsUpdated {
+        restore_prompt_context_on_startup,
+        ..
+    } = event
+    else {
+        panic!("expected authoritative MEM settings event")
+    };
+    assert!(!restore_prompt_context_on_startup);
+    assert!(
+        !load_web_mem_settings(&memory_dir, false)
+            .unwrap()
+            .restore_prompt_context_on_startup
+    );
+}
+
+#[test]
+fn restore_prompt_context_on_startup_off_keeps_snapshot_without_importing() {
+    let state = routing_test_state();
+    let id = register_real_worker(&state, "handoff-gate-off");
+    write_prompt_context_snapshot(&state, &id, &context_handoff_fixture("pd_gate_off")).unwrap();
+    let path = current_session_store(&state)
+        .unwrap()
+        .prompt_context_path_for_session(&id);
+    restore_prompt_context_snapshot(&state, &id).unwrap();
+    assert!(
+        path.exists(),
+        "disabled restore must keep the snapshot for a later opt-in restart"
+    );
+    let handle = session_worker_handle(&state, &id, None).unwrap();
+    assert!(handle
+        .export_dynamic_context()
+        .unwrap()
+        .unwrap()
+        .deltas
+        .is_empty());
+    // Opting in must consume and import the kept snapshot.
+    state
+        .mem
+        .lock()
+        .unwrap()
+        .settings
+        .restore_prompt_context_on_startup = true;
+    restore_prompt_context_snapshot(&state, &id).unwrap();
+    assert!(!path.exists(), "enabled restore consumes the snapshot");
+    assert_eq!(
+        handle.export_dynamic_context().unwrap().unwrap().deltas,
+        context_handoff_fixture("pd_gate_off").deltas
+    );
+    std::mem::take(&mut *state.manager.lock().unwrap())
+        .shutdown_all_detached()
+        .unwrap();
+    std::fs::remove_dir_all(&state.template.data_dir).unwrap();
+}
+
+#[test]
 fn claude_codex_tool_discovery_setting_is_authoritative_and_mem_persistent() {
     let state = routing_test_state();
     assert!(
@@ -17181,6 +17294,12 @@ fn context_handoff_persists_runtime_state_without_text_deltas() {
 #[test]
 fn context_handoff_is_consumed_before_import_and_cannot_replay_after_crash() {
     let state = routing_test_state();
+    state
+        .mem
+        .lock()
+        .unwrap()
+        .settings
+        .restore_prompt_context_on_startup = true;
     let id = register_real_worker(&state, "handoff-consume");
     let snapshot = context_handoff_fixture("pd_76");
     write_prompt_context_snapshot(&state, &id, &snapshot).unwrap();
@@ -17215,6 +17334,12 @@ fn context_handoff_is_consumed_before_import_and_cannot_replay_after_crash() {
 #[test]
 fn context_handoff_shutdown_uses_registered_primary_not_first_worker() {
     let state = routing_test_state();
+    state
+        .mem
+        .lock()
+        .unwrap()
+        .settings
+        .restore_prompt_context_on_startup = true;
     state.sessions.lock().unwrap().clear();
     let id = register_real_worker(&state, "handoff-primary");
     let old = session_worker_handle(&state, &id, None).unwrap();
@@ -17268,6 +17393,12 @@ fn context_handoff_failed_export_invalidates_previous_snapshot() {
 #[test]
 fn context_handoff_real_compaction_survives_graceful_restart() {
     let state = routing_test_state();
+    state
+        .mem
+        .lock()
+        .unwrap()
+        .settings
+        .restore_prompt_context_on_startup = true;
     state.sessions.lock().unwrap().clear();
     let id = register_real_worker(&state, "handoff-compact");
     let mut core = AgentCore::new(

@@ -111,6 +111,8 @@ pub(super) struct WebMemSettings {
     pub(super) model_tool_result_bytes: usize,
     #[serde(default = "default_context_compress_threshold_percent")]
     pub(super) context_compress_threshold_percent: u8,
+    #[serde(default = "default_restore_prompt_context_on_startup")]
+    pub(super) restore_prompt_context_on_startup: bool,
 }
 
 impl Default for WebMemSettings {
@@ -132,6 +134,7 @@ impl WebMemSettings {
             claude_codex_tool_discovery: default_claude_codex_tool_discovery(),
             model_tool_result_bytes: default_model_tool_result_bytes(),
             context_compress_threshold_percent: default_context_compress_threshold_percent(),
+            restore_prompt_context_on_startup: default_restore_prompt_context_on_startup(),
         }
     }
 }
@@ -150,6 +153,10 @@ pub(super) fn validate_model_tool_result_bytes(max_bytes: usize) -> Result<(), S
 
 pub(super) const fn default_context_compress_threshold_percent() -> u8 {
     agent_core::DEFAULT_CONTEXT_COMPRESS_THRESHOLD_PERCENT
+}
+
+pub(super) const fn default_restore_prompt_context_on_startup() -> bool {
+    false
 }
 
 pub(super) fn validate_context_compress_threshold_percent(percent: u8) -> Result<(), String> {

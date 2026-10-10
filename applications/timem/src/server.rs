@@ -283,6 +283,7 @@ impl WebMemState {
             claude_codex_tool_discovery: self.settings.claude_codex_tool_discovery,
             model_tool_result_bytes: self.settings.model_tool_result_bytes,
             context_compress_threshold_percent: self.settings.context_compress_threshold_percent,
+            restore_prompt_context_on_startup: self.settings.restore_prompt_context_on_startup,
         }
     }
 }
@@ -941,6 +942,7 @@ enum WireEvent {
         claude_codex_tool_discovery: bool,
         model_tool_result_bytes: usize,
         context_compress_threshold_percent: u8,
+        restore_prompt_context_on_startup: bool,
     },
     MemTemporaryItems {
         items: Vec<MemTemporaryItem>,
@@ -1062,6 +1064,7 @@ struct WebMemInfo {
     claude_codex_tool_discovery: bool,
     model_tool_result_bytes: usize,
     context_compress_threshold_percent: u8,
+    restore_prompt_context_on_startup: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1476,6 +1479,9 @@ enum ClientCommand {
     SystemContextCompressThresholdUpdate {
         percent: u8,
     },
+    SystemRestorePromptContextOnStartupUpdate {
+        enabled: bool,
+    },
     MemTemporaryItemsList,
     MemTemporaryItemsDelete {
         ids: Vec<String>,
@@ -1503,6 +1509,7 @@ impl ClientCommand {
             | Self::BetaClaudeCodexToolDiscoveryUpdate { .. }
             | Self::SystemModelToolResultBytesUpdate { .. }
             | Self::SystemContextCompressThresholdUpdate { .. }
+            | Self::SystemRestorePromptContextOnStartupUpdate { .. }
             | Self::MemTemporaryItemsDelete { .. }
             | Self::McpServerDelete { .. }
             | Self::ModelEndpointUpsert { .. }
@@ -1569,6 +1576,7 @@ impl ClientCommand {
                 | Self::BetaClaudeCodexToolDiscoveryUpdate { .. }
                 | Self::SystemModelToolResultBytesUpdate { .. }
                 | Self::SystemContextCompressThresholdUpdate { .. }
+                | Self::SystemRestorePromptContextOnStartupUpdate { .. }
                 | Self::MemTemporaryItemsDelete { .. }
                 | Self::McpServerDelete { .. }
                 | Self::ModelEndpointUpsert { .. }
@@ -4640,6 +4648,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -4669,6 +4678,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -4697,6 +4707,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: enabled,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -4726,6 +4737,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: max_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -4755,6 +4767,35 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: percent,
+                restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
+        }
+        ClientCommand::SystemRestorePromptContextOnStartupUpdate { enabled } => {
+            let (memory_dir, settings) = {
+                let mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                let mut settings = mem.settings.clone();
+                settings.restore_prompt_context_on_startup = enabled;
+                (mem.layout.memory_dir(), settings)
+            };
+            save_web_mem_settings(&memory_dir, &settings)?;
+            state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .settings = settings.clone();
+            let event = WireEvent::MemSettingsUpdated {
+                temporary_retention_days: settings.temporary_retention_days,
+                temporary_capacity_bytes: settings.temporary_capacity_bytes,
+                conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
+                model_tool_result_bytes: settings.model_tool_result_bytes,
+                context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                restore_prompt_context_on_startup: enabled,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -7724,6 +7765,17 @@ fn create_context_with_worker(
 /// model context instead of starting from an empty one. A missing, oversized,
 /// or corrupt snapshot is not an error: the session simply starts fresh.
 fn restore_prompt_context_snapshot(state: &AppState, session_id: &str) -> Result<(), String> {
+    // MEM-scoped opt-in: shutdown snapshots always stay on disk (they reflect
+    // the last exit), but auto-restore after a runtime restart only runs when
+    // the user enabled it. Disabling must not consume or delete snapshots.
+    let restore_enabled = state
+        .mem
+        .lock()
+        .map(|mem| mem.settings.restore_prompt_context_on_startup)
+        .unwrap_or(false);
+    if !restore_enabled {
+        return Ok(());
+    }
     let store = current_session_store(state)?;
     let path = store.prompt_context_path_for_session(session_id);
     let metadata = match std::fs::metadata(&path) {
@@ -12702,6 +12754,7 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
             claude_codex_tool_discovery: false,
             model_tool_result_bytes: default_model_tool_result_bytes(),
             context_compress_threshold_percent: default_context_compress_threshold_percent(),
+            restore_prompt_context_on_startup: default_restore_prompt_context_on_startup(),
         });
     let (role_library, session_groups) = current_mem_state(state)
         .map(|mem| (mem.role_library, mem.session_groups))
