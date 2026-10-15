@@ -114,6 +114,8 @@ export const en: Strings = {
     uploading: "Uploading {name}",
     uploadingFile: "Uploading file…",
     uploadingHint: "{text} · send is paused until it finishes",
+    imageUnsupportedHint: "The active endpoint {model} does not accept image input; images are dropped from the request. Switch to a vision-capable endpoint (e.g. glm-5.3-flash)",
+    imageUnsupportedTitle: "Images cannot be read by this model",
     createSessionFirst: "Create a session to start…",
     queueTitle: "Queued",
     countLabel: "{count} queued",

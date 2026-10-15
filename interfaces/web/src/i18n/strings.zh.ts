@@ -111,6 +111,8 @@ export const zh = {
     uploading: "正在上传 {name}",
     uploadingFile: "正在上传文件…",
     uploadingHint: "{text} · 上传完成前暂停发送",
+    imageUnsupportedHint: "当前接入点 {model} 不支持图片输入，图片会被当作普通文本忽略；请改用支持视觉的接入点（如 glm-5.3-flash）",
+    imageUnsupportedTitle: "图片将无法被模型读取",
     createSessionFirst: "先创建一个会话…",
     queueTitle: "待发送",
     countLabel: "{count} 条",

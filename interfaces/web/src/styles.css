@@ -141,6 +141,9 @@ button:disabled { cursor: not-allowed; }
 .pending-attachment button { display: grid; flex: none; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px; color: #7899a4; background: transparent; }
 .pending-attachment button:hover { color: #f1b3b3; background: #ffffff0d; }
 .pending-attachment.uploading { color: #a9d9d0; border-color: #44776f; background: #142d31; }
+.attachment-warning { display: flex; align-items: center; gap: 6px; max-width: min(560px, 100%); padding: 5px 8px; border: 1px solid #5c4a2a; border-radius: 4px; background: #2b2415; color: #e4bd76; font-size: 11px; line-height: 1.45; }
+.attachment-warning > svg { flex: none; color: #e4bd76; }
+.attachment-warning > span { min-width: 0; overflow-wrap: anywhere; }
 .upload-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: #70d2bd; animation: upload-dot-pulse .9s ease-in-out infinite; }
 .attach-button { display: grid; place-items: center; width: 32px; height: 31px; border: 1px solid #3b5360; border-radius: 5px; color: #b9ced6; background: transparent; }.attach-button:hover { background: #213640; color: #7fd2c0; }.file-input { display: none; }
 .attach-button.uploading:disabled { opacity: .85; color: #82d8c8; border-color: #4b8d86; background: #173038; animation: upload-button-pulse 1s ease-in-out infinite; }
@@ -1004,6 +1007,8 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .send-button { background: #397fad; color: #fff; box-shadow: 0 1px 3px #315e7d2e; }
 :root[data-theme="light"] .send-button:hover { background: #2f6f9a; }
 :root[data-theme="light"] .pending-attachment.uploading { color: #347567; border-color: #aed2ca; background: #edf8f5; }
+:root[data-theme="light"] .attachment-warning { border-color: #d9c391; background: #f9f3e2; color: #8a6d2f; }
+:root[data-theme="light"] .attachment-warning > svg { color: #8a6d2f; }
 :root[data-theme="light"] .attachment-summary { background: #f0f2f3; color: #667981; }
 :root[data-theme="light"] .attachment-summary svg { color: #7a8e96; }
 
