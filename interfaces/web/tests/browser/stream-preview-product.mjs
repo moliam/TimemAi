@@ -580,6 +580,32 @@ async function main() {
       console.log("PASS actual Host + HTTP SSE + Chrome: broken HTTP retains partial response and Chat");
       return;
     }
+    if (protocol === "native") {
+      // Regression: a native turn ends only through the task_finished tool,
+      // whose summary otherwise rides the authoritative turn_finished event
+      // that the host emits after terminal persistence. The summary must also
+      // reach stream UIs early as a Final model preview; otherwise the answer
+      // area stays empty during that window. The browser DOM can render the
+      // final before this observer socket drains its queue, so wait for the
+      // authoritative delivery here before comparing wire order.
+      await waitFor(() => received.some(raw => {
+        const e = raw.type === "semantic_event" ? raw.event : raw;
+        return e.type === "turn_finished";
+      }), "observer socket never received turn_finished");
+      const previewIndex = received.findIndex(raw => {
+        const e = raw.type === "semantic_event" ? raw.event : raw;
+        return e.type === "core_topic" && e.event?.topic?.name === "core.model.preview"
+          && e.event.payload?.response?.status === "final"
+          && String(e.event.payload?.response?.text ?? "").includes("HTTP final");
+      });
+      const finishIndex = received.findIndex(raw => {
+        const e = raw.type === "semantic_event" ? raw.event : raw;
+        return e.type === "turn_finished";
+      });
+      assert(previewIndex >= 0, "task_finished summary never published as a Final model preview");
+      assert(finishIndex >= 0 && previewIndex < finishIndex,
+        "Final model preview must precede the authoritative turn_finished delivery");
+    }
     await waitFor(()=>browser.evaluate(`document.querySelector('.turn-final-delivery')?.textContent.includes('HTTP final')`),"final answer absent",20000);
     if (scenario === "normal") {
       assert(!received.some(raw => {
