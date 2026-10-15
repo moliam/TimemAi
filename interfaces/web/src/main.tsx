@@ -8540,8 +8540,12 @@ function TimemThread({
     missingSessionHint ||
     lockedControlHint ||
     (uploadingAttachment ? "Wait for file upload" : sendLabel);
+  // Reserved attachments (consumed by queued messages) still leave with a
+  // future send, so the warning scope is the full session attachment list.
   const imageAttachmentPending =
-    availableAttachments.some((attachment) => isImageFileName(attachment.name)) ||
+    (activeSession?.attachments ?? []).some((attachment) =>
+      isImageFileName(attachment.name),
+    ) ||
     (uploadingAttachment && isImageFileName(uploadingAttachmentFile?.name));
   const attachedFileCount = activeSession?.attachments.length ?? 0;
   const attachmentSummary =
@@ -9801,7 +9805,9 @@ function TimemThread({
             </section>
           )}
           {!!activeSession &&
-            (!!availableAttachments.length || uploadingAttachment) && (
+            (!!availableAttachments.length ||
+              uploadingAttachment ||
+              (!!imageUnsupportedEndpoint && imageAttachmentPending)) && (
               <div
                 className="attachment-strip"
                 aria-label={attachmentStripLabel}
