@@ -19194,3 +19194,40 @@ fn real_worker_timer_tool_call_projects_into_web_timers() {
     assert_eq!(persisted[0].spec.created_by, "model");
     shutdown_timer_workers(&state);
 }
+
+#[test]
+fn web_snapshot_serializes_documented_input_modalities_for_every_catalog_model() {
+    let state = routing_test_state();
+    let snapshot = serde_json::to_value(snapshot_for(&state, TEST_PORT)).unwrap();
+    let catalog = snapshot["server"]["model_catalog"]
+        .as_array()
+        .expect("model_catalog array");
+    // The web attachment warning depends on this projection; a struct rename
+    // or silent field drop must fail here, not in the UI.
+    for model in catalog {
+        let modalities = model["input_modalities"]
+            .as_array()
+            .unwrap_or_else(|| panic!("missing input_modalities on {}", model["id"]));
+        assert!(!modalities.is_empty(), "{}", model["id"]);
+        assert!(
+            modalities
+                .iter()
+                .all(|m| matches!(m.as_str(), Some("text" | "image" | "video" | "file"))),
+            "{}",
+            model["id"]
+        );
+    }
+    let glm = catalog
+        .iter()
+        .find(|m| m["id"] == "z-glm5.3")
+        .expect("z-glm5.3 entry");
+    assert_eq!(glm["input_modalities"], serde_json::json!(["text"]));
+    let flash = catalog
+        .iter()
+        .find(|m| m["id"] == "z-glm5.3-flash")
+        .expect("z-glm5.3-flash entry");
+    assert_eq!(
+        flash["input_modalities"],
+        serde_json::json!(["text", "image", "video", "file"])
+    );
+}
