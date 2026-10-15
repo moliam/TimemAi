@@ -723,8 +723,27 @@ fn action_detail_for_shell(kind: &CoreActionKind) -> (String, Option<ActionTimer
         CoreActionKind::ChatHistory { operation } => {
             (memory_action_detail("raw_chat", operation.trim()), None)
         }
+        CoreActionKind::Timer { op, name } => {
+            let label = match op.trim() {
+                "new" => "创建定时",
+                "del" => "删除定时",
+                _ => "定时任务",
+            };
+            (
+                format!("{}: {}", label, truncate_prompt(name.trim(), 60)),
+                None,
+            )
+        }
         CoreActionKind::Other { action } => (format!("Action: {action}"), None),
     }
+}
+
+fn truncate_prompt(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let truncated: String = text.chars().take(max_chars).collect();
+    format!("{truncated}…")
 }
 
 fn action_status_detail_for_shell(kind: &CoreActionKind, status: &str, pid: Option<u32>) -> String {
@@ -747,6 +766,14 @@ fn action_status_detail_for_shell(kind: &CoreActionKind, status: &str, pid: Opti
             }
             _ => format!("后台任务状态: {}", fallback_unknown(job_id.trim())),
         },
+        CoreActionKind::Timer { op, name } => {
+            let label = match op.trim() {
+                "new" => "定时任务已创建",
+                "del" => "定时任务已删除",
+                _ => "定时任务已处理",
+            };
+            format!("{}: {}", label, truncate_prompt(name.trim(), 60))
+        }
         _ => match status {
             "completed" => "Action: 已完成".to_string(),
             "timeout" => "Action: 超时".to_string(),
