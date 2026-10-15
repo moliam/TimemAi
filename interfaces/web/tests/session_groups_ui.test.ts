@@ -49,15 +49,15 @@ describe("sortable Session group UI", () => {
     expect(source).not.toContain("collapsed && bucketSessions.length > 0");
     expect(source).not.toContain("session-group-content-indicator");
     expect(styles).toMatch(
-      /\.session-group-heading \{[^}]*margin: 3px 2px 1px;[^}]*padding: 3px;/,
+      /\.session-group-heading \{[^}]*margin: 2px 2px 1px;[^}]*padding: 2px;/,
     );
     expect(styles).toContain(
-      ".session-group:first-child .session-group-heading { margin-top: 2px; }",
+      ".session-group:first-child .session-group-heading { margin-top: 1px; }",
     );
     expect(styles).toContain(".session-group-unread-dot {");
     expect(styles).not.toContain(".session-group-content-indicator");
     expect(styles).toMatch(
-      /\.session-group-list \{[^}]*min-height: 8px;[^}]*padding: 0 0 2px;/,
+      /\.session-group-list \{[^}]*min-height: 8px;[^}]*padding: 0 0 1px;/,
     );
   });
 
