@@ -1774,6 +1774,12 @@ body {
 
 /* Transient model recovery belongs to the active working header, not the thought stream. */
 .model-retry-status { position: relative; flex: none; margin-left: auto; color: #b7a16e; font-size: 10px; line-height: 1; }
+/* Stream delivery keeps the recovery pill visible while the frame heading is hidden.
+   The pill sits at the left of the delivery area, so its dropdown must anchor
+   left-aligned instead of the heading-style right:0 anchor (which would push
+   the 420px detail box off-screen). */
+.turn-answer-delivery > .model-retry-status { display: inline-flex; margin: 0 0 8px; }
+.turn-answer-delivery > .model-retry-status .model-retry-detail { right: auto; left: 0; }
 .model-retry-status summary { display: inline-flex; align-items: center; gap: 4px; border: 1px solid #665a3b; border-radius: 999px; min-height: 20px; padding: 2px 7px 2px 5px; background: #302b20; color: #dbc17d; font-weight: 700; cursor: pointer; list-style: none; user-select: none; }
 .model-retry-status summary::-webkit-details-marker { display: none; }
 .model-retry-status summary svg { transition: transform .16s ease; }

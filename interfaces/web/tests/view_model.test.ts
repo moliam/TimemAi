@@ -14,6 +14,8 @@ import {
 import {
   activeModelRetryStatus,
   activityFromTopic,
+  completionStopReasonText,
+  repairIssueText,
   applySessionRuntimeProfile,
   applyTurnProjection,
   appendActivityToCurrentTurn,
@@ -3300,6 +3302,57 @@ describe("web topic view model", () => {
       events: [recovered.events[0]],
     };
     expect(activeModelRetryStatus(completed)).toBeNull();
+  });
+
+  it("keeps protocol-repair status visible across the repair retry model request", () => {
+    const repairWait = turn("repair-wait", "working");
+    repairWait.events = [
+      {
+        event_id: "repair",
+        source: "core_topic",
+        created_at_ms: 2,
+        payload: topic("core.model.repair", {
+          attempt: 1,
+          max_attempts: 2,
+          issue: "truncated_model_output",
+        }) as unknown as Record<string, unknown>,
+      },
+      {
+        event_id: "next-request",
+        source: "worker_activity",
+        created_at_ms: 3,
+        payload: { kind: "model_request", round: 2 },
+      },
+    ];
+    expect(activeModelRetryStatus(repairWait)).toMatchObject({
+      kind: "retrying",
+      progress: "1/2",
+    });
+
+    const superseded = turn("superseded", "working");
+    superseded.events = [
+      ...repairWait.events,
+      {
+        event_id: "response",
+        source: "worker_activity",
+        created_at_ms: 4,
+        payload: { kind: "model_response", round: 2 },
+      },
+    ];
+    expect(activeModelRetryStatus(superseded)).toBeNull();
+  });
+
+  it("explains terminal stop reasons and repair issues in the user language", () => {
+    expect(completionStopReasonText("ProtocolRepairFailed")).toBe("协议修复失败");
+    expect(completionStopReasonText("ModelError")).toBe("模型请求失败");
+    expect(completionStopReasonText("CancelledByUser")).toBe("已取消");
+    expect(completionStopReasonText("turn_finished")).toBe("已完成");
+    expect(completionStopReasonText("SomeNewReason")).toBe("SomeNewReason");
+
+    expect(repairIssueText("truncated_model_output")).toContain("输出上限");
+    expect(repairIssueText("missing_response_root")).toContain("response 根节点");
+    expect(repairIssueText("unknown_issue_x")).toBe("unknown_issue_x");
+    expect(repairIssueText("")).toContain("模型回复不符合当前协议要求");
   });
 
   it("renders model free talk verbatim without an invented completion label", () => {
