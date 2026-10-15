@@ -1,0 +1,39 @@
+kind: tool
+id: timer
+binding_type: builtin
+binding_name: timer
+summary: Let the runtime schedule timed prompts that arrive as new turns when due, surviving compression and restart.
+description: |
+  Use this tool to create or delete scheduled timers for the current session. Each timer carries a
+  prompt; when due, the runtime delivers the prompt as new user-visible input (a new turn when idle,
+  or the next interaction batch when a turn is active). Timers survive context compression and
+  session restart because the firing authority lives in the runtime host, not the model context.
+
+  ops:
+  - new: create a timer. `prompt` is required. `mode` is "once" (default) or "repeat".
+    For "once", exactly one of `after_ms` (relative delay from creation) or `at` (absolute
+    ISO-RFC3339 UTC instant) is required. For "repeat", one of `after_ms`/`at` plus `interval_ms`
+    is required; the prompt refires every interval_ms. `name` is optional and auto-generated as
+    timer0, timer1, ... when omitted.
+  - del: delete a timer by `name`. No error if the name does not exist only via
+    explicit error text.
+
+  The runtime host computes the concrete fire time and owns scheduling; this tool only records the
+  intent. Do not use timers for sub-second delays or as a substitute for direct tool calls.
+input_schema: |
+  {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "op": {"type":"string","enum":["new","del"],"description":"Timer operation."},
+      "prompt": {"type":"string","description":"Prompt text delivered when the timer fires. Required for new."},
+      "name": {"type":"string","description":"Optional stable handle name for new (auto-named timer0/timer1/... when omitted); required for del."},
+      "mode": {"type":"string","enum":["once","repeat"],"description":"once fires a single time (default); repeat refires every interval_ms."},
+      "after_ms": {"type":"integer","description":"Relative delay from creation in milliseconds for the first fire."},
+      "at": {"type":"string","description":"Absolute first-fire instant as ISO-RFC3339 UTC, e.g. 2026-01-01T09:00:00Z."},
+      "interval_ms": {"type":"integer","description":"Refire period in milliseconds. Required for repeat; invalid for once."}
+    },
+    "required": ["op"]
+  }
+example_json: |
+  {"timer":{"op":"new","prompt":"check the long build result and report","after_ms":300000}}

@@ -853,6 +853,7 @@ fn importing_empty_dynamic_context_replaces_existing_state() {
         active_memo: None,
         pending_forcible_memo_note: None,
         pending_interrupted_memo_note: None,
+        active_timers: Vec::new(),
     });
 
     let snapshot = core.export_dynamic_context();
