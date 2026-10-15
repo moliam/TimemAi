@@ -1042,16 +1042,22 @@ button:disabled { cursor: not-allowed; }
 .timer-item-origin.user { background: #173b32; color: #6fd3c0; }
 .timer-item-prompt { color: #9db0bd; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
 .timer-item-meta { color: #6f8491; font-size: 11px; }
+.timer-item-schedule { color: #6f8491; font-size: 11px; }
+.timer-item-schedule.parked { color: #b89157; }
+.timer-form-hint { color: #6f8491; font-size: 11px; line-height: 1.5; }
+.timer-form-hint.error { color: #d29a92; }
 .timer-item-actions { display: flex; gap: 6px; align-items: center; }
-.timer-toggle { border: 1px solid #2c3b49; border-radius: 5px; padding: 3px 8px; background: #1a2632; color: #9aabb8; font-size: 11px; font-weight: 650; }
+.timer-toggle { border: 1px solid #2c3b49; border-radius: 5px; padding: 4px; width: 26px; height: 26px; display: grid; place-items: center; background: #1a2632; color: #9aabb8; }
+.timer-toggle svg { display: block; }
 .timer-toggle:hover { background: #24333f; color: #d5e1e8; }
 .timer-toggle.off { color: #b89157; border-color: #4a3f28; background: #2c2417; }
 .timer-delete { border: 1px solid transparent; border-radius: 5px; padding: 3px; background: transparent; color: #9aabb8; display: grid; place-items: center; }
 .timer-delete:hover { color: #e58b85; background: #3a2222; }
 .timer-create-form { border-top: 1px solid #25303c; padding: 12px; display: grid; gap: 8px; }
-.timer-create-form label { display: grid; gap: 4px; color: #8fa2af; font-size: 11px; font-weight: 650; }
-.timer-create-form input, .timer-create-form select { border: 1px solid #2c3b49; border-radius: 5px; padding: 6px 8px; background: #131c26; color: #d5e1e8; font-size: 12px; }
-.timer-create-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.timer-create-form label { display: grid; gap: 4px; min-width: 0; color: #8fa2af; font-size: 11px; font-weight: 650; }
+.timer-create-form input, .timer-create-form select, .timer-create-form textarea { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid #2c3b49; border-radius: 5px; padding: 6px 8px; background: #131c26; color: #d5e1e8; font-size: 12px; font-family: inherit; resize: vertical; }
+.timer-create-form textarea { line-height: 1.5; }
+.timer-create-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
 .timer-create-submit { border: 0; border-radius: 5px; padding: 7px 10px; background: #1f443c; color: #b9ecd9; font-size: 12px; font-weight: 700; }
 .timer-create-submit:disabled { opacity: .55; cursor: default; }
 .timer-create-submit:not(:disabled):hover { background: #27584d; }

@@ -91,6 +91,8 @@ import {
   Wrench,
   X,
   AlarmClock,
+  Pause,
+  Play,
 } from "lucide-react";
 import {
   createContext,
@@ -3793,7 +3795,7 @@ function TimemApp() {
       <div
         inert={workspaceModalOpen}
         aria-hidden={workspaceModalOpen || undefined}
-        className={`app-shell ${leftSidebarCollapsed ? "left-sidebar-collapsed" : ""} ${!showToolRepo && rightSidebarCollapsed ? "right-sidebar-collapsed" : ""}`}
+        className={`app-shell ${leftSidebarCollapsed ? "left-sidebar-collapsed" : ""} ${!showToolRepo && !showTimers && rightSidebarCollapsed ? "right-sidebar-collapsed" : ""}`}
         style={
           {
             "--left-sidebar-width": `${sidebarLayout.leftWidth}px`,
@@ -4850,6 +4852,7 @@ function TimemApp() {
                     setShowAppearance(false);
                     setShowRuntime(false);
                     setShowMcp(false);
+                    if (showTimers) closeTimersPanel();
                     if (showToolRepo) closeToolRepoPanel();
                     else setShowToolRepo(true);
                   }}
@@ -4878,9 +4881,11 @@ function TimemApp() {
                 }}
               >
                 <AlarmClock size={17} />
-                <span className="timer-header-count" aria-hidden="true">
-                  {activeTimerCount}
-                </span>
+                {activeTimerCount > 0 && (
+                  <span className="timer-header-count" aria-hidden="true">
+                    {activeTimerCount}
+                  </span>
+                )}
               </button>
             </div>
           </header>
@@ -5116,7 +5121,7 @@ function TimemApp() {
             onDecisionReply={replyToDecision}
           />
         </main>
-        {!showToolRepo && showRoles && (
+        {!showToolRepo && !showTimers && showRoles && (
           <button
             type="button"
             className="role-panel-backdrop"
@@ -5124,7 +5129,7 @@ function TimemApp() {
             onClick={() => setShowRoles(false)}
           />
         )}
-        {!showToolRepo && (
+        {!showToolRepo && !showTimers && (
           <WorkerRolePanel
             key={activeSession?.session_id ?? "no-session"}
             session={activeSession}
@@ -7153,6 +7158,21 @@ function formatChatLibraryDate(value: number) {
   });
 }
 
+function timerRelativeTime(targetMs: number): string {
+  const delta = targetMs - Date.now();
+  const formatter = new Intl.RelativeTimeFormat(undefined, {
+    numeric: "auto",
+  });
+  const abs = Math.abs(delta);
+  if (abs < 60_000)
+    return formatter.format(Math.round(delta / 1000), "second");
+  if (abs < 3_600_000)
+    return formatter.format(Math.round(delta / 60_000), "minute");
+  if (abs < 86_400_000)
+    return formatter.format(Math.round(delta / 3_600_000), "hour");
+  return formatter.format(Math.round(delta / 86_400_000), "day");
+}
+
 function TimerPanel({
   panelRef,
   onResizeStart,
@@ -7193,6 +7213,12 @@ function TimerPanel({
   const intervalValid = mode === "once" || Number(intervalMinutes) > 0;
   const canCreate =
     !!session && !!prompt.trim() && triggerValid && intervalValid;
+  const showInvalidHint =
+    !canCreate &&
+    (prompt.trim().length > 0 ||
+      delayMinutes.length > 0 ||
+      atValue.length > 0 ||
+      intervalMinutes.length > 0);
   const resetForm = () => {
     setPrompt("");
     setName("");
@@ -7273,17 +7299,34 @@ function TimerPanel({
                 </span>
               </div>
               <div className="timer-item-prompt">{timer.prompt}</div>
-              <div className="timer-item-meta">
+              <div
+                className={`timer-item-schedule${timer.parked_reason ? " parked" : ""}`}
+                title={new Date(timer.next_fire_ms).toLocaleString()}
+              >
+                {timer.mode === "repeat"
+                  ? t("timer.modeRepeat")
+                  : t("timer.modeOnce")}
+                {timer.mode === "repeat" && timer.interval_ms
+                  ? ` · ${t("timer.everyMinutes", {
+                      minutes: Math.max(
+                        1,
+                        Math.round(timer.interval_ms / 60_000),
+                      ),
+                    })}`
+                  : ""}
+                {" · "}
                 {timer.enabled
                   ? t("timer.nextFire", {
-                      time: new Date(timer.next_fire_ms).toLocaleString(),
+                      time: timerRelativeTime(timer.next_fire_ms),
                     })
-                  : t("timer.toggleOff")}
+                  : timer.parked_reason
+                    ? t("timer.parked")
+                    : t("timer.paused")}
               </div>
               <div className="timer-item-actions">
                 <button
                   type="button"
-                  className={`timer-toggle${timer.enabled ? " off" : ""}`}
+                  className={`timer-toggle${timer.enabled ? "" : " off"}`}
                   title={timer.enabled ? t("timer.toggleOn") : t("timer.toggleOff")}
                   aria-label={timer.enabled ? t("timer.toggleOn") : t("timer.toggleOff")}
                   onClick={() => {
@@ -7296,7 +7339,7 @@ function TimerPanel({
                     });
                   }}
                 >
-                  {timer.enabled ? t("timer.toggleOn") : t("timer.toggleOff")}
+                  {timer.enabled ? <Pause size={13} /> : <Play size={13} />}
                 </button>
                 <button
                   type="button"
@@ -7398,7 +7441,12 @@ function TimerPanel({
             </label>
           )}
         </div>
-        <div className="timer-item-meta">{t("timer.scheduleHint")}</div>
+        {showInvalidHint && (
+          <div className="timer-form-hint error">
+            {t("timer.invalidInput")}
+          </div>
+        )}
+        <div className="timer-form-hint">{t("timer.scheduleHint")}</div>
         <button
           type="submit"
           className="timer-create-submit"
