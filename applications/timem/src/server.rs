@@ -570,6 +570,10 @@ struct WebTimer {
     next_fire_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_fired_ms: Option<u128>,
+    /// Why the runtime parked (auto-disabled) this timer after a failed
+    /// delivery. None for user-paused timers; cleared on re-enable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parked_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -7133,6 +7137,7 @@ fn merge_session_timers_from_core(
                         enabled: true,
                         next_fire_ms,
                         last_fired_ms: None,
+                        parked_reason: None,
                     }
                 }
             };
@@ -7315,6 +7320,7 @@ fn create_session_timer(
             enabled: true,
             next_fire_ms,
             last_fired_ms: None,
+            parked_reason: None,
         });
     }
     persist_timers(state, session_id)?;
@@ -7367,6 +7373,20 @@ fn toggle_session_timer(
             .find(|timer| timer.spec.timer_id == timer_id)
             .ok_or_else(|| "timer_not_found".to_string())?;
         timer.enabled = enabled;
+        if enabled {
+            // Resuming restarts the relative schedule from now so a timer
+            // paused long ago does not fire in a burst on the next tick.
+            // Absolute `at` schedules keep their instant (already fixed in
+            // wall-clock time); repeat timers restart from the interval.
+            let now = now_ms();
+            if timer.spec.after_ms.is_some() {
+                timer.next_fire_ms = now as u64 + timer.spec.after_ms.unwrap_or(0);
+            } else if timer.spec.mode == "repeat" {
+                timer.next_fire_ms =
+                    now as u64 + timer.spec.interval_ms.unwrap_or(0).max(1000);
+            }
+            timer.parked_reason = None;
+        }
     }
     persist_timers(state, session_id)?;
     publish_timers_updated(state, session_id);
@@ -7447,9 +7467,15 @@ fn fire_due_timers(state: &AppState) {
                 }
             } else {
                 session.timers[index].enabled = false;
+                session.timers[index].parked_reason =
+                    Some("delivery_failed".to_string());
             }
         }
         let _ = persist_timers(state, &session_id);
+        // A consumed once-timer must leave Core's projection too, or the
+        // post-compression confirmation would promise a fire that already
+        // happened.
+        sync_worker_timers(state, &session_id);
         publish_timers_updated(state, &session_id);
     }
 }
