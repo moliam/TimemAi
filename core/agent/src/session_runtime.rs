@@ -1,5 +1,6 @@
 use crate::model_stream::{
-    JsonPublicTextStream, PublicTextTarget, TurnResponsePreview, XmlPublicTextStream,
+    JsonPublicTextStream, NativeFinishSummaryStream, PublicTextTarget, TurnResponsePreview,
+    XmlPublicTextStream,
 };
 use crate::turn_state::{allocate_turn_token, TurnProjectionState};
 use crate::{
@@ -640,7 +641,17 @@ fn run_session_turn_with_model_client_and_reminder_override(
                             &turn_id,
                             &mut action_runtime,
                         );
+                        // Optimistic finish adjudication: a streamed
+                        // task_finished summary stays provisional until the
+                        // authoritative step is known. A terminal stop confirms
+                        // it as Final; an intercepted or failed finish (memo
+                        // guard, approval, failed actions, round limit) demotes
+                        // it to a settled intermediate so the answer area stops
+                        // claiming it while the turn keeps working.
                         if let Some((preview, session, turn_id)) = action_runtime.preview.as_mut() {
+                            if preview.finish_pending() {
+                                preview.resolve_finish(is_terminal_stop(&step));
+                            }
                             preview.publish(action_runtime.ui, session, turn_id);
                         }
                         if let Some((has_tool_call, has_free_talk)) =
@@ -882,6 +893,27 @@ fn run_session_turn_with_model_client_and_reminder_override(
         core.cancel_background_resources_for_session(request.session);
         core.mark_user_interrupted_work();
     }
+    if outcome.stop_reason == Some(TurnStopReason::TurnFinished)
+        && !outcome.text.is_empty()
+        && !response_preview.finish_confirmed_final(&outcome.text)
+    {
+        // A task_finished summary otherwise reaches live UIs only with the
+        // authoritative turn_finished delivery, which the host emits after its
+        // terminal persistence. Route the answer through the same provisional
+        // Final preview path the streamed <final_answer> protocol already uses,
+        // while the turn projection is still Active, so stream UIs render it
+        // immediately instead of showing an empty answer area. An optimistically
+        // streamed summary that already settled Final with the same text skips
+        // the redundant replacement publish.
+        response_preview.begin();
+        if response_preview
+            .append(PublicTextTarget::Response, &outcome.text)
+            .is_ok()
+        {
+            response_preview.validated(true, true);
+            response_preview.publish(ui, request.session, &turn_id);
+        }
+    }
     let mut action_runtime = TurnActionRuntime::new(ui);
     if outcome.stop_reason == Some(TurnStopReason::CancelledByUser) {
         // A user stop abandons the turn's authority: the memo must not
@@ -1057,6 +1089,7 @@ fn call_model_with_system_retries(
         preview.begin();
         let mut json = JsonPublicTextStream::default();
         let mut xml = XmlPublicTextStream::default();
+        let mut finish = NativeFinishSummaryStream::default();
         let shared_ui = std::cell::RefCell::new(&mut *ui);
         let mut preview_error = false;
         let result = model_client.call_model_interaction_streaming(
@@ -1083,6 +1116,14 @@ fn call_model_with_system_retries(
                     .unwrap_or("");
                 let parsed = if effective_request.is_native() {
                     emit(PublicTextTarget::Response, content);
+                    // Optimistic finish: stream the task_finished summary out
+                    // of the tool-call argument deltas while they arrive, so a
+                    // single long Q&A answer renders progressively instead of
+                    // appearing only after the whole transport completes. The
+                    // authoritative outcome still settles or retracts it later.
+                    finish.push_event(event, &mut |text| {
+                        emit(PublicTextTarget::FinishSummary, text);
+                    });
                     Ok(())
                 } else if config.response_protocol
                     == crate::response_protocol::ResponseProtocolKind::Json

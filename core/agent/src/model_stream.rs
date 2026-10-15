@@ -256,6 +256,22 @@ impl ResponsePreviewState {
         self.attempt
     }
 
+    /// Clears the current attempt's streamed text (the optimistic finish
+    /// summary supersedes a same-attempt progress note as the answer draft).
+    pub fn replace_current(&mut self, attempt: u64) {
+        if attempt != self.attempt {
+            return;
+        }
+        if self
+            .visible
+            .as_ref()
+            .is_some_and(|preview| preview.attempt == attempt && !preview.text.is_empty())
+        {
+            self.revision = self.revision.saturating_add(1);
+            self.visible = None;
+        }
+    }
+
     /// Any destination's first visible text ends the prior response preview.
     pub fn replace_prior(&mut self, attempt: u64) {
         if attempt == self.attempt
@@ -479,11 +495,280 @@ impl XmlPublicTextStream {
     }
 }
 
-/// Typed provisional destinations for public text preview.
+/// Typed provisional destinations for public text preview. `FinishSummary`
+/// marks text extracted from a streaming `task_finished` tool-call argument:
+/// it renders like response text but opts the preview into optimistic finish
+/// semantics (deferred settle, retriable on intercepted finishes).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PublicTextTarget {
     Response,
+    FinishSummary,
+}
+
+/// Incremental extractor for a `task_finished` summary from streaming native
+/// tool-call argument fragments. It only unescapes and forwards summary string
+/// bytes; structural JSON validation stays with the authoritative response
+/// parser, and any unexpected shape simply stops emitting.
+#[derive(Default)]
+pub struct NativeFinishSummaryStream {
+    calls: Vec<(String, Option<String>)>,
+    parser: SummaryArgumentParser,
+}
+
+impl NativeFinishSummaryStream {
+    /// Feeds one transport stream event and emits newly resolved summary text.
+    pub fn push_event(&mut self, event: &serde_json::Value, emit: &mut dyn FnMut(&str)) {
+        for (key, name, arguments) in Self::event_fragments(event) {
+            if let Some(name) = name {
+                match self.calls.iter_mut().find(|(existing, _)| existing == &key) {
+                    Some((_, slot)) => *slot = Some(name),
+                    None => self.calls.push((key.clone(), Some(name))),
+                }
+            }
+            if arguments.is_empty() {
+                continue;
+            }
+            let is_finish_call = self
+                .calls
+                .iter()
+                .find(|(existing, _)| existing == &key)
+                .and_then(|(_, name)| name.as_deref())
+                == Some("task_finished");
+            if is_finish_call {
+                self.parser.push(&arguments, emit);
+            }
+        }
+    }
+
+    /// Returns `(call key, optional function name, argument fragment)` tuples.
+    fn event_fragments(event: &serde_json::Value) -> Vec<(String, Option<String>, String)> {
+        let mut fragments = Vec::new();
+        if let Some(tool_calls) = event
+            .pointer("/choices/0/delta/tool_calls")
+            .and_then(|value| value.as_array())
+        {
+            for call in tool_calls {
+                let Some(index) = call.get("index").and_then(|value| value.as_u64()) else {
+                    continue;
+                };
+                let function = call.pointer("/function");
+                let name = function
+                    .and_then(|value| value.get("name"))
+                    .and_then(|value| value.as_str())
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string);
+                let arguments = function
+                    .and_then(|value| value.get("arguments"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                fragments.push((index.to_string(), name, arguments));
+            }
+            return fragments;
+        }
+        let event_type = event.get("type").and_then(|value| value.as_str());
+        if event_type == Some("response.output_item.added") {
+            let item = event.get("item");
+            if item
+                .and_then(|value| value.get("type"))
+                .and_then(|value| value.as_str())
+                == Some("function_call")
+            {
+                if let (Some(id), Some(name)) = (
+                    item.and_then(|value| value.get("id"))
+                        .and_then(|value| value.as_str()),
+                    item.and_then(|value| value.get("name"))
+                        .and_then(|value| value.as_str()),
+                ) {
+                    fragments.push((id.to_string(), Some(name.to_string()), String::new()));
+                }
+            }
+        } else if event_type == Some("response.function_call_arguments.delta") {
+            if let (Some(item_id), Some(delta)) = (
+                event.get("item_id").and_then(|value| value.as_str()),
+                event.get("delta").and_then(|value| value.as_str()),
+            ) {
+                fragments.push((item_id.to_string(), None, delta.to_string()));
+            }
+        }
+        fragments
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SummaryState {
+    #[default]
+    ObjectStart,
+    KeyStart,
+    InKey,
+    AfterKey,
+    ValueStart,
+    InValue,
+    InSkipString,
+    SkipEscaped,
+    Escaped,
+    Unicode,
+    Done,
+    Failed,
+}
+
+/// Byte-by-byte JSON state machine extracting the top-level `"summary"`
+/// string value. It tolerates arbitrary chunk boundaries and escapes; any
+/// other shape stops emitting without failing the transport. String values of
+/// other keys are skipped so `"summary"` need not be the first key.
+#[derive(Default)]
+struct SummaryArgumentParser {
+    state: SummaryState,
+    key: String,
+    key_is_summary: bool,
+    unicode: [u8; 4],
+    unicode_index: usize,
+    pending_high_surrogate: Option<u16>,
+}
+
+impl SummaryArgumentParser {
+    fn push(&mut self, text: &str, emit: &mut dyn FnMut(&str)) {
+        for ch in text.chars() {
+            match self.state {
+                SummaryState::ObjectStart => match ch {
+                    '{' => self.state = SummaryState::KeyStart,
+                    c if c.is_whitespace() => {}
+                    _ => self.state = SummaryState::Failed,
+                },
+                SummaryState::KeyStart => match ch {
+                    '"' => {
+                        self.key.clear();
+                        self.state = SummaryState::InKey;
+                    }
+                    c if c.is_whitespace() => {}
+                    _ => self.state = SummaryState::Failed,
+                },
+                SummaryState::InKey => match ch {
+                    '"' => {
+                        self.key_is_summary = self.key == "summary";
+                        self.state = SummaryState::AfterKey;
+                    }
+                    '\\' => self.state = SummaryState::Failed,
+                    c => self.key.push(c),
+                },
+                SummaryState::AfterKey => match ch {
+                    ':' => self.state = SummaryState::ValueStart,
+                    ',' => self.state = SummaryState::KeyStart,
+                    c if c.is_whitespace() => {}
+                    _ => self.state = SummaryState::Failed,
+                },
+                SummaryState::ValueStart => match ch {
+                    '"' if self.key_is_summary => self.state = SummaryState::InValue,
+                    '"' => self.state = SummaryState::InSkipString,
+                    c if c.is_whitespace() => {}
+                    // Numbers, booleans, null, or nested values are unsupported;
+                    // stop emitting rather than mis-track the structure.
+                    _ => self.state = SummaryState::Failed,
+                },
+                SummaryState::InValue => match ch {
+                    '"' => self.state = SummaryState::Done,
+                    '\\' => self.state = SummaryState::Escaped,
+                    c => self.emit_char(c, emit),
+                },
+                SummaryState::InSkipString => match ch {
+                    '"' => self.state = SummaryState::AfterKey,
+                    '\\' => self.state = SummaryState::SkipEscaped,
+                    _ => {}
+                },
+                SummaryState::SkipEscaped => self.state = SummaryState::InSkipString,
+                SummaryState::Escaped => match ch {
+                    '"' | '\\' | '/' => {
+                        self.emit_char(ch, emit);
+                        self.state = SummaryState::InValue;
+                    }
+                    'b' => {
+                        self.emit_char('\u{8}', emit);
+                        self.state = SummaryState::InValue;
+                    }
+                    'f' => {
+                        self.emit_char('\u{c}', emit);
+                        self.state = SummaryState::InValue;
+                    }
+                    'n' => {
+                        self.emit_char('\n', emit);
+                        self.state = SummaryState::InValue;
+                    }
+                    'r' => {
+                        self.emit_char('\r', emit);
+                        self.state = SummaryState::InValue;
+                    }
+                    't' => {
+                        self.emit_char('\t', emit);
+                        self.state = SummaryState::InValue;
+                    }
+                    'u' => {
+                        self.unicode_index = 0;
+                        self.state = SummaryState::Unicode;
+                    }
+                    _ => self.state = SummaryState::Failed,
+                },
+                SummaryState::Unicode => {
+                    let Some(digit) = ch.to_digit(16) else {
+                        self.state = SummaryState::Failed;
+                        continue;
+                    };
+                    self.unicode[self.unicode_index] = digit as u8;
+                    self.unicode_index += 1;
+                    if self.unicode_index < 4 {
+                        continue;
+                    }
+                    let value = (0..4).fold(0u16, |acc, i| {
+                        acc | ((self.unicode[i] as u16) << (4 * (3 - i)))
+                    });
+                    self.state = SummaryState::InValue;
+                    self.emit_code_unit(value, emit);
+                }
+                SummaryState::Done | SummaryState::Failed => {}
+            }
+        }
+    }
+
+    fn emit_code_unit(&mut self, value: u16, emit: &mut dyn FnMut(&str)) {
+        match (self.pending_high_surrogate.take(), value) {
+            (Some(high), 0xDC00..=0xDFFF) => {
+                let combined =
+                    0x10000 + (((high - 0xD800) as u32) << 10) + u32::from(value - 0xDC00);
+                if let Some(c) = char::from_u32(combined) {
+                    emit(&c.to_string());
+                }
+            }
+            (Some(_), 0xD800..=0xDBFF) => {
+                self.emit_replacement(emit);
+                self.pending_high_surrogate = Some(value);
+            }
+            (Some(_), lone) => {
+                self.emit_replacement(emit);
+                if let Some(c) = char::from_u32(u32::from(lone)) {
+                    emit(&c.to_string());
+                }
+            }
+            (None, 0xD800..=0xDBFF) => self.pending_high_surrogate = Some(value),
+            (None, plain) => {
+                if let Some(c) = char::from_u32(u32::from(plain)) {
+                    emit(&c.to_string());
+                }
+            }
+        }
+    }
+
+    fn emit_char(&mut self, c: char, emit: &mut dyn FnMut(&str)) {
+        if self.pending_high_surrogate.take().is_some() {
+            // Plain chars never complete a surrogate pair: pairs arrive as two
+            // consecutive \u escapes. The pending unit was a lone surrogate.
+            self.emit_replacement(emit);
+        }
+        emit(&c.to_string());
+    }
+
+    fn emit_replacement(&self, emit: &mut dyn FnMut(&str)) {
+        emit("\u{FFFD}");
+    }
 }
 
 /// Per-Turn provisional projection; never decides authoritative Turn lifecycle.
@@ -495,16 +780,24 @@ pub struct TurnResponsePreview {
     failed: bool,
     interruption: Option<String>,
     awaiting_first_text: bool,
+    finish_candidate: bool,
 }
 impl TurnResponsePreview {
     pub fn begin(&mut self) {
         self.attempt = self.response.begin();
         self.awaiting_first_text = true;
         self.failed = false;
+        self.finish_candidate = false;
     }
-    pub fn append(&mut self, _target: PublicTextTarget, text: &str) -> Result<bool, String> {
+    pub fn append(&mut self, target: PublicTextTarget, text: &str) -> Result<bool, String> {
         if self.failed {
             return Ok(false);
+        }
+        if target == PublicTextTarget::FinishSummary {
+            if !self.finish_candidate && !text.is_empty() {
+                self.response.replace_current(self.attempt);
+            }
+            self.finish_candidate = true;
         }
         if self.awaiting_first_text && !text.is_empty() {
             self.awaiting_first_text = false;
@@ -525,7 +818,37 @@ impl TurnResponsePreview {
             self.retract();
             return;
         }
+        if self.finish_candidate && !final_response {
+            // An optimistic task_finished summary is streamed before the
+            // authoritative outcome is known (memo guard, action results).
+            // Keep it provisional and let resolve_finish settle the attempt.
+            return;
+        }
         self.response.settle(self.attempt, final_response);
+    }
+    /// The attempt streamed a task_finished summary and its authoritative
+    /// outcome has not been resolved yet.
+    pub fn finish_pending(&self) -> bool {
+        self.finish_candidate && !self.failed
+    }
+    /// Whether the visible preview is already settled Final with exactly the
+    /// authoritative summary (the optimistic stream was confirmed).
+    pub fn finish_confirmed_final(&self, text: &str) -> bool {
+        !self.failed
+            && self.response.visible().is_some_and(|preview| {
+                preview.status == PreviewStatus::Final && preview.text == text
+            })
+    }
+    /// Settles a pending optimistic finish. `final_response == false` demotes
+    /// the text to a settled intermediate (finish was intercepted/rejected);
+    /// `true` confirms it as the Final answer.
+    pub fn resolve_finish(&mut self, final_response: bool) -> bool {
+        if !self.finish_pending() {
+            self.finish_candidate = false;
+            return false;
+        }
+        self.finish_candidate = false;
+        self.response.settle(self.attempt, final_response)
     }
     pub fn interrupt(&mut self, reason: &str) {
         self.failed = true;

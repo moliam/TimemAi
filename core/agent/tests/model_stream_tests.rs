@@ -265,3 +265,81 @@ fn sse_event_between_one_and_four_mib_is_accepted() {
     }
     assert_eq!(output, text);
 }
+
+use agent_core::model_stream::NativeFinishSummaryStream;
+
+fn finish_event(index: u64, name: Option<&str>, arguments: &str) -> serde_json::Value {
+    let mut delta = serde_json::json!({ "index": index });
+    if let Some(name) = name {
+        delta["function"]["name"] = serde_json::json!(name);
+    }
+    if !arguments.is_empty() {
+        delta["function"]["arguments"] = serde_json::json!(arguments);
+    }
+    serde_json::json!({ "choices": [{ "delta": { "tool_calls": [delta] } }] })
+}
+
+#[test]
+fn finish_summary_stream_emits_text_across_arbitrary_boundaries() {
+    let full = r#"{"summary":"你好 🌍 \"quoted\" done"}"#;
+    // Transport events always deliver complete UTF-8 text, so chunk splits sit
+    // on char boundaries; a mid-char split cannot occur in &str data.
+    let boundaries: Vec<usize> = full
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(full.len()))
+        .collect();
+    for boundary in boundaries {
+        let mut stream = NativeFinishSummaryStream::default();
+        let mut output = String::new();
+        stream.push_event(&finish_event(0, Some("task_finished"), &full[..boundary]), &mut |text| output.push_str(text));
+        stream.push_event(&finish_event(0, None, &full[boundary..]), &mut |text| output.push_str(text));
+        assert_eq!(output, "你好 🌍 \"quoted\" done", "boundary {boundary}");
+    }
+}
+
+#[test]
+fn finish_summary_stream_skips_other_keys_and_ignores_non_finish_calls() {
+    let mut stream = NativeFinishSummaryStream::default();
+    let mut output = String::new();
+    stream.push_event(&finish_event(0, Some("readfile"), r#"{"path":"Cargo.toml"}"#), &mut |text| output.push_str(text));
+    stream.push_event(&finish_event(1, None, r#"{"path":"x"}"#), &mut |text| output.push_str(text));
+    assert!(output.is_empty(), "non-finish calls must not emit");
+
+    stream.push_event(&finish_event(2, Some("task_finished"), r#"{"other":"skip","summary":"ok"}"#), &mut |text| output.push_str(text));
+    assert_eq!(output, "ok");
+
+    let mut invalid = NativeFinishSummaryStream::default();
+    let mut nothing = String::new();
+    invalid.push_event(&finish_event(0, Some("task_finished"), r#"{"summary":123}"#), &mut |text| nothing.push_str(text));
+    assert!(nothing.is_empty(), "non-string summary must not emit");
+}
+
+#[test]
+fn finish_summary_stream_surrogate_pairs_and_lone_units() {
+    let mut stream = NativeFinishSummaryStream::default();
+    let mut output = String::new();
+    // 🌍 = \ud83c\udf0d (valid pair); \ud800 alone is a lone high surrogate.
+    stream.push_event(&finish_event(0, Some("task_finished"), r#"{"summary":"a\ud83c\udf0db\ud800c"}"#), &mut |text| output.push_str(text));
+    assert_eq!(output, "a🌍b\u{FFFD}c");
+}
+
+#[test]
+fn finish_summary_stream_responses_api_events() {
+    let mut stream = NativeFinishSummaryStream::default();
+    let mut output = String::new();
+    let added = serde_json::json!({
+        "type": "response.output_item.added",
+        "item": { "type": "function_call", "id": "fc_1", "name": "task_finished" },
+    });
+    stream.push_event(&added, &mut |text| output.push_str(text));
+    for delta in [r#"{"sum"#, r#"mary":"resp"#, r#"onse"}"#] {
+        let event = serde_json::json!({
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_1",
+            "delta": delta,
+        });
+        stream.push_event(&event, &mut |text| output.push_str(text));
+    }
+    assert_eq!(output, "response");
+}
