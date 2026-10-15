@@ -400,6 +400,12 @@ enum CoreSessionWorkerCommand {
     ImportContext {
         snapshot: agent_core::DynamicContextSnapshot,
     },
+    /// Re-projects the Host-owned authoritative timer set (timers.json)
+    /// into the worker's Core state. Silent by design: the Host already
+    /// published the authoritative change, so no topic echo is emitted.
+    TimerSync {
+        timers: Vec<agent_core::TimerSpec>,
+    },
     Shutdown,
 }
 
@@ -935,6 +941,15 @@ impl CoreSessionWorkerHandle {
     ) -> Result<(), String> {
         self.command_tx
             .send(CoreSessionWorkerCommand::ImportContext { snapshot })
+            .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    /// Projects the Host-authoritative timer set into the worker's Core
+    /// state. Fire-and-forget: the worker merges it when idle between
+    /// commands, and the Host does not need an ack.
+    pub fn sync_timers(&self, timers: Vec<agent_core::TimerSpec>) -> Result<(), String> {
+        self.command_tx
+            .send(CoreSessionWorkerCommand::TimerSync { timers })
             .map_err(|_| "core_session_worker_stopped".to_string())
     }
 
@@ -1833,6 +1848,7 @@ impl CoreSessionWorker {
                     | CoreSessionWorkerCommand::ExportContext { .. }
                     | CoreSessionWorkerCommand::ClearContext
                     | CoreSessionWorkerCommand::ImportContext { .. }
+                    | CoreSessionWorkerCommand::TimerSync { .. }
                         if shutdown_requested.load(Ordering::SeqCst) =>
                     {
                         break;
@@ -2139,6 +2155,9 @@ impl CoreSessionWorker {
                         )
                         .with_worker_scope(&identity.context_id, &identity.worker_id);
                         let _ = event_tx.send(CoreSessionWorkerEvent::Topics(vec![event]));
+                    }
+                    CoreSessionWorkerCommand::TimerSync { timers } => {
+                        core.replace_timers(timers);
                     }
                     CoreSessionWorkerCommand::ExportContext { result_tx } => {
                         let _ = result_tx.send(Ok(core.export_dynamic_context()));

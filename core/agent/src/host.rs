@@ -384,6 +384,7 @@ pub const CORE_TOPIC_CONTEXT_COMPRESS: &str = "core.context.compress";
 pub const CORE_TOPIC_TOOLGEN: &str = "core.toolgen";
 pub const CORE_TOPIC_LIFECYCLE: &str = "core.lifecycle";
 pub const CORE_TOPIC_MEMO: &str = "core.memo";
+pub const CORE_TOPIC_TIMER: &str = "core.timer";
 pub const CORE_TOPIC_USER_APPROVAL_REQUEST: &str = "core.user.approval.request";
 pub const CORE_TOPIC_ROUND_LIMIT_REQUEST: &str = "core.user.round_limit.request";
 pub const CORE_TOPIC_OUTPUT_EXPAND_REQUEST: &str = "core.user.output_expand.request";
@@ -935,6 +936,30 @@ pub fn memo_stops_finish_topic_event(session_id: impl Into<String>, memo: &str) 
             "active": true,
             "text": memo,
             "op": "stops_finish",
+        }),
+    )
+}
+
+/// Authoritative timer set for a session after a lifecycle transition.
+/// `op` is "created" | "deleted". The full timers array is the state;
+/// consumers replace their view with it.
+pub fn timer_topic_event(
+    session_id: impl Into<String>,
+    op: &str,
+    timers: &[crate::TimerSpec],
+) -> CoreTopicEvent {
+    CoreTopicEvent::new(
+        session_id,
+        CoreTopic::new(
+            CORE_TOPIC_TIMER,
+            json!({
+                "name": CORE_TOPIC_TIMER,
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "op": op,
+            "timers": timers,
         }),
     )
 }
@@ -1610,6 +1635,11 @@ fn action_kind_topic_payload(kind: &CoreActionKind) -> Value {
             "kind": "chat_history",
             "operation": operation,
         }),
+        CoreActionKind::Timer { op, name } => json!({
+            "kind": "timer",
+            "op": op,
+            "name": name,
+        }),
         CoreActionKind::Other { action } => json!({
             "kind": "other",
             "action": action,
@@ -1647,6 +1677,10 @@ fn action_kind_from_topic_payload(value: &Value, fallback_action: &str) -> CoreA
         },
         "chat_history" => CoreActionKind::ChatHistory {
             operation: value["operation"].as_str().unwrap_or_default().to_string(),
+        },
+        "timer" => CoreActionKind::Timer {
+            op: value["op"].as_str().unwrap_or_default().to_string(),
+            name: value["name"].as_str().unwrap_or_default().to_string(),
         },
         "other" => CoreActionKind::Other {
             action: value["action"]
