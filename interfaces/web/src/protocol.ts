@@ -196,8 +196,26 @@ export type Session = {
   message_queue: MessageQueueProjection;
   /** Active long-task memo text from the core.memo topic. */
   active_memo?: string | null;
+  /** Host-authoritative scheduled timers (user + model created). */
+  timers?: TimerInfo[];
   /** Wall-clock ms of the latest explicit context clear. */
   context_cleared_at_ms?: number | null;
+};
+
+/** Flattened host timer projection (Core TimerSpec + host scheduling state). */
+export type TimerInfo = {
+  timer_id: string;
+  name: string;
+  prompt: string;
+  mode: "once" | "repeat" | string;
+  after_ms?: number | null;
+  at?: string | null;
+  interval_ms?: number | null;
+  created_by: "user" | "model" | string;
+  created_at_ms: number;
+  enabled: boolean;
+  next_fire_ms: number;
+  last_fired_ms?: number | null;
 };
 
 export type McpTransport =
@@ -516,6 +534,11 @@ export type WireEvent =
       type: "session_memo_updated";
       session_id: string;
       memo_text: string | null;
+    }
+  | {
+      type: "timers_updated";
+      session_id: string;
+      timers: TimerInfo[];
     }
   | {
       type: "session_context_cleared";
@@ -892,6 +915,23 @@ export type ClientCommand =
   | { type: "model_endpoint_share_export"; request_id: string; endpoint_id: string; basic: boolean; advanced: boolean; personal: boolean }
   | { type: "model_endpoint_share_import"; request_id: string; data: string }
   | { type: "model_endpoint_secret_reveal"; endpoint_id: string }
+  | {
+      type: "timer_create";
+      session_id: string;
+      prompt: string;
+      name?: string;
+      mode?: "once" | "repeat";
+      after_ms?: number;
+      at?: string;
+      interval_ms?: number;
+    }
+  | { type: "timer_delete"; session_id: string; timer_id: string }
+  | {
+      type: "timer_toggle";
+      session_id: string;
+      timer_id: string;
+      enabled: boolean;
+    }
   | { type: "mcp_server_upsert"; session_id: string; config: McpServerConfig }
   | { type: "mcp_server_delete"; server_id: string }
   | {
