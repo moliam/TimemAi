@@ -1,6 +1,6 @@
 import { MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation } from "./tool_invocation";
 import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
-import { initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
+import { initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
 import type { CatalogModel } from "./model_endpoints";
 import { applyBetaDebugDefault } from "./beta_preferences";
 import { StreamUiModeSetting, useStreamUiMode, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
@@ -15086,7 +15086,7 @@ function ModelEndpointEditor({
     response_protocol: endpoint?.response_protocol ?? "xml",
     base_url: endpoint?.base_url ?? "",
     max_llm_input_tokens: endpoint?.max_llm_input_tokens ?? 100_000,
-    max_llm_output_tokens: endpoint?.max_llm_output_tokens ?? 10_000,
+    max_llm_output_tokens: endpoint?.max_llm_output_tokens ?? 20_000,
     stream: endpoint?.stream ?? true,
     function_calling: endpoint?.function_calling ?? true,
     api_key: revealedApiKey,
@@ -15181,6 +15181,9 @@ function ModelEndpointEditor({
   });
   const providerLabels: Record<string, string> = { openai: "OpenAI", zhipu: t("endpoints.zhipu") };
   const capabilityIssue = endpointCapabilityIssue(draft, selectedModel, providers);
+  const templateBudget = templateBudgetSuggestion(selectedModel);
+  const inputBudgetInvalid = !!selectedModel && (capabilityIssue?.code === "input_budget" || capabilityIssue?.code === "context_budget");
+  const outputBudgetInvalid = !!selectedModel && (capabilityIssue?.code === "output_budget" || capabilityIssue?.code === "context_budget");
   const catalogInvalid = capabilityIssue !== null;
   const dailyReasoningOptions = allowed != null
     ? displayedAllowed
@@ -15387,12 +15390,28 @@ function ModelEndpointEditor({
           <input className="endpoint-token-budget" type="number" inputMode="numeric" onKeyDown={(event) => { if (event.key === "ArrowUp" || event.key === "ArrowDown") event.preventDefault(); }} min={selectedModel?.min_input ?? 3000} max={selectedModel ? Math.min(selectedModel.max_input, selectedModel.context_window - draft.max_llm_output_tokens) : MAX_LLM_INPUT_TOKENS_CEILING} step={1}
             value={draft.max_llm_input_tokens} onChange={(e) => edit({ max_llm_input_tokens: Number(e.target.value) })} />
           {selectedModel && <small>{selectedModel.min_input.toLocaleString()} – {Math.min(selectedModel.max_input, selectedModel.context_window - draft.max_llm_output_tokens).toLocaleString()}</small>}
+          {selectedModel && templateBudget?.input !== undefined && draft.max_llm_input_tokens !== templateBudget.input && (
+            <div className={`endpoint-budget-restore${inputBudgetInvalid ? " invalid" : ""}`}>
+              <small>{inputBudgetInvalid
+                ? t("endpoints.budgetInvalidHint", { value: templateBudget.input.toLocaleString() })
+                : t("endpoints.budgetKeptHint", { value: templateBudget.input.toLocaleString() })}</small>
+              <button type="button" onClick={() => setDraft(current => restoreEndpointTemplateBudget(current, selectedModel, "max_llm_input_tokens"))}>{t("endpoints.restoreBudgetDefault")}</button>
+            </div>
+          )}
         </label>
         <label>
           {t("endpoints.maxOutput")}
           <input className="endpoint-token-budget" type="number" inputMode="numeric" onKeyDown={(event) => { if (event.key === "ArrowUp" || event.key === "ArrowDown") event.preventDefault(); }} min={selectedModel?.min_output ?? 512} max={selectedModel ? Math.min(selectedModel.max_output, selectedModel.context_window - draft.max_llm_input_tokens) : MAX_LLM_INPUT_TOKENS_CEILING} step={1}
             value={draft.max_llm_output_tokens} onChange={(e) => edit({ max_llm_output_tokens: Number(e.target.value) })} />
           {selectedModel && <small>{selectedModel.min_output.toLocaleString()} – {Math.min(selectedModel.max_output, selectedModel.context_window - draft.max_llm_input_tokens).toLocaleString()}</small>}
+          {selectedModel && templateBudget?.output !== undefined && draft.max_llm_output_tokens !== templateBudget.output && (
+            <div className={`endpoint-budget-restore${outputBudgetInvalid ? " invalid" : ""}`}>
+              <small>{outputBudgetInvalid
+                ? t("endpoints.budgetInvalidHint", { value: templateBudget.output.toLocaleString() })
+                : t("endpoints.budgetKeptHint", { value: templateBudget.output.toLocaleString() })}</small>
+              <button type="button" onClick={() => setDraft(current => restoreEndpointTemplateBudget(current, selectedModel, "max_llm_output_tokens"))}>{t("endpoints.restoreBudgetDefault")}</button>
+            </div>
+          )}
         </label>
         <section className="wide endpoint-reasoning-panel" aria-label={t("endpoints.reasoningSettings")}>
           <details className="endpoint-reasoning-config">

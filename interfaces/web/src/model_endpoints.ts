@@ -494,6 +494,28 @@ export function templateBaseUrl(model: CatalogModel | undefined, protocol: strin
   return profile ? profile.base_url ?? model?.base_url : undefined;
 }
 
+/** Template-suggested token budgets: capped defaults shared by apply and restore. */
+export function templateBudgetSuggestion(model: CatalogModel | undefined): { input: number; output: number } | undefined {
+  if (!model) return undefined;
+  return {
+    input: Math.min(256_000, model.max_input),
+    output: Math.min(20_000, model.max_output),
+  };
+}
+
+/** Restore one token-budget field to the template-suggested default. */
+export function restoreEndpointTemplateBudget(
+  draft: ModelEndpointDraft,
+  model: CatalogModel | undefined,
+  field: "max_llm_input_tokens" | "max_llm_output_tokens",
+): ModelEndpointDraft {
+  const budget = templateBudgetSuggestion(model);
+  if (!budget) return draft;
+  const requirements = draft.requirements ?? initialEndpointRequirements();
+  return { ...draft, [field]: budget[field === "max_llm_input_tokens" ? "input" : "output"],
+    requirements: { ...requirements, field_sources: { ...requirements.field_sources, [field]: "template" as const } } };
+}
+
 // Visibility is value-based, independent of who last edited the field.
 export function canRestoreEndpointTemplateUrl(draft: ModelEndpointDraft, model?: CatalogModel): boolean {
   const defaultUrl = templateBaseUrl(model, draft.api_protocol);
@@ -584,21 +606,20 @@ export function applyEndpointTemplate(draft: ModelEndpointDraft, model?: Catalog
   const protocol = model.protocols.find(p => !p.disabled_reason);
   if (!protocol) return draft;
   const requirements = structuredClone(draft.requirements ?? initialEndpointRequirements());
-  // Selecting a different template is an explicit intent to adopt it: the
-  // address follows the template (migrated legacy values included), while
-  // user-tuned knobs like the protocol choice or function calling keep
-  // their overrides below.
-  if (draft.catalog_id !== model.id && requirements.field_sources.base_url === "user" && templateBaseUrl(model, requirements.field_sources.api_protocol === "user" ? draft.api_protocol : protocol.protocol) !== undefined)
-    requirements.field_sources.base_url = "template";
+  // A user-owned address (custom proxy, migrated legacy value) survives a
+  // template switch: applying a template keeps user-tuned legal inputs, and
+  // the editor offers "restore default URL" separately. Template-owned or
+  // absent values follow the template below.
   const next = { ...draft, catalog_id: model.id, requirements };
   const effectiveProtocol = requirements.field_sources.api_protocol === "user" ? draft.api_protocol : protocol.protocol;
   const base_url = templateBaseUrl(model, effectiveProtocol);
+  const budget = templateBudgetSuggestion(model)!;
   const suggestions: Partial<ModelEndpointDraft> = {
     name: model.label, model: model.model, ...(base_url === undefined ? {} : { base_url }), api_protocol: protocol.protocol,
     stream: true, function_calling: functionCallingDefault(model, effectiveProtocol),
     reasoning_effort: protocol.fixed_effort ?? model.default_effort,
-    max_llm_input_tokens: Math.min(256_000, model.max_input),
-    max_llm_output_tokens: Math.min(10_000, model.max_output),
+    max_llm_input_tokens: budget.input,
+    max_llm_output_tokens: budget.output,
   };
   for (const [key, value] of Object.entries(suggestions)) {
     if (requirements.field_sources[key] !== "user") {

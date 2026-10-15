@@ -5632,6 +5632,15 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .endpoint-editor-grid { column-gap: 18px; row-gap: 14px; }
 .endpoint-editor-grid input:not([type="checkbox"]), .endpoint-editor-grid select { min-height: 36px; border-radius: 7px; }
 .endpoint-editor-grid select:disabled, .endpoint-editor-grid input:not([type="checkbox"]):read-only { opacity: .65; cursor: not-allowed; }
+.endpoint-budget-restore { display: flex; gap: 8px; align-items: baseline; margin-top: 2px; }
+.endpoint-budget-restore small { color: #8fa5b2; }
+.endpoint-budget-restore button { background: none; border: 0; padding: 0; color: #80cbb8; font-size: 11px; cursor: pointer; white-space: nowrap; }
+.endpoint-budget-restore.invalid small { color: #e4a0a8; }
+.endpoint-budget-restore.invalid button { color: #e08a94; }
+:root[data-theme="light"] .endpoint-budget-restore small { color: #5c707c; }
+:root[data-theme="light"] .endpoint-budget-restore button { color: #267a64; }
+:root[data-theme="light"] .endpoint-budget-restore.invalid small { color: #913d49; }
+:root[data-theme="light"] .endpoint-budget-restore.invalid button { color: #8b3f49; }
 .endpoint-base-reset { display: flex; gap: 12px; align-items: baseline; margin-top: -6px; }
 .endpoint-base-reset button { background: none; border: 0; padding: 0; color: #80cbb8; font-size: 11px; cursor: pointer; }
 .endpoint-editor-grid .endpoint-constraint-note { color: #d5bb87; line-height: 1.65; }
