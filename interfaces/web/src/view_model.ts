@@ -1113,7 +1113,7 @@ export function turnsFromHistoryRecords(
       if (record.role === "user") {
         const kind =
           record.kind &&
-          ["task", "supplement", "approval"].includes(record.kind)
+          ["task", "supplement", "approval", "timer"].includes(record.kind)
             ? record.kind
             : "task";
         turn.user_entries.push({

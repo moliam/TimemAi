@@ -90,6 +90,7 @@ import {
   Trash2,
   Wrench,
   X,
+  AlarmClock,
 } from "lucide-react";
 import {
   createContext,
@@ -294,6 +295,7 @@ import {
 } from "./queued_messages";
 
 import { commandNeedsReliableDelivery } from "./command_outbox";
+import type { TimerInfo } from "./protocol";
 import { classifyEventSequence, snapshotEventBaseline } from "./event_cursor";
 import {
   enablesSemanticDelivery,
@@ -560,6 +562,7 @@ function TimemApp() {
     number | null
   >(null);
   const [showToolRepo, setShowToolRepo] = useState(false);
+  const [showTimers, setShowTimers] = useState(false);
   const [chatLibraryMode, setChatLibraryMode] = useState<
     "search" | "favorites" | null
   >(null);
@@ -779,6 +782,8 @@ function TimemApp() {
   const mobileSidebarRef = useRef<HTMLElement | null>(null);
   const toolRepoButtonRef = useRef<HTMLButtonElement | null>(null);
   const toolRepoPanelRef = useRef<HTMLElement | null>(null);
+  const timersButtonRef = useRef<HTMLButtonElement | null>(null);
+  const timersPanelRef = useRef<HTMLElement | null>(null);
   const chatLibraryPanelRef = useRef<HTMLElement | null>(null);
   const chatLibraryTriggerRef = useRef<HTMLButtonElement | null>(null);
   const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -834,6 +839,10 @@ function TimemApp() {
   const closeToolRepoPanel = useCallback(() => {
     setShowToolRepo(false);
     toolRepoButtonRef.current?.focus({ preventScroll: true });
+  }, []);
+  const closeTimersPanel = useCallback(() => {
+    setShowTimers(false);
+    timersButtonRef.current?.focus({ preventScroll: true });
   }, []);
   const closeRuntimePanel = useCallback((restoreFocus = true) => {
     setShowRuntime(false);
@@ -967,6 +976,15 @@ function TimemApp() {
     document.addEventListener("keydown", dismissOnEscape);
     return () => document.removeEventListener("keydown", dismissOnEscape);
   }, [closeToolRepoPanel, showToolRepo]);
+  useEffect(() => {
+    if (!showTimers) return;
+    timersPanelRef.current?.focus({ preventScroll: true });
+    const dismissOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeTimersPanel();
+    };
+    document.addEventListener("keydown", dismissOnEscape);
+    return () => document.removeEventListener("keydown", dismissOnEscape);
+  }, [closeTimersPanel, showTimers]);
 
   useEffect(() => {
     if (!showMobileSessions) return;
@@ -2066,6 +2084,16 @@ function TimemApp() {
           current.map((session) =>
             session.session_id === event.session_id
               ? { ...session, active_memo: event.memo_text ?? null }
+              : session,
+          ),
+        );
+        return;
+      }
+      if (event.type === "timers_updated") {
+        setSessions((current) =>
+          current.map((session) =>
+            session.session_id === event.session_id
+              ? { ...session, timers: event.timers }
               : session,
           ),
         );
@@ -3561,6 +3589,10 @@ function TimemApp() {
   const toolRepoLabel = showToolRepo
     ? "Close ToolRepo"
     : `Open ToolRepo · ${activeToolCount} reusable tools`;
+  const activeTimerCount = activeSession?.timers?.length ?? 0;
+  const timersLabel = showTimers
+    ? t("timer.ariaLabel")
+    : `${t("timer.ariaLabel")} · ${activeTimerCount}`;
   const mobileSessionsLabel = showMobileSessions
     ? "Close session navigation"
     : "Open session navigation";
@@ -4828,6 +4860,28 @@ function TimemApp() {
                   </span>
                 </button>
               )}
+              <button
+                type="button"
+                ref={timersButtonRef}
+                title={t("timer.title")}
+                aria-label={timersLabel}
+                className={`icon-button timer-header-button ${showTimers ? "selected" : ""} ${activeTimerCount > 0 ? "has-timers" : ""}`}
+                aria-expanded={showTimers}
+                aria-controls="timer-panel"
+                onClick={() => {
+                  setShowAppearance(false);
+                  setShowRuntime(false);
+                  setShowMcp(false);
+                  setShowToolRepo(false);
+                  if (showTimers) closeTimersPanel();
+                  else setShowTimers(true);
+                }}
+              >
+                <AlarmClock size={17} />
+                <span className="timer-header-count" aria-hidden="true">
+                  {activeTimerCount}
+                </span>
+              </button>
             </div>
           </header>
           {showAppearance && (
@@ -5220,6 +5274,24 @@ function TimemApp() {
             className="side-panel-backdrop"
             aria-label="Close ToolRepo"
             onClick={closeToolRepoPanel}
+          />
+        )}
+        {showTimers && (
+          <button
+            type="button"
+            className="side-panel-backdrop"
+            aria-label={t("common.close")}
+            onClick={closeTimersPanel}
+          />
+        )}
+        {showTimers && (
+          <TimerPanel
+            key={activeSession?.session_id ?? "no-session"}
+            panelRef={timersPanelRef}
+            onResizeStart={(event) => startSidebarResize("right", event)}
+            onClose={closeTimersPanel}
+            session={activeSession}
+            sendCommand={sendCommandRef}
           />
         )}
         {toolGenEnabled && showToolRepo && (
@@ -7079,6 +7151,264 @@ function formatChatLibraryDate(value: number) {
     year:
       date.getFullYear() === new Date().getFullYear() ? undefined : "numeric",
   });
+}
+
+function TimerPanel({
+  panelRef,
+  onResizeStart,
+  onClose,
+  session,
+  sendCommand,
+}: {
+  panelRef: MutableRefObject<HTMLElement | null>;
+  onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onClose: () => void;
+  session: Session | undefined;
+  sendCommand: MutableRefObject<
+    (command: ClientCommand, requestedCommandId?: string) => boolean
+  >;
+}) {
+  useT();
+  const timers = session?.timers ?? [];
+  const [prompt, setPrompt] = useState("");
+  const [name, setName] = useState("");
+  const [mode, setMode] = useState<"once" | "repeat">("once");
+  const [trigger, setTrigger] = useState<"delay" | "at">("delay");
+  const [delayMinutes, setDelayMinutes] = useState("");
+  const [atValue, setAtValue] = useState("");
+  const [intervalMinutes, setIntervalMinutes] = useState("");
+  useEffect(() => {
+    setPrompt("");
+    setName("");
+    setMode("once");
+    setTrigger("delay");
+    setDelayMinutes("");
+    setAtValue("");
+    setIntervalMinutes("");
+  }, [session?.session_id]);
+  const triggerValid =
+    trigger === "delay"
+      ? Number(delayMinutes) > 0
+      : !!atValue && !Number.isNaN(new Date(atValue).getTime());
+  const intervalValid = mode === "once" || Number(intervalMinutes) > 0;
+  const canCreate =
+    !!session && !!prompt.trim() && triggerValid && intervalValid;
+  const resetForm = () => {
+    setPrompt("");
+    setName("");
+    setDelayMinutes("");
+    setAtValue("");
+    setIntervalMinutes("");
+  };
+  const submitCreate = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!canCreate || !session) return;
+    const command: ClientCommand = {
+      type: "timer_create",
+      session_id: session.session_id,
+      prompt: prompt.trim(),
+      mode,
+      ...(name.trim() ? { name: name.trim() } : {}),
+      ...(trigger === "delay"
+        ? { after_ms: Math.round(Number(delayMinutes) * 60_000) }
+        : { at: new Date(atValue).toISOString() }),
+      ...(mode === "repeat"
+        ? { interval_ms: Math.round(Number(intervalMinutes) * 60_000) }
+        : {}),
+    };
+    if (!sendCommand.current(command)) return;
+    resetForm();
+  };
+  return (
+    <aside
+      id="timer-panel"
+      ref={panelRef}
+      className="timer-panel toolrepo-side-panel session-side-panel"
+      aria-label={t("timer.title")}
+      tabIndex={-1}
+    >
+      <button
+        type="button"
+        className="sidebar-resize-handle right"
+        title="Resize timers"
+        aria-label="Resize timers"
+        onPointerDown={onResizeStart}
+      />
+      <header className="side-panel-header">
+        <div className="side-panel-title">
+          <AlarmClock size={15} />
+          <strong>{t("timer.title")}</strong>
+        </div>
+        <button
+          type="button"
+          className="icon-button"
+          title={t("common.close")}
+          aria-label={t("common.close")}
+          onClick={onClose}
+        >
+          <X size={16} />
+        </button>
+      </header>
+      <div className="timer-list">
+        {timers.length === 0 ? (
+          <div className="activity-empty">
+            <strong>{t("timer.empty")}</strong>
+          </div>
+        ) : (
+          timers.map((timer) => (
+            <div key={timer.timer_id} className="timer-item">
+              <div className="timer-item-top">
+                <b>{timer.name}</b>
+                <span
+                  className={`timer-item-origin${timer.created_by === "user" ? " user" : ""}`}
+                >
+                  {timer.created_by === "user"
+                    ? t("timer.createdByUser")
+                    : t("timer.createdByModel")}
+                </span>
+                <span className="timer-item-meta">
+                  {timer.mode === "repeat"
+                    ? t("timer.modeRepeat")
+                    : t("timer.modeOnce")}
+                </span>
+              </div>
+              <div className="timer-item-prompt">{timer.prompt}</div>
+              <div className="timer-item-meta">
+                {timer.enabled
+                  ? t("timer.nextFire", {
+                      time: new Date(timer.next_fire_ms).toLocaleString(),
+                    })
+                  : t("timer.toggleOff")}
+              </div>
+              <div className="timer-item-actions">
+                <button
+                  type="button"
+                  className={`timer-toggle${timer.enabled ? " off" : ""}`}
+                  title={timer.enabled ? t("timer.toggleOn") : t("timer.toggleOff")}
+                  aria-label={timer.enabled ? t("timer.toggleOn") : t("timer.toggleOff")}
+                  onClick={() => {
+                    if (!session) return;
+                    sendCommand.current({
+                      type: "timer_toggle",
+                      session_id: session.session_id,
+                      timer_id: timer.timer_id,
+                      enabled: !timer.enabled,
+                    });
+                  }}
+                >
+                  {timer.enabled ? t("timer.toggleOn") : t("timer.toggleOff")}
+                </button>
+                <button
+                  type="button"
+                  className="timer-delete"
+                  title={t("timer.deleteTimer")}
+                  aria-label={t("timer.deleteTimer")}
+                  onClick={() => {
+                    if (!session) return;
+                    sendCommand.current({
+                      type: "timer_delete",
+                      session_id: session.session_id,
+                      timer_id: timer.timer_id,
+                    });
+                  }}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+      <form className="timer-create-form" onSubmit={submitCreate}>
+        <label>
+          {t("timer.promptLabel")}
+          <textarea
+            rows={2}
+            value={prompt}
+            placeholder={t("timer.promptPlaceholder")}
+            onChange={(event) => setPrompt(event.target.value)}
+          />
+        </label>
+        <label>
+          {t("timer.nameLabel")}
+          <input
+            value={name}
+            placeholder={t("timer.namePlaceholder")}
+            onChange={(event) => setName(event.target.value)}
+          />
+        </label>
+        <div className="timer-create-row">
+          <label>
+            {t("timer.modeLabel")}
+            <select
+              value={mode}
+              onChange={(event) =>
+                setMode(event.target.value as "once" | "repeat")
+              }
+            >
+              <option value="once">{t("timer.modeOnce")}</option>
+              <option value="repeat">{t("timer.modeRepeat")}</option>
+            </select>
+          </label>
+          <label>
+            {t("timer.triggerLabel")}
+            <select
+              value={trigger}
+              onChange={(event) =>
+                setTrigger(event.target.value as "delay" | "at")
+              }
+            >
+              <option value="delay">{t("timer.triggerDelay")}</option>
+              <option value="at">{t("timer.triggerAt")}</option>
+            </select>
+          </label>
+        </div>
+        <div className="timer-create-row">
+          {trigger === "delay" ? (
+            <label>
+              {t("timer.triggerDelay")}
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={delayMinutes}
+                onChange={(event) => setDelayMinutes(event.target.value)}
+              />
+            </label>
+          ) : (
+            <label>
+              {t("timer.triggerAt")}
+              <input
+                type="datetime-local"
+                value={atValue}
+                onChange={(event) => setAtValue(event.target.value)}
+              />
+            </label>
+          )}
+          {mode === "repeat" && (
+            <label>
+              {t("timer.intervalLabel")}
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={intervalMinutes}
+                onChange={(event) => setIntervalMinutes(event.target.value)}
+              />
+            </label>
+          )}
+        </div>
+        <div className="timer-item-meta">{t("timer.scheduleHint")}</div>
+        <button
+          type="submit"
+          className="timer-create-submit"
+          disabled={!canCreate}
+        >
+          {t("timer.createButton")}
+        </button>
+      </form>
+    </aside>
+  );
 }
 
 function ToolRepoPanel({
@@ -10269,6 +10599,7 @@ const TurnInteraction = memo(function TurnInteraction({
                     <Trash2 size={13} />
                   </button>
                   {entry.kind === "supplement" && <span>{t("composer.supplementTag")}</span>}
+                  {entry.kind === "timer" && <span>{t("timer.timerTag")}</span>}
                   <UserText text={entry.text} />
                   {(
                     entry.worker_roles ??

@@ -1029,6 +1029,39 @@ button:disabled { cursor: not-allowed; }
 /* ToolGen is session-scoped; the side panel is a quiet repository browser, not another chat surface. */
 .toolrepo-header-button { width: auto; min-width: 42px; display: inline-flex; grid-template-columns: none; align-items: center; justify-content: center; gap: 4px; padding: 0 8px; }
 .toolrepo-header-count { min-width: 11px; color: #8f9ba2; font-size: 10px; font-weight: 700; line-height: 1; text-align: center; }
+.timer-header-button.has-timers { color: #6fd3c0; border-color: #2c5a52; background: #14342f; }
+.timer-header-count { min-width: 11px; color: #8f9ba2; font-size: 10px; font-weight: 700; line-height: 1; text-align: center; }
+.timer-header-button.has-timers .timer-header-count { color: #6fd3c0; }
+.timer-panel { min-width: 0; display: flex; flex-direction: column; border-left: 1px solid #25303c; background: #10171f; }
+.timer-panel header { padding: 18px 16px 15px; display: flex; justify-content: space-between; border-bottom: 1px solid #25303c; }
+.timer-list { overflow-y: auto; padding: 10px; display: grid; gap: 8px; align-content: start; }
+.timer-item { border: 1px solid #243040; border-radius: 6px; padding: 9px 10px; background: #131c26; display: grid; gap: 6px; }
+.timer-item-top { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #d3e0e8; }
+.timer-item-top b { font-weight: 700; }
+.timer-item-origin { padding: 1px 6px; border-radius: 999px; background: #223240; color: #8fb6c9; font-size: 10px; font-weight: 700; }
+.timer-item-origin.user { background: #173b32; color: #6fd3c0; }
+.timer-item-prompt { color: #9db0bd; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
+.timer-item-meta { color: #6f8491; font-size: 11px; }
+.timer-item-actions { display: flex; gap: 6px; align-items: center; }
+.timer-toggle { border: 1px solid #2c3b49; border-radius: 5px; padding: 3px 8px; background: #1a2632; color: #9aabb8; font-size: 11px; font-weight: 650; }
+.timer-toggle:hover { background: #24333f; color: #d5e1e8; }
+.timer-toggle.off { color: #b89157; border-color: #4a3f28; background: #2c2417; }
+.timer-delete { border: 1px solid transparent; border-radius: 5px; padding: 3px; background: transparent; color: #9aabb8; display: grid; place-items: center; }
+.timer-delete:hover { color: #e58b85; background: #3a2222; }
+.timer-create-form { border-top: 1px solid #25303c; padding: 12px; display: grid; gap: 8px; }
+.timer-create-form label { display: grid; gap: 4px; color: #8fa2af; font-size: 11px; font-weight: 650; }
+.timer-create-form input, .timer-create-form select { border: 1px solid #2c3b49; border-radius: 5px; padding: 6px 8px; background: #131c26; color: #d5e1e8; font-size: 12px; }
+.timer-create-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.timer-create-submit { border: 0; border-radius: 5px; padding: 7px 10px; background: #1f443c; color: #b9ecd9; font-size: 12px; font-weight: 700; }
+.timer-create-submit:disabled { opacity: .55; cursor: default; }
+.timer-create-submit:not(:disabled):hover { background: #27584d; }
+:root[data-theme="light"] .timer-panel { border-color: #d3dde2; background: #f8fafb; }
+:root[data-theme="light"] .timer-item { border-color: #d9e2e8; background: #ffffff; }
+:root[data-theme="light"] .timer-item-top { color: #2c3a44; }
+:root[data-theme="light"] .timer-item-prompt { color: #46565f; }
+:root[data-theme="light"] .timer-create-form { border-color: #d3dde2; }
+:root[data-theme="light"] .timer-create-form input, :root[data-theme="light"] .timer-create-form select { background: #ffffff; border-color: #c6d2da; color: #2c3a44; }
+:root[data-theme="light"] .timer-toggle { background: #eef2f5; color: #4d5f6a; border-color: #c6d2da; }
 .toolrepo-header-button:hover .toolrepo-header-count, .toolrepo-header-button.selected .toolrepo-header-count { color: currentColor; }
 .toolrepo-header-button.count-pulse .toolrepo-header-count { animation: tool-count-pulse .7s ease-in-out 3; }
 .completion-toolgen { display: inline-flex; align-items: center; gap: 4px; margin-left: auto; padding: 0 3px 0 9px; border: 0; border-left: 1px solid #333; background: transparent; color: #6f8fa8; font: inherit; font-weight: 650; }
