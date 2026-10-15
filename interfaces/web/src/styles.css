@@ -1288,6 +1288,8 @@ button:disabled { cursor: not-allowed; }
 .turn-work-item.thinking, .turn-work-item.thinking .message-content { font-size: max(14px, var(--content-size)); }
 .tool-activity b, .tool-activity-status, .tool-activity-duration { line-height: 1.35; }
 .tool-activity-status, .tool-activity-duration { font-size: 11px; }
+.tool-activity-bytes { font-size: 11px; color: #7f929e; font-variant-numeric: tabular-nums; }
+:root[data-theme="light"] .tool-activity-bytes { color: #6a7d88; }
 .tool-activity-command { font-size: 11px; }
 .tool-activity-body { max-width: calc(100% - 21px); }
 .tool-activity-body .code-block, .tool-activity-body pre { max-width: 100%; }
@@ -5112,6 +5114,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .stream-tool-dot { width: 8px; height: 8px; border-radius: 50%; background: #f1c56f; flex: none; align-self: center; }
 .stream-tool-status { color: #98afbc; }
 .stream-tool-elapsed { color: #98afbc; font-variant-numeric: tabular-nums; flex: none; }
+.stream-tool-bytes { color: #7f929e; font-variant-numeric: tabular-nums; flex: none; font-size: 11px; }
 .stream-tool-command {
   margin: 8px 0 0;
   padding: 8px 10px;
@@ -5142,6 +5145,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
 :root[data-theme="light"] .stream-working-trailer.model-waiting { color: #286a9b; }
 :root[data-theme="light"] .stream-tool-status { color: #5c6f7a; }
 :root[data-theme="light"] .stream-tool-elapsed { color: #5c6f7a; }
+:root[data-theme="light"] .stream-tool-bytes { color: #6a7d88; }
 :root[data-theme="light"] .stream-tool-command { background: #eef2f1; color: #33484f; box-shadow: 0 2px 6px #24333a14; }
 :root[data-theme="light"] .stream-tool-detail { color: #5c6f7a; }
 @media (prefers-reduced-motion: reduce) {

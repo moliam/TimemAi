@@ -2260,6 +2260,11 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
           typeof payload.elapsed_ms === "number"
             ? payload.elapsed_ms
             : undefined,
+        tool_output_bytes:
+          typeof payload.tool_output_bytes === "number" &&
+          Number.isFinite(payload.tool_output_bytes)
+            ? payload.tool_output_bytes
+            : undefined,
         timeout_ms: numericKindValue("timeout_ms"),
         loop_timeout_ms: numericKindValue("loop_timeout_ms"),
         interval_ms: numericKindValue("interval_ms"),

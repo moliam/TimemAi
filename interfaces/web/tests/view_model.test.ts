@@ -4837,3 +4837,81 @@ describe("sessionContextCompressPending", () => {
     expect(sessionContextCompressPending(target)).toBe(false);
   });
 });
+
+describe("tool result size badge", () => {
+  it("maps finish-event tool_output_bytes and preserves it through start/finish pairing", () => {
+    expect(
+      activityFromTopic(
+        topic("core.action", {
+          action: "readfile",
+          status: "completed",
+          event: "finish",
+          input: { path: "main.rs" },
+          tool_output_bytes: 4096,
+        }),
+      ),
+    ).toMatchObject({ tool_output_bytes: 4096 });
+
+    // Non-numeric noise maps to an undefined badge rather than being coerced.
+    expect(
+      activityFromTopic(
+        topic("core.action", {
+          action: "readfile",
+          status: "completed",
+          event: "finish",
+          input: { path: "main.rs" },
+          tool_output_bytes: "4096",
+        }),
+      )?.tool_output_bytes,
+    ).toBeUndefined();
+
+    // The start event carries no bytes; the settled row must keep the value
+    // reported by the paired finish event after lifecycle coalescing.
+    const startEvent: WebTurnEvent = {
+      event_id: "s1",
+      source: "core_topic",
+      created_at_ms: 100,
+      payload: {
+        session_id: "session_1",
+        topic: { name: "core.action", attributes: { event: "start" } },
+        state: { name: "running" },
+        payload: {
+          action: "readfile",
+          action_id: "call-1",
+          event: "start",
+          status: "running",
+          input: { path: "main.rs" },
+        },
+      },
+    };
+    const finishEvent: WebTurnEvent = {
+      event_id: "f1",
+      source: "core_topic",
+      created_at_ms: 200,
+      payload: {
+        session_id: "session_1",
+        topic: { name: "core.action", attributes: { event: "finish" } },
+        state: { name: "running" },
+        payload: {
+          action: "readfile",
+          action_id: "call-1",
+          event: "finish",
+          status: "completed",
+          input: { path: "main.rs" },
+          tool_output_bytes: 1536,
+        },
+      },
+    };
+    const coalesced = coalesceActionLifecycle([startEvent, finishEvent]);
+    expect(coalesced).toHaveLength(1);
+    expect(coalesced[0].payload.payload).toMatchObject({
+      action: "readfile",
+      tool_output_bytes: 1536,
+    });
+    expect(
+      activityFromTopic(
+        coalesced[0].payload as unknown as CoreTopicEvent,
+      ),
+    ).toMatchObject({ tool_output_bytes: 1536 });
+  });
+});

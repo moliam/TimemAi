@@ -301,6 +301,7 @@ export const zh = {
     toolsLabel: "工具",
     remaining: "剩余 {time}",
     elapsed: "已用时 {time}",
+    resultBytes: "注入下轮提示的结果数据 {size}",
     waitEndedRunning: "等待结束 · 进程仍在运行 · pid {pid}",
     waitEndedMaybe: "等待结束 · 进程可能仍在运行",
   },
