@@ -304,6 +304,7 @@ export const en: Strings = {
     toolsLabel: "tools",
     remaining: "{time} remaining",
     elapsed: "{time} elapsed",
+    resultBytes: "result data injected into the next prompt: {size}",
     waitEndedRunning: "wait ended · process still running · pid {pid}",
     waitEndedMaybe: "wait ended · process may still be running",
   },

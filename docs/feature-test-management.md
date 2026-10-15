@@ -796,5 +796,5 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 工具行常态顺序统一为“状态 → 工具图标或名称 → 命令/参数摘要”。有详情时不常驻展开箭头，整行在 hover/focus 下呈现可点击反馈；鼠标、触屏、Enter/Space点击同一行切换展开/收起，文本选择不会误触折叠。无详情行不获得虚假按钮语义。
 - 状态槽、工具身份和摘要垂直居中并使用固定行高；执行中圆点切换到完成/失败文字不改变已展开行高度。折叠工具组与实时工具状态槽共用水平起点；390px窄屏允许摘要换行但保持分组对齐。
 - `tool_presentation.test.tsx`覆盖参数顺序、行/字节/匹配/单端选择器、tail/encoding、非法范围、未知字段、HTML转义、Windows路径、敏感文本脱敏、第三方回退，以及memory操作图标分类。`tool_activity_layout.test.ts`守卫整行披露、状态/工具/摘要顺序、固定行高和水平起点。
-- `tool-presentation-e2e.mjs`在真实Chrome验证普通/流式视图、FileText/DatabaseSearch/Database、无常驻箭头、整行hover指针、鼠标与键盘切换、原始参数详情、状态→工具→摘要顺序、明暗主题和390px布局。既有`stream-preview-acceptance.mjs`完整回归验证状态更新不重挂载、不改变展开高度、文本选择保护、折叠组/实时行对齐及连续流式交互。
+- `tool-presentation-e2e.mjs`在真实Chrome验证普通/流式视图、FileText/DatabaseSearch/Database、无常驻箭头、整行hover指针、鼠标与键盘切换、原始参数详情、状态→工具→摘要顺序、明暗主题和390px布局；并验证工具结果量徽章（core.action finish 的 `tool_output_bytes`，仅计工具自身 tool_output、不含 runtime 信封元数据）在两视图渲染于耗时之后，格式化文本（如 4 KB/512 B）与本地化标签一致，1280/390 宽度与明暗主题下无溢出。既有`stream-preview-acceptance.mjs`完整回归验证状态更新不重挂载、不改变展开高度、文本选择保护、折叠组/实时行对齐及连续流式交互。
 - 验证：类型检查、Web 588项、5项性能守卫、工具专项Chrome及完整流式Chrome验收、架构/模块/测试契约与diff检查通过；Host嵌入构建和dist已更新。未重启开发实例。

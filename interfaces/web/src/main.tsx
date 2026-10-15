@@ -11241,6 +11241,14 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
             </span>
           );
         })()}
+        {activity.tool_output_bytes !== undefined && (() => {
+          const size = formatBytes(activity.tool_output_bytes);
+          return (
+            <span className="stream-tool-bytes" aria-label={t("tools.resultBytes", { size })}>
+              {size}
+            </span>
+          );
+        })()}
       </div>
       <div className={`stream-tool-fold${open ? " expanded" : ""}`} inert={!open}>
         <div>
@@ -11255,7 +11263,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
   const b = next.activity;
   return a.id === b.id && a.tool_status === b.tool_status && a.tool_name === b.tool_name &&
     a.tool_mode === b.tool_mode && a.title === b.title && a.code === b.code && a.detail === b.detail &&
-    a.elapsed_ms === b.elapsed_ms && JSON.stringify(a.memory_search) === JSON.stringify(b.memory_search) &&
+    a.tool_output_bytes === b.tool_output_bytes && a.elapsed_ms === b.elapsed_ms && JSON.stringify(a.memory_search) === JSON.stringify(b.memory_search) &&
     JSON.stringify(a.self_tool) === JSON.stringify(b.self_tool) && JSON.stringify(a.readfile) === JSON.stringify(b.readfile) &&
     JSON.stringify(a.run_bash_edit) === JSON.stringify(b.run_bash_edit);
 });
@@ -12393,7 +12401,8 @@ function ToolActivity({ activity }: { activity: Activity }) {
           {invocationPreview}
         </code>
       )}
-      {(remainingWaitMs !== undefined || displayedElapsedMs !== undefined) && (
+      {(remainingWaitMs !== undefined || displayedElapsedMs !== undefined ||
+        activity.tool_output_bytes !== undefined) && (
         <span className="tool-activity-timing">
           {status === "background_running" && (
             <span className="tool-activity-background">{t("tools.statusBg")}</span>
@@ -12417,6 +12426,14 @@ function ToolActivity({ activity }: { activity: Activity }) {
                 {running
                   ? <LocalizedFlippingTime message="tools.elapsed" time={time} />
                   : time}
+              </span>
+            );
+          })()}
+          {activity.tool_output_bytes !== undefined && (() => {
+            const size = formatBytes(activity.tool_output_bytes);
+            return (
+              <span className="tool-activity-bytes" title={t("tools.resultBytes", { size })}>
+                {size}
               </span>
             );
           })()}
