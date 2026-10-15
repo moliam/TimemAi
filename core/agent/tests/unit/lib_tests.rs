@@ -4732,3 +4732,67 @@ fn dynamic_context_estimate_counts_tool_only_deltas_and_excludes_orphans() {
         before.total_tokens()
     )));
 }
+
+#[test]
+fn action_finish_topic_reports_tool_output_bytes_excluding_metadata() {
+    #[derive(Default)]
+    struct TopicRecorder(Vec<CoreTopicEvent>);
+    impl ActionRuntime for TopicRecorder {
+        fn should_cancel(&mut self) -> bool {
+            false
+        }
+        fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
+            self.0.extend_from_slice(events);
+        }
+    }
+    let mut core = test_core("finish_tool_output_bytes");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    let _ = core.begin_turn("record memo", None);
+    let mut runtime = TopicRecorder::default();
+    core.apply_model_response_with_action_runtime(
+        LlmResponse {
+            tool_calls: Vec::new(),
+            content: r#"{"status":"working","working_still_action":[{"memo":{"op":"create","text":"steady goal"}}]}"#.to_string(),
+            model_name: "test".to_string(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        },
+        &mut runtime,
+    );
+    let finish = runtime
+        .0
+        .iter()
+        .find(|event| {
+            event.topic.name == "core.action"
+                && event.payload["event"] == "finish"
+                && event.payload["action"] == "memo"
+        })
+        .expect("memo finish topic");
+    let reported = finish.payload["tool_output_bytes"]
+        .as_u64()
+        .expect("tool_output_bytes on finish payload") as usize;
+    assert!(reported > 0);
+
+    // The badge must count only the tool's own output. The rendered prompt
+    // carries the full envelope (tool_call_id + runtime_metadata +
+    // tool_output); re-serialize just its tool_output member and compare.
+    let prompt = core.build_next_prompt();
+    let anchor = prompt.find(r#"{"action_result""#).expect("envelope in prompt");
+    let line_end = prompt[anchor..]
+        .find('\n')
+        .map(|offset| anchor + offset)
+        .unwrap_or(prompt.len());
+    let envelope: serde_json::Value =
+        serde_json::from_str(prompt[anchor..line_end].trim()).expect("envelope json");
+    let tool_output_only =
+        serde_json::to_string(&envelope["action_result"]["tool_output"]).unwrap();
+    assert_eq!(
+        reported,
+        tool_output_only.len(),
+        "badge bytes must equal tool_output serialization, metadata excluded"
+    );
+    assert!(
+        reported < line_end - anchor,
+        "badge bytes must be smaller than the full envelope line"
+    );
+}

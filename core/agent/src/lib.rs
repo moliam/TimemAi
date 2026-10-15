@@ -7475,6 +7475,14 @@ Runtime tool_call ids:",
         event.payload["event"] = json!("finish");
         event.payload["active"] = json!(false);
         event.payload["status"] = json!(outcome.status.as_str());
+        // Interfaces badge: how much of the next prompt this tool's own
+        // result occupies. Counts only `tool_output` (the tool payload the
+        // model actually sees); runtime-added metadata is excluded.
+        let (tool_output, _truncation) =
+            self.structured_tool_output(action, outcome, self.model_tool_result_bytes);
+        if let Ok(serialized) = serde_json::to_string(&tool_output) {
+            event.payload["tool_output_bytes"] = json!(serialized.len());
+        }
         match cpu_time {
             Some(duration) => {
                 event.payload["cpu_time_ns"] =
