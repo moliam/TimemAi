@@ -216,6 +216,8 @@ export type TimerInfo = {
   enabled: boolean;
   next_fire_ms: number;
   last_fired_ms?: number | null;
+  /** Why the runtime parked (auto-disabled) this timer; absent when user-paused. */
+  parked_reason?: string | null;
 };
 
 export type McpTransport =
