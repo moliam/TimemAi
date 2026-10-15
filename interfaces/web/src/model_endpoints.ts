@@ -217,10 +217,42 @@ export type CatalogModel = {
   efforts: string[]; default_effort: string; middle_default: boolean;
   min_input: number; max_input: number; min_output: number; max_output: number;
   context_window: number;
+  input_modalities?: string[];
   protocols: { protocol: string; base_url?: string; disabled_reason: string | null;
     function_calling: "supported" | "conditional" | "unsupported" | "unknown";
     fixed_effort: string | null; fixed_reason: string | null }[];
 };
+
+// Documented image input support for the active route. Unknown modalities
+// (older snapshots) stay permissive so the hint never blocks legitimate use.
+export function catalogAcceptsImages(model: CatalogModel | undefined): boolean | undefined {
+  if (!model?.input_modalities) return undefined;
+  return model.input_modalities.includes("image");
+}
+
+// Resolve the catalog entry behind an endpoint. Catalog endpoints match by
+// catalog_id; template endpoints (requirements.provider set) match by model id
+// so hand-tuned copies of a preset still surface its documented facts.
+// Mirror of the host-side image_media_type admission (png/jpg/jpeg/webp/gif):
+// these extensions become vision input parts on send.
+export function isImageFileName(name: string | undefined): boolean {
+  return !!name && /\.(png|jpe?g|webp|gif)$/i.test(name);
+}
+
+export function endpointCatalogModel(
+  endpoint: ModelEndpoint | undefined,
+  catalog: readonly CatalogModel[],
+): CatalogModel | undefined {
+  if (!endpoint) return undefined;
+  if (endpoint.catalog_id) {
+    return catalog.find((model) => model.id === endpoint.catalog_id);
+  }
+  const provider = endpoint.requirements?.provider;
+  if (!provider) return undefined;
+  return catalog.find(
+    (model) => model.provider === provider && model.model === endpoint.model,
+  );
+}
 
 
 export type EndpointRequirements = {

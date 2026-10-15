@@ -1,6 +1,6 @@
 import { MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation } from "./tool_invocation";
 import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
-import { initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
+import { initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
 import type { CatalogModel } from "./model_endpoints";
 import { applyBetaDebugDefault } from "./beta_preferences";
 import { StreamUiModeSetting, useStreamUiMode, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
@@ -3488,6 +3488,14 @@ function TimemApp() {
   const headerModelEndpoint = (server?.model_endpoints ?? []).find(
     (endpoint) => endpointMatchesProfile(endpoint, activeSession?.runtime_profile),
   );
+  // Documented catalog facts decide the image warning; custom endpoints
+  // (unknown modalities) stay permissive to avoid false alarms.
+  const activeImageUnsupportedEndpoint =
+    catalogAcceptsImages(
+      endpointCatalogModel(headerModelEndpoint, server?.model_catalog ?? []),
+    ) === false
+      ? headerModelEndpoint?.name ?? headerModelLabel
+      : undefined;
   const openEndpointSettings = () => {
     setShowRuntime(false);
     setShowMcp(false);
@@ -5043,6 +5051,7 @@ function TimemApp() {
                 ? pendingUploadFiles[activeSession.session_id]
                 : undefined
             }
+            imageUnsupportedEndpoint={activeImageUnsupportedEndpoint}
             loadingHistory={
               activeSession
                 ? pendingHistorySessionIds.has(activeSession.session_id)
@@ -8291,6 +8300,7 @@ function TimemThread({
   pendingDecisionKeys,
   uploadingAttachment,
   uploadingAttachmentFile,
+  imageUnsupportedEndpoint,
   loadingHistory,
   pendingToolGenTurnIds,
   toolGenSessionBusy,
@@ -8328,6 +8338,7 @@ function TimemThread({
   pendingDecisionKeys: Set<string>;
   uploadingAttachment: boolean;
   uploadingAttachmentFile?: { name: string; bytes: number };
+  imageUnsupportedEndpoint?: string;
   loadingHistory: boolean;
   pendingToolGenTurnIds: Set<string>;
   toolGenSessionBusy: boolean;
@@ -8529,6 +8540,9 @@ function TimemThread({
     missingSessionHint ||
     lockedControlHint ||
     (uploadingAttachment ? "Wait for file upload" : sendLabel);
+  const imageAttachmentPending =
+    availableAttachments.some((attachment) => isImageFileName(attachment.name)) ||
+    (uploadingAttachment && isImageFileName(uploadingAttachmentFile?.name));
   const attachedFileCount = activeSession?.attachments.length ?? 0;
   const attachmentSummary =
     attachedFileCount === 1
@@ -9857,6 +9871,20 @@ function TimemThread({
                     </div>
                   );
                 })}
+                {imageAttachmentPending && imageUnsupportedEndpoint && (
+                  <div
+                    className="attachment-warning"
+                    role="status"
+                    title={t("composer.imageUnsupportedTitle")}
+                  >
+                    <TriangleAlert size={13} aria-hidden="true" />
+                    <span>
+                      {t("composer.imageUnsupportedHint", {
+                        model: imageUnsupportedEndpoint,
+                      })}
+                    </span>
+                  </div>
+                )}
               </div>
             )}
           {activeSession && restartCwdDecision ? (

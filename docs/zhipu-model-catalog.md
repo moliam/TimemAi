@@ -25,6 +25,8 @@ z-glm5.3 另提供官方 Responses 协议入口：独立基址 `https://open.big
 不声明 Timem 获得 Coding Plan 使用资格。
 Coding Plan 的工具白名单、账户与计费限制独立于普通 API 协议适配。
 Flash 的文档能力包含图片、视频与文件，但目录中的文档事实不等于 Timem 已实现全部输入格式。
+`documented_facts.input_modalities` 会投影到 Web：当会话当前接入点声明不含 `image` 且附件中出现图片时，
+附件条会显示醒目警告并建议切换到多模态接入点（例如 z-glm5.3-flash）；纯文本模型的拒答来自模型自身能力，而非协议适配问题。
 
 ## 请求与工具往返
 

@@ -92,7 +92,7 @@ it("does not silently fall back when the bound endpoint is deleted", () => {
   expect(endpointMatchesProfile(endpoint, profile)).toBe(false);
 });
 
-import { endpointProtocolOptions, canRestoreEndpointTemplateUrl, changeEndpointProtocol, restoreEndpointTemplateReasoning, restoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBaseUrl, templateBudgetSuggestion, applyEndpointTemplate, editEndpoint, editEndpointRequirements, functionCallingDefault, initialEndpointRequirements, type CatalogModel, type ModelEndpointDraft, type ProviderSpec } from "../src/model_endpoints";
+import { endpointProtocolOptions, canRestoreEndpointTemplateUrl, changeEndpointProtocol, restoreEndpointTemplateReasoning, restoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBaseUrl, templateBudgetSuggestion, applyEndpointTemplate, editEndpoint, editEndpointRequirements, functionCallingDefault, initialEndpointRequirements, catalogAcceptsImages, endpointCatalogModel, isImageFileName, type CatalogModel, type ModelEndpointDraft, type ProviderSpec } from "../src/model_endpoints";
 const template: CatalogModel = { id:"fixture/model", revision:1, provider:"openai", model:"fixture-model", label:"Fixture", base_url:"https://example.test/v1", efforts:["none","low","high","max"], default_effort:"low", middle_default:false, min_input:3000, max_input:200000, min_output:512, max_output:30000, context_window:230000, protocols:[{protocol:"openai-responses",disabled_reason:null,function_calling:"supported",fixed_effort:null,fixed_reason:null}] };
 const blank = (): ModelEndpointDraft => ({ ...endpoint, http_headers:{}, request_fields:{}, allow_cross_origin_redirects:false, requirements:initialEndpointRequirements() });
 const providerSpecs: ProviderSpec[] = [
@@ -730,5 +730,42 @@ describe("endpoint capability feedback", () => {
     setLocale("en");
     expect(endpointSaveErrorMessage("catalog_token_budget_out_of_range")).toContain("token budget");
     setLocale("zh");
+  });
+});
+
+describe("documented image input modalities", () => {
+  const catalog: CatalogModel[] = [
+    { ...template, id: "z-glm5.3", provider: "zhipu", model: "glm-5.3", input_modalities: ["text"] },
+    { ...template, id: "z-glm5.3-flash", provider: "zhipu", model: "glm-5.3-flash", input_modalities: ["text", "image", "video", "file"] },
+    { ...template, id: "legacy" },
+  ];
+
+  it("surfaces image support from documented modalities and stays permissive when unknown", () => {
+    expect(catalogAcceptsImages(catalog[0])).toBe(false);
+    expect(catalogAcceptsImages(catalog[1])).toBe(true);
+    expect(catalogAcceptsImages(catalog[2])).toBeUndefined();
+    expect(catalogAcceptsImages(undefined)).toBeUndefined();
+  });
+
+  it("resolves the catalog entry by catalog id or template provider plus model", () => {
+    expect(endpointCatalogModel({ ...endpoint, catalog_id: "z-glm5.3" } as never, catalog)?.id).toBe("z-glm5.3");
+    const templateCopy = editEndpoint(blank(), { model: "glm-5.3-flash", requirements: undefined } as never);
+    expect(
+      endpointCatalogModel(
+        { ...templateCopy, catalog_id: null, requirements: { version: 1, provider: "zhipu", allowed_reasoning: null, adaptive_reasoning: null, field_sources: {} } } as never,
+        catalog,
+      )?.id,
+    ).toBe("z-glm5.3-flash");
+    expect(endpointCatalogModel({ ...endpoint, catalog_id: "unknown-id" } as never, catalog)).toBeUndefined();
+    expect(endpointCatalogModel(undefined, catalog)).toBeUndefined();
+  });
+
+  it("mirrors the host image extension admission", () => {
+    expect(isImageFileName("photo.PNG")).toBe(true);
+    expect(isImageFileName("shot.jpeg")).toBe(true);
+    expect(isImageFileName("scan.webp")).toBe(true);
+    expect(isImageFileName("anim.gif")).toBe(true);
+    expect(isImageFileName("notes.txt")).toBe(false);
+    expect(isImageFileName(undefined)).toBe(false);
   });
 });
