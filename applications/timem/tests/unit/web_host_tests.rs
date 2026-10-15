@@ -8148,6 +8148,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         pending_turn_id: None,
         turn_projection: TurnProjectionCache::default(),
         active_memo: None,
+        timers: Vec::new(),
         context_cleared_at_ms: None,
         previous_memo_for_notice: None,
         message_queue: SessionMessageQueue::new(MAX_NEXT_TURN_INTENTS),
@@ -17439,6 +17440,7 @@ fn context_handoff_persists_runtime_state_without_text_deltas() {
         active_memo: Some("resume the long task".to_string()),
         pending_forcible_memo_note: Some("memo was closed by runtime".to_string()),
         pending_interrupted_memo_note: None,
+        active_timers: Vec::new(),
     };
 
     write_prompt_context_snapshot(&state, id, &snapshot).unwrap();
@@ -18590,4 +18592,319 @@ fn interrupted_queued_message_id_follows_the_shared_history_formula() {
     );
     assert_eq!(turn.turn_id, "turn_q");
     assert_eq!(turn.state, "interrupted");
+}
+
+// ---------------------------------------------------------------------------
+// Timers
+// ---------------------------------------------------------------------------
+
+fn web_timer_fixture(name: &str, mode: &str, next_fire_ms: u64) -> WebTimer {
+    WebTimer {
+        spec: TimerSpec {
+            timer_id: unique_web_id("timer"),
+            name: name.to_string(),
+            prompt: format!("prompt {name}"),
+            mode: mode.to_string(),
+            after_ms: Some(1000),
+            at: None,
+            interval_ms: if mode == "repeat" { Some(60_000) } else { None },
+            created_by: "user".to_string(),
+        },
+        created_at_ms: now_ms(),
+        enabled: true,
+        next_fire_ms,
+        last_fired_ms: None,
+    }
+}
+
+#[test]
+fn web_timer_compute_next_fire_ms_parses_at_and_rejects_invalid() {
+    let spec = TimerSpec {
+        timer_id: "t".into(),
+        name: "t".into(),
+        prompt: "p".into(),
+        mode: "once".into(),
+        after_ms: Some(1500),
+        at: None,
+        interval_ms: None,
+        created_by: "user".into(),
+    };
+    assert_eq!(compute_next_fire_ms(&spec, 10_000).unwrap(), 11_500);
+    let spec = TimerSpec {
+        after_ms: None,
+        at: Some("2026-01-01T00:00:00Z".into()),
+        ..spec
+    };
+    assert_eq!(
+        compute_next_fire_ms(&spec, 0).unwrap(),
+        1_767_225_600_000_u64
+    );
+    let spec = TimerSpec {
+        after_ms: None,
+        at: Some("not-a-timestamp".into()),
+        ..spec
+    };
+    assert!(compute_next_fire_ms(&spec, 0).is_err());
+}
+
+#[test]
+fn web_timer_user_input_validation() {
+    assert!(validate_user_timer_input("once", Some(1000), None, None).is_ok());
+    assert!(validate_user_timer_input("once", None, Some("2026-01-01T00:00:00Z"), None).is_ok());
+    assert!(validate_user_timer_input("once", Some(1000), None, Some(50))
+        .unwrap_err()
+        .contains("interval_requires_repeat"));
+    assert!(validate_user_timer_input("repeat", Some(1000), None, None)
+        .unwrap_err()
+        .contains("interval_required"));
+    assert!(validate_user_timer_input("repeat", Some(1000), None, Some(0))
+        .unwrap_err()
+        .contains("interval_invalid"));
+    assert!(validate_user_timer_input("hourly", Some(1000), None, None)
+        .unwrap_err()
+        .contains("mode_invalid"));
+    assert!(validate_user_timer_input("once", None, None, None)
+        .unwrap_err()
+        .contains("schedule_invalid"));
+    assert!(validate_user_timer_input("once", Some(1000), Some("2026-01-01T00:00:00Z"), None)
+        .unwrap_err()
+        .contains("schedule_invalid"));
+    assert!(validate_user_timer_input("once", Some(0), None, None)
+        .unwrap_err()
+        .contains("after_ms_invalid"));
+}
+
+#[test]
+fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
+    let state = routing_test_state();
+    // Empty prompt is rejected.
+    assert!(create_session_timer(
+        &state,
+        "session_a",
+        None,
+        "   ".to_string(),
+        None,
+        Some(1000),
+        None,
+        None
+    )
+    .unwrap_err()
+    .contains("prompt_required"));
+
+    create_session_timer(&state, "session_a", None, "first".into(), None, Some(1000), None, None)
+        .unwrap();
+    create_session_timer(&state, "session_a", None, "second".into(), None, None, Some("2030-01-01T00:00:00Z".to_string()), None)
+        .unwrap();
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let names: Vec<String> = sessions["session_a"]
+            .timers
+            .iter()
+            .map(|timer| timer.spec.name.clone())
+            .collect();
+        assert_eq!(names, vec!["timer0".to_string(), "timer1".to_string()]);
+    }
+    // Duplicate explicit name.
+    assert!(create_session_timer(
+        &state,
+        "session_a",
+        Some("timer1".into()),
+        "dup".into(),
+        None,
+        Some(1000),
+        None,
+        None
+    )
+    .unwrap_err()
+    .contains("name_exists"));
+    // timers.json persisted with the projection.
+    let persisted = load_session_timers(&state, "session_a");
+    assert_eq!(persisted.len(), 2);
+    assert!(persisted[0].next_fire_ms > 0);
+    assert!(persisted[1].next_fire_ms > now_ms() as u64);
+}
+
+#[test]
+fn web_timer_toggle_and_delete() {
+    let state = routing_test_state();
+    create_session_timer(&state, "session_a", Some("work".into()), "p".into(), None, Some(1000), None, None)
+        .unwrap();
+    let timer_id = state.sessions.lock().unwrap()["session_a"].timers[0]
+        .spec
+        .timer_id
+        .clone();
+    toggle_session_timer(&state, "session_a", &timer_id, false).unwrap();
+    assert!(!state.sessions.lock().unwrap()["session_a"].timers[0].enabled);
+    // Disabled timers never fire.
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.timers[0].next_fire_ms = 0;
+    }
+    fire_due_timers(&state);
+    assert_eq!(state.sessions.lock().unwrap()["session_a"].timers.len(), 1);
+    toggle_session_timer(&state, "session_a", &timer_id, true).unwrap();
+    assert!(state.sessions.lock().unwrap()["session_a"].timers[0].enabled);
+    assert!(delete_session_timer(&state, "session_a", &timer_id).is_ok());
+    assert!(state.sessions.lock().unwrap()["session_a"].timers.is_empty());
+    assert!(delete_session_timer(&state, "session_a", &timer_id)
+        .unwrap_err()
+        .contains("timer_not_found"));
+}
+
+#[test]
+fn web_timer_merge_from_core_preserves_host_metadata() {
+    let state = routing_test_state();
+    let mut seeded = web_timer_fixture("existing", "once", 123_456);
+    seeded.created_at_ms = 42;
+    seeded.enabled = false;
+    seeded.last_fired_ms = Some(7);
+    let existing_id = seeded.spec.timer_id.clone();
+    let existing_spec = seeded.spec.clone();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions.get_mut("session_a").unwrap().timers = vec![seeded];
+    }
+    // Core reports the existing timer (prompt changed) plus a new model timer.
+    let mut updated = existing_spec.clone();
+    updated.prompt = "changed by model".into();
+    let model_timer = TimerSpec {
+        timer_id: "timer_model_1".into(),
+        name: "timer0".into(),
+        prompt: "model job".into(),
+        mode: "once".into(),
+        after_ms: Some(2000),
+        at: None,
+        interval_ms: None,
+        created_by: "model".into(),
+    };
+    merge_session_timers_from_core(&state, "session_a", &[updated, model_timer]).unwrap();
+    let timers = state.sessions.lock().unwrap()["session_a"].timers.clone();
+    assert_eq!(timers.len(), 2);
+    let kept = timers.iter().find(|t| t.spec.timer_id == existing_id).unwrap();
+    assert_eq!(kept.spec.prompt, "changed by model");
+    assert_eq!(kept.created_at_ms, 42);
+    assert!(!kept.enabled);
+    assert_eq!(kept.last_fired_ms, Some(7));
+    assert_eq!(kept.next_fire_ms, 123_456);
+    let fresh = timers.iter().find(|t| t.spec.timer_id == "timer_model_1").unwrap();
+    assert!(fresh.enabled);
+    assert!(fresh.next_fire_ms > now_ms() as u64);
+    assert_eq!(fresh.last_fired_ms, None);
+}
+
+#[test]
+fn web_timer_fire_due_enqueues_into_active_turn() {
+    let state = routing_test_state();
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("tick".into()),
+        "do the thing".into(),
+        None,
+        Some(1000),
+        None,
+        None,
+    )
+    .unwrap();
+    // Simulate a turn in flight: pending_turn_id alone satisfies the
+    // enqueue precondition without a live worker.
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.pending_turn_id = Some("turn_fake_active".into());
+        session.timers[0].next_fire_ms = 0;
+    }
+    fire_due_timers(&state);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions["session_a"];
+        // once timer removed after successful delivery.
+        assert!(session.timers.is_empty());
+        assert_eq!(session.message_queue.projection().items.len(), 1);
+        assert_eq!(
+            session.message_queue.projection().items[0].payload.text,
+            "[timer:tick] do the thing"
+        );
+    }
+    // repeat timers advance instead of being removed.
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("loop".into()),
+        "loop job".into(),
+        Some("repeat".into()),
+        Some(1000),
+        None,
+        Some(60_000),
+    )
+    .unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.timers[0].next_fire_ms = 0;
+    }
+    fire_due_timers(&state);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions["session_a"];
+        assert_eq!(session.timers.len(), 1);
+        assert!(session.timers[0].next_fire_ms > now_ms() as u64);
+        assert!(session.timers[0].last_fired_ms.is_some());
+        assert_eq!(session.message_queue.projection().items.len(), 2);
+    }
+}
+
+#[test]
+fn web_timer_fire_due_idle_session_starts_new_timer_turn() {
+    let state = routing_test_state();
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("wakeup".into()),
+        "deliver me as a turn".into(),
+        None,
+        Some(1000),
+        None,
+        None,
+    )
+    .unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions.get_mut("session_a").unwrap().timers[0].next_fire_ms = 0;
+    }
+    fire_due_timers(&state);
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions["session_a"];
+    // once timer is consumed by delivery.
+    assert!(session.timers.is_empty());
+    // The prompt became a real turn entry with the timer kind. (Without a
+    // live worker the dispatch step falls back to the queue; that fallback
+    // is environment detail, not what this test pins down.)
+    let turn = session
+        .turns
+        .iter()
+        .find(|turn| {
+            turn.user_entries.iter().any(|entry| entry.kind == "timer")
+        })
+        .expect("timer turn entry");
+    let entry = turn
+        .user_entries
+        .iter()
+        .find(|entry| entry.kind == "timer")
+        .unwrap();
+    assert_eq!(entry.text, "[timer:wakeup] deliver me as a turn");
+}
+
+#[test]
+fn web_timer_serde_flattens_spec_fields() {
+    let timer = web_timer_fixture("flat", "once", 99);
+    let value = serde_json::to_value(&timer).unwrap();
+    assert_eq!(value["name"], "flat");
+    assert_eq!(value["prompt"], "prompt flat");
+    assert_eq!(value["created_by"], "user");
+    assert_eq!(value["enabled"], true);
+    assert_eq!(value["next_fire_ms"], 99);
+    let parsed: WebTimer = serde_json::from_value(value).unwrap();
+    assert_eq!(parsed, timer);
 }
