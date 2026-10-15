@@ -169,6 +169,7 @@ import {
   wheelDeltaPixels,
 } from "./scroll";
 import {
+  type ActiveModelRetryStatus,
   applyTurnProjection,
   activeModelRetryStatus,
   activityFromTopic,
@@ -183,6 +184,8 @@ import {
   coalesceActionLifecycle,
   compareTurnTimelineItems,
   compareTurnStreamItems,
+  completionStopReasonText,
+  repairIssueText,
   composerPrimaryAction,
   composerSendDecision,
   turnCommandId,
@@ -10365,23 +10368,7 @@ const TurnInteraction = memo(function TurnInteraction({
                 )}
               </button>
               {isWorking && modelRetryStatus && (
-                <details
-                  className={`model-retry-status ${modelRetryStatus.kind}`}
-                >
-                  <summary
-                    title={t("retry.detailExpand", { name: modelRetryStatus.label })}
-                    aria-label={t("retry.detailExpand", { name: modelRetryStatus.label })}
-                  >
-                    <ChevronRight size={12} aria-hidden="true" />
-                    <span>{modelRetryStatus.label}</span>
-                    {modelRetryStatus.progress && (
-                      <small>{modelRetryStatus.progress}</small>
-                    )}
-                  </summary>
-                  <div className="model-retry-detail">
-                    <MarkdownContent text={modelRetryStatus.detail} />
-                  </div>
-                </details>
+                <ModelRetryStatusPill status={modelRetryStatus} />
               )}
             </div>
           )}
@@ -10477,6 +10464,14 @@ const TurnInteraction = memo(function TurnInteraction({
           turn={turn}
           streamTools={runningStreamTools}
           streamWorking={isWorking}
+          modelRetryStatus={
+    showWorkFrame &&
+    !streamRetentionActive ||
+    turn.state !== "working" ||
+    decisions.length > 0
+      ? null
+      : modelRetryStatus
+  }
           waitingModel={
             /* Session-scoped single slot: only the active turn publishes an
              * Active projection, and this trailer renders only while the turn
@@ -10617,6 +10612,25 @@ function StreamProcess({ closing, onArchived, children }: {
     return () => { cancelAnimationFrame(frame); animation.cancel(); viewport?.removeEventListener("wheel", stopFollowing); viewport?.removeEventListener("touchstart", stopFollowing); viewport?.removeEventListener("keydown", stopOnKey); };
   }, [closing, onArchived]);
   return <div ref={ref} className={`stream-continuous-process${closing ? " archiving" : ""}`}>{children}</div>;
+}
+
+function ModelRetryStatusPill({ status }: { status: ActiveModelRetryStatus }) {
+  useT();
+  return (
+    <details className={`model-retry-status ${status.kind}`}>
+      <summary
+        title={t("retry.detailExpand", { name: status.label })}
+        aria-label={t("retry.detailExpand", { name: status.label })}
+      >
+        <ChevronRight size={12} aria-hidden="true" />
+        <span>{status.label}</span>
+        {status.progress && <small>{status.progress}</small>}
+      </summary>
+      <div className="model-retry-detail">
+        <MarkdownContent text={status.detail} />
+      </div>
+    </details>
+  );
 }
 
 function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activities, responseArriving }: {
@@ -10876,6 +10890,7 @@ function TurnAnswerDelivery({
   streamTools,
   streamWorking,
   waitingModel,
+  modelRetryStatus,
   toolGenPending,
   toolGenBlocked,
   favorite,
@@ -10892,6 +10907,7 @@ function TurnAnswerDelivery({
   streamRetained: boolean;
   workExpanded: boolean;
   onStreamArchived: () => void;
+  modelRetryStatus: ActiveModelRetryStatus | null;
   toolGenPending: boolean;
   toolGenBlocked: boolean;
   favorite?: ChatFavorite;
@@ -10929,7 +10945,7 @@ function TurnAnswerDelivery({
           responseArriving={!!previewText}
         />
       </StreamProcess>}
-      {hasPreview && preview?.interruption && <div className="response-preview-interruption" role="status">{preview.interruption === "cancelled" ? "Stopped — partial response" : preview.interruption === "network_error" ? "Network error — partial response" : "Model error — partial response"}</div>}
+      {hasPreview && preview?.interruption && <div className="response-preview-interruption" role="status">{preview.interruption === "cancelled" ? t("interim.previewStopped") : preview.interruption === "network_error" ? t("interim.previewNetworkError") : t("interim.previewModelError")}</div>}
       {(hasFinal || !!previewText) && (
         <FinalAnswerDelivery
           text={turn.final_answer || previewText}
@@ -10945,6 +10961,9 @@ function TurnAnswerDelivery({
           onToolGen={onToolGen}
           onDelete={onDelete}
         />
+      )}
+      {streamUiMode && streamWorking && modelRetryStatus && (
+        <ModelRetryStatusPill status={modelRetryStatus} />
       )}
       {streamUiMode && streamWorking && (
         <div
@@ -14763,6 +14782,7 @@ function CompletionCard({
   onToolGen?: () => void;
   answerActions?: React.ReactNode;
 }) {
+  useT();
   const stats = completion.stats ?? {};
   const cancelled = completion.stop_reason?.toLowerCase() === "cancelledbyuser";
   const toolGenLabel = toolGenPending
@@ -14809,13 +14829,21 @@ function CompletionCard({
         </span>
       ))}
       {!cancelled && isNotableStopReason(completion.stop_reason) && (
-        <span className="completion-status">
-          <b>Status</b> {completion.stop_reason}
+        <span
+          className="completion-status"
+          title={completion.stop_reason ?? undefined}
+        >
+          <b>{t("completion.statusLabel")}</b>{" "}
+          {completionStopReasonText(completion.stop_reason ?? "")}
         </span>
       )}
       {completion.repair_issue && (
-        <span className="completion-status warning">
-          <b>Last repair</b> {completion.repair_issue}
+        <span
+          className="completion-status warning"
+          title={completion.repair_issue}
+        >
+          <b>{t("completion.repairLabel")}</b>{" "}
+          {repairIssueText(completion.repair_issue)}
         </span>
       )}
       {onToolGen && !cancelled && (

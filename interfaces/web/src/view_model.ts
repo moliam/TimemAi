@@ -1993,6 +1993,54 @@ function protocolRepairDisplayReason(payload: Record<string, unknown>): string {
   return reason || t("repair.fallback");
 }
 
+const COMPLETION_REPAIR_ISSUE_KEYS: Record<string, Parameters<typeof t>[0]> = {
+  xml_recovered_final_answer_requires_retry:
+    "completion.repairIssueExtraAfterFinalAnswer",
+  invalid_xml: "completion.repairIssueInvalidXml",
+  invalid_xml_response_root: "completion.repairIssueInvalidXmlResponseRoot",
+  xml_response_root_missing: "completion.repairIssueXmlResponseRootMissing",
+  missing_response_root: "completion.repairIssueMissingResponseRoot",
+  xml_response_root_unclosed: "completion.repairIssueXmlResponseRootUnclosed",
+  xml_content_before_response: "completion.repairIssueXmlContentBeforeResponse",
+  xml_content_after_response: "completion.repairIssueXmlContentAfterResponse",
+  empty_response: "completion.repairIssueEmptyResponse",
+  truncated_model_output: "completion.repairIssueTruncatedModelOutput",
+  finish_confirm_required_before_final_answer:
+    "completion.repairIssueFinishConfirmRequiredBeforeFinalAnswer",
+  finish_confirm_prefix_invalid: "completion.repairIssueFinishConfirmPrefixInvalid",
+};
+
+/** Terminal display text for the last protocol-repair issue of a turn. */
+export function repairIssueText(issue: string): string {
+  const trimmed = issue.trim();
+  if (!trimmed) return t("completion.repairIssueFallback");
+  const key = COMPLETION_REPAIR_ISSUE_KEYS[trimmed];
+  return key ? t(key) : trimmed;
+}
+
+const COMPLETION_STOP_REASON_KEYS: Record<string, Parameters<typeof t>[0]> = {
+  protocolrepairfailed: "completion.stopReasonProtocolRepairFailed",
+  protocol_repair_failed: "completion.stopReasonProtocolRepairFailed",
+  modelerror: "completion.stopReasonModelError",
+  model_error: "completion.stopReasonModelError",
+  outputlimitstoppedbyuser: "completion.stopReasonOutputLimitStoppedByUser",
+  output_limit_stopped_by_user: "completion.stopReasonOutputLimitStoppedByUser",
+  roundlimitreached: "completion.stopReasonRoundLimitReached",
+  round_limit_reached: "completion.stopReasonRoundLimitReached",
+  cancelledbyuser: "completion.stopReasonCancelledByUser",
+  cancelled_by_user: "completion.stopReasonCancelledByUser",
+  turnfinished: "completion.stopReasonTurnFinished",
+  turn_finished: "completion.stopReasonTurnFinished",
+};
+
+/** Terminal display text for a turn stop reason; unknown codes stay verbatim. */
+export function completionStopReasonText(reason: string): string {
+  const trimmed = reason.trim();
+  if (!trimmed) return trimmed;
+  const key = COMPLETION_STOP_REASON_KEYS[trimmed.toLowerCase()];
+  return key ? t(key) : trimmed;
+}
+
 export type ActiveModelRetryStatus = {
   kind:
     | "network-error"
@@ -2081,7 +2129,13 @@ export function activeModelRetryStatus(
     if (event.source === "worker_activity") {
       const kind = event.payload.kind;
       if (kind === "model_request" || kind === "model_response") {
-        status = null;
+        // A protocol-repair retry IS the following model request: keep the
+        // repair status visible while that (often long) wait runs, and clear
+        // it only when a response or a newer failure supersedes it. Transport
+        // `model_retry` status still clears on the next request as before.
+        if (kind === "model_response" || status?.kind !== "retrying") {
+          status = null;
+        }
         continue;
       }
       if (kind !== "model_retry") continue;
