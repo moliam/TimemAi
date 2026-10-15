@@ -798,3 +798,12 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - `tool_presentation.test.tsx`覆盖参数顺序、行/字节/匹配/单端选择器、tail/encoding、非法范围、未知字段、HTML转义、Windows路径、敏感文本脱敏、第三方回退，以及memory操作图标分类。`tool_activity_layout.test.ts`守卫整行披露、状态/工具/摘要顺序、固定行高和水平起点。
 - `tool-presentation-e2e.mjs`在真实Chrome验证普通/流式视图、FileText/DatabaseSearch/Database、无常驻箭头、整行hover指针、鼠标与键盘切换、原始参数详情、状态→工具→摘要顺序、明暗主题和390px布局；并验证工具结果量徽章（core.action finish 的 `tool_output_bytes`，仅计工具自身 tool_output、不含 runtime 信封元数据）在两视图渲染于耗时之后，格式化文本（如 4 KB/512 B）与本地化标签一致，1280/390 宽度与明暗主题下无溢出。既有`stream-preview-acceptance.mjs`完整回归验证状态更新不重挂载、不改变展开高度、文本选择保护、折叠组/实时行对齐及连续流式交互。
 - 验证：类型检查、Web 588项、5项性能守卫、工具专项Chrome及完整流式Chrome验收、架构/模块/测试契约与diff检查通过；Host嵌入构建和dist已更新。未重启开发实例。
+
+## 2026-10 图片附件 × 文本-only 接入点警告
+
+- 触发背景：GLM 5.3（`z-glm5.3`，`input_modalities=["text"]`）收到图片附件时模型回复“无法看到图片”，请求本身 HTTP 200 无协议错误。curl 实测确认 glm-5.3 无视觉、glm-5.3-flash 正确识图；属模型能力事实而非适配 bug，产品缺口是目录能力未透传到 UI。
+- Core：`CatalogModel` 新增 `input_modalities`（来自 `documented_facts.input_modalities`，严格限定 text/image/video/file、非空、无重复；schema 先行拒绝未知枚举与空数组），随既有 Web 快照序列化，不影响请求构建。
+- Web：会话当前接入点按 catalog_id（模板副本按 provider+model 兜底）解析目录条目；声明不含 image 且附件中存在图片（png/jpg/jpeg/webp/gif，与 Host `image_media_type` 镜像）时，附件条渲染警告行（TriangleAlert、role=status、i18n zh/en），提示切换多模态接入点。自定义/未知模态接入点保持沉默不误报。
+- 验收修复（e2e 抓出）：图片被待发送队列消息占用后 `availableAttachments` 排除它导致警告消失——判定范围改为会话全量附件，且警告行可独立撑起附件条（避免全被占用时警告无处渲染）。
+- 测试看护：`model_catalog_tests.rs` 断言目录模态事实与非法输入拒绝；`web_host_tests.rs` 断言快照对每个目录模型序列化非空合法 `input_modalities` 且 glm-5.3/flash 值正确（防字段静默丢失）；`model_endpoints.test.ts` 覆盖模态解析、接入点→目录条目解析与扩展名镜像；`image-attachment-warning-e2e.mjs`（已挂入 `test:browser` CI 链）在真实 Chrome 验证：文本路由+图片出警告、txt/多模态/旧快照沉默、队列占用仍警告且隐藏已占用附件、zh/en 文案与 tooltip、明暗主题 1280/390 几何无溢出。
+- 验证：agent_core 9 项目录测试、timem lib 380 项、Web vitest 716 项、五套浏览器验收（含新增）、模块边界/测试契约/diff 检查通过；dist 已重建入库。

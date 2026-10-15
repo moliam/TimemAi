@@ -438,10 +438,10 @@ async function main() {
     publish(2, "early response continued", []);
     await waitFor(() => contains(".response-preview", "continued"), "chat update missing");
     publish(3, "early response continued", [], "network_error");
-    await waitFor(() => contains(".response-preview-interruption", "Network error"), "network interruption missing");
+    await waitFor(() => contains(".response-preview-interruption", "网络错误"), "network interruption missing");
     await browser.call("Page.reload", {ignoreCache:true});
     await waitFor(() => contains(".response-preview", "early response continued"), "reconnect lost partial chat");
-    await waitFor(() => contains(".response-preview-interruption", "Network error"), "reconnect lost interruption");
+    await waitFor(() => contains(".response-preview-interruption", "网络错误"), "reconnect lost interruption");
     publish(4, null, []);
     await waitFor(async () => !(await contains(".response-preview", "early response")), "invalid response not retracted");
     const thoughtEvent = (id, text, time) => ({
