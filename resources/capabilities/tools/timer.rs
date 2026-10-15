@@ -138,20 +138,14 @@ fn schedule_exactly_one(after_ms: Option<u64>, at: &str) -> bool {
 }
 
 fn str_field(action: &ParsedAction, key: &str) -> String {
-    action
-        .raw_input
-        .get(key)
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default()
-        .to_string()
+    action.input_str(key)
 }
 
 fn u64_field(action: &ParsedAction, key: &str) -> Option<u64> {
-    let value = action.raw_input.get(key)?;
-    value
-        .as_u64()
-        .or_else(|| value.as_i64().and_then(|v| u64::try_from(v).ok()))
+    // Delegate to the shared accessor: XML suites deliver bare text children
+    // as strings when no integer schema applies, so numeric fields must
+    // accept both JSON numbers and numeric strings uniformly.
+    action.input_u64(key)
 }
 
 fn failed(error: &str) -> ActionExecution {

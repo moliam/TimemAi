@@ -18614,6 +18614,7 @@ fn web_timer_fixture(name: &str, mode: &str, next_fire_ms: u64) -> WebTimer {
         enabled: true,
         next_fire_ms,
         last_fired_ms: None,
+        parked_reason: None,
     }
 }
 
@@ -18759,6 +18760,7 @@ fn web_timer_merge_from_core_preserves_host_metadata() {
     seeded.created_at_ms = 42;
     seeded.enabled = false;
     seeded.last_fired_ms = Some(7);
+    seeded.parked_reason = Some("delivery_failed".to_string());
     let existing_id = seeded.spec.timer_id.clone();
     let existing_spec = seeded.spec.clone();
     {
@@ -18787,6 +18789,7 @@ fn web_timer_merge_from_core_preserves_host_metadata() {
     assert!(!kept.enabled);
     assert_eq!(kept.last_fired_ms, Some(7));
     assert_eq!(kept.next_fire_ms, 123_456);
+    assert_eq!(kept.parked_reason.as_deref(), Some("delivery_failed"));
     let fresh = timers.iter().find(|t| t.spec.timer_id == "timer_model_1").unwrap();
     assert!(fresh.enabled);
     assert!(fresh.next_fire_ms > now_ms() as u64);
@@ -18907,4 +18910,287 @@ fn web_timer_serde_flattens_spec_fields() {
     assert_eq!(value["next_fire_ms"], 99);
     let parsed: WebTimer = serde_json::from_value(value).unwrap();
     assert_eq!(parsed, timer);
+}
+
+// ---------------------------------------------------------------------------
+// Timers: real-worker end-to-end (spawned CoreSessionWorker + injected model)
+// ---------------------------------------------------------------------------
+
+struct TimerPromptCaptureModel {
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+impl ModelClient for TimerPromptCaptureModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        Ok(LlmResponse {
+            tool_calls: Vec::new(),
+            content: confirmed_xml_response("<final_answer>timer turn done</final_answer>"),
+            model_name: "test-model".to_string(),
+            usage: UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                total_tokens: 12,
+                ..UsageStats::zero()
+            },
+            truncated: false,
+        })
+    }
+}
+
+struct TimerToolCallModel {
+    calls: u8,
+}
+
+impl ModelClient for TimerToolCallModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.calls += 1;
+        // Round 1: call the timer tool through the XML protocol. The child
+        // element text form exercises the same parsing a real model uses.
+        let content = if self.calls == 1 {
+            "<ASSISTANT><free_talk>Scheduling a reminder.</free_talk><actions><timer name=\"schedule reminder\"><op>new</op><name>build-watch</name><prompt>check the long build</prompt><after_ms>60000</after_ms></timer></actions></ASSISTANT>".to_string()
+        } else {
+            confirmed_xml_response("<final_answer>Reminder scheduled.</final_answer>")
+        };
+        Ok(LlmResponse {
+            tool_calls: Vec::new(),
+            content,
+            model_name: "test-model".to_string(),
+            usage: UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                total_tokens: 12,
+                ..UsageStats::zero()
+            },
+            truncated: false,
+        })
+    }
+}
+
+fn register_timer_model_worker<M>(state: &AppState, model: M, label: &str) -> String
+where
+    M: ModelClient + Send + 'static,
+{
+    let ordinal = state.sessions.lock().unwrap().len() as u32;
+    let session_id = unique_web_id("timer_session");
+    let context_id = test_context_id(&session_id);
+    let worker_dir =
+        std::env::temp_dir().join(format!("timem_web_timer_{label}_{}", now_ms()));
+    std::fs::create_dir_all(&worker_dir).unwrap();
+    let core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &worker_dir,
+    );
+    let config = state.template.settings.lock().unwrap().config.clone();
+    let worker_id = state
+        .manager
+        .lock()
+        .unwrap()
+        .spawn_worker_in_session_with_model_client(
+            core,
+            config,
+            CoreSessionWorkerWorkspace::new(
+                &worker_dir,
+                worker_dir.join("audit.json"),
+                "test-web",
+                "local",
+            ),
+            session_id.clone(),
+            context_id.clone(),
+            Some(format!("Timer {label}")),
+            None,
+            model,
+        )
+        .unwrap();
+    let mut session = test_web_session(&session_id, ordinal, format!("Timer {label}"));
+    session.current_dir = worker_dir.display().to_string();
+    session.contexts[0] = WebContext {
+        context_id: context_id.clone(),
+        current_dir: worker_dir.display().to_string(),
+        worker_ids: vec![worker_id.clone()],
+    };
+    session.workers[0].worker_id = worker_id.clone();
+    session.workers[0].context_id = context_id;
+    session.active_context_id = session.contexts[0].context_id.clone();
+    session.primary_worker_id = worker_id;
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session);
+    session_id
+}
+
+fn shutdown_timer_workers(state: &AppState) {
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+}
+
+fn drain_until(state: &AppState, deadline_ms: u64, ready: impl Fn() -> bool, what: &str) {
+    let deadline = Instant::now() + Duration::from_millis(deadline_ms);
+    loop {
+        for (event_session_id, context_id, worker_id, event) in drain_worker_events(state) {
+            handle_scoped_worker_event(&state, &event_session_id, &context_id, &worker_id, event);
+        }
+        if ready() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn real_worker_timer_fire_delivers_prompt_and_completes_turn() {
+    let state = routing_test_state();
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let session_id =
+        register_timer_model_worker(&state, TimerPromptCaptureModel { prompts: Arc::clone(&prompts) }, "fire");
+
+    create_session_timer(
+        &state,
+        &session_id,
+        Some("tick".into()),
+        "do the timed job".into(),
+        None,
+        Some(1000),
+        None,
+        None,
+    )
+    .unwrap();
+    // Force the timer due on the next scheduler tick.
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions
+            .get_mut(&session_id)
+            .unwrap()
+            .timers[0]
+            .next_fire_ms = 0;
+    }
+
+    fire_due_timers(&state);
+
+    drain_until(
+        &state,
+        20_000,
+        || {
+            let sessions = state.sessions.lock().unwrap();
+            let session = &sessions[&session_id];
+            session.state == "ready"
+                && session.timers.is_empty()
+                && session
+                    .messages
+                    .iter()
+                    .any(|message| message.text == "timer turn done")
+        },
+        "timer-fired turn to finish",
+    );
+
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        // The fired prompt reached the real model inside a real turn.
+        assert!(
+            prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|prompt| prompt.contains("[timer:tick] do the timed job")),
+            "model never received the fired timer prompt"
+        );
+        // The once timer was consumed and its turn carries the timer kind.
+        assert!(session.timers.is_empty());
+        assert!(session.message_queue.is_empty());
+        assert!(session.turns.iter().any(|turn| {
+            turn.user_entries.iter().any(|entry| entry.kind == "timer")
+        }));
+    }
+    shutdown_timer_workers(&state);
+}
+
+#[test]
+fn real_worker_timer_tool_call_projects_into_web_timers() {
+    let state = routing_test_state();
+    let session_id =
+        register_timer_model_worker(&state, TimerToolCallModel { calls: 0 }, "tool");
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "schedule a reminder".to_string(),
+            input_kind: None,
+            source_turn_id: None,
+            attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap();
+
+    drain_until(
+        &state,
+        20_000,
+        || {
+            let sessions = state.sessions.lock().unwrap();
+            let session = &sessions[&session_id];
+            session.state == "ready"
+                && session
+                    .messages
+                    .iter()
+                    .any(|message| message.text == "Reminder scheduled.")
+        },
+        "timer tool-call turn to finish",
+    );
+
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        let timers = &session.timers;
+        assert_eq!(timers.len(), 1, "model timer must be projected: {timers:#?}");
+        assert_eq!(timers[0].spec.created_by, "model");
+        assert_eq!(timers[0].spec.name, "build-watch");
+        assert_eq!(timers[0].spec.prompt, "check the long build");
+        assert_eq!(timers[0].spec.after_ms, Some(60000));
+        assert!(timers[0].enabled);
+        assert!(timers[0].next_fire_ms > now_ms() as u64);
+        // The chat carries a core.timer topic event for the timeline.
+        assert!(session.turns.iter().any(|turn| {
+            turn.events.iter().any(|event| {
+                event.source == "core_topic"
+                    && event.payload["topic"]["name"]
+                        .as_str()
+                        .is_some_and(|name| name == "core.timer")
+            })
+        }));
+    }
+    // Persisted projection matches the session state.
+    let persisted = load_session_timers(&state, &session_id);
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].spec.created_by, "model");
+    shutdown_timer_workers(&state);
 }
