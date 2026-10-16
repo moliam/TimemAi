@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { isMemorySearch, memorySearchPresentation, readFilePresentation, runBashEditPresentation, selfToolPresentation } from "../src/tool_presentation";
-import { MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, readFileRangeLabel, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation } from "../src/tool_invocation";
+import { isMemorySearch, memorySearchPresentation, readFilePresentation, runBashEditPresentation, selfToolPresentation, timerPresentation, timerDelayParts, formatTimerAt } from "../src/tool_presentation";
+import { MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, readFileRangeLabel, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation, TimerToolIcon, TimerInvocation } from "../src/tool_invocation";
 import { activityFromTopic } from "../src/view_model";
 import type { CoreTopicEvent } from "../src/protocol";
 import { t } from "../src/i18n";
@@ -259,5 +259,81 @@ describe("memory search icon", () => {
     expect(renderToStaticMarkup(<MemorySearchIcon />)).toContain("lucide-database-search");
     expect(renderToStaticMarkup(<MemoryIcon />)).toContain("lucide-database");
     expect(renderToStaticMarkup(<MemoryIcon />)).not.toContain("lucide-database-search");
+  });
+});
+
+describe("readable timer lifecycle presentation", () => {
+  it("renders a once timer with a relative delay in user language", () => {
+    const timer = timerPresentation("timer", {
+      op: "new", name: "build-check", prompt: "检查 CI 构建结果",
+      mode: "once", after_ms: 600000,
+    })!;
+    expect(timer.kind).toBe("new_once");
+    const html = renderToStaticMarkup(<><TimerToolIcon /><TimerInvocation timer={timer} /></>);
+    expect(html).toContain("lucide-calendar-clock");
+    expect(html).toContain("新建定时");
+    expect(html).toContain("build-check");
+    expect(html).toContain("单次");
+    expect(html).toContain("10 分钟后");
+    expect(html).toContain("任务");
+    expect(html).toContain("检查 CI 构建结果");
+    expect(html).not.toContain("after_ms");
+    expect(html).not.toContain("600000");
+  });
+
+  it("renders a repeat timer with the interval and an absolute once with local time", () => {
+    const repeat = timerPresentation("timer", {
+      op: "new", prompt: "日报", mode: "repeat", interval_ms: 1800000, after_ms: 60000,
+    })!;
+    expect(repeat.kind).toBe("new_repeat");
+    const repeatHtml = renderToStaticMarkup(<TimerInvocation timer={repeat} />);
+    expect(repeatHtml).toContain("循环");
+    expect(repeatHtml).toContain("每 30 分钟");
+    expect(repeatHtml).not.toContain("interval_ms");
+
+    const at = timerPresentation("timer", {
+      op: "new", prompt: "早会", mode: "once", at: "2026-10-16T01:30:00Z",
+    })!;
+    const atHtml = renderToStaticMarkup(<TimerInvocation timer={at} />);
+    expect(atHtml).toContain("于 2026-");
+    expect(atHtml).toContain("任务");
+  });
+
+  it("renders a delete row naming the timer", () => {
+    const del = timerPresentation("timer", { op: "del", name: "build-check" })!;
+    expect(del).toEqual({ kind: "delete", name: "build-check" });
+    const html = renderToStaticMarkup(<TimerInvocation timer={del} />);
+    expect(html).toContain("删除定时");
+    expect(html).toContain("build-check");
+  });
+
+  it.each([
+    { op: "new" },                                   // no prompt
+    { op: "new", prompt: "p" },                      // no schedule (exactly one required)
+    { op: "new", prompt: "p", after_ms: 1, at: "2026-01-01T00:00:00Z" }, // both schedules
+    { op: "new", prompt: "p", mode: "once", after_ms: 1, interval_ms: 2 }, // once+interval
+    { op: "new", prompt: "p", mode: "repeat", after_ms: 1 },               // repeat without interval
+    { op: "new", prompt: "p", after_ms: -1 },        // negative delay
+    { op: "new", prompt: "p", at: "not-a-date" },    // invalid absolute
+    { op: "new", prompt: "p", after_ms: 1, extra: 1 }, // unknown field
+    { op: "del" },                                   // delete without name
+    { op: "del", name: "x", prompt: "y" },           // delete with create fields
+    { op: "other", prompt: "p", after_ms: 1 },       // unknown op
+  ])("falls back instead of guessing malformed timer inputs: %j", (value) => {
+    expect(timerPresentation("timer", value)).toBeUndefined();
+  });
+
+  it("splits durations into human units for delay and every labels", () => {
+    expect(timerDelayParts(45000)).toEqual({ unit: "seconds", value: 45 });
+    expect(timerDelayParts(600000)).toEqual({ unit: "minutes", value: 10 });
+    expect(timerDelayParts(750000)).toEqual({ unit: "minutes", value: 12.5 });
+    expect(timerDelayParts(3720000)).toEqual({ unit: "hours", hours: 1, minutes: 2 });
+    expect(timerDelayParts(90000000)).toEqual({ unit: "days", days: 1, hours: 1 });
+  });
+
+  it("formats absolute fire instants as local wall-clock", () => {
+    const text = formatTimerAt("2026-10-16T01:02:03Z");
+    expect(text).toMatch(/^2026-10-1[56] \d{2}:\d{2}:\d{2}$/);
+    expect(formatTimerAt("garbage")).toBe("garbage");
   });
 });

@@ -28,7 +28,7 @@ describe("tool activity row layout", () => {
       expect(section).not.toContain('<ActionStatus');
     }
     expect(styles).toContain('.tool-activity.settled .tool-activity-timing { grid-column: 3; }');
-    expect(styles).toContain('.tool-activity.settled :is(.file-tool-preview, .bash-edit-preview, .memory-search-preview, .self-tool-preview) { grid-column: 2; }');
+    expect(styles).toContain('.tool-activity.settled :is(.file-tool-preview, .bash-edit-preview, .memory-search-preview, .self-tool-preview, .timer-tool-preview) { grid-column: 2; }');
     expect(styles).toContain('.tool-failure-icon { color: #d08181; }');
   });
 
@@ -254,4 +254,16 @@ it("uses one typography contract for system-level notices", () => {
 it("narrows tool rendering from the right edge while preserving mobile width", () => {
   expect(styles).toContain("width: 90%;\n  max-width: 90%;\n  margin-right: auto;");
   expect(styles).toMatch(/@media \(max-width: 720px\) \{[\s\S]*\.stream-tool-run,[\s\S]*width: 100%; max-width: 100%;/);
+});
+
+it("renders timer lifecycle rows as standalone system-status lines", () => {
+  // Ordinary mode: timer activities bypass the collapsed tool group.
+  expect(source).toMatch(/if \(activity\.timer\)\s*\n?\s*return \(\s*\n\s*<ToolActivity[\s\S]*?timer-row-/);
+  // Grouping never absorbs timer rows in either mode.
+  const grouping = readFileSync(new URL("../src/activity_groups.ts", import.meta.url), "utf8");
+  expect(grouping).toContain('activity.tone === "action" && !activity.timer');
+  expect(source).toContain('if (previous && foldable(entry) && foldable(previous[0])) previous.push(entry);');
+  expect(source).toMatch(/if \(activity\.timer\)\s*\n?\s*return \(\s*\n\s*<div key=\{key\} className="stream-tool-merged-item">/);
+  expect(styles).toContain(', .timer-tool-preview) { grid-column: 2; }');
+  expect(styles).toContain('.timer-tool-icon { color: #8bc8ba; }');
 });

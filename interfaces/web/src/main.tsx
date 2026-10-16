@@ -1,4 +1,4 @@
-import { MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation } from "./tool_invocation";
+import { MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation, TimerInvocation, TimerToolIcon } from "./tool_invocation";
 import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
 import { initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
 import type { CatalogModel } from "./model_endpoints";
@@ -10916,6 +10916,15 @@ const TurnInteraction = memo(function TurnInteraction({
                   {workItems.map((item, index) => {
                     const { activity } = item;
                     if (activity?.tone === "action") {
+                      // Timer lifecycle rows are system-status lines: they stay
+                      // individually visible and never fold into tool groups.
+                      if (activity.timer)
+                        return (
+                          <ToolActivity
+                            key={`timer-row-${item.key}`}
+                            activity={activity}
+                          />
+                        );
                       const summary = toolActivityRunByStartIndex.get(index);
                       return summary ? (
                         <ToolActivityGroup
@@ -11173,9 +11182,13 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
     }] : []),
   ].map(entry => ({ ...entry, createdAt: entry.time })).sort(compareTurnStreamItems);
   const groups: (typeof entries)[] = [];
+  // Timer lifecycle rows are standalone system-status lines in stream mode
+  // too: they never merge into the foldable tool runs.
+  const foldable = (entry: { activity?: { tone?: string; timer?: unknown } | null } | undefined) =>
+    entry?.activity?.tone === "action" && !entry.activity.timer;
   for (const entry of entries) {
     const previous = groups.at(-1);
-    if (entry.activity?.tone === "action" && previous?.[0].activity?.tone === "action") previous.push(entry);
+    if (previous && foldable(entry) && foldable(previous[0])) previous.push(entry);
     else groups.push([entry]);
   }
   // One reverse scan, rather than rescanning the suffix for every tool group.
@@ -11191,6 +11204,12 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
     {groups.map((group, index) => {
       const { key, activity } = group[0];
       if (activity?.tone === "action") {
+        if (activity.timer)
+          return (
+            <div key={key} className="stream-tool-merged-item">
+              <div><StreamToolRow activity={activity} /></div>
+            </div>
+          );
         // 逻辑时序 +1 有两种入口：后续 AI 回复内容，或新 call 实际开始执行。
         // 此处处理 AI 内容入口；串行 call 入口由 handoffIds 按执行事件顺序判定。
         // 工具完成、用户补充本身不推进时序，不得仅据此折叠旧结果。
@@ -11288,6 +11307,7 @@ function ToolActivityIcon({
       </span>
     );
   if (activity.run_bash_edit) return <RunBashEditIcon />;
+  if (activity.timer) return <TimerToolIcon />;
   if (activity.readfile) return <ReadFileIcon />;
   if (activity.memory_search) return <MemorySearchIcon />;
   if (activity.self_tool) return <SelfToolIcon />;
@@ -11364,7 +11384,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
         )}
         <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
         {status === "background_running" && <span className="stream-tool-background">(bg)</span>}
-        {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && <span className="stream-tool-command-preview tool-invocation-preview" title={invocationPreview}>{invocationPreview.replace(/\s+/g, " ")}</span>}
+        {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && <span className="stream-tool-command-preview tool-invocation-preview" title={invocationPreview}>{invocationPreview.replace(/\s+/g, " ")}</span>}
         {(running
           ? liveElapsedMs
           : activity.elapsed_ms) !== undefined && (() => {
@@ -12532,7 +12552,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
         </span>
       )}
       <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
-      {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && (
+      {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && (
         <code className="tool-activity-command tool-invocation-preview" title={invocationPreview}>
           {invocationPreview}
         </code>

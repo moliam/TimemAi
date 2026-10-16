@@ -1,4 +1,4 @@
-import { memorySearchPresentation, readFilePresentation, runBashEditPresentation, selfToolPresentation } from "./tool_presentation";
+import { memorySearchPresentation, readFilePresentation, runBashEditPresentation, selfToolPresentation, timerPresentation } from "./tool_presentation";
 import {
   Activity,
   ChatHistoryRecord,
@@ -2254,6 +2254,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         self_tool: selfToolPresentation(action, redactedInput),
         readfile: readFilePresentation(action, redactedInput),
         run_bash_edit: runBashEditPresentation(action, redactedInput),
+        timer: timerPresentation(action, redactedInput),
         tool_status: status,
         tool_mode: toolMode,
         elapsed_ms:

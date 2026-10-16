@@ -111,7 +111,9 @@ export function summarizeConsecutiveToolActivities(
 
   activities.forEach((activity, index) => {
     if (activity === null) return;
-    if (activity.tone === "action") {
+    // Timer lifecycle rows render as standalone system-status lines and must
+    // not be absorbed into collapsed tool groups.
+    if (activity.tone === "action" && !activity.timer) {
       if (startIndex < 0) startIndex = index;
       tools.push(activity);
       return;
