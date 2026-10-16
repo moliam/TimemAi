@@ -835,8 +835,8 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 ## 2026-10 Timer 面板创建区交互重做 + 定时触发消息底色
 
 - 触发背景：用户反馈点开闹钟面板时，常驻的创建表单被误读为「修改现有 timer」；「提示内容」一词不准确——timer prompt 是触发时投递的工作指派；另外要求定时触发的那一轮用户消息底色与手动输入区分，且闹钟按钮 active 态用已有蓝色、不引入新颜色。
-- Web 面板：创建区收进「新建定时」按钮（Plus 图标、dashed 边框、aria-expanded/aria-controls），点击展开表单；「收起」按钮关闭并丢弃草稿；创建成功自动收起并清空；会话切换重置展开态与全部字段。字段正名「工作内容」（workLabel/workPlaceholder），编辑/展开/收起/校验文案同步更名，i18n zh/en。
-- 定时触发消息：`.turn-user-entry.timer` 在最终权威样式层叠加现有 accent 蓝 #3b82f6 半透明底（dark 0.18 / light 0.12，实测正文对比度 8.56/9.69、标签 5.20+），手动输入气泡保持原蓝灰底，两者可计算样式区分；闹钟 header 按钮 has-timers 态从 teal 换成用户气泡层既有蓝系（dark #263746/#8fc3e8，light #d9edff/#286792），不新增色相。
+- Web 面板：创建区收进「新建定时」按钮（Plus 图标、dashed 边框、aria-expanded/aria-controls），点击展开表单；「收起」按钮关闭并丢弃草稿；创建成功自动收起并清空；会话切换重置展开态与全部字段；顺手删除无引用的孤儿键 timer.createPending（初版常驻面板遗留）。字段正名「工作内容」（workLabel/workPlaceholder），编辑/展开/收起/校验文案同步更名，i18n zh/en。
+- 定时触发消息：`.turn-user-entry.timer` 在最终权威样式层叠加现有 accent 蓝 #3b82f6 半透明底（dark 0.18 / light 0.10，实测正文对比度 8.56/9.69、标签 ≥5.20），手动输入气泡保持原蓝灰底，两者可计算样式区分；闹钟 header 按钮 has-timers 态从 teal 换成用户气泡层既有蓝系（dark #263746/#8fc3e8，light #d9edff/#286792），不新增色相。
 - 焦点契约（验收审计补充）：展开进入「工作内容」输入框、收起（含创建成功自动收起）焦点回到「新建定时」按钮，首挂载与会话切换重置不抢焦点。
 - 测试看护：timer-ui-acceptance e2e 扩展——初始折叠与 aria-expanded=false、展开后出现「工作内容」标签且焦点落入输入框、创建成功表单收起、收起丢弃草稿且重开为空且焦点回按钮、timer 消息与手动消息计算背景色区分且为 rgba(59,130,246,*)、明暗主题 1440/390 布局无溢出；夹具补普通 task turn 与 timer-fired turn 对照。
 - 验证：vitest 733 全绿；timer e2e 全绿；module_boundary/test_contract/diff/performance_guard 通过；dist 重建。

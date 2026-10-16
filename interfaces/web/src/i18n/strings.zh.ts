@@ -704,7 +704,6 @@ export const zh = {
     createToggle: "新建定时",
     createCollapse: "收起",
     createButton: "创建",
-    createPending: "创建中…",
     createdByUser: "用户",
     createdByModel: "模型",
     nextFire: "下次 {time}",
