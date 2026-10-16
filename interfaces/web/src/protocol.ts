@@ -359,6 +359,7 @@ export type Activity = {
   self_tool?: import("./tool_presentation").SelfToolPresentation;
   readfile?: import("./tool_presentation").ReadFilePresentation;
   run_bash_edit?: import("./tool_presentation").RunBashEditPresentation;
+  timer?: import("./tool_presentation").TimerPresentation;
   elapsed_ms?: number;
   /** Bytes of the tool's own result output injected into the next prompt (runtime metadata excluded). */
   tool_output_bytes?: number;

@@ -822,3 +822,12 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - Web：长 prompt（>80 字符或含换行）两行 line-clamp 截断 + 「+/−」展开收起（aria-expanded）；铅笔按钮进入编辑态（textarea 预填、可拉伸），保存按钮空文案禁用，保存发 `timer_update` 后退出编辑，取消丢弃草稿；会话切换时编辑态与展开集重置。i18n zh/en；深浅主题样式。
 - 测试看护：`web_timer_update_prompt_preserves_schedule_and_persists` 覆盖空/超长/不存在 id 拒绝、trim、调度字段不变、幂等、持久化；timer-ui-acceptance e2e 扩展——clamp 几何（scrollHeight>clientHeight）、展开后全文可见、编辑预填/空禁用/保存命令与主机回显/调度行不变/取消丢弃，1440/390 × 明暗全过。
 - 验证：timem lib 380、vitest 716、timer e2e 全绿；module_boundary/test_contract/diff 检查通过；dist 重建。
+
+## 2026-10 Timer 工具行用户语言渲染（独立系统状态行）
+
+- 触发背景：用户反馈 `op=new mode=once after_ms=600000` 这类技术参数对用户不友好；设计方针——已知明确含义的 tool 用用户语言渲染（bash 例外），timer 行类似备忘/压缩做系统状态级展示：单独一行、不折叠。同时要求模型侧明确：timer 触发时 prompt 会随请求携带，任务不清晰必须先与用户澄清。
+- Presentation：`timerPresentation` 严格解析（op/prompt/name/mode/after_ms/at/interval_ms 白名单；once 时 after_ms/at 恰一；repeat 必有 interval；非法/未知字段整体回退裸参数）；`timerDelayParts`（秒/分/小时/天人性化拆分）与 `formatTimerAt`（本地墙钟 yyyy-MM-dd HH:mm:ss）。
+- 渲染：CalendarClock 图标；摘要文案——新建定时（名），单次/循环，10 分钟后 | 于 2026-10-16 09:00:00 | 每 30 分钟，任务: <prompt>；删除定时：名。两种 UI 模式（经典 + 流式）timer 行均绕开折叠工具组独立渲染（activity_groups 与 stream 分组双重排除），网格列对齐/深浅主题/移动端换行齐全。i18n zh/en。
+- 模型指引（timer.yaml）：补充触发语义说明——prompt 即未来运行的完整工作指派，需求模糊时必须先澄清再建 timer。
+- 测试看护：tool_presentation.test.tsx 新增 6 组（三种行文案与图标、绝对时间本地化、11 类非法输入回退、时长拆分）；tool_activity_layout.test.ts 断言双模式独立渲染与分组排除；tool-presentation-e2e 真实 Chrome 验证双模式 timer 行不被吸收、文案完整、无 after_ms/600000 泄漏，并把行级交互断言作用域收紧到 readfile 行。静态提示词快照检查通过。
+- 验证：vitest 733、tool-presentation e2e 全绿；module_boundary/test_contract/diff 检查通过；dist 重建。

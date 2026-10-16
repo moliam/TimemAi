@@ -5865,10 +5865,14 @@ body.workspace-modal-open .app-shell { user-select: none; }
 
 
 /* Structured readfile previews share one compact presentation in both modes. */
-.file-tool-icon, .bash-edit-icon, .memory-search-icon, .memory-tool-icon, .self-tool-icon, .tool-failure-icon { display: inline-flex; align-items: center; vertical-align: middle; }
+.file-tool-icon, .bash-edit-icon, .memory-search-icon, .memory-tool-icon, .self-tool-icon, .tool-failure-icon, .timer-tool-icon { display: inline-flex; align-items: center; vertical-align: middle; }
+.timer-tool-icon { color: #8bc8ba; }
+.timer-tool-preview { color: #a8c9d7; overflow-wrap: anywhere; }
+.timer-tool-preview + .tool-activity-timing { margin-left: 6px; }
 .file-tool-preview { min-width: 0; display: flex; align-items: center; gap: 10px; color: var(--text-secondary, #a3a3a3); font-family: var(--agent-other-font), var(--agent-chinese-font), sans-serif; font-size: 11px; line-height: 1.5; }
 .tool-activity .file-tool-preview { grid-column: 3; width: 100%; }
-.stream-tool-head > .file-tool-preview { flex: 1; }
+.stream-tool-head > .file-tool-preview,
+.stream-tool-head > .timer-tool-preview { flex: 1; }
 .file-tool-path { min-width: 0; display: flex; flex: 1 1 auto; overflow: hidden; white-space: nowrap; }
 .file-tool-directory { min-width: 0; overflow: hidden; text-overflow: ellipsis; opacity: .7; }
 .file-tool-name { flex-shrink: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
@@ -5885,8 +5889,9 @@ body.workspace-modal-open .app-shell { user-select: none; }
 :root[data-theme="light"] .bash-edit-preview,
 :root[data-theme="light"] .memory-search-preview,
 :root[data-theme="light"] .self-tool-preview { color: #52606d; }
+:root[data-theme="light"] .timer-tool-preview { color: #33586b; }
 @media (max-width: 600px) {
-  .file-tool-preview { flex-wrap: wrap; gap: 1px 8px; }
+  .file-tool-preview, .timer-tool-preview { flex-wrap: wrap; gap: 1px 8px; }
   .file-tool-path { flex-basis: 100%; }
   .file-tool-range { max-width: 100%; }
 }
@@ -5971,9 +5976,9 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .tool-activity.settled .tool-activity-timing { grid-column: 3; }
 .tool-activity.running .tool-activity-timing { grid-column: 4; }
 .tool-activity.settled .tool-activity-command,
-.tool-activity.settled :is(.file-tool-preview, .bash-edit-preview, .memory-search-preview, .self-tool-preview) { grid-column: 2; }
+.tool-activity.settled :is(.file-tool-preview, .bash-edit-preview, .memory-search-preview, .self-tool-preview, .timer-tool-preview) { grid-column: 2; }
 .tool-activity.running .tool-activity-command,
-.tool-activity.running :is(.file-tool-preview, .bash-edit-preview, .memory-search-preview, .self-tool-preview) { grid-column: 3; }
+.tool-activity.running :is(.file-tool-preview, .bash-edit-preview, .memory-search-preview, .self-tool-preview, .timer-tool-preview) { grid-column: 3; }
 .tool-activity.poll-activity .tool-activity-command { grid-column: 1 / -1; }
 
 /* Running metadata is intentionally quiet; settled content returns to the
@@ -6084,3 +6089,6 @@ body.workspace-modal-open .app-shell { user-select: none; }
 :root[data-theme="light"] .model-service-diagnostic { color: #687983; }
 :root[data-theme="light"] .model-service-diagnostic summary { color: #586b75; }
 :root[data-theme="light"] .model-service-diagnostic > :not(summary) { border-left-color: #ccd5da; }
+
+:root[data-theme="light"] .timer-tool-icon { color: #2b7a68; }
+:root[data-theme="light"] .timer-tool-preview { color: #33586b; }
