@@ -380,8 +380,13 @@ async function main() {
 
     // Edit prompt: pencil opens a textarea prefilled; save sends timer_update
     // and the host echo re-renders the new prompt with schedule untouched.
+    // The schedule line embeds a live relative time ("in 60 seconds"), which
+    // re-renders as the wall clock advances; compare the stable structure
+    // instead: the absolute-fire title (from next_fire_ms) and the mode
+    // prefix. A prompt-only edit must leave both untouched.
     const scheduleBefore = await browser.evaluate(
-      `document.querySelector('.timer-item-schedule')?.textContent`,
+      `(() => { const el = document.querySelector('.timer-item-schedule');
+        return { title: el?.getAttribute('title') ?? null, text: el?.textContent ?? "" }; })()`,
     );
     await click(`document.querySelector('.timer-item-actions .timer-edit')?.click()`);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.timer-item-edit textarea')`), "edit textarea missing");
@@ -410,9 +415,17 @@ async function main() {
     ), "host echo must re-render the edited prompt");
     const update = lastCommand("timer_update");
     assert(update && update.timer_id === "timer-u1" && update.prompt.includes("编辑后的提示"), `timer_update command missing or wrong: ${JSON.stringify(update)}`);
+    const scheduleAfter = await browser.evaluate(
+      `(() => { const el = document.querySelector('.timer-item-schedule');
+        return { title: el?.getAttribute('title') ?? null, text: el?.textContent ?? "" }; })()`,
+    );
     assert(
-      (await browser.evaluate(`document.querySelector('.timer-item-schedule')?.textContent`)) === scheduleBefore,
-      "prompt edit must not touch the schedule line",
+      scheduleAfter.title === scheduleBefore.title && scheduleAfter.title !== null,
+      `prompt edit must not touch the fire time: ${JSON.stringify({ before: scheduleBefore, after: scheduleAfter })}`,
+    );
+    assert(
+      scheduleAfter.text.startsWith("单次"),
+      `prompt edit must not change the mode prefix: ${JSON.stringify({ before: scheduleBefore.text, after: scheduleAfter.text })}`,
     );
     // Cancel path: pencil then cancel leaves the prompt unchanged.
     await click(`document.querySelector('.timer-item-actions .timer-edit')?.click()`);
