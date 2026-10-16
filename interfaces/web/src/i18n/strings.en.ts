@@ -623,7 +623,7 @@ export const en: Strings = {
     contextCompressThresholdDesc: "Start automatic compression when context usage reaches the selected percentage. Saved by the current MEM and effective from the next model request.",
     contextCompressThresholdAria: "Choose context compression threshold",
     restorePromptContextTitle: "Restore last context on startup",
-    restorePromptContextDesc: "When enabled, Timem automatically imports each session's dynamic context from the last shutdown after a runtime restart. When disabled, a restart restores history only; snapshots stay on disk and can be re-enabled anytime. Saved by the current MEM. Off by default.",
+    restorePromptContextDesc: "When enabled, Timem saves the context on exit and resumes from it on the next restart.",
     restorePromptContextAria: "Toggle restoring last context on startup",
     saving: "Saving…",
     streamUiTitle: "Show answers as they arrive",

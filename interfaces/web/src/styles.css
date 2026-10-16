@@ -5872,8 +5872,18 @@ body.workspace-modal-open .app-shell { user-select: none; }
 }
 
 /* System settings: formal controls first, followed by a distinct Beta subsection. */
-.system-tool-result-options,
-.system-context-compress-options { grid-template-columns: repeat(5, minmax(0, 1fr)) !important; margin-top: 14px; }
+/* Both fields share one subgrid so the title line and the select line stay
+   horizontally aligned across columns; descriptions live on their own
+   variable-height trailing row so multi-line copy never shifts the controls. */
+.system-select-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 18px; }
+.system-select-field { min-width: 0; display: grid; grid-row: span 4; grid-template-rows: subgrid; row-gap: 6px; }
+.system-select-field .system-setting-status { margin-top: 0; }
+.system-select-title { color: #c8d4cf; font-size: 12px; font-weight: 650; }
+.system-select-desc { margin: 0; color: #77847e; font-size: 10px; line-height: 1.45; }
+.system-select-field select { min-width: 0; width: 100%; height: 34px; border: 1px solid #303936; border-radius: 6px; padding: 0 9px; background: #141917; color: #dce7e2; font: inherit; font-size: 12px; }
+:root[data-theme="light"] .system-select-title { color: #33473f; }
+:root[data-theme="light"] .system-select-desc { color: #65766f; }
+:root[data-theme="light"] .system-select-field select { border-color: #c9d6d0; background: #f7faf8; color: #24352f; }
 .system-feature-card { background: #1b201e; }
 :root[data-theme="light"] .system-feature-card { background: #fff; }
 .system-setting-status { display: block; margin-top: 10px; color: #75847e; font-size: 10px; }
@@ -5884,8 +5894,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
 :root[data-theme="light"] .system-subsection-heading p { color: #65766f; }
 :root[data-theme="light"] .system-subsection-heading strong { color: #33473f; }
 @media (max-width: 620px) {
-  .system-tool-result-options,
-  .system-context-compress-options { grid-template-columns: repeat(5, minmax(42px, 1fr)) !important; overflow-x: auto; }
+  .system-select-grid { grid-template-columns: 1fr; }
 }
 
 /* Tool rows are deliberately narrower than answer prose. Keep the left edge
