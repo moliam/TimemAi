@@ -19231,3 +19231,62 @@ fn web_snapshot_serializes_documented_input_modalities_for_every_catalog_model()
         serde_json::json!(["text", "image", "video", "file"])
     );
 }
+
+#[test]
+fn web_timer_update_prompt_preserves_schedule_and_persists() {
+    let state = routing_test_state();
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("work".into()),
+        "original prompt".into(),
+        None,
+        Some(1000),
+        None,
+        None,
+    )
+    .unwrap();
+    let (timer_id, next_fire, enabled) = {
+        let sessions = state.sessions.lock().unwrap();
+        let timer = &sessions["session_a"].timers[0];
+        (
+            timer.spec.timer_id.clone(),
+            timer.next_fire_ms,
+            timer.enabled,
+        )
+    };
+    // Empty and whitespace-only prompts are rejected.
+    assert!(update_session_timer(&state, "session_a", &timer_id, "  ")
+        .unwrap_err()
+        .contains("prompt_required"));
+    // Oversized prompts are rejected.
+    assert!(update_session_timer(
+        &state,
+        "session_a",
+        &timer_id,
+        &"x".repeat(8001)
+    )
+    .unwrap_err()
+    .contains("timer_prompt_too_long"));
+    // Unknown timer/session ids fail closed.
+    assert!(update_session_timer(&state, "session_a", "missing", "p")
+        .unwrap_err()
+        .contains("timer_not_found"));
+    assert!(update_session_timer(&state, "missing", &timer_id, "p")
+        .unwrap_err()
+        .contains("session_not_found"));
+    // Valid edit trims, persists, and keeps schedule state untouched.
+    update_session_timer(&state, "session_a", &timer_id, "  revised prompt  ").unwrap();
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let timer = &sessions["session_a"].timers[0];
+        assert_eq!(timer.spec.prompt, "revised prompt");
+        assert_eq!(timer.next_fire_ms, next_fire);
+        assert_eq!(timer.enabled, enabled);
+    }
+    // Identical prompt is a no-op success (no churn).
+    update_session_timer(&state, "session_a", &timer_id, "revised prompt").unwrap();
+    // persisted projection carries the new prompt.
+    let persisted = load_session_timers(&state, "session_a");
+    assert_eq!(persisted[0].spec.prompt, "revised prompt");
+}
