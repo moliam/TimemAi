@@ -14053,69 +14053,69 @@ const SettingsCenter = memo(function SettingsCenter(
                   <h3 id="system-settings-title">{t("system.title")}</h3>
                   <Settings size={19} aria-hidden="true" />
                 </div>
-                <section className="settings-group system-tool-result-limit">
-                  <div className="settings-group-heading">
-                    <div>
-                      <strong>{t("system.toolResultLimitTitle")}</strong>
-                      <p>{t("system.toolResultLimitDesc")}</p>
-                    </div>
-                  </div>
-                  <div
-                    className="segmented-control system-tool-result-options"
-                    aria-label={t("system.toolResultLimitAria")}
-                  >
-                    {([30720, 20480, 16384, 10240, 8192] as const).map(
-                      (maxBytes) => (
-                        <button
-                          type="button"
-                          key={maxBytes}
-                          className={modelToolResultBytes === maxBytes ? "active" : ""}
-                          aria-pressed={modelToolResultBytes === maxBytes}
-                          disabled={modelToolResultBytesPending || !connected}
-                          onClick={() => onModelToolResultBytesChange(maxBytes)}
-                        >
-                          {maxBytes / 1024}K
-                        </button>
-                      ),
-                    )}
-                  </div>
-                  {modelToolResultBytesPending && (
-                    <small className="system-setting-status" role="status" aria-live="polite">
-                      {t("system.saving")}
-                    </small>
-                  )}
-                </section>
-                <section className="settings-group system-context-compress-threshold">
-                  <div className="settings-group-heading">
-                    <div>
-                      <strong>{t("system.contextCompressThresholdTitle")}</strong>
-                      <p>{t("system.contextCompressThresholdDesc")}</p>
-                    </div>
-                  </div>
-                  <div
-                    className="segmented-control system-context-compress-options"
-                    aria-label={t("system.contextCompressThresholdAria")}
-                  >
-                    {([80, 85, 90, 95, 100] as const).map((percent) => (
-                      <button
-                        type="button"
-                        key={percent}
-                        className={
-                          contextCompressThresholdPercent === percent ? "active" : ""
+                <section className="settings-group system-runtime-tuning">
+                  <div className="system-select-grid">
+                    <label className="system-select-field">
+                      <span className="system-select-title">
+                        {t("system.toolResultLimitTitle")}
+                      </span>
+                      <select
+                        value={modelToolResultBytes}
+                        aria-label={t("system.toolResultLimitAria")}
+                        disabled={modelToolResultBytesPending || !connected}
+                        onChange={(event) =>
+                          onModelToolResultBytesChange(
+                            Number(event.target.value) as ModelToolResultBytes,
+                          )
                         }
-                        aria-pressed={contextCompressThresholdPercent === percent}
-                        disabled={contextCompressThresholdPending || !connected}
-                        onClick={() => onContextCompressThresholdChange(percent)}
                       >
-                        {percent}%
-                      </button>
-                    ))}
+                        {([30720, 20480, 16384, 10240, 8192] as const).map(
+                          (maxBytes) => (
+                            <option key={maxBytes} value={maxBytes}>
+                              {maxBytes / 1024}K
+                            </option>
+                          ),
+                        )}
+                      </select>
+                      <span className="system-select-desc">
+                        {t("system.toolResultLimitDesc")}
+                      </span>
+                      {modelToolResultBytesPending && (
+                        <small className="system-setting-status" role="status" aria-live="polite">
+                          {t("system.saving")}
+                        </small>
+                      )}
+                    </label>
+                    <label className="system-select-field">
+                      <span className="system-select-title">
+                        {t("system.contextCompressThresholdTitle")}
+                      </span>
+                      <select
+                        value={contextCompressThresholdPercent}
+                        aria-label={t("system.contextCompressThresholdAria")}
+                        disabled={contextCompressThresholdPending || !connected}
+                        onChange={(event) =>
+                          onContextCompressThresholdChange(
+                            Number(event.target.value) as ContextCompressThresholdPercent,
+                          )
+                        }
+                      >
+                        {([80, 85, 90, 95, 100] as const).map((percent) => (
+                          <option key={percent} value={percent}>
+                            {percent}%
+                          </option>
+                        ))}
+                      </select>
+                      <span className="system-select-desc">
+                        {t("system.contextCompressThresholdDesc")}
+                      </span>
+                      {contextCompressThresholdPending && (
+                        <small className="system-setting-status" role="status" aria-live="polite">
+                          {t("system.saving")}
+                        </small>
+                      )}
+                    </label>
                   </div>
-                  {contextCompressThresholdPending && (
-                    <small className="system-setting-status" role="status" aria-live="polite">
-                      {t("system.saving")}
-                    </small>
-                  )}
                 </section>
                 <section className="settings-group system-restore-prompt-context">
                   <div className="settings-group-heading">
