@@ -292,8 +292,13 @@ fn finish_summary_stream_emits_text_across_arbitrary_boundaries() {
     for boundary in boundaries {
         let mut stream = NativeFinishSummaryStream::default();
         let mut output = String::new();
-        stream.push_event(&finish_event(0, Some("task_finished"), &full[..boundary]), &mut |text| output.push_str(text));
-        stream.push_event(&finish_event(0, None, &full[boundary..]), &mut |text| output.push_str(text));
+        stream.push_event(
+            &finish_event(0, Some("task_finished"), &full[..boundary]),
+            &mut |text| output.push_str(text),
+        );
+        stream.push_event(&finish_event(0, None, &full[boundary..]), &mut |text| {
+            output.push_str(text)
+        });
         assert_eq!(output, "你好 🌍 \"quoted\" done", "boundary {boundary}");
     }
 }
@@ -302,16 +307,31 @@ fn finish_summary_stream_emits_text_across_arbitrary_boundaries() {
 fn finish_summary_stream_skips_other_keys_and_ignores_non_finish_calls() {
     let mut stream = NativeFinishSummaryStream::default();
     let mut output = String::new();
-    stream.push_event(&finish_event(0, Some("readfile"), r#"{"path":"Cargo.toml"}"#), &mut |text| output.push_str(text));
-    stream.push_event(&finish_event(1, None, r#"{"path":"x"}"#), &mut |text| output.push_str(text));
+    stream.push_event(
+        &finish_event(0, Some("readfile"), r#"{"path":"Cargo.toml"}"#),
+        &mut |text| output.push_str(text),
+    );
+    stream.push_event(&finish_event(1, None, r#"{"path":"x"}"#), &mut |text| {
+        output.push_str(text)
+    });
     assert!(output.is_empty(), "non-finish calls must not emit");
 
-    stream.push_event(&finish_event(2, Some("task_finished"), r#"{"other":"skip","summary":"ok"}"#), &mut |text| output.push_str(text));
+    stream.push_event(
+        &finish_event(
+            2,
+            Some("task_finished"),
+            r#"{"other":"skip","summary":"ok"}"#,
+        ),
+        &mut |text| output.push_str(text),
+    );
     assert_eq!(output, "ok");
 
     let mut invalid = NativeFinishSummaryStream::default();
     let mut nothing = String::new();
-    invalid.push_event(&finish_event(0, Some("task_finished"), r#"{"summary":123}"#), &mut |text| nothing.push_str(text));
+    invalid.push_event(
+        &finish_event(0, Some("task_finished"), r#"{"summary":123}"#),
+        &mut |text| nothing.push_str(text),
+    );
     assert!(nothing.is_empty(), "non-string summary must not emit");
 }
 
@@ -320,7 +340,14 @@ fn finish_summary_stream_surrogate_pairs_and_lone_units() {
     let mut stream = NativeFinishSummaryStream::default();
     let mut output = String::new();
     // 🌍 = \ud83c\udf0d (valid pair); \ud800 alone is a lone high surrogate.
-    stream.push_event(&finish_event(0, Some("task_finished"), r#"{"summary":"a\ud83c\udf0db\ud800c"}"#), &mut |text| output.push_str(text));
+    stream.push_event(
+        &finish_event(
+            0,
+            Some("task_finished"),
+            r#"{"summary":"a\ud83c\udf0db\ud800c"}"#,
+        ),
+        &mut |text| output.push_str(text),
+    );
     assert_eq!(output, "a🌍b\u{FFFD}c");
 }
 

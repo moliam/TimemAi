@@ -300,10 +300,8 @@ fn catalog_exposes_documented_input_modalities() {
 
 #[test]
 fn catalog_rejects_invalid_input_modalities() {
-    let mut value: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../resources/zhipu_model_catalog.json"
-    ))
-    .unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_str(include_str!("../../../resources/zhipu_model_catalog.json")).unwrap();
     // The descriptor schema rejects unknown modality enums and empty arrays
     // first; the interpreter adds duplicate detection on top.
     value["models"][0]["documented_facts"]["input_modalities"] =

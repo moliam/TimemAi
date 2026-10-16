@@ -58,11 +58,11 @@ use agent_core::{
     work_instruction_load_request, work_instruction_mode_from_sources, AgentCore, BashApprovalMode,
     CoreSessionWorkerWorkspace, HostDecision, HostDecisionRequest, InterfacePreferences,
     ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind, RuntimeDataLayout,
-    TimerSpec,
-    SessionToolRepo, ToolDetail, ToolSummary, TopicReply, TurnProjection, WorkInstructionLoadMode,
-    CORE_TOPIC_ACTION, CORE_TOPIC_CONTEXT_COMPRESS, CORE_TOPIC_MODEL_REPAIR,
-    CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_TOOLGEN,
-    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD, CORE_TOPIC_TIMER,
+    SessionToolRepo, TimerSpec, ToolDetail, ToolSummary, TopicReply, TurnProjection,
+    WorkInstructionLoadMode, CORE_TOPIC_ACTION, CORE_TOPIC_CONTEXT_COMPRESS,
+    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP,
+    CORE_TOPIC_TIMER, CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST,
+    CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use agent_core::{
     capability::CapabilityRegistry, rolling_file_store::RollingCapacity, self_tool::SelfToolPaths,
@@ -2425,18 +2425,10 @@ fn client_command_trace_fields(command: &ClientCommand) -> (&'static str, Option
             ("turn_supplement", Some(session_id.clone()))
         }
         ClientCommand::TurnCancel { session_id, .. } => ("turn_cancel", Some(session_id.clone())),
-        ClientCommand::TimerCreate { session_id, .. } => {
-            ("timer_create", Some(session_id.clone()))
-        }
-        ClientCommand::TimerDelete { session_id, .. } => {
-            ("timer_delete", Some(session_id.clone()))
-        }
-        ClientCommand::TimerToggle { session_id, .. } => {
-            ("timer_toggle", Some(session_id.clone()))
-        }
-        ClientCommand::TimerUpdate { session_id, .. } => {
-            ("timer_update", Some(session_id.clone()))
-        }
+        ClientCommand::TimerCreate { session_id, .. } => ("timer_create", Some(session_id.clone())),
+        ClientCommand::TimerDelete { session_id, .. } => ("timer_delete", Some(session_id.clone())),
+        ClientCommand::TimerToggle { session_id, .. } => ("timer_toggle", Some(session_id.clone())),
+        ClientCommand::TimerUpdate { session_id, .. } => ("timer_update", Some(session_id.clone())),
         _ => ("other", None),
     }
 }
@@ -7057,8 +7049,7 @@ fn persist_timers(state: &AppState, session_id: &str) -> Result<(), String> {
         .map_err(|error| format!("timers_serialize_failed:{error}"))?;
     let path = timers_path(state, session_id)?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("timers_dir_failed:{error}"))?;
+        std::fs::create_dir_all(parent).map_err(|error| format!("timers_dir_failed:{error}"))?;
     }
     agent_core::atomic_write_file(&path, &payload)
         .map_err(|error| format!("timers_write_failed:{error}"))
@@ -7180,11 +7171,11 @@ fn merge_session_timers_from_core(
 }
 
 fn publish_timers_updated(state: &AppState, session_id: &str) {
-    let timers = state
-        .sessions
-        .lock()
-        .ok()
-        .and_then(|sessions| sessions.get(session_id).map(|session| session.timers.clone()));
+    let timers = state.sessions.lock().ok().and_then(|sessions| {
+        sessions
+            .get(session_id)
+            .map(|session| session.timers.clone())
+    });
     if let Some(timers) = timers {
         publish_semantic(
             state,
@@ -7204,13 +7195,16 @@ fn publish_timer_topic_notice(state: &AppState, session_id: &str, op: &str) {
         .lock()
         .ok()
         .and_then(|sessions| {
-            sessions
-                .get(session_id)
-                .map(|session| session.timers.iter().map(|timer| timer.spec.clone()).collect())
+            sessions.get(session_id).map(|session| {
+                session
+                    .timers
+                    .iter()
+                    .map(|timer| timer.spec.clone())
+                    .collect()
+            })
         })
         .unwrap_or_default();
-    let wire_payload =
-        agent_core::host::timer_topic_event(session_id, op, &specs).wire_payload();
+    let wire_payload = agent_core::host::timer_topic_event(session_id, op, &specs).wire_payload();
     let turn_ref = append_active_turn_event(state, session_id, "core_topic", wire_payload.clone());
     publish_core_semantic(
         state,
@@ -7233,7 +7227,13 @@ fn sync_worker_timers(state: &AppState, session_id: &str) {
     let specs: Vec<TimerSpec> = match state.sessions.lock() {
         Ok(sessions) => sessions
             .get(session_id)
-            .map(|session| session.timers.iter().map(|timer| timer.spec.clone()).collect())
+            .map(|session| {
+                session
+                    .timers
+                    .iter()
+                    .map(|timer| timer.spec.clone())
+                    .collect()
+            })
             .unwrap_or_default(),
         Err(_) => return,
     };
@@ -7398,8 +7398,7 @@ fn toggle_session_timer(
             if timer.spec.after_ms.is_some() {
                 timer.next_fire_ms = now as u64 + timer.spec.after_ms.unwrap_or(0);
             } else if timer.spec.mode == "repeat" {
-                timer.next_fire_ms =
-                    now as u64 + timer.spec.interval_ms.unwrap_or(0).max(1000);
+                timer.next_fire_ms = now as u64 + timer.spec.interval_ms.unwrap_or(0).max(1000);
             }
             timer.parked_reason = None;
         }
@@ -7524,8 +7523,7 @@ fn fire_due_timers(state: &AppState) {
                 }
             } else {
                 session.timers[index].enabled = false;
-                session.timers[index].parked_reason =
-                    Some("delivery_failed".to_string());
+                session.timers[index].parked_reason = Some("delivery_failed".to_string());
             }
         }
         let _ = persist_timers(state, &session_id);
@@ -7537,12 +7535,7 @@ fn fire_due_timers(state: &AppState) {
     }
 }
 
-fn deliver_timer_fire(
-    state: &AppState,
-    session_id: &str,
-    timer_id: &str,
-    fire_text: &str,
-) -> bool {
+fn deliver_timer_fire(state: &AppState, session_id: &str, timer_id: &str, fire_text: &str) -> bool {
     let idle = state
         .sessions
         .lock()
@@ -12660,8 +12653,7 @@ fn handle_scoped_worker_event(
                     if let Ok(topic_timers) =
                         serde_json::from_value::<Vec<TimerSpec>>(event.payload["timers"].clone())
                     {
-                        let _ =
-                            merge_session_timers_from_core(state, session_id, &topic_timers);
+                        let _ = merge_session_timers_from_core(state, session_id, &topic_timers);
                     }
                 }
                 if event.topic.name == CORE_TOPIC_TOOLGEN {
