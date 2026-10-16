@@ -1294,6 +1294,11 @@ enum ClientCommand {
         timer_id: String,
         enabled: bool,
     },
+    TimerUpdate {
+        session_id: String,
+        timer_id: String,
+        prompt: String,
+    },
     SessionDelete {
         session_id: String,
     },
@@ -1618,7 +1623,8 @@ impl ClientCommand {
             | Self::McpServerReconnect { session_id, .. }
             | Self::TimerCreate { session_id, .. }
             | Self::TimerDelete { session_id, .. }
-            | Self::TimerToggle { session_id, .. } => Some(format!("session:{session_id}")),
+            | Self::TimerToggle { session_id, .. }
+            | Self::TimerUpdate { session_id, .. } => Some(format!("session:{session_id}")),
         }
     }
 
@@ -2427,6 +2433,9 @@ fn client_command_trace_fields(command: &ClientCommand) -> (&'static str, Option
         }
         ClientCommand::TimerToggle { session_id, .. } => {
             ("timer_toggle", Some(session_id.clone()))
+        }
+        ClientCommand::TimerUpdate { session_id, .. } => {
+            ("timer_update", Some(session_id.clone()))
         }
         _ => ("other", None),
     }
@@ -3625,6 +3634,13 @@ fn handle_command_with_id(
             enabled,
         } => {
             toggle_session_timer(state, &session_id, &timer_id, enabled)?;
+        }
+        ClientCommand::TimerUpdate {
+            session_id,
+            timer_id,
+            prompt,
+        } => {
+            update_session_timer(state, &session_id, &timer_id, &prompt)?;
         }
         ClientCommand::SessionDelete { session_id } => {
             let worker_ids = session_worker_ids(state, &session_id)?;
@@ -7389,6 +7405,47 @@ fn toggle_session_timer(
         }
     }
     persist_timers(state, session_id)?;
+    publish_timers_updated(state, session_id);
+    Ok(())
+}
+
+/// Prompt-only edits keep schedule state (enabled/next_fire) untouched: the
+/// firing payload changes, not the calendar. Re-projects into Core so the
+/// timer tool view and compression confirmations stay truthful.
+fn update_session_timer(
+    state: &AppState,
+    session_id: &str,
+    timer_id: &str,
+    prompt: &str,
+) -> Result<(), String> {
+    let prompt = prompt.trim().to_string();
+    if prompt.is_empty() {
+        return Err("prompt_required".to_string());
+    }
+    if prompt.len() > 8000 {
+        return Err("timer_prompt_too_long".to_string());
+    }
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        let timer = session
+            .timers
+            .iter_mut()
+            .find(|timer| timer.spec.timer_id == timer_id)
+            .ok_or_else(|| "timer_not_found".to_string())?;
+        if timer.spec.prompt == prompt {
+            return Ok(());
+        }
+        timer.spec.prompt = prompt;
+    }
+    persist_timers(state, session_id)?;
+    sync_worker_timers(state, session_id);
+    publish_timer_topic_notice(state, session_id, "updated");
     publish_timers_updated(state, session_id);
     Ok(())
 }
