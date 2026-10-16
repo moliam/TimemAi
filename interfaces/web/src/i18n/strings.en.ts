@@ -698,7 +698,6 @@ export const en: Strings = {
     createToggle: "New timer",
     createCollapse: "Collapse",
     createButton: "Create",
-    createPending: "Creating…",
     createdByUser: "user",
     createdByModel: "model",
     nextFire: "Next {time}",
