@@ -936,6 +936,12 @@ export type ClientCommand =
       timer_id: string;
       enabled: boolean;
     }
+  | {
+      type: "timer_update";
+      session_id: string;
+      timer_id: string;
+      prompt: string;
+    }
   | { type: "mcp_server_upsert"; session_id: string; config: McpServerConfig }
   | { type: "mcp_server_delete"; server_id: string }
   | {

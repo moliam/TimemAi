@@ -37,7 +37,8 @@ async function waitFor(check, message, timeout = 10000) {
 const now = Date.now();
 const timers = () => [
   {
-    timer_id: "timer-u1", name: "每日提醒", prompt: "检查长构建结果并汇报",
+    timer_id: "timer-u1", name: "每日提醒",
+    prompt: "检查长构建结果并汇报：跑 ctest --output-on-failure，失败用例列出清单与原因；\n全绿则一句话汇报，并顺带检查磁盘占用，超过 85% 时清理 target 旧产物。",
     mode: "once", after_ms: 60000, at: null, interval_ms: null,
     created_by: "user", created_at_ms: now, enabled: true,
     next_fire_ms: now + 60000, last_fired_ms: null,
@@ -171,6 +172,11 @@ async function startHost() {
         broadcastTimers();
       } else if (command.type === "timer_delete") {
         authoritativeTimers = authoritativeTimers.filter((timer) => timer.timer_id !== command.timer_id);
+        broadcastTimers();
+      } else if (command.type === "timer_update") {
+        authoritativeTimers = authoritativeTimers.map((timer) =>
+          timer.timer_id === command.timer_id ? { ...timer, prompt: command.prompt } : timer,
+        );
         broadcastTimers();
       } else if (command.type === "timer_create") {
         authoritativeTimers = [
@@ -321,6 +327,76 @@ async function main() {
     ), "enabled state not restored");
     toggle = lastCommand("timer_toggle");
     assert(toggle && toggle.enabled === true, "re-enable toggle missing");
+
+    // Prompt clamp: long prompts clamp to two lines, expand restores full text.
+    assert(
+      await browser.evaluate(`document.querySelector('.timer-item-prompt')?.classList.contains('clamped') === true`),
+      "long prompt must clamp",
+    );
+    const promptBox = await browser.evaluate(
+      `(() => { const el = document.querySelector('.timer-item-prompt'); return { client: el.clientHeight, scroll: el.scrollHeight }; })()`,
+    );
+    assert(promptBox.scroll > promptBox.client, `clamped prompt must hide overflow ${JSON.stringify(promptBox)}`);
+    await click(`document.querySelector('.timer-item-prompt-toggle')?.click()`);
+    await waitFor(() => browser.evaluate(
+      `document.querySelector('.timer-item-prompt')?.classList.contains('clamped') === false`,
+    ), "expand must remove clamp");
+    const expandedBox = await browser.evaluate(
+      `(() => { const el = document.querySelector('.timer-item-prompt'); return { client: el.clientHeight, scroll: el.scrollHeight }; })()`,
+    );
+    assert(expandedBox.scroll <= expandedBox.client + 1, `expanded prompt must show all text ${JSON.stringify(expandedBox)}`);
+    await click(`document.querySelector('.timer-item-prompt-toggle')?.click()`);
+    await waitFor(() => browser.evaluate(
+      `document.querySelector('.timer-item-prompt')?.classList.contains('clamped') === true`,
+    ), "collapse must restore clamp");
+
+    // Edit prompt: pencil opens a textarea prefilled; save sends timer_update
+    // and the host echo re-renders the new prompt with schedule untouched.
+    const scheduleBefore = await browser.evaluate(
+      `document.querySelector('.timer-item-schedule')?.textContent`,
+    );
+    await click(`document.querySelector('.timer-item-actions .timer-edit')?.click()`);
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.timer-item-edit textarea')`), "edit textarea missing");
+    assert(
+      (await browser.evaluate(`document.querySelector('.timer-item-edit textarea')?.value`)).includes("检查长构建结果并汇报"),
+      "edit textarea must be prefilled",
+    );
+    // Empty draft keeps save disabled.
+    await browser.evaluate(
+      `(() => { const el = document.querySelector('.timer-item-edit textarea'); el.focus();
+        Object.getOwnPropertyDescriptor(el.constructor.prototype, 'value').set.call(el, '   ');
+        el.dispatchEvent(new Event('input', { bubbles: true })); })()`,
+    );
+    assert(
+      await browser.evaluate(`document.querySelector('.timer-edit-save')?.disabled === true`),
+      "save must stay disabled for blank prompt",
+    );
+    await browser.evaluate(
+      `(() => { const el = document.querySelector('.timer-item-edit textarea'); el.focus();
+        Object.getOwnPropertyDescriptor(el.constructor.prototype, 'value').set.call(el, '编辑后的提示：每晚 22 点汇总当日提交并输出日报。');
+        el.dispatchEvent(new Event('input', { bubbles: true })); })()`,
+    );
+    await click(`document.querySelector('.timer-edit-save')?.click()`);
+    await waitFor(() => browser.evaluate(
+      `document.querySelector('.timer-item-prompt')?.textContent.includes('编辑后的提示') ?? false`,
+    ), "host echo must re-render the edited prompt");
+    const update = lastCommand("timer_update");
+    assert(update && update.timer_id === "timer-u1" && update.prompt.includes("编辑后的提示"), `timer_update command missing or wrong: ${JSON.stringify(update)}`);
+    assert(
+      (await browser.evaluate(`document.querySelector('.timer-item-schedule')?.textContent`)) === scheduleBefore,
+      "prompt edit must not touch the schedule line",
+    );
+    // Cancel path: pencil then cancel leaves the prompt unchanged.
+    await click(`document.querySelector('.timer-item-actions .timer-edit')?.click()`);
+    await browser.evaluate(
+      `(() => { const el = document.querySelector('.timer-item-edit textarea'); el.focus();
+        Object.getOwnPropertyDescriptor(el.constructor.prototype, 'value').set.call(el, '不应保存的内容');
+        el.dispatchEvent(new Event('input', { bubbles: true })); })()`,
+    );
+    await click(`document.querySelector('.timer-edit-cancel')?.click()`);
+    await waitFor(() => browser.evaluate(
+      `document.querySelector('.timer-item-prompt')?.textContent.includes('编辑后的提示') ?? false`,
+    ), "cancel must discard the draft");
 
     // Create form validation: prompt required, delay required.
     assert(
