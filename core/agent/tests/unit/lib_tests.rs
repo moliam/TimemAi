@@ -4777,7 +4777,9 @@ fn action_finish_topic_reports_tool_output_bytes_excluding_metadata() {
     // carries the full envelope (tool_call_id + runtime_metadata +
     // tool_output); re-serialize just its tool_output member and compare.
     let prompt = core.build_next_prompt();
-    let anchor = prompt.find(r#"{"action_result""#).expect("envelope in prompt");
+    let anchor = prompt
+        .find(r#"{"action_result""#)
+        .expect("envelope in prompt");
     let line_end = prompt[anchor..]
         .find('\n')
         .map(|offset| anchor + offset)

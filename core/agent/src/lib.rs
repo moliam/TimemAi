@@ -49,8 +49,6 @@ pub mod interaction;
 pub mod memmgr;
 #[path = "../../../resources/capabilities/tools/memo.rs"]
 pub mod memo;
-#[path = "../../../resources/capabilities/tools/timer.rs"]
-pub mod timer;
 pub mod model_api;
 pub mod model_catalog;
 mod model_payload;
@@ -61,6 +59,8 @@ pub mod model_transport;
 pub mod negotiation;
 mod notification;
 pub mod reasoning;
+#[path = "../../../resources/capabilities/tools/timer.rs"]
+pub mod timer;
 pub use timem_platform as os;
 pub mod profiler;
 pub mod prompt_cache;
@@ -151,8 +151,8 @@ pub use host::{
     CORE_TOPIC_CONTEXT_COMPRESS, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST,
     CORE_TOPIC_MEMO, CORE_TOPIC_MODEL_CAPABILITY_NEGOTIATION, CORE_TOPIC_MODEL_REPAIR,
     CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
-    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TOOLGEN,
-    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_TIMER, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TIMER,
+    CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
     DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT, USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT,
 };
 pub use interaction::{

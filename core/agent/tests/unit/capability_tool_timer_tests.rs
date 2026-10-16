@@ -114,10 +114,19 @@ fn timer_new_repeat_with_at_and_interval() {
 #[test]
 fn timer_auto_name_fills_gaps_and_respects_explicit_names() {
     let (mut core, dir) = setup("auto_name");
-    run(&mut core, json!({"op": "new", "prompt": "a", "after_ms": 1000}));
-    run(&mut core, json!({"op": "new", "prompt": "b", "after_ms": 1000}));
+    run(
+        &mut core,
+        json!({"op": "new", "prompt": "a", "after_ms": 1000}),
+    );
+    run(
+        &mut core,
+        json!({"op": "new", "prompt": "b", "after_ms": 1000}),
+    );
     run(&mut core, json!({"op": "del", "name": "timer0"}));
-    run(&mut core, json!({"op": "new", "prompt": "c", "after_ms": 1000}));
+    run(
+        &mut core,
+        json!({"op": "new", "prompt": "c", "after_ms": 1000}),
+    );
     let names: Vec<&str> = core.timers().iter().map(|t| t.name.as_str()).collect();
     assert_eq!(names, vec!["timer1", "timer0"]);
     // Duplicate explicit name is rejected.
@@ -144,7 +153,11 @@ fn timer_validates_schedule_and_mode() {
     )
     .contains("schedule_invalid"));
     // zero delay
-    assert!(run(&mut core, json!({"op": "new", "prompt": "x", "after_ms": 0})).contains("after_ms_invalid"));
+    assert!(run(
+        &mut core,
+        json!({"op": "new", "prompt": "x", "after_ms": 0})
+    )
+    .contains("after_ms_invalid"));
     // interval on once
     assert!(run(
         &mut core,
@@ -180,7 +193,10 @@ fn timer_validates_schedule_and_mode() {
 #[test]
 fn timer_del_unknown_name_errors_and_name_required() {
     let (mut core, dir) = setup("del");
-    run(&mut core, json!({"op": "new", "prompt": "x", "after_ms": 1000}));
+    run(
+        &mut core,
+        json!({"op": "new", "prompt": "x", "after_ms": 1000}),
+    );
     assert!(run(&mut core, json!({"op": "del"})).contains("name_required"));
     assert!(run(&mut core, json!({"op": "del", "name": "nope"})).contains("not_found"));
     let out = run(&mut core, json!({"op": "del", "name": "timer0"}));
