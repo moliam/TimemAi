@@ -20,6 +20,11 @@ description: |
 
   The runtime host computes the concrete fire time and owns scheduling; this tool only records the
   intent. Do not use timers for sub-second delays or as a substitute for direct tool calls.
+
+  When a timer fires, its prompt is carried into the model request as user input (a new turn when
+  idle, or the next interaction batch when a turn is active). The prompt IS the work assignment for
+  that future run: if the user's requirement is vague or incomplete, clarify it with the user BEFORE
+  creating the timer, then encode the agreed task in a self-contained prompt.
 input_schema: |
   {
     "type": "object",
