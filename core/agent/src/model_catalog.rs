@@ -340,7 +340,7 @@ pub fn parse(text: &str) -> Result<Vec<CatalogModel>, String> {
             .as_array()
             .ok_or("catalog_modalities_missing")?
             .iter()
-            .map(|m| string(m))
+            .map(string)
             .collect::<Result<Vec<_>, _>>()?;
         if input_modalities.is_empty()
             || input_modalities.len() > 4
