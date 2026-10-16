@@ -7205,6 +7205,9 @@ function TimerPanel({
     new Set(),
   );
   const [createOpen, setCreateOpen] = useState(false);
+  const createOpenRef = useRef(false);
+  const createToggleRef = useRef<HTMLButtonElement | null>(null);
+  const workFieldRef = useRef<HTMLTextAreaElement | null>(null);
   const [prompt, setPrompt] = useState("");
   const [name, setName] = useState("");
   const [mode, setMode] = useState<"once" | "repeat">("once");
@@ -7225,6 +7228,17 @@ function TimerPanel({
     setEditDraft("");
     setExpandedPrompts(new Set());
   }, [session?.session_id]);
+  // Disclosure focus contract: expanding moves focus into the first field;
+  // collapsing (toggle, collapse button, or successful create) returns focus
+  // to the toggle. Guarded by the previous state so mount and session resets
+  // never steal focus.
+  useEffect(() => {
+    const wasOpen = createOpenRef.current;
+    createOpenRef.current = createOpen;
+    if (createOpen === wasOpen) return;
+    if (createOpen) workFieldRef.current?.focus();
+    else createToggleRef.current?.focus({ preventScroll: true });
+  }, [createOpen]);
   const triggerValid =
     trigger === "delay"
       ? Number(delayMinutes) > 0
@@ -7479,6 +7493,7 @@ function TimerPanel({
       <footer className="timer-create-area">
         <button
           type="button"
+          ref={createToggleRef}
           className="timer-create-toggle"
           aria-expanded={createOpen}
           aria-controls="timer-create-form"
@@ -7493,6 +7508,7 @@ function TimerPanel({
         <label>
           {t("timer.workLabel")}
           <textarea
+            ref={workFieldRef}
             rows={2}
             value={prompt}
             placeholder={t("timer.workPlaceholder")}
