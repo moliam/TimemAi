@@ -7204,6 +7204,7 @@ function TimerPanel({
   const [expandedPrompts, setExpandedPrompts] = useState<ReadonlySet<string>>(
     new Set(),
   );
+  const [createOpen, setCreateOpen] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [name, setName] = useState("");
   const [mode, setMode] = useState<"once" | "repeat">("once");
@@ -7212,6 +7213,7 @@ function TimerPanel({
   const [atValue, setAtValue] = useState("");
   const [intervalMinutes, setIntervalMinutes] = useState("");
   useEffect(() => {
+    setCreateOpen(false);
     setPrompt("");
     setName("");
     setMode("once");
@@ -7260,6 +7262,7 @@ function TimerPanel({
         : {}),
     };
     if (!sendCommand.current(command)) return;
+    setCreateOpen(false);
     resetForm();
   };
   return (
@@ -7473,13 +7476,26 @@ function TimerPanel({
           ))
         )}
       </div>
-      <form className="timer-create-form" onSubmit={submitCreate}>
+      <footer className="timer-create-area">
+        <button
+          type="button"
+          className="timer-create-toggle"
+          aria-expanded={createOpen}
+          aria-controls="timer-create-form"
+          title={t("timer.createToggle")}
+          onClick={() => setCreateOpen((open) => !open)}
+        >
+          <Plus size={13} />
+          {t("timer.createToggle")}
+        </button>
+        {createOpen && (
+        <form id="timer-create-form" className="timer-create-form" onSubmit={submitCreate}>
         <label>
-          {t("timer.promptLabel")}
+          {t("timer.workLabel")}
           <textarea
             rows={2}
             value={prompt}
-            placeholder={t("timer.promptPlaceholder")}
+            placeholder={t("timer.workPlaceholder")}
             onChange={(event) => setPrompt(event.target.value)}
           />
         </label>
@@ -7558,14 +7574,28 @@ function TimerPanel({
           </div>
         )}
         <div className="timer-form-hint">{t("timer.scheduleHint")}</div>
-        <button
-          type="submit"
-          className="timer-create-submit"
-          disabled={!canCreate}
-        >
-          {t("timer.createButton")}
-        </button>
-      </form>
+        <div className="timer-create-actions">
+          <button
+            type="submit"
+            className="timer-create-submit"
+            disabled={!canCreate}
+          >
+            {t("timer.createButton")}
+          </button>
+          <button
+            type="button"
+            className="timer-create-collapse"
+            onClick={() => {
+              setCreateOpen(false);
+              resetForm();
+            }}
+          >
+            {t("timer.createCollapse")}
+          </button>
+        </div>
+        </form>
+        )}
+      </footer>
     </aside>
   );
 }
