@@ -442,6 +442,10 @@ async function main() {
       "toggle must advertise expanded state",
     );
     assert(
+      await browser.evaluate(`document.activeElement?.tagName === 'TEXTAREA' && document.activeElement?.closest('.timer-create-form') !== null`),
+      "expanding must focus the work assignment field",
+    );
+    assert(
       (await browser.evaluate(`document.querySelector('.timer-create-form label')?.textContent`)).includes("工作内容"),
       "work assignment label missing",
     );
@@ -496,6 +500,10 @@ async function main() {
     await setNativeValue(".timer-create-form textarea", "草稿会被丢弃");
     await click(`document.querySelector('.timer-create-collapse').click()`);
     await waitFor(async () => !(await exists(".timer-create-form")), "collapse must close the form");
+    assert(
+      await browser.evaluate(`document.activeElement?.classList.contains('timer-create-toggle') === true`),
+      "collapse must return focus to the toggle",
+    );
     await click(`document.querySelector('.timer-create-toggle').click()`);
     await waitFor(() => exists(".timer-create-form"), "form must reopen for repeat mode");
     assert(

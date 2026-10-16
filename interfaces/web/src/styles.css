@@ -1749,7 +1749,7 @@ body {
 /* Timer-fired turns reuse the existing accent blue as a tint so scheduled
    submissions read distinctly from hand-typed input without a new hue. */
 .turn-user-entry.timer { background: #3b82f62e; }
-:root[data-theme="light"] .turn-user-entry.timer { background: #3b82f626; }
+:root[data-theme="light"] .turn-user-entry.timer { background: #3b82f61f; }
 :root[data-theme="light"] .turn-user-content,
 :root[data-theme="light"] .turn-stream-tools .turn-work-item.user-supplement { background: #d9edff; color: #17324d; }
 :root[data-theme="light"] .turn-user-entry { color: #17324d; }
