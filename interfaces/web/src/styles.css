@@ -1034,9 +1034,9 @@ button:disabled { cursor: not-allowed; }
 /* ToolGen is session-scoped; the side panel is a quiet repository browser, not another chat surface. */
 .toolrepo-header-button { width: auto; min-width: 42px; display: inline-flex; grid-template-columns: none; align-items: center; justify-content: center; gap: 4px; padding: 0 8px; }
 .toolrepo-header-count { min-width: 11px; color: #8f9ba2; font-size: 10px; font-weight: 700; line-height: 1; text-align: center; }
-.timer-header-button.has-timers { color: #6fd3c0; border-color: #2c5a52; background: #14342f; }
+.timer-header-button.has-timers { color: #8fc3e8; border-color: #3b5366; background: #263746; }
 .timer-header-count { min-width: 11px; color: #8f9ba2; font-size: 10px; font-weight: 700; line-height: 1; text-align: center; }
-.timer-header-button.has-timers .timer-header-count { color: #6fd3c0; }
+.timer-header-button.has-timers .timer-header-count { color: #8fc3e8; }
 .timer-panel { min-width: 0; display: flex; flex-direction: column; border-left: 1px solid #25303c; background: #10171f; }
 .timer-panel header { padding: 18px 16px 15px; display: flex; justify-content: space-between; border-bottom: 1px solid #25303c; }
 .timer-list { overflow-y: auto; padding: 10px; display: grid; gap: 8px; align-content: start; }
@@ -1071,7 +1071,14 @@ button:disabled { cursor: not-allowed; }
 .timer-toggle.off { color: #b89157; border-color: #4a3f28; background: #2c2417; }
 .timer-delete { border: 1px solid transparent; border-radius: 5px; padding: 3px; background: transparent; color: #9aabb8; display: grid; place-items: center; }
 .timer-delete:hover { color: #e58b85; background: #3a2222; }
-.timer-create-form { border-top: 1px solid #25303c; padding: 12px; display: grid; gap: 8px; }
+.timer-create-area { border-top: 1px solid #25303c; padding: 12px; display: grid; gap: 8px; }
+.timer-create-form { display: grid; gap: 8px; }
+.timer-create-toggle { display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px dashed #365363; border-radius: 5px; padding: 8px 10px; background: transparent; color: #91a5b1; font-size: 12px; font-weight: 700; }
+.timer-create-toggle:hover { border-color: #4a7183; background: #17242e; color: #d5e1e8; }
+.timer-create-actions { display: flex; gap: 8px; }
+.timer-create-actions .timer-create-submit { flex: 1; }
+.timer-create-collapse { border: 1px solid #365363; border-radius: 5px; padding: 7px 12px; background: transparent; color: #91a5b1; font-size: 12px; }
+.timer-create-collapse:hover { color: #d5e1e8; }
 .timer-create-form label { display: grid; gap: 4px; min-width: 0; color: #8fa2af; font-size: 11px; font-weight: 650; }
 .timer-create-form input, .timer-create-form select, .timer-create-form textarea { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid #2c3b49; border-radius: 5px; padding: 6px 8px; background: #131c26; color: #d5e1e8; font-size: 12px; font-family: inherit; resize: vertical; }
 .timer-create-form textarea { line-height: 1.5; }
@@ -1090,7 +1097,13 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .timer-edit:hover { background: #e3edf0; color: #1d6a58; }
 :root[data-theme="light"] .timer-item-top { color: #2c3a44; }
 :root[data-theme="light"] .timer-item-prompt { color: #46565f; }
-:root[data-theme="light"] .timer-create-form { border-color: #d3dde2; }
+:root[data-theme="light"] .timer-header-button.has-timers { color: #286792; border-color: #b8d8f2; background: #d9edff; }
+:root[data-theme="light"] .timer-header-button.has-timers .timer-header-count { color: #286792; }
+:root[data-theme="light"] .timer-create-area { border-color: #d3dde2; }
+:root[data-theme="light"] .timer-create-toggle { border-color: #bfd3d8; color: #5f7480; }
+:root[data-theme="light"] .timer-create-toggle:hover { border-color: #9fb9c1; background: #eef4f6; color: #263b43; }
+:root[data-theme="light"] .timer-create-collapse { border-color: #bfd3d8; color: #5f7480; }
+:root[data-theme="light"] .timer-create-collapse:hover { color: #263b43; }
 :root[data-theme="light"] .timer-create-form input, :root[data-theme="light"] .timer-create-form select { background: #ffffff; border-color: #c6d2da; color: #2c3a44; }
 :root[data-theme="light"] .timer-toggle { background: #eef2f5; color: #4d5f6a; border-color: #c6d2da; }
 .toolrepo-header-button:hover .toolrepo-header-count, .toolrepo-header-button.selected .toolrepo-header-count { color: currentColor; }
@@ -1733,6 +1746,10 @@ body {
 .turn-user-entry + .turn-user-entry { border-color: #3b5366; }
 .turn-user-entry > span { color: #8fc3e8; }
 .turn-user-entry.approval { background: #22313d; color: #c3d1da; }
+/* Timer-fired turns reuse the existing accent blue as a tint so scheduled
+   submissions read distinctly from hand-typed input without a new hue. */
+.turn-user-entry.timer { background: #3b82f62e; }
+:root[data-theme="light"] .turn-user-entry.timer { background: #3b82f626; }
 :root[data-theme="light"] .turn-user-content,
 :root[data-theme="light"] .turn-stream-tools .turn-work-item.user-supplement { background: #d9edff; color: #17324d; }
 :root[data-theme="light"] .turn-user-entry { color: #17324d; }

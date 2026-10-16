@@ -46,6 +46,19 @@ const timers = () => [
 ];
 let authoritativeTimers = timers();
 
+const timerFiredTurn = () => ({
+  turn_id: "turn-timer-fired", state: "finished", created_at_ms: now,
+  user_entries: [{
+    kind: "timer", text: "每日提醒：检查长构建结果并汇报。",
+    created_at_ms: now,
+  }],
+  events: [], final_answer: "已汇报。", completion: { stop_reason: "TurnComplete" },
+});
+const plainTaskTurn = () => ({
+  turn_id: "turn-plain-task", state: "finished", created_at_ms: now,
+  user_entries: [{ kind: "task", text: "手动输入的任务", created_at_ms: now }],
+  events: [], final_answer: "完成。", completion: { stop_reason: "TurnComplete" },
+});
 const worker = (state) => ({
   worker_id: "worker-1", context_id: "context-1", display_name: "Primary",
   ordinal: 0, state, parent_worker_id: null,
@@ -57,7 +70,7 @@ const session = () => ({
   timers: authoritativeTimers,
   contexts: [{ context_id: "context-1", current_dir: "/work", worker_ids: ["worker-1"] }],
   workers: [worker("ready")], active_context_id: "context-1", primary_worker_id: "worker-1",
-  attachments: [], roles: [], messages: [], turns: [],
+  attachments: [], roles: [], messages: [], turns: [plainTaskTurn(), timerFiredTurn()],
   history_before_cursor: null, history_has_more: false,
   active_turn_id: null, cancelling_turn_id: null, pending_turn_id: null,
   message_queue: {
@@ -413,6 +426,26 @@ async function main() {
       `document.querySelector('.timer-item-prompt')?.textContent.includes('编辑后的提示') ?? false`,
     ), "cancel must discard the draft");
 
+    // Create area stays collapsed behind the "new timer" toggle until clicked.
+    assert(
+      await browser.evaluate(`!document.querySelector('.timer-create-form')`),
+      "create form must stay collapsed until the toggle is clicked",
+    );
+    assert(
+      await browser.evaluate(`document.querySelector('.timer-create-toggle')?.getAttribute('aria-expanded') === 'false'`),
+      "toggle must advertise collapsed state",
+    );
+    await click(`document.querySelector('.timer-create-toggle').click()`);
+    await waitFor(() => exists(".timer-create-form"), "create form must expand after toggle");
+    assert(
+      await browser.evaluate(`document.querySelector('.timer-create-toggle')?.getAttribute('aria-expanded') === 'true'`),
+      "toggle must advertise expanded state",
+    );
+    assert(
+      (await browser.evaluate(`document.querySelector('.timer-create-form label')?.textContent`)).includes("工作内容"),
+      "work assignment label missing",
+    );
+
     // Create form validation: prompt required, delay required.
     assert(
       await browser.evaluate(`document.querySelector('.timer-create-submit')?.disabled === true`),
@@ -450,6 +483,25 @@ async function main() {
     await waitFor(() => browser.evaluate(
       `document.querySelector('.timer-header-count')?.textContent === '2'`,
     ), "header count must show 2 after create");
+
+    // Successful create collapses the form back to the toggle.
+    await waitFor(() => exists(".timer-create-toggle"), "toggle must return after create");
+    assert(
+      await browser.evaluate(`!document.querySelector('.timer-create-form')`),
+      "form must collapse after a successful create",
+    );
+    // Collapse button discards drafts and closes the form.
+    await click(`document.querySelector('.timer-create-toggle').click()`);
+    await waitFor(() => exists(".timer-create-form"), "form must reopen");
+    await setNativeValue(".timer-create-form textarea", "草稿会被丢弃");
+    await click(`document.querySelector('.timer-create-collapse').click()`);
+    await waitFor(async () => !(await exists(".timer-create-form")), "collapse must close the form");
+    await click(`document.querySelector('.timer-create-toggle').click()`);
+    await waitFor(() => exists(".timer-create-form"), "form must reopen for repeat mode");
+    assert(
+      await browser.evaluate(`document.querySelector('.timer-create-form textarea')?.value === ''`),
+      "reopened form must start empty",
+    );
 
     // Repeat mode reveals the interval field and sends interval_ms.
     await browser.evaluate(
@@ -509,6 +561,29 @@ async function main() {
     assert(lastCommand("timer_delete") !== null, "timer_delete command not sent after confirm");
     const dialogMessage = browser.dialogs[dialogCountBefore] ?? "";
     assert(dialogMessage.includes("每日提醒"), `confirm dialog must name the timer: ${JSON.stringify(dialogMessage)}`);
+
+    await waitFor(async () => !(await exists(".timer-create-form")), "repeat create must collapse the form");
+
+    // Timer-fired turn renders with the blue tint distinct from the plain
+    // user bubble; assert per theme against the computed style.
+    for (const theme of ["dark", "light"]) {
+      await browser.evaluate(`document.documentElement.dataset.theme = ${JSON.stringify(theme)}`);
+      await browser.evaluate(`new Promise((resolveFrame) => requestAnimationFrame(() => requestAnimationFrame(resolveFrame)))`);
+      const timerBg = await browser.evaluate(
+        `getComputedStyle(document.querySelector('.turn-user-entry.timer')).backgroundColor`,
+      );
+      const plainBg = await browser.evaluate(
+        `getComputedStyle(document.querySelector('.turn-user-entry.task')).backgroundColor`,
+      );
+      const bubbleBg = await browser.evaluate(
+        `getComputedStyle(document.querySelector('.turn-user-content')).backgroundColor`,
+      );
+      assert(timerBg && timerBg !== "rgba(0, 0, 0, 0)" && timerBg !== plainBg,
+        `timer entry must tint: theme=${theme} timer=${timerBg} plain=${plainBg}`);
+      assert(timerBg.startsWith("rgba(59, 130, 246,"),
+        `timer tint must use the existing accent blue: theme=${theme} got=${timerBg}`);
+      assert(bubbleBg !== timerBg, "bubble and timer tint must differ");
+    }
 
     // Layout acceptance across themes and widths (panel + create form).
     for (const theme of ["dark", "light"]) {
