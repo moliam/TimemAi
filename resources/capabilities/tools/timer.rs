@@ -130,11 +130,7 @@ fn execute_del(
 
 /// The first fire is described by exactly one of after_ms / at.
 fn schedule_exactly_one(after_ms: Option<u64>, at: &str) -> bool {
-    match (after_ms, at.is_empty()) {
-        (None, true) => false,
-        (Some(_), false) => false,
-        _ => true,
-    }
+    matches!((after_ms, at.is_empty()), (None, false) | (Some(_), true))
 }
 
 fn str_field(action: &ParsedAction, key: &str) -> String {

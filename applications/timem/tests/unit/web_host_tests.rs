@@ -19088,7 +19088,7 @@ fn drain_until(state: &AppState, deadline_ms: u64, ready: impl Fn() -> bool, wha
     let deadline = Instant::now() + Duration::from_millis(deadline_ms);
     loop {
         for (event_session_id, context_id, worker_id, event) in drain_worker_events(state) {
-            handle_scoped_worker_event(&state, &event_session_id, &context_id, &worker_id, event);
+            handle_scoped_worker_event(state, &event_session_id, &context_id, &worker_id, event);
         }
         if ready() {
             return;

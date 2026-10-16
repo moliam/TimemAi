@@ -7479,15 +7479,17 @@ fn fire_due_timers(state: &AppState) {
             .values()
             .filter(|session| !session.workers.is_empty())
             .flat_map(|session| {
-                session.timers.iter().filter_map(move |timer| {
-                    (timer.enabled && u128::from(timer.next_fire_ms) <= now).then(|| {
+                session
+                    .timers
+                    .iter()
+                    .filter(|timer| timer.enabled && u128::from(timer.next_fire_ms) <= now)
+                    .map(|timer| {
                         (
                             session.session_id.clone(),
                             timer.spec.timer_id.clone(),
                             format!("[timer:{}] {}", timer.spec.name, timer.spec.prompt),
                         )
                     })
-                })
             })
             .collect()
     };
