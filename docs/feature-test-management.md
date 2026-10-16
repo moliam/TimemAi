@@ -807,3 +807,11 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 验收修复（e2e 抓出）：图片被待发送队列消息占用后 `availableAttachments` 排除它导致警告消失——判定范围改为会话全量附件，且警告行可独立撑起附件条（避免全被占用时警告无处渲染）。
 - 测试看护：`model_catalog_tests.rs` 断言目录模态事实与非法输入拒绝；`web_host_tests.rs` 断言快照对每个目录模型序列化非空合法 `input_modalities` 且 glm-5.3/flash 值正确（防字段静默丢失）；`model_endpoints.test.ts` 覆盖模态解析、接入点→目录条目解析与扩展名镜像；`image-attachment-warning-e2e.mjs`（已挂入 `test:browser` CI 链）在真实 Chrome 验证：文本路由+图片出警告、txt/多模态/旧快照沉默、队列占用仍警告且隐藏已占用附件、zh/en 文案与 tooltip、明暗主题 1280/390 几何无溢出。
 - 验证：agent_core 9 项目录测试、timem lib 380 项、Web vitest 716 项、五套浏览器验收（含新增）、模块边界/测试契约/diff 检查通过；dist 已重建入库。
+
+## 2026-10 Timer 面板 prompt 展开/编辑
+
+- 触发背景：用户反馈面板只见名字不见内容，prompt 是触发时投递给会话的核心载荷，需要可见、可核对、可修改。澄清：产品面板本有删除按钮与 prompt 全文（用户看到的是示意网页的简化画法），但「编辑 prompt」是真实产品缺口。
+- Host：新增 `timer_update` 命令（per-session lane）：trim 后非空、上限 8000 字符、session/timer 不存在失败关闭；同文 prompt 幂等返回；更新 spec.prompt 后持久化 timers.json、`sync_worker_timers` 重投影 Core（工具视图与压缩确认保持真实）、广播 core.timer notice 与 timers_updated。**调度状态（enabled/next_fire_ms/last_fired_ms）原样保留**——改的是触发载荷不是日历。
+- Web：长 prompt（>80 字符或含换行）两行 line-clamp 截断 + 「+/−」展开收起（aria-expanded）；铅笔按钮进入编辑态（textarea 预填、可拉伸），保存按钮空文案禁用，保存发 `timer_update` 后退出编辑，取消丢弃草稿；会话切换时编辑态与展开集重置。i18n zh/en；深浅主题样式。
+- 测试看护：`web_timer_update_prompt_preserves_schedule_and_persists` 覆盖空/超长/不存在 id 拒绝、trim、调度字段不变、幂等、持久化；timer-ui-acceptance e2e 扩展——clamp 几何（scrollHeight>clientHeight）、展开后全文可见、编辑预填/空禁用/保存命令与主机回显/调度行不变/取消丢弃，1440/390 × 明暗全过。
+- 验证：timem lib 380、vitest 716、timer e2e 全绿；module_boundary/test_contract/diff 检查通过；dist 重建。

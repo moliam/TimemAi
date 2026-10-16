@@ -7199,6 +7199,11 @@ function TimerPanel({
 }) {
   useT();
   const timers = session?.timers ?? [];
+  const [editingTimerId, setEditingTimerId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  const [expandedPrompts, setExpandedPrompts] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
   const [prompt, setPrompt] = useState("");
   const [name, setName] = useState("");
   const [mode, setMode] = useState<"once" | "repeat">("once");
@@ -7214,6 +7219,9 @@ function TimerPanel({
     setDelayMinutes("");
     setAtValue("");
     setIntervalMinutes("");
+    setEditingTimerId(null);
+    setEditDraft("");
+    setExpandedPrompts(new Set());
   }, [session?.session_id]);
   const triggerValid =
     trigger === "delay"
@@ -7307,7 +7315,79 @@ function TimerPanel({
                     : t("timer.modeOnce")}
                 </span>
               </div>
-              <div className="timer-item-prompt">{timer.prompt}</div>
+              {editingTimerId === timer.timer_id ? (
+                <div className="timer-item-edit">
+                  <textarea
+                    rows={4}
+                    value={editDraft}
+                    placeholder={t("timer.editPlaceholder")}
+                    aria-label={t("timer.editTimer")}
+                    onChange={(event) => setEditDraft(event.target.value)}
+                  />
+                  <div className="timer-edit-buttons">
+                    <button
+                      type="button"
+                      className="timer-edit-save"
+                      disabled={!editDraft.trim()}
+                      title={t("timer.editSave")}
+                      onClick={() => {
+                        if (!session || !editDraft.trim()) return;
+                        sendCommand.current({
+                          type: "timer_update",
+                          session_id: session.session_id,
+                          timer_id: timer.timer_id,
+                          prompt: editDraft.trim(),
+                        });
+                        setEditingTimerId(null);
+                      }}
+                    >
+                      {t("timer.editSave")}
+                    </button>
+                    <button
+                      type="button"
+                      className="timer-edit-cancel"
+                      title={t("timer.editCancel")}
+                      onClick={() => setEditingTimerId(null)}
+                    >
+                      {t("timer.editCancel")}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div
+                    className={`timer-item-prompt${expandedPrompts.has(timer.timer_id) ? "" : " clamped"}`}
+                  >
+                    {timer.prompt}
+                  </div>
+                  {(timer.prompt.length > 80 ||
+                    timer.prompt.includes("\n")) && (
+                    <button
+                      type="button"
+                      className="timer-item-prompt-toggle"
+                      aria-expanded={expandedPrompts.has(timer.timer_id)}
+                      title={
+                        expandedPrompts.has(timer.timer_id)
+                          ? t("timer.promptCollapse")
+                          : t("timer.promptExpand")
+                      }
+                      onClick={() =>
+                        setExpandedPrompts((current) => {
+                          const next = new Set(current);
+                          if (next.has(timer.timer_id)) {
+                            next.delete(timer.timer_id);
+                          } else {
+                            next.add(timer.timer_id);
+                          }
+                          return next;
+                        })
+                      }
+                    >
+                      {expandedPrompts.has(timer.timer_id) ? "−" : "+"}
+                    </button>
+                  )}
+                </>
+              )}
               <div
                 className={`timer-item-schedule${timer.parked_reason ? " parked" : ""}`}
                 title={new Date(timer.next_fire_ms).toLocaleString()}
@@ -7350,6 +7430,20 @@ function TimerPanel({
                 >
                   {timer.enabled ? <Pause size={13} /> : <Play size={13} />}
                 </button>
+                {editingTimerId !== timer.timer_id && (
+                  <button
+                    type="button"
+                    className="timer-edit"
+                    title={t("timer.editTimer")}
+                    aria-label={t("timer.editTimer")}
+                    onClick={() => {
+                      setEditingTimerId(timer.timer_id);
+                      setEditDraft(timer.prompt);
+                    }}
+                  >
+                    <Pencil size={13} />
+                  </button>
+                )}
                 <button
                   type="button"
                   className="timer-delete"

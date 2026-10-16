@@ -1046,6 +1046,19 @@ button:disabled { cursor: not-allowed; }
 .timer-item-origin { padding: 1px 6px; border-radius: 999px; background: #223240; color: #8fb6c9; font-size: 10px; font-weight: 700; }
 .timer-item-origin.user { background: #173b32; color: #6fd3c0; }
 .timer-item-prompt { color: #9db0bd; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
+.timer-item-prompt.clamped { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.timer-item-prompt-toggle { justify-self: start; border: 0; border-radius: 4px; padding: 1px 8px; background: #1f2b33; color: #8bc8ba; font-size: 11px; font-weight: 700; line-height: 1.6; }
+.timer-item-prompt-toggle:hover { background: #2b3943; color: #d5e1e8; }
+.timer-item-edit { display: grid; gap: 6px; }
+.timer-item-edit textarea { width: 100%; border: 1px solid #365363; border-radius: 5px; background: #0e161d; color: #c4d2dc; font: inherit; font-size: 12px; line-height: 1.5; padding: 7px 8px; resize: vertical; min-height: 64px; }
+.timer-edit-buttons { display: flex; gap: 6px; }
+.timer-edit-save { border: 0; border-radius: 4px; padding: 4px 12px; background: #1e5a4e; color: #d8f5ee; font-size: 11px; font-weight: 700; }
+.timer-edit-save:hover:not(:disabled) { background: #26705f; }
+.timer-edit-save:disabled { opacity: .45; cursor: not-allowed; }
+.timer-edit-cancel { border: 1px solid #365363; border-radius: 4px; padding: 4px 12px; background: transparent; color: #91a5b1; font-size: 11px; }
+.timer-edit-cancel:hover { color: #d5e1e8; }
+.timer-edit { display: grid; place-items: center; width: 24px; height: 24px; border: 0; border-radius: 5px; background: transparent; color: #91a5b1; }
+.timer-edit:hover { color: #e5faf4; background: #18333a; }
 .timer-item-meta { color: #6f8491; font-size: 11px; }
 .timer-item-schedule { color: #6f8491; font-size: 11px; }
 .timer-item-schedule.parked { color: #b89157; }
@@ -1068,6 +1081,13 @@ button:disabled { cursor: not-allowed; }
 .timer-create-submit:not(:disabled):hover { background: #27584d; }
 :root[data-theme="light"] .timer-panel { border-color: #d3dde2; background: #f8fafb; }
 :root[data-theme="light"] .timer-item { border-color: #d9e2e8; background: #ffffff; }
+:root[data-theme="light"] .timer-item-prompt-toggle { background: #e3edf0; color: #2b7a68; }
+:root[data-theme="light"] .timer-item-prompt-toggle:hover { background: #d2e4e9; }
+:root[data-theme="light"] .timer-item-edit textarea { border-color: #bfd3d8; background: #f7fbfc; color: #31444d; }
+:root[data-theme="light"] .timer-edit-save { background: #d8efe9; color: #1d6a58; }
+:root[data-theme="light"] .timer-edit-save:hover:not(:disabled) { background: #c3e8de; }
+:root[data-theme="light"] .timer-edit-cancel { border-color: #bfd3d8; color: #5f7480; }
+:root[data-theme="light"] .timer-edit:hover { background: #e3edf0; color: #1d6a58; }
 :root[data-theme="light"] .timer-item-top { color: #2c3a44; }
 :root[data-theme="light"] .timer-item-prompt { color: #46565f; }
 :root[data-theme="light"] .timer-create-form { border-color: #d3dde2; }
