@@ -693,6 +693,7 @@ export const zh = {
     parked: "投递失败已停用",
     scheduleHint: "填写延迟分钟数或选择绝对时间（二选一）",
     deleteTimer: "删除该定时任务",
+    deleteConfirm: "删除定时任务「{name}」？该操作不可撤销，删除后不再触发。",
     toggleOn: "暂停该定时任务",
     toggleOff: "恢复该定时任务",
     editTimer: "编辑提示内容",

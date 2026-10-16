@@ -808,6 +808,13 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 测试看护：`model_catalog_tests.rs` 断言目录模态事实与非法输入拒绝；`web_host_tests.rs` 断言快照对每个目录模型序列化非空合法 `input_modalities` 且 glm-5.3/flash 值正确（防字段静默丢失）；`model_endpoints.test.ts` 覆盖模态解析、接入点→目录条目解析与扩展名镜像；`image-attachment-warning-e2e.mjs`（已挂入 `test:browser` CI 链）在真实 Chrome 验证：文本路由+图片出警告、txt/多模态/旧快照沉默、队列占用仍警告且隐藏已占用附件、zh/en 文案与 tooltip、明暗主题 1280/390 几何无溢出。
 - 验证：agent_core 9 项目录测试、timem lib 380 项、Web vitest 716 项、五套浏览器验收（含新增）、模块边界/测试契约/diff 检查通过；dist 已重建入库。
 
+## 2026-10 Timer 删除二次确认
+
+- 触发背景：用户要求「用户点击删除的时候，二次确认，其他的不用」。删除不可逆且静默丢掉整个调度，而启停/编辑可恢复，故仅删除走确认。
+- Web：删除按钮先 `window.confirm`（文案点名 timer 名字、明示不可撤销且不再触发），取消则不发命令；与面板级删除（MCP/收藏/清上下文）的既有确认模式一致。启停与编辑保持即时执行。i18n zh/en。
+- 测试：timer-ui-acceptance e2e 浏览器驱动新增原生对话框接管（`Page.javascriptDialogOpening` → `handleJavaScriptDialog`，闭包开关控制接受/取消、记录文案）——验证「取消：定时器保留且不产生 timer_delete 命令、文案点名 timer」与「确认：条目移除且命令送达」，1440/390 × 明暗全过。示意演示页删除同步加同款确认。
+- 验证：vitest 716、timer e2e 全绿；module_boundary/test_contract/diff 检查通过；dist 已重建。
+
 ## 2026-10 Timer 面板 prompt 展开/编辑
 
 - 触发背景：用户反馈面板只见名字不见内容，prompt 是触发时投递给会话的核心载荷，需要可见、可核对、可修改。澄清：产品面板本有删除按钮与 prompt 全文（用户看到的是示意网页的简化画法），但「编辑 prompt」是真实产品缺口。

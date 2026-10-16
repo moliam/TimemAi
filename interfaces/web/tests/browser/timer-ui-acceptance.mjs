@@ -265,13 +265,28 @@ async function startBrowser(url) {
       socket.send(JSON.stringify({ id, method, params }));
     });
     await call("Runtime.enable"); await call("Page.enable");
+    // Native confirm() dialogs must not stall the run: the driver answers
+    // them from a closure flag (setDialogAccept) and records the message.
+    const dialogs = [];
+    let dialogAccept = true;
+    socket.addEventListener("message", ({ data }) => {
+      const message = JSON.parse(String(data));
+      if (message.method === "Page.javascriptDialogOpening") {
+        dialogs.push(message.params.message);
+        socket.send(JSON.stringify({
+          id: ++sequence, method: "Page.handleJavaScriptDialog",
+          params: { accept: dialogAccept },
+        }));
+      }
+    });
     const evaluate = async (expression) => {
       const result = await call("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
       if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
       return result.result.value;
     };
     return {
-      call, evaluate,
+      call, evaluate, dialogs,
+      setDialogAccept: (accept) => { dialogAccept = accept; },
       async close() { socket.close(); await stopBrowserProcess(child, profile); },
     };
   } catch (error) {
@@ -472,11 +487,28 @@ async function main() {
     );
     await waitFor(() => contains(".timer-item", "循环巡检"), "repeat timer item did not render");
     const beforeDelete = await browser.evaluate(`document.querySelectorAll('.timer-item').length`);
+    // Dismissing the confirm must not delete nor send any command.
+    browser.setDialogAccept(false);
+    const dismissedDialogCount = browser.dialogs.length;
+    await click(`document.querySelector('.timer-delete').click()`);
+    await sleep(300);
+    assert(
+      await browser.evaluate(`document.querySelectorAll('.timer-item').length === ${beforeDelete}`),
+      "dismissed confirm must keep the timer",
+    );
+    assert(lastCommand("timer_delete") == null, "dismissed confirm must not send timer_delete");
+    const dismissedMessage = browser.dialogs[dismissedDialogCount] ?? "";
+    assert(dismissedMessage.includes("每日提醒"), `confirm dialog must name the timer: ${JSON.stringify(dismissedMessage)}`);
+    // Accepting the confirm deletes the same timer.
+    const dialogCountBefore = browser.dialogs.length;
+    browser.setDialogAccept(true);
     await click(`document.querySelector('.timer-delete').click()`);
     await waitFor(() => browser.evaluate(
       `document.querySelectorAll('.timer-item').length === ${beforeDelete - 1}`,
-    ), "timer item not removed after delete");
-    assert(lastCommand("timer_delete") !== null, "timer_delete command not sent");
+    ), "timer item not removed after confirmed delete");
+    assert(lastCommand("timer_delete") !== null, "timer_delete command not sent after confirm");
+    const dialogMessage = browser.dialogs[dialogCountBefore] ?? "";
+    assert(dialogMessage.includes("每日提醒"), `confirm dialog must name the timer: ${JSON.stringify(dialogMessage)}`);
 
     // Layout acceptance across themes and widths (panel + create form).
     for (const theme of ["dark", "light"]) {

@@ -687,6 +687,7 @@ export const en: Strings = {
     parked: "Parked after failed delivery",
     scheduleHint: "Set a delay in minutes or pick an absolute time",
     deleteTimer: "Delete this timer",
+    deleteConfirm: "Delete timer \"{name}\"? This cannot be undone; it will never fire again.",
     toggleOn: "Pause this timer",
     toggleOff: "Resume this timer",
     editTimer: "Edit the prompt",

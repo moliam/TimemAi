@@ -7451,6 +7451,14 @@ function TimerPanel({
                   aria-label={t("timer.deleteTimer")}
                   onClick={() => {
                     if (!session) return;
+                    // Deleting is irreversible and drops the schedule; other
+                    // timer actions stay immediate per panel conventions.
+                    if (
+                      !window.confirm(
+                        t("timer.deleteConfirm", { name: timer.name }),
+                      )
+                    )
+                      return;
                     sendCommand.current({
                       type: "timer_delete",
                       session_id: session.session_id,
