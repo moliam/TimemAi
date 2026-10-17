@@ -147,7 +147,7 @@ contract. An in-progress context-compression notice is one concise status line
 title and detail; completed notices retain their compression metrics.
 
 Browser acceptance startup evidence lives in `tests/browser/browser-startup.mjs`,
-not the application bundle. It preserves the 12-second startup gate and records
+not the application bundle. It preserves the 30-second startup gate and records
 bounded stderr and HTTP probe timing/status. Linux failure diagnostics read only
 the spawned Chrome PID's counters and at most 16 thread wait locations, plus
 system pressure counters; they never inspect command lines or environments.

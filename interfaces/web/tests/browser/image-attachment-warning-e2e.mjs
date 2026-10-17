@@ -199,7 +199,7 @@ async function startBrowser(url) {
       startup.port(port);
       if (port === null) return false;
       return startup.probe(`http://127.0.0.1:${port}/json/version`);
-    }, () => startup.failure(), 12000);
+    }, () => startup.failure(), 30000);
     const target = await (await fetch(
       `http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`,
       { method: "PUT" },
