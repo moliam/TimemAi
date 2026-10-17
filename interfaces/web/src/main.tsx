@@ -201,6 +201,7 @@ import {
   finishTurn,
   groupDecisionsBySessionTurn,
   manualToolGenCommand,
+  parseTimerEntryText,
   prependHistoryRecords,
   turnsFromHistoryRecords,
   pruneSessionDrafts,
@@ -10805,7 +10806,10 @@ const TurnInteraction = memo(function TurnInteraction({
                 ({ entry }) =>
                   entry.kind !== "approval" && entry.kind !== "resume_directly",
               )
-              .map(({ entry, roleIndex }) => (
+              .map(({ entry, roleIndex }) => {
+                const timerParts =
+                  entry.kind === "timer" ? parseTimerEntryText(entry.text) : null;
+                return (
                 <div
                   className={`turn-user-entry ${entry.kind}`}
                   key={`${entry.created_at_ms}-${roleIndex}`}
@@ -10829,8 +10833,16 @@ const TurnInteraction = memo(function TurnInteraction({
                     <Trash2 size={13} />
                   </button>
                   {entry.kind === "supplement" && <span>{t("composer.supplementTag")}</span>}
-                  {entry.kind === "timer" && <span>{t("timer.timerTag")}</span>}
-                  <UserText text={entry.text} />
+                  {timerParts && (
+                    <div className="timer-entry-head">
+                      <span>{t("timer.timerTag")}</span>
+                      <span className="timer-entry-badge" aria-hidden="true">
+                        <AlarmClock size={11} />
+                      </span>
+                      {timerParts.name && <b className="timer-entry-name">{timerParts.name}</b>}
+                    </div>
+                  )}
+                  <UserText text={timerParts ? timerParts.prompt : entry.text} />
                   {(
                     entry.worker_roles ??
                     (entry.worker_role ? [entry.worker_role] : [])
@@ -10864,7 +10876,8 @@ const TurnInteraction = memo(function TurnInteraction({
                     </div>
                   )}
                 </div>
-              ))}
+                );
+              })}
           </div>
         </section>
       )}

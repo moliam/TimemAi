@@ -846,3 +846,11 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 背景：统一收紧竖向节奏，减少零散留白——聊天头部由 38px 降到 34px（ctx/cache 读数、endpoint 选择器、模型胶囊同步），侧栏会话行由 26px 降到 24px；会话列表/分组标题/identity 元数据等 gap 与 margin 同步微调（session-group-heading margin 1px 2px 0、session-group-list padding 0、header-context gap 2px、model-meta gap 1px 等）。纯样式改动，无逻辑与结构变化。
 - 测试看护：endpoint_header_button.test.ts 与 session_groups_ui.test.ts 的样式断言同步到 34px/24px 新值。
 - 验证：vitest 734 全绿；dist 重建（仅 index css/js 产物变化）；git diff --check 通过。
+
+## 2026-10 Timer 触发条目结构化呈现
+
+- 背景：Host 在 timer 触发轮的入口文本里带有 `[timer:名]` 前缀，此前直接原样渲染给用户，技术前缀泄漏且缺少视觉锚点。
+- Presentation：新增 `parseTimerEntryText`（view_model）——严格前缀解析 `[timer:name]`，拆出名称与裸提示词；空名回退无名称、非起始前缀不剥离，不改写存储的历史文本。渲染层 timer 条目头部展示「定时触发」标签 + 闹钟徽标（AlarmClock，#2563eb 实心蓝）+ 定时器名称，正文只显示裸提示词。
+- 样式：闹钟 header 按钮 has-timers 态改为 #2563eb 实心蓝（明暗主题一致），与条目徽标同色相；清理中间层两条永不生效的 `.turn-user-entry.timer` 底色死代码（被最终权威层 #3b82f62e/#3b82f61a 同优先级覆盖，登记对比度仍以权威层为准）。
+- 测试看护：view_model 新增 parseTimerEntryText 4 组用例（前缀拆分、纯提示词、空名回退、非起始前缀不剥离）；user_text 断言更新为「timer 条目渲染裸提示词」；timer-ui-acceptance e2e 新增——名称与提示词可见、原始 `[timer:` 前缀不泄漏、徽标与名称元素存在。
+- 验证：vitest 738 全绿；timer e2e 明暗 × 1440/390 全过；dist 重建；git diff --check 通过。

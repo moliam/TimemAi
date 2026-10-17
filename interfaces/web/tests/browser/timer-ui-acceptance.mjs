@@ -49,7 +49,7 @@ let authoritativeTimers = timers();
 const timerFiredTurn = () => ({
   turn_id: "turn-timer-fired", state: "finished", created_at_ms: now,
   user_entries: [{
-    kind: "timer", text: "每日提醒：检查长构建结果并汇报。",
+    kind: "timer", text: "[timer:每日提醒] 检查长构建结果并汇报。",
     created_at_ms: now,
   }],
   events: [], final_answer: "已汇报。", completion: { stop_reason: "TurnComplete" },
@@ -584,6 +584,17 @@ async function main() {
     assert(dialogMessage.includes("每日提醒"), `confirm dialog must name the timer: ${JSON.stringify(dialogMessage)}`);
 
     await waitFor(async () => !(await exists(".timer-create-form")), "repeat create must collapse the form");
+
+    // Timer-fired entry presents tag + alarm badge + timer name, and the
+    // body shows the bare prompt without the raw "[timer:name]" prefix.
+    const timerEntryText = await browser.evaluate(
+      `document.querySelector('.turn-user-entry.timer')?.innerText`,
+    );
+    assert(timerEntryText?.includes("每日提醒"), `timer name must render: ${JSON.stringify(timerEntryText)}`);
+    assert(timerEntryText?.includes("检查长构建结果并汇报"), `timer prompt must render: ${JSON.stringify(timerEntryText)}`);
+    assert(!timerEntryText?.includes("[timer:"), `timer entry must strip the raw prefix: ${JSON.stringify(timerEntryText)}`);
+    assert(await exists(".turn-user-entry.timer .timer-entry-badge"), "timer alarm badge must render");
+    assert(await exists(".turn-user-entry.timer .timer-entry-name"), "timer name element must render");
 
     // Timer-fired turn renders with the blue tint distinct from the plain
     // user bubble; assert per theme against the computed style.
