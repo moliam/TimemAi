@@ -58,10 +58,11 @@ use agent_core::{
     work_instruction_load_request, work_instruction_mode_from_sources, AgentCore, BashApprovalMode,
     CoreSessionWorkerWorkspace, HostDecision, HostDecisionRequest, InterfacePreferences,
     ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind, RuntimeDataLayout,
-    SessionToolRepo, ToolDetail, ToolSummary, TopicReply, TurnProjection, WorkInstructionLoadMode,
-    CORE_TOPIC_ACTION, CORE_TOPIC_CONTEXT_COMPRESS, CORE_TOPIC_MODEL_REPAIR,
-    CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_TOOLGEN,
-    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    SessionToolRepo, TimerSpec, ToolDetail, ToolSummary, TopicReply, TurnProjection,
+    WorkInstructionLoadMode, CORE_TOPIC_ACTION, CORE_TOPIC_CONTEXT_COMPRESS,
+    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP,
+    CORE_TOPIC_TIMER, CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST,
+    CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use agent_core::{
     capability::CapabilityRegistry, rolling_file_store::RollingCapacity, self_tool::SelfToolPaths,
@@ -122,6 +123,7 @@ const PORT_END: u16 = 23_456;
 const DEFAULT_MEM_PREFERRED_PORT: u16 = 13_764;
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(40);
 const EVENT_CHANNEL_CAPACITY: usize = 256;
+const TIMER_SCHEDULER_INTERVAL: Duration = Duration::from_millis(500);
 const TEMPORARY_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const TEMPORARY_MAINTENANCE_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const TEMPORARY_MAINTENANCE_BUSY_RETRY_INTERVAL: Duration = Duration::from_secs(60);
@@ -283,6 +285,7 @@ impl WebMemState {
             claude_codex_tool_discovery: self.settings.claude_codex_tool_discovery,
             model_tool_result_bytes: self.settings.model_tool_result_bytes,
             context_compress_threshold_percent: self.settings.context_compress_threshold_percent,
+            restore_prompt_context_on_startup: self.settings.restore_prompt_context_on_startup,
         }
     }
 }
@@ -552,6 +555,27 @@ struct RestartCwdDecision {
     session_cwd_available: bool,
 }
 
+/// Host-authoritative scheduled timer. `spec` carries the Core-owned
+/// semantics (prompt, mode, schedule description); the remaining fields are
+/// Host scheduling state persisted in the session's timers.json.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct WebTimer {
+    #[serde(flatten)]
+    spec: TimerSpec,
+    created_at_ms: u128,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    /// Wall-clock ms of the next scheduled fire; recomputed from the spec
+    /// when the timer is (re)created.
+    next_fire_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_fired_ms: Option<u128>,
+    /// Why the runtime parked (auto-disabled) this timer after a failed
+    /// delivery. None for user-paused timers; cleared on re-enable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parked_reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct WebSession {
     session_id: String,
@@ -600,6 +624,9 @@ struct WebSession {
     /// Active long-task memo text (core.memo topic). None when no memo is set.
     #[serde(skip_serializing_if = "Option::is_none")]
     active_memo: Option<String>,
+    /// Host-authoritative timers (user + model created), persisted in the
+    /// session's own timers.json and fired by the timer scheduler.
+    timers: Vec<WebTimer>,
     /// Wall-clock ms of the latest explicit context clear; usage events at or
     /// before it must not feed the ctx meter.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -804,6 +831,10 @@ enum WireEvent {
         session_id: String,
         memo_text: Option<String>,
     },
+    TimersUpdated {
+        session_id: String,
+        timers: Vec<WebTimer>,
+    },
     SessionContextCleared {
         session_id: String,
         cleared_at_ms: u128,
@@ -941,6 +972,7 @@ enum WireEvent {
         claude_codex_tool_discovery: bool,
         model_tool_result_bytes: usize,
         context_compress_threshold_percent: u8,
+        restore_prompt_context_on_startup: bool,
     },
     MemTemporaryItems {
         items: Vec<MemTemporaryItem>,
@@ -1062,6 +1094,7 @@ struct WebMemInfo {
     claude_codex_tool_discovery: bool,
     model_tool_result_bytes: usize,
     context_compress_threshold_percent: u8,
+    restore_prompt_context_on_startup: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1237,6 +1270,34 @@ enum ClientCommand {
     },
     SessionRequestContextCompress {
         session_id: String,
+    },
+    TimerCreate {
+        session_id: String,
+        #[serde(default)]
+        name: Option<String>,
+        prompt: String,
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default)]
+        after_ms: Option<u64>,
+        #[serde(default)]
+        at: Option<String>,
+        #[serde(default)]
+        interval_ms: Option<u64>,
+    },
+    TimerDelete {
+        session_id: String,
+        timer_id: String,
+    },
+    TimerToggle {
+        session_id: String,
+        timer_id: String,
+        enabled: bool,
+    },
+    TimerUpdate {
+        session_id: String,
+        timer_id: String,
+        prompt: String,
     },
     SessionDelete {
         session_id: String,
@@ -1476,6 +1537,9 @@ enum ClientCommand {
     SystemContextCompressThresholdUpdate {
         percent: u8,
     },
+    SystemRestorePromptContextOnStartupUpdate {
+        enabled: bool,
+    },
     MemTemporaryItemsList,
     MemTemporaryItemsDelete {
         ids: Vec<String>,
@@ -1503,6 +1567,7 @@ impl ClientCommand {
             | Self::BetaClaudeCodexToolDiscoveryUpdate { .. }
             | Self::SystemModelToolResultBytesUpdate { .. }
             | Self::SystemContextCompressThresholdUpdate { .. }
+            | Self::SystemRestorePromptContextOnStartupUpdate { .. }
             | Self::MemTemporaryItemsDelete { .. }
             | Self::McpServerDelete { .. }
             | Self::ModelEndpointUpsert { .. }
@@ -1555,7 +1620,11 @@ impl ClientCommand {
             | Self::SessionRuntimeUpdate { session_id, .. }
             | Self::ModelEndpointApply { session_id, .. }
             | Self::McpSessionToggle { session_id, .. }
-            | Self::McpServerReconnect { session_id, .. } => Some(format!("session:{session_id}")),
+            | Self::McpServerReconnect { session_id, .. }
+            | Self::TimerCreate { session_id, .. }
+            | Self::TimerDelete { session_id, .. }
+            | Self::TimerToggle { session_id, .. }
+            | Self::TimerUpdate { session_id, .. } => Some(format!("session:{session_id}")),
         }
     }
 
@@ -1569,6 +1638,7 @@ impl ClientCommand {
                 | Self::BetaClaudeCodexToolDiscoveryUpdate { .. }
                 | Self::SystemModelToolResultBytesUpdate { .. }
                 | Self::SystemContextCompressThresholdUpdate { .. }
+                | Self::SystemRestorePromptContextOnStartupUpdate { .. }
                 | Self::MemTemporaryItemsDelete { .. }
                 | Self::McpServerDelete { .. }
                 | Self::ModelEndpointUpsert { .. }
@@ -1765,6 +1835,7 @@ pub async fn run(
     // background. A fresh Hello with the full snapshot is broadcast once the
     // restore finishes.
     spawn_event_bridge(state.clone());
+    spawn_timer_scheduler(state.clone());
 
     let listener = bind_web_listener(launch.port, launch.public_access, prefer_default_mem_port)
         .await
@@ -2354,6 +2425,10 @@ fn client_command_trace_fields(command: &ClientCommand) -> (&'static str, Option
             ("turn_supplement", Some(session_id.clone()))
         }
         ClientCommand::TurnCancel { session_id, .. } => ("turn_cancel", Some(session_id.clone())),
+        ClientCommand::TimerCreate { session_id, .. } => ("timer_create", Some(session_id.clone())),
+        ClientCommand::TimerDelete { session_id, .. } => ("timer_delete", Some(session_id.clone())),
+        ClientCommand::TimerToggle { session_id, .. } => ("timer_toggle", Some(session_id.clone())),
+        ClientCommand::TimerUpdate { session_id, .. } => ("timer_update", Some(session_id.clone())),
         _ => ("other", None),
     }
 }
@@ -3519,6 +3594,46 @@ fn handle_command_with_id(
         ClientCommand::SessionRequestContextCompress { session_id } => {
             request_session_context_compress(state, &session_id)?;
         }
+        ClientCommand::TimerCreate {
+            session_id,
+            name,
+            prompt,
+            mode,
+            after_ms,
+            at,
+            interval_ms,
+        } => {
+            create_session_timer(
+                state,
+                &session_id,
+                name,
+                prompt,
+                mode,
+                after_ms,
+                at,
+                interval_ms,
+            )?;
+        }
+        ClientCommand::TimerDelete {
+            session_id,
+            timer_id,
+        } => {
+            delete_session_timer(state, &session_id, &timer_id)?;
+        }
+        ClientCommand::TimerToggle {
+            session_id,
+            timer_id,
+            enabled,
+        } => {
+            toggle_session_timer(state, &session_id, &timer_id, enabled)?;
+        }
+        ClientCommand::TimerUpdate {
+            session_id,
+            timer_id,
+            prompt,
+        } => {
+            update_session_timer(state, &session_id, &timer_id, &prompt)?;
+        }
         ClientCommand::SessionDelete { session_id } => {
             let worker_ids = session_worker_ids(state, &session_id)?;
             {
@@ -4640,6 +4755,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -4669,6 +4785,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -4697,6 +4814,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: enabled,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -4726,6 +4844,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: max_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -4755,6 +4874,35 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: percent,
+                restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
+        }
+        ClientCommand::SystemRestorePromptContextOnStartupUpdate { enabled } => {
+            let (memory_dir, settings) = {
+                let mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                let mut settings = mem.settings.clone();
+                settings.restore_prompt_context_on_startup = enabled;
+                (mem.layout.memory_dir(), settings)
+            };
+            save_web_mem_settings(&memory_dir, &settings)?;
+            state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .settings = settings.clone();
+            let event = WireEvent::MemSettingsUpdated {
+                temporary_retention_days: settings.temporary_retention_days,
+                temporary_capacity_bytes: settings.temporary_capacity_bytes,
+                conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
+                model_tool_result_bytes: settings.model_tool_result_bytes,
+                context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                restore_prompt_context_on_startup: enabled,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -5614,6 +5762,7 @@ fn create_session_in_group(
                 pending_turn_id: None,
                 turn_projection: TurnProjectionCache::default(),
                 active_memo: None,
+                timers: Vec::new(),
                 context_cleared_at_ms: None,
                 previous_memo_for_notice: None,
                 message_queue: SessionMessageQueue::new(MAX_NEXT_TURN_INTENTS),
@@ -6218,6 +6367,9 @@ fn restore_stored_session(
     // Turns already dispatched when the restart hit remain marked
     // interrupted by the restored history itself.
     let message_queue = restored_message_queue;
+    // Timers are Host authority persisted beside the session; restore them
+    // into the projection so the scheduler resumes firing after restart.
+    let timers = load_session_timers(state, &stored.session_id);
     {
         let mut sessions = state
             .sessions
@@ -6270,6 +6422,7 @@ fn restore_stored_session(
                 pending_turn_id: None,
                 turn_projection: TurnProjectionCache::default(),
                 active_memo: None,
+                timers,
                 context_cleared_at_ms: None,
                 previous_memo_for_notice: None,
                 message_queue,
@@ -6298,8 +6451,49 @@ fn restore_stored_session(
         None,
         true,
     )?;
-    restore_prompt_context_snapshot(state, &stored.session_id)?;
+    // A snapshot handoff is best-effort: unreadable/oversized/corrupt data
+    // must degrade to a history-only restore instead of blocking the session
+    // from being usable at all. Snapshot consumption semantics stay inside
+    // restore_prompt_context_snapshot (fail-closed deletion before import).
+    if let Err(error) = restore_prompt_context_snapshot(state, &stored.session_id) {
+        state.runtime_log.record(
+            "session_restore_context_snapshot_failed",
+            json!({
+                "session_id": stored.session_id,
+                "reason": error,
+                "action": "history_only_restore",
+            }),
+        );
+        eprintln!(
+            "[timem_web_warning] prompt_context_restore_degraded session_id={:?} reason={error}",
+            stored.session_id
+        );
+    }
     persist_restored_session_runtime_cache(state, &stored)?;
+    // The snapshot import may have overwritten Core timers with the older
+    // snapshot projection; re-project the timers.json authority so Core sees
+    // the full live set (user + model timers) for confirmations and the tool.
+    {
+        let specs: Vec<TimerSpec> = state
+            .sessions
+            .lock()
+            .map(|sessions| {
+                sessions
+                    .get(&stored.session_id)
+                    .map(|session| {
+                        session
+                            .timers
+                            .iter()
+                            .map(|timer| timer.spec.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        if let Ok(handle) = session_worker_handle(state, &stored.session_id, None) {
+            let _ = handle.sync_timers(specs);
+        }
+    }
     // A missing preset stays explicitly bound and fails closed at submission.
     // Do not discard restored history just because an endpoint was deleted.
     let endpoint_id = {
@@ -6815,7 +7009,7 @@ fn web_message_from_history_record(record: ChatHistoryRecord) -> Option<WebChatM
 
 fn history_user_entry_kind(kind: Option<&str>) -> &str {
     match kind {
-        Some(kind @ ("task" | "supplement" | "approval" | "queued_interrupted")) => kind,
+        Some(kind @ ("task" | "supplement" | "approval" | "queued_interrupted" | "timer")) => kind,
         _ => "task",
     }
 }
@@ -6827,6 +7021,590 @@ fn next_turn_intents_path(state: &AppState, session_id: &str) -> Result<PathBuf,
         .parent()
         .map(|parent| parent.join("next_turn_intents.json"))
         .ok_or_else(|| "next_turn_intents_path_invalid".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Timers: Host-authoritative scheduled prompts
+// ---------------------------------------------------------------------------
+
+fn timers_path(state: &AppState, session_id: &str) -> Result<PathBuf, String> {
+    let store = current_session_store(state)?;
+    let metadata = store.metadata_path_for_session(session_id);
+    metadata
+        .parent()
+        .map(|parent| parent.join("timers.json"))
+        .ok_or_else(|| "timers_path_invalid".to_string())
+}
+
+fn persist_timers(state: &AppState, session_id: &str) -> Result<(), String> {
+    let timers = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?
+        .get(session_id)
+        .ok_or_else(|| "session_not_found".to_string())?
+        .timers
+        .clone();
+    let payload = serde_json::to_vec_pretty(&timers)
+        .map_err(|error| format!("timers_serialize_failed:{error}"))?;
+    let path = timers_path(state, session_id)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("timers_dir_failed:{error}"))?;
+    }
+    agent_core::atomic_write_file(&path, &payload)
+        .map_err(|error| format!("timers_write_failed:{error}"))
+}
+
+fn load_session_timers(state: &AppState, session_id: &str) -> Vec<WebTimer> {
+    let Ok(path) = timers_path(state, session_id) else {
+        return Vec::new();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Vec::new();
+    };
+    match serde_json::from_slice::<Vec<WebTimer>>(&bytes) {
+        Ok(timers) => timers,
+        Err(error) => {
+            eprintln!(
+                "[timem_web_warning] timers_restore_failed session_id={session_id:?} reason={error}"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Concrete first-fire instant from a spec. The Host owns the clock, so the
+/// ISO `at` string is parsed here (chrono), never inside Core.
+fn compute_next_fire_ms(spec: &TimerSpec, now_ms_value: u128) -> Result<u64, String> {
+    if let Some(after_ms) = spec.after_ms {
+        return Ok(now_ms_value as u64 + after_ms);
+    }
+    if let Some(at) = spec.at.as_deref() {
+        let parsed = chrono::DateTime::parse_from_rfc3339(at)
+            .map_err(|error| format!("at_parse_failed:{error}"))?;
+        return Ok(parsed.timestamp_millis().max(0) as u64);
+    }
+    Err("schedule_invalid".to_string())
+}
+
+fn next_free_timer_name(timers: &[WebTimer]) -> String {
+    let mut n: u64 = 0;
+    loop {
+        let candidate = format!("timer{n}");
+        if !timers.iter().any(|timer| timer.spec.name == candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// Core timer topics carry the full authoritative set (user timers were
+/// synced into Core beforehand). Replace-all while preserving host-owned
+/// metadata (created_at_ms, enabled, fire bookkeeping) for known ids.
+fn merge_session_timers_from_core(
+    state: &AppState,
+    session_id: &str,
+    specs: &[TimerSpec],
+) -> Result<(), String> {
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        let now = now_ms();
+        let mut merged: Vec<WebTimer> = Vec::with_capacity(specs.len());
+        for spec in specs {
+            let web_timer = match session
+                .timers
+                .iter()
+                .find(|timer| timer.spec.timer_id == spec.timer_id)
+            {
+                Some(existing) => {
+                    let mut updated = existing.clone();
+                    updated.spec = spec.clone();
+                    updated
+                }
+                None => {
+                    let next_fire_ms = match compute_next_fire_ms(spec, now) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            eprintln!(
+                                "[timem_web_warning] timer_schedule_unusable session_id={session_id:?} name={:?} reason={error}",
+                                spec.name
+                            );
+                            continue;
+                        }
+                    };
+                    WebTimer {
+                        spec: spec.clone(),
+                        created_at_ms: now,
+                        enabled: true,
+                        next_fire_ms,
+                        last_fired_ms: None,
+                        parked_reason: None,
+                    }
+                }
+            };
+            merged.push(web_timer);
+        }
+        // Race guard: a user timer created while a turn is in flight may not
+        // have reached Core's projection yet (TimerSync is queued behind the
+        // turn). Core is authoritative for model timers only; keep host-side
+        // user timers missing from the reported set instead of dropping them.
+        for timer in &session.timers {
+            if timer.spec.created_by == "user"
+                && !merged
+                    .iter()
+                    .any(|candidate| candidate.spec.timer_id == timer.spec.timer_id)
+            {
+                merged.push(timer.clone());
+            }
+        }
+        session.timers = merged;
+    }
+    persist_timers(state, session_id)?;
+    publish_timers_updated(state, session_id);
+    Ok(())
+}
+
+fn publish_timers_updated(state: &AppState, session_id: &str) {
+    let timers = state.sessions.lock().ok().and_then(|sessions| {
+        sessions
+            .get(session_id)
+            .map(|session| session.timers.clone())
+    });
+    if let Some(timers) = timers {
+        publish_semantic(
+            state,
+            WireEvent::TimersUpdated {
+                session_id: session_id.to_string(),
+                timers,
+            },
+        );
+    }
+}
+
+/// Mirrors the core.timer topic render path so user-driven timer changes
+/// also leave a chat-visible notice attached to the active turn.
+fn publish_timer_topic_notice(state: &AppState, session_id: &str, op: &str) {
+    let specs: Vec<TimerSpec> = state
+        .sessions
+        .lock()
+        .ok()
+        .and_then(|sessions| {
+            sessions.get(session_id).map(|session| {
+                session
+                    .timers
+                    .iter()
+                    .map(|timer| timer.spec.clone())
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+    let wire_payload = agent_core::host::timer_topic_event(session_id, op, &specs).wire_payload();
+    let turn_ref = append_active_turn_event(state, session_id, "core_topic", wire_payload.clone());
+    publish_core_semantic(
+        state,
+        session_id,
+        WireEvent::CoreTopic {
+            session_id: session_id.to_string(),
+            turn_id: turn_ref.as_ref().map(|value| value.turn_id.clone()),
+            timeline_seq: turn_ref.as_ref().map(|value| value.timeline_seq),
+            created_at_ms: turn_ref.as_ref().map(|value| value.created_at_ms),
+            turn_event_id: turn_ref.map(|value| value.event_id),
+            event: wire_payload,
+        },
+    );
+}
+
+/// Pushes the authoritative timer set into the worker's Core projection.
+/// Best-effort: a missing live worker picks the set up via the next topic
+/// sync or restart restore.
+fn sync_worker_timers(state: &AppState, session_id: &str) {
+    let specs: Vec<TimerSpec> = match state.sessions.lock() {
+        Ok(sessions) => sessions
+            .get(session_id)
+            .map(|session| {
+                session
+                    .timers
+                    .iter()
+                    .map(|timer| timer.spec.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Err(_) => return,
+    };
+    if let Ok(handle) = session_worker_handle(state, session_id, None) {
+        if let Err(error) = handle.sync_timers(specs) {
+            state.runtime_log.record(
+                "timer_worker_sync_failed",
+                json!({"session_id": session_id, "error": error}),
+            );
+        }
+    }
+}
+
+fn validate_user_timer_input(
+    mode: &str,
+    after_ms: Option<u64>,
+    at: Option<&str>,
+    interval_ms: Option<u64>,
+) -> Result<(), String> {
+    match mode {
+        "once" => {
+            if interval_ms.is_some() {
+                return Err("interval_requires_repeat".to_string());
+            }
+        }
+        "repeat" => {
+            let Some(interval) = interval_ms else {
+                return Err("interval_required".to_string());
+            };
+            if interval == 0 {
+                return Err("interval_invalid".to_string());
+            }
+        }
+        _ => return Err("mode_invalid".to_string()),
+    }
+    if after_ms.is_some() == at.is_some() {
+        return Err("schedule_invalid".to_string());
+    }
+    if after_ms == Some(0) {
+        return Err("after_ms_invalid".to_string());
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_session_timer(
+    state: &AppState,
+    session_id: &str,
+    name: Option<String>,
+    prompt: String,
+    mode: Option<String>,
+    after_ms: Option<u64>,
+    at: Option<String>,
+    interval_ms: Option<u64>,
+) -> Result<(), String> {
+    let prompt = prompt.trim().to_string();
+    if prompt.is_empty() {
+        return Err("prompt_required".to_string());
+    }
+    let mode = mode.unwrap_or_else(|| "once".to_string());
+    let at = at
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    validate_user_timer_input(&mode, after_ms, at.as_deref(), interval_ms)?;
+    let now = now_ms();
+    let mut spec = TimerSpec {
+        timer_id: unique_web_id("timer"),
+        name: name
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default(),
+        prompt,
+        mode,
+        after_ms,
+        at,
+        interval_ms,
+        created_by: "user".to_string(),
+    };
+    let next_fire_ms = compute_next_fire_ms(&spec, now)?;
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        if !spec.name.is_empty() && session.timers.iter().any(|t| t.spec.name == spec.name) {
+            return Err(format!("name_exists:{}", spec.name));
+        }
+        if session.timers.len() >= agent_core::MAX_TIMERS {
+            return Err("timer_limit".to_string());
+        }
+        if spec.name.is_empty() {
+            spec.name = next_free_timer_name(&session.timers);
+        }
+        session.timers.push(WebTimer {
+            spec,
+            created_at_ms: now,
+            enabled: true,
+            next_fire_ms,
+            last_fired_ms: None,
+            parked_reason: None,
+        });
+    }
+    persist_timers(state, session_id)?;
+    sync_worker_timers(state, session_id);
+    publish_timer_topic_notice(state, session_id, "created");
+    publish_timers_updated(state, session_id);
+    Ok(())
+}
+
+fn delete_session_timer(state: &AppState, session_id: &str, timer_id: &str) -> Result<(), String> {
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        let index = session
+            .timers
+            .iter()
+            .position(|timer| timer.spec.timer_id == timer_id)
+            .ok_or_else(|| "timer_not_found".to_string())?;
+        session.timers.remove(index);
+    }
+    persist_timers(state, session_id)?;
+    sync_worker_timers(state, session_id);
+    publish_timer_topic_notice(state, session_id, "deleted");
+    publish_timers_updated(state, session_id);
+    Ok(())
+}
+
+fn toggle_session_timer(
+    state: &AppState,
+    session_id: &str,
+    timer_id: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        let timer = session
+            .timers
+            .iter_mut()
+            .find(|timer| timer.spec.timer_id == timer_id)
+            .ok_or_else(|| "timer_not_found".to_string())?;
+        timer.enabled = enabled;
+        if enabled {
+            // Resuming restarts the relative schedule from now so a timer
+            // paused long ago does not fire in a burst on the next tick.
+            // Absolute `at` schedules keep their instant (already fixed in
+            // wall-clock time); repeat timers restart from the interval.
+            let now = now_ms();
+            if timer.spec.after_ms.is_some() {
+                timer.next_fire_ms = now as u64 + timer.spec.after_ms.unwrap_or(0);
+            } else if timer.spec.mode == "repeat" {
+                timer.next_fire_ms = now as u64 + timer.spec.interval_ms.unwrap_or(0).max(1000);
+            }
+            timer.parked_reason = None;
+        }
+    }
+    persist_timers(state, session_id)?;
+    publish_timers_updated(state, session_id);
+    Ok(())
+}
+
+/// Prompt-only edits keep schedule state (enabled/next_fire) untouched: the
+/// firing payload changes, not the calendar. Re-projects into Core so the
+/// timer tool view and compression confirmations stay truthful.
+fn update_session_timer(
+    state: &AppState,
+    session_id: &str,
+    timer_id: &str,
+    prompt: &str,
+) -> Result<(), String> {
+    let prompt = prompt.trim().to_string();
+    if prompt.is_empty() {
+        return Err("prompt_required".to_string());
+    }
+    if prompt.len() > 8000 {
+        return Err("timer_prompt_too_long".to_string());
+    }
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        let timer = session
+            .timers
+            .iter_mut()
+            .find(|timer| timer.spec.timer_id == timer_id)
+            .ok_or_else(|| "timer_not_found".to_string())?;
+        if timer.spec.prompt == prompt {
+            return Ok(());
+        }
+        timer.spec.prompt = prompt;
+    }
+    persist_timers(state, session_id)?;
+    sync_worker_timers(state, session_id);
+    publish_timer_topic_notice(state, session_id, "updated");
+    publish_timers_updated(state, session_id);
+    Ok(())
+}
+
+/// Fires due timers every TIMER_SCHEDULER_INTERVAL. Idle sessions start a
+/// new "timer" turn; busy sessions enqueue the prompt into the next
+/// interaction batch. A failed delivery parks the timer (disabled) instead
+/// of retry-hammering or silently dropping the prompt.
+fn spawn_timer_scheduler(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            fire_due_timers(&state);
+            sleep(TIMER_SCHEDULER_INTERVAL).await;
+        }
+    });
+}
+
+fn fire_due_timers(state: &AppState) {
+    if state
+        .session_restore_in_progress
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
+    let now = now_ms();
+    // (session_id, timer_id, fire_text)
+    let due: Vec<(String, String, String)> = {
+        let Ok(sessions) = state.sessions.lock() else {
+            return;
+        };
+        sessions
+            .values()
+            .filter(|session| !session.workers.is_empty())
+            .flat_map(|session| {
+                session
+                    .timers
+                    .iter()
+                    .filter(|timer| timer.enabled && u128::from(timer.next_fire_ms) <= now)
+                    .map(|timer| {
+                        (
+                            session.session_id.clone(),
+                            timer.spec.timer_id.clone(),
+                            format!("[timer:{}] {}", timer.spec.name, timer.spec.prompt),
+                        )
+                    })
+            })
+            .collect()
+    };
+    for (session_id, timer_id, fire_text) in due {
+        let delivered = deliver_timer_fire(state, &session_id, &timer_id, &fire_text);
+        let fired_at = now_ms();
+        {
+            let Ok(mut sessions) = state.sessions.lock() else {
+                continue;
+            };
+            let Some(session) = sessions.get_mut(&session_id) else {
+                continue;
+            };
+            let Some(index) = session
+                .timers
+                .iter()
+                .position(|timer| timer.spec.timer_id == timer_id)
+            else {
+                continue;
+            };
+            session.timers[index].last_fired_ms = Some(fired_at);
+            if delivered {
+                if session.timers[index].spec.mode == "repeat" {
+                    // A small floor avoids a hot loop for tiny intervals.
+                    let interval = session.timers[index]
+                        .spec
+                        .interval_ms
+                        .unwrap_or(0)
+                        .max(1000);
+                    session.timers[index].next_fire_ms = fired_at as u64 + interval;
+                } else {
+                    session.timers.remove(index);
+                }
+            } else {
+                session.timers[index].enabled = false;
+                session.timers[index].parked_reason = Some("delivery_failed".to_string());
+            }
+        }
+        let _ = persist_timers(state, &session_id);
+        // A consumed once-timer must leave Core's projection too, or the
+        // post-compression confirmation would promise a fire that already
+        // happened.
+        sync_worker_timers(state, &session_id);
+        publish_timers_updated(state, &session_id);
+    }
+}
+
+fn deliver_timer_fire(state: &AppState, session_id: &str, timer_id: &str, fire_text: &str) -> bool {
+    let idle = state
+        .sessions
+        .lock()
+        .ok()
+        .and_then(|sessions| {
+            sessions.get(session_id).map(|session| {
+                current_turn_id(session).is_none() && session.message_queue.is_empty()
+            })
+        })
+        .unwrap_or(false);
+    if idle {
+        return match submit_turn_with_selected_attachments_and_kind(
+            state,
+            session_id,
+            fire_text.to_string(),
+            None,
+            None,
+            Vec::new(),
+            "timer",
+        ) {
+            Ok(_) => true,
+            Err(error) => {
+                // A turn may have started between the idle check and the
+                // submit; fall back to enqueue when one is now active.
+                let turn_active = state
+                    .sessions
+                    .lock()
+                    .ok()
+                    .and_then(|sessions| {
+                        sessions
+                            .get(session_id)
+                            .map(|session| current_turn_id(session).is_some())
+                    })
+                    .unwrap_or(false);
+                if turn_active {
+                    enqueue_timer_fire(state, session_id, timer_id, fire_text.to_string())
+                } else {
+                    log_timer_fire_failure(state, session_id, timer_id, &error);
+                    false
+                }
+            }
+        };
+    }
+    enqueue_timer_fire(state, session_id, timer_id, fire_text.to_string())
+}
+
+fn enqueue_timer_fire(
+    state: &AppState,
+    session_id: &str,
+    timer_id: &str,
+    fire_text: String,
+) -> bool {
+    let command_id = unique_web_id("timer_fire");
+    match enqueue_next_turn_intent(state, session_id, &command_id, fire_text, None, Vec::new()) {
+        Ok(_) => true,
+        Err(error) => {
+            log_timer_fire_failure(state, session_id, timer_id, &error);
+            false
+        }
+    }
+}
+
+fn log_timer_fire_failure(state: &AppState, session_id: &str, timer_id: &str, error: &str) {
+    state.runtime_log.record(
+        "timer_fire_failed",
+        json!({"session_id": session_id, "timer_id": timer_id, "error": error}),
+    );
 }
 
 fn message_queue_error(error: SessionMessageQueueError) -> String {
@@ -7724,6 +8502,17 @@ fn create_context_with_worker(
 /// model context instead of starting from an empty one. A missing, oversized,
 /// or corrupt snapshot is not an error: the session simply starts fresh.
 fn restore_prompt_context_snapshot(state: &AppState, session_id: &str) -> Result<(), String> {
+    // MEM-scoped opt-in: shutdown snapshots always stay on disk (they reflect
+    // the last exit), but auto-restore after a runtime restart only runs when
+    // the user enabled it. Disabling must not consume or delete snapshots.
+    let restore_enabled = state
+        .mem
+        .lock()
+        .map(|mem| mem.settings.restore_prompt_context_on_startup)
+        .unwrap_or(false);
+    if !restore_enabled {
+        return Ok(());
+    }
     let store = current_session_store(state)?;
     let path = store.prompt_context_path_for_session(session_id);
     let metadata = match std::fs::metadata(&path) {
@@ -11859,6 +12648,16 @@ fn handle_scoped_worker_event(
                         );
                     }
                 }
+                if event.topic.name == CORE_TOPIC_TIMER {
+                    // Core timer topics carry the full authoritative timer
+                    // set (model tool created/deleted). Replace the session
+                    // projection while preserving host scheduling metadata.
+                    if let Ok(topic_timers) =
+                        serde_json::from_value::<Vec<TimerSpec>>(event.payload["timers"].clone())
+                    {
+                        let _ = merge_session_timers_from_core(state, session_id, &topic_timers);
+                    }
+                }
                 if event.topic.name == CORE_TOPIC_TOOLGEN {
                     if let Ok(repo) = session_tool_repo(state, session_id) {
                         if let Ok(tools) = repo.list() {
@@ -12702,6 +13501,7 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
             claude_codex_tool_discovery: false,
             model_tool_result_bytes: default_model_tool_result_bytes(),
             context_compress_threshold_percent: default_context_compress_threshold_percent(),
+            restore_prompt_context_on_startup: default_restore_prompt_context_on_startup(),
         });
     let (role_library, session_groups) = current_mem_state(state)
         .map(|mem| (mem.role_library, mem.session_groups))

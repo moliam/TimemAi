@@ -28,7 +28,7 @@ describe("tool activity row layout", () => {
       expect(section).not.toContain('<ActionStatus');
     }
     expect(styles).toContain('.tool-activity.settled .tool-activity-timing { grid-column: 3; }');
-    expect(styles).toContain('.tool-activity.settled :is(.file-tool-preview, .bash-edit-preview, .memory-search-preview, .self-tool-preview) { grid-column: 2; }');
+    expect(styles).toContain('.tool-activity.settled :is(.file-tool-preview, .bash-edit-preview, .memory-search-preview, .self-tool-preview, .timer-tool-preview) { grid-column: 2; }');
     expect(styles).toContain('.tool-failure-icon { color: #d08181; }');
   });
 
@@ -254,4 +254,43 @@ it("uses one typography contract for system-level notices", () => {
 it("narrows tool rendering from the right edge while preserving mobile width", () => {
   expect(styles).toContain("width: 90%;\n  max-width: 90%;\n  margin-right: auto;");
   expect(styles).toMatch(/@media \(max-width: 720px\) \{[\s\S]*\.stream-tool-run,[\s\S]*width: 100%; max-width: 100%;/);
+});
+
+it("renders timer lifecycle rows as standalone system-status lines", () => {
+  // Ordinary mode: timer activities bypass the collapsed tool group.
+  expect(source).toMatch(/if \(activity\.timer\)\s*\n?\s*return \(\s*\n\s*<ToolActivity[\s\S]*?timer-row-/);
+  // Grouping never absorbs timer rows in either mode.
+  const grouping = readFileSync(new URL("../src/activity_groups.ts", import.meta.url), "utf8");
+  expect(grouping).toContain('activity.tone === "action" && !activity.timer');
+  expect(source).toContain('if (previous && foldable(entry) && foldable(previous[0])) previous.push(entry);');
+  expect(source).toMatch(/if \(activity\.timer\)\s*\n?\s*return \(\s*\n\s*<div key=\{key\} className="stream-tool-merged-item">/);
+  expect(styles).toContain(', .timer-tool-preview) { grid-column: 2; }');
+  expect(styles).toContain('.timer-tool-icon { color: #8bc8ba; }');
+});
+
+
+it("renders pipe-delimited result size before elapsed in both tool views", () => {
+  const stream = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
+  const ordinary = source.slice(source.indexOf("function ToolActivity("), source.indexOf("function MemoIcon("));
+  expect(stream).toContain('className="stream-tool-meta"');
+  expect(ordinary).toContain('className="tool-activity-meta"');
+  expect(stream).toContain('className="stream-tool-sep" aria-hidden="true">|</span>');
+  expect(ordinary).toContain('className="tool-activity-sep" aria-hidden="true">|</span>');
+  const streamMeta = stream.indexOf('className="stream-tool-meta"');
+  const streamBytes = stream.indexOf('className="stream-tool-bytes"');
+  const streamElapsed = stream.indexOf('className="stream-tool-elapsed"');
+  expect(streamMeta).toBeLessThan(streamBytes);
+  expect(streamBytes).toBeLessThan(streamElapsed);
+  const ordinaryMeta = ordinary.indexOf('className="tool-activity-meta"');
+  const ordinaryBytes = ordinary.indexOf('className="tool-activity-bytes"');
+  const ordinaryDuration = ordinary.indexOf('className="tool-activity-duration"');
+  expect(ordinaryMeta).toBeLessThan(ordinaryBytes);
+  expect(ordinaryBytes).toBeLessThan(ordinaryDuration);
+  expect(source).toContain("function formatResultBytes(");
+  expect(source).toContain("return `${bytes}B`;");
+  expect(source).toContain("return `${Math.ceil(bytes / 1024)}KB`;");
+  expect(styles).toContain(".stream-tool-meta {");
+  expect(styles).toContain(".tool-activity-meta,");
+  expect(styles).toContain(".tool-activity-duration-slot { display: none; }");
+  expect(styles).toContain(".tool-activity summary .tool-activity-sep { display: none; }");
 });

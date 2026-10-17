@@ -103,6 +103,88 @@ export function isMemorySearch(action: string, input: unknown): boolean {
     (input.op === "sql" && (input.type === "durable" || input.type === "raw_chat"));
 }
 
+export type TimerPresentation =
+  | { kind: "new_once"; name?: string; prompt: string; afterMs?: number; at?: string }
+  | { kind: "new_repeat"; name?: string; prompt: string; intervalMs: number; afterMs?: number; at?: string }
+  | { kind: "delete"; name: string };
+
+const TIMER_KNOWN = new Set(["op", "prompt", "name", "mode", "after_ms", "at", "interval_ms"]);
+
+export function timerPresentation(
+  action: string,
+  input: unknown,
+): TimerPresentation | undefined {
+  if (action !== "timer" || !record(input) || typeof input.op !== "string") return;
+  if (Object.keys(input).some(key => !TIMER_KNOWN.has(key))) return;
+  const name =
+    typeof input.name === "string" && input.name.trim() ? input.name.trim()
+    : undefined;
+  if (input.name !== undefined && name === undefined) return;
+  if (input.prompt !== undefined && (typeof input.prompt !== "string" || !input.prompt.trim())) return;
+  const parseMs = (value: unknown, min: number):
+    { valid: true; ms?: number } | { valid: false } => {
+    if (value === undefined) return { valid: true };
+    if (typeof value !== "number" || !Number.isSafeInteger(value)
+      || value < min || value > 3.2e12) return { valid: false };
+    return { valid: true, ms: value };
+  };
+  const after = parseMs(input.after_ms, 0);
+  if (!after.valid) return;
+  const interval = parseMs(input.interval_ms, 1);
+  if (!interval.valid) return;
+  const afterMs = after.ms;
+  const intervalMs = interval.ms;
+  const at =
+    input.at === undefined ? undefined
+    : typeof input.at === "string" && !Number.isNaN(new Date(input.at).getTime()) ? input.at
+    : undefined;
+  if (input.at !== undefined && at === undefined) return;
+  if (input.op === "del") {
+    if (!name || input.prompt !== undefined || input.mode !== undefined
+      || afterMs !== undefined || at !== undefined || intervalMs !== undefined) return;
+    return { kind: "delete", name };
+  }
+  if (input.op !== "new" || !input.prompt) return;
+  if ((afterMs === undefined) === (at === undefined)) return; // exactly one
+  const mode = input.mode === undefined ? "once" : input.mode;
+  if (mode === "once") {
+    if (intervalMs !== undefined) return;
+    return { kind: "new_once", name, prompt: input.prompt, afterMs, at };
+  }
+  if (mode !== "repeat" || intervalMs === undefined) return;
+  return { kind: "new_repeat", name, prompt: input.prompt, intervalMs, afterMs, at };
+}
+
+export function isTimerActivityInput(action: string, input: unknown): boolean {
+  return timerPresentation(action, input) !== undefined;
+}
+
+/** Split a duration into human units for localized delay/every labels. */
+export function timerDelayParts(ms: number):
+  | { unit: "seconds" | "minutes"; value: number }
+  | { unit: "hours"; hours: number; minutes: number }
+  | { unit: "days"; days: number; hours: number } {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return { unit: "seconds", value: seconds };
+  const minutes = seconds / 60;
+  if (minutes < 60)
+    return { unit: "minutes", value: Number.isInteger(minutes) ? minutes : Math.round(minutes * 10) / 10 };
+  const totalMinutes = Math.round(minutes);
+  const hours = Math.floor(totalMinutes / 60);
+  if (hours < 24) return { unit: "hours", hours, minutes: totalMinutes % 60 };
+  const days = Math.floor(hours / 24);
+  return { unit: "days", days, hours: hours % 24 };
+}
+
+/** Local wall-clock rendering for absolute fire instants. */
+export function formatTimerAt(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  const p2 = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${p2(date.getMonth() + 1)}-${p2(date.getDate())} `
+    + `${p2(date.getHours())}:${p2(date.getMinutes())}:${p2(date.getSeconds())}`;
+}
+
 export function selfToolPresentation(
   action: string,
   input: unknown,

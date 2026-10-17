@@ -12,6 +12,10 @@ const protocolSource = readFileSync(
   new URL("../src/protocol.ts", import.meta.url),
   "utf8",
 );
+const stylesSource = readFileSync(
+  new URL("../src/styles.css", import.meta.url),
+  "utf8",
+);
 
 describe("System settings UI contract", () => {
   it("uses System as the first-level category and keeps Beta features below it", () => {
@@ -33,6 +37,8 @@ describe("System settings UI contract", () => {
     expect(mainSource).toContain(
       "([30720, 20480, 16384, 10240, 8192] as const)",
     );
+    expect(mainSource).toMatch(/<select[\s\S]*?value=\{modelToolResultBytes\}/);
+    expect(mainSource).not.toContain("system-tool-result-options");
     expect(mainSource).toContain('type: "system_model_tool_result_bytes_update"');
     expect(mainSource).toContain("server?.mem?.model_tool_result_bytes ?? 16384");
     expect(protocolSource).toContain(
@@ -42,6 +48,8 @@ describe("System settings UI contract", () => {
       '| { type: "system_model_tool_result_bytes_update"; max_bytes: ModelToolResultBytes }',
     );
     expect(protocolSource).toContain("model_tool_result_bytes: ModelToolResultBytes");
+    expect(mainSource).toContain("system-runtime-tuning");
+    expect(mainSource).toContain("system-select-grid");
     expect(zh.system.toolResultLimitTitle).toBe("工具结果保留长度");
     expect(zh.system.toolResultLimitDesc).toBe("设置单个工具结果的最大保留长度(KB)");
     expect(en.system.toolResultLimitDesc).toContain("(KB)");
@@ -49,8 +57,31 @@ describe("System settings UI contract", () => {
     expect(mainSource).not.toContain('t("beta.instructionPresent")');
   });
 
+  it("aligns the runtime tuning columns: title row, select row, then trailing description", () => {
+    const fieldBlock = (token: string) => {
+      const start = mainSource.lastIndexOf("<label", mainSource.indexOf(`t("system.${token}")`));
+      const end = mainSource.indexOf("</label>", start);
+      return mainSource.slice(start, end);
+    };
+    for (const token of ["toolResultLimitTitle", "contextCompressThresholdTitle"]) {
+      const block = fieldBlock(token);
+      const titleAt = block.indexOf("system-select-title");
+      const selectAt = block.search(/<select/);
+      const descAt = block.indexOf("system-select-desc");
+      expect(titleAt).toBeGreaterThan(-1);
+      expect(selectAt).toBeGreaterThan(titleAt);
+      expect(descAt).toBeGreaterThan(selectAt);
+    }
+    expect(stylesSource).toContain("grid-template-rows: subgrid");
+    expect(stylesSource).toMatch(/\.system-select-field[^}]*grid-row: span 4/);
+  });
+
   it("offers the exact Host-backed context compression thresholds with a 90% default", () => {
     expect(mainSource).toContain("([80, 85, 90, 95, 100] as const)");
+    expect(mainSource).toMatch(
+      /<select[\s\S]*?value=\{contextCompressThresholdPercent\}/,
+    );
+    expect(mainSource).not.toContain("system-context-compress-options");
     expect(mainSource).toContain(
       'type: "system_context_compress_threshold_update"',
     );

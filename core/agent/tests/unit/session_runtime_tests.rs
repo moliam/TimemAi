@@ -797,6 +797,357 @@ fn session_turn_uses_model_service_config_response_protocol_over_core_state() {
     assert_eq!(outcome.repair_issue, None);
 }
 
+struct NativeFinishModel;
+impl ModelClient for NativeFinishModel {
+    fn call_model(
+        &mut self,
+        config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        Ok(LlmResponse {
+            tool_calls: vec![crate::NativeToolCall {
+                assistant_continuation: None,
+                id: "call_finish_preview".to_string(),
+                name: "task_finished".to_string(),
+                arguments: serde_json::json!({"summary": "Native summary delivered early."}),
+                raw_arguments: "{\"summary\":\"Native summary delivered early.\"}".to_string(),
+            }],
+            content: String::new(),
+            model_name: config.model.clone(),
+            usage: usage(100, 10),
+            truncated: false,
+        })
+    }
+}
+
+#[derive(Default)]
+struct FinishPreviewOrderUi {
+    log: Vec<String>,
+}
+
+impl TurnUi for FinishPreviewOrderUi {
+    fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
+        for event in events {
+            if event.topic.name != "core.model.preview" {
+                continue;
+            }
+            let response = &event.payload["response"];
+            self.log.push(format!(
+                "preview:{}:{}",
+                response["status"].as_str().unwrap_or("null"),
+                response["text"].as_str().unwrap_or_default()
+            ));
+        }
+    }
+
+    fn on_turn_projection(&mut self, projection: &TurnProjection) {
+        let label = match projection {
+            TurnProjection::Active(_) => "active",
+            TurnProjection::Finished(_) => "finished",
+        };
+        self.log.push(format!("projection:{label}"));
+    }
+}
+
+struct StreamingFinishModel;
+
+impl ModelClient for StreamingFinishModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        Err("unexpected_non_streaming_call".to_string())
+    }
+
+    fn call_model_interaction_streaming(
+        &mut self,
+        config: &ModelServiceConfig,
+        _request: &ModelInteractionRequest,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+        on_content: &mut dyn FnMut(&serde_json::Value),
+    ) -> Result<LlmResponse, String> {
+        let fragments = ["{\"summary\":\"乐观", "流式", "输出\"}"];
+        for (index, fragment) in fragments.iter().enumerate() {
+            let mut function = serde_json::Map::new();
+            if index == 0 {
+                function.insert("name".to_string(), serde_json::json!("task_finished"));
+            }
+            function.insert("arguments".to_string(), serde_json::json!(fragment));
+            let event = serde_json::json!({
+                "choices": [{ "delta": { "tool_calls": [{
+                    "index": 0,
+                    "function": serde_json::Value::Object(function),
+                }]}}]
+            });
+            on_content(&event);
+        }
+        Ok(LlmResponse {
+            tool_calls: vec![crate::NativeToolCall {
+                assistant_continuation: None,
+                id: "call_finish_stream".to_string(),
+                name: "task_finished".to_string(),
+                arguments: serde_json::json!({"summary": "乐观流式输出"}),
+                raw_arguments: String::new(),
+            }],
+            content: String::new(),
+            model_name: config.model.clone(),
+            usage: usage(100, 10),
+            truncated: false,
+        })
+    }
+}
+
+#[test]
+fn native_task_finished_summary_streams_optimistically_then_confirms_final() {
+    let dir = tmp_dir("native_finish_optimistic_stream");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Xml;
+    config.interaction.tool_call_mode = crate::ToolCallMode::Native;
+    let mut model = StreamingFinishModel;
+    let mut ui = FinishPreviewOrderUi::default();
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "answer in one shot",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "乐观流式输出");
+    // The optimistic fragments must surface as streaming previews before the
+    // authoritative confirmation arrives.
+    let streaming_prefix = ui
+        .log
+        .iter()
+        .filter(|entry| entry.starts_with("preview:streaming:"))
+        .map(|entry| entry.strip_prefix("preview:streaming:").unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        streaming_prefix.contains(&"乐观") && streaming_prefix.contains(&"乐观流式"),
+        "summary fragments must stream progressively, log: {:?}",
+        ui.log
+    );
+    let confirmed = ui
+        .log
+        .iter()
+        .position(|entry| entry == "preview:final:乐观流式输出")
+        .expect("optimistic summary must settle Final");
+    let finished = ui
+        .log
+        .iter()
+        .position(|entry| entry == "projection:finished")
+        .expect("finished projection");
+    assert!(confirmed < finished, "log: {:?}", ui.log);
+    // The confirmed Final must come from the optimistic stream itself, not a
+    // redundant end-of-turn replacement publish.
+    assert_eq!(
+        ui.log
+            .iter()
+            .filter(|entry| entry.starts_with("preview:final:"))
+            .count(),
+        1,
+        "duplicate final publishes, log: {:?}",
+        ui.log
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+struct MemoGuardFinishModel {
+    calls: usize,
+}
+
+impl ModelClient for MemoGuardFinishModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        Err("unexpected_non_streaming_call".to_string())
+    }
+
+    fn call_model_interaction_streaming(
+        &mut self,
+        config: &ModelServiceConfig,
+        _request: &ModelInteractionRequest,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+        on_content: &mut dyn FnMut(&serde_json::Value),
+    ) -> Result<LlmResponse, String> {
+        self.calls += 1;
+        let summary = match self.calls {
+            1 => "第一次过早收尾",
+            _ => "耗尽守卫后放行",
+        };
+        if self.calls == 1 {
+            let fragments = ["{\"summary\":\"第一次", "过早收尾\"}"];
+            for (index, fragment) in fragments.iter().enumerate() {
+                let mut function = serde_json::Map::new();
+                if index == 0 {
+                    function.insert("name".to_string(), serde_json::json!("task_finished"));
+                }
+                function.insert("arguments".to_string(), serde_json::json!(fragment));
+                on_content(&serde_json::json!({
+                    "choices": [{ "delta": { "tool_calls": [{
+                        "index": 0,
+                        "function": serde_json::Value::Object(function),
+                    }]}}]
+                }));
+            }
+        }
+        Ok(LlmResponse {
+            tool_calls: vec![crate::NativeToolCall {
+                assistant_continuation: None,
+                id: format!("call_memo_{}", self.calls),
+                name: "task_finished".to_string(),
+                arguments: serde_json::json!({"summary": summary}),
+                raw_arguments: String::new(),
+            }],
+            content: String::new(),
+            model_name: config.model.clone(),
+            usage: usage(100, 10),
+            truncated: false,
+        })
+    }
+}
+
+#[test]
+fn intercepted_task_finish_demotes_optimistic_summary_to_intermediate() {
+    let dir = tmp_dir("native_finish_memo_demotion");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    core.set_active_memo("长任务目标".to_string());
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Xml;
+    config.interaction.tool_call_mode = crate::ToolCallMode::Native;
+    let mut model = MemoGuardFinishModel { calls: 0 };
+    let mut ui = FinishPreviewOrderUi::default();
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "finish with memo active",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    // The memo guard intercepts the first three finishes; the fourth passes.
+    assert_eq!(model.calls, 4, "memo guard must intercept early finishes");
+    assert_eq!(outcome.text, "耗尽守卫后放行");
+    assert_eq!(outcome.stop_reason, Some(TurnStopReason::TurnFinished));
+    // The optimistic first-attempt summary must be demoted to a settled
+    // intermediate while the turn keeps working, never left claiming Final.
+    let demoted = ui
+        .log
+        .iter()
+        .position(|entry| entry == "preview:intermediate:第一次过早收尾")
+        .unwrap_or_else(|| {
+            panic!(
+                "optimistic summary must demote to intermediate, log: {:?}",
+                ui.log
+            )
+        });
+    let confirmed = ui
+        .log
+        .iter()
+        .position(|entry| entry == "preview:final:耗尽守卫后放行")
+        .unwrap_or_else(|| panic!("authoritative summary must settle Final, log: {:?}", ui.log));
+    let finished = ui
+        .log
+        .iter()
+        .position(|entry| entry == "projection:finished")
+        .expect("finished projection");
+    assert!(
+        demoted < confirmed && confirmed < finished,
+        "log: {:?}",
+        ui.log
+    );
+    assert!(
+        !ui.log
+            .iter()
+            .any(|entry| entry == "preview:final:第一次过早收尾"),
+        "intercepted finish must never claim Final, log: {:?}",
+        ui.log
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn native_task_finished_publishes_final_preview_before_finished_projection() {
+    let dir = tmp_dir("native_finish_final_preview");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Xml;
+    config.interaction.tool_call_mode = crate::ToolCallMode::Native;
+    let mut model = NativeFinishModel;
+    let mut ui = FinishPreviewOrderUi::default();
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "finish now",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "Native summary delivered early.");
+    assert_eq!(outcome.stop_reason, Some(TurnStopReason::TurnFinished));
+    let preview_index = ui
+        .log
+        .iter()
+        .position(|entry| entry == "preview:final:Native summary delivered early.")
+        .expect("task_finished summary must be published as a Final preview");
+    let finished_index = ui
+        .log
+        .iter()
+        .position(|entry| entry == "projection:finished")
+        .expect("finished projection must be published");
+    assert!(
+        preview_index < finished_index,
+        "the Final preview must reach live UI before the finished projection; log: {:?}",
+        ui.log
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
 #[test]
 fn turn_focus_reminder_schedule_respects_periods_and_skips_backlog() {
     let interval = Duration::from_secs(10 * 60);

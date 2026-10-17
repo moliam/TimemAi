@@ -58,6 +58,18 @@ It may contain:
   reconnect/refresh, or treat `accepted` ACKs as business success. If a command
   never reaches Host, it did not happen and the user may explicitly try again.
   Host projections/events remain the only source of visible business changes.
+- Browser-local unsent composer draft persistence in `src/composer_drafts.ts`:
+  per-session draft text in localStorage, hard-capped (32 sessions, 100k chars
+  per draft, 200k total) with a 7-day TTL, fail-soft against corrupted or
+  unavailable storage. Drafts are restored on mount, saved debounced after
+  typing, and flushed on pagehide/visibilitychange teardown. Restored drafts
+  survive progressive session restore: they are pruned only after their session
+  was live once and then disappeared, while disk entries for sessions never
+  observed stay frozen until TTL. The fullscreen composer editor writes through
+  with a keystroke-safe throttle and an explicit discard reverts to the
+  pre-open draft. This is pure presentation convenience: it is not a command
+  outbox, never replays commands, and cross-tab behavior is last-writer-wins
+  without storage-event sync.
 - Per-tab semantic event cursors and strict sequenced delivery. In cursor mode,
   authoritative state is reduced only from `semantic_event` envelopes; raw
   legacy duplicates are ignored. The cursor advances only after the reducer
@@ -135,7 +147,7 @@ contract. An in-progress context-compression notice is one concise status line
 title and detail; completed notices retain their compression metrics.
 
 Browser acceptance startup evidence lives in `tests/browser/browser-startup.mjs`,
-not the application bundle. It preserves the 12-second startup gate and records
+not the application bundle. It preserves the 30-second startup gate and records
 bounded stderr and HTTP probe timing/status. Linux failure diagnostics read only
 the spawned Chrome PID's counters and at most 16 thread wait locations, plus
 system pressure counters; they never inspect command lines or environments.

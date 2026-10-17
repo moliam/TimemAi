@@ -1,6 +1,8 @@
-import { MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation } from "./tool_invocation";
+import { MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation, TimerInvocation, TimerToolIcon } from "./tool_invocation";
 import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
-import { initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
+import { initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
+import { persistComposerDraftTexts, readComposerDraftTexts } from "./composer_drafts";
+import { createComposerWriteThrough, type ComposerWriteThrough } from "./composer_input";
 import type { CatalogModel } from "./model_endpoints";
 import { applyBetaDebugDefault } from "./beta_preferences";
 import { StreamUiModeSetting, useStreamUiMode, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
@@ -88,8 +90,12 @@ import {
   SquareTerminal,
   TriangleAlert,
   Trash2,
+  User,
   Wrench,
   X,
+  AlarmClock,
+  Pause,
+  Play,
 } from "lucide-react";
 import {
   createContext,
@@ -169,6 +175,7 @@ import {
   wheelDeltaPixels,
 } from "./scroll";
 import {
+  type ActiveModelRetryStatus,
   applyTurnProjection,
   activeModelRetryStatus,
   activityFromTopic,
@@ -183,6 +190,8 @@ import {
   coalesceActionLifecycle,
   compareTurnTimelineItems,
   compareTurnStreamItems,
+  completionStopReasonText,
+  repairIssueText,
   composerPrimaryAction,
   composerSendDecision,
   turnCommandId,
@@ -195,9 +204,10 @@ import {
   finishTurn,
   groupDecisionsBySessionTurn,
   manualToolGenCommand,
+  parseTimerEntryText,
   prependHistoryRecords,
-  turnsFromHistoryRecords,
   pruneSessionDrafts,
+  turnsFromHistoryRecords,
   pruneSessionSubmissionLocks,
   releaseSessionDraftSubmission,
   removePendingAttachment,
@@ -291,6 +301,7 @@ import {
 } from "./queued_messages";
 
 import { commandNeedsReliableDelivery } from "./command_outbox";
+import type { TimerInfo } from "./protocol";
 import { classifyEventSequence, snapshotEventBaseline } from "./event_cursor";
 import {
   enablesSemanticDelivery,
@@ -557,6 +568,7 @@ function TimemApp() {
     number | null
   >(null);
   const [showToolRepo, setShowToolRepo] = useState(false);
+  const [showTimers, setShowTimers] = useState(false);
   const [chatLibraryMode, setChatLibraryMode] = useState<
     "search" | "favorites" | null
   >(null);
@@ -725,6 +737,8 @@ function TimemApp() {
     useState(false);
   const [pendingContextCompressThreshold, setPendingContextCompressThreshold] =
     useState(false);
+  const [pendingRestorePromptContext, setPendingRestorePromptContext] =
+    useState(false);
   const [rejectedSubmitCommandIds, setRejectedSubmitCommandIds] = useState<
     Set<string>
   >(() => new Set());
@@ -774,6 +788,8 @@ function TimemApp() {
   const mobileSidebarRef = useRef<HTMLElement | null>(null);
   const toolRepoButtonRef = useRef<HTMLButtonElement | null>(null);
   const toolRepoPanelRef = useRef<HTMLElement | null>(null);
+  const timersButtonRef = useRef<HTMLButtonElement | null>(null);
+  const timersPanelRef = useRef<HTMLElement | null>(null);
   const chatLibraryPanelRef = useRef<HTMLElement | null>(null);
   const chatLibraryTriggerRef = useRef<HTMLButtonElement | null>(null);
   const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -829,6 +845,10 @@ function TimemApp() {
   const closeToolRepoPanel = useCallback(() => {
     setShowToolRepo(false);
     toolRepoButtonRef.current?.focus({ preventScroll: true });
+  }, []);
+  const closeTimersPanel = useCallback(() => {
+    setShowTimers(false);
+    timersButtonRef.current?.focus({ preventScroll: true });
   }, []);
   const closeRuntimePanel = useCallback((restoreFocus = true) => {
     setShowRuntime(false);
@@ -962,6 +982,15 @@ function TimemApp() {
     document.addEventListener("keydown", dismissOnEscape);
     return () => document.removeEventListener("keydown", dismissOnEscape);
   }, [closeToolRepoPanel, showToolRepo]);
+  useEffect(() => {
+    if (!showTimers) return;
+    timersPanelRef.current?.focus({ preventScroll: true });
+    const dismissOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeTimersPanel();
+    };
+    document.addEventListener("keydown", dismissOnEscape);
+    return () => document.removeEventListener("keydown", dismissOnEscape);
+  }, [closeTimersPanel, showTimers]);
 
   useEffect(() => {
     if (!showMobileSessions) return;
@@ -1068,6 +1097,7 @@ function TimemApp() {
       !pendingClaudeCodexToolDiscovery &&
       !pendingModelToolResultBytes &&
       !pendingContextCompressThreshold &&
+      !pendingRestorePromptContext &&
       !favoriteCapacityUpdating &&
       !pendingMemSwitch &&
       !memTemporaryItemsDeleting
@@ -1083,6 +1113,7 @@ function TimemApp() {
     pendingMemConversationCapacity,
     pendingMemRetention,
     pendingMemSwitch,
+    pendingRestorePromptContext,
   ]);
   const refreshMemTemporaryItems = useCallback(() => {
     setMemTemporaryItemsLoading(true);
@@ -1283,6 +1314,25 @@ function TimemApp() {
         reportUiError(
           "System setting failed",
           "Reconnect to Timem Web before changing the context compression threshold.",
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand],
+  );
+  const saveRestorePromptContextOnStartup = useCallback(
+    (enabled: boolean) => {
+      setPendingRestorePromptContext(true);
+      if (
+        !sendCommand({
+          type: "system_restore_prompt_context_on_startup_update",
+          enabled,
+        })
+      ) {
+        setPendingRestorePromptContext(false);
+        reportUiError(
+          "System setting failed",
+          "Reconnect to Timem Web before changing the startup context restore preference.",
           "system",
         );
       }
@@ -1510,6 +1560,7 @@ function TimemApp() {
     setPendingClaudeCodexToolDiscovery(false);
     setPendingModelToolResultBytes(false);
     setPendingContextCompressThreshold(false);
+    setPendingRestorePromptContext(false);
     setMemSwitchCandidate(null);
   }, [interruptEndpointShare]);
 
@@ -1805,6 +1856,8 @@ function TimemApp() {
             setPendingModelToolResultBytes(false);
           if (completed?.type === "system_context_compress_threshold_update")
             setPendingContextCompressThreshold(false);
+          if (completed?.type === "system_restore_prompt_context_on_startup_update")
+            setPendingRestorePromptContext(false);
           const memSwitchNeedsConfirmation =
             completed?.type === "mem_switch" &&
             !completed.stop_running &&
@@ -1917,6 +1970,7 @@ function TimemApp() {
         setPendingClaudeCodexToolDiscovery(false);
         setPendingModelToolResultBytes(false);
         setPendingContextCompressThreshold(false);
+        setPendingRestorePromptContext(false);
         setServer((current) =>
           current
             ? {
@@ -1932,6 +1986,8 @@ function TimemApp() {
                   model_tool_result_bytes: event.model_tool_result_bytes,
                   context_compress_threshold_percent:
                     event.context_compress_threshold_percent,
+                  restore_prompt_context_on_startup:
+                    event.restore_prompt_context_on_startup,
                 },
               }
             : current,
@@ -2034,6 +2090,16 @@ function TimemApp() {
           current.map((session) =>
             session.session_id === event.session_id
               ? { ...session, active_memo: event.memo_text ?? null }
+              : session,
+          ),
+        );
+        return;
+      }
+      if (event.type === "timers_updated") {
+        setSessions((current) =>
+          current.map((session) =>
+            session.session_id === event.session_id
+              ? { ...session, timers: event.timers }
               : session,
           ),
         );
@@ -3426,6 +3492,14 @@ function TimemApp() {
   const headerModelEndpoint = (server?.model_endpoints ?? []).find(
     (endpoint) => endpointMatchesProfile(endpoint, activeSession?.runtime_profile),
   );
+  // Documented catalog facts decide the image warning; custom endpoints
+  // (unknown modalities) stay permissive to avoid false alarms.
+  const activeImageUnsupportedEndpoint =
+    catalogAcceptsImages(
+      endpointCatalogModel(headerModelEndpoint, server?.model_catalog ?? []),
+    ) === false
+      ? headerModelEndpoint?.name ?? headerModelLabel
+      : undefined;
   const openEndpointSettings = () => {
     setShowRuntime(false);
     setShowMcp(false);
@@ -3529,6 +3603,10 @@ function TimemApp() {
   const toolRepoLabel = showToolRepo
     ? "Close ToolRepo"
     : `Open ToolRepo · ${activeToolCount} reusable tools`;
+  const activeTimerCount = activeSession?.timers?.length ?? 0;
+  const timersLabel = showTimers
+    ? t("timer.ariaLabel")
+    : `${t("timer.ariaLabel")} · ${activeTimerCount}`;
   const mobileSessionsLabel = showMobileSessions
     ? "Close session navigation"
     : "Open session navigation";
@@ -3729,7 +3807,7 @@ function TimemApp() {
       <div
         inert={workspaceModalOpen}
         aria-hidden={workspaceModalOpen || undefined}
-        className={`app-shell ${leftSidebarCollapsed ? "left-sidebar-collapsed" : ""} ${!showToolRepo && rightSidebarCollapsed ? "right-sidebar-collapsed" : ""}`}
+        className={`app-shell ${leftSidebarCollapsed ? "left-sidebar-collapsed" : ""} ${!showToolRepo && !showTimers && rightSidebarCollapsed ? "right-sidebar-collapsed" : ""}`}
         style={
           {
             "--left-sidebar-width": `${sidebarLayout.leftWidth}px`,
@@ -4786,6 +4864,7 @@ function TimemApp() {
                     setShowAppearance(false);
                     setShowRuntime(false);
                     setShowMcp(false);
+                    if (showTimers) closeTimersPanel();
                     if (showToolRepo) closeToolRepoPanel();
                     else setShowToolRepo(true);
                   }}
@@ -4796,6 +4875,30 @@ function TimemApp() {
                   </span>
                 </button>
               )}
+              <button
+                type="button"
+                ref={timersButtonRef}
+                title={t("timer.title")}
+                aria-label={timersLabel}
+                className={`icon-button timer-header-button ${showTimers ? "selected" : ""} ${activeTimerCount > 0 ? "has-timers" : ""}`}
+                aria-expanded={showTimers}
+                aria-controls="timer-panel"
+                onClick={() => {
+                  setShowAppearance(false);
+                  setShowRuntime(false);
+                  setShowMcp(false);
+                  setShowToolRepo(false);
+                  if (showTimers) closeTimersPanel();
+                  else setShowTimers(true);
+                }}
+              >
+                <AlarmClock size={17} />
+                {activeTimerCount > 0 && (
+                  <span className="timer-header-count" aria-hidden="true">
+                    {activeTimerCount}
+                  </span>
+                )}
+              </button>
             </div>
           </header>
           {showAppearance && (
@@ -4818,6 +4921,11 @@ function TimemApp() {
               }
               contextCompressThresholdPending={pendingContextCompressThreshold}
               onContextCompressThresholdChange={saveContextCompressThreshold}
+              restorePromptContextOnStartup={
+                server?.mem?.restore_prompt_context_on_startup ?? false
+              }
+              restorePromptContextPending={pendingRestorePromptContext}
+              onRestorePromptContextChange={saveRestorePromptContextOnStartup}
               claudeCodexToolDiscoveryEnabled={
                 server?.mem?.claude_codex_tool_discovery ?? false
               }
@@ -4947,6 +5055,7 @@ function TimemApp() {
                 ? pendingUploadFiles[activeSession.session_id]
                 : undefined
             }
+            imageUnsupportedEndpoint={activeImageUnsupportedEndpoint}
             loadingHistory={
               activeSession
                 ? pendingHistorySessionIds.has(activeSession.session_id)
@@ -5025,7 +5134,7 @@ function TimemApp() {
             onDecisionReply={replyToDecision}
           />
         </main>
-        {!showToolRepo && showRoles && (
+        {!showToolRepo && !showTimers && showRoles && (
           <button
             type="button"
             className="role-panel-backdrop"
@@ -5033,7 +5142,7 @@ function TimemApp() {
             onClick={() => setShowRoles(false)}
           />
         )}
-        {!showToolRepo && (
+        {!showToolRepo && !showTimers && (
           <WorkerRolePanel
             key={activeSession?.session_id ?? "no-session"}
             session={activeSession}
@@ -5183,6 +5292,24 @@ function TimemApp() {
             className="side-panel-backdrop"
             aria-label="Close ToolRepo"
             onClick={closeToolRepoPanel}
+          />
+        )}
+        {showTimers && (
+          <button
+            type="button"
+            className="side-panel-backdrop"
+            aria-label={t("common.close")}
+            onClick={closeTimersPanel}
+          />
+        )}
+        {showTimers && (
+          <TimerPanel
+            key={activeSession?.session_id ?? "no-session"}
+            panelRef={timersPanelRef}
+            onResizeStart={(event) => startSidebarResize("right", event)}
+            onClose={closeTimersPanel}
+            session={activeSession}
+            sendCommand={sendCommandRef}
           />
         )}
         {toolGenEnabled && showToolRepo && (
@@ -5709,6 +5836,8 @@ function ExpandedTextEditor({
   disabled,
   onCommit,
   onClose,
+  onLiveCommit,
+  onDiscard,
 }: {
   title: string;
   eyebrow: string;
@@ -5718,6 +5847,8 @@ function ExpandedTextEditor({
   disabled?: boolean;
   onCommit: (value: string) => void;
   onClose: () => void;
+  onLiveCommit?: (value: string) => void;
+  onDiscard?: () => void;
 }) {
   useT();
   // Keep high-frequency typing local to the fullscreen editor. Updating the
@@ -5727,6 +5858,42 @@ function ExpandedTextEditor({
     onCommit(draft);
     onClose();
   };
+
+  // Throttled write-through for callers that persist the draft (the composer).
+  // Bounded frequency keeps high-frequency typing local while capping
+  // unsaved-text loss if the page is torn down mid-edit. The pending timer is
+  // never reset by newer keystrokes, so continuous typing still commits at
+  // most 800ms behind.
+  const liveCommitAtRef = useRef(0);
+  const liveCommitTimerRef = useRef<number | null>(null);
+  const liveStateRef = useRef({ draft, value, onLiveCommit });
+  liveStateRef.current = { draft, value, onLiveCommit };
+  // The pending timer is deliberately not reset by re-runs of this effect, so
+  // continuous typing still commits at most 800ms behind.
+  useEffect(() => {
+    const state = liveStateRef.current;
+    if (!state.onLiveCommit) return;
+    if (state.draft === state.value) return;
+    if (liveCommitTimerRef.current !== null) return;
+    const wait = Math.max(0, 800 - (Date.now() - liveCommitAtRef.current));
+    liveCommitTimerRef.current = window.setTimeout(() => {
+      liveCommitTimerRef.current = null;
+      liveCommitAtRef.current = Date.now();
+      const current = liveStateRef.current;
+      if (current.onLiveCommit && current.draft !== current.value) {
+        current.onLiveCommit(current.draft);
+      }
+    }, wait);
+  }, [draft, value, onLiveCommit]);
+  useEffect(
+    () => () => {
+      if (liveCommitTimerRef.current !== null) {
+        window.clearTimeout(liveCommitTimerRef.current);
+        liveCommitTimerRef.current = null;
+      }
+    },
+    [],
+  );
   return createPortal(
     <div className="expanded-text-backdrop" role="presentation">
       <section
@@ -5774,7 +5941,14 @@ function ExpandedTextEditor({
               : t("composer.charCount", { count: draft.length.toLocaleString() })}
           </span>
           <div>
-            <button type="button" className="secondary" onClick={onClose}>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => {
+                onDiscard?.();
+                onClose();
+              }}
+            >
               {t("composer.discardChanges")}
             </button>
             <button type="button" className="primary" onClick={finish}>
@@ -5787,6 +5961,111 @@ function ExpandedTextEditor({
     document.body,
   );
 }
+
+const ComposerField = memo(function ComposerField({
+  sessionId,
+  value,
+  disabled,
+  placeholder,
+  ariaLabel,
+  hint,
+  hintId,
+  expandLabel,
+  attachRef,
+  onTyping,
+  lastCommitted,
+  onPasteImages,
+  onEnter,
+  onCtrlEnter,
+  onExpand,
+}: {
+  sessionId: string | undefined;
+  value: string;
+  disabled: boolean;
+  placeholder: string;
+  ariaLabel: string;
+  hint: string;
+  hintId: string;
+  expandLabel: string;
+  attachRef: (textarea: HTMLTextAreaElement | null) => void;
+  onTyping: (text: string) => void;
+  lastCommitted: string | null;
+  onPasteImages: (files: File[]) => void;
+  onEnter: () => void;
+  onCtrlEnter: () => void;
+  onExpand: () => void;
+}) {
+  // High-frequency typing stays local to this field; the thread-level draft
+  // state is only updated through the throttled write-through, so one
+  // keystroke no longer rerenders the whole chat UI.
+  const [text, setText] = useState(value);
+  const syncedExternalRef = useRef(value);
+  const sessionRef = useRef(sessionId);
+  if (sessionId !== sessionRef.current) {
+    // Session switch: adopt the new session draft verbatim, even if it
+    // coincidentally equals the previous session's last committed text.
+    sessionRef.current = sessionId;
+    syncedExternalRef.current = value;
+    setText(value);
+  } else if (value !== syncedExternalRef.current) {
+    if (value !== lastCommitted) {
+      // Authoritative external change (submit cleared, rejection refilled,
+      // draft restore, session switch): adopt it verbatim.
+      setText(value);
+    }
+    // Otherwise this is our own throttled write-through echo arriving while
+    // newer local typing may exist: keep the local text.
+    syncedExternalRef.current = value;
+  }
+  return (
+    <div className="expandable-text-field composer-text-field">
+      <textarea
+        ref={attachRef}
+        value={text}
+        placeholder={placeholder}
+        aria-label={ariaLabel}
+        aria-describedby={hintId}
+        title={hint}
+        disabled={disabled}
+        onChange={(event) => {
+          setText(event.target.value);
+          onTyping(event.target.value);
+        }}
+        onPaste={(event) => {
+          const images = clipboardImageFiles(
+            Array.from(event.clipboardData?.items ?? []),
+          );
+          if (images.length === 0) return;
+          event.preventDefault();
+          onPasteImages(images);
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" || event.nativeEvent.isComposing)
+            return;
+          if (event.metaKey || event.ctrlKey) {
+            event.preventDefault();
+            onCtrlEnter();
+            return;
+          }
+          if (!event.shiftKey) {
+            event.preventDefault();
+            onEnter();
+          }
+        }}
+      />
+      <button
+        type="button"
+        className="text-field-expand"
+        title={expandLabel}
+        aria-label={expandLabel}
+        disabled={disabled}
+        onClick={onExpand}
+      >
+        <Maximize2 size={14} />
+      </button>
+    </div>
+  );
+});
 
 function WorkerRolePanel({
   session,
@@ -7044,6 +7323,455 @@ function formatChatLibraryDate(value: number) {
   });
 }
 
+function timerRelativeTime(targetMs: number): string {
+  const delta = targetMs - Date.now();
+  const formatter = new Intl.RelativeTimeFormat(undefined, {
+    numeric: "auto",
+  });
+  const abs = Math.abs(delta);
+  if (abs < 60_000)
+    return formatter.format(Math.round(delta / 1000), "second");
+  if (abs < 3_600_000)
+    return formatter.format(Math.round(delta / 60_000), "minute");
+  if (abs < 86_400_000)
+    return formatter.format(Math.round(delta / 3_600_000), "hour");
+  return formatter.format(Math.round(delta / 86_400_000), "day");
+}
+
+function TimerPanel({
+  panelRef,
+  onResizeStart,
+  onClose,
+  session,
+  sendCommand,
+}: {
+  panelRef: MutableRefObject<HTMLElement | null>;
+  onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onClose: () => void;
+  session: Session | undefined;
+  sendCommand: MutableRefObject<
+    (command: ClientCommand, requestedCommandId?: string) => boolean
+  >;
+}) {
+  useT();
+  const timers = session?.timers ?? [];
+  const [editingTimerId, setEditingTimerId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  const [expandedPrompts, setExpandedPrompts] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
+  const [createOpen, setCreateOpen] = useState(false);
+  const createOpenRef = useRef(false);
+  const createToggleRef = useRef<HTMLButtonElement | null>(null);
+  const workFieldRef = useRef<HTMLTextAreaElement | null>(null);
+  const [prompt, setPrompt] = useState("");
+  const [name, setName] = useState("");
+  const [mode, setMode] = useState<"once" | "repeat">("once");
+  const [trigger, setTrigger] = useState<"delay" | "at">("delay");
+  const [delayMinutes, setDelayMinutes] = useState("");
+  const [atValue, setAtValue] = useState("");
+  const [intervalMinutes, setIntervalMinutes] = useState("");
+  useEffect(() => {
+    setCreateOpen(false);
+    setPrompt("");
+    setName("");
+    setMode("once");
+    setTrigger("delay");
+    setDelayMinutes("");
+    setAtValue("");
+    setIntervalMinutes("");
+    setEditingTimerId(null);
+    setEditDraft("");
+    setExpandedPrompts(new Set());
+  }, [session?.session_id]);
+  // Disclosure focus contract: expanding moves focus into the first field;
+  // collapsing (toggle, collapse button, or successful create) returns focus
+  // to the toggle. Guarded by the previous state so mount and session resets
+  // never steal focus.
+  useEffect(() => {
+    const wasOpen = createOpenRef.current;
+    createOpenRef.current = createOpen;
+    if (createOpen === wasOpen) return;
+    if (createOpen) workFieldRef.current?.focus();
+    else createToggleRef.current?.focus({ preventScroll: true });
+  }, [createOpen]);
+  const triggerValid =
+    trigger === "delay"
+      ? Number(delayMinutes) > 0
+      : !!atValue && !Number.isNaN(new Date(atValue).getTime());
+  const intervalValid = mode === "once" || Number(intervalMinutes) > 0;
+  const canCreate =
+    !!session && !!prompt.trim() && triggerValid && intervalValid;
+  const showInvalidHint =
+    !canCreate &&
+    (prompt.trim().length > 0 ||
+      delayMinutes.length > 0 ||
+      atValue.length > 0 ||
+      intervalMinutes.length > 0);
+  const resetForm = () => {
+    setPrompt("");
+    setName("");
+    setDelayMinutes("");
+    setAtValue("");
+    setIntervalMinutes("");
+  };
+  const submitCreate = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!canCreate || !session) return;
+    const command: ClientCommand = {
+      type: "timer_create",
+      session_id: session.session_id,
+      prompt: prompt.trim(),
+      mode,
+      ...(name.trim() ? { name: name.trim() } : {}),
+      ...(trigger === "delay"
+        ? { after_ms: Math.round(Number(delayMinutes) * 60_000) }
+        : { at: new Date(atValue).toISOString() }),
+      ...(mode === "repeat"
+        ? { interval_ms: Math.round(Number(intervalMinutes) * 60_000) }
+        : {}),
+    };
+    if (!sendCommand.current(command)) return;
+    setCreateOpen(false);
+    resetForm();
+  };
+  return (
+    <aside
+      id="timer-panel"
+      ref={panelRef}
+      className="timer-panel toolrepo-side-panel session-side-panel"
+      aria-label={t("timer.title")}
+      tabIndex={-1}
+    >
+      <button
+        type="button"
+        className="sidebar-resize-handle right"
+        title="Resize timers"
+        aria-label="Resize timers"
+        onPointerDown={onResizeStart}
+      />
+      <header className="side-panel-header">
+        <div className="side-panel-title">
+          <AlarmClock size={15} />
+          <strong>{t("timer.title")}</strong>
+        </div>
+        <button
+          type="button"
+          className="icon-button"
+          title={t("common.close")}
+          aria-label={t("common.close")}
+          onClick={onClose}
+        >
+          <X size={16} />
+        </button>
+      </header>
+      <div className="timer-list">
+        {timers.length === 0 ? (
+          <div className="activity-empty">
+            <strong>{t("timer.empty")}</strong>
+          </div>
+        ) : (
+          timers.map((timer) => (
+            <div key={timer.timer_id} className="timer-item">
+              <div className="timer-item-top">
+                <b>{timer.name}</b>
+                <span
+                  className={`timer-item-origin${timer.created_by === "user" ? " user" : ""}`}
+                >
+                  {timer.created_by === "user"
+                    ? t("timer.createdByUser")
+                    : t("timer.createdByModel")}
+                </span>
+                <span className="timer-item-meta">
+                  {timer.mode === "repeat"
+                    ? t("timer.modeRepeat")
+                    : t("timer.modeOnce")}
+                </span>
+              </div>
+              {editingTimerId === timer.timer_id ? (
+                <div className="timer-item-edit">
+                  <textarea
+                    rows={4}
+                    value={editDraft}
+                    placeholder={t("timer.editPlaceholder")}
+                    aria-label={t("timer.editTimer")}
+                    onChange={(event) => setEditDraft(event.target.value)}
+                  />
+                  <div className="timer-edit-buttons">
+                    <button
+                      type="button"
+                      className="timer-edit-save"
+                      disabled={!editDraft.trim()}
+                      title={t("timer.editSave")}
+                      onClick={() => {
+                        if (!session || !editDraft.trim()) return;
+                        sendCommand.current({
+                          type: "timer_update",
+                          session_id: session.session_id,
+                          timer_id: timer.timer_id,
+                          prompt: editDraft.trim(),
+                        });
+                        setEditingTimerId(null);
+                      }}
+                    >
+                      {t("timer.editSave")}
+                    </button>
+                    <button
+                      type="button"
+                      className="timer-edit-cancel"
+                      title={t("timer.editCancel")}
+                      onClick={() => setEditingTimerId(null)}
+                    >
+                      {t("timer.editCancel")}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div
+                    className={`timer-item-prompt${expandedPrompts.has(timer.timer_id) ? "" : " clamped"}`}
+                  >
+                    {timer.prompt}
+                  </div>
+                  {(timer.prompt.length > 80 ||
+                    timer.prompt.includes("\n")) && (
+                    <button
+                      type="button"
+                      className="timer-item-prompt-toggle"
+                      aria-expanded={expandedPrompts.has(timer.timer_id)}
+                      title={
+                        expandedPrompts.has(timer.timer_id)
+                          ? t("timer.promptCollapse")
+                          : t("timer.promptExpand")
+                      }
+                      onClick={() =>
+                        setExpandedPrompts((current) => {
+                          const next = new Set(current);
+                          if (next.has(timer.timer_id)) {
+                            next.delete(timer.timer_id);
+                          } else {
+                            next.add(timer.timer_id);
+                          }
+                          return next;
+                        })
+                      }
+                    >
+                      {expandedPrompts.has(timer.timer_id) ? "−" : "+"}
+                    </button>
+                  )}
+                </>
+              )}
+              <div
+                className={`timer-item-schedule${timer.parked_reason ? " parked" : ""}`}
+                title={new Date(timer.next_fire_ms).toLocaleString()}
+              >
+                {timer.mode === "repeat"
+                  ? t("timer.modeRepeat")
+                  : t("timer.modeOnce")}
+                {timer.mode === "repeat" && timer.interval_ms
+                  ? ` · ${t("timer.everyMinutes", {
+                      minutes: Math.max(
+                        1,
+                        Math.round(timer.interval_ms / 60_000),
+                      ),
+                    })}`
+                  : ""}
+                {" · "}
+                {timer.enabled
+                  ? t("timer.nextFire", {
+                      time: timerRelativeTime(timer.next_fire_ms),
+                    })
+                  : timer.parked_reason
+                    ? t("timer.parked")
+                    : t("timer.paused")}
+              </div>
+              <div className="timer-item-actions">
+                <button
+                  type="button"
+                  className={`timer-toggle${timer.enabled ? "" : " off"}`}
+                  title={timer.enabled ? t("timer.toggleOn") : t("timer.toggleOff")}
+                  aria-label={timer.enabled ? t("timer.toggleOn") : t("timer.toggleOff")}
+                  onClick={() => {
+                    if (!session) return;
+                    sendCommand.current({
+                      type: "timer_toggle",
+                      session_id: session.session_id,
+                      timer_id: timer.timer_id,
+                      enabled: !timer.enabled,
+                    });
+                  }}
+                >
+                  {timer.enabled ? <Pause size={13} /> : <Play size={13} />}
+                </button>
+                {editingTimerId !== timer.timer_id && (
+                  <button
+                    type="button"
+                    className="timer-edit"
+                    title={t("timer.editTimer")}
+                    aria-label={t("timer.editTimer")}
+                    onClick={() => {
+                      setEditingTimerId(timer.timer_id);
+                      setEditDraft(timer.prompt);
+                    }}
+                  >
+                    <Pencil size={13} />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="timer-delete"
+                  title={t("timer.deleteTimer")}
+                  aria-label={t("timer.deleteTimer")}
+                  onClick={() => {
+                    if (!session) return;
+                    // Deleting is irreversible and drops the schedule; other
+                    // timer actions stay immediate per panel conventions.
+                    if (
+                      !window.confirm(
+                        t("timer.deleteConfirm", { name: timer.name }),
+                      )
+                    )
+                      return;
+                    sendCommand.current({
+                      type: "timer_delete",
+                      session_id: session.session_id,
+                      timer_id: timer.timer_id,
+                    });
+                  }}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+      <footer className="timer-create-area">
+        <button
+          type="button"
+          ref={createToggleRef}
+          className="timer-create-toggle"
+          aria-expanded={createOpen}
+          aria-controls="timer-create-form"
+          title={t("timer.createToggle")}
+          onClick={() => setCreateOpen((open) => !open)}
+        >
+          <Plus size={13} />
+          {t("timer.createToggle")}
+        </button>
+        {createOpen && (
+        <form id="timer-create-form" className="timer-create-form" onSubmit={submitCreate}>
+        <label>
+          {t("timer.workLabel")}
+          <textarea
+            ref={workFieldRef}
+            rows={2}
+            value={prompt}
+            placeholder={t("timer.workPlaceholder")}
+            onChange={(event) => setPrompt(event.target.value)}
+          />
+        </label>
+        <label>
+          {t("timer.nameLabel")}
+          <input
+            value={name}
+            placeholder={t("timer.namePlaceholder")}
+            onChange={(event) => setName(event.target.value)}
+          />
+        </label>
+        <div className="timer-create-row">
+          <label>
+            {t("timer.modeLabel")}
+            <select
+              value={mode}
+              onChange={(event) =>
+                setMode(event.target.value as "once" | "repeat")
+              }
+            >
+              <option value="once">{t("timer.modeOnce")}</option>
+              <option value="repeat">{t("timer.modeRepeat")}</option>
+            </select>
+          </label>
+          <label>
+            {t("timer.triggerLabel")}
+            <select
+              value={trigger}
+              onChange={(event) =>
+                setTrigger(event.target.value as "delay" | "at")
+              }
+            >
+              <option value="delay">{t("timer.triggerDelay")}</option>
+              <option value="at">{t("timer.triggerAt")}</option>
+            </select>
+          </label>
+        </div>
+        <div className="timer-create-row">
+          {trigger === "delay" ? (
+            <label>
+              {t("timer.triggerDelay")}
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={delayMinutes}
+                onChange={(event) => setDelayMinutes(event.target.value)}
+              />
+            </label>
+          ) : (
+            <label>
+              {t("timer.triggerAt")}
+              <input
+                type="datetime-local"
+                value={atValue}
+                onChange={(event) => setAtValue(event.target.value)}
+              />
+            </label>
+          )}
+          {mode === "repeat" && (
+            <label>
+              {t("timer.intervalLabel")}
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={intervalMinutes}
+                onChange={(event) => setIntervalMinutes(event.target.value)}
+              />
+            </label>
+          )}
+        </div>
+        {showInvalidHint && (
+          <div className="timer-form-hint error">
+            {t("timer.invalidInput")}
+          </div>
+        )}
+        <div className="timer-form-hint">{t("timer.scheduleHint")}</div>
+        <div className="timer-create-actions">
+          <button
+            type="submit"
+            className="timer-create-submit"
+            disabled={!canCreate}
+          >
+            {t("timer.createButton")}
+          </button>
+          <button
+            type="button"
+            className="timer-create-collapse"
+            onClick={() => {
+              setCreateOpen(false);
+              resetForm();
+            }}
+          >
+            {t("timer.createCollapse")}
+          </button>
+        </div>
+        </form>
+        )}
+      </footer>
+    </aside>
+  );
+}
+
 function ToolRepoPanel({
   panelRef,
   onResizeStart,
@@ -7876,6 +8604,7 @@ function TimemThread({
   pendingDecisionKeys,
   uploadingAttachment,
   uploadingAttachmentFile,
+  imageUnsupportedEndpoint,
   loadingHistory,
   pendingToolGenTurnIds,
   toolGenSessionBusy,
@@ -7913,6 +8642,7 @@ function TimemThread({
   pendingDecisionKeys: Set<string>;
   uploadingAttachment: boolean;
   uploadingAttachmentFile?: { name: string; bytes: number };
+  imageUnsupportedEndpoint?: string;
   loadingHistory: boolean;
   pendingToolGenTurnIds: Set<string>;
   toolGenSessionBusy: boolean;
@@ -7991,7 +8721,7 @@ function TimemThread({
   const hideWorkingMemoTooltip = () => setWorkingMemoVisible(false);
   const [draftsBySession, setDraftsBySession] = useState<
     Record<string, string>
-  >({});
+  >(() => readComposerDraftTexts());
   const [composerExpanded, setComposerExpanded] = useState(false);
   const [expandedQueueSessionIds, setExpandedQueueSessionIds] = useState<
     Set<string>
@@ -8027,6 +8757,72 @@ function TimemThread({
   const queuedMessagesPaused =
     !!activeSession && !activeSession.message_queue.auto_send_enabled;
   const draft = draftForSession(draftsBySession, activeSessionId);
+
+  // Live composer text: updated on every keystroke without any Thread-level
+  // rerender. Submit paths read this so Enter always sends exactly what is
+  // visible in the field, even while the throttled write-through is pending.
+  const composerLiveTextRef = useRef(draft);
+  const activeSessionIdRef = useRef(activeSessionId);
+  activeSessionIdRef.current = activeSessionId;
+  const composerWriteThroughTextRef = useRef<string | null>(null);
+  const commitComposerText = useCallback((text: string) => {
+    composerWriteThroughTextRef.current = text;
+    setDraftsBySession((current) =>
+      setSessionDraft(current, activeSessionIdRef.current, text),
+    );
+  }, []);
+  const composerWriteThroughRef = useRef<ComposerWriteThrough | null>(null);
+  if (composerWriteThroughRef.current === null) {
+    composerWriteThroughRef.current = createComposerWriteThrough({
+      commit: commitComposerText,
+      now: () => Date.now(),
+      schedule: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      cancel: (id) => window.clearTimeout(id),
+      intervalMs: 300,
+    });
+  }
+  useEffect(
+    () => () => composerWriteThroughRef.current?.dispose(),
+    [],
+  );
+  const handleComposerTyping = useCallback((text: string) => {
+    composerLiveTextRef.current = text;
+    composerWriteThroughRef.current?.onInput(text);
+  }, []);
+  useEffect(() => {
+    // Adopt authoritative draft changes (restore, rejection refill, submit
+    // clear) into the live-text ref, but skip our own write-through echo: the
+    // local field may already hold newer keystrokes than the committed copy.
+    if (draft !== composerWriteThroughTextRef.current)
+      composerLiveTextRef.current = draft;
+  }, [draft]);
+  useEffect(() => {
+    // A pending write-through belongs to the session it was typed in; it must
+    // never leak into the next session's draft after a switch.
+    composerWriteThroughRef.current?.reset();
+  }, [activeSessionId]);
+
+  // Fullscreen composer editor: capture the pre-open draft so an explicit
+  // discard can revert the throttled write-through below.
+  const composerExpandedBaseRef = useRef("");
+  // Expanded-editor commits are authoritative: they must replace the live text
+  // immediately, not only the throttled thread-level copy.
+  const applyAuthoritativeComposerText = useCallback(
+    (value: string) => {
+      // Authoritative wins over any pending local write-through: drop stale
+      // scheduled typing so it cannot overwrite this value after adoption.
+      composerWriteThroughRef.current?.reset();
+      composerLiveTextRef.current = value;
+      setDraftsBySession((current) =>
+        setSessionDraft(current, activeSessionId, value),
+      );
+    },
+    [activeSessionId],
+  );
+  const commitComposerExpandedDraft = applyAuthoritativeComposerText;
+  const discardComposerExpandedDraft = useCallback(() => {
+    applyAuthoritativeComposerText(composerExpandedBaseRef.current);
+  }, [applyAuthoritativeComposerText]);
   const queuedMessages: QueuedMessage[] =
     activeSession?.message_queue.items.map((item) => ({
       id: item.command_id,
@@ -8114,6 +8910,13 @@ function TimemThread({
     missingSessionHint ||
     lockedControlHint ||
     (uploadingAttachment ? "Wait for file upload" : sendLabel);
+  // Reserved attachments (consumed by queued messages) still leave with a
+  // future send, so the warning scope is the full session attachment list.
+  const imageAttachmentPending =
+    (activeSession?.attachments ?? []).some((attachment) =>
+      isImageFileName(attachment.name),
+    ) ||
+    (uploadingAttachment && isImageFileName(uploadingAttachmentFile?.name));
   const attachedFileCount = activeSession?.attachments.length ?? 0;
   const attachmentSummary =
     attachedFileCount === 1
@@ -8614,9 +9417,31 @@ function TimemThread({
     viewport.style.scrollBehavior = previousBehavior;
   }, [activeSessionId]);
 
+  // Drafts restored from disk survive progressive session restore: the Host
+  // fills the session list newest-first in the background, so a missing id is
+  // not proof the session is gone. A restored draft is pruned only after its
+  // session was live once and then disappeared; drafts typed in this visit
+  // keep the immediate prune.
+  const restoredDraftSessionIdsRef = useRef<Set<string> | null>(null);
+  const everLiveSessionIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (sessionIds.length === 0) return;
-    setDraftsBySession((current) => pruneSessionDrafts(current, sessionIds));
+    if (restoredDraftSessionIdsRef.current === null) {
+      restoredDraftSessionIdsRef.current = new Set(
+        Object.keys(readComposerDraftTexts()),
+      );
+    }
+    for (const sessionId of liveSessionIds) {
+      everLiveSessionIdsRef.current.add(sessionId);
+    }
+    setDraftsBySession((current) =>
+      pruneSessionDrafts(
+        current,
+        sessionIds,
+        restoredDraftSessionIdsRef.current,
+        everLiveSessionIdsRef.current,
+      ),
+    );
     setExpandedQueueSessionIds(
       (current) =>
         new Set(
@@ -8642,6 +9467,45 @@ function TimemThread({
     }
     pruneSessionSubmissionLocks(submittingDraftSessionIdsRef, sessionIds);
   }, [liveSessionIds]);
+
+  // Persist unsent composer drafts browser-locally: debounced on change and
+  // flushed synchronously when the page may be torn down or hidden. Entries
+  // for sessions that are not live stay frozen on disk (bounded, with TTL) so
+  // drafts survive reloads while sessions are still restoring in background.
+  const draftsPersistRef = useRef(draftsBySession);
+  const liveSessionIdsRef = useRef<ReadonlySet<string> | null>(null);
+  useEffect(() => {
+    liveSessionIdsRef.current = liveSessionIds;
+  }, [liveSessionIds]);
+  useEffect(() => {
+    draftsPersistRef.current = draftsBySession;
+    const id = window.setTimeout(() => {
+      persistComposerDraftTexts(
+        draftsBySession,
+        liveSessionIdsRef.current,
+        everLiveSessionIdsRef.current,
+      );
+    }, 500);
+    return () => window.clearTimeout(id);
+  }, [draftsBySession]);
+  useEffect(() => {
+    const flush = () =>
+      persistComposerDraftTexts(
+        draftsPersistRef.current,
+        liveSessionIdsRef.current,
+        everLiveSessionIdsRef.current,
+      );
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVisibility);
+      flush();
+    };
+  }, []);
 
   useEffect(() => {
     if (rejectedSubmitCommandIds.size === 0) return;
@@ -8742,7 +9606,8 @@ function TimemThread({
   };
   const submitDraft = () => {
     if (uploadingAttachment || sessionInteractionLocked) return;
-    if (activeSession && activeSession.state !== "working" && !draft.trim()) {
+    const liveDraft = composerLiveTextRef.current;
+    if (activeSession && activeSession.state !== "working" && !liveDraft.trim()) {
       if (!window.confirm(t("composer.emptyContinueConfirm"))) return;
       onSendForSession(
         activeSession.session_id,
@@ -8756,12 +9621,18 @@ function TimemThread({
       );
       return;
     }
+    const liveDrafts = setSessionDraft(
+      draftsBySession,
+      activeSessionId,
+      composerLiveTextRef.current,
+    );
     const reserved = reserveSessionDraftSubmission(
       submittingDraftSessionIdsRef,
       activeSessionId,
-      draftsBySession,
+      liveDrafts,
     );
     if (reserved === null) return;
+    composerWriteThroughRef.current?.reset();
     const attachmentIds = availableAttachments.map(
       (attachment) => attachment.id,
     );
@@ -8777,7 +9648,7 @@ function TimemThread({
     // Release the synchronous event guard before publishing the next draft.
     const nextDrafts = finishSessionDraftSubmission(
       submittingDraftSessionIdsRef,
-      draftsBySession,
+      liveDrafts,
       reserved.sessionId,
       reserved.text,
       sent,
@@ -8796,12 +9667,18 @@ function TimemThread({
 
   const submitDraftAsSupplement = () => {
     if (uploadingAttachment || sessionInteractionLocked) return;
+    const liveDrafts = setSessionDraft(
+      draftsBySession,
+      activeSessionId,
+      composerLiveTextRef.current,
+    );
     const reserved = reserveSessionDraftSubmission(
       submittingDraftSessionIdsRef,
       activeSessionId,
-      draftsBySession,
+      liveDrafts,
     );
     if (reserved === null) return;
+    composerWriteThroughRef.current?.reset();
     const sent = onSendForSession(
       reserved.sessionId,
       reserved.text,
@@ -8813,7 +9690,7 @@ function TimemThread({
     if (sent && selectedRoleIds.length > 0) onRolesConsumed(reserved.sessionId);
     const nextDrafts = finishSessionDraftSubmission(
       submittingDraftSessionIdsRef,
-      draftsBySession,
+      liveDrafts,
       reserved.sessionId,
       reserved.text,
       sent,
@@ -9372,7 +10249,9 @@ function TimemThread({
             </section>
           )}
           {!!activeSession &&
-            (!!availableAttachments.length || uploadingAttachment) && (
+            (!!availableAttachments.length ||
+              uploadingAttachment ||
+              (!!imageUnsupportedEndpoint && imageAttachmentPending)) && (
               <div
                 className="attachment-strip"
                 aria-label={attachmentStripLabel}
@@ -9442,6 +10321,20 @@ function TimemThread({
                     </div>
                   );
                 })}
+                {imageAttachmentPending && imageUnsupportedEndpoint && (
+                  <div
+                    className="attachment-warning"
+                    role="status"
+                    title={t("composer.imageUnsupportedTitle")}
+                  >
+                    <TriangleAlert size={13} aria-hidden="true" />
+                    <span>
+                      {t("composer.imageUnsupportedHint", {
+                        model: imageUnsupportedEndpoint,
+                      })}
+                    </span>
+                  </div>
+                )}
               </div>
             )}
           {activeSession && restartCwdDecision ? (
@@ -9458,85 +10351,54 @@ function TimemThread({
                 submitDraft();
               }}
             >
-              <div className="expandable-text-field composer-text-field">
-                <textarea
-                  ref={attachComposerTextarea}
-                  value={draft}
-                  placeholder={
-                    !activeSession
-                      ? t("composer.createSessionFirst")
-                      : sessionInteractionLocked
-                        ? sessionInteractionLockReason
-                        : activeSession.state === "working"
-                          ? t("composer.placeholderQueue")
-                          : t("composer.placeholderDirect")
-                  }
-                  aria-label={t("composer.messageAria")}
-                  aria-describedby={composerHintId}
-                  title={composerHint}
-                  disabled={!activeSession || sessionInteractionLocked}
-                  onChange={(event) =>
-                    setDraftsBySession((current) =>
-                      setSessionDraft(
-                        current,
-                        activeSessionId,
-                        event.target.value,
-                      ),
-                    )
-                  }
-                  onPaste={(event) => {
-                    const images = clipboardImageFiles(
-                      Array.from(event.clipboardData?.items ?? []),
-                    );
-                    if (images.length === 0) return;
-                    event.preventDefault();
-                    void (async () => {
-                      for (const image of images) {
-                        await onUpload(image);
-                      }
-                    })();
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter" || event.nativeEvent.isComposing)
-                      return;
-                    if (event.metaKey || event.ctrlKey) {
-                      event.preventDefault();
-                      submitDraftAsSupplement();
-                      return;
+              <ComposerField
+                sessionId={activeSessionId}
+                value={draft}
+                disabled={!activeSession || sessionInteractionLocked}
+                placeholder={
+                  !activeSession
+                    ? t("composer.createSessionFirst")
+                    : sessionInteractionLocked
+                      ? sessionInteractionLockReason
+                      : activeSession.state === "working"
+                        ? t("composer.placeholderQueue")
+                        : t("composer.placeholderDirect")
+                }
+                ariaLabel={t("composer.messageAria")}
+                hint={composerHint}
+                hintId={composerHintId}
+                expandLabel={t("composer.expandEditUserMessage")}
+                attachRef={attachComposerTextarea}
+                onTyping={handleComposerTyping}
+                lastCommitted={composerWriteThroughTextRef.current}
+                onPasteImages={(images) => {
+                  void (async () => {
+                    for (const image of images) {
+                      await onUpload(image);
                     }
-                    if (!event.shiftKey) {
-                      event.preventDefault();
-                      submitDraft();
-                    }
-                  }}
-                />
-                <button
-                  type="button"
-                  className="text-field-expand"
-                  title={t("composer.expandEditUserMessage")}
-                  aria-label={t("composer.expandEditUserMessage")}
-                  disabled={!activeSession || sessionInteractionLocked}
-                  onClick={() => setComposerExpanded(true)}
-                >
-                  <Maximize2 size={14} />
-                </button>
-              </div>
+                  })();
+                }}
+                onEnter={submitDraft}
+                onCtrlEnter={submitDraftAsSupplement}
+                onExpand={() => {
+                  composerExpandedBaseRef.current = composerLiveTextRef.current;
+                  setComposerExpanded(true);
+                }}
+              />
               {composerExpanded && activeSession && (
                 <ExpandedTextEditor
                   eyebrow={t("composer.eyebrowMessage")}
                   title={t("composer.editUserMessage")}
-                  value={draft}
+                  value={composerLiveTextRef.current}
                   disabled={sessionInteractionLocked}
                   placeholder={
                     activeSession.state === "working"
                       ? t("composer.placeholderQueue")
                       : t("composer.placeholderDirect")
                   }
-                  onCommit={(value) =>
-                    setDraftsBySession((current) =>
-                      setSessionDraft(current, activeSessionId, value),
-                    )
-                  }
+                  onCommit={applyAuthoritativeComposerText}
+                  onLiveCommit={commitComposerExpandedDraft}
+                  onDiscard={discardComposerExpandedDraft}
                   onClose={() => setComposerExpanded(false)}
                 />
               )}
@@ -9967,7 +10829,7 @@ const TurnInteraction = memo(function TurnInteraction({
             sessionId,
             tone: "thinking" as const,
             kind: "user_supplement" as const,
-            title: t("composer.supplementTitle"),
+            title: "",
             detail: entry.text,
             createdAt: entry.created_at_ms,
             timelineSeq: entry.timeline_seq,
@@ -10208,7 +11070,10 @@ const TurnInteraction = memo(function TurnInteraction({
                 ({ entry }) =>
                   entry.kind !== "approval" && entry.kind !== "resume_directly",
               )
-              .map(({ entry, roleIndex }) => (
+              .map(({ entry, roleIndex }) => {
+                const timerParts =
+                  entry.kind === "timer" ? parseTimerEntryText(entry.text) : null;
+                return (
                 <div
                   className={`turn-user-entry ${entry.kind}`}
                   key={`${entry.created_at_ms}-${roleIndex}`}
@@ -10232,7 +11097,16 @@ const TurnInteraction = memo(function TurnInteraction({
                     <Trash2 size={13} />
                   </button>
                   {entry.kind === "supplement" && <span>{t("composer.supplementTag")}</span>}
-                  <UserText text={entry.text} />
+                  {timerParts && (
+                    <div className="timer-entry-head">
+                      <span>{t("timer.timerTag")}</span>
+                      <span className="timer-entry-badge" aria-hidden="true">
+                        <AlarmClock size={11} />
+                      </span>
+                      {timerParts.name && <b className="timer-entry-name">{timerParts.name}</b>}
+                    </div>
+                  )}
+                  <UserText text={timerParts ? timerParts.prompt : entry.text} />
                   {(
                     entry.worker_roles ??
                     (entry.worker_role ? [entry.worker_role] : [])
@@ -10266,7 +11140,8 @@ const TurnInteraction = memo(function TurnInteraction({
                     </div>
                   )}
                 </div>
-              ))}
+                );
+              })}
           </div>
         </section>
       )}
@@ -10331,23 +11206,7 @@ const TurnInteraction = memo(function TurnInteraction({
                 )}
               </button>
               {isWorking && modelRetryStatus && (
-                <details
-                  className={`model-retry-status ${modelRetryStatus.kind}`}
-                >
-                  <summary
-                    title={t("retry.detailExpand", { name: modelRetryStatus.label })}
-                    aria-label={t("retry.detailExpand", { name: modelRetryStatus.label })}
-                  >
-                    <ChevronRight size={12} aria-hidden="true" />
-                    <span>{modelRetryStatus.label}</span>
-                    {modelRetryStatus.progress && (
-                      <small>{modelRetryStatus.progress}</small>
-                    )}
-                  </summary>
-                  <div className="model-retry-detail">
-                    <MarkdownContent text={modelRetryStatus.detail} />
-                  </div>
-                </details>
+                <ModelRetryStatusPill status={modelRetryStatus} />
               )}
             </div>
           )}
@@ -10380,6 +11239,15 @@ const TurnInteraction = memo(function TurnInteraction({
                   {workItems.map((item, index) => {
                     const { activity } = item;
                     if (activity?.tone === "action") {
+                      // Timer lifecycle rows are system-status lines: they stay
+                      // individually visible and never fold into tool groups.
+                      if (activity.timer)
+                        return (
+                          <ToolActivity
+                            key={`timer-row-${item.key}`}
+                            activity={activity}
+                          />
+                        );
                       const summary = toolActivityRunByStartIndex.get(index);
                       return summary ? (
                         <ToolActivityGroup
@@ -10443,6 +11311,14 @@ const TurnInteraction = memo(function TurnInteraction({
           turn={turn}
           streamTools={runningStreamTools}
           streamWorking={isWorking}
+          modelRetryStatus={
+    showWorkFrame &&
+    !streamRetentionActive ||
+    turn.state !== "working" ||
+    decisions.length > 0
+      ? null
+      : modelRetryStatus
+  }
           waitingModel={
             /* Session-scoped single slot: only the active turn publishes an
              * Active projection, and this trailer renders only while the turn
@@ -10585,6 +11461,25 @@ function StreamProcess({ closing, onArchived, children }: {
   return <div ref={ref} className={`stream-continuous-process${closing ? " archiving" : ""}`}>{children}</div>;
 }
 
+function ModelRetryStatusPill({ status }: { status: ActiveModelRetryStatus }) {
+  useT();
+  return (
+    <details className={`model-retry-status ${status.kind}`}>
+      <summary
+        title={t("retry.detailExpand", { name: status.label })}
+        aria-label={t("retry.detailExpand", { name: status.label })}
+      >
+        <ChevronRight size={12} aria-hidden="true" />
+        <span>{status.label}</span>
+        {status.progress && <small>{status.progress}</small>}
+      </summary>
+      <div className="model-retry-detail">
+        <MarkdownContent text={status.detail} />
+      </div>
+    </details>
+  );
+}
+
 function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activities, responseArriving }: {
   responseArriving: boolean;
   thoughtText: string;
@@ -10610,9 +11505,13 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
     }] : []),
   ].map(entry => ({ ...entry, createdAt: entry.time })).sort(compareTurnStreamItems);
   const groups: (typeof entries)[] = [];
+  // Timer lifecycle rows are standalone system-status lines in stream mode
+  // too: they never merge into the foldable tool runs.
+  const foldable = (entry: { activity?: { tone?: string; timer?: unknown } | null } | undefined) =>
+    entry?.activity?.tone === "action" && !entry.activity.timer;
   for (const entry of entries) {
     const previous = groups.at(-1);
-    if (entry.activity?.tone === "action" && previous?.[0].activity?.tone === "action") previous.push(entry);
+    if (previous && foldable(entry) && foldable(previous[0])) previous.push(entry);
     else groups.push([entry]);
   }
   // One reverse scan, rather than rescanning the suffix for every tool group.
@@ -10628,6 +11527,12 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
     {groups.map((group, index) => {
       const { key, activity } = group[0];
       if (activity?.tone === "action") {
+        if (activity.timer)
+          return (
+            <div key={key} className="stream-tool-merged-item">
+              <div><StreamToolRow activity={activity} /></div>
+            </div>
+          );
         // 逻辑时序 +1 有两种入口：后续 AI 回复内容，或新 call 实际开始执行。
         // 此处处理 AI 内容入口；串行 call 入口由 handoffIds 按执行事件顺序判定。
         // 工具完成、用户补充本身不推进时序，不得仅据此折叠旧结果。
@@ -10725,6 +11630,7 @@ function ToolActivityIcon({
       </span>
     );
   if (activity.run_bash_edit) return <RunBashEditIcon />;
+  if (activity.timer) return <TimerToolIcon />;
   if (activity.readfile) return <ReadFileIcon />;
   if (activity.memory_search) return <MemorySearchIcon />;
   if (activity.self_tool) return <SelfToolIcon />;
@@ -10801,16 +11707,37 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
         )}
         <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
         {status === "background_running" && <span className="stream-tool-background">(bg)</span>}
-        {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && <span className="stream-tool-command-preview tool-invocation-preview" title={invocationPreview}>{invocationPreview.replace(/\s+/g, " ")}</span>}
-        {(running
+        {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && <span className="stream-tool-command-preview tool-invocation-preview" title={invocationPreview}>{invocationPreview.replace(/\s+/g, " ")}</span>}
+        {((running
           ? liveElapsedMs
-          : activity.elapsed_ms) !== undefined && (() => {
+          : activity.elapsed_ms) !== undefined ||
+          activity.tool_output_bytes !== undefined) && (() => {
           const elapsed = running
             ? formatLiveElapsed(liveElapsedMs)
-            : formatToolElapsed(activity.elapsed_ms!);
+            : activity.elapsed_ms !== undefined
+              ? formatToolElapsed(activity.elapsed_ms!)
+              : undefined;
+          const size = activity.tool_output_bytes !== undefined
+            ? formatResultBytes(activity.tool_output_bytes)
+            : undefined;
           return (
-            <span className="stream-tool-elapsed" aria-label={elapsed}>
-              {running ? <FlippingTime value={elapsed} /> : elapsed}
+            <span className="stream-tool-meta">
+              {size !== undefined && (
+                <>
+                  <span className="stream-tool-sep" aria-hidden="true">|</span>
+                  <span className="stream-tool-bytes" aria-label={t("tools.resultBytes", { size })}>
+                    {size}
+                  </span>
+                </>
+              )}
+              {size !== undefined && elapsed !== undefined && (
+                <span className="stream-tool-sep" aria-hidden="true">|</span>
+              )}
+              {elapsed !== undefined && (
+                <span className="stream-tool-elapsed" aria-label={elapsed}>
+                  {running ? <FlippingTime value={elapsed} /> : elapsed}
+                </span>
+              )}
             </span>
           );
         })()}
@@ -10828,7 +11755,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
   const b = next.activity;
   return a.id === b.id && a.tool_status === b.tool_status && a.tool_name === b.tool_name &&
     a.tool_mode === b.tool_mode && a.title === b.title && a.code === b.code && a.detail === b.detail &&
-    a.elapsed_ms === b.elapsed_ms && JSON.stringify(a.memory_search) === JSON.stringify(b.memory_search) &&
+    a.tool_output_bytes === b.tool_output_bytes && a.elapsed_ms === b.elapsed_ms && JSON.stringify(a.memory_search) === JSON.stringify(b.memory_search) &&
     JSON.stringify(a.self_tool) === JSON.stringify(b.self_tool) && JSON.stringify(a.readfile) === JSON.stringify(b.readfile) &&
     JSON.stringify(a.run_bash_edit) === JSON.stringify(b.run_bash_edit);
 });
@@ -10842,6 +11769,7 @@ function TurnAnswerDelivery({
   streamTools,
   streamWorking,
   waitingModel,
+  modelRetryStatus,
   toolGenPending,
   toolGenBlocked,
   favorite,
@@ -10858,6 +11786,7 @@ function TurnAnswerDelivery({
   streamRetained: boolean;
   workExpanded: boolean;
   onStreamArchived: () => void;
+  modelRetryStatus: ActiveModelRetryStatus | null;
   toolGenPending: boolean;
   toolGenBlocked: boolean;
   favorite?: ChatFavorite;
@@ -10895,7 +11824,7 @@ function TurnAnswerDelivery({
           responseArriving={!!previewText}
         />
       </StreamProcess>}
-      {hasPreview && preview?.interruption && <div className="response-preview-interruption" role="status">{preview.interruption === "cancelled" ? "Stopped — partial response" : preview.interruption === "network_error" ? "Network error — partial response" : "Model error — partial response"}</div>}
+      {hasPreview && preview?.interruption && <div className="response-preview-interruption" role="status">{preview.interruption === "cancelled" ? t("interim.previewStopped") : preview.interruption === "network_error" ? t("interim.previewNetworkError") : t("interim.previewModelError")}</div>}
       {(hasFinal || !!previewText) && (
         <FinalAnswerDelivery
           text={turn.final_answer || previewText}
@@ -10911,6 +11840,9 @@ function TurnAnswerDelivery({
           onToolGen={onToolGen}
           onDelete={onDelete}
         />
+      )}
+      {streamUiMode && streamWorking && modelRetryStatus && (
+        <ModelRetryStatusPill status={modelRetryStatus} />
       )}
       {streamUiMode && streamWorking && (
         <div
@@ -11692,10 +12624,9 @@ function ActivityView({ activity, enterPulse = false }: { activity: Activity; en
     return (
       <div className="turn-work-item thinking user-supplement">
         <span className="activity-mark" aria-hidden="true">
-          💡
+          <User size={13} strokeWidth={1.8} />
         </span>
         <div className="user-supplement-line">
-          <strong>{activity.title}</strong>
           {activity.detail && <UserText text={activity.detail} />}
         </div>
       </div>
@@ -11956,12 +12887,13 @@ function ToolActivity({ activity }: { activity: Activity }) {
         </span>
       )}
       <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
-      {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && (
+      {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && (
         <code className="tool-activity-command tool-invocation-preview" title={invocationPreview}>
           {invocationPreview}
         </code>
       )}
-      {(remainingWaitMs !== undefined || displayedElapsedMs !== undefined) && (
+      {(remainingWaitMs !== undefined || displayedElapsedMs !== undefined ||
+        activity.tool_output_bytes !== undefined) && (
         <span className="tool-activity-timing">
           {status === "background_running" && (
             <span className="tool-activity-background">{t("tools.statusBg")}</span>
@@ -11975,16 +12907,37 @@ function ToolActivity({ activity }: { activity: Activity }) {
               </span>
             );
           })()}
-          {displayedElapsedMs !== undefined && (() => {
-            const time = running
-              ? formatLiveElapsed(displayedElapsedMs)
-              : formatDuration(displayedElapsedMs)!;
-            const label = running ? t("tools.elapsed", { time }) : time;
+          {(displayedElapsedMs !== undefined ||
+            activity.tool_output_bytes !== undefined) && (() => {
+            const size = activity.tool_output_bytes !== undefined
+              ? formatResultBytes(activity.tool_output_bytes)
+              : undefined;
             return (
-              <span className="tool-activity-duration" aria-label={label}>
-                {running
-                  ? <LocalizedFlippingTime message="tools.elapsed" time={time} />
-                  : time}
+              <span className="tool-activity-meta">
+                {size !== undefined && (
+                  <>
+                    <span className="tool-activity-sep" aria-hidden="true">|</span>
+                    <span className="tool-activity-bytes" title={t("tools.resultBytes", { size })}>
+                      {size}
+                    </span>
+                  </>
+                )}
+                {displayedElapsedMs !== undefined && (() => {
+                  const time = running
+                    ? formatLiveElapsed(displayedElapsedMs)
+                    : formatDuration(displayedElapsedMs)!;
+                  const label = running ? t("tools.elapsed", { time }) : time;
+                  return (
+                    <span className="tool-activity-duration-slot">
+                      {size !== undefined && <span className="tool-activity-sep" aria-hidden="true">|</span>}
+                      <span className="tool-activity-duration" aria-label={label}>
+                        {running
+                          ? <LocalizedFlippingTime message="tools.elapsed" time={time} />
+                          : time}
+                      </span>
+                    </span>
+                  );
+                })()}
               </span>
             );
           })()}
@@ -13049,6 +14002,9 @@ type SettingsCenterProps = {
   onContextCompressThresholdChange: (
     percent: ContextCompressThresholdPercent,
   ) => void;
+  restorePromptContextOnStartup: boolean;
+  restorePromptContextPending: boolean;
+  onRestorePromptContextChange: (enabled: boolean) => void;
   claudeCodexToolDiscoveryEnabled: boolean;
   claudeCodexToolDiscoveryPending: boolean;
   onClaudeCodexToolDiscoveryChange: (enabled: boolean) => void;
@@ -13116,6 +14072,9 @@ const SettingsCenter = memo(function SettingsCenter(
     contextCompressThresholdPercent,
     contextCompressThresholdPending,
     onContextCompressThresholdChange,
+    restorePromptContextOnStartup,
+    restorePromptContextPending,
+    onRestorePromptContextChange,
     claudeCodexToolDiscoveryEnabled,
     claudeCodexToolDiscoveryPending,
     onClaudeCodexToolDiscoveryChange,
@@ -13183,6 +14142,7 @@ const SettingsCenter = memo(function SettingsCenter(
     conversationCapacityPending ||
     modelToolResultBytesPending ||
     contextCompressThresholdPending ||
+    restorePromptContextPending ||
     claudeCodexToolDiscoveryPending ||
     favoriteCapacityPending ||
     switchPending ||
@@ -13563,65 +14523,91 @@ const SettingsCenter = memo(function SettingsCenter(
                   <h3 id="system-settings-title">{t("system.title")}</h3>
                   <Settings size={19} aria-hidden="true" />
                 </div>
-                <section className="settings-group system-tool-result-limit">
-                  <div className="settings-group-heading">
-                    <div>
-                      <strong>{t("system.toolResultLimitTitle")}</strong>
-                      <p>{t("system.toolResultLimitDesc")}</p>
-                    </div>
-                  </div>
-                  <div
-                    className="segmented-control system-tool-result-options"
-                    aria-label={t("system.toolResultLimitAria")}
-                  >
-                    {([30720, 20480, 16384, 10240, 8192] as const).map(
-                      (maxBytes) => (
-                        <button
-                          type="button"
-                          key={maxBytes}
-                          className={modelToolResultBytes === maxBytes ? "active" : ""}
-                          aria-pressed={modelToolResultBytes === maxBytes}
-                          disabled={modelToolResultBytesPending || !connected}
-                          onClick={() => onModelToolResultBytesChange(maxBytes)}
-                        >
-                          {maxBytes / 1024}K
-                        </button>
-                      ),
-                    )}
-                  </div>
-                  {modelToolResultBytesPending && (
-                    <small className="system-setting-status" role="status" aria-live="polite">
-                      {t("system.saving")}
-                    </small>
-                  )}
-                </section>
-                <section className="settings-group system-context-compress-threshold">
-                  <div className="settings-group-heading">
-                    <div>
-                      <strong>{t("system.contextCompressThresholdTitle")}</strong>
-                      <p>{t("system.contextCompressThresholdDesc")}</p>
-                    </div>
-                  </div>
-                  <div
-                    className="segmented-control system-context-compress-options"
-                    aria-label={t("system.contextCompressThresholdAria")}
-                  >
-                    {([80, 85, 90, 95, 100] as const).map((percent) => (
-                      <button
-                        type="button"
-                        key={percent}
-                        className={
-                          contextCompressThresholdPercent === percent ? "active" : ""
+                <section className="settings-group system-runtime-tuning">
+                  <div className="system-select-grid">
+                    <label className="system-select-field">
+                      <span className="system-select-title">
+                        {t("system.toolResultLimitTitle")}
+                      </span>
+                      <select
+                        value={modelToolResultBytes}
+                        aria-label={t("system.toolResultLimitAria")}
+                        disabled={modelToolResultBytesPending || !connected}
+                        onChange={(event) =>
+                          onModelToolResultBytesChange(
+                            Number(event.target.value) as ModelToolResultBytes,
+                          )
                         }
-                        aria-pressed={contextCompressThresholdPercent === percent}
-                        disabled={contextCompressThresholdPending || !connected}
-                        onClick={() => onContextCompressThresholdChange(percent)}
                       >
-                        {percent}%
-                      </button>
-                    ))}
+                        {([30720, 20480, 16384, 10240, 8192] as const).map(
+                          (maxBytes) => (
+                            <option key={maxBytes} value={maxBytes}>
+                              {maxBytes / 1024}K
+                            </option>
+                          ),
+                        )}
+                      </select>
+                      <span className="system-select-desc">
+                        {t("system.toolResultLimitDesc")}
+                      </span>
+                      {modelToolResultBytesPending && (
+                        <small className="system-setting-status" role="status" aria-live="polite">
+                          {t("system.saving")}
+                        </small>
+                      )}
+                    </label>
+                    <label className="system-select-field">
+                      <span className="system-select-title">
+                        {t("system.contextCompressThresholdTitle")}
+                      </span>
+                      <select
+                        value={contextCompressThresholdPercent}
+                        aria-label={t("system.contextCompressThresholdAria")}
+                        disabled={contextCompressThresholdPending || !connected}
+                        onChange={(event) =>
+                          onContextCompressThresholdChange(
+                            Number(event.target.value) as ContextCompressThresholdPercent,
+                          )
+                        }
+                      >
+                        {([80, 85, 90, 95, 100] as const).map((percent) => (
+                          <option key={percent} value={percent}>
+                            {percent}%
+                          </option>
+                        ))}
+                      </select>
+                      <span className="system-select-desc">
+                        {t("system.contextCompressThresholdDesc")}
+                      </span>
+                      {contextCompressThresholdPending && (
+                        <small className="system-setting-status" role="status" aria-live="polite">
+                          {t("system.saving")}
+                        </small>
+                      )}
+                    </label>
                   </div>
-                  {contextCompressThresholdPending && (
+                </section>
+                <section className="settings-group system-restore-prompt-context">
+                  <div className="settings-group-heading">
+                    <div>
+                      <strong>{t("system.restorePromptContextTitle")}</strong>
+                      <p>{t("system.restorePromptContextDesc")}</p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      className="settings-feature-switch"
+                      aria-checked={restorePromptContextOnStartup}
+                      aria-label={t("system.restorePromptContextAria")}
+                      disabled={restorePromptContextPending || !connected}
+                      onClick={() =>
+                        onRestorePromptContextChange(!restorePromptContextOnStartup)
+                      }
+                    >
+                      <span className="settings-feature-switch-thumb" />
+                    </button>
+                  </div>
+                  {restorePromptContextPending && (
                     <small className="system-setting-status" role="status" aria-live="polite">
                       {t("system.saving")}
                     </small>
@@ -14696,6 +15682,7 @@ function CompletionCard({
   onToolGen?: () => void;
   answerActions?: React.ReactNode;
 }) {
+  useT();
   const stats = completion.stats ?? {};
   const cancelled = completion.stop_reason?.toLowerCase() === "cancelledbyuser";
   const toolGenLabel = toolGenPending
@@ -14742,13 +15729,21 @@ function CompletionCard({
         </span>
       ))}
       {!cancelled && isNotableStopReason(completion.stop_reason) && (
-        <span className="completion-status">
-          <b>Status</b> {completion.stop_reason}
+        <span
+          className="completion-status"
+          title={completion.stop_reason ?? undefined}
+        >
+          <b>{t("completion.statusLabel")}</b>{" "}
+          {completionStopReasonText(completion.stop_reason ?? "")}
         </span>
       )}
       {completion.repair_issue && (
-        <span className="completion-status warning">
-          <b>Last repair</b> {completion.repair_issue}
+        <span
+          className="completion-status warning"
+          title={completion.repair_issue}
+        >
+          <b>{t("completion.repairLabel")}</b>{" "}
+          {repairIssueText(completion.repair_issue)}
         </span>
       )}
       {onToolGen && !cancelled && (
@@ -14850,6 +15845,14 @@ function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// Compact size form for pipe-delimited tool row metadata ("| 4KB | 1.2s");
+// prose panels keep the spaced formatBytes above.
+function formatResultBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
 function ModelEndpointPanel({
@@ -14991,7 +15994,7 @@ function ModelEndpointEditor({
     response_protocol: endpoint?.response_protocol ?? "xml",
     base_url: endpoint?.base_url ?? "",
     max_llm_input_tokens: endpoint?.max_llm_input_tokens ?? 100_000,
-    max_llm_output_tokens: endpoint?.max_llm_output_tokens ?? 10_000,
+    max_llm_output_tokens: endpoint?.max_llm_output_tokens ?? 20_000,
     stream: endpoint?.stream ?? true,
     function_calling: endpoint?.function_calling ?? true,
     api_key: revealedApiKey,
@@ -15086,6 +16089,9 @@ function ModelEndpointEditor({
   });
   const providerLabels: Record<string, string> = { openai: "OpenAI", zhipu: t("endpoints.zhipu") };
   const capabilityIssue = endpointCapabilityIssue(draft, selectedModel, providers);
+  const templateBudget = templateBudgetSuggestion(selectedModel);
+  const inputBudgetInvalid = !!selectedModel && (capabilityIssue?.code === "input_budget" || capabilityIssue?.code === "context_budget");
+  const outputBudgetInvalid = !!selectedModel && (capabilityIssue?.code === "output_budget" || capabilityIssue?.code === "context_budget");
   const catalogInvalid = capabilityIssue !== null;
   const dailyReasoningOptions = allowed != null
     ? displayedAllowed
@@ -15292,12 +16298,28 @@ function ModelEndpointEditor({
           <input className="endpoint-token-budget" type="number" inputMode="numeric" onKeyDown={(event) => { if (event.key === "ArrowUp" || event.key === "ArrowDown") event.preventDefault(); }} min={selectedModel?.min_input ?? 3000} max={selectedModel ? Math.min(selectedModel.max_input, selectedModel.context_window - draft.max_llm_output_tokens) : MAX_LLM_INPUT_TOKENS_CEILING} step={1}
             value={draft.max_llm_input_tokens} onChange={(e) => edit({ max_llm_input_tokens: Number(e.target.value) })} />
           {selectedModel && <small>{selectedModel.min_input.toLocaleString()} – {Math.min(selectedModel.max_input, selectedModel.context_window - draft.max_llm_output_tokens).toLocaleString()}</small>}
+          {selectedModel && templateBudget?.input !== undefined && draft.max_llm_input_tokens !== templateBudget.input && (
+            <div className={`endpoint-budget-restore${inputBudgetInvalid ? " invalid" : ""}`}>
+              <small>{inputBudgetInvalid
+                ? t("endpoints.budgetInvalidHint", { value: templateBudget.input.toLocaleString() })
+                : t("endpoints.budgetKeptHint", { value: templateBudget.input.toLocaleString() })}</small>
+              <button type="button" onClick={() => setDraft(current => restoreEndpointTemplateBudget(current, selectedModel, "max_llm_input_tokens"))}>{t("endpoints.restoreBudgetDefault")}</button>
+            </div>
+          )}
         </label>
         <label>
           {t("endpoints.maxOutput")}
           <input className="endpoint-token-budget" type="number" inputMode="numeric" onKeyDown={(event) => { if (event.key === "ArrowUp" || event.key === "ArrowDown") event.preventDefault(); }} min={selectedModel?.min_output ?? 512} max={selectedModel ? Math.min(selectedModel.max_output, selectedModel.context_window - draft.max_llm_input_tokens) : MAX_LLM_INPUT_TOKENS_CEILING} step={1}
             value={draft.max_llm_output_tokens} onChange={(e) => edit({ max_llm_output_tokens: Number(e.target.value) })} />
           {selectedModel && <small>{selectedModel.min_output.toLocaleString()} – {Math.min(selectedModel.max_output, selectedModel.context_window - draft.max_llm_input_tokens).toLocaleString()}</small>}
+          {selectedModel && templateBudget?.output !== undefined && draft.max_llm_output_tokens !== templateBudget.output && (
+            <div className={`endpoint-budget-restore${outputBudgetInvalid ? " invalid" : ""}`}>
+              <small>{outputBudgetInvalid
+                ? t("endpoints.budgetInvalidHint", { value: templateBudget.output.toLocaleString() })
+                : t("endpoints.budgetKeptHint", { value: templateBudget.output.toLocaleString() })}</small>
+              <button type="button" onClick={() => setDraft(current => restoreEndpointTemplateBudget(current, selectedModel, "max_llm_output_tokens"))}>{t("endpoints.restoreBudgetDefault")}</button>
+            </div>
+          )}
         </label>
         <section className="wide endpoint-reasoning-panel" aria-label={t("endpoints.reasoningSettings")}>
           <details className="endpoint-reasoning-config">

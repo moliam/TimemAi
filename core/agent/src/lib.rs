@@ -59,6 +59,8 @@ pub mod model_transport;
 pub mod negotiation;
 mod notification;
 pub mod reasoning;
+#[path = "../../../resources/capabilities/tools/timer.rs"]
+pub mod timer;
 pub use timem_platform as os;
 pub mod profiler;
 pub mod prompt_cache;
@@ -149,8 +151,8 @@ pub use host::{
     CORE_TOPIC_CONTEXT_COMPRESS, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST,
     CORE_TOPIC_MEMO, CORE_TOPIC_MODEL_CAPABILITY_NEGOTIATION, CORE_TOPIC_MODEL_REPAIR,
     CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
-    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TOOLGEN,
-    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TIMER,
+    CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
     DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT, USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT,
 };
 pub use interaction::{
@@ -519,6 +521,39 @@ pub(crate) struct PromptSlice {
     pub(crate) slice_index: usize,
     pub(crate) slice_count: usize,
 }
+/// Upper bound on timers held per session. The cap keeps a runaway model
+/// loop from creating unbounded scheduler load.
+pub const MAX_TIMERS: usize = 32;
+
+/// A scheduled prompt timer. Core owns the semantic state (what fires and
+/// the trigger description); the Host owns the wall clock: it computes the
+/// concrete fire time, persists timers across restarts, and delivers the
+/// prompt as a turn when due.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TimerSpec {
+    pub timer_id: String,
+    /// Stable display/handle name; auto-named `timer0`, `timer1`, ... when
+    /// the creator does not provide one. Unique within a session.
+    pub name: String,
+    /// Prompt text delivered to the session when the timer fires.
+    pub prompt: String,
+    /// "once" fires a single time; "repeat" refires every interval_ms.
+    pub mode: String,
+    /// Relative delay from creation in milliseconds. Exactly one of
+    /// `after_ms` / `at` describes the first fire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_ms: Option<u64>,
+    /// Absolute first-fire instant as an ISO-RFC3339 UTC string. Core
+    /// passes it through verbatim; the Host parses it with its clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    /// Refire period in milliseconds; present only for mode "repeat".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_ms: Option<u64>,
+    /// Who created the timer: "model" (timer tool) or "user" (interface).
+    pub created_by: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DynamicContextSnapshot {
     pub deltas: Vec<PromptDelta>,
@@ -537,6 +572,11 @@ pub struct DynamicContextSnapshot {
     pub pending_forcible_memo_note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_interrupted_memo_note: Option<String>,
+    /// Timers active at snapshot time. They survive a restart because the
+    /// Host scheduler keeps firing them; unlike the memo they are restored
+    /// into Core state on import.
+    #[serde(default)]
+    pub active_timers: Vec<TimerSpec>,
 }
 
 impl DynamicContextSnapshot {
@@ -549,6 +589,7 @@ impl DynamicContextSnapshot {
             && self.active_memo.is_none()
             && self.pending_forcible_memo_note.is_none()
             && self.pending_interrupted_memo_note.is_none()
+            && self.active_timers.is_empty()
     }
 }
 
@@ -1935,6 +1976,9 @@ pub struct AgentCore {
     native_exchanges: Vec<NativeExchange>,
     turn_finished_summary: Option<String>,
     active_memo: Option<String>,
+    /// Scheduled timers (see TimerSpec). They survive compression and
+    /// restart; the Host scheduler is the firing authority.
+    timers: Vec<TimerSpec>,
     /// Rechargeable budget of memo-finish-guard interceptions for the
     /// current turn. Each model response that does not attempt to finish
     /// recharges it by 1 (capped); each guarded finish attempt consumes 1.
@@ -2068,6 +2112,7 @@ impl AgentCore {
             native_exchanges: Vec::new(),
             turn_finished_summary: None,
             active_memo: None,
+            timers: Vec::new(),
             memo_finish_guard_tokens: MEMO_FINISH_GUARD_TOKEN_CAP,
             pending_forcible_memo_note: None,
             pending_interrupted_memo_note: None,
@@ -3327,6 +3372,7 @@ impl AgentCore {
             active_memo: self.active_memo.clone(),
             pending_forcible_memo_note: self.pending_forcible_memo_note.clone(),
             pending_interrupted_memo_note: self.pending_interrupted_memo_note.clone(),
+            active_timers: self.timers.clone(),
         }
     }
 
@@ -3347,6 +3393,10 @@ impl AgentCore {
         // belong to.
         self.pending_forcible_memo_note = snapshot.pending_forcible_memo_note;
         self.pending_interrupted_memo_note = snapshot.pending_interrupted_memo_note;
+        // Unlike the memo, timers ARE reactivated: their firing authority
+        // lives in the Host scheduler, so Core state is a projection that
+        // must follow the snapshot across restarts.
+        self.timers = snapshot.active_timers;
         if let Some(max_seq) = self
             .deltas
             .iter()
@@ -3573,6 +3623,69 @@ impl AgentCore {
         if let Some(memo) = self.active_memo.take() {
             self.memo_deleted_this_turn = Some(memo);
         }
+    }
+
+    /// Scheduled timers, in creation order.
+    pub fn timers(&self) -> &[TimerSpec] {
+        &self.timers
+    }
+
+    /// Insert a validated timer, auto-naming it `timerN` when its name is
+    /// empty. Fails on a duplicate name or when MAX_TIMERS is reached.
+    pub(crate) fn add_timer(&mut self, mut spec: TimerSpec) -> Result<TimerSpec, String> {
+        if !spec.name.is_empty() && self.timers.iter().any(|t| t.name == spec.name) {
+            return Err(format!("name_exists:{}", spec.name));
+        }
+        if self.timers.len() >= MAX_TIMERS {
+            return Err("timer_limit".to_string());
+        }
+        if spec.name.is_empty() {
+            spec.name = self.next_timer_auto_name();
+        }
+        self.timers.push(spec.clone());
+        Ok(spec)
+    }
+
+    /// Remove a timer by name. Returns the removed spec or not_found.
+    pub(crate) fn remove_timer(&mut self, name: &str) -> Result<TimerSpec, String> {
+        let index = self
+            .timers
+            .iter()
+            .position(|t| t.name == name)
+            .ok_or_else(|| format!("not_found:{name}"))?;
+        Ok(self.timers.remove(index))
+    }
+
+    /// Replace the timer set wholesale. Used by the Host to re-project its
+    /// persisted authority (timers.json) into a restored worker.
+    pub fn replace_timers(&mut self, timers: Vec<TimerSpec>) {
+        self.timers = timers;
+    }
+
+    fn next_timer_auto_name(&self) -> String {
+        let mut n: u64 = 0;
+        loop {
+            let candidate = format!("timer{n}");
+            if !self.timers.iter().any(|t| t.name == candidate) {
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+
+    /// Confirmation line appended to the post-compression runtime slice so
+    /// the compacted context still knows which timers will fire. Each entry
+    /// carries created_by so user-created timers stay attributable.
+    pub(crate) fn active_timers_confirmation_line(&self) -> String {
+        if self.timers.is_empty() {
+            return String::new();
+        }
+        let entries: Vec<String> = self
+            .timers
+            .iter()
+            .map(|t| format!("[{}|{}|{}] {}", t.name, t.mode, t.created_by, t.prompt))
+            .collect();
+        format!("\nactive timers: {}", entries.join("; "))
     }
 
     pub(crate) fn record_turn_finished(&mut self, summary: String) {
@@ -4189,10 +4302,13 @@ impl AgentCore {
                 .as_ref()
                 .map(|memo| format!("\nmemo active: {memo}"))
                 .unwrap_or_default();
+            // Timers survive compaction; restate them so the compacted
+            // context still expects their prompts to arrive later.
+            let timers_line = self.active_timers_confirmation_line();
             slices.push((
                 "context_compressed".to_string(),
                 format!(
-                    "context compressed successfully.\nCWD: {}{memo_line}",
+                    "context compressed successfully.\nCWD: {}{memo_line}{timers_line}",
                     self.current_prompt_cwd.display()
                 ),
             ));
@@ -7359,6 +7475,14 @@ Runtime tool_call ids:",
         event.payload["event"] = json!("finish");
         event.payload["active"] = json!(false);
         event.payload["status"] = json!(outcome.status.as_str());
+        // Interfaces badge: how much of the next prompt this tool's own
+        // result occupies. Counts only `tool_output` (the tool payload the
+        // model actually sees); runtime-added metadata is excluded.
+        let (tool_output, _truncation) =
+            self.structured_tool_output(action, outcome, self.model_tool_result_bytes);
+        if let Ok(serialized) = serde_json::to_string(&tool_output) {
+            event.payload["tool_output_bytes"] = json!(serialized.len());
+        }
         match cpu_time {
             Some(duration) => {
                 event.payload["cpu_time_ns"] =
@@ -8385,12 +8509,8 @@ impl FileChatHistoryStore {
         before_ms: Option<i64>,
         session_scope: Option<&str>,
     ) -> std::io::Result<Vec<RawChatHistoryRecord>> {
-        let mut rows = self.query_unlocked(query, 50, after_ms, before_ms)?;
-        if let Some(session_id) = session_scope {
-            rows.retain(|record| record.session == session_id);
-        }
-        rows.truncate(limit.clamp(1, 50));
-        Ok(rows)
+        let rows = self.query_unlocked(query, 50, after_ms, before_ms, session_scope)?;
+        Ok(rows.into_iter().take(limit.clamp(1, 50)).collect())
     }
 
     fn query_unlocked(
@@ -8399,10 +8519,16 @@ impl FileChatHistoryStore {
         limit: usize,
         after_ms: Option<i64>,
         before_ms: Option<i64>,
+        session: Option<&str>,
     ) -> std::io::Result<Vec<RawChatHistoryRecord>> {
         let terms = search_terms(query);
         let mut rows = self.read_all_unlocked()?;
         rows.retain(|record| time_in_window(record.started_at_ms, after_ms, before_ms));
+        if let Some(session_id) = session {
+            // Filter by session before the newest-first truncation so a busy
+            // sibling session cannot crowd out this session's newest records.
+            rows.retain(|record| record.session == session_id);
+        }
         if !terms.is_empty() {
             rows.retain(|record| chat_record_matches(record, &terms));
         }
@@ -8421,7 +8547,7 @@ impl FileChatHistoryStore {
     ) -> Result<usize, String> {
         let clean_id = id.trim();
         let targets = if clean_id.is_empty() {
-            self.query_unlocked(query, limit, after_ms, before_ms)
+            self.query_unlocked(query, limit, after_ms, before_ms, None)
                 .map_err(|_| "chat_history_read_failed".to_string())?
                 .into_iter()
                 .map(|record| record.turn_id)
@@ -8495,6 +8621,7 @@ impl FileChatHistoryStore {
                                 .to_string(),
                             turn_id: turn_id.to_string(),
                             started_at_ms: turn_id_millis(turn_id)
+                                .or_else(|| value.get("time_ms").and_then(Value::as_i64))
                                 .or_else(|| value.get("created_at").and_then(Value::as_i64))
                                 .unwrap_or_default(),
                             user_input: user_input.to_string(),
@@ -8523,6 +8650,7 @@ impl FileChatHistoryStore {
                                     .to_string(),
                                 turn_id: turn_id.to_string(),
                                 started_at_ms: turn_id_millis(turn_id)
+                                    .or_else(|| value.get("time_ms").and_then(Value::as_i64))
                                     .or_else(|| value.get("created_at").and_then(Value::as_i64))
                                     .unwrap_or_default(),
                                 user_input: String::new(),
@@ -8818,9 +8946,11 @@ fn push_search_term(token: &str, seen: &mut HashSet<String>, terms: &mut Vec<Str
 }
 
 fn turn_id_millis(turn_id: &str) -> Option<i64> {
-    turn_id
-        .strip_prefix("turn_")
-        .and_then(|value| value.parse::<i64>().ok())
+    let remainder = turn_id.strip_prefix("turn_")?;
+    // Turn ids are `turn_<start_millis>[_<sequence>]`; the optional sequence
+    // suffix must not invalidate the millisecond prefix.
+    let millis = remainder.split('_').next()?;
+    millis.parse::<i64>().ok()
 }
 
 fn chat_record_matches(record: &RawChatHistoryRecord, terms: &[String]) -> bool {

@@ -4,6 +4,7 @@ import { coalesceActionLifecycle } from "../src/view_model";
 import { reconcileSessionTimelineCache } from "../src/session_timeline_cache";
 import { requestTimelineNavigationWork } from "../src/timeline_navigation_work";
 import { streamToolHandoffIds, computeStreamRetention, summarizeConsecutiveToolActivities } from "../src/activity_groups";
+import { createComposerWriteThrough } from "../src/composer_input";
 import type { Activity, WebTurnEvent } from "../src/protocol";
 
 const guardEnabled = process.env.TIMEM_PERF_GUARD === "1";
@@ -91,6 +92,50 @@ describe("web performance guard", () => {
     expect(layoutRequests).toBe(0);
     expect(new Set(cache)).toEqual(new Set(["session-a", "session-b"]));
     assertUnder("web_scroll_and_warm_switch_50000_cycles", elapsedMs, 1_500);
+  });
+  it("absorbs a 5000-keystroke composer burst with bounded write-through commits", () => {
+    // Virtual clock: typing advances time; only the scheduler decides commits.
+    let now = 0;
+    let nextTimerId = 0;
+    const timers = new Map<number, { callback: () => void; at: number }>();
+    const schedule = (callback: () => void, delayMs: number) => {
+      nextTimerId += 1;
+      timers.set(nextTimerId, { callback, at: now + delayMs });
+      return nextTimerId;
+    };
+    const cancel = (id: number) => { timers.delete(id); };
+    let commits = 0;
+    let committed = "";
+    const writeThrough = createComposerWriteThrough({
+      commit: (text) => { commits += 1; committed = text; },
+      now: () => now,
+      schedule,
+      cancel,
+      intervalMs: 300,
+    });
+    const digits = "0123456789";
+    const started = performance.now();
+    let draft = "";
+    for (let keystroke = 0; keystroke < 5_000; keystroke += 1) {
+      draft += digits[keystroke % digits.length];
+      writeThrough.onInput(draft);
+      // Fire due virtual timers like a host event loop would.
+      while (timers.size > 0) {
+        const due = [...timers.entries()].filter(([, timer]) => timer.at <= now).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!due) break;
+        timers.delete(due[0]);
+        now = Math.max(now, due[1].at);
+        due[1].callback();
+      }
+      now += 5;
+    }
+    writeThrough.flush();
+    const elapsedMs = performance.now() - started;
+    expect(committed).toBe(draft);
+    // At most one commit per interval window plus the final flush.
+    expect(commits).toBeLessThanOrEqual(Math.ceil(25_000 / 300) + 2);
+    writeThrough.dispose();
+    assertUnder("web_composer_write_through_5000_keystrokes", elapsedMs, 1_500);
   });
 
 });

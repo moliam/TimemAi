@@ -1,7 +1,8 @@
 import { DatabaseSearch } from "./database_search_icon";
-import { createLucideIcon, Database, Eye, PenLine } from "lucide-react";
+import { CalendarClock, createLucideIcon, Database, Eye, PenLine } from "lucide-react";
 import { t } from "./i18n";
-import type { FileSelector, MemorySearchPresentation, ReadFilePresentation, RunBashEditPresentation, SelfToolPresentation } from "./tool_presentation";
+import type { FileSelector, MemorySearchPresentation, ReadFilePresentation, RunBashEditPresentation, SelfToolPresentation, TimerPresentation } from "./tool_presentation";
+import { formatTimerAt, timerDelayParts } from "./tool_presentation";
 
 const SquareText = createLucideIcon("SquareText", [
   ["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2", key: "square" }],
@@ -92,4 +93,57 @@ export function SelfToolInvocation({ operation }: { operation: SelfToolPresentat
       ? "tools.inspectRuntimeSettings"
       : "tools.inspectCurrentDirectory";
   return <span className="self-tool-preview tool-invocation-preview">{t(key)}</span>;
+}
+
+
+export function TimerToolIcon() {
+  return <span className="timer-tool-icon" title="timer"><CalendarClock size={14} aria-hidden="true" /><span className="sr-only">timer</span></span>;
+}
+
+function timerDelayLabel(afterMs: number): string {
+  const parts = timerDelayParts(afterMs);
+  switch (parts.unit) {
+    case "seconds": return t("tools.timerDelaySeconds", { value: parts.value });
+    case "minutes": return t("tools.timerDelayMinutes", { value: parts.value });
+    case "hours": return parts.minutes === 0
+      ? t("tools.timerDelayHoursWhole", { hours: parts.hours })
+      : t("tools.timerDelayHours", { hours: parts.hours, minutes: parts.minutes });
+    case "days": return parts.hours === 0
+      ? t("tools.timerDelayDaysWhole", { days: parts.days })
+      : t("tools.timerDelayDays", { days: parts.days, hours: parts.hours });
+  }
+}
+
+function timerEveryLabel(intervalMs: number): string {
+  const parts = timerDelayParts(intervalMs);
+  switch (parts.unit) {
+    case "seconds": return t("tools.timerEverySeconds", { value: parts.value });
+    case "minutes": return t("tools.timerEveryMinutes", { value: parts.value });
+    case "hours": return parts.minutes === 0
+      ? t("tools.timerEveryHoursWhole", { hours: parts.hours })
+      : t("tools.timerEveryHours", { hours: parts.hours, minutes: parts.minutes });
+    case "days": return parts.hours === 0
+      ? t("tools.timerEveryDaysWhole", { days: parts.days })
+      : t("tools.timerEveryDays", { days: parts.days, hours: parts.hours });
+  }
+}
+
+export function TimerInvocation({ timer }: { timer: TimerPresentation }) {
+  if (timer.kind === "delete")
+    return <span className="timer-tool-preview tool-invocation-preview" title={timer.name}>
+      {t("tools.timerDelete")}：{timer.name}
+    </span>;
+  const name = timer.name ? `（${timer.name}）` : "";
+  const mode = timer.kind === "new_once" ? t("tools.timerOnce") : t("tools.timerRepeat");
+  const schedule = timer.kind === "new_once"
+    ? timer.afterMs !== undefined
+      ? timerDelayLabel(timer.afterMs)
+      : t("tools.timerAtTime", { time: formatTimerAt(timer.at ?? "") })
+    : timerEveryLabel(timer.intervalMs);
+  return <span
+    className="timer-tool-preview tool-invocation-preview"
+    title={[`${t("tools.timerNew")}${name}，${mode}，${schedule}`, `${t("tools.timerTask")}: ${timer.prompt}`].join("\n")}
+  >
+    {t("tools.timerNew")}{name}，{mode}，{schedule}，{t("tools.timerTask")}: {timer.prompt}
+  </span>;
 }

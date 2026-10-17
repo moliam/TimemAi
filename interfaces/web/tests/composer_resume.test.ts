@@ -16,7 +16,7 @@ describe("composer direct resume", () => {
     expect(source).toContain('window.confirm(t("composer.emptyContinueConfirm"))');
     expect(zh.composer.emptyContinueConfirm).toBe("未输入内容，是否让Timem直接继续");
     expect(source).toMatch(
-      /activeSession\.state !== "working" && !draft\.trim\(\)[\s\S]*onSendForSession\([\s\S]*clientId\("resume"\)[\s\S]*true,\s*true,/,
+      /activeSession\.state !== "working" && !liveDraft\.trim\(\)[\s\S]*onSendForSession\([\s\S]*clientId\("resume"\)[\s\S]*true,\s*true,/,
     );
     expect(source).not.toMatch(
       /className="send-button"[\s\S]{0,500}!hasDraftText/,

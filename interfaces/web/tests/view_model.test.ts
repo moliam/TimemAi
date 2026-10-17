@@ -14,6 +14,8 @@ import {
 import {
   activeModelRetryStatus,
   activityFromTopic,
+  completionStopReasonText,
+  repairIssueText,
   applySessionRuntimeProfile,
   applyTurnProjection,
   appendActivityToCurrentTurn,
@@ -26,6 +28,7 @@ import {
   clearDecisionsForWorker,
   coalesceActionLifecycle,
   compareTurnTimelineItems,
+  parseTimerEntryText,
   compareTurnStreamItems,
   composerPrimaryAction,
   composerSendDecision,
@@ -3302,6 +3305,57 @@ describe("web topic view model", () => {
     expect(activeModelRetryStatus(completed)).toBeNull();
   });
 
+  it("keeps protocol-repair status visible across the repair retry model request", () => {
+    const repairWait = turn("repair-wait", "working");
+    repairWait.events = [
+      {
+        event_id: "repair",
+        source: "core_topic",
+        created_at_ms: 2,
+        payload: topic("core.model.repair", {
+          attempt: 1,
+          max_attempts: 2,
+          issue: "truncated_model_output",
+        }) as unknown as Record<string, unknown>,
+      },
+      {
+        event_id: "next-request",
+        source: "worker_activity",
+        created_at_ms: 3,
+        payload: { kind: "model_request", round: 2 },
+      },
+    ];
+    expect(activeModelRetryStatus(repairWait)).toMatchObject({
+      kind: "retrying",
+      progress: "1/2",
+    });
+
+    const superseded = turn("superseded", "working");
+    superseded.events = [
+      ...repairWait.events,
+      {
+        event_id: "response",
+        source: "worker_activity",
+        created_at_ms: 4,
+        payload: { kind: "model_response", round: 2 },
+      },
+    ];
+    expect(activeModelRetryStatus(superseded)).toBeNull();
+  });
+
+  it("explains terminal stop reasons and repair issues in the user language", () => {
+    expect(completionStopReasonText("ProtocolRepairFailed")).toBe("协议修复失败");
+    expect(completionStopReasonText("ModelError")).toBe("模型请求失败");
+    expect(completionStopReasonText("CancelledByUser")).toBe("已取消");
+    expect(completionStopReasonText("turn_finished")).toBe("已完成");
+    expect(completionStopReasonText("SomeNewReason")).toBe("SomeNewReason");
+
+    expect(repairIssueText("truncated_model_output")).toContain("输出上限");
+    expect(repairIssueText("missing_response_root")).toContain("response 根节点");
+    expect(repairIssueText("unknown_issue_x")).toBe("unknown_issue_x");
+    expect(repairIssueText("")).toContain("模型回复不符合当前协议要求");
+  });
+
   it("renders model free talk verbatim without an invented completion label", () => {
     const activity = activityFromTopic(
       topic("core.model.response", {
@@ -4782,5 +4836,110 @@ describe("sessionContextCompressPending", () => {
       turns: [stale],
     };
     expect(sessionContextCompressPending(target)).toBe(false);
+  });
+});
+
+describe("tool result size badge", () => {
+  it("maps finish-event tool_output_bytes and preserves it through start/finish pairing", () => {
+    expect(
+      activityFromTopic(
+        topic("core.action", {
+          action: "readfile",
+          status: "completed",
+          event: "finish",
+          input: { path: "main.rs" },
+          tool_output_bytes: 4096,
+        }),
+      ),
+    ).toMatchObject({ tool_output_bytes: 4096 });
+
+    // Non-numeric noise maps to an undefined badge rather than being coerced.
+    expect(
+      activityFromTopic(
+        topic("core.action", {
+          action: "readfile",
+          status: "completed",
+          event: "finish",
+          input: { path: "main.rs" },
+          tool_output_bytes: "4096",
+        }),
+      )?.tool_output_bytes,
+    ).toBeUndefined();
+
+    // The start event carries no bytes; the settled row must keep the value
+    // reported by the paired finish event after lifecycle coalescing.
+    const startEvent: WebTurnEvent = {
+      event_id: "s1",
+      source: "core_topic",
+      created_at_ms: 100,
+      payload: {
+        session_id: "session_1",
+        topic: { name: "core.action", attributes: { event: "start" } },
+        state: { name: "running" },
+        payload: {
+          action: "readfile",
+          action_id: "call-1",
+          event: "start",
+          status: "running",
+          input: { path: "main.rs" },
+        },
+      },
+    };
+    const finishEvent: WebTurnEvent = {
+      event_id: "f1",
+      source: "core_topic",
+      created_at_ms: 200,
+      payload: {
+        session_id: "session_1",
+        topic: { name: "core.action", attributes: { event: "finish" } },
+        state: { name: "running" },
+        payload: {
+          action: "readfile",
+          action_id: "call-1",
+          event: "finish",
+          status: "completed",
+          input: { path: "main.rs" },
+          tool_output_bytes: 1536,
+        },
+      },
+    };
+    const coalesced = coalesceActionLifecycle([startEvent, finishEvent]);
+    expect(coalesced).toHaveLength(1);
+    expect(coalesced[0].payload.payload).toMatchObject({
+      action: "readfile",
+      tool_output_bytes: 1536,
+    });
+    expect(
+      activityFromTopic(
+        coalesced[0].payload as unknown as CoreTopicEvent,
+      ),
+    ).toMatchObject({ tool_output_bytes: 1536 });
+  });
+});
+
+
+describe("parseTimerEntryText", () => {
+  it("splits the host timer prefix into name and prompt", () => {
+    expect(parseTimerEntryText("[timer:say_hello] 请向用户说一句你好")).toEqual({
+      name: "say_hello",
+      prompt: "请向用户说一句你好",
+    });
+  });
+
+  it("keeps prompt-only timer text unchanged", () => {
+    const text = "每日提醒：检查长构建结果并汇报。";
+    expect(parseTimerEntryText(text)).toEqual({ name: null, prompt: text });
+  });
+
+  it("falls back to no name for an empty timer name", () => {
+    expect(parseTimerEntryText("[timer:] 剩余内容")).toEqual({
+      name: null,
+      prompt: "剩余内容",
+    });
+  });
+
+  it("does not strip a prefix that is not at the start", () => {
+    const text = "正文 [timer:late] 不是前缀";
+    expect(parseTimerEntryText(text)).toEqual({ name: null, prompt: text });
   });
 });

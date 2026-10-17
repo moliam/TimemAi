@@ -196,8 +196,28 @@ export type Session = {
   message_queue: MessageQueueProjection;
   /** Active long-task memo text from the core.memo topic. */
   active_memo?: string | null;
+  /** Host-authoritative scheduled timers (user + model created). */
+  timers?: TimerInfo[];
   /** Wall-clock ms of the latest explicit context clear. */
   context_cleared_at_ms?: number | null;
+};
+
+/** Flattened host timer projection (Core TimerSpec + host scheduling state). */
+export type TimerInfo = {
+  timer_id: string;
+  name: string;
+  prompt: string;
+  mode: "once" | "repeat" | string;
+  after_ms?: number | null;
+  at?: string | null;
+  interval_ms?: number | null;
+  created_by: "user" | "model" | string;
+  created_at_ms: number;
+  enabled: boolean;
+  next_fire_ms: number;
+  last_fired_ms?: number | null;
+  /** Why the runtime parked (auto-disabled) this timer; absent when user-paused. */
+  parked_reason?: string | null;
 };
 
 export type McpTransport =
@@ -339,7 +359,10 @@ export type Activity = {
   self_tool?: import("./tool_presentation").SelfToolPresentation;
   readfile?: import("./tool_presentation").ReadFilePresentation;
   run_bash_edit?: import("./tool_presentation").RunBashEditPresentation;
+  timer?: import("./tool_presentation").TimerPresentation;
   elapsed_ms?: number;
+  /** Bytes of the tool's own result output injected into the next prompt (runtime metadata excluded). */
+  tool_output_bytes?: number;
   timeout_ms?: number;
   loop_timeout_ms?: number;
   interval_ms?: number;
@@ -477,6 +500,7 @@ export type Snapshot = {
       claude_codex_tool_discovery: boolean;
       model_tool_result_bytes: ModelToolResultBytes;
       context_compress_threshold_percent: ContextCompressThresholdPercent;
+      restore_prompt_context_on_startup: boolean;
     };
     runtime_options: Array<{
       key: string;
@@ -515,6 +539,11 @@ export type WireEvent =
       type: "session_memo_updated";
       session_id: string;
       memo_text: string | null;
+    }
+  | {
+      type: "timers_updated";
+      session_id: string;
+      timers: TimerInfo[];
     }
   | {
       type: "session_context_cleared";
@@ -649,6 +678,7 @@ export type WireEvent =
       claude_codex_tool_discovery: boolean;
       model_tool_result_bytes: ModelToolResultBytes;
       context_compress_threshold_percent: ContextCompressThresholdPercent;
+      restore_prompt_context_on_startup: boolean;
     }
   | { type: "mem_temporary_items"; items: MemTemporaryItem[]; error?: string }
   | { type: "file_uploaded"; session_id: string; file: Attachment }
@@ -890,6 +920,29 @@ export type ClientCommand =
   | { type: "model_endpoint_share_export"; request_id: string; endpoint_id: string; basic: boolean; advanced: boolean; personal: boolean }
   | { type: "model_endpoint_share_import"; request_id: string; data: string }
   | { type: "model_endpoint_secret_reveal"; endpoint_id: string }
+  | {
+      type: "timer_create";
+      session_id: string;
+      prompt: string;
+      name?: string;
+      mode?: "once" | "repeat";
+      after_ms?: number;
+      at?: string;
+      interval_ms?: number;
+    }
+  | { type: "timer_delete"; session_id: string; timer_id: string }
+  | {
+      type: "timer_toggle";
+      session_id: string;
+      timer_id: string;
+      enabled: boolean;
+    }
+  | {
+      type: "timer_update";
+      session_id: string;
+      timer_id: string;
+      prompt: string;
+    }
   | { type: "mcp_server_upsert"; session_id: string; config: McpServerConfig }
   | { type: "mcp_server_delete"; server_id: string }
   | {
@@ -913,6 +966,7 @@ export type ClientCommand =
       type: "system_context_compress_threshold_update";
       percent: ContextCompressThresholdPercent;
     }
+  | { type: "system_restore_prompt_context_on_startup_update"; enabled: boolean }
   | { type: "mem_temporary_items_list" }
   | { type: "mem_temporary_items_delete"; ids: string[] }
   | {

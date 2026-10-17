@@ -30,17 +30,17 @@ describe("header endpoint selector", () => {
 
   it("uses a deep borderless surface with the same height as the ctx/cache readout", () => {
     expect(styles).toContain(
-      ".header-context-actions { align-self: center; border-left: 1px solid #2a3944; padding-left: 12px; margin-left: 2px; height: 38px; }",
+      ".header-context-actions { align-self: center; border-left: 1px solid #2a3944; padding-left: 12px; margin-left: 2px; height: 34px; }",
     );
     expect(styles).toContain(
       ':root[data-theme="light"] .header-context-actions { border-left-color: #ccd9dd; }',
     );
-    expect(styles).toContain(".header-context { min-height: 38px; }");
+    expect(styles).toContain(".header-context { min-height: 34px; }");
     expect(styles).toMatch(
       /\.header-session-cluster \.header-model \{[\s\S]*font-size: 13px;/,
     );
     expect(styles).toMatch(
-      /\.header-session-cluster \.header-model \{[\s\S]*height: 38px;[\s\S]*border: 0;[\s\S]*background: #244a40;[\s\S]*color: #fff;[\s\S]*box-shadow: none;/,
+      /\.header-session-cluster \.header-model \{[\s\S]*height: 34px;[\s\S]*border: 0;[\s\S]*background: #244a40;[\s\S]*color: #fff;[\s\S]*box-shadow: none;/,
     );
     expect(styles).toMatch(
       /:root\[data-theme="light"\] \.header-session-cluster \.header-model \{[\s\S]*border: 0;[\s\S]*background: #315f52;[\s\S]*color: #fff;[\s\S]*box-shadow: none;/,
