@@ -60,7 +60,8 @@ describe("fixed composer scroll ownership", () => {
       source.indexOf("const attachComposerTextarea = useCallback"),
       source.indexOf("const [composerExpanded"),
     );
-    expect(source).toContain("ref={attachComposerTextarea}");
+    expect(source).toContain("attachRef={attachComposerTextarea}");
+    expect(source).toContain("ref={attachRef}");
     expect(attachment).toContain('textarea.addEventListener("wheel"');
     expect(attachment).toContain("passive: false");
     expect(attachment).toContain("canScrollInDirection(textarea, deltaY)");
