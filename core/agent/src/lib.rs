@@ -8509,12 +8509,8 @@ impl FileChatHistoryStore {
         before_ms: Option<i64>,
         session_scope: Option<&str>,
     ) -> std::io::Result<Vec<RawChatHistoryRecord>> {
-        let mut rows = self.query_unlocked(query, 50, after_ms, before_ms)?;
-        if let Some(session_id) = session_scope {
-            rows.retain(|record| record.session == session_id);
-        }
-        rows.truncate(limit.clamp(1, 50));
-        Ok(rows)
+        let rows = self.query_unlocked(query, 50, after_ms, before_ms, session_scope)?;
+        Ok(rows.into_iter().take(limit.clamp(1, 50)).collect())
     }
 
     fn query_unlocked(
@@ -8523,10 +8519,16 @@ impl FileChatHistoryStore {
         limit: usize,
         after_ms: Option<i64>,
         before_ms: Option<i64>,
+        session: Option<&str>,
     ) -> std::io::Result<Vec<RawChatHistoryRecord>> {
         let terms = search_terms(query);
         let mut rows = self.read_all_unlocked()?;
         rows.retain(|record| time_in_window(record.started_at_ms, after_ms, before_ms));
+        if let Some(session_id) = session {
+            // Filter by session before the newest-first truncation so a busy
+            // sibling session cannot crowd out this session's newest records.
+            rows.retain(|record| record.session == session_id);
+        }
         if !terms.is_empty() {
             rows.retain(|record| chat_record_matches(record, &terms));
         }
@@ -8545,7 +8547,7 @@ impl FileChatHistoryStore {
     ) -> Result<usize, String> {
         let clean_id = id.trim();
         let targets = if clean_id.is_empty() {
-            self.query_unlocked(query, limit, after_ms, before_ms)
+            self.query_unlocked(query, limit, after_ms, before_ms, None)
                 .map_err(|_| "chat_history_read_failed".to_string())?
                 .into_iter()
                 .map(|record| record.turn_id)
@@ -8619,6 +8621,7 @@ impl FileChatHistoryStore {
                                 .to_string(),
                             turn_id: turn_id.to_string(),
                             started_at_ms: turn_id_millis(turn_id)
+                                .or_else(|| value.get("time_ms").and_then(Value::as_i64))
                                 .or_else(|| value.get("created_at").and_then(Value::as_i64))
                                 .unwrap_or_default(),
                             user_input: user_input.to_string(),
@@ -8647,6 +8650,7 @@ impl FileChatHistoryStore {
                                     .to_string(),
                                 turn_id: turn_id.to_string(),
                                 started_at_ms: turn_id_millis(turn_id)
+                                    .or_else(|| value.get("time_ms").and_then(Value::as_i64))
                                     .or_else(|| value.get("created_at").and_then(Value::as_i64))
                                     .unwrap_or_default(),
                                 user_input: String::new(),
@@ -8942,9 +8946,11 @@ fn push_search_term(token: &str, seen: &mut HashSet<String>, terms: &mut Vec<Str
 }
 
 fn turn_id_millis(turn_id: &str) -> Option<i64> {
-    turn_id
-        .strip_prefix("turn_")
-        .and_then(|value| value.parse::<i64>().ok())
+    let remainder = turn_id.strip_prefix("turn_")?;
+    // Turn ids are `turn_<start_millis>[_<sequence>]`; the optional sequence
+    // suffix must not invalidate the millisecond prefix.
+    let millis = remainder.split('_').next()?;
+    millis.parse::<i64>().ok()
 }
 
 fn chat_record_matches(record: &RawChatHistoryRecord, terms: &[String]) -> bool {
