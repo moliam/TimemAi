@@ -840,3 +840,9 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 焦点契约（验收审计补充）：展开进入「工作内容」输入框、收起（含创建成功自动收起）焦点回到「新建定时」按钮，首挂载与会话切换重置不抢焦点。
 - 测试看护：timer-ui-acceptance e2e 扩展——初始折叠与 aria-expanded=false、展开后出现「工作内容」标签且焦点落入输入框、创建成功表单收起、收起丢弃草稿且重开为空且焦点回按钮、timer 消息与手动消息计算背景色区分且为 rgba(59,130,246,*)、明暗主题 1440/390 布局无溢出；夹具补普通 task turn 与 timer-fired turn 对照。
 - 验证：vitest 733 全绿；timer e2e 全绿；module_boundary/test_contract/diff/performance_guard 通过；dist 重建。
+
+## 2026-10 布局密度收紧（头部与会话列表）
+
+- 背景：统一收紧竖向节奏，减少零散留白——聊天头部由 38px 降到 34px（ctx/cache 读数、endpoint 选择器、模型胶囊同步），侧栏会话行由 26px 降到 24px；会话列表/分组标题/identity 元数据等 gap 与 margin 同步微调（session-group-heading margin 1px 2px 0、session-group-list padding 0、header-context gap 2px、model-meta gap 1px 等）。纯样式改动，无逻辑与结构变化。
+- 测试看护：endpoint_header_button.test.ts 与 session_groups_ui.test.ts 的样式断言同步到 34px/24px 新值。
+- 验证：vitest 734 全绿；dist 重建（仅 index css/js 产物变化）；git diff --check 通过。
