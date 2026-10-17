@@ -877,3 +877,16 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 背景：时间线中用户补充条目此前渲染 💡 + `[用户补充]` 文字标签，占位大且与系统提示灯泡语义混淆；用户要求换 lucide `User` 图标并去掉标签。
 - 改动：`main.tsx` 的 `user_supplement` 渲染分支 activity-mark 改为 lucide `User`（size 13），移除标题行；`supplementItems` 不再注入 `composer.supplementTitle`（两份 i18n 键与 `.user-supplement-line strong` 死样式规则同步清理），条目仅保留补充正文。
 - 测试看护：既有 `.user-supplement` 相关断言仅检查正文文本与气泡样式（stream-preview-acceptance），改动后全套 stream-preview-suite 24 场景 PASS 复核通过；activity_groups / i18n 单测绿。
+
+
+## 2026-10 raw_chat 历史搜索时间戳/排序/会话隔离修复
+
+- 背景：产品验收发现 `memmgr raw_chat` 搜索所有记录 `created_at_ms=0`——真实 turn id 是 `turn_<millis>_<seq>` 而 `turn_id_millis` 只认纯数字后缀；回退字段 `created_at` 实际不存在（审计层写入的是 `time_ms`）。连锁后果：时间窗过滤失效、最新优先排序退化为文件序（最旧优先）、繁忙兄弟会话可把目标会话挤出有界窗口。
+- 改动：`core/agent/src/lib.rs`——`turn_id_millis` 解析序列后缀；回退链补 `time_ms`（保留 `created_at` 兼容旧数据）；会话过滤移到截断之前（delete 路径保持全局语义）。
+- 测试看护：`capability_tool_memmgr_tests.rs` 新增 3 组——序列 id 时间戳与 time_ms 回退、最新优先排序 + after/before 窗口、55 条繁忙兄弟会话噪声下 session 作用域存活。agent_core lib 全量 882 过。
+
+## 2026-10 命令工具子进程先退出不再误报输入失败
+
+- 背景：远端 ubuntu CI 暴露：不读 stdin 的快速命令工具脚本（`printf && exit 0`）在共享 runner 调度抖动下被间歇性误报 `command_input_failed: child exited before input delivery completed`。根因：executor 主循环先 `try_wait` 后 `try_write`，父线程被延迟调度时子进程已退出而 payload 尚未写完——此刻 payload 已无人可读，子进程自身退出状态与捕获输出才是权威结果。同根因第二表现面：子进程退出后写管道收 EPIPE 走写错误分支同样误报。
+- 改动：`core/agent/src/executor.rs`——退出早于投递完成时按子进程退出状态正常渲染（不读 payload 就干活的工具是合法行为）；写错误仅在子进程仍存活时判为 `command_input_failed`（`closed_stdin` 场景不变）；已退出则收敛到权威 wait 结果。
+- 测试看护：`executor_tests.rs` 新增 1MB payload + 不读 stdin 立即退出脚本，两种交错（退出先观察 / EPIPE 先到）都收敛 `status: 0` 且含 `still_alive`；`closed_stdin`/sigsegv/超时守护场景全部复核通过；agent_core lib 全量 883 过。
