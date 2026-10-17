@@ -789,6 +789,11 @@ button:disabled { cursor: not-allowed; }
 .turn-user-entry { padding: 10px 16px; color: #ececec; }
 .turn-user-entry + .turn-user-entry { border-color: #444; }
 .turn-user-entry.approval { background: #2c2c2c; }
+.timer-entry-head { display: flex; align-items: center; gap: 7px; margin: 0 0 5px; }
+.timer-entry-head > span { margin: 0; }
+.turn-user-entry .timer-entry-badge { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; border-radius: 5px; background: #2563eb; color: #fff; box-shadow: inset 0 -1px 0 #ffffff26; }
+.timer-entry-badge svg { display: block; }
+.turn-user-entry .timer-entry-name { min-width: 0; overflow: hidden; color: #dbe7f5; font-size: 11px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 
 .turn-assistant-frame {
   overflow: visible;
@@ -953,6 +958,8 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .turn-user-entry { color: #202020; }
 :root[data-theme="light"] .turn-user-entry + .turn-user-entry { border-color: #ddd; }
 :root[data-theme="light"] .turn-user-entry.approval { background: #eee; }
+:root[data-theme="light"] .turn-user-entry .timer-entry-badge { background: #2563eb; color: #fff; }
+:root[data-theme="light"] .turn-user-entry .timer-entry-name { color: #1d4ed8; }
 :root[data-theme="light"] .turn-assistant-frame,
 :root[data-theme="light"] .turn-assistant-frame.working { border: 0; border-left: 1px solid #e2e2e2; background: transparent; }
 :root[data-theme="light"] .work-collapse-toggle { color: #777; }
@@ -1034,9 +1041,9 @@ button:disabled { cursor: not-allowed; }
 /* ToolGen is session-scoped; the side panel is a quiet repository browser, not another chat surface. */
 .toolrepo-header-button { width: auto; min-width: 42px; display: inline-flex; grid-template-columns: none; align-items: center; justify-content: center; gap: 4px; padding: 0 8px; }
 .toolrepo-header-count { min-width: 11px; color: #8f9ba2; font-size: 10px; font-weight: 700; line-height: 1; text-align: center; }
-.timer-header-button.has-timers { color: #8fc3e8; border-color: #3b5366; background: #263746; }
+.timer-header-button.has-timers { color: #fff; border-color: #2563eb; background: #2563eb; }
 .timer-header-count { min-width: 11px; color: #8f9ba2; font-size: 10px; font-weight: 700; line-height: 1; text-align: center; }
-.timer-header-button.has-timers .timer-header-count { color: #8fc3e8; }
+.timer-header-button.has-timers .timer-header-count { color: #fff; }
 .timer-panel { min-width: 0; display: flex; flex-direction: column; border-left: 1px solid #25303c; background: #10171f; }
 .timer-panel header { padding: 18px 16px 15px; display: flex; justify-content: space-between; border-bottom: 1px solid #25303c; }
 .timer-list { overflow-y: auto; padding: 10px; display: grid; gap: 8px; align-content: start; }
@@ -1097,8 +1104,8 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .timer-edit:hover { background: #e3edf0; color: #1d6a58; }
 :root[data-theme="light"] .timer-item-top { color: #2c3a44; }
 :root[data-theme="light"] .timer-item-prompt { color: #46565f; }
-:root[data-theme="light"] .timer-header-button.has-timers { color: #286792; border-color: #b8d8f2; background: #d9edff; }
-:root[data-theme="light"] .timer-header-button.has-timers .timer-header-count { color: #286792; }
+:root[data-theme="light"] .timer-header-button.has-timers { color: #fff; border-color: #2563eb; background: #2563eb; }
+:root[data-theme="light"] .timer-header-button.has-timers .timer-header-count { color: #fff; }
 :root[data-theme="light"] .timer-create-area { border-color: #d3dde2; }
 :root[data-theme="light"] .timer-create-toggle { border-color: #bfd3d8; color: #5f7480; }
 :root[data-theme="light"] .timer-create-toggle:hover { border-color: #9fb9c1; background: #eef4f6; color: #263b43; }

@@ -1154,6 +1154,20 @@ export function turnsFromHistoryRecords(
     .sort((left, right) => left.created_at_ms - right.created_at_ms);
 }
 
+/**
+ * Timer-fired turns carry the Host-authored "[timer:name] prompt" prefix in
+ * their entry text. Presentation splits it into the timer name and the bare
+ * prompt without rewriting the stored history text.
+ */
+export function parseTimerEntryText(
+  text: string,
+): { name: string | null; prompt: string } {
+  const match = /^\[timer:([^\]]*)\]\s*/.exec(text);
+  if (!match) return { name: null, prompt: text };
+  const name = match[1].trim();
+  return { name: name.length > 0 ? name : null, prompt: text.slice(match[0].length) };
+}
+
 type ChatMessageHistoryRecord = Extract<ChatHistoryRecord, { type: "message" }>;
 
 function isChatMessageHistoryRecord(

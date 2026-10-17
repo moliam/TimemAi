@@ -28,6 +28,7 @@ import {
   clearDecisionsForWorker,
   coalesceActionLifecycle,
   compareTurnTimelineItems,
+  parseTimerEntryText,
   compareTurnStreamItems,
   composerPrimaryAction,
   composerSendDecision,
@@ -4913,5 +4914,32 @@ describe("tool result size badge", () => {
         coalesced[0].payload as unknown as CoreTopicEvent,
       ),
     ).toMatchObject({ tool_output_bytes: 1536 });
+  });
+});
+
+
+describe("parseTimerEntryText", () => {
+  it("splits the host timer prefix into name and prompt", () => {
+    expect(parseTimerEntryText("[timer:say_hello] 请向用户说一句你好")).toEqual({
+      name: "say_hello",
+      prompt: "请向用户说一句你好",
+    });
+  });
+
+  it("keeps prompt-only timer text unchanged", () => {
+    const text = "每日提醒：检查长构建结果并汇报。";
+    expect(parseTimerEntryText(text)).toEqual({ name: null, prompt: text });
+  });
+
+  it("falls back to no name for an empty timer name", () => {
+    expect(parseTimerEntryText("[timer:] 剩余内容")).toEqual({
+      name: null,
+      prompt: "剩余内容",
+    });
+  });
+
+  it("does not strip a prefix that is not at the start", () => {
+    const text = "正文 [timer:late] 不是前缀";
+    expect(parseTimerEntryText(text)).toEqual({ name: null, prompt: text });
   });
 });
