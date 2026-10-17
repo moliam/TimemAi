@@ -388,15 +388,28 @@ export function releaseSessionDraftSubmission(
   return locks.current.delete(sessionId);
 }
 
+/**
+ * Prunes session drafts, but drafts restored from browser-local storage
+ * survive progressive session restore: the Host fills the session list
+ * newest-first in the background, so a missing id is not proof the session
+ * is gone. A restored draft is pruned only after its session was live once
+ * and then disappeared; drafts typed in this visit keep the immediate prune.
+ */
 export function pruneSessionDrafts(
   drafts: SessionDrafts,
   liveSessionIds: Iterable<string>,
+  restoredDraftSessionIds: ReadonlySet<string> | null = null,
+  everLiveSessionIds: ReadonlySet<string> = new Set(),
 ): SessionDrafts {
   const live = new Set(liveSessionIds);
   let changed = false;
   const next: SessionDrafts = {};
   for (const [sessionId, draft] of Object.entries(drafts)) {
-    if (live.has(sessionId)) {
+    const keep =
+      live.has(sessionId) ||
+      (restoredDraftSessionIds?.has(sessionId) === true &&
+        !everLiveSessionIds.has(sessionId));
+    if (keep) {
       next[sessionId] = draft;
     } else {
       changed = true;
