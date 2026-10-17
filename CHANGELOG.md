@@ -1,5 +1,55 @@
 # Changelog
 
+## [2.5.0] - 2026-10-18
+
+### Added
+
+- Session timers end to end: a `timer` built-in tool with authoritative host
+  scheduling, Web timer panel (create/toggle/delete with confirmation, prompt
+  clamp/expand/inline edit, fired-entry tinting and badges), terminal action
+  rendering, and user-language lifecycle rows.
+- Browser-local persistence of unsent composer drafts per Session.
+- A warning when the active endpoint cannot read image attachments, derived from
+  documented input modalities exposed by the capability catalog, covering queued
+  attachments and both themes/widths.
+- Tool result size on action finish plus compact pipe-delimited size and elapsed
+  metadata on tool rows.
+- Opt-in restore of the last shutdown's dynamic prompt context on startup, with
+  graceful degradation to history-only restore when the snapshot is unusable.
+
+### Changed
+
+- Composer keystrokes stay local behind a throttled write-through, so heavy
+  history no longer rerenders the whole thread per key; submitting inside the
+  throttle window still sends the complete live text.
+- System settings merge tool-result length and context-compression threshold
+  into one aligned card with dropdowns; Session list and chat header are denser.
+- Applying an endpoint catalog template keeps user-entered values; interruption
+  copy is localized.
+
+### Fixed
+
+- `raw_chat` history search now reports real timestamps for
+  `turn_<millis>_<sequence>` ids, restores newest-first ordering, honors
+  after/before windows, and no longer lets a busier sibling session crowd out a
+  scoped session's records.
+- A command child that exits without reading stdin is reported by its own exit
+  status instead of a spurious `command_input_failed` under scheduler jitter.
+- `task_finished` summaries stream as an optimistic preview so answers appear
+  while the turn closes; repair and error notices are explicit and visible in
+  the stream UI, and the action-result heading is reserved for real tool
+  results.
+- Browser acceptance gates are portable across remote runner hardware: startup
+  budget raised to 30s and the typing median ceiling to 120ms with unchanged
+  structural regression guards.
+
+### Compatibility
+
+- Timer prompts are the work assignment for the fired run; clients must render
+  timer lifecycle from host projections rather than inferring state locally.
+- See [2.5.0 release notes](docs/release-notes-v2.5.0.md) for highlights,
+  upgrade guidance, and platform boundaries.
+
 ## [2.4.0] - 2026-10-09
 
 ### Added
