@@ -122,7 +122,6 @@ export const zh = {
     sendFailed: "发送失败，请重试",
     supplementTag: "[补充]",
     usingRoles: "本条将使用",
-    supplementTitle: "[用户补充]",
     messageAria: "Message Timem",
     sendNow: "立即",
   },

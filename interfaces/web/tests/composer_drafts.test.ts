@@ -165,7 +165,7 @@ describe("composer draft wiring", () => {
   it("wires the fullscreen composer editor for write-through and explicit discard", () => {
     expect(source).toContain("onLiveCommit={commitComposerExpandedDraft}");
     expect(source).toContain("onDiscard={discardComposerExpandedDraft}");
-    expect(source).toContain("composerExpandedBaseRef.current = draft");
+    expect(source).toContain("composerExpandedBaseRef.current = composerLiveTextRef.current");
     // The pending write-through timer must not be reset by newer keystrokes.
     expect(source).toContain("liveCommitTimerRef.current !== null) return;");
   });

@@ -864,3 +864,16 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 边界：纯展示便利，非 command outbox，绝不重放命令；多标签页 last-writer-wins（无 storage 事件同步，已知边界）。
 - 测试看护：`composer_drafts.test.ts` 单测（往返、上限裁剪、TTL、坏数据、存储失败、超长保留旧副本、接线断言）；新增真实 Chrome e2e `composer-draft-acceptance.mjs`（输入→防抖落盘、reload 恢复、提交清空且 turn_submit 命令送达、再 reload 保持空）并入 `test:browser`。
 - 验证：vitest 749 全绿（53 文件）；composer draft e2e 全过；dist 重建；module_boundary/test_contract 检查通过。
+
+## 2026-10 Composer 击键本地化（写通节流）
+
+- 背景：主 composer 每次击键都 `setDraftsBySession`（Thread 级 state），导致整个超大 Thread 组件树逐键重渲染，重历史下输入肉眼可见地卡。
+- 模块：新增 `src/composer_input.ts`——`createComposerWriteThrough` 300ms 节流写回：pending 定时不被新键击重置（连续输入滞后上界一个窗口），`flush` 立即提交最新文本，`reset` 丢弃挂起（权威值覆盖、会话切换、提交后防串写），`dispose` 卸载清理。`main.tsx` 中 `ComposerField`（memo，本地 useState）承载击键；`composerLiveTextRef` 每键更新实时文本，提交路径读它——节流窗口内 Enter/点击发送也保证发送可见全文；`lastCommitted` 区分自身写回回显与权威外部值，避免回显覆盖更新的本地键击；全屏编辑器「完成/放弃」走 `applyAuthoritativeComposerText`（先 reset 挂起写回再权威写 live ref + draft state）。
+- 测试看护：`composer_input.test.ts` 单测 4 组（连续输入聚合一次提交、flush 立即写、reset 丢弃不写回、pending 不被新键击重置）；performance_guard 新增 5000 键虚拟时钟实验——断言提交次数 ≤ 时间窗数 + 2、实测 2.11ms；新增真实 Chrome e2e `composer-input-acceptance.mjs`——20 turn×8KB 重历史快照下逐键输入 120 字符，断言逐键 rAF 延迟 median ≤40ms、重帧（≥150ms）占比 ≤20%、总时长有界，并在节流窗口内立即点击发送断言 `turn_submit` 命令携带完整实时文本；已挂入 `test:browser` 链。
+- 验证：vitest 全量绿；stream-preview-suite 24 场景 PASS；composer-draft / composer-input e2e 过；TIMEM_PERF_GUARD=1 perf guard 过；dist 重建；git diff --check 通过。
+
+## 2026-10 用户补充条目改用 lucide User 图标
+
+- 背景：时间线中用户补充条目此前渲染 💡 + `[用户补充]` 文字标签，占位大且与系统提示灯泡语义混淆；用户要求换 lucide `User` 图标并去掉标签。
+- 改动：`main.tsx` 的 `user_supplement` 渲染分支 activity-mark 改为 lucide `User`（size 13），移除标题行；`supplementItems` 不再注入 `composer.supplementTitle`（两份 i18n 键与 `.user-supplement-line strong` 死样式规则同步清理），条目仅保留补充正文。
+- 测试看护：既有 `.user-supplement` 相关断言仅检查正文文本与气泡样式（stream-preview-acceptance），改动后全套 stream-preview-suite 24 场景 PASS 复核通过；activity_groups / i18n 单测绿。

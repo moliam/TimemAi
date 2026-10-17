@@ -125,7 +125,6 @@ export const en: Strings = {
     sendFailed: "Sending failed; please retry",
     supplementTag: "[Supplement]",
     usingRoles: "This message will use",
-    supplementTitle: "[User supplement]",
     messageAria: "Message Timem",
     sendNow: "Send now",
   },

@@ -2,6 +2,7 @@ import { MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, Rea
 import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
 import { initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
 import { persistComposerDraftTexts, readComposerDraftTexts } from "./composer_drafts";
+import { createComposerWriteThrough, type ComposerWriteThrough } from "./composer_input";
 import type { CatalogModel } from "./model_endpoints";
 import { applyBetaDebugDefault } from "./beta_preferences";
 import { StreamUiModeSetting, useStreamUiMode, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
@@ -89,6 +90,7 @@ import {
   SquareTerminal,
   TriangleAlert,
   Trash2,
+  User,
   Wrench,
   X,
   AlarmClock,
@@ -5960,6 +5962,111 @@ function ExpandedTextEditor({
   );
 }
 
+const ComposerField = memo(function ComposerField({
+  sessionId,
+  value,
+  disabled,
+  placeholder,
+  ariaLabel,
+  hint,
+  hintId,
+  expandLabel,
+  attachRef,
+  onTyping,
+  lastCommitted,
+  onPasteImages,
+  onEnter,
+  onCtrlEnter,
+  onExpand,
+}: {
+  sessionId: string | undefined;
+  value: string;
+  disabled: boolean;
+  placeholder: string;
+  ariaLabel: string;
+  hint: string;
+  hintId: string;
+  expandLabel: string;
+  attachRef: (textarea: HTMLTextAreaElement | null) => void;
+  onTyping: (text: string) => void;
+  lastCommitted: string | null;
+  onPasteImages: (files: File[]) => void;
+  onEnter: () => void;
+  onCtrlEnter: () => void;
+  onExpand: () => void;
+}) {
+  // High-frequency typing stays local to this field; the thread-level draft
+  // state is only updated through the throttled write-through, so one
+  // keystroke no longer rerenders the whole chat UI.
+  const [text, setText] = useState(value);
+  const syncedExternalRef = useRef(value);
+  const sessionRef = useRef(sessionId);
+  if (sessionId !== sessionRef.current) {
+    // Session switch: adopt the new session draft verbatim, even if it
+    // coincidentally equals the previous session's last committed text.
+    sessionRef.current = sessionId;
+    syncedExternalRef.current = value;
+    setText(value);
+  } else if (value !== syncedExternalRef.current) {
+    if (value !== lastCommitted) {
+      // Authoritative external change (submit cleared, rejection refilled,
+      // draft restore, session switch): adopt it verbatim.
+      setText(value);
+    }
+    // Otherwise this is our own throttled write-through echo arriving while
+    // newer local typing may exist: keep the local text.
+    syncedExternalRef.current = value;
+  }
+  return (
+    <div className="expandable-text-field composer-text-field">
+      <textarea
+        ref={attachRef}
+        value={text}
+        placeholder={placeholder}
+        aria-label={ariaLabel}
+        aria-describedby={hintId}
+        title={hint}
+        disabled={disabled}
+        onChange={(event) => {
+          setText(event.target.value);
+          onTyping(event.target.value);
+        }}
+        onPaste={(event) => {
+          const images = clipboardImageFiles(
+            Array.from(event.clipboardData?.items ?? []),
+          );
+          if (images.length === 0) return;
+          event.preventDefault();
+          onPasteImages(images);
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" || event.nativeEvent.isComposing)
+            return;
+          if (event.metaKey || event.ctrlKey) {
+            event.preventDefault();
+            onCtrlEnter();
+            return;
+          }
+          if (!event.shiftKey) {
+            event.preventDefault();
+            onEnter();
+          }
+        }}
+      />
+      <button
+        type="button"
+        className="text-field-expand"
+        title={expandLabel}
+        aria-label={expandLabel}
+        disabled={disabled}
+        onClick={onExpand}
+      >
+        <Maximize2 size={14} />
+      </button>
+    </div>
+  );
+});
+
 function WorkerRolePanel({
   session,
   library,
@@ -8651,26 +8758,71 @@ function TimemThread({
     !!activeSession && !activeSession.message_queue.auto_send_enabled;
   const draft = draftForSession(draftsBySession, activeSessionId);
 
+  // Live composer text: updated on every keystroke without any Thread-level
+  // rerender. Submit paths read this so Enter always sends exactly what is
+  // visible in the field, even while the throttled write-through is pending.
+  const composerLiveTextRef = useRef(draft);
+  const activeSessionIdRef = useRef(activeSessionId);
+  activeSessionIdRef.current = activeSessionId;
+  const composerWriteThroughTextRef = useRef<string | null>(null);
+  const commitComposerText = useCallback((text: string) => {
+    composerWriteThroughTextRef.current = text;
+    setDraftsBySession((current) =>
+      setSessionDraft(current, activeSessionIdRef.current, text),
+    );
+  }, []);
+  const composerWriteThroughRef = useRef<ComposerWriteThrough | null>(null);
+  if (composerWriteThroughRef.current === null) {
+    composerWriteThroughRef.current = createComposerWriteThrough({
+      commit: commitComposerText,
+      now: () => Date.now(),
+      schedule: (callback, delayMs) => window.setTimeout(callback, delayMs),
+      cancel: (id) => window.clearTimeout(id),
+      intervalMs: 300,
+    });
+  }
+  useEffect(
+    () => () => composerWriteThroughRef.current?.dispose(),
+    [],
+  );
+  const handleComposerTyping = useCallback((text: string) => {
+    composerLiveTextRef.current = text;
+    composerWriteThroughRef.current?.onInput(text);
+  }, []);
+  useEffect(() => {
+    // Adopt authoritative draft changes (restore, rejection refill, submit
+    // clear) into the live-text ref, but skip our own write-through echo: the
+    // local field may already hold newer keystrokes than the committed copy.
+    if (draft !== composerWriteThroughTextRef.current)
+      composerLiveTextRef.current = draft;
+  }, [draft]);
+  useEffect(() => {
+    // A pending write-through belongs to the session it was typed in; it must
+    // never leak into the next session's draft after a switch.
+    composerWriteThroughRef.current?.reset();
+  }, [activeSessionId]);
+
   // Fullscreen composer editor: capture the pre-open draft so an explicit
   // discard can revert the throttled write-through below.
   const composerExpandedBaseRef = useRef("");
-  const commitComposerExpandedDraft = useCallback(
+  // Expanded-editor commits are authoritative: they must replace the live text
+  // immediately, not only the throttled thread-level copy.
+  const applyAuthoritativeComposerText = useCallback(
     (value: string) => {
+      // Authoritative wins over any pending local write-through: drop stale
+      // scheduled typing so it cannot overwrite this value after adoption.
+      composerWriteThroughRef.current?.reset();
+      composerLiveTextRef.current = value;
       setDraftsBySession((current) =>
         setSessionDraft(current, activeSessionId, value),
       );
     },
     [activeSessionId],
   );
+  const commitComposerExpandedDraft = applyAuthoritativeComposerText;
   const discardComposerExpandedDraft = useCallback(() => {
-    setDraftsBySession((current) =>
-      setSessionDraft(
-        current,
-        activeSessionId,
-        composerExpandedBaseRef.current,
-      ),
-    );
-  }, [activeSessionId]);
+    applyAuthoritativeComposerText(composerExpandedBaseRef.current);
+  }, [applyAuthoritativeComposerText]);
   const queuedMessages: QueuedMessage[] =
     activeSession?.message_queue.items.map((item) => ({
       id: item.command_id,
@@ -9454,7 +9606,8 @@ function TimemThread({
   };
   const submitDraft = () => {
     if (uploadingAttachment || sessionInteractionLocked) return;
-    if (activeSession && activeSession.state !== "working" && !draft.trim()) {
+    const liveDraft = composerLiveTextRef.current;
+    if (activeSession && activeSession.state !== "working" && !liveDraft.trim()) {
       if (!window.confirm(t("composer.emptyContinueConfirm"))) return;
       onSendForSession(
         activeSession.session_id,
@@ -9468,12 +9621,18 @@ function TimemThread({
       );
       return;
     }
+    const liveDrafts = setSessionDraft(
+      draftsBySession,
+      activeSessionId,
+      composerLiveTextRef.current,
+    );
     const reserved = reserveSessionDraftSubmission(
       submittingDraftSessionIdsRef,
       activeSessionId,
-      draftsBySession,
+      liveDrafts,
     );
     if (reserved === null) return;
+    composerWriteThroughRef.current?.reset();
     const attachmentIds = availableAttachments.map(
       (attachment) => attachment.id,
     );
@@ -9489,7 +9648,7 @@ function TimemThread({
     // Release the synchronous event guard before publishing the next draft.
     const nextDrafts = finishSessionDraftSubmission(
       submittingDraftSessionIdsRef,
-      draftsBySession,
+      liveDrafts,
       reserved.sessionId,
       reserved.text,
       sent,
@@ -9508,12 +9667,18 @@ function TimemThread({
 
   const submitDraftAsSupplement = () => {
     if (uploadingAttachment || sessionInteractionLocked) return;
+    const liveDrafts = setSessionDraft(
+      draftsBySession,
+      activeSessionId,
+      composerLiveTextRef.current,
+    );
     const reserved = reserveSessionDraftSubmission(
       submittingDraftSessionIdsRef,
       activeSessionId,
-      draftsBySession,
+      liveDrafts,
     );
     if (reserved === null) return;
+    composerWriteThroughRef.current?.reset();
     const sent = onSendForSession(
       reserved.sessionId,
       reserved.text,
@@ -9525,7 +9690,7 @@ function TimemThread({
     if (sent && selectedRoleIds.length > 0) onRolesConsumed(reserved.sessionId);
     const nextDrafts = finishSessionDraftSubmission(
       submittingDraftSessionIdsRef,
-      draftsBySession,
+      liveDrafts,
       reserved.sessionId,
       reserved.text,
       sent,
@@ -10186,88 +10351,52 @@ function TimemThread({
                 submitDraft();
               }}
             >
-              <div className="expandable-text-field composer-text-field">
-                <textarea
-                  ref={attachComposerTextarea}
-                  value={draft}
-                  placeholder={
-                    !activeSession
-                      ? t("composer.createSessionFirst")
-                      : sessionInteractionLocked
-                        ? sessionInteractionLockReason
-                        : activeSession.state === "working"
-                          ? t("composer.placeholderQueue")
-                          : t("composer.placeholderDirect")
-                  }
-                  aria-label={t("composer.messageAria")}
-                  aria-describedby={composerHintId}
-                  title={composerHint}
-                  disabled={!activeSession || sessionInteractionLocked}
-                  onChange={(event) =>
-                    setDraftsBySession((current) =>
-                      setSessionDraft(
-                        current,
-                        activeSessionId,
-                        event.target.value,
-                      ),
-                    )
-                  }
-                  onPaste={(event) => {
-                    const images = clipboardImageFiles(
-                      Array.from(event.clipboardData?.items ?? []),
-                    );
-                    if (images.length === 0) return;
-                    event.preventDefault();
-                    void (async () => {
-                      for (const image of images) {
-                        await onUpload(image);
-                      }
-                    })();
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key !== "Enter" || event.nativeEvent.isComposing)
-                      return;
-                    if (event.metaKey || event.ctrlKey) {
-                      event.preventDefault();
-                      submitDraftAsSupplement();
-                      return;
+              <ComposerField
+                sessionId={activeSessionId}
+                value={draft}
+                disabled={!activeSession || sessionInteractionLocked}
+                placeholder={
+                  !activeSession
+                    ? t("composer.createSessionFirst")
+                    : sessionInteractionLocked
+                      ? sessionInteractionLockReason
+                      : activeSession.state === "working"
+                        ? t("composer.placeholderQueue")
+                        : t("composer.placeholderDirect")
+                }
+                ariaLabel={t("composer.messageAria")}
+                hint={composerHint}
+                hintId={composerHintId}
+                expandLabel={t("composer.expandEditUserMessage")}
+                attachRef={attachComposerTextarea}
+                onTyping={handleComposerTyping}
+                lastCommitted={composerWriteThroughTextRef.current}
+                onPasteImages={(images) => {
+                  void (async () => {
+                    for (const image of images) {
+                      await onUpload(image);
                     }
-                    if (!event.shiftKey) {
-                      event.preventDefault();
-                      submitDraft();
-                    }
-                  }}
-                />
-                <button
-                  type="button"
-                  className="text-field-expand"
-                  title={t("composer.expandEditUserMessage")}
-                  aria-label={t("composer.expandEditUserMessage")}
-                  disabled={!activeSession || sessionInteractionLocked}
-                  onClick={() => {
-                    composerExpandedBaseRef.current = draft;
-                    setComposerExpanded(true);
-                  }}
-                >
-                  <Maximize2 size={14} />
-                </button>
-              </div>
+                  })();
+                }}
+                onEnter={submitDraft}
+                onCtrlEnter={submitDraftAsSupplement}
+                onExpand={() => {
+                  composerExpandedBaseRef.current = composerLiveTextRef.current;
+                  setComposerExpanded(true);
+                }}
+              />
               {composerExpanded && activeSession && (
                 <ExpandedTextEditor
                   eyebrow={t("composer.eyebrowMessage")}
                   title={t("composer.editUserMessage")}
-                  value={draft}
+                  value={composerLiveTextRef.current}
                   disabled={sessionInteractionLocked}
                   placeholder={
                     activeSession.state === "working"
                       ? t("composer.placeholderQueue")
                       : t("composer.placeholderDirect")
                   }
-                  onCommit={(value) =>
-                    setDraftsBySession((current) =>
-                      setSessionDraft(current, activeSessionId, value),
-                    )
-                  }
+                  onCommit={applyAuthoritativeComposerText}
                   onLiveCommit={commitComposerExpandedDraft}
                   onDiscard={discardComposerExpandedDraft}
                   onClose={() => setComposerExpanded(false)}
@@ -10700,7 +10829,7 @@ const TurnInteraction = memo(function TurnInteraction({
             sessionId,
             tone: "thinking" as const,
             kind: "user_supplement" as const,
-            title: t("composer.supplementTitle"),
+            title: "",
             detail: entry.text,
             createdAt: entry.created_at_ms,
             timelineSeq: entry.timeline_seq,
@@ -12482,10 +12611,9 @@ function ActivityView({ activity, enterPulse = false }: { activity: Activity; en
     return (
       <div className="turn-work-item thinking user-supplement">
         <span className="activity-mark" aria-hidden="true">
-          💡
+          <User size={13} strokeWidth={1.8} />
         </span>
         <div className="user-supplement-line">
-          <strong>{activity.title}</strong>
           {activity.detail && <UserText text={activity.detail} />}
         </div>
       </div>
