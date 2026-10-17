@@ -854,3 +854,13 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 样式：闹钟 header 按钮 has-timers 态改为 #2563eb 实心蓝（明暗主题一致），与条目徽标同色相；清理中间层两条永不生效的 `.turn-user-entry.timer` 底色死代码（被最终权威层 #3b82f62e/#3b82f61a 同优先级覆盖，登记对比度仍以权威层为准）。
 - 测试看护：view_model 新增 parseTimerEntryText 4 组用例（前缀拆分、纯提示词、空名回退、非起始前缀不剥离）；user_text 断言更新为「timer 条目渲染裸提示词」；timer-ui-acceptance e2e 新增——名称与提示词可见、原始 `[timer:` 前缀不泄漏、徽标与名称元素存在。
 - 验证：vitest 738 全绿；timer e2e 明暗 × 1440/390 全过；dist 重建；git diff --check 通过。
+
+## 2026-10 Composer 草稿本地持久化
+
+- 触发背景：用户输入大量内容未回车提交，误关 WebUI 后内容丢失。需求是浏览器侧草稿自动保存与找回。
+- 模块：新增 `src/composer_drafts.ts`——按 session id 存 localStorage（键 `timem-web-composer-drafts-v1`），硬上限 32 会话 / 单条 100k 字符 / 总量 200k，7 天 TTL；JSON 损坏、字段异常、超长条目一律丢弃，隐私模式存储不可用则静默降级为纯内存。
+- 接线：挂载时恢复到 `draftsBySession`；输入后 500ms 防抖落盘；`pagehide`/`visibilitychange(hidden)`/卸载同步冲刷。渐进恢复竞态防护——Host 后台新→旧填充会话列表，磁盘恢复的草稿只有「会话出现过再消失」才剪除（`pruneSessionDrafts` 扩展 restoredDraftSessionIds/everLiveSessionIds 参数），未见过会话的磁盘条目冻结至 TTL；会话删除后磁盘条目在已知 live/everLive 后即清除。
+- 全屏编辑器：节流写通（pending 定时不被新键击重置，丢失上界 ~800ms）；「放弃修改」显式回退到打开前底稿；「完成」提交全文。
+- 边界：纯展示便利，非 command outbox，绝不重放命令；多标签页 last-writer-wins（无 storage 事件同步，已知边界）。
+- 测试看护：`composer_drafts.test.ts` 单测（往返、上限裁剪、TTL、坏数据、存储失败、超长保留旧副本、接线断言）；新增真实 Chrome e2e `composer-draft-acceptance.mjs`（输入→防抖落盘、reload 恢复、提交清空且 turn_submit 命令送达、再 reload 保持空）并入 `test:browser`。
+- 验证：vitest 749 全绿（53 文件）；composer draft e2e 全过；dist 重建；module_boundary/test_contract 检查通过。

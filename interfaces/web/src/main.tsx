@@ -1,6 +1,7 @@
 import { MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation, TimerInvocation, TimerToolIcon } from "./tool_invocation";
 import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
 import { initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
+import { persistComposerDraftTexts, readComposerDraftTexts } from "./composer_drafts";
 import type { CatalogModel } from "./model_endpoints";
 import { applyBetaDebugDefault } from "./beta_preferences";
 import { StreamUiModeSetting, useStreamUiMode, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
@@ -203,8 +204,8 @@ import {
   manualToolGenCommand,
   parseTimerEntryText,
   prependHistoryRecords,
-  turnsFromHistoryRecords,
   pruneSessionDrafts,
+  turnsFromHistoryRecords,
   pruneSessionSubmissionLocks,
   releaseSessionDraftSubmission,
   removePendingAttachment,
@@ -5833,6 +5834,8 @@ function ExpandedTextEditor({
   disabled,
   onCommit,
   onClose,
+  onLiveCommit,
+  onDiscard,
 }: {
   title: string;
   eyebrow: string;
@@ -5842,6 +5845,8 @@ function ExpandedTextEditor({
   disabled?: boolean;
   onCommit: (value: string) => void;
   onClose: () => void;
+  onLiveCommit?: (value: string) => void;
+  onDiscard?: () => void;
 }) {
   useT();
   // Keep high-frequency typing local to the fullscreen editor. Updating the
@@ -5851,6 +5856,42 @@ function ExpandedTextEditor({
     onCommit(draft);
     onClose();
   };
+
+  // Throttled write-through for callers that persist the draft (the composer).
+  // Bounded frequency keeps high-frequency typing local while capping
+  // unsaved-text loss if the page is torn down mid-edit. The pending timer is
+  // never reset by newer keystrokes, so continuous typing still commits at
+  // most 800ms behind.
+  const liveCommitAtRef = useRef(0);
+  const liveCommitTimerRef = useRef<number | null>(null);
+  const liveStateRef = useRef({ draft, value, onLiveCommit });
+  liveStateRef.current = { draft, value, onLiveCommit };
+  // The pending timer is deliberately not reset by re-runs of this effect, so
+  // continuous typing still commits at most 800ms behind.
+  useEffect(() => {
+    const state = liveStateRef.current;
+    if (!state.onLiveCommit) return;
+    if (state.draft === state.value) return;
+    if (liveCommitTimerRef.current !== null) return;
+    const wait = Math.max(0, 800 - (Date.now() - liveCommitAtRef.current));
+    liveCommitTimerRef.current = window.setTimeout(() => {
+      liveCommitTimerRef.current = null;
+      liveCommitAtRef.current = Date.now();
+      const current = liveStateRef.current;
+      if (current.onLiveCommit && current.draft !== current.value) {
+        current.onLiveCommit(current.draft);
+      }
+    }, wait);
+  }, [draft, value, onLiveCommit]);
+  useEffect(
+    () => () => {
+      if (liveCommitTimerRef.current !== null) {
+        window.clearTimeout(liveCommitTimerRef.current);
+        liveCommitTimerRef.current = null;
+      }
+    },
+    [],
+  );
   return createPortal(
     <div className="expanded-text-backdrop" role="presentation">
       <section
@@ -5898,7 +5939,14 @@ function ExpandedTextEditor({
               : t("composer.charCount", { count: draft.length.toLocaleString() })}
           </span>
           <div>
-            <button type="button" className="secondary" onClick={onClose}>
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => {
+                onDiscard?.();
+                onClose();
+              }}
+            >
               {t("composer.discardChanges")}
             </button>
             <button type="button" className="primary" onClick={finish}>
@@ -8566,7 +8614,7 @@ function TimemThread({
   const hideWorkingMemoTooltip = () => setWorkingMemoVisible(false);
   const [draftsBySession, setDraftsBySession] = useState<
     Record<string, string>
-  >({});
+  >(() => readComposerDraftTexts());
   const [composerExpanded, setComposerExpanded] = useState(false);
   const [expandedQueueSessionIds, setExpandedQueueSessionIds] = useState<
     Set<string>
@@ -8602,6 +8650,27 @@ function TimemThread({
   const queuedMessagesPaused =
     !!activeSession && !activeSession.message_queue.auto_send_enabled;
   const draft = draftForSession(draftsBySession, activeSessionId);
+
+  // Fullscreen composer editor: capture the pre-open draft so an explicit
+  // discard can revert the throttled write-through below.
+  const composerExpandedBaseRef = useRef("");
+  const commitComposerExpandedDraft = useCallback(
+    (value: string) => {
+      setDraftsBySession((current) =>
+        setSessionDraft(current, activeSessionId, value),
+      );
+    },
+    [activeSessionId],
+  );
+  const discardComposerExpandedDraft = useCallback(() => {
+    setDraftsBySession((current) =>
+      setSessionDraft(
+        current,
+        activeSessionId,
+        composerExpandedBaseRef.current,
+      ),
+    );
+  }, [activeSessionId]);
   const queuedMessages: QueuedMessage[] =
     activeSession?.message_queue.items.map((item) => ({
       id: item.command_id,
@@ -9196,9 +9265,31 @@ function TimemThread({
     viewport.style.scrollBehavior = previousBehavior;
   }, [activeSessionId]);
 
+  // Drafts restored from disk survive progressive session restore: the Host
+  // fills the session list newest-first in the background, so a missing id is
+  // not proof the session is gone. A restored draft is pruned only after its
+  // session was live once and then disappeared; drafts typed in this visit
+  // keep the immediate prune.
+  const restoredDraftSessionIdsRef = useRef<Set<string> | null>(null);
+  const everLiveSessionIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (sessionIds.length === 0) return;
-    setDraftsBySession((current) => pruneSessionDrafts(current, sessionIds));
+    if (restoredDraftSessionIdsRef.current === null) {
+      restoredDraftSessionIdsRef.current = new Set(
+        Object.keys(readComposerDraftTexts()),
+      );
+    }
+    for (const sessionId of liveSessionIds) {
+      everLiveSessionIdsRef.current.add(sessionId);
+    }
+    setDraftsBySession((current) =>
+      pruneSessionDrafts(
+        current,
+        sessionIds,
+        restoredDraftSessionIdsRef.current,
+        everLiveSessionIdsRef.current,
+      ),
+    );
     setExpandedQueueSessionIds(
       (current) =>
         new Set(
@@ -9224,6 +9315,45 @@ function TimemThread({
     }
     pruneSessionSubmissionLocks(submittingDraftSessionIdsRef, sessionIds);
   }, [liveSessionIds]);
+
+  // Persist unsent composer drafts browser-locally: debounced on change and
+  // flushed synchronously when the page may be torn down or hidden. Entries
+  // for sessions that are not live stay frozen on disk (bounded, with TTL) so
+  // drafts survive reloads while sessions are still restoring in background.
+  const draftsPersistRef = useRef(draftsBySession);
+  const liveSessionIdsRef = useRef<ReadonlySet<string> | null>(null);
+  useEffect(() => {
+    liveSessionIdsRef.current = liveSessionIds;
+  }, [liveSessionIds]);
+  useEffect(() => {
+    draftsPersistRef.current = draftsBySession;
+    const id = window.setTimeout(() => {
+      persistComposerDraftTexts(
+        draftsBySession,
+        liveSessionIdsRef.current,
+        everLiveSessionIdsRef.current,
+      );
+    }, 500);
+    return () => window.clearTimeout(id);
+  }, [draftsBySession]);
+  useEffect(() => {
+    const flush = () =>
+      persistComposerDraftTexts(
+        draftsPersistRef.current,
+        liveSessionIdsRef.current,
+        everLiveSessionIdsRef.current,
+      );
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVisibility);
+      flush();
+    };
+  }, []);
 
   useEffect(() => {
     if (rejectedSubmitCommandIds.size === 0) return;
@@ -10114,7 +10244,10 @@ function TimemThread({
                   title={t("composer.expandEditUserMessage")}
                   aria-label={t("composer.expandEditUserMessage")}
                   disabled={!activeSession || sessionInteractionLocked}
-                  onClick={() => setComposerExpanded(true)}
+                  onClick={() => {
+                    composerExpandedBaseRef.current = draft;
+                    setComposerExpanded(true);
+                  }}
                 >
                   <Maximize2 size={14} />
                 </button>
@@ -10135,6 +10268,8 @@ function TimemThread({
                       setSessionDraft(current, activeSessionId, value),
                     )
                   }
+                  onLiveCommit={commitComposerExpandedDraft}
+                  onDiscard={discardComposerExpandedDraft}
                   onClose={() => setComposerExpanded(false)}
                 />
               )}
