@@ -183,13 +183,13 @@ fn execute_command_action_outcome_with_process_job(
         match child.try_wait() {
             Ok(Some(status)) => {
                 if input.is_some() {
+                    // The child exited before stdin delivery completed, so the
+                    // payload can no longer be read. The child's own exit
+                    // status and captured output are the authoritative result:
+                    // a tool that ignores its JSON payload and exits is not an
+                    // input delivery failure. Genuine delivery failures surface
+                    // as stdin pipe write errors on the live child instead.
                     drop(input.take());
-                    terminate_command_descendants(child.id(), process_job.as_ref());
-                    return render_command_input_failure(
-                        action,
-                        "child exited before input delivery completed",
-                        output.finish(),
-                    );
                 }
                 break status;
             }
@@ -219,7 +219,17 @@ fn execute_command_action_outcome_with_process_job(
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
                 Err(error) => {
+                    // A write error observed only after the child already
+                    // exited is a consequence of that exit: nobody could read
+                    // the remaining payload, so the child's exit status and
+                    // captured output stay authoritative. A live child that
+                    // closed its stdin (or broke the pipe) is a genuine
+                    // command_input_failed.
+                    let exited = matches!(child.try_wait(), Ok(Some(_)));
                     drop(input.take());
+                    if exited {
+                        break child.wait().expect("reaped child status");
+                    }
                     terminate_command_process(&mut child, process_job.as_ref());
                     return render_command_input_failure(
                         action,
