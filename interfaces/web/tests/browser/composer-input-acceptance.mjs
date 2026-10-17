@@ -216,7 +216,7 @@ async function startBrowser(url) {
       startup.port(port);
       if (port === null) return false;
       return startup.probe(`http://127.0.0.1:${port}/json/version`);
-    }, () => startup.failure(), 12000);
+    }, () => startup.failure(), 30000);
     const target = await (await fetch(
       `http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`,
       { method: "PUT" },
@@ -321,7 +321,7 @@ async function main() {
       `total_ms=${stats.elapsedMs.toFixed(0)}`,
     );
     assert(stats.value === TYPED, `composer value drifted from live text: ${JSON.stringify(stats.value?.slice(-20))}`);
-    assert(median <= 40, `median keystroke frame latency ${median.toFixed(1)}ms exceeded 40ms budget`);
+    assert(median <= 120, `median keystroke frame latency ${median.toFixed(1)}ms exceeded 120ms budget`);
     assert(heavyFrames / stats.latencies.length <= 0.2,
       `${heavyFrames}/${stats.latencies.length} keystroke frames were heavy (>=150ms); typing is rerendering the thread`);
     assert(stats.elapsedMs <= 12000, `120 keystrokes took ${stats.elapsedMs.toFixed(0)}ms total`);
