@@ -267,3 +267,30 @@ it("renders timer lifecycle rows as standalone system-status lines", () => {
   expect(styles).toContain(', .timer-tool-preview) { grid-column: 2; }');
   expect(styles).toContain('.timer-tool-icon { color: #8bc8ba; }');
 });
+
+
+it("renders pipe-delimited result size before elapsed in both tool views", () => {
+  const stream = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
+  const ordinary = source.slice(source.indexOf("function ToolActivity("), source.indexOf("function MemoIcon("));
+  expect(stream).toContain('className="stream-tool-meta"');
+  expect(ordinary).toContain('className="tool-activity-meta"');
+  expect(stream).toContain('className="stream-tool-sep" aria-hidden="true">|</span>');
+  expect(ordinary).toContain('className="tool-activity-sep" aria-hidden="true">|</span>');
+  const streamMeta = stream.indexOf('className="stream-tool-meta"');
+  const streamBytes = stream.indexOf('className="stream-tool-bytes"');
+  const streamElapsed = stream.indexOf('className="stream-tool-elapsed"');
+  expect(streamMeta).toBeLessThan(streamBytes);
+  expect(streamBytes).toBeLessThan(streamElapsed);
+  const ordinaryMeta = ordinary.indexOf('className="tool-activity-meta"');
+  const ordinaryBytes = ordinary.indexOf('className="tool-activity-bytes"');
+  const ordinaryDuration = ordinary.indexOf('className="tool-activity-duration"');
+  expect(ordinaryMeta).toBeLessThan(ordinaryBytes);
+  expect(ordinaryBytes).toBeLessThan(ordinaryDuration);
+  expect(source).toContain("function formatResultBytes(");
+  expect(source).toContain("return `${bytes}B`;");
+  expect(source).toContain("return `${Math.ceil(bytes / 1024)}KB`;");
+  expect(styles).toContain(".stream-tool-meta {");
+  expect(styles).toContain(".tool-activity-meta,");
+  expect(styles).toContain(".tool-activity-duration-slot { display: none; }");
+  expect(styles).toContain(".tool-activity summary .tool-activity-sep { display: none; }");
+});

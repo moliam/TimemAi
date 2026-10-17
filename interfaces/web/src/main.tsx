@@ -11708,23 +11708,36 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
         <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
         {status === "background_running" && <span className="stream-tool-background">(bg)</span>}
         {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && <span className="stream-tool-command-preview tool-invocation-preview" title={invocationPreview}>{invocationPreview.replace(/\s+/g, " ")}</span>}
-        {(running
+        {((running
           ? liveElapsedMs
-          : activity.elapsed_ms) !== undefined && (() => {
+          : activity.elapsed_ms) !== undefined ||
+          activity.tool_output_bytes !== undefined) && (() => {
           const elapsed = running
             ? formatLiveElapsed(liveElapsedMs)
-            : formatToolElapsed(activity.elapsed_ms!);
+            : activity.elapsed_ms !== undefined
+              ? formatToolElapsed(activity.elapsed_ms!)
+              : undefined;
+          const size = activity.tool_output_bytes !== undefined
+            ? formatResultBytes(activity.tool_output_bytes)
+            : undefined;
           return (
-            <span className="stream-tool-elapsed" aria-label={elapsed}>
-              {running ? <FlippingTime value={elapsed} /> : elapsed}
-            </span>
-          );
-        })()}
-        {activity.tool_output_bytes !== undefined && (() => {
-          const size = formatBytes(activity.tool_output_bytes);
-          return (
-            <span className="stream-tool-bytes" aria-label={t("tools.resultBytes", { size })}>
-              {size}
+            <span className="stream-tool-meta">
+              {size !== undefined && (
+                <>
+                  <span className="stream-tool-sep" aria-hidden="true">|</span>
+                  <span className="stream-tool-bytes" aria-label={t("tools.resultBytes", { size })}>
+                    {size}
+                  </span>
+                </>
+              )}
+              {size !== undefined && elapsed !== undefined && (
+                <span className="stream-tool-sep" aria-hidden="true">|</span>
+              )}
+              {elapsed !== undefined && (
+                <span className="stream-tool-elapsed" aria-label={elapsed}>
+                  {running ? <FlippingTime value={elapsed} /> : elapsed}
+                </span>
+              )}
             </span>
           );
         })()}
@@ -12894,24 +12907,37 @@ function ToolActivity({ activity }: { activity: Activity }) {
               </span>
             );
           })()}
-          {displayedElapsedMs !== undefined && (() => {
-            const time = running
-              ? formatLiveElapsed(displayedElapsedMs)
-              : formatDuration(displayedElapsedMs)!;
-            const label = running ? t("tools.elapsed", { time }) : time;
+          {(displayedElapsedMs !== undefined ||
+            activity.tool_output_bytes !== undefined) && (() => {
+            const size = activity.tool_output_bytes !== undefined
+              ? formatResultBytes(activity.tool_output_bytes)
+              : undefined;
             return (
-              <span className="tool-activity-duration" aria-label={label}>
-                {running
-                  ? <LocalizedFlippingTime message="tools.elapsed" time={time} />
-                  : time}
-              </span>
-            );
-          })()}
-          {activity.tool_output_bytes !== undefined && (() => {
-            const size = formatBytes(activity.tool_output_bytes);
-            return (
-              <span className="tool-activity-bytes" title={t("tools.resultBytes", { size })}>
-                {size}
+              <span className="tool-activity-meta">
+                {size !== undefined && (
+                  <>
+                    <span className="tool-activity-sep" aria-hidden="true">|</span>
+                    <span className="tool-activity-bytes" title={t("tools.resultBytes", { size })}>
+                      {size}
+                    </span>
+                  </>
+                )}
+                {displayedElapsedMs !== undefined && (() => {
+                  const time = running
+                    ? formatLiveElapsed(displayedElapsedMs)
+                    : formatDuration(displayedElapsedMs)!;
+                  const label = running ? t("tools.elapsed", { time }) : time;
+                  return (
+                    <span className="tool-activity-duration-slot">
+                      {size !== undefined && <span className="tool-activity-sep" aria-hidden="true">|</span>}
+                      <span className="tool-activity-duration" aria-label={label}>
+                        {running
+                          ? <LocalizedFlippingTime message="tools.elapsed" time={time} />
+                          : time}
+                      </span>
+                    </span>
+                  );
+                })()}
               </span>
             );
           })()}
@@ -15819,6 +15845,14 @@ function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+// Compact size form for pipe-delimited tool row metadata ("| 4KB | 1.2s");
+// prose panels keep the spaced formatBytes above.
+function formatResultBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
 function ModelEndpointPanel({

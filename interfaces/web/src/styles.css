@@ -1515,7 +1515,8 @@ button:disabled { cursor: not-allowed; }
   .chat-scroll { padding-inline: 12px; }
   .turn-work-item.thinking, .turn-work-item.thinking .message-content { font-size: var(--content-size); }
   .tool-activity summary { grid-template-columns: max-content max-content minmax(0, 1fr); }
-  .tool-activity summary .tool-activity-duration { display: none; }
+  .tool-activity summary .tool-activity-duration-slot { display: none; }
+  .tool-activity summary .tool-activity-sep { display: none; }
 }
 
 
@@ -5162,6 +5163,9 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .stream-tool-status { color: #98afbc; }
 .stream-tool-elapsed { color: #98afbc; font-variant-numeric: tabular-nums; flex: none; }
 .stream-tool-bytes { color: #7f929e; font-variant-numeric: tabular-nums; flex: none; font-size: 11px; }
+.stream-tool-meta { display: inline-flex; align-items: center; flex: none; gap: 6px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.stream-tool-sep,
+.tool-activity-sep { flex: none; color: inherit; opacity: .45; }
 .stream-tool-command {
   margin: 8px 0 0;
   padding: 8px 10px;
@@ -5994,6 +5998,8 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .tool-activity-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: #f1c56f; }
 .tool-failure-icon { color: #d08181; }
 .tool-activity-timing { min-width: 0; display: inline-flex; align-items: center; justify-self: end; gap: 6px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.tool-activity-meta,
+.tool-activity-duration-slot { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .tool-activity.settled .tool-activity-timing { grid-column: 3; }
 .tool-activity.running .tool-activity-timing { grid-column: 4; }
 .tool-activity.settled .tool-activity-command,

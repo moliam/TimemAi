@@ -407,10 +407,13 @@ async function main() {
    })()`),'successful and failed tools share the same icon/content columns');
    assert(await browser.evaluate(`!document.querySelector('.stream-tool-toggle > svg, .tool-activity > summary > .tool-activity-chevron')`),'no persistent disclosure glyph');
    const bytesSel=stream?'.stream-tool-bytes':'.tool-activity-bytes';
-   const badges=await browser.evaluate(`(()=>[...document.querySelectorAll(${JSON.stringify('BYTESSEL')})].map(e=>({text:e.textContent.trim(),label:e.getAttribute('aria-label')||e.getAttribute('title')||'',prev:e.previousElementSibling?.className??''})) )()`.replace('BYTESSEL',bytesSel));
+   const badges=await browser.evaluate(`(()=>[...document.querySelectorAll(${JSON.stringify('BYTESSEL')})].map(e=>({text:e.textContent.trim(),label:e.getAttribute('aria-label')||e.getAttribute('title')||'',meta:e.closest('.stream-tool-meta,.tool-activity-meta')?.textContent??''})) )()`.replace('BYTESSEL',bytesSel));
    assert(badges.length===2,'exactly two result-size badges in mode '+stream+': '+JSON.stringify(badges));
-   assert(badges[0].text==='4 KB'&&badges[0].label.includes('4 KB')&&badges[1].text==='512 B'&&badges[1].label.includes('512 B'),'badge text and localized label '+JSON.stringify(badges));
-   assert(badges.every(b=>b.prev.includes(stream?'stream-tool-elapsed':'tool-activity-duration')),'badge sits after elapsed/duration '+JSON.stringify(badges));
+   assert(badges[0].text==='4KB'&&badges[0].label.includes('4KB')&&badges[1].text==='512B'&&badges[1].label.includes('512B'),'compact badge text and localized label '+JSON.stringify(badges));
+   assert(badges.every(b=>/^\|[0-9.]+[BKMG]?B\|/.test(b.meta)),'meta reads "| size |" with size first '+JSON.stringify(badges));
+   const wantElapsed=stream?['1.2s','0.3s']:['1s','0s'];
+   const metas=await browser.evaluate(`[...document.querySelectorAll('.stream-tool-meta,.tool-activity-meta')].map(e=>e.textContent)`);
+   assert(metas.includes('|4KB|'+wantElapsed[0])&&metas.includes('|512B|'+wantElapsed[1]),'pipe-delimited meta order/elapsed format in mode '+stream+': '+JSON.stringify(metas));
    if(!stream) await browser.evaluate(`document.querySelectorAll('.tool-activity-group').forEach(e=>e.open=true)`);
    for(const width of [1280,390]) {
     await browser.call('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:false});
@@ -421,7 +424,7 @@ async function main() {
      assert(info.width>0 && info.inside && !info.overflow && info.icon && info.font.includes('IBM Plex Mono') && info.fontSize==='11.5px' && Math.abs(info.rowRatio-expectedRatio)<.015,'geometry/font/width '+stream+' '+width+' '+theme+' '+JSON.stringify(info));
      assert(info.range.includes('15190–15244') && info.name==='web_host_tests.rs' && info.title.includes(path),'semantic content');
      const badgeInfo=await browser.evaluate(`(()=>{const b=document.querySelector(${JSON.stringify('BYTESSEL')});if(!b)return null;const r=b.getBoundingClientRect();const row=b.closest('.stream-tool-head,summary,.tool-activity-static');const rr=row?row.getBoundingClientRect():null;return {w:r.width,inside:!!rr&&r.right<=rr.right+1&&r.left>=rr.left-1,text:b.textContent.trim()};})()`.replace('BYTESSEL',bytesSel));
-     assert(badgeInfo&&badgeInfo.w>0&&badgeInfo.inside&&badgeInfo.text==='4 KB','result-size badge geometry '+stream+' '+width+' '+theme+' '+JSON.stringify(badgeInfo));
+     assert(badgeInfo&&badgeInfo.w>0&&badgeInfo.inside&&badgeInfo.text==='4KB','result-size badge geometry '+stream+' '+width+' '+theme+' '+JSON.stringify(badgeInfo));
     }
    }
    // Timer lifecycle rows stay standalone and user-readable in both modes.
