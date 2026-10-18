@@ -73,6 +73,34 @@ Node.js are not required. Updates replace the executable only: exit Timem first
 on Windows, extract the newer archive over the same directory, and MEM
 workspaces, Sessions, credentials, and user configuration stay untouched.
 
+### One-command binary upgrade (prebuilt archives)
+
+Installed through any method? Upgrade with a single networked command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/moliam/TimemAi/main/upgrade.sh | bash
+```
+
+```powershell
+irm https://raw.githubusercontent.com/moliam/TimemAi/main/upgrade-online.ps1 | iex
+```
+
+Compatibility contract of both upgraders:
+
+- Resolve the latest Release (or `TIMEM_VERSION=vX.Y.Z` to pin), pick the
+  archive for the current platform, and verify the downloaded file against the
+  published `.sha256` sidecar before touching anything.
+- Locate the existing installation through the platform defaults and `PATH`,
+  and refuse to run when no prior installation exists.
+- Back up the previous executable, replace it atomically, and run `--help` as a
+  post-install check; on failure the backup is restored automatically.
+- The Windows upgrader stops running Timem processes first and waits for the
+  executable lock to clear, because Windows locks a running `.exe`.
+- MEM workspaces, Sessions, credentials, cached configuration, and user
+  `reminder_tips.json` overrides are never modified.
+- Unsupported platforms (for example Windows on ARM) fail fast with the
+  source-upgrade pointer instead of guessing.
+
 ### Prerequisites and installed files
 
 Both online and checkout flows are source builds. They require:

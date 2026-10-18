@@ -59,8 +59,10 @@ exactly that tag, and rebuilds it. Published tags are immutable; a broken asset
 is fixed by re-running the workflow for the same tag, where
 `gh release upload --clobber` replaces only the asset files, never the tag.
 
-Prebuilt archives are a download convenience. The reviewable install contract
-remains the one-line installer and the checkout installers. Archives contain
+Prebuilt archives are a download convenience and back the one-command
+upgraders (`upgrade.sh` / `upgrade-online.ps1`), which download, checksum,
+replace, and verify them against an existing installation. The reviewable
+install contract remains the one-line installer and the checkout installers. Archives contain
 only `timem`, the `timem-web` alias, the shipped `reminder_tips.json`, and a
 package README; extracting a newer archive over an existing installation
 replaces the executable only and preserves MEM workspaces, Sessions,
