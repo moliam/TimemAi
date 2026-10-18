@@ -10,6 +10,7 @@ import { SelfUpgradeSetting } from "./self_upgrade";
 import { StreamText } from "./stream_reveal";
 import { FlippingTime } from "./flipping_time";
 import { UserText } from "./user_text";
+import { formatUserEntryTime } from "./user_entry_time";
 import {
   AssistantRuntimeProvider,
   ThreadMessageLike,
@@ -11140,6 +11141,12 @@ const TurnInteraction = memo(function TurnInteraction({
                       ))}
                     </div>
                   )}
+                  <time
+                    className="turn-entry-time"
+                    dateTime={new Date(entry.created_at_ms).toISOString()}
+                  >
+                    {formatUserEntryTime(entry.created_at_ms)}
+                  </time>
                 </div>
                 );
               })}
