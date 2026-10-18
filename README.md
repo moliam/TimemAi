@@ -51,6 +51,11 @@ The installer builds the latest formal GitHub Release in a temporary directory,
 installs the `timem` executable, and removes the temporary source. Rust and the
 platform C/C++ build tools are required; Node.js is not required.
 
+Prebuilt `timem` archives for Windows x64, macOS (Apple Silicon and Intel), and
+Linux x64 are attached to every GitHub Release, each with a `.sha256` sidecar:
+extract, add the directory to PATH, and run `timem`. Exit Timem before
+replacing a running executable on Windows.
+
 Developers who prefer a source checkout can clone the repository and run
 `./install.sh` on macOS/Linux or `install.ps1` on Windows. Checkout installs use
 Git-based update instructions; one-line installs simply tell users to rerun the
