@@ -180,6 +180,39 @@ fn command_action_contains_script_sigsegv_and_executor_remains_usable() {
 
 #[cfg(unix)]
 #[test]
+fn command_action_child_exiting_without_reading_input_is_not_input_failure() {
+    let dir = temp_case_dir("command_exit_before_input");
+    // The child never reads stdin and exits immediately; the oversized
+    // payload cannot finish pipe delivery first. The child's own exit
+    // status and output are the authoritative result under both
+    // interleavings: exit observed before the next write, or a pipe
+    // write error observed after the exit.
+    fs::write(dir.join("quick.sh"), "#!/bin/sh\nprintf still_alive\n").unwrap();
+
+    let outcome = execute_command_action_outcome(
+        "quick_tool",
+        &dir.join("quick.sh"),
+        &json!({"payload": "x".repeat(1024 * 1024)}),
+        4000,
+    );
+    let _ = fs::remove_dir_all(&dir);
+    assert!(
+        !outcome.text.contains("command_input_failed"),
+        "{}",
+        outcome.text
+    );
+    assert_eq!(
+        outcome.status,
+        crate::ActionStatus::Completed,
+        "{}",
+        outcome.text
+    );
+    assert!(outcome.text.contains("status: 0"), "{}", outcome.text);
+    assert!(outcome.text.contains("still_alive"), "{}", outcome.text);
+}
+
+#[cfg(unix)]
+#[test]
 fn command_action_drains_large_output_without_pipe_deadlock() {
     let dir = temp_case_dir("command_large_output");
     fs::write(

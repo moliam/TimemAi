@@ -277,3 +277,45 @@ fn provider_registry_declares_closed_admission() {
     assert!(!openai.allowed_protocols.contains(&"anthropic"));
     assert!(agent_core::model_catalog::provider_spec("unknown-provider").is_none());
 }
+
+#[test]
+fn catalog_exposes_documented_input_modalities() {
+    let text_only = models()
+        .iter()
+        .find(|m| m.id == "z-glm5.3")
+        .expect("zhipu glm-5.3 catalog entry");
+    assert_eq!(text_only.input_modalities, vec!["text".to_string()]);
+    let multimodal = models()
+        .iter()
+        .find(|m| m.id == "z-glm5.3-flash")
+        .expect("zhipu glm-5.3-flash catalog entry");
+    assert!(multimodal.input_modalities.contains(&"image".to_string()));
+    assert!(models()
+        .iter()
+        .find(|m| m.id == "openai/gpt-5.5")
+        .expect("openai catalog entry")
+        .input_modalities
+        .contains(&"image".to_string()));
+}
+
+#[test]
+fn catalog_rejects_invalid_input_modalities() {
+    let mut value: serde_json::Value =
+        serde_json::from_str(include_str!("../../../resources/zhipu_model_catalog.json")).unwrap();
+    // The descriptor schema rejects unknown modality enums and empty arrays
+    // first; the interpreter adds duplicate detection on top.
+    value["models"][0]["documented_facts"]["input_modalities"] =
+        serde_json::json!(["text", "hologram"]);
+    assert_eq!(
+        parse(&value.to_string()).unwrap_err(),
+        "catalog_schema_enum"
+    );
+    value["models"][0]["documented_facts"]["input_modalities"] = serde_json::json!([]);
+    assert!(parse(&value.to_string()).is_err());
+    value["models"][0]["documented_facts"]["input_modalities"] =
+        serde_json::json!(["text", "text"]);
+    assert_eq!(
+        parse(&value.to_string()).unwrap_err(),
+        "catalog_invalid_input_modalities"
+    );
+}

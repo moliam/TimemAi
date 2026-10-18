@@ -49,15 +49,15 @@ describe("sortable Session group UI", () => {
     expect(source).not.toContain("collapsed && bucketSessions.length > 0");
     expect(source).not.toContain("session-group-content-indicator");
     expect(styles).toMatch(
-      /\.session-group-heading \{[^}]*margin: 3px 2px 1px;[^}]*padding: 3px;/,
+      /\.session-group-heading \{[^}]*margin: 1px 2px 0;[^}]*padding: 2px;/,
     );
     expect(styles).toContain(
-      ".session-group:first-child .session-group-heading { margin-top: 2px; }",
+      ".session-group:first-child .session-group-heading { margin-top: 0; }",
     );
     expect(styles).toContain(".session-group-unread-dot {");
     expect(styles).not.toContain(".session-group-content-indicator");
     expect(styles).toMatch(
-      /\.session-group-list \{[^}]*min-height: 8px;[^}]*padding: 0 0 2px;/,
+      /\.session-group-list \{[^}]*min-height: 8px;[^}]*padding: 0;/,
     );
   });
 
@@ -128,10 +128,10 @@ describe("sortable Session group UI", () => {
       '<div className="composer-wrap aui-thread-footer">',
     );
     expect(styles).toMatch(
-      /\.session-row \{[^}]*min-height: 26px;[^}]*border-radius: 4px;/,
+      /\.session-row \{[^}]*min-height: 24px;[^}]*border-radius: 4px;/,
     );
     expect(styles).toMatch(
-      /\.session-row \.session \{[^}]*min-height: 26px;[^}]*padding: 0 2px 0 34px;/,
+      /\.session-row \.session \{[^}]*min-height: 24px;[^}]*padding: 0 2px 0 34px;/,
     );
     expect(styles).toContain(".session-name { line-height: 1.15; }");
   });
@@ -167,7 +167,7 @@ describe("sortable Session group UI", () => {
     expect(styles).toContain(".session-row.dragging");
   });
 
-  it("uses a compact destructive check inside the 26px Session row", () => {
+  it("uses a compact destructive check inside the 24px Session row", () => {
     expect(styles).toMatch(
       /\.session-delete-select \{[^}]*width: 18px;[^}]*height: 18px;/,
     );

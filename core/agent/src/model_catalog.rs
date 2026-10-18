@@ -76,6 +76,9 @@ pub struct CatalogModel {
     pub min_output: u32,
     pub max_output: u32,
     pub context_window: u32,
+    /// Documented input modalities (text/image/video/file). Consumers use this
+    /// for capability UX hints; it never gates request building by itself.
+    pub input_modalities: Vec<String>,
 }
 
 static CATALOG: OnceLock<Result<Vec<CatalogModel>, String>> = OnceLock::new();
@@ -333,6 +336,22 @@ pub fn parse(text: &str) -> Result<Vec<CatalogModel>, String> {
             }
             protocols.push(projection);
         }
+        let input_modalities = entry["documented_facts"]["input_modalities"]
+            .as_array()
+            .ok_or("catalog_modalities_missing")?
+            .iter()
+            .map(string)
+            .collect::<Result<Vec<_>, _>>()?;
+        if input_modalities.is_empty()
+            || input_modalities.len() > 4
+            || input_modalities.iter().enumerate().any(|(i, m)| {
+                m.is_empty()
+                    || !matches!(m.as_str(), "text" | "image" | "video" | "file")
+                    || input_modalities[..i].contains(m)
+            })
+        {
+            return Err("catalog_invalid_input_modalities".into());
+        }
         let limit = |key: &str| {
             entry["limits"][key]
                 .as_u64()
@@ -373,6 +392,7 @@ pub fn parse(text: &str) -> Result<Vec<CatalogModel>, String> {
             min_output: 512,
             max_output: limit("max_output_tokens").ok_or("catalog_output_missing")?,
             context_window,
+            input_modalities,
         });
     }
     Ok(result)

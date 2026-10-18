@@ -325,7 +325,7 @@ async function startBrowser(url) {
       startup.port(port);
       if (port === null) return false;
       return startup.probe(`http://127.0.0.1:${port}/json/version`);
-    }, () => startup.failure(), 12000);
+    }, () => startup.failure(), 30000);
 
     const target = await (await fetch(
       `http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`,
@@ -382,8 +382,10 @@ async function main() {
   await waitFor(()=>browser.evaluate(`document.body.textContent.includes('Long task')`),'initial snapshot');
   for(const stream of [false,true]) {
    await browser.evaluate(`localStorage.setItem('timem-web-stream-ui-mode-v1',${JSON.stringify(String(stream))})`);
-   const action={event_id:'file-read',source:'core_topic',created_at_ms:Date.now(),payload:{session_id:'session-1',state:{name:'running'},topic:{name:'core.action',attributes:{}},payload:{action:'readfile',action_id:'file-read',status:'completed',input:{ender:{line_nr:15244},path,starter:{line_nr:15190}}}}};
-   host.setSession(makeSession({turns:[{...turn('turn-1'),events:[action,{...action,event_id:'memory-search',payload:{...action.payload,payload:{action:'memmgr',action_id:'memory-search',status:'completed',input:{type:'raw_chat',op:'search',search_text:'project'}}}},{...action,event_id:'memory-delete',payload:{...action.payload,payload:{action:'memmgr',action_id:'memory-delete',status:'completed',input:{type:'scratch',op:'delete',id:'scratch-id'}}}},{...action,event_id:'self-inspect',payload:{...action.payload,payload:{action:'self_tool',action_id:'self-inspect',status:'completed',input:{type:'params'}}}},{...action,event_id:'file-failed',payload:{...action.payload,payload:{action:'readfile',action_id:'file-failed',status:'failed',input:{path:'missing.txt'}}}}]}]}));
+   const action={event_id:'file-read',source:'core_topic',created_at_ms:Date.now(),payload:{session_id:'session-1',state:{name:'running'},topic:{name:'core.action',attributes:{}},payload:{action:'readfile',action_id:'file-read',status:'completed',input:{ender:{line_nr:15244},path,starter:{line_nr:15190}},elapsed_ms:1200,tool_output_bytes:4096}}};
+   const timerAction={...action,event_id:'timer-new',payload:{...action.payload,payload:{action:'timer',action_id:'timer-new',status:'completed',input:{op:'new',name:'build-check',prompt:'检查 CI 构建结果并汇报',mode:'once',after_ms:600000},elapsed_ms:15}}};
+   const timerDelete={...action,event_id:'timer-del',payload:{...action.payload,payload:{action:'timer',action_id:'timer-del',status:'completed',input:{op:'del',name:'build-check'},elapsed_ms:8}}};
+   host.setSession(makeSession({turns:[{...turn('turn-1'),events:[timerAction,timerDelete,action,{...action,event_id:'memory-search',payload:{...action.payload,payload:{action:'memmgr',action_id:'memory-search',status:'completed',input:{type:'raw_chat',op:'search',search_text:'project'},elapsed_ms:300,tool_output_bytes:512}}},{...action,event_id:'memory-delete',payload:{...action.payload,payload:{action:'memmgr',action_id:'memory-delete',status:'completed',input:{type:'scratch',op:'delete',id:'scratch-id'}}}},{...action,event_id:'self-inspect',payload:{...action.payload,payload:{action:'self_tool',action_id:'self-inspect',status:'completed',input:{type:'params'}}}},{...action,event_id:'file-failed',payload:{...action.payload,payload:{action:'readfile',action_id:'file-failed',status:'failed',input:{path:'missing.txt'}}}}]}]}));
    await browser.call('Page.reload');
    try { await waitFor(()=>browser.evaluate(`!!document.querySelector('.file-tool-preview')`),'file preview mode '+stream); } catch(error) { console.log(await browser.evaluate(`document.body.innerText`)); throw error; }
    assert(await browser.evaluate(`document.querySelectorAll('.memory-search-icon .lucide-database-search').length===1`),'memory search icon only for search');
@@ -404,6 +406,14 @@ async function main() {
        Math.abs(successIcon.left-failureIcon.left)<1 && Math.abs(successContent.left-failureContent.left)<1;
    })()`),'successful and failed tools share the same icon/content columns');
    assert(await browser.evaluate(`!document.querySelector('.stream-tool-toggle > svg, .tool-activity > summary > .tool-activity-chevron')`),'no persistent disclosure glyph');
+   const bytesSel=stream?'.stream-tool-bytes':'.tool-activity-bytes';
+   const badges=await browser.evaluate(`(()=>[...document.querySelectorAll(${JSON.stringify('BYTESSEL')})].map(e=>({text:e.textContent.trim(),label:e.getAttribute('aria-label')||e.getAttribute('title')||'',meta:e.closest('.stream-tool-meta,.tool-activity-meta')?.textContent??''})) )()`.replace('BYTESSEL',bytesSel));
+   assert(badges.length===2,'exactly two result-size badges in mode '+stream+': '+JSON.stringify(badges));
+   assert(badges[0].text==='4KB'&&badges[0].label.includes('4KB')&&badges[1].text==='512B'&&badges[1].label.includes('512B'),'compact badge text and localized label '+JSON.stringify(badges));
+   assert(badges.every(b=>/^\|[0-9.]+[BKMG]?B\|/.test(b.meta)),'meta reads "| size |" with size first '+JSON.stringify(badges));
+   const wantElapsed=stream?['1.2s','0.3s']:['1s','0s'];
+   const metas=await browser.evaluate(`[...document.querySelectorAll('.stream-tool-meta,.tool-activity-meta')].map(e=>e.textContent)`);
+   assert(metas.includes('|4KB|'+wantElapsed[0])&&metas.includes('|512B|'+wantElapsed[1]),'pipe-delimited meta order/elapsed format in mode '+stream+': '+JSON.stringify(metas));
    if(!stream) await browser.evaluate(`document.querySelectorAll('.tool-activity-group').forEach(e=>e.open=true)`);
    for(const width of [1280,390]) {
     await browser.call('Emulation.setDeviceMetricsOverride',{width,height:1000,deviceScaleFactor:1,mobile:false});
@@ -413,22 +423,36 @@ async function main() {
      const expectedRatio=width<=720?1:.9;
      assert(info.width>0 && info.inside && !info.overflow && info.icon && info.font.includes('IBM Plex Mono') && info.fontSize==='11.5px' && Math.abs(info.rowRatio-expectedRatio)<.015,'geometry/font/width '+stream+' '+width+' '+theme+' '+JSON.stringify(info));
      assert(info.range.includes('15190–15244') && info.name==='web_host_tests.rs' && info.title.includes(path),'semantic content');
+     const badgeInfo=await browser.evaluate(`(()=>{const b=document.querySelector(${JSON.stringify('BYTESSEL')});if(!b)return null;const r=b.getBoundingClientRect();const row=b.closest('.stream-tool-head,summary,.tool-activity-static');const rr=row?row.getBoundingClientRect():null;return {w:r.width,inside:!!rr&&r.right<=rr.right+1&&r.left>=rr.left-1,text:b.textContent.trim()};})()`.replace('BYTESSEL',bytesSel));
+     assert(badgeInfo&&badgeInfo.w>0&&badgeInfo.inside&&badgeInfo.text==='4KB','result-size badge geometry '+stream+' '+width+' '+theme+' '+JSON.stringify(badgeInfo));
     }
    }
+   // Timer lifecycle rows stay standalone and user-readable in both modes.
+   {
+    const rows=await browser.evaluate(`[...document.querySelectorAll('.timer-tool-preview')].map(e=>e.textContent.trim())`);
+    assert(rows.length===2,'two timer rows in mode '+stream+': '+JSON.stringify(rows));
+    assert(rows[0].includes('新建定时')&&rows[0].includes('build-check')&&rows[0].includes('单次')&&rows[0].includes('10 分钟后')&&rows[0].includes('任务')&&rows[0].includes('检查 CI 构建结果'),'timer new copy '+JSON.stringify(rows));
+    assert(rows[0].indexOf('600000')===-1&&rows[0].indexOf('after_ms')===-1,'no raw ms params '+JSON.stringify(rows));
+    assert(rows[1].includes('删除定时')&&rows[1].includes('build-check'),'timer delete copy '+JSON.stringify(rows));
+    const standalone=await browser.evaluate(`(()=>{const icon=document.querySelector('.lucide-calendar-clock');if(!icon)return null;const row=icon.closest('.stream-tool-head,summary,.tool-activity-static');const group=row?.closest('.tool-activity-group details,.stream-tool-run');return {icon:!!icon,absorbed:!!group,visible:row?row.getBoundingClientRect().height>0:false};})()`);
+    assert(standalone&&standalone.icon&&!standalone.absorbed&&standalone.visible,'timer row standalone in mode '+stream+': '+JSON.stringify(standalone));
+   }
    const selector=stream?'.stream-tool-toggle':'.tool-activity > summary';
-   assert(await browser.evaluate(`(() => {const row=document.querySelector(${JSON.stringify(selector)});const children=[...row.children];const tool=children.findIndex(e=>e.tagName==='B');const preview=children.findIndex(e=>e.matches('.file-tool-preview,.stream-tool-command-preview,.tool-activity-command'));const visibleStatus=children.find(e=>e.matches('.stream-tool-status-slot,.tool-activity-running-marker,.stream-tool-status,.tool-activity-status'));return !visibleStatus&&tool===0&&preview>tool&&!row.textContent.includes('✓');})()`),'completed tool removes status marker and shifts left');
-   await browser.evaluate(`document.querySelector(${JSON.stringify(selector)}).scrollIntoView({block:'center'})`);
-   await browser.evaluate(`document.querySelector(${JSON.stringify(selector)}).dispatchEvent(new MouseEvent('mouseover',{bubbles:true}))`);
-   assert(await browser.evaluate(`getComputedStyle(document.querySelector(${JSON.stringify(selector)})).cursor==='pointer'`),'whole row has pointer affordance');
-   const hit=await browser.evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)}),r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
+   const toolRow=`[...document.querySelectorAll(${JSON.stringify(selector)})].find(r=>r.querySelector('.file-tool-preview'))`;
+   assert(await browser.evaluate(`(() => {const row=(${toolRow});if(!row)return false;const children=[...row.children];const tool=children.findIndex(e=>e.tagName==='B');const preview=children.findIndex(e=>e.matches('.file-tool-preview,.stream-tool-command-preview,.tool-activity-command'));const visibleStatus=children.find(e=>e.matches('.stream-tool-status-slot,.tool-activity-running-marker,.stream-tool-status,.tool-activity-status'));return !visibleStatus&&tool===0&&preview>tool&&!row.textContent.includes('✓');})()`),'completed tool removes status marker and shifts left');
+   await browser.evaluate(`(${toolRow}).scrollIntoView({block:'center'})`);
+   await browser.evaluate(`(${toolRow}).dispatchEvent(new MouseEvent('mouseover',{bubbles:true}))`);
+   assert(await browser.evaluate(`getComputedStyle((${toolRow})).cursor==='pointer'`),'whole row has pointer affordance');
+   const hit=await browser.evaluate(`(()=>{const e=(${toolRow}),r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};})()`);
    for(const type of ['mousePressed','mouseReleased']) await browser.call('Input.dispatchMouseEvent',{type,x:hit.x,y:hit.y,button:'left',clickCount:1});
-   await waitFor(()=>browser.evaluate(stream?`document.querySelector('.stream-tool-toggle').getAttribute('aria-expanded')==='true'`:`document.querySelector('.tool-activity').open`),'pointer expands details');
-   assert(await browser.evaluate(`document.querySelector(${JSON.stringify(stream?'.stream-tool-detail':'.tool-activity-body')}).textContent.includes('line_nr')`),'original parameters preserved');
-   await browser.evaluate(`document.querySelector(${JSON.stringify(selector)}).focus()`);
+   const detailOf=`((${toolRow}).closest('details,.stream-tool-merged-item')?.querySelector('.stream-tool-detail,.tool-activity-body'))`;
+   await waitFor(()=>browser.evaluate(stream?`(${toolRow}).getAttribute('aria-expanded')==='true'`:`((${toolRow}).closest('details')?.open===true)`),'pointer expands details');
+   assert(await browser.evaluate(`(${detailOf})?.textContent.includes('line_nr')===true`),'original parameters preserved');
+   await browser.evaluate(`(${toolRow}).focus()`);
    for(const type of ['keyDown','keyUp']) await browser.call('Input.dispatchKeyEvent',{type,key:' ',code:'Space',windowsVirtualKeyCode:32});
-   await waitFor(()=>browser.evaluate(stream?`document.querySelector('.stream-tool-toggle').getAttribute('aria-expanded')==='false'`:`!document.querySelector('.tool-activity').open`),'keyboard collapses details');
+   await waitFor(()=>browser.evaluate(stream?`(${toolRow}).getAttribute('aria-expanded')==='false'`:`((${toolRow}).closest('details')?.open===false)`),'keyboard collapses details');
   }
-  console.log('PASS tool presentation: ordinary/stream alignment, Eye self_tool, single CircleX failure icon, semantic summaries, pointer/keyboard, light/dark, 390px');
+  console.log('PASS tool presentation: ordinary/stream alignment, Eye self_tool, single CircleX failure icon, result-size badges, semantic summaries, standalone user-readable timer lifecycle rows, pointer/keyboard, light/dark, 390px');
  } finally {await browser.close();await host.close();}
 }
 await main();

@@ -92,7 +92,7 @@ it("does not silently fall back when the bound endpoint is deleted", () => {
   expect(endpointMatchesProfile(endpoint, profile)).toBe(false);
 });
 
-import { endpointProtocolOptions, canRestoreEndpointTemplateUrl, changeEndpointProtocol, restoreEndpointTemplateReasoning, restoreEndpointTemplateUrl, templateBaseUrl, applyEndpointTemplate, editEndpoint, editEndpointRequirements, functionCallingDefault, initialEndpointRequirements, type CatalogModel, type ModelEndpointDraft, type ProviderSpec } from "../src/model_endpoints";
+import { endpointProtocolOptions, canRestoreEndpointTemplateUrl, changeEndpointProtocol, restoreEndpointTemplateReasoning, restoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBaseUrl, templateBudgetSuggestion, applyEndpointTemplate, editEndpoint, editEndpointRequirements, functionCallingDefault, initialEndpointRequirements, catalogAcceptsImages, endpointCatalogModel, isImageFileName, type CatalogModel, type ModelEndpointDraft, type ProviderSpec } from "../src/model_endpoints";
 const template: CatalogModel = { id:"fixture/model", revision:1, provider:"openai", model:"fixture-model", label:"Fixture", base_url:"https://example.test/v1", efforts:["none","low","high","max"], default_effort:"low", middle_default:false, min_input:3000, max_input:200000, min_output:512, max_output:30000, context_window:230000, protocols:[{protocol:"openai-responses",disabled_reason:null,function_calling:"supported",fixed_effort:null,fixed_reason:null}] };
 const blank = (): ModelEndpointDraft => ({ ...endpoint, http_headers:{}, request_fields:{}, allow_cross_origin_redirects:false, requirements:initialEndpointRequirements() });
 const providerSpecs: ProviderSpec[] = [
@@ -148,7 +148,7 @@ describe("editable endpoint templates", () => {
   it("defaults token budgets from the selected model limits", () => {
     const standard = applyEndpointTemplate(blank(), template);
     expect(standard.max_llm_input_tokens).toBe(200_000);
-    expect(standard.max_llm_output_tokens).toBe(10_000);
+    expect(standard.max_llm_output_tokens).toBe(20_000);
     expect(standard.requirements?.field_sources.max_llm_input_tokens).toBe("template");
     expect(standard.requirements?.field_sources.max_llm_output_tokens).toBe("template");
 
@@ -160,7 +160,7 @@ describe("editable endpoint templates", () => {
       context_window: 1_050_000,
     });
     expect(large.max_llm_input_tokens).toBe(256_000);
-    expect(large.max_llm_output_tokens).toBe(10_000);
+    expect(large.max_llm_output_tokens).toBe(20_000);
 
     const small = applyEndpointTemplate(blank(), {
       ...template,
@@ -171,6 +171,19 @@ describe("editable endpoint templates", () => {
     });
     expect(small.max_llm_input_tokens).toBe(64_000);
     expect(small.max_llm_output_tokens).toBe(8_000);
+  });
+
+  it("suggests a 20K output default and restores either budget field on demand", () => {
+    const draft = applyEndpointTemplate(blank(), template);
+    expect(templateBudgetSuggestion(template)).toEqual({ input: 200_000, output: 20_000 });
+    const manual = editEndpoint(draft, { max_llm_output_tokens: 25_000, max_llm_input_tokens: 150_000 });
+    const restoredOutput = restoreEndpointTemplateBudget(manual, template, "max_llm_output_tokens");
+    expect(restoredOutput.max_llm_output_tokens).toBe(20_000);
+    expect(restoredOutput.requirements?.field_sources.max_llm_output_tokens).toBe("template");
+    expect(restoredOutput.max_llm_input_tokens).toBe(150_000); // untouched sibling
+    const restoredInput = restoreEndpointTemplateBudget(manual, template, "max_llm_input_tokens");
+    expect(restoredInput.max_llm_input_tokens).toBe(200_000);
+    expect(restoreEndpointTemplateBudget(manual, undefined, "max_llm_output_tokens")).toBe(manual);
   });
 
   it("recomputes template-owned budgets but preserves user overrides", () => {
@@ -195,7 +208,7 @@ describe("editable endpoint templates", () => {
     expect(preserved.max_llm_output_tokens).toBe(5_000);
   });
 
-  it("suggests fields, preserves user overrides while a template switch adopts the address", () => {
+  it("suggests fields and preserves all user overrides across a template switch", () => {
     let draft = applyEndpointTemplate(blank(), template);
     expect(draft.model).toBe(template.model);
     expect(draft.requirements?.field_sources.model).toBe("template");
@@ -203,10 +216,10 @@ describe("editable endpoint templates", () => {
     draft = editEndpointRequirements(draft, {allowed_reasoning:["low"],adaptive_reasoning:false});
     draft = applyEndpointTemplate(draft, {...template,id:"other",model:"other-model",default_effort:"high"});
     expect(draft.model).toBe("manual-model");
-    // Selecting a different template adopts its address; the proxy must be
-    // re-entered afterwards if it should survive future switches.
-    expect(draft.base_url).toBe(template.base_url);
-    expect(draft.requirements?.field_sources.base_url).toBe("template");
+    // A user-owned address (custom proxy) survives the template switch; the
+    // editor offers "Restore default URL" separately instead of overwriting.
+    expect(draft.base_url).toBe("https://proxy.test/v1");
+    expect(draft.requirements?.field_sources.base_url).toBe("user");
     expect(draft.max_llm_output_tokens).toBe(25000);
     expect(draft.requirements?.allowed_reasoning).toEqual(["low"]);
     expect(draft.requirements?.adaptive_reasoning).toBe(false);
@@ -401,12 +414,14 @@ describe("protocol-specific template URLs", () => {
     expect(changeEndpointProtocol(detached,"openai-compatible",protocolTemplate).base_url).toBe(draft.base_url);
     expect(changeEndpointProtocol(draft,"openai-compatible").base_url).toBe(draft.base_url);
   });
-  it("adopts the template address when switching to a different template", () => {
+  it("keeps a user address when switching to a different template", () => {
     const legacy = editEndpoint(blank(), { model: "legacy-model", base_url: "https://open.bigmodel.cn/api/coding/paas/v4", api_protocol: "openai-compatible" });
     const applied = applyEndpointTemplate(legacy, protocolTemplate);
-    expect(applied.base_url).toBe(protocolTemplate.protocols[1].base_url);
-    expect(applied.requirements?.field_sources.base_url).toBe("template");
-    expect(changeEndpointProtocol(applied, "openai-responses", protocolTemplate).base_url).toBe(protocolTemplate.protocols[0].base_url);
+    expect(applied.base_url).toBe("https://open.bigmodel.cn/api/coding/paas/v4");
+    expect(applied.requirements?.field_sources.base_url).toBe("user");
+    // Restoring explicitly adopts the template address again.
+    expect(restoreEndpointTemplateUrl(applied, protocolTemplate).base_url).toBe(protocolTemplate.protocols[1].base_url);
+    expect(changeEndpointProtocol(applied, "openai-responses", protocolTemplate).base_url).toBe("https://open.bigmodel.cn/api/coding/paas/v4");
   });
 
   it("keeps a custom address when re-applying the same template", () => {
@@ -715,5 +730,42 @@ describe("endpoint capability feedback", () => {
     setLocale("en");
     expect(endpointSaveErrorMessage("catalog_token_budget_out_of_range")).toContain("token budget");
     setLocale("zh");
+  });
+});
+
+describe("documented image input modalities", () => {
+  const catalog: CatalogModel[] = [
+    { ...template, id: "z-glm5.3", provider: "zhipu", model: "glm-5.3", input_modalities: ["text"] },
+    { ...template, id: "z-glm5.3-flash", provider: "zhipu", model: "glm-5.3-flash", input_modalities: ["text", "image", "video", "file"] },
+    { ...template, id: "legacy" },
+  ];
+
+  it("surfaces image support from documented modalities and stays permissive when unknown", () => {
+    expect(catalogAcceptsImages(catalog[0])).toBe(false);
+    expect(catalogAcceptsImages(catalog[1])).toBe(true);
+    expect(catalogAcceptsImages(catalog[2])).toBeUndefined();
+    expect(catalogAcceptsImages(undefined)).toBeUndefined();
+  });
+
+  it("resolves the catalog entry by catalog id or template provider plus model", () => {
+    expect(endpointCatalogModel({ ...endpoint, catalog_id: "z-glm5.3" } as never, catalog)?.id).toBe("z-glm5.3");
+    const templateCopy = editEndpoint(blank(), { model: "glm-5.3-flash", requirements: undefined } as never);
+    expect(
+      endpointCatalogModel(
+        { ...templateCopy, catalog_id: null, requirements: { version: 1, provider: "zhipu", allowed_reasoning: null, adaptive_reasoning: null, field_sources: {} } } as never,
+        catalog,
+      )?.id,
+    ).toBe("z-glm5.3-flash");
+    expect(endpointCatalogModel({ ...endpoint, catalog_id: "unknown-id" } as never, catalog)).toBeUndefined();
+    expect(endpointCatalogModel(undefined, catalog)).toBeUndefined();
+  });
+
+  it("mirrors the host image extension admission", () => {
+    expect(isImageFileName("photo.PNG")).toBe(true);
+    expect(isImageFileName("shot.jpeg")).toBe(true);
+    expect(isImageFileName("scan.webp")).toBe(true);
+    expect(isImageFileName("anim.gif")).toBe(true);
+    expect(isImageFileName("notes.txt")).toBe(false);
+    expect(isImageFileName(undefined)).toBe(false);
   });
 });

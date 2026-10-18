@@ -475,6 +475,18 @@ pub(super) fn topic_summary(payload: &Value) -> Option<String> {
                 humanize(op).to_lowercase()
             ))
         }
+        "core.timer" => {
+            let op = data.get("op").and_then(Value::as_str).unwrap_or("created");
+            let timers = data
+                .get("timers")
+                .and_then(Value::as_array)
+                .map(|list| list.len())
+                .unwrap_or(0);
+            Some(format!(
+                "{ANSI_DIM}Timer {} · {timers} active{ANSI_RESET}",
+                humanize(op).to_lowercase()
+            ))
+        }
         _ => None,
     }
 }

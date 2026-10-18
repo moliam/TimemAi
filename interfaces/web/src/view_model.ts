@@ -1,4 +1,4 @@
-import { memorySearchPresentation, readFilePresentation, runBashEditPresentation, selfToolPresentation } from "./tool_presentation";
+import { memorySearchPresentation, readFilePresentation, runBashEditPresentation, selfToolPresentation, timerPresentation } from "./tool_presentation";
 import {
   Activity,
   ChatHistoryRecord,
@@ -388,15 +388,28 @@ export function releaseSessionDraftSubmission(
   return locks.current.delete(sessionId);
 }
 
+/**
+ * Prunes session drafts, but drafts restored from browser-local storage
+ * survive progressive session restore: the Host fills the session list
+ * newest-first in the background, so a missing id is not proof the session
+ * is gone. A restored draft is pruned only after its session was live once
+ * and then disappeared; drafts typed in this visit keep the immediate prune.
+ */
 export function pruneSessionDrafts(
   drafts: SessionDrafts,
   liveSessionIds: Iterable<string>,
+  restoredDraftSessionIds: ReadonlySet<string> | null = null,
+  everLiveSessionIds: ReadonlySet<string> = new Set(),
 ): SessionDrafts {
   const live = new Set(liveSessionIds);
   let changed = false;
   const next: SessionDrafts = {};
   for (const [sessionId, draft] of Object.entries(drafts)) {
-    if (live.has(sessionId)) {
+    const keep =
+      live.has(sessionId) ||
+      (restoredDraftSessionIds?.has(sessionId) === true &&
+        !everLiveSessionIds.has(sessionId));
+    if (keep) {
       next[sessionId] = draft;
     } else {
       changed = true;
@@ -1113,7 +1126,7 @@ export function turnsFromHistoryRecords(
       if (record.role === "user") {
         const kind =
           record.kind &&
-          ["task", "supplement", "approval"].includes(record.kind)
+          ["task", "supplement", "approval", "timer"].includes(record.kind)
             ? record.kind
             : "task";
         turn.user_entries.push({
@@ -1152,6 +1165,20 @@ export function turnsFromHistoryRecords(
       ),
     }))
     .sort((left, right) => left.created_at_ms - right.created_at_ms);
+}
+
+/**
+ * Timer-fired turns carry the Host-authored "[timer:name] prompt" prefix in
+ * their entry text. Presentation splits it into the timer name and the bare
+ * prompt without rewriting the stored history text.
+ */
+export function parseTimerEntryText(
+  text: string,
+): { name: string | null; prompt: string } {
+  const match = /^\[timer:([^\]]*)\]\s*/.exec(text);
+  if (!match) return { name: null, prompt: text };
+  const name = match[1].trim();
+  return { name: name.length > 0 ? name : null, prompt: text.slice(match[0].length) };
 }
 
 type ChatMessageHistoryRecord = Extract<ChatHistoryRecord, { type: "message" }>;
@@ -1993,6 +2020,54 @@ function protocolRepairDisplayReason(payload: Record<string, unknown>): string {
   return reason || t("repair.fallback");
 }
 
+const COMPLETION_REPAIR_ISSUE_KEYS: Record<string, Parameters<typeof t>[0]> = {
+  xml_recovered_final_answer_requires_retry:
+    "completion.repairIssueExtraAfterFinalAnswer",
+  invalid_xml: "completion.repairIssueInvalidXml",
+  invalid_xml_response_root: "completion.repairIssueInvalidXmlResponseRoot",
+  xml_response_root_missing: "completion.repairIssueXmlResponseRootMissing",
+  missing_response_root: "completion.repairIssueMissingResponseRoot",
+  xml_response_root_unclosed: "completion.repairIssueXmlResponseRootUnclosed",
+  xml_content_before_response: "completion.repairIssueXmlContentBeforeResponse",
+  xml_content_after_response: "completion.repairIssueXmlContentAfterResponse",
+  empty_response: "completion.repairIssueEmptyResponse",
+  truncated_model_output: "completion.repairIssueTruncatedModelOutput",
+  finish_confirm_required_before_final_answer:
+    "completion.repairIssueFinishConfirmRequiredBeforeFinalAnswer",
+  finish_confirm_prefix_invalid: "completion.repairIssueFinishConfirmPrefixInvalid",
+};
+
+/** Terminal display text for the last protocol-repair issue of a turn. */
+export function repairIssueText(issue: string): string {
+  const trimmed = issue.trim();
+  if (!trimmed) return t("completion.repairIssueFallback");
+  const key = COMPLETION_REPAIR_ISSUE_KEYS[trimmed];
+  return key ? t(key) : trimmed;
+}
+
+const COMPLETION_STOP_REASON_KEYS: Record<string, Parameters<typeof t>[0]> = {
+  protocolrepairfailed: "completion.stopReasonProtocolRepairFailed",
+  protocol_repair_failed: "completion.stopReasonProtocolRepairFailed",
+  modelerror: "completion.stopReasonModelError",
+  model_error: "completion.stopReasonModelError",
+  outputlimitstoppedbyuser: "completion.stopReasonOutputLimitStoppedByUser",
+  output_limit_stopped_by_user: "completion.stopReasonOutputLimitStoppedByUser",
+  roundlimitreached: "completion.stopReasonRoundLimitReached",
+  round_limit_reached: "completion.stopReasonRoundLimitReached",
+  cancelledbyuser: "completion.stopReasonCancelledByUser",
+  cancelled_by_user: "completion.stopReasonCancelledByUser",
+  turnfinished: "completion.stopReasonTurnFinished",
+  turn_finished: "completion.stopReasonTurnFinished",
+};
+
+/** Terminal display text for a turn stop reason; unknown codes stay verbatim. */
+export function completionStopReasonText(reason: string): string {
+  const trimmed = reason.trim();
+  if (!trimmed) return trimmed;
+  const key = COMPLETION_STOP_REASON_KEYS[trimmed.toLowerCase()];
+  return key ? t(key) : trimmed;
+}
+
 export type ActiveModelRetryStatus = {
   kind:
     | "network-error"
@@ -2081,7 +2156,13 @@ export function activeModelRetryStatus(
     if (event.source === "worker_activity") {
       const kind = event.payload.kind;
       if (kind === "model_request" || kind === "model_response") {
-        status = null;
+        // A protocol-repair retry IS the following model request: keep the
+        // repair status visible while that (often long) wait runs, and clear
+        // it only when a response or a newer failure supersedes it. Transport
+        // `model_retry` status still clears on the next request as before.
+        if (kind === "model_response" || status?.kind !== "retrying") {
+          status = null;
+        }
         continue;
       }
       if (kind !== "model_retry") continue;
@@ -2200,11 +2281,17 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         self_tool: selfToolPresentation(action, redactedInput),
         readfile: readFilePresentation(action, redactedInput),
         run_bash_edit: runBashEditPresentation(action, redactedInput),
+        timer: timerPresentation(action, redactedInput),
         tool_status: status,
         tool_mode: toolMode,
         elapsed_ms:
           typeof payload.elapsed_ms === "number"
             ? payload.elapsed_ms
+            : undefined,
+        tool_output_bytes:
+          typeof payload.tool_output_bytes === "number" &&
+          Number.isFinite(payload.tool_output_bytes)
+            ? payload.tool_output_bytes
             : undefined,
         timeout_ms: numericKindValue("timeout_ms"),
         loop_timeout_ms: numericKindValue("loop_timeout_ms"),

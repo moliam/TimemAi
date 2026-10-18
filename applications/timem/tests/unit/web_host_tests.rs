@@ -6414,6 +6414,284 @@ fn context_compress_threshold_is_authoritative_mem_persistent_and_validated() {
 }
 
 #[test]
+fn restore_prompt_context_on_startup_defaults_off_and_persists_via_command() {
+    let state = routing_test_state();
+    // The default must be opt-in: legacy behavior restores nothing.
+    assert!(
+        !state
+            .mem
+            .lock()
+            .unwrap()
+            .settings
+            .restore_prompt_context_on_startup
+    );
+    assert!(
+        !snapshot_for(&state, TEST_PORT)
+            .server
+            .mem
+            .restore_prompt_context_on_startup
+    );
+
+    let command = ClientCommand::SystemRestorePromptContextOnStartupUpdate { enabled: true };
+    assert_eq!(command.mutation_lane().as_deref(), Some("global"));
+    assert!(command.uses_global_mutation_barrier());
+    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+    let event = handle_command(&state, TEST_PORT, command).unwrap().unwrap();
+    let WireEvent::MemSettingsUpdated {
+        restore_prompt_context_on_startup,
+        ..
+    } = event
+    else {
+        panic!("expected authoritative MEM settings event")
+    };
+    assert!(restore_prompt_context_on_startup);
+    assert!(
+        state
+            .mem
+            .lock()
+            .unwrap()
+            .settings
+            .restore_prompt_context_on_startup
+    );
+    assert!(
+        load_web_mem_settings(&memory_dir, false)
+            .unwrap()
+            .restore_prompt_context_on_startup
+    );
+    assert!(
+        snapshot_for(&state, TEST_PORT)
+            .server
+            .mem
+            .restore_prompt_context_on_startup
+    );
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SystemRestorePromptContextOnStartupUpdate { enabled: false },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::MemSettingsUpdated {
+        restore_prompt_context_on_startup,
+        ..
+    } = event
+    else {
+        panic!("expected authoritative MEM settings event")
+    };
+    assert!(!restore_prompt_context_on_startup);
+    assert!(
+        !load_web_mem_settings(&memory_dir, false)
+            .unwrap()
+            .restore_prompt_context_on_startup
+    );
+}
+
+#[test]
+fn restore_prompt_context_on_startup_off_keeps_snapshot_without_importing() {
+    let state = routing_test_state();
+    let id = register_real_worker(&state, "handoff-gate-off");
+    write_prompt_context_snapshot(&state, &id, &context_handoff_fixture("pd_gate_off")).unwrap();
+    let path = current_session_store(&state)
+        .unwrap()
+        .prompt_context_path_for_session(&id);
+    restore_prompt_context_snapshot(&state, &id).unwrap();
+    assert!(
+        path.exists(),
+        "disabled restore must keep the snapshot for a later opt-in restart"
+    );
+    let handle = session_worker_handle(&state, &id, None).unwrap();
+    assert!(handle
+        .export_dynamic_context()
+        .unwrap()
+        .unwrap()
+        .deltas
+        .is_empty());
+    // Opting in must consume and import the kept snapshot.
+    state
+        .mem
+        .lock()
+        .unwrap()
+        .settings
+        .restore_prompt_context_on_startup = true;
+    restore_prompt_context_snapshot(&state, &id).unwrap();
+    assert!(!path.exists(), "enabled restore consumes the snapshot");
+    assert_eq!(
+        handle.export_dynamic_context().unwrap().unwrap().deltas,
+        context_handoff_fixture("pd_gate_off").deltas
+    );
+    std::mem::take(&mut *state.manager.lock().unwrap())
+        .shutdown_all_detached()
+        .unwrap();
+    std::fs::remove_dir_all(&state.template.data_dir).unwrap();
+}
+
+#[test]
+fn restore_prompt_context_on_startup_covers_off_on_off_toggle_cycle() {
+    let state = routing_test_state();
+    let id = register_real_worker(&state, "handoff-toggle");
+    let handle = session_worker_handle(&state, &id, None).unwrap();
+    let path = current_session_store(&state)
+        .unwrap()
+        .prompt_context_path_for_session(&id);
+
+    // Phase 1 (off): a shutdown snapshot exists; a restart must not import
+    // it and must keep it on disk.
+    write_prompt_context_snapshot(&state, &id, &context_handoff_fixture("pd_toggle_1")).unwrap();
+    restore_prompt_context_snapshot(&state, &id).unwrap();
+    assert!(path.exists(), "off keeps the first snapshot");
+    assert!(handle
+        .export_dynamic_context()
+        .unwrap()
+        .unwrap()
+        .deltas
+        .is_empty());
+
+    // Phase 2 (on): the next restart imports and consumes the snapshot.
+    state
+        .mem
+        .lock()
+        .unwrap()
+        .settings
+        .restore_prompt_context_on_startup = true;
+    restore_prompt_context_snapshot(&state, &id).unwrap();
+    assert!(!path.exists(), "on consumes the first snapshot");
+    assert_eq!(
+        handle.export_dynamic_context().unwrap().unwrap().deltas,
+        context_handoff_fixture("pd_toggle_1").deltas
+    );
+
+    // Phase 3: keep working under on, then the next shutdown writes a fresh
+    // snapshot; toggling back to off must make the next restart skip the new
+    // snapshot (kept on disk) without touching the imported context.
+    handle
+        .import_dynamic_context(context_handoff_fixture("pd_toggle_2"))
+        .unwrap();
+    persist_prompt_context_snapshots(&state, &state.manager.lock().unwrap()).unwrap();
+    assert!(path.exists(), "shutdown snapshot writing is never gated");
+    handle.clear_dynamic_context().unwrap();
+    state
+        .mem
+        .lock()
+        .unwrap()
+        .settings
+        .restore_prompt_context_on_startup = false;
+    restore_prompt_context_snapshot(&state, &id).unwrap();
+    assert!(path.exists(), "off keeps the second snapshot");
+    assert!(
+        handle
+            .export_dynamic_context()
+            .unwrap()
+            .unwrap()
+            .deltas
+            .is_empty(),
+        "off restart must not resurrect any imported context"
+    );
+
+    // Phase 4: re-enabling later still restores the kept second snapshot.
+    state
+        .mem
+        .lock()
+        .unwrap()
+        .settings
+        .restore_prompt_context_on_startup = true;
+    restore_prompt_context_snapshot(&state, &id).unwrap();
+    assert!(!path.exists());
+    assert_eq!(
+        handle.export_dynamic_context().unwrap().unwrap().deltas,
+        context_handoff_fixture("pd_toggle_2").deltas
+    );
+
+    std::mem::take(&mut *state.manager.lock().unwrap())
+        .shutdown_all_detached()
+        .unwrap();
+    std::fs::remove_dir_all(&state.template.data_dir).unwrap();
+}
+
+#[test]
+fn corrupt_snapshot_degrades_to_history_only_restore_without_blocking_session() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("corrupt_snapshot_restore"));
+    let data_dir = root.join("data");
+    let space = "corrupt_snapshot_mem";
+    let workspace = root.join("workspace");
+    let runtime_log_path = root.join("runtime.log");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    set_test_mem(&state, data_dir.clone(), space);
+    let mut template = (*state.template).clone();
+    template.current_dir = workspace.clone();
+    template.workspace_dirs = vec![workspace.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template);
+    state.runtime_log = RuntimeLog::with_path_and_limit(runtime_log_path.clone(), 64 * 1024);
+    state.sessions.lock().unwrap().clear();
+    state
+        .mem
+        .lock()
+        .unwrap()
+        .settings
+        .restore_prompt_context_on_startup = true;
+
+    let store = current_session_store(&state).unwrap();
+    let session_id = "session_corrupt_snapshot";
+    let history_path = store.history_path_for_session(session_id);
+    store
+        .append_history_record(
+            session_id,
+            &ChatHistoryRecord::Message {
+                role: ChatHistoryRole::User,
+                turn_id: "turn_before_corruption".to_string(),
+                created_at_ms: 1,
+                kind: Some("task".to_string()),
+                command_id: None,
+                delivery_state: None,
+                content: "history survives unreadable snapshot".to_string(),
+            },
+        )
+        .unwrap();
+    store
+        .upsert_session(&StoredSession {
+            model_endpoint_id: None,
+            session_id: session_id.to_string(),
+            display_name: "Corrupt snapshot session".to_string(),
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            current_dir: workspace.display().to_string(),
+            profile: StoredSessionProfile::default(),
+            env: BTreeMap::new(),
+            env_overrides: None,
+            mcp_server_ids: Vec::new(),
+            state: StoredSessionState::Ready,
+            last_turn_id: Some("turn_before_corruption".to_string()),
+            raw_chat_history_path: history_path.display().to_string(),
+            group_id: None,
+            ordinal: 0,
+        })
+        .unwrap();
+
+    // Simulate an unreadable snapshot payload at the exact handoff path.
+    let snapshot_path = store.prompt_context_path_for_session(session_id);
+    std::fs::create_dir_all(snapshot_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(&snapshot_path).unwrap();
+
+    // The restore must succeed (history-only) instead of failing the session.
+    assert_eq!(restore_stored_sessions(&state).unwrap(), 1);
+    let diagnostic = std::fs::read_to_string(&runtime_log_path).unwrap();
+    assert!(diagnostic.contains("session_restore_context_snapshot_failed"));
+    assert!(diagnostic.contains("prompt_context_read_failed"));
+    let sessions = state.sessions.lock().unwrap();
+    let session = sessions.get(session_id).unwrap();
+    assert_eq!(
+        session.messages[0].text,
+        "history survives unreadable snapshot"
+    );
+    drop(sessions);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn claude_codex_tool_discovery_setting_is_authoritative_and_mem_persistent() {
     let state = routing_test_state();
     assert!(
@@ -7870,6 +8148,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         pending_turn_id: None,
         turn_projection: TurnProjectionCache::default(),
         active_memo: None,
+        timers: Vec::new(),
         context_cleared_at_ms: None,
         previous_memo_for_notice: None,
         message_queue: SessionMessageQueue::new(MAX_NEXT_TURN_INTENTS),
@@ -17161,6 +17440,7 @@ fn context_handoff_persists_runtime_state_without_text_deltas() {
         active_memo: Some("resume the long task".to_string()),
         pending_forcible_memo_note: Some("memo was closed by runtime".to_string()),
         pending_interrupted_memo_note: None,
+        active_timers: Vec::new(),
     };
 
     write_prompt_context_snapshot(&state, id, &snapshot).unwrap();
@@ -17181,6 +17461,12 @@ fn context_handoff_persists_runtime_state_without_text_deltas() {
 #[test]
 fn context_handoff_is_consumed_before_import_and_cannot_replay_after_crash() {
     let state = routing_test_state();
+    state
+        .mem
+        .lock()
+        .unwrap()
+        .settings
+        .restore_prompt_context_on_startup = true;
     let id = register_real_worker(&state, "handoff-consume");
     let snapshot = context_handoff_fixture("pd_76");
     write_prompt_context_snapshot(&state, &id, &snapshot).unwrap();
@@ -17215,6 +17501,12 @@ fn context_handoff_is_consumed_before_import_and_cannot_replay_after_crash() {
 #[test]
 fn context_handoff_shutdown_uses_registered_primary_not_first_worker() {
     let state = routing_test_state();
+    state
+        .mem
+        .lock()
+        .unwrap()
+        .settings
+        .restore_prompt_context_on_startup = true;
     state.sessions.lock().unwrap().clear();
     let id = register_real_worker(&state, "handoff-primary");
     let old = session_worker_handle(&state, &id, None).unwrap();
@@ -17268,6 +17560,12 @@ fn context_handoff_failed_export_invalidates_previous_snapshot() {
 #[test]
 fn context_handoff_real_compaction_survives_graceful_restart() {
     let state = routing_test_state();
+    state
+        .mem
+        .lock()
+        .unwrap()
+        .settings
+        .restore_prompt_context_on_startup = true;
     state.sessions.lock().unwrap().clear();
     let id = register_real_worker(&state, "handoff-compact");
     let mut core = AgentCore::new(
@@ -18294,4 +18592,738 @@ fn interrupted_queued_message_id_follows_the_shared_history_formula() {
     );
     assert_eq!(turn.turn_id, "turn_q");
     assert_eq!(turn.state, "interrupted");
+}
+
+// ---------------------------------------------------------------------------
+// Timers
+// ---------------------------------------------------------------------------
+
+fn web_timer_fixture(name: &str, mode: &str, next_fire_ms: u64) -> WebTimer {
+    WebTimer {
+        spec: TimerSpec {
+            timer_id: unique_web_id("timer"),
+            name: name.to_string(),
+            prompt: format!("prompt {name}"),
+            mode: mode.to_string(),
+            after_ms: Some(1000),
+            at: None,
+            interval_ms: if mode == "repeat" { Some(60_000) } else { None },
+            created_by: "user".to_string(),
+        },
+        created_at_ms: now_ms(),
+        enabled: true,
+        next_fire_ms,
+        last_fired_ms: None,
+        parked_reason: None,
+    }
+}
+
+#[test]
+fn web_timer_compute_next_fire_ms_parses_at_and_rejects_invalid() {
+    let spec = TimerSpec {
+        timer_id: "t".into(),
+        name: "t".into(),
+        prompt: "p".into(),
+        mode: "once".into(),
+        after_ms: Some(1500),
+        at: None,
+        interval_ms: None,
+        created_by: "user".into(),
+    };
+    assert_eq!(compute_next_fire_ms(&spec, 10_000).unwrap(), 11_500);
+    let spec = TimerSpec {
+        after_ms: None,
+        at: Some("2026-01-01T00:00:00Z".into()),
+        ..spec
+    };
+    assert_eq!(
+        compute_next_fire_ms(&spec, 0).unwrap(),
+        1_767_225_600_000_u64
+    );
+    let spec = TimerSpec {
+        after_ms: None,
+        at: Some("not-a-timestamp".into()),
+        ..spec
+    };
+    assert!(compute_next_fire_ms(&spec, 0).is_err());
+}
+
+#[test]
+fn web_timer_user_input_validation() {
+    assert!(validate_user_timer_input("once", Some(1000), None, None).is_ok());
+    assert!(validate_user_timer_input("once", None, Some("2026-01-01T00:00:00Z"), None).is_ok());
+    assert!(
+        validate_user_timer_input("once", Some(1000), None, Some(50))
+            .unwrap_err()
+            .contains("interval_requires_repeat")
+    );
+    assert!(validate_user_timer_input("repeat", Some(1000), None, None)
+        .unwrap_err()
+        .contains("interval_required"));
+    assert!(
+        validate_user_timer_input("repeat", Some(1000), None, Some(0))
+            .unwrap_err()
+            .contains("interval_invalid")
+    );
+    assert!(validate_user_timer_input("hourly", Some(1000), None, None)
+        .unwrap_err()
+        .contains("mode_invalid"));
+    assert!(validate_user_timer_input("once", None, None, None)
+        .unwrap_err()
+        .contains("schedule_invalid"));
+    assert!(
+        validate_user_timer_input("once", Some(1000), Some("2026-01-01T00:00:00Z"), None)
+            .unwrap_err()
+            .contains("schedule_invalid")
+    );
+    assert!(validate_user_timer_input("once", Some(0), None, None)
+        .unwrap_err()
+        .contains("after_ms_invalid"));
+}
+
+#[test]
+fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
+    let state = routing_test_state();
+    // Empty prompt is rejected.
+    assert!(create_session_timer(
+        &state,
+        "session_a",
+        None,
+        "   ".to_string(),
+        None,
+        Some(1000),
+        None,
+        None
+    )
+    .unwrap_err()
+    .contains("prompt_required"));
+
+    create_session_timer(
+        &state,
+        "session_a",
+        None,
+        "first".into(),
+        None,
+        Some(1000),
+        None,
+        None,
+    )
+    .unwrap();
+    create_session_timer(
+        &state,
+        "session_a",
+        None,
+        "second".into(),
+        None,
+        None,
+        Some("2030-01-01T00:00:00Z".to_string()),
+        None,
+    )
+    .unwrap();
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let names: Vec<String> = sessions["session_a"]
+            .timers
+            .iter()
+            .map(|timer| timer.spec.name.clone())
+            .collect();
+        assert_eq!(names, vec!["timer0".to_string(), "timer1".to_string()]);
+    }
+    // Duplicate explicit name.
+    assert!(create_session_timer(
+        &state,
+        "session_a",
+        Some("timer1".into()),
+        "dup".into(),
+        None,
+        Some(1000),
+        None,
+        None
+    )
+    .unwrap_err()
+    .contains("name_exists"));
+    // timers.json persisted with the projection.
+    let persisted = load_session_timers(&state, "session_a");
+    assert_eq!(persisted.len(), 2);
+    assert!(persisted[0].next_fire_ms > 0);
+    assert!(persisted[1].next_fire_ms > now_ms() as u64);
+}
+
+#[test]
+fn web_timer_toggle_and_delete() {
+    let state = routing_test_state();
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("work".into()),
+        "p".into(),
+        None,
+        Some(1000),
+        None,
+        None,
+    )
+    .unwrap();
+    let timer_id = state.sessions.lock().unwrap()["session_a"].timers[0]
+        .spec
+        .timer_id
+        .clone();
+    toggle_session_timer(&state, "session_a", &timer_id, false).unwrap();
+    assert!(!state.sessions.lock().unwrap()["session_a"].timers[0].enabled);
+    // Disabled timers never fire.
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.timers[0].next_fire_ms = 0;
+    }
+    fire_due_timers(&state);
+    assert_eq!(state.sessions.lock().unwrap()["session_a"].timers.len(), 1);
+    toggle_session_timer(&state, "session_a", &timer_id, true).unwrap();
+    assert!(state.sessions.lock().unwrap()["session_a"].timers[0].enabled);
+    assert!(delete_session_timer(&state, "session_a", &timer_id).is_ok());
+    assert!(state.sessions.lock().unwrap()["session_a"]
+        .timers
+        .is_empty());
+    assert!(delete_session_timer(&state, "session_a", &timer_id)
+        .unwrap_err()
+        .contains("timer_not_found"));
+}
+
+#[test]
+fn web_timer_merge_from_core_preserves_host_metadata() {
+    let state = routing_test_state();
+    let mut seeded = web_timer_fixture("existing", "once", 123_456);
+    seeded.created_at_ms = 42;
+    seeded.enabled = false;
+    seeded.last_fired_ms = Some(7);
+    seeded.parked_reason = Some("delivery_failed".to_string());
+    let existing_id = seeded.spec.timer_id.clone();
+    let existing_spec = seeded.spec.clone();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions.get_mut("session_a").unwrap().timers = vec![seeded];
+    }
+    // Core reports the existing timer (prompt changed) plus a new model timer.
+    let mut updated = existing_spec.clone();
+    updated.prompt = "changed by model".into();
+    let model_timer = TimerSpec {
+        timer_id: "timer_model_1".into(),
+        name: "timer0".into(),
+        prompt: "model job".into(),
+        mode: "once".into(),
+        after_ms: Some(2000),
+        at: None,
+        interval_ms: None,
+        created_by: "model".into(),
+    };
+    merge_session_timers_from_core(&state, "session_a", &[updated, model_timer]).unwrap();
+    let timers = state.sessions.lock().unwrap()["session_a"].timers.clone();
+    assert_eq!(timers.len(), 2);
+    let kept = timers
+        .iter()
+        .find(|t| t.spec.timer_id == existing_id)
+        .unwrap();
+    assert_eq!(kept.spec.prompt, "changed by model");
+    assert_eq!(kept.created_at_ms, 42);
+    assert!(!kept.enabled);
+    assert_eq!(kept.last_fired_ms, Some(7));
+    assert_eq!(kept.next_fire_ms, 123_456);
+    assert_eq!(kept.parked_reason.as_deref(), Some("delivery_failed"));
+    let fresh = timers
+        .iter()
+        .find(|t| t.spec.timer_id == "timer_model_1")
+        .unwrap();
+    assert!(fresh.enabled);
+    assert!(fresh.next_fire_ms > now_ms() as u64);
+    assert_eq!(fresh.last_fired_ms, None);
+}
+
+#[test]
+fn web_timer_fire_due_enqueues_into_active_turn() {
+    let state = routing_test_state();
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("tick".into()),
+        "do the thing".into(),
+        None,
+        Some(1000),
+        None,
+        None,
+    )
+    .unwrap();
+    // Simulate a turn in flight: pending_turn_id alone satisfies the
+    // enqueue precondition without a live worker.
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.pending_turn_id = Some("turn_fake_active".into());
+        session.timers[0].next_fire_ms = 0;
+    }
+    fire_due_timers(&state);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions["session_a"];
+        // once timer removed after successful delivery.
+        assert!(session.timers.is_empty());
+        assert_eq!(session.message_queue.projection().items.len(), 1);
+        assert_eq!(
+            session.message_queue.projection().items[0].payload.text,
+            "[timer:tick] do the thing"
+        );
+    }
+    // repeat timers advance instead of being removed.
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("loop".into()),
+        "loop job".into(),
+        Some("repeat".into()),
+        Some(1000),
+        None,
+        Some(60_000),
+    )
+    .unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.timers[0].next_fire_ms = 0;
+    }
+    fire_due_timers(&state);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions["session_a"];
+        assert_eq!(session.timers.len(), 1);
+        assert!(session.timers[0].next_fire_ms > now_ms() as u64);
+        assert!(session.timers[0].last_fired_ms.is_some());
+        assert_eq!(session.message_queue.projection().items.len(), 2);
+    }
+}
+
+#[test]
+fn web_timer_fire_due_idle_session_starts_new_timer_turn() {
+    let state = routing_test_state();
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("wakeup".into()),
+        "deliver me as a turn".into(),
+        None,
+        Some(1000),
+        None,
+        None,
+    )
+    .unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions.get_mut("session_a").unwrap().timers[0].next_fire_ms = 0;
+    }
+    fire_due_timers(&state);
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions["session_a"];
+    // once timer is consumed by delivery.
+    assert!(session.timers.is_empty());
+    // The prompt became a real turn entry with the timer kind. (Without a
+    // live worker the dispatch step falls back to the queue; that fallback
+    // is environment detail, not what this test pins down.)
+    let turn = session
+        .turns
+        .iter()
+        .find(|turn| turn.user_entries.iter().any(|entry| entry.kind == "timer"))
+        .expect("timer turn entry");
+    let entry = turn
+        .user_entries
+        .iter()
+        .find(|entry| entry.kind == "timer")
+        .unwrap();
+    assert_eq!(entry.text, "[timer:wakeup] deliver me as a turn");
+}
+
+#[test]
+fn web_timer_serde_flattens_spec_fields() {
+    let timer = web_timer_fixture("flat", "once", 99);
+    let value = serde_json::to_value(&timer).unwrap();
+    assert_eq!(value["name"], "flat");
+    assert_eq!(value["prompt"], "prompt flat");
+    assert_eq!(value["created_by"], "user");
+    assert_eq!(value["enabled"], true);
+    assert_eq!(value["next_fire_ms"], 99);
+    let parsed: WebTimer = serde_json::from_value(value).unwrap();
+    assert_eq!(parsed, timer);
+}
+
+// ---------------------------------------------------------------------------
+// Timers: real-worker end-to-end (spawned CoreSessionWorker + injected model)
+// ---------------------------------------------------------------------------
+
+struct TimerPromptCaptureModel {
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+impl ModelClient for TimerPromptCaptureModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        Ok(LlmResponse {
+            tool_calls: Vec::new(),
+            content: confirmed_xml_response("<final_answer>timer turn done</final_answer>"),
+            model_name: "test-model".to_string(),
+            usage: UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                total_tokens: 12,
+                ..UsageStats::zero()
+            },
+            truncated: false,
+        })
+    }
+}
+
+struct TimerToolCallModel {
+    calls: u8,
+}
+
+impl ModelClient for TimerToolCallModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.calls += 1;
+        // Round 1: call the timer tool through the XML protocol. The child
+        // element text form exercises the same parsing a real model uses.
+        let content = if self.calls == 1 {
+            "<ASSISTANT><free_talk>Scheduling a reminder.</free_talk><actions><timer name=\"schedule reminder\"><op>new</op><name>build-watch</name><prompt>check the long build</prompt><after_ms>60000</after_ms></timer></actions></ASSISTANT>".to_string()
+        } else {
+            confirmed_xml_response("<final_answer>Reminder scheduled.</final_answer>")
+        };
+        Ok(LlmResponse {
+            tool_calls: Vec::new(),
+            content,
+            model_name: "test-model".to_string(),
+            usage: UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                total_tokens: 12,
+                ..UsageStats::zero()
+            },
+            truncated: false,
+        })
+    }
+}
+
+fn register_timer_model_worker<M>(state: &AppState, model: M, label: &str) -> String
+where
+    M: ModelClient + Send + 'static,
+{
+    let ordinal = state.sessions.lock().unwrap().len() as u32;
+    let session_id = unique_web_id("timer_session");
+    let context_id = test_context_id(&session_id);
+    let worker_dir = std::env::temp_dir().join(format!("timem_web_timer_{label}_{}", now_ms()));
+    std::fs::create_dir_all(&worker_dir).unwrap();
+    let core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &worker_dir,
+    );
+    let config = state.template.settings.lock().unwrap().config.clone();
+    let worker_id = state
+        .manager
+        .lock()
+        .unwrap()
+        .spawn_worker_in_session_with_model_client(
+            core,
+            config,
+            CoreSessionWorkerWorkspace::new(
+                &worker_dir,
+                worker_dir.join("audit.json"),
+                "test-web",
+                "local",
+            ),
+            session_id.clone(),
+            context_id.clone(),
+            Some(format!("Timer {label}")),
+            None,
+            model,
+        )
+        .unwrap();
+    let mut session = test_web_session(&session_id, ordinal, format!("Timer {label}"));
+    session.current_dir = worker_dir.display().to_string();
+    session.contexts[0] = WebContext {
+        context_id: context_id.clone(),
+        current_dir: worker_dir.display().to_string(),
+        worker_ids: vec![worker_id.clone()],
+    };
+    session.workers[0].worker_id = worker_id.clone();
+    session.workers[0].context_id = context_id;
+    session.active_context_id = session.contexts[0].context_id.clone();
+    session.primary_worker_id = worker_id;
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session);
+    session_id
+}
+
+fn shutdown_timer_workers(state: &AppState) {
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+}
+
+fn drain_until(state: &AppState, deadline_ms: u64, ready: impl Fn() -> bool, what: &str) {
+    let deadline = Instant::now() + Duration::from_millis(deadline_ms);
+    loop {
+        for (event_session_id, context_id, worker_id, event) in drain_worker_events(state) {
+            handle_scoped_worker_event(state, &event_session_id, &context_id, &worker_id, event);
+        }
+        if ready() {
+            return;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn real_worker_timer_fire_delivers_prompt_and_completes_turn() {
+    let state = routing_test_state();
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let session_id = register_timer_model_worker(
+        &state,
+        TimerPromptCaptureModel {
+            prompts: Arc::clone(&prompts),
+        },
+        "fire",
+    );
+
+    create_session_timer(
+        &state,
+        &session_id,
+        Some("tick".into()),
+        "do the timed job".into(),
+        None,
+        Some(1000),
+        None,
+        None,
+    )
+    .unwrap();
+    // Force the timer due on the next scheduler tick.
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions.get_mut(&session_id).unwrap().timers[0].next_fire_ms = 0;
+    }
+
+    fire_due_timers(&state);
+
+    drain_until(
+        &state,
+        20_000,
+        || {
+            let sessions = state.sessions.lock().unwrap();
+            let session = &sessions[&session_id];
+            session.state == "ready"
+                && session.timers.is_empty()
+                && session
+                    .messages
+                    .iter()
+                    .any(|message| message.text == "timer turn done")
+        },
+        "timer-fired turn to finish",
+    );
+
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        // The fired prompt reached the real model inside a real turn.
+        assert!(
+            prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|prompt| prompt.contains("[timer:tick] do the timed job")),
+            "model never received the fired timer prompt"
+        );
+        // The once timer was consumed and its turn carries the timer kind.
+        assert!(session.timers.is_empty());
+        assert!(session.message_queue.is_empty());
+        assert!(session
+            .turns
+            .iter()
+            .any(|turn| { turn.user_entries.iter().any(|entry| entry.kind == "timer") }));
+    }
+    shutdown_timer_workers(&state);
+}
+
+#[test]
+fn real_worker_timer_tool_call_projects_into_web_timers() {
+    let state = routing_test_state();
+    let session_id = register_timer_model_worker(&state, TimerToolCallModel { calls: 0 }, "tool");
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "schedule a reminder".to_string(),
+            input_kind: None,
+            source_turn_id: None,
+            attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap();
+
+    drain_until(
+        &state,
+        20_000,
+        || {
+            let sessions = state.sessions.lock().unwrap();
+            let session = &sessions[&session_id];
+            session.state == "ready"
+                && session
+                    .messages
+                    .iter()
+                    .any(|message| message.text == "Reminder scheduled.")
+        },
+        "timer tool-call turn to finish",
+    );
+
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        let timers = &session.timers;
+        assert_eq!(
+            timers.len(),
+            1,
+            "model timer must be projected: {timers:#?}"
+        );
+        assert_eq!(timers[0].spec.created_by, "model");
+        assert_eq!(timers[0].spec.name, "build-watch");
+        assert_eq!(timers[0].spec.prompt, "check the long build");
+        assert_eq!(timers[0].spec.after_ms, Some(60000));
+        assert!(timers[0].enabled);
+        assert!(timers[0].next_fire_ms > now_ms() as u64);
+        // The chat carries a core.timer topic event for the timeline.
+        assert!(session.turns.iter().any(|turn| {
+            turn.events.iter().any(|event| {
+                event.source == "core_topic"
+                    && event.payload["topic"]["name"]
+                        .as_str()
+                        .is_some_and(|name| name == "core.timer")
+            })
+        }));
+    }
+    // Persisted projection matches the session state.
+    let persisted = load_session_timers(&state, &session_id);
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].spec.created_by, "model");
+    shutdown_timer_workers(&state);
+}
+
+#[test]
+fn web_snapshot_serializes_documented_input_modalities_for_every_catalog_model() {
+    let state = routing_test_state();
+    let snapshot = serde_json::to_value(snapshot_for(&state, TEST_PORT)).unwrap();
+    let catalog = snapshot["server"]["model_catalog"]
+        .as_array()
+        .expect("model_catalog array");
+    // The web attachment warning depends on this projection; a struct rename
+    // or silent field drop must fail here, not in the UI.
+    for model in catalog {
+        let modalities = model["input_modalities"]
+            .as_array()
+            .unwrap_or_else(|| panic!("missing input_modalities on {}", model["id"]));
+        assert!(!modalities.is_empty(), "{}", model["id"]);
+        assert!(
+            modalities
+                .iter()
+                .all(|m| matches!(m.as_str(), Some("text" | "image" | "video" | "file"))),
+            "{}",
+            model["id"]
+        );
+    }
+    let glm = catalog
+        .iter()
+        .find(|m| m["id"] == "z-glm5.3")
+        .expect("z-glm5.3 entry");
+    assert_eq!(glm["input_modalities"], serde_json::json!(["text"]));
+    let flash = catalog
+        .iter()
+        .find(|m| m["id"] == "z-glm5.3-flash")
+        .expect("z-glm5.3-flash entry");
+    assert_eq!(
+        flash["input_modalities"],
+        serde_json::json!(["text", "image", "video", "file"])
+    );
+}
+
+#[test]
+fn web_timer_update_prompt_preserves_schedule_and_persists() {
+    let state = routing_test_state();
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("work".into()),
+        "original prompt".into(),
+        None,
+        Some(1000),
+        None,
+        None,
+    )
+    .unwrap();
+    let (timer_id, next_fire, enabled) = {
+        let sessions = state.sessions.lock().unwrap();
+        let timer = &sessions["session_a"].timers[0];
+        (
+            timer.spec.timer_id.clone(),
+            timer.next_fire_ms,
+            timer.enabled,
+        )
+    };
+    // Empty and whitespace-only prompts are rejected.
+    assert!(update_session_timer(&state, "session_a", &timer_id, "  ")
+        .unwrap_err()
+        .contains("prompt_required"));
+    // Oversized prompts are rejected.
+    assert!(
+        update_session_timer(&state, "session_a", &timer_id, &"x".repeat(8001))
+            .unwrap_err()
+            .contains("timer_prompt_too_long")
+    );
+    // Unknown timer/session ids fail closed.
+    assert!(update_session_timer(&state, "session_a", "missing", "p")
+        .unwrap_err()
+        .contains("timer_not_found"));
+    assert!(update_session_timer(&state, "missing", &timer_id, "p")
+        .unwrap_err()
+        .contains("session_not_found"));
+    // Valid edit trims, persists, and keeps schedule state untouched.
+    update_session_timer(&state, "session_a", &timer_id, "  revised prompt  ").unwrap();
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let timer = &sessions["session_a"].timers[0];
+        assert_eq!(timer.spec.prompt, "revised prompt");
+        assert_eq!(timer.next_fire_ms, next_fire);
+        assert_eq!(timer.enabled, enabled);
+    }
+    // Identical prompt is a no-op success (no churn).
+    update_session_timer(&state, "session_a", &timer_id, "revised prompt").unwrap();
+    // persisted projection carries the new prompt.
+    let persisted = load_session_timers(&state, "session_a");
+    assert_eq!(persisted[0].spec.prompt, "revised prompt");
 }

@@ -796,5 +796,97 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 工具行常态顺序统一为“状态 → 工具图标或名称 → 命令/参数摘要”。有详情时不常驻展开箭头，整行在 hover/focus 下呈现可点击反馈；鼠标、触屏、Enter/Space点击同一行切换展开/收起，文本选择不会误触折叠。无详情行不获得虚假按钮语义。
 - 状态槽、工具身份和摘要垂直居中并使用固定行高；执行中圆点切换到完成/失败文字不改变已展开行高度。折叠工具组与实时工具状态槽共用水平起点；390px窄屏允许摘要换行但保持分组对齐。
 - `tool_presentation.test.tsx`覆盖参数顺序、行/字节/匹配/单端选择器、tail/encoding、非法范围、未知字段、HTML转义、Windows路径、敏感文本脱敏、第三方回退，以及memory操作图标分类。`tool_activity_layout.test.ts`守卫整行披露、状态/工具/摘要顺序、固定行高和水平起点。
-- `tool-presentation-e2e.mjs`在真实Chrome验证普通/流式视图、FileText/DatabaseSearch/Database、无常驻箭头、整行hover指针、鼠标与键盘切换、原始参数详情、状态→工具→摘要顺序、明暗主题和390px布局。既有`stream-preview-acceptance.mjs`完整回归验证状态更新不重挂载、不改变展开高度、文本选择保护、折叠组/实时行对齐及连续流式交互。
+- `tool-presentation-e2e.mjs`在真实Chrome验证普通/流式视图、FileText/DatabaseSearch/Database、无常驻箭头、整行hover指针、鼠标与键盘切换、原始参数详情、状态→工具→摘要顺序、明暗主题和390px布局；并验证工具结果量徽章（core.action finish 的 `tool_output_bytes`，仅计工具自身 tool_output、不含 runtime 信封元数据）在两视图以竖线分隔渲染于摘要之后、耗时之前，紧凑格式（如 | 4KB | 1.2s、| 512B | 0.3s），与本地化标签一致，1280/390 宽度与明暗主题下无溢出。既有`stream-preview-acceptance.mjs`完整回归验证状态更新不重挂载、不改变展开高度、文本选择保护、折叠组/实时行对齐及连续流式交互。
 - 验证：类型检查、Web 588项、5项性能守卫、工具专项Chrome及完整流式Chrome验收、架构/模块/测试契约与diff检查通过；Host嵌入构建和dist已更新。未重启开发实例。
+
+## 2026-10 图片附件 × 文本-only 接入点警告
+
+- 触发背景：GLM 5.3（`z-glm5.3`，`input_modalities=["text"]`）收到图片附件时模型回复“无法看到图片”，请求本身 HTTP 200 无协议错误。curl 实测确认 glm-5.3 无视觉、glm-5.3-flash 正确识图；属模型能力事实而非适配 bug，产品缺口是目录能力未透传到 UI。
+- Core：`CatalogModel` 新增 `input_modalities`（来自 `documented_facts.input_modalities`，严格限定 text/image/video/file、非空、无重复；schema 先行拒绝未知枚举与空数组），随既有 Web 快照序列化，不影响请求构建。
+- Web：会话当前接入点按 catalog_id（模板副本按 provider+model 兜底）解析目录条目；声明不含 image 且附件中存在图片（png/jpg/jpeg/webp/gif，与 Host `image_media_type` 镜像）时，附件条渲染警告行（TriangleAlert、role=status、i18n zh/en），提示切换多模态接入点。自定义/未知模态接入点保持沉默不误报。
+- 验收修复（e2e 抓出）：图片被待发送队列消息占用后 `availableAttachments` 排除它导致警告消失——判定范围改为会话全量附件，且警告行可独立撑起附件条（避免全被占用时警告无处渲染）。
+- 测试看护：`model_catalog_tests.rs` 断言目录模态事实与非法输入拒绝；`web_host_tests.rs` 断言快照对每个目录模型序列化非空合法 `input_modalities` 且 glm-5.3/flash 值正确（防字段静默丢失）；`model_endpoints.test.ts` 覆盖模态解析、接入点→目录条目解析与扩展名镜像；`image-attachment-warning-e2e.mjs`（已挂入 `test:browser` CI 链）在真实 Chrome 验证：文本路由+图片出警告、txt/多模态/旧快照沉默、队列占用仍警告且隐藏已占用附件、zh/en 文案与 tooltip、明暗主题 1280/390 几何无溢出。
+- 验证：agent_core 9 项目录测试、timem lib 380 项、Web vitest 716 项、五套浏览器验收（含新增）、模块边界/测试契约/diff 检查通过；dist 已重建入库。
+
+## 2026-10 Timer 删除二次确认
+
+- 触发背景：用户要求「用户点击删除的时候，二次确认，其他的不用」。删除不可逆且静默丢掉整个调度，而启停/编辑可恢复，故仅删除走确认。
+- Web：删除按钮先 `window.confirm`（文案点名 timer 名字、明示不可撤销且不再触发），取消则不发命令；与面板级删除（MCP/收藏/清上下文）的既有确认模式一致。启停与编辑保持即时执行。i18n zh/en。
+- 测试：timer-ui-acceptance e2e 浏览器驱动新增原生对话框接管（`Page.javascriptDialogOpening` → `handleJavaScriptDialog`，闭包开关控制接受/取消、记录文案）——验证「取消：定时器保留且不产生 timer_delete 命令、文案点名 timer」与「确认：条目移除且命令送达」，1440/390 × 明暗全过。示意演示页删除同步加同款确认。
+- 验证：vitest 716、timer e2e 全绿；module_boundary/test_contract/diff 检查通过；dist 已重建。
+
+## 2026-10 Timer 面板 prompt 展开/编辑
+
+- 触发背景：用户反馈面板只见名字不见内容，prompt 是触发时投递给会话的核心载荷，需要可见、可核对、可修改。澄清：产品面板本有删除按钮与 prompt 全文（用户看到的是示意网页的简化画法），但「编辑 prompt」是真实产品缺口。
+- Host：新增 `timer_update` 命令（per-session lane）：trim 后非空、上限 8000 字符、session/timer 不存在失败关闭；同文 prompt 幂等返回；更新 spec.prompt 后持久化 timers.json、`sync_worker_timers` 重投影 Core（工具视图与压缩确认保持真实）、广播 core.timer notice 与 timers_updated。**调度状态（enabled/next_fire_ms/last_fired_ms）原样保留**——改的是触发载荷不是日历。
+- Web：长 prompt（>80 字符或含换行）两行 line-clamp 截断 + 「+/−」展开收起（aria-expanded）；铅笔按钮进入编辑态（textarea 预填、可拉伸），保存按钮空文案禁用，保存发 `timer_update` 后退出编辑，取消丢弃草稿；会话切换时编辑态与展开集重置。i18n zh/en；深浅主题样式。
+- 测试看护：`web_timer_update_prompt_preserves_schedule_and_persists` 覆盖空/超长/不存在 id 拒绝、trim、调度字段不变、幂等、持久化；timer-ui-acceptance e2e 扩展——clamp 几何（scrollHeight>clientHeight）、展开后全文可见、编辑预填/空禁用/保存命令与主机回显/调度行不变/取消丢弃，1440/390 × 明暗全过。
+- 验证：timem lib 380、vitest 716、timer e2e 全绿；module_boundary/test_contract/diff 检查通过；dist 重建。
+
+## 2026-10 Timer 工具行用户语言渲染（独立系统状态行）
+
+- 触发背景：用户反馈 `op=new mode=once after_ms=600000` 这类技术参数对用户不友好；设计方针——已知明确含义的 tool 用用户语言渲染（bash 例外），timer 行类似备忘/压缩做系统状态级展示：单独一行、不折叠。同时要求模型侧明确：timer 触发时 prompt 会随请求携带，任务不清晰必须先与用户澄清。
+- Presentation：`timerPresentation` 严格解析（op/prompt/name/mode/after_ms/at/interval_ms 白名单；once 时 after_ms/at 恰一；repeat 必有 interval；非法/未知字段整体回退裸参数）；`timerDelayParts`（秒/分/小时/天人性化拆分）与 `formatTimerAt`（本地墙钟 yyyy-MM-dd HH:mm:ss）。
+- 渲染：CalendarClock 图标；摘要文案——新建定时（名），单次/循环，10 分钟后 | 于 2026-10-16 09:00:00 | 每 30 分钟，任务: <prompt>；删除定时：名。两种 UI 模式（经典 + 流式）timer 行均绕开折叠工具组独立渲染（activity_groups 与 stream 分组双重排除），网格列对齐/深浅主题/移动端换行齐全。i18n zh/en。
+- 模型指引（timer.yaml）：补充触发语义说明——prompt 即未来运行的完整工作指派，需求模糊时必须先澄清再建 timer。
+- 测试看护：tool_presentation.test.tsx 新增 6 组（三种行文案与图标、绝对时间本地化、11 类非法输入回退、时长拆分）；tool_activity_layout.test.ts 断言双模式独立渲染与分组排除；tool-presentation-e2e 真实 Chrome 验证双模式 timer 行不被吸收、文案完整、无 after_ms/600000 泄漏，并把行级交互断言作用域收紧到 readfile 行。静态提示词快照检查通过。
+- 验证：vitest 733、tool-presentation e2e 全绿；module_boundary/test_contract/diff 检查通过；dist 重建。
+
+## 2026-10 Timer 面板创建区交互重做 + 定时触发消息底色
+
+- 触发背景：用户反馈点开闹钟面板时，常驻的创建表单被误读为「修改现有 timer」；「提示内容」一词不准确——timer prompt 是触发时投递的工作指派；另外要求定时触发的那一轮用户消息底色与手动输入区分，且闹钟按钮 active 态用已有蓝色、不引入新颜色。
+- Web 面板：创建区收进「新建定时」按钮（Plus 图标、dashed 边框、aria-expanded/aria-controls），点击展开表单；「收起」按钮关闭并丢弃草稿；创建成功自动收起并清空；会话切换重置展开态与全部字段；顺手删除无引用的孤儿键 timer.createPending（初版常驻面板遗留）。字段正名「工作内容」（workLabel/workPlaceholder），编辑/展开/收起/校验文案同步更名，i18n zh/en。
+- 定时触发消息：`.turn-user-entry.timer` 在最终权威样式层叠加现有 accent 蓝 #3b82f6 半透明底（dark 0.18 / light 0.10，实测正文对比度 8.56/9.69、标签 ≥5.20），手动输入气泡保持原蓝灰底，两者可计算样式区分；闹钟 header 按钮 has-timers 态从 teal 换成用户气泡层既有蓝系（dark #263746/#8fc3e8，light #d9edff/#286792），不新增色相。
+- 焦点契约（验收审计补充）：展开进入「工作内容」输入框、收起（含创建成功自动收起）焦点回到「新建定时」按钮，首挂载与会话切换重置不抢焦点。
+- 测试看护：timer-ui-acceptance e2e 扩展——初始折叠与 aria-expanded=false、展开后出现「工作内容」标签且焦点落入输入框、创建成功表单收起、收起丢弃草稿且重开为空且焦点回按钮、timer 消息与手动消息计算背景色区分且为 rgba(59,130,246,*)、明暗主题 1440/390 布局无溢出；夹具补普通 task turn 与 timer-fired turn 对照。
+- 验证：vitest 733 全绿；timer e2e 全绿；module_boundary/test_contract/diff/performance_guard 通过；dist 重建。
+
+## 2026-10 布局密度收紧（头部与会话列表）
+
+- 背景：统一收紧竖向节奏，减少零散留白——聊天头部由 38px 降到 34px（ctx/cache 读数、endpoint 选择器、模型胶囊同步），侧栏会话行由 26px 降到 24px；会话列表/分组标题/identity 元数据等 gap 与 margin 同步微调（session-group-heading margin 1px 2px 0、session-group-list padding 0、header-context gap 2px、model-meta gap 1px 等）。纯样式改动，无逻辑与结构变化。
+- 测试看护：endpoint_header_button.test.ts 与 session_groups_ui.test.ts 的样式断言同步到 34px/24px 新值。
+- 验证：vitest 734 全绿；dist 重建（仅 index css/js 产物变化）；git diff --check 通过。
+
+## 2026-10 Timer 触发条目结构化呈现
+
+- 背景：Host 在 timer 触发轮的入口文本里带有 `[timer:名]` 前缀，此前直接原样渲染给用户，技术前缀泄漏且缺少视觉锚点。
+- Presentation：新增 `parseTimerEntryText`（view_model）——严格前缀解析 `[timer:name]`，拆出名称与裸提示词；空名回退无名称、非起始前缀不剥离，不改写存储的历史文本。渲染层 timer 条目头部展示「定时触发」标签 + 闹钟徽标（AlarmClock，#2563eb 实心蓝）+ 定时器名称，正文只显示裸提示词。
+- 样式：闹钟 header 按钮 has-timers 态改为 #2563eb 实心蓝（明暗主题一致），与条目徽标同色相；清理中间层两条永不生效的 `.turn-user-entry.timer` 底色死代码（被最终权威层 #3b82f62e/#3b82f61a 同优先级覆盖，登记对比度仍以权威层为准）。
+- 测试看护：view_model 新增 parseTimerEntryText 4 组用例（前缀拆分、纯提示词、空名回退、非起始前缀不剥离）；user_text 断言更新为「timer 条目渲染裸提示词」；timer-ui-acceptance e2e 新增——名称与提示词可见、原始 `[timer:` 前缀不泄漏、徽标与名称元素存在。
+- 验证：vitest 738 全绿；timer e2e 明暗 × 1440/390 全过；dist 重建；git diff --check 通过。
+
+## 2026-10 Composer 草稿本地持久化
+
+- 触发背景：用户输入大量内容未回车提交，误关 WebUI 后内容丢失。需求是浏览器侧草稿自动保存与找回。
+- 模块：新增 `src/composer_drafts.ts`——按 session id 存 localStorage（键 `timem-web-composer-drafts-v1`），硬上限 32 会话 / 单条 100k 字符 / 总量 200k，7 天 TTL；JSON 损坏、字段异常、超长条目一律丢弃，隐私模式存储不可用则静默降级为纯内存。
+- 接线：挂载时恢复到 `draftsBySession`；输入后 500ms 防抖落盘；`pagehide`/`visibilitychange(hidden)`/卸载同步冲刷。渐进恢复竞态防护——Host 后台新→旧填充会话列表，磁盘恢复的草稿只有「会话出现过再消失」才剪除（`pruneSessionDrafts` 扩展 restoredDraftSessionIds/everLiveSessionIds 参数），未见过会话的磁盘条目冻结至 TTL；会话删除后磁盘条目在已知 live/everLive 后即清除。
+- 全屏编辑器：节流写通（pending 定时不被新键击重置，丢失上界 ~800ms）；「放弃修改」显式回退到打开前底稿；「完成」提交全文。
+- 边界：纯展示便利，非 command outbox，绝不重放命令；多标签页 last-writer-wins（无 storage 事件同步，已知边界）。
+- 测试看护：`composer_drafts.test.ts` 单测（往返、上限裁剪、TTL、坏数据、存储失败、超长保留旧副本、接线断言）；新增真实 Chrome e2e `composer-draft-acceptance.mjs`（输入→防抖落盘、reload 恢复、提交清空且 turn_submit 命令送达、再 reload 保持空）并入 `test:browser`。
+- 验证：vitest 749 全绿（53 文件）；composer draft e2e 全过；dist 重建；module_boundary/test_contract 检查通过。
+
+## 2026-10 Composer 击键本地化（写通节流）
+
+- 背景：主 composer 每次击键都 `setDraftsBySession`（Thread 级 state），导致整个超大 Thread 组件树逐键重渲染，重历史下输入肉眼可见地卡。
+- 模块：新增 `src/composer_input.ts`——`createComposerWriteThrough` 300ms 节流写回：pending 定时不被新键击重置（连续输入滞后上界一个窗口），`flush` 立即提交最新文本，`reset` 丢弃挂起（权威值覆盖、会话切换、提交后防串写），`dispose` 卸载清理。`main.tsx` 中 `ComposerField`（memo，本地 useState）承载击键；`composerLiveTextRef` 每键更新实时文本，提交路径读它——节流窗口内 Enter/点击发送也保证发送可见全文；`lastCommitted` 区分自身写回回显与权威外部值，避免回显覆盖更新的本地键击；全屏编辑器「完成/放弃」走 `applyAuthoritativeComposerText`（先 reset 挂起写回再权威写 live ref + draft state）。
+- 测试看护：`composer_input.test.ts` 单测 4 组（连续输入聚合一次提交、flush 立即写、reset 丢弃不写回、pending 不被新键击重置）；performance_guard 新增 5000 键虚拟时钟实验——断言提交次数 ≤ 时间窗数 + 2、实测 2.11ms；新增真实 Chrome e2e `composer-input-acceptance.mjs`——20 turn×8KB 重历史快照下逐键输入 120 字符，断言逐键 rAF 延迟 median ≤120ms（宽松上界只容纳共享 runner 抖动；全量重渲染回归的 median 为数百 ms，仍会被稳定捕获）、重帧（≥150ms）占比 ≤20%、总时长有界，并在节流窗口内立即点击发送断言 `turn_submit` 命令携带完整实时文本；已挂入 `test:browser` 链。
+- 验证：vitest 全量绿；stream-preview-suite 24 场景 PASS；composer-draft / composer-input e2e 过；TIMEM_PERF_GUARD=1 perf guard 过；dist 重建；git diff --check 通过。
+
+## 2026-10 用户补充条目改用 lucide User 图标
+
+- 背景：时间线中用户补充条目此前渲染 💡 + `[用户补充]` 文字标签，占位大且与系统提示灯泡语义混淆；用户要求换 lucide `User` 图标并去掉标签。
+- 改动：`main.tsx` 的 `user_supplement` 渲染分支 activity-mark 改为 lucide `User`（size 13），移除标题行；`supplementItems` 不再注入 `composer.supplementTitle`（两份 i18n 键与 `.user-supplement-line strong` 死样式规则同步清理），条目仅保留补充正文。
+- 测试看护：既有 `.user-supplement` 相关断言仅检查正文文本与气泡样式（stream-preview-acceptance），改动后全套 stream-preview-suite 24 场景 PASS 复核通过；activity_groups / i18n 单测绿。
+
+
+## 2026-10 raw_chat 历史搜索时间戳/排序/会话隔离修复
+
+- 背景：产品验收发现 `memmgr raw_chat` 搜索所有记录 `created_at_ms=0`——真实 turn id 是 `turn_<millis>_<seq>` 而 `turn_id_millis` 只认纯数字后缀；回退字段 `created_at` 实际不存在（审计层写入的是 `time_ms`）。连锁后果：时间窗过滤失效、最新优先排序退化为文件序（最旧优先）、繁忙兄弟会话可把目标会话挤出有界窗口。
+- 改动：`core/agent/src/lib.rs`——`turn_id_millis` 解析序列后缀；回退链补 `time_ms`（保留 `created_at` 兼容旧数据）；会话过滤移到截断之前（delete 路径保持全局语义）。
+- 测试看护：`capability_tool_memmgr_tests.rs` 新增 3 组——序列 id 时间戳与 time_ms 回退、最新优先排序 + after/before 窗口、55 条繁忙兄弟会话噪声下 session 作用域存活。agent_core lib 全量 882 过。
+
+## 2026-10 命令工具子进程先退出不再误报输入失败
+
+- 背景：远端 ubuntu CI 暴露：不读 stdin 的快速命令工具脚本（`printf && exit 0`）在共享 runner 调度抖动下被间歇性误报 `command_input_failed: child exited before input delivery completed`。根因：executor 主循环先 `try_wait` 后 `try_write`，父线程被延迟调度时子进程已退出而 payload 尚未写完——此刻 payload 已无人可读，子进程自身退出状态与捕获输出才是权威结果。同根因第二表现面：子进程退出后写管道收 EPIPE 走写错误分支同样误报。
+- 改动：`core/agent/src/executor.rs`——退出早于投递完成时按子进程退出状态正常渲染（不读 payload 就干活的工具是合法行为）；写错误仅在子进程仍存活时判为 `command_input_failed`（`closed_stdin` 场景不变）；已退出则收敛到权威 wait 结果。
+- 测试看护：`executor_tests.rs` 新增 1MB payload + 不读 stdin 立即退出脚本，两种交错（退出先观察 / EPIPE 先到）都收敛 `status: 0` 且含 `still_alive`；`closed_stdin`/sigsegv/超时守护场景全部复核通过；agent_core lib 全量 883 过。

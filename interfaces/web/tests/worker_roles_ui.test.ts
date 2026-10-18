@@ -64,14 +64,17 @@ describe("optimistic worker role UI", () => {
     const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 
     expect(source).toContain('aria-label={t("roles.expandDescEditor")}');
-    expect(source).toContain('aria-label={t("composer.expandEditUserMessage")}');
+    expect(source).toContain('expandLabel={t("composer.expandEditUserMessage")}');
+    expect(source).toContain('title={expandLabel}');
+    expect(source).toContain('aria-label={expandLabel}');
     expect(zh.roles.expandDescEditor).toBe("展开编辑 Role 描述");
     expect(zh.composer.expandEditUserMessage).toBe("展开编辑用户信息");
     expect(zh.composer.editCommitNote).toBe("输入内容会在完成编辑时一次性同步；不会自动保存或发送。");
     expect(source).toContain('const [draft, setDraft] = useState(value);');
     expect(source).toMatch(/const finish = \(\) => \{\s*onCommit\(draft\);\s*onClose\(\);\s*\};/);
     expect(source).toMatch(/spellCheck=\{false\}\s+placeholder=\{placeholder\}\s+onChange=\{\(event\) => setDraft\(event\.target\.value\)\}/);
-    expect(source).toMatch(/onCommit=\{\(value\) =>\s*setDraftsBySession\(\(current\) =>\s*setSessionDraft\(current, activeSessionId, value\),?\s*\)\s*\}/);
+    expect(source).toContain("onCommit={applyAuthoritativeComposerText}");
+    expect(source).toMatch(/const applyAuthoritativeComposerText = useCallback\(\s*\(value: string\) => \{[\s\S]*?setSessionDraft\(current, activeSessionId, value\),/);
     expect(source).not.toContain('composerDraftBeforeExpand');
     expect(source).not.toContain('descriptionBeforeExpand');
     expect(styles).toContain('.worker-role-description-field textarea { padding-right: 40px; resize: none; }');

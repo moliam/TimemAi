@@ -151,14 +151,42 @@ TIMEM_PERF_GUARD=1 pnpm --dir interfaces/web exec vitest run tests/performance_g
 ```
 
 The Web experiments print elapsed time for 20,000 action lifecycle events, a
-50,000-event frame queue burst, and 50,000 combined scroll-invalidation/warm-A/B
-cache cycles. The last guard also asserts that scroll invalidation requests no
+50,000-event frame queue burst, 50,000 combined scroll-invalidation/warm-A/B
+cache cycles, and a 5,000-keystroke composer write-through burst. The last guard also asserts that scroll invalidation requests no
 geometry or floating-layout work while both warm Session panes remain cached.
 These thresholds are intentionally broad CI regression alarms, not product
 latency targets and not proof of browser rendering smoothness. Compare repeated
 runs on the same machine/build. Use command-correlated JSONL stages and a browser
 Performance profile to isolate render, reveal-layout, scroll-listener, or
 synchronous-geometry work; timestamp order alone does not establish causality.
+
+## Composer keystroke write-through
+
+High-frequency composer typing stays local to the memoized `ComposerField`
+component: a keystroke updates local component state and a live-text ref only.
+A 300ms throttled write-through (`src/composer_input.ts`) commits the newest
+text into Thread-level draft state; the pending timer is deliberately not reset
+by newer keystrokes, so the committed copy lags the visible text by at most one
+window under continuous typing. Submit paths read the live-text ref, so Enter
+inside the throttle window still sends exactly the visible text. Session
+switches and fullscreen-editor commit/discard adopt authoritative text and drop
+any pending timer first.
+
+Regression commands:
+
+```bash
+TIMEM_PERF_GUARD=1 pnpm --dir interfaces/web exec vitest run tests/performance_guard.test.ts
+node interfaces/web/tests/browser/composer-input-acceptance.mjs
+```
+
+The guard experiment drives 5,000 keystrokes on a virtual clock and asserts the
+commit count stays bounded by the interval windows (plus the final flush). The
+Chrome acceptance loads a deliberately heavy history (20 archived turns with
+8KB markdown final answers), types 120 keystrokes one by one, and asserts the
+median next-frame latency after each input event stays fast, heavy (>=150ms)
+frames stay rare, and an immediate submit inside the throttle window sends the
+complete live text. As with the other experiments, these are broad CI
+regression alarms on one machine/build, not product smoothness proof.
 
 ## Low-cost streaming presentation
 

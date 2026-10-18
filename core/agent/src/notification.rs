@@ -40,6 +40,10 @@ pub enum CoreActionKind {
     ChatHistory {
         operation: String,
     },
+    Timer {
+        op: String,
+        name: String,
+    },
     Other {
         action: String,
     },
@@ -164,6 +168,17 @@ fn action_kind(action: &ParsedAction) -> CoreActionKind {
         },
         "chat_history_query" => CoreActionKind::ChatHistory {
             operation: "query".to_string(),
+        },
+        "timer" => CoreActionKind::Timer {
+            op: action.input_str("op"),
+            name: {
+                let name = action.input_str("name");
+                if name.is_empty() {
+                    action.input_str("prompt")
+                } else {
+                    name
+                }
+            },
         },
         other => CoreActionKind::Other {
             action: other.to_string(),
