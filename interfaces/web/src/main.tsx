@@ -6,6 +6,7 @@ import { createComposerWriteThrough, type ComposerWriteThrough } from "./compose
 import type { CatalogModel } from "./model_endpoints";
 import { applyBetaDebugDefault } from "./beta_preferences";
 import { StreamUiModeSetting, useStreamUiMode, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
+import { SelfUpgradeSetting } from "./self_upgrade";
 import { StreamText } from "./stream_reveal";
 import { FlippingTime } from "./flipping_time";
 import { UserText } from "./user_text";
@@ -14613,6 +14614,7 @@ const SettingsCenter = memo(function SettingsCenter(
                     </small>
                   )}
                 </section>
+                <SelfUpgradeSetting />
                 <StreamUiModeSetting />
                 <div className="system-subsection-heading">
                   <strong>{t("system.betaFeaturesTitle")}</strong>

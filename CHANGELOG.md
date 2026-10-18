@@ -1,5 +1,29 @@
 # Changelog
 
+## [2.6.0] - 2026-10-19
+
+### Added
+
+- In-app self upgrade in Settings -> System: check for a new release, download
+  the official prebuilt archive with a live progress bar, verify the sha256
+  sidecar, stage and `--help`-validate the new binary, replace the running
+  executable (atomic rename on Unix, rename-then-move on Windows), and finish
+  with a Chrome-style restart button. MEM workspaces, sessions, credentials,
+  and user configuration are never touched; a failed upgrade leaves the
+  current binary untouched.
+- Upgrade restart hands the workspace over to a replacement process: the old
+  process spawns the replaced executable on the same port (token preserved),
+  exits gracefully, and the browser reconnects to the replacement.
+- `tar.gz` release archives for Windows alongside the zip, giving the in-app
+  updater one uniform archive format on every supported platform.
+
+### Fixed
+
+- `scripts/package_release_assets.sh` resolves a relative output directory
+  before archiving from inside its staging directory; release backfills no
+  longer fail with `tar: Failed to open` on a relative `dist-assets` path.
+
+
 ## [2.5.0] - 2026-10-18
 
 ### Added

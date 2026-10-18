@@ -5936,6 +5936,31 @@ body.workspace-modal-open .app-shell { user-select: none; }
 :root[data-theme="light"] .system-select-field select { border-color: #c9d6d0; background: #f7faf8; color: #24352f; }
 .system-feature-card { background: #1b201e; }
 :root[data-theme="light"] .system-feature-card { background: #fff; }
+.system-upgrade-version { flex: none; margin-left: auto; padding: 4px 10px; border: 1px solid #33413c; border-radius: 999px; color: #9db3ab; font-size: 11px; font-weight: 650; }
+.system-upgrade-body { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+.system-upgrade-status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; color: #aebec6; font-size: 12.5px; }
+.system-upgrade-status.ok { color: #7fd3ac; }
+.system-upgrade-status.error { color: #d99c8f; }
+.system-upgrade-button { flex: none; padding: 6px 14px; border: 1px solid #33505b; border-radius: 6px; background: #18333a; color: #cfe3ea; font-size: 12.5px; font-weight: 650; cursor: pointer; }
+.system-upgrade-button:hover:not(:disabled) { border-color: #3f6b7a; background: #1d4550; }
+.system-upgrade-button:disabled { opacity: .55; cursor: default; }
+.system-upgrade-button.primary { border-color: #2f7d63; background: #16513f; color: #bdf0dc; }
+.system-upgrade-button.primary:hover:not(:disabled) { border-color: #37997a; background: #1a614b; }
+.system-upgrade-progress { position: relative; flex: 1 1 140px; min-width: 120px; height: 6px; overflow: hidden; border-radius: 999px; background: #30383d; }
+.system-upgrade-progress > span { display: block; height: 100%; border-radius: inherit; background: #6fd3c0; transition: width .3s ease; }
+.system-upgrade-percent { flex: none; min-width: 38px; text-align: right; font-variant-numeric: tabular-nums; font-size: 11.5px; color: #8fa3ac; }
+.system-upgrade-error { flex: 1 1 100%; padding: 6px 8px; border-radius: 5px; background: #241a17; color: #d9b3a8; font-size: 11px; word-break: break-all; }
+:root[data-theme="light"] .system-upgrade-version { border-color: #c6d2cd; color: #5c6f68; }
+:root[data-theme="light"] .system-upgrade-status { color: #43535b; }
+:root[data-theme="light"] .system-upgrade-status.ok { color: #25765a; }
+:root[data-theme="light"] .system-upgrade-status.error { color: #a3553f; }
+:root[data-theme="light"] .system-upgrade-button { border-color: #b8ccdb; background: #e4eef5; color: #2b4c5c; }
+:root[data-theme="light"] .system-upgrade-button:hover:not(:disabled) { border-color: #93b4c8; background: #d7e8f2; }
+:root[data-theme="light"] .system-upgrade-button.primary { border-color: #6ab99a; background: #dff3e9; color: #1f6a50; }
+:root[data-theme="light"] .system-upgrade-button.primary:hover:not(:disabled) { border-color: #4e9d7c; background: #cdeada; }
+:root[data-theme="light"] .system-upgrade-progress { background: #dce3e6; }
+:root[data-theme="light"] .system-upgrade-progress > span { background: #4e9d7c; }
+:root[data-theme="light"] .system-upgrade-error { background: #f3e4df; color: #a3553f; }
 .system-setting-status { display: block; margin-top: 10px; color: #75847e; font-size: 10px; }
 .system-subsection-heading { margin-top: 24px; padding: 0 2px 2px; }
 .system-subsection-heading strong { color: #c8d4cf; font-size: 12px; }

@@ -23,6 +23,10 @@ pub struct BrowserRouteHandlers<S> {
     pub performance_trace: MethodRouter<S>,
     pub debug_browse: MethodRouter<S>,
     pub debug_reset_statistics: MethodRouter<S>,
+    pub upgrade_status: MethodRouter<S>,
+    pub upgrade_check: MethodRouter<S>,
+    pub upgrade_apply: MethodRouter<S>,
+    pub upgrade_restart: MethodRouter<S>,
     pub websocket: MethodRouter<S>,
     pub static_assets: MethodRouter<S>,
 }
@@ -47,6 +51,10 @@ where
         .route("/api/upload", handlers.upload)
         .route("/api/debug-browse", handlers.debug_browse)
         .route("/api/debug/reset", handlers.debug_reset_statistics)
+        .route("/api/upgrade/status", handlers.upgrade_status)
+        .route("/api/upgrade/check", handlers.upgrade_check)
+        .route("/api/upgrade/apply", handlers.upgrade_apply)
+        .route("/api/upgrade/restart", handlers.upgrade_restart)
         .route(
             "/api/performance-trace",
             handlers
@@ -86,6 +94,10 @@ mod tests {
             performance_trace: post(|| async { StatusCode::NO_CONTENT }),
             debug_browse: get(|| async { "debug_browse" }),
             debug_reset_statistics: post(|| async { "debug_reset_statistics" }),
+            upgrade_status: get(|| async { "upgrade_status" }),
+            upgrade_check: post(|| async { "upgrade_check" }),
+            upgrade_apply: post(|| async { "upgrade_apply" }),
+            upgrade_restart: post(|| async { "upgrade_restart" }),
             websocket: get(|| async { "websocket" }),
             static_assets: get(|request: Request<Body>| async move {
                 format!("asset:{}", request.uri().path()).into_response()
@@ -111,6 +123,7 @@ mod tests {
             ("/api/health", "health"),
             ("/api/attach/sessions", "attach_sessions"),
             ("/api/snapshot", "snapshot"),
+            ("/api/upgrade/status", "upgrade_status"),
             ("/ws", "websocket"),
             ("/unknown", "asset:/unknown"),
         ] {
@@ -124,10 +137,33 @@ mod tests {
         }
 
         let response = router
+            .clone()
             .oneshot(Request::post("/api/health").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        // Upgrade control endpoints are POST-only besides the status probe.
+        for (path, expected) in [
+            ("/api/upgrade/check", "upgrade_check"),
+            ("/api/upgrade/apply", "upgrade_apply"),
+            ("/api/upgrade/restart", "upgrade_restart"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(Request::post(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(body(response).await, expected);
+
+            let response = router
+                .clone()
+                .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        }
     }
 
     #[tokio::test]
