@@ -210,6 +210,10 @@
   `timem-vX.Y.Z-<target>` archives (Windows x64 zip; macOS Apple Silicon/Intel
   and Linux x64 tar.gz) with `.sha256` sidecars through the new
   `Release assets` workflow and `scripts/package_release_assets.sh`.
+- One-command networked upgraders `upgrade.sh` and `upgrade-online.ps1`:
+  resolve the latest Release for the current platform, verify the checksum,
+  stop Timem (Windows), back up and atomically replace the installed
+  executable, and roll back automatically when the post-install check fails.
 
 - Track first-touched readfile paths per prompt context and inject a one-time
   module-boundary reminder for a newly touched directory and a module-function

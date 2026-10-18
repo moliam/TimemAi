@@ -56,6 +56,26 @@ Linux x64 are attached to every GitHub Release, each with a `.sha256` sidecar:
 extract, add the directory to PATH, and run `timem`. Exit Timem before
 replacing a running executable on Windows.
 
+Already installed? Upgrade in one command (same command for every future
+update):
+
+macOS / Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/moliam/TimemAi/main/upgrade.sh | bash
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/moliam/TimemAi/main/upgrade-online.ps1 | iex
+```
+
+The upgrader downloads the prebuilt archive for your platform, verifies its
+checksum, backs up and replaces the executable, and checks the new binary; it
+rolls back automatically if the check fails. MEM workspaces, Sessions,
+credentials, and user configuration are preserved.
+
 Developers who prefer a source checkout can clone the repository and run
 `./install.sh` on macOS/Linux or `install.ps1` on Windows. Checkout installs use
 Git-based update instructions; one-line installs simply tell users to rerun the

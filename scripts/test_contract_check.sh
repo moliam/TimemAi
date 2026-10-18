@@ -617,4 +617,26 @@ if ! search_fixed "## Release assets" docs/release-management.md; then
   exit 1
 fi
 
+upgrade_online_required=(
+  "raw.githubusercontent.com/moliam/TimemAi/main/upgrade.sh"
+  "irm https://raw.githubusercontent.com/moliam/TimemAi/main/upgrade-online.ps1 | iex"
+  'releases/download/$version'
+  "x86_64-pc-windows-msvc.zip"
+  "Checksum mismatch"
+  "timem is not installed"
+  "unsupported platform"
+  "rolling back"
+)
+for pattern in "${upgrade_online_required[@]}"; do
+  if ! search_fixed "$pattern" upgrade.sh upgrade-online.ps1; then
+    echo "missing required one-line upgrade item: $pattern" >&2
+    exit 1
+  fi
+done
+
+if ! search_fixed "scripts/upgrade_logic_test.sh" scripts/ci.sh; then
+  echo "upgrade script logic test must remain wired into CI" >&2
+  exit 1
+fi
+
 echo "test_contract_check: ok"
