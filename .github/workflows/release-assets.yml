@@ -1,0 +1,115 @@
+name: Release assets
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-assets-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-upload:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+    steps:
+      - name: Resolve latest release tag (manual runs)
+        if: github.event_name != 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="$(gh release list --limit 1 --json tagName --jq '.[0].tagName')"
+          if [ -z "$tag" ]; then
+            echo "no published release found; nothing to build" >&2
+            exit 1
+          fi
+          echo "TIMEM_RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          # Old tags predate the packager; backfill it from the branch that
+          # dispatched this run (main may not carry it yet either).
+          echo "TIMEM_PACKAGER_REF=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
+
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.release.tag_name || env.TIMEM_RELEASE_TAG }}
+
+      - name: Install stable Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+          rustc --version
+          cargo --version
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fetch --locked
+          cargo build --locked --release --target ${{ matrix.target }} --bin timem
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Backfill runs on tags older than the packager script; take the
+          # packaging tool from the default branch. Binaries still build
+          # strictly from the checked-out tag; the script only archives them.
+          if [ ! -f scripts/package_release_assets.sh ]; then
+            packager_ref="${TIMEM_PACKAGER_REF:-${{ github.event.repository.default_branch || 'main' }}}"
+            default_branch="${{ github.event.repository.default_branch || 'main' }}"
+            git fetch origin "$packager_ref" --depth=1
+            if ! git show "origin/$packager_ref:scripts/package_release_assets.sh" > scripts/package_release_assets.sh 2>/dev/null; then
+              git fetch origin "$default_branch" --depth=1
+              git show "origin/$default_branch:scripts/package_release_assets.sh" > scripts/package_release_assets.sh
+            fi
+            chmod +x scripts/package_release_assets.sh
+          fi
+          scripts/package_release_assets.sh ${{ matrix.target }} target/${{ matrix.target }}/release dist-assets
+
+          # Smoke: the packaged executable must at least print usage.
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            target/${{ matrix.target }}/release/timem.exe --help >/dev/null
+          else
+            target/${{ matrix.target }}/release/timem --help >/dev/null
+          fi
+
+      - name: Upload release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [[ "$GITHUB_EVENT_NAME" != "release" ]]; then
+            tag="${TIMEM_RELEASE_TAG:?resolved during the tag step}"
+          fi
+          gh release upload "$tag" dist-assets/* --clobber
+
+      - name: Upload packaged assets artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ matrix.target }}
+          path: dist-assets/*
+          if-no-files-found: error

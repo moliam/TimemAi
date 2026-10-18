@@ -90,6 +90,34 @@ try {
     )) {
         if (-not $onlineText.Contains($required)) { throw "install-online.ps1 missing contract: $required" }
     }
+    $upgradeText = [IO.File]::ReadAllText((Join-Path $root 'upgrade-online.ps1'))
+    foreach ($required in @(
+        'x86_64-pc-windows-msvc.zip',
+        'releases/download/$resolvedVersion',
+        'Get-FileHash $archive -Algorithm SHA256',
+        'Malformed checksum sidecar',
+        'Stop-TimemProcesses',
+        'timem.exe.bak.$stamp',
+        'Move-Item $pending $exe -Force',
+        '[IO.File]::WriteAllText((Join-Path $bin ''timem-web.cmd''), $shim)',
+        'rolled back to the previous version',
+        'PROCESSOR_ARCHITECTURE'
+    )) {
+        if (-not $upgradeText.Contains($required)) { throw "upgrade-online.ps1 missing contract: $required" }
+    }
+    . (Join-Path $root 'upgrade-online.ps1')
+    if ((Resolve-UpgradeVersion 'v9.8.7' 'moliam/TimemAi') -ne 'v9.8.7') {
+        throw 'upgrade script did not preserve an explicit release version'
+    }
+    foreach ($invalidVersion in @('../main', 'bad/version', '')) {
+        try {
+            Resolve-UpgradeVersion $invalidVersion 'moliam/TimemAi' | Out-Null
+            throw "unsafe upgrade release version was accepted: $invalidVersion"
+        } catch {
+            if ($_.Exception.Message -like 'unsafe upgrade release version was accepted:*') { throw }
+        }
+    }
+
     Write-Output 'windows_install_logic_test: ok'
 } finally {
     Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue

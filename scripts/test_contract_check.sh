@@ -582,4 +582,61 @@ for pattern in "${workflow_required[@]}"; do
   fi
 done
 
+release_assets_workflow=".github/workflows/release-assets.yml"
+if [ ! -f "$release_assets_workflow" ]; then
+  echo "missing release assets workflow: $release_assets_workflow" >&2
+  exit 1
+fi
+
+release_assets_required=(
+  "types: [published]"
+  'cargo build --locked --release --target ${{ matrix.target }} --bin timem'
+  "scripts/package_release_assets.sh"
+  "gh release upload"
+  "x86_64-pc-windows-msvc"
+  "aarch64-apple-darwin"
+  "x86_64-apple-darwin"
+  "x86_64-unknown-linux-gnu"
+  "if-no-files-found: error"
+)
+
+for pattern in "${release_assets_required[@]}"; do
+  if ! search_fixed "$pattern" "$release_assets_workflow"; then
+    echo "missing required release assets item: $pattern" >&2
+    exit 1
+  fi
+done
+
+if ! search_fixed "scripts/package_release_assets.sh --self-test" scripts/ci.sh; then
+  echo "release assets packaging self-test must remain wired into CI" >&2
+  exit 1
+fi
+
+if ! search_fixed "## Release assets" docs/release-management.md; then
+  echo "release management document must describe release assets" >&2
+  exit 1
+fi
+
+upgrade_online_required=(
+  "raw.githubusercontent.com/moliam/TimemAi/main/upgrade.sh"
+  "irm https://raw.githubusercontent.com/moliam/TimemAi/main/upgrade-online.ps1 | iex"
+  'releases/download/$version'
+  "x86_64-pc-windows-msvc.zip"
+  "Checksum mismatch"
+  "timem is not installed"
+  "unsupported platform"
+  "rolling back"
+)
+for pattern in "${upgrade_online_required[@]}"; do
+  if ! search_fixed "$pattern" upgrade.sh upgrade-online.ps1; then
+    echo "missing required one-line upgrade item: $pattern" >&2
+    exit 1
+  fi
+done
+
+if ! search_fixed "scripts/upgrade_logic_test.sh" scripts/ci.sh; then
+  echo "upgrade script logic test must remain wired into CI" >&2
+  exit 1
+fi
+
 echo "test_contract_check: ok"

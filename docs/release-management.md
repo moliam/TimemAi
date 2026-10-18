@@ -25,7 +25,9 @@ executable authority for this rule.
 5. Create one annotated `vX.Y.Z` tag pointing to that verified commit. Never move or overwrite a published tag.
 6. Create a non-draft, non-prerelease GitHub Release from the committed release
    notes, then verify its tag and public URL.
-7. Open a pull request from the release branch into `main`; do not bypass its
+7. Verify the `Release assets` workflow uploaded the prebuilt archives and
+   `.sha256` sidecars for all four targets to that Release.
+8. Open a pull request from the release branch into `main`; do not bypass its
    required checks.
 
 ## Timem Web Release Evidence
@@ -41,3 +43,27 @@ Record any manual browser/terminal checks in `docs/manual-release-smoke.md`.
 Do not claim exactly-once execution for irreversible external tools across a
 process crash unless that tool supplies an idempotency or reconciliation
 contract.
+
+## Release assets
+
+Every public release carries prebuilt archives produced by
+`.github/workflows/release-assets.yml`. When the Release is published, the
+workflow builds the release binary for `x86_64-pc-windows-msvc`,
+`aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-unknown-linux-gnu`,
+packages it with `scripts/package_release_assets.sh`, smoke-tests `--help`,
+and uploads `timem-vX.Y.Z-<target>.zip` (Windows) or `.tar.gz` (macOS/Linux)
+plus a `.sha256` sidecar to the Release.
+
+A manual `workflow_dispatch` run resolves the latest Release tag, checks out
+exactly that tag, and rebuilds it. Published tags are immutable; a broken asset
+is fixed by re-running the workflow for the same tag, where
+`gh release upload --clobber` replaces only the asset files, never the tag.
+
+Prebuilt archives are a download convenience and back the one-command
+upgraders (`upgrade.sh` / `upgrade-online.ps1`), which download, checksum,
+replace, and verify them against an existing installation. The reviewable
+install contract remains the one-line installer and the checkout installers. Archives contain
+only `timem`, the `timem-web` alias, the shipped `reminder_tips.json`, and a
+package README; extracting a newer archive over an existing installation
+replaces the executable only and preserves MEM workspaces, Sessions,
+credentials, and user configuration.
