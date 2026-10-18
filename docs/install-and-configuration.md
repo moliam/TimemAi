@@ -58,6 +58,21 @@ cd TimemAi
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
+### Prebuilt release archives
+
+Every GitHub Release also carries prebuilt archives built by CI from the tagged
+commit: `timem-vX.Y.Z-<target>.zip` for `x86_64-pc-windows-msvc` and
+`timem-vX.Y.Z-<target>.tar.gz` for `aarch64-apple-darwin`,
+`x86_64-apple-darwin`, and `x86_64-unknown-linux-gnu`, each with a `.sha256`
+sidecar.
+
+Extract the archive, add the extracted directory to PATH, and run `timem`. The
+archive contains only the executable, the `timem-web` compatibility alias, the
+shipped `reminder_tips.json`, and a package README; Rust, build tools, and
+Node.js are not required. Updates replace the executable only: exit Timem first
+on Windows, extract the newer archive over the same directory, and MEM
+workspaces, Sessions, credentials, and user configuration stay untouched.
+
 ### Prerequisites and installed files
 
 Both online and checkout flows are source builds. They require:

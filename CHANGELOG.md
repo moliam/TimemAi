@@ -206,6 +206,11 @@
 
 ### Added
 
+- Prebuilt release assets: publishing a Release now builds and uploads
+  `timem-vX.Y.Z-<target>` archives (Windows x64 zip; macOS Apple Silicon/Intel
+  and Linux x64 tar.gz) with `.sha256` sidecars through the new
+  `Release assets` workflow and `scripts/package_release_assets.sh`.
+
 - Track first-touched readfile paths per prompt context and inject a one-time
   module-boundary reminder for a newly touched directory and a module-function
   reminder for a newly touched file. Context compaction resets the tracking so
