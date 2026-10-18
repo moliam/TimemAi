@@ -43,6 +43,9 @@ jobs:
             exit 1
           fi
           echo "TIMEM_RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+          # Old tags predate the packager; backfill it from the branch that
+          # dispatched this run (main may not carry it yet either).
+          echo "TIMEM_PACKAGER_REF=$GITHUB_REF_NAME" >> "$GITHUB_ENV"
 
       - name: Checkout
         uses: actions/checkout@v5
@@ -74,8 +77,13 @@ jobs:
           # packaging tool from the default branch. Binaries still build
           # strictly from the checked-out tag; the script only archives them.
           if [ ! -f scripts/package_release_assets.sh ]; then
-            git fetch origin "${{ github.event.repository.default_branch || 'main' }}" --depth=1
-            git show "origin/${{ github.event.repository.default_branch || 'main' }}:scripts/package_release_assets.sh" > scripts/package_release_assets.sh
+            packager_ref="${TIMEM_PACKAGER_REF:-${{ github.event.repository.default_branch || 'main' }}}"
+            default_branch="${{ github.event.repository.default_branch || 'main' }}"
+            git fetch origin "$packager_ref" --depth=1
+            if ! git show "origin/$packager_ref:scripts/package_release_assets.sh" > scripts/package_release_assets.sh 2>/dev/null; then
+              git fetch origin "$default_branch" --depth=1
+              git show "origin/$default_branch:scripts/package_release_assets.sh" > scripts/package_release_assets.sh
+            fi
             chmod +x scripts/package_release_assets.sh
           fi
           scripts/package_release_assets.sh ${{ matrix.target }} target/${{ matrix.target }}/release dist-assets
