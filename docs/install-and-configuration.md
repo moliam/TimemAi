@@ -61,10 +61,10 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ### Prebuilt release archives
 
 Every GitHub Release also carries prebuilt archives built by CI from the tagged
-commit: `timem-vX.Y.Z-<target>.zip` for `x86_64-pc-windows-msvc` and
-`timem-vX.Y.Z-<target>.tar.gz` for `aarch64-apple-darwin`,
-`x86_64-apple-darwin`, and `x86_64-unknown-linux-gnu`, each with a `.sha256`
-sidecar.
+commit: `timem-vX.Y.Z-<target>.zip` and `timem-vX.Y.Z-<target>.tar.gz` for
+`x86_64-pc-windows-msvc`, and `timem-vX.Y.Z-<target>.tar.gz` for
+`aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-unknown-linux-gnu`,
+each with a `.sha256` sidecar.
 
 Extract the archive, add the extracted directory to PATH, and run `timem`. The
 archive contains only the executable, the `timem-web` compatibility alias, the
@@ -72,6 +72,22 @@ shipped `reminder_tips.json`, and a package README; Rust, build tools, and
 Node.js are not required. Updates replace the executable only: exit Timem first
 on Windows, extract the newer archive over the same directory, and MEM
 workspaces, Sessions, credentials, and user configuration stay untouched.
+
+### In-app self upgrade (Settings -> System)
+
+Timem Web can upgrade itself without a terminal: open Settings -> System and
+use the Software upgrade card. It checks the latest GitHub Release, downloads
+the platform's prebuilt `tar.gz` with a live progress bar, verifies the
+published `.sha256` sidecar, validates the new binary with `--help` before
+swapping it in, and keeps a timestamped backup next to the executable. A
+Chrome-style restart button then hands the workspace to the replaced process
+on the same port with the same access token; the browser session keeps
+working after the reload. MEM workspaces, Sessions, credentials, and user
+configuration are never modified, and a failed upgrade leaves the running
+version untouched.
+
+`TIMEM_UPGRADE_BASE_URL` (mirror/test server) and `TIMEM_UPGRADE_REPOSITORY`
+override the download source for the in-app upgrader.
 
 ### One-command binary upgrade (prebuilt archives)
 

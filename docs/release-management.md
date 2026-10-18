@@ -51,7 +51,8 @@ Every public release carries prebuilt archives produced by
 workflow builds the release binary for `x86_64-pc-windows-msvc`,
 `aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-unknown-linux-gnu`,
 packages it with `scripts/package_release_assets.sh`, smoke-tests `--help`,
-and uploads `timem-vX.Y.Z-<target>.zip` (Windows) or `.tar.gz` (macOS/Linux)
+and uploads `timem-vX.Y.Z-<target>.zip` plus `.tar.gz` (Windows) or
+`.tar.gz` (macOS/Linux)
 plus a `.sha256` sidecar to the Release.
 
 A manual `workflow_dispatch` run resolves the latest Release tag, checks out

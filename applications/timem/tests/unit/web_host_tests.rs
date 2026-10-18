@@ -2123,6 +2123,95 @@ fn same_process_duplicate_id_reuses_terminal_result_without_a_second_handler_eff
 }
 
 #[tokio::test]
+async fn upgrade_endpoints_report_idle_status_and_gate_restart_on_pending() {
+    let state = routing_test_state();
+    let headers = HeaderMap::new();
+
+    // Status is readable without auth in local mode (public_access = false).
+    let response = upgrade_status(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery { token: None }),
+        headers.clone(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("bounded status body");
+    let status: serde_json::Value = serde_json::from_slice(&body).expect("json status");
+    assert_eq!(status["phase"]["phase"], "idle");
+    assert_eq!(
+        status["current_version"],
+        self_upgrade::current_workspace_version()
+    );
+
+    // Restart is rejected unless an upgrade is pending.
+    let response = upgrade_restart(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery { token: None }),
+        headers.clone(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    // Once pending, restart fires the notify instead of returning CONFLICT.
+    self_upgrade::set_phase(
+        &state.upgrade,
+        self_upgrade::UpgradePhase::PendingRestart {
+            current_version: "2.6.0".to_string(),
+            pending_version: "v999.0.0".to_string(),
+        },
+    );
+    let response = upgrade_restart(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery { token: None }),
+        headers,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+}
+
+#[tokio::test]
+async fn public_mode_upgrade_endpoints_require_the_access_token() {
+    let mut state = routing_test_state();
+    state.public_access = true;
+    state.token = "secret-token".to_string();
+    let headers = HeaderMap::new();
+
+    let response = upgrade_status(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery { token: None }),
+        headers.clone(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = upgrade_check(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery { token: None }),
+        headers.clone(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = upgrade_apply(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery { token: None }),
+        headers.clone(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = upgrade_restart(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery { token: None }),
+        headers,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn disconnect_after_acceptance_does_not_abort_queued_commands() {
     let (command_tx, command_rx) = tokio_mpsc::channel(2);
     let (result_tx, result_rx) = tokio_mpsc::unbounded_channel();
@@ -8013,6 +8102,10 @@ fn routing_test_state() -> AppState {
         runtime_log: RuntimeLog::default(),
         lifecycle_diagnostics: LifecycleDiagnostics::disabled(),
         runtime_started_at: agent_core::local_datetime_label(),
+        upgrade: self_upgrade::new_upgrade_runtime(None),
+        restart_notify: Arc::new(tokio::sync::Notify::new()),
+        restart_args: Arc::new(Vec::new()),
+        restart_public_token: None,
     }
 }
 

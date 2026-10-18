@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent_core"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "encoding_rs",
  "libc",
@@ -511,6 +511,16 @@ dependencies = [
  "cfg-if",
  "rustix",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
 ]
 
 [[package]]
@@ -1693,6 +1703,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
+ "xattr",
+]
+
+[[package]]
 name = "termimad"
 version = "0.34.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1769,7 +1790,7 @@ checksum = "ef927ca75afb808a4d64dd374f00a2adf8d0fcff8e7b184af886c3c87ec4a3f3"
 
 [[package]]
 name = "timem"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "agent_core",
  "axum",
@@ -1779,8 +1800,11 @@ dependencies = [
  "futures-util",
  "libc",
  "rcgen",
+ "reqwest",
+ "ring",
  "serde",
  "serde_json",
+ "tar",
  "timem_http_websocket",
  "timem_session",
  "timem_shell",
@@ -1790,7 +1814,7 @@ dependencies = [
 
 [[package]]
 name = "timem_http_websocket"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "axum",
  "futures-util",
@@ -1803,7 +1827,7 @@ dependencies = [
 
 [[package]]
 name = "timem_in_process"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "timem_session",
  "timem_ui_contract",
@@ -1811,7 +1835,7 @@ dependencies = [
 
 [[package]]
 name = "timem_platform"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -1819,7 +1843,7 @@ dependencies = [
 
 [[package]]
 name = "timem_session"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "agent_core",
  "serde",
@@ -1829,7 +1853,7 @@ dependencies = [
 
 [[package]]
 name = "timem_shell"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "crossterm",
  "home",
@@ -1849,7 +1873,7 @@ dependencies = [
 
 [[package]]
 name = "timem_ui_contract"
-version = "2.5.0"
+version = "2.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2492,6 +2516,16 @@ checksum = "524e57b2c537c0f9b1e69f1965311ec12182b4122e45035b1508cd24d2adadb1"
 dependencies = [
  "cfg-if",
  "windows-sys 0.48.0",
+]
+
+[[package]]
+name = "xattr"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
+dependencies = [
+ "libc",
+ "rustix",
 ]
 
 [[package]]
