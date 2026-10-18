@@ -150,7 +150,6 @@ windows_ci_required=(
   "./scripts/windows_install_logic_test.ps1"
   "cargo check --workspace --all-targets --locked"
   "cargo test --workspace --locked -- --test-threads=1"
-  "cache-dependency-path: interfaces/web/pnpm-lock.yaml"
   "pnpm --dir interfaces/web test"
   "pnpm --dir interfaces/web build"
   "git diff --exit-code -- interfaces/web/dist"
@@ -179,6 +178,11 @@ done
 
 if search_fixed "web_ui/timem-web" .github/workflows/ci.yml; then
   echo "Windows CI must use the semantic interfaces/web layout" >&2
+  exit 1
+fi
+
+if search_fixed "cache: pnpm" .github/workflows/ci.yml; then
+  echo "setup-node pnpm cache must stay disabled: cache misses fail the post-save step" >&2
   exit 1
 fi
 
