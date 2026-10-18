@@ -81,8 +81,10 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: 24
-          cache: pnpm
-          cache-dependency-path: interfaces/web/pnpm-lock.yaml
+          # No setup-node package cache: on cache misses the post step tried
+          # to save pnpm's cwd-relative fallback store path, which never
+          # exists, so every miss failed the job (seen on ubuntu main runs).
+          # The gate installs dependencies via frozen lockfile anyway.
 
       - name: Run production CI gate
         shell: bash
@@ -134,8 +136,10 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: 24
-          cache: pnpm
-          cache-dependency-path: interfaces/web/pnpm-lock.yaml
+          # No setup-node package cache: on cache misses the post step tried
+          # to save pnpm's cwd-relative fallback store path, which never
+          # exists, so every miss failed the job (seen on ubuntu main runs).
+          # The gate installs dependencies via frozen lockfile anyway.
 
       - name: Validate PowerShell delivery scripts
         shell: pwsh
