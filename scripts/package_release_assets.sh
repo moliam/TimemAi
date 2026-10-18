@@ -107,9 +107,10 @@ Install:
 3. Run: timem    (the browser opens automatically)
    Terminal mode: timem --shell
 
-Update: exit Timem first (Windows locks the running .exe), then extract a
-newer archive over the old directory. MEM workspaces (~/.timem), Sessions,
-credentials, and user configuration are preserved.
+Update: open Settings -> System in the Web UI and run the built-in upgrade
+(Windows replaces the running executable automatically). Alternatively exit
+Timem and extract a newer archive over the old directory. MEM workspaces
+(~/.timem), Sessions, credentials, and user configuration are preserved.
 
 Verify integrity against the .sha256 sidecar next to this archive.
 EOF
@@ -120,6 +121,9 @@ package() {
   local version stage asset sumfile digest kind
   version="$(workspace_version)"
   mkdir -p "$out_dir"
+  # Absolute-ize early: tar/zip run from inside the staging directory and a
+  # relative out_dir would resolve the archive path under .stage-* instead.
+  out_dir="$(cd "$out_dir" && pwd)"
   stage="$out_dir/.stage-$target"
   rm -rf "$stage"
   mkdir -p "$stage"
@@ -129,15 +133,16 @@ package() {
       kind="windows"
       stage_common "$stage" "$bin_dir" "$kind" "$target"
       write_readme "$stage" "$version"
-      asset="$out_dir/timem-v$version-$target.zip"
-      make_zip "$stage" "$asset" timem.exe timem-web.cmd reminder_tips.json README-ASSETS.txt
+      assets="$out_dir/timem-v$version-$target.zip $out_dir/timem-v$version-$target.tar.gz"
+      make_zip "$stage" "$out_dir/timem-v$version-$target.zip" timem.exe timem-web.cmd reminder_tips.json README-ASSETS.txt
+      (cd "$stage" && tar -czf "$out_dir/timem-v$version-$target.tar.gz" timem.exe timem-web.cmd reminder_tips.json README-ASSETS.txt)
       ;;
     *-apple-darwin | *-linux-*)
       kind="unix"
       stage_common "$stage" "$bin_dir" "$kind" "$target"
       write_readme "$stage" "$version"
-      asset="$out_dir/timem-v$version-$target.tar.gz"
-      (cd "$stage" && tar -czf "$asset" timem timem-web reminder_tips.json README-ASSETS.txt)
+      assets="$out_dir/timem-v$version-$target.tar.gz"
+      (cd "$stage" && tar -czf "$out_dir/timem-v$version-$target.tar.gz" timem timem-web reminder_tips.json README-ASSETS.txt)
       ;;
     *)
       echo "unsupported target triple: $target" >&2
@@ -145,12 +150,14 @@ package() {
       ;;
   esac
 
-  digest="$(cd "$out_dir" && checksum_file "$(basename "$asset")")"
-  sumfile="$asset.sha256"
-  printf '%s\n' "$digest" > "$sumfile"
+  for asset in $assets; do
+    digest="$(cd "$out_dir" && checksum_file "$(basename "$asset")")"
+    sumfile="$asset.sha256"
+    printf '%s\n' "$digest" > "$sumfile"
+    echo "packaged: $asset"
+    echo "checksum: $sumfile"
+  done
   rm -rf "$stage"
-  echo "packaged: $asset"
-  echo "checksum: $sumfile"
 }
 
 self_test() {
@@ -186,6 +193,13 @@ PYEOF
   tar_names="$(tar -tzf "$tar_asset" | sort | tr '\n' ' ')"
   if [ "$tar_names" != "README-ASSETS.txt reminder_tips.json timem timem-web " ]; then
     echo "tar member mismatch: $tar_names" >&2
+    exit 1
+  fi
+
+  local win_tar_names
+  win_tar_names="$(tar -tzf "$tmp/out/timem-v$version-x86_64-pc-windows-msvc.tar.gz" | sort | tr '\n' ' ')"
+  if [ "$win_tar_names" != "README-ASSETS.txt reminder_tips.json timem-web.cmd timem.exe " ]; then
+    echo "windows tar member mismatch: $win_tar_names" >&2
     exit 1
   fi
 

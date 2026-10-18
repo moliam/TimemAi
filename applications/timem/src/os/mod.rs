@@ -25,6 +25,13 @@ impl LaunchParent {
         }
     }
 
+    /// A self-upgrade replacement process must not watch its launcher: the
+    /// old Timem process exits right after spawning it, and that exit is the
+    /// expected handoff, not a shutdown request.
+    pub(crate) fn detached() -> Self {
+        Self { pid: None }
+    }
+
     pub(crate) fn pid_u32(self) -> Option<u32> {
         self.pid
     }

@@ -11,7 +11,9 @@ UI layer or a second owner of Agent, Session, or Turn semantics.
 - `src/routes.rs`: fixed browser HTTP/WebSocket paths, HTTP method placement, global and
   endpoint-specific request-body bounds, static fallback routing, and the browser-wide security
   response layer. Product hosts inject authenticated handlers and state; the Bridge does not build
-  snapshots, authorize users, dispatch commands, or own Session/Turn state.
+  snapshots, authorize users, dispatch commands, or own Session/Turn state. The `/api/upgrade/*`
+  family follows the same rule: the Bridge only places the paths and methods; check, apply,
+  restart semantics, and their authentication live in the product host.
 - `src/transport.rs`: Axum WebSocket frame splitting, bounded JSON text decoding/encoding,
   same-origin request validation, and browser-safe response headers. It does not authenticate a
   product, build snapshots, dispatch commands, or own Session/Turn state.

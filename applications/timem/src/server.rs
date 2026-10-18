@@ -5,6 +5,7 @@ mod mem_maintenance;
 mod model_endpoint_import;
 mod model_endpoint_share;
 mod response_preview;
+mod self_upgrade;
 mod websocket_delivery;
 
 #[cfg(test)]
@@ -19,6 +20,7 @@ use model_endpoint_import::{
     scan_model_endpoint_imports, ModelEndpointImportCandidate, ModelEndpointImportCandidateReport,
     MAX_MODEL_ENDPOINT_IMPORT_CANDIDATES,
 };
+use self_upgrade::{SharedUpgradeRuntime, UpgradePhase};
 use websocket_delivery::{command_ack, finish_command_dedup};
 #[cfg(test)]
 use websocket_delivery::{
@@ -108,7 +110,7 @@ use timem_session::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{broadcast, mpsc as tokio_mpsc, oneshot},
+    sync::{broadcast, mpsc as tokio_mpsc, oneshot, Notify},
     time::{sleep, timeout, Instant},
 };
 
@@ -191,6 +193,15 @@ struct AppState {
     /// Local time label captured at process start; used by the session resume
     /// notice so it reports the actual restart moment, not the turn moment.
     runtime_started_at: String,
+    upgrade: SharedUpgradeRuntime,
+    /// Fired by the upgrade restart endpoint; wakes the graceful shutdown
+    /// path so the replacement process can take over the listener and lease.
+    restart_notify: Arc<Notify>,
+    /// Original launch arguments reused for the replacement process.
+    restart_args: Arc<Vec<String>>,
+    /// Public access token forwarded to the replacement process so browser
+    /// URLs keep working across an upgrade restart.
+    restart_public_token: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1705,6 +1716,9 @@ pub(crate) enum WebExitReason {
     Sighup,
     ParentProcessExited,
     ServerCompleted,
+    /// The running executable was replaced by a self upgrade and a
+    /// replacement process was spawned; this process must exit.
+    RestartRequested,
 }
 
 impl WebExitReason {
@@ -1718,6 +1732,7 @@ impl WebExitReason {
             Self::Sighup => "sighup",
             Self::ParentProcessExited => "parent_process_exited",
             Self::ServerCompleted => "server_completed",
+            Self::RestartRequested => "restart_requested",
         }
     }
 }
@@ -1732,16 +1747,27 @@ pub async fn run(
     }
 
     let launch = WebLaunchOptions::parse(args)?;
+    // A replacement process spawned by the in-app upgrade must not watch its
+    // launcher (the old process exits immediately) and must not reopen a
+    // browser tab; it inherits the user's existing browser session.
+    let restarted_by_upgrade = std::env::var_os("TIMEM_WEB_RESTARTED").is_some();
     agent_core::configure_audit_storage(launch.debug);
     if std::env::var_os("TIMEM_DATA_DIR").is_some() {
         return Err("unsupported_env:TIMEM_DATA_DIR; MEM is the complete workspace".to_string());
     }
     diagnostics.checkpoint("configuration_parsed", serde_json::Value::Null);
-    let launch_parent = crate::os::LaunchParent::capture();
+    let launch_parent = if restarted_by_upgrade {
+        crate::os::LaunchParent::detached()
+    } else {
+        crate::os::LaunchParent::capture()
+    };
     let template = WorkerTemplate::from_environment(&launch)?;
     let prefer_default_mem_port = uses_system_default_mem(&template.initial_space);
     println!("Starting Timem Web and restoring the selected workspace...");
-    let token = launch.public_access.then(generate_token).transpose()?;
+    let token = launch
+        .public_access
+        .then(restart_inherited_token)
+        .transpose()?;
     let manager = Arc::new(Mutex::new(CoreSessionWorkerManager::new()));
     let sessions = Arc::new(Mutex::new(BTreeMap::new()));
     let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
@@ -1827,7 +1853,16 @@ pub async fn run(
         runtime_log,
         lifecycle_diagnostics: diagnostics.clone(),
         runtime_started_at: agent_core::local_datetime_label(),
+        upgrade: self_upgrade::new_upgrade_runtime(std::env::current_exe().ok()),
+        restart_notify: Arc::new(Notify::new()),
+        restart_args: Arc::new(args.to_vec()),
+        restart_public_token: token.clone(),
     };
+    // Best-effort removal of stale upgrade backups (older than one day)
+    // left next to the executable by previous self upgrades.
+    if let Some(executable) = state.upgrade.executable_path.as_deref() {
+        self_upgrade::cleanup_upgrade_leftovers(executable);
+    }
     let cleanup_guard = WebRuntimeCleanupGuard::new(&state);
 
     // Session restore no longer blocks the listener: the web UI gets its first
@@ -1887,7 +1922,7 @@ pub async fn run(
     }
     spawn_background_session_restore(state.clone());
     let _ = schedule_selected_session_mcp_refreshes(&state);
-    if launch.open_browser && !launch.public_access {
+    if launch.open_browser && !launch.public_access && !restarted_by_upgrade {
         if should_auto_open_browser() {
             if let Err(error) = open_browser(&local_url) {
                 eprintln!("Could not open the browser automatically: {error}");
@@ -1914,6 +1949,7 @@ pub async fn run(
         .with_graceful_shutdown(shutdown_signal(
             shutdown_monitor,
             Arc::clone(&shutdown_reason),
+            state.restart_notify.clone(),
             diagnostics.clone(),
         ))
         .await
@@ -1926,7 +1962,89 @@ pub async fn run(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .unwrap_or(WebExitReason::ServerCompleted);
+    if reason == WebExitReason::RestartRequested {
+        spawn_replacement_process(&state);
+    }
     Ok(reason)
+}
+
+/// Reuses the public access token handed over by an upgrade restart so the
+/// browser URL keeps working after the replacement process binds.
+fn restart_inherited_token() -> Result<String, String> {
+    match std::env::var("TIMEM_WEB_RESTART_TOKEN") {
+        Ok(token) if !token.trim().is_empty() => Ok(token),
+        _ => generate_token(),
+    }
+}
+
+/// Spawns the replaced executable as the successor of this process. Called
+/// only after graceful shutdown released the listener and workspace lease,
+/// so the successor can bind the same port and take over cleanly.
+fn spawn_replacement_process(state: &AppState) {
+    let Some(executable) = state
+        .upgrade
+        .executable_path
+        .clone()
+        .or_else(|| std::env::current_exe().ok())
+    else {
+        eprintln!("[timem_upgrade_restart] replacement executable path unavailable");
+        return;
+    };
+    let mut args: Vec<String> = state.restart_args.as_ref().clone();
+    let has_explicit_port = args
+        .windows(2)
+        .any(|pair| pair.first().map(String::as_str) == Some("--port"));
+    if !has_explicit_port {
+        let port = state.listen_port.load(std::sync::atomic::Ordering::SeqCst);
+        if port != 0 {
+            args.push("--port".to_string());
+            args.push(port.to_string());
+        }
+    }
+    // The old process exits right after spawn; the replacement must not hold
+    // its stdout/stderr pipes or a closed-terminal write could take it down.
+    // Console output is preserved in a restart log next to the executable so
+    // upgrade problems stay diagnosable for users who ran Timem from a
+    // terminal that has since closed.
+    let restart_log = executable
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".timem-restart.log");
+    let open_restart_log = || {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&restart_log)
+            .map(std::process::Stdio::from)
+            .unwrap_or(std::process::Stdio::null())
+    };
+    let mut command = std::process::Command::new(&executable);
+    command
+        .args(&args)
+        .env("TIMEM_WEB_RESTARTED", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(open_restart_log())
+        .stderr(open_restart_log());
+    if let Some(token) = state.restart_public_token.as_deref() {
+        command.env("TIMEM_WEB_RESTART_TOKEN", token);
+    }
+    match command.spawn() {
+        Ok(child) => {
+            println!(
+                "Timem upgrade restart: replacement process started (pid {}).",
+                child.id()
+            );
+            println!(
+                "Timem upgrade restart: replacement output is appended to {}",
+                restart_log.display()
+            );
+        }
+        Err(error) => {
+            eprintln!(
+                "[timem_upgrade_restart] failed to start the replacement process: {error}. Restart Timem manually; the upgraded executable is already in place."
+            );
+        }
+    }
 }
 
 fn shutdown_trigger_exit_reason(trigger: crate::os::ShutdownTrigger) -> WebExitReason {
@@ -1943,9 +2061,13 @@ fn shutdown_trigger_exit_reason(trigger: crate::os::ShutdownTrigger) -> WebExitR
 async fn shutdown_signal(
     monitor: crate::os::ShutdownSignalMonitor,
     selected_reason: Arc<Mutex<Option<WebExitReason>>>,
+    restart_notify: Arc<Notify>,
     diagnostics: LifecycleDiagnostics,
 ) {
-    let reason = shutdown_trigger_exit_reason(monitor.detect().await);
+    let reason = tokio::select! {
+        trigger = monitor.detect() => shutdown_trigger_exit_reason(trigger),
+        _ = restart_notify.notified() => WebExitReason::RestartRequested,
+    };
     diagnostics.event(
         "shutdown_trigger_received",
         serde_json::json!({"reason": reason.label()}),
@@ -2450,6 +2572,72 @@ async fn debug_reset_statistics(
     }
 }
 
+async fn upgrade_status(
+    State((state, _)): State<(AppState, u16)>,
+    Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    Json(json!({
+        "phase": self_upgrade::snapshot_phase(&state.upgrade),
+        "current_version": self_upgrade::current_workspace_version(),
+    }))
+    .into_response()
+}
+
+async fn upgrade_check(
+    State((state, _)): State<(AppState, u16)>,
+    Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let runtime = state.upgrade.clone();
+    tokio::spawn(async move {
+        self_upgrade::run_check(&runtime).await;
+    });
+    StatusCode::ACCEPTED.into_response()
+}
+
+async fn upgrade_apply(
+    State((state, _)): State<(AppState, u16)>,
+    Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let runtime = state.upgrade.clone();
+    tokio::spawn(async move {
+        self_upgrade::run_apply(&runtime).await;
+    });
+    StatusCode::ACCEPTED.into_response()
+}
+
+async fn upgrade_restart(
+    State((state, _)): State<(AppState, u16)>,
+    Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match self_upgrade::snapshot_phase(&state.upgrade) {
+        UpgradePhase::PendingRestart { .. } => {
+            state.restart_notify.notify_one();
+            StatusCode::ACCEPTED.into_response()
+        }
+        _ => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "restart_requires_pending_upgrade"})),
+        )
+            .into_response(),
+    }
+}
+
 fn build_router(state: AppState, port: u16) -> Router {
     build_browser_router(
         (state, port),
@@ -2461,6 +2649,10 @@ fn build_router(state: AppState, port: u16) -> Router {
             performance_trace: post(performance_trace),
             debug_browse: get(debug_browse),
             debug_reset_statistics: post(debug_reset_statistics),
+            upgrade_status: get(upgrade_status),
+            upgrade_check: post(upgrade_check),
+            upgrade_apply: post(upgrade_apply),
+            upgrade_restart: post(upgrade_restart),
             websocket: get(websocket),
             static_assets: get(static_asset),
         },
