@@ -808,6 +808,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     fn write_archive(dir: &Path, members: &[(&str, &[u8])]) -> PathBuf {
         let archive = dir.join("asset.tar.gz");
         let file = std::fs::File::create(&archive).unwrap();
