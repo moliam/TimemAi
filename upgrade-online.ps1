@@ -23,7 +23,10 @@ function Assert-UpgradeIdentifier([string]$Value, [string]$Label) {
 }
 
 function Resolve-UpgradeVersion([string]$Requested, [string]$Repo) {
-    if ($Requested -ne 'latest') { return $Requested }
+    if ($Requested -ne 'latest') {
+        Assert-UpgradeIdentifier $Requested 'release version'
+        return $Requested
+    }
     try {
         $response = Invoke-WebRequest -UseBasicParsing -Method Head -Uri "https://github.com/$Repo/releases/latest"
         $base = $response.BaseResponse
