@@ -11144,9 +11144,9 @@ const TurnInteraction = memo(function TurnInteraction({
                   <time
                     className="turn-entry-time"
                     dateTime={new Date(entry.created_at_ms).toISOString()}
-                  >
-                    {formatUserEntryTime(entry.created_at_ms)}
-                  </time>
+                    data-time={formatUserEntryTime(entry.created_at_ms)}
+                    aria-label={formatUserEntryTime(entry.created_at_ms)}
+                  />
                 </div>
                 );
               })}

@@ -61,7 +61,8 @@ button:disabled { cursor: not-allowed; }
 .turn-user-entry > span { display: inline-block; margin: 0 8px 4px 0; color: #91cfc5; font-size: 11px; font-weight: 750; }
 .turn-user-entry.approval { background: #193239; color: #b8c8ce; }
 .turn-user-entry.approval > span { color: #d6b56f; }
-.turn-entry-time { display: block; margin-top: 4px; color: #8fb5b3; font: 10px/1.4 var(--ui-font); text-align: right; }
+.turn-entry-time { display: block; margin-top: 4px; color: #8fb5b3; font: 10px/1.4 var(--ui-font); text-align: right; user-select: none; }
+.turn-entry-time::after { content: attr(data-time); }
 .turn-entry-attachments { display: grid; gap: 4px; margin-top: 8px; padding-top: 7px; border-top: 1px solid #ffffff1a; }
 .turn-entry-attachments > span { min-width: 0; display: flex; align-items: center; gap: 5px; color: #b8c7cc; font-size: 11px; line-height: 1.35; }
 .turn-entry-attachments svg { flex: none; color: #91aaa9; }
