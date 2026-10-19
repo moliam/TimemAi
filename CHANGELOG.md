@@ -4,6 +4,13 @@
 
 ### Added
 
+- Settings -> System -> "Show answers as they arrive" gains a nested sub-setting
+  "Collapse interim conversation after the task finishes" (default off). Off
+  keeps the interim conversation and tool rows expanded beside the final answer
+  after the task ends and across reloads; on restores the classic fold into the
+  collapsed Thought/Action frame. The choice is browser-local and toggling it
+  applies immediately in both directions.
+
 - In-app self upgrade in Settings -> System: check for a new release, download
   the official prebuilt archive with a live progress bar, verify the sha256
   sidecar, stage and `--help`-validate the new binary, replace the running

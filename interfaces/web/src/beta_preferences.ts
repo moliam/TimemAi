@@ -3,6 +3,7 @@ import { useSyncExternalStore } from "react";
 // UI-only preferences. Host debug mode supplies defaults, never overrides a choice.
 const keys = {
   stream: "timem-web-stream-ui-mode-v1",
+  streamArchive: "timem-web-stream-archive-v1",
   toolResults: "timem-web-tool-result-status-v1",
 } as const;
 type Preference = keyof typeof keys;
@@ -15,15 +16,18 @@ function read(name: Preference): boolean | undefined {
   } catch { return undefined; }
 }
 const choices: Record<Preference, boolean | undefined> = {
-  stream: read("stream"), toolResults: read("toolResults"),
+  stream: read("stream"), streamArchive: read("streamArchive"), toolResults: read("toolResults"),
 };
 function notify() { listeners.forEach(listener => listener()); }
+// The archive sub-setting must default off even in Host debug mode: its
+// user-facing contract is "keep the interim conversation expanded" by default.
+const debugExempt: ReadonlySet<Preference> = new Set(["streamArchive"]);
 export function applyBetaDebugDefault(debug: boolean) {
   if (debugDefault === debug) return;
   debugDefault = debug;
   notify();
 }
-export function getBetaPreference(name: Preference) { return choices[name] ?? debugDefault; }
+export function getBetaPreference(name: Preference) { return choices[name] ?? (debugExempt.has(name) ? false : debugDefault); }
 export function setBetaPreference(name: Preference, value: boolean) {
   choices[name] = value;
   try { window.localStorage.setItem(keys[name], JSON.stringify(value)); }

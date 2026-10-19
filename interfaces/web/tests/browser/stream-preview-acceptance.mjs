@@ -477,6 +477,9 @@ async function main() {
     await waitFor(() => contains("body", "ORDER_NEW"), "incremental thought missing");
     assert(await browser.evaluate(`(() => { const text = document.querySelector('.turn-stream-tools').textContent;
       return text.indexOf('ORDER_OLD') < text.indexOf('ORDER_SUPPLEMENT') && text.indexOf('ORDER_SUPPLEMENT') < text.indexOf('ORDER_NEW'); })()`), "incremental wire moved new thought before snapshot items");
+    // Paged archive recovery exercises the collapsed-frame path: enable the
+    // archive sub-setting so the completed turn folds into Thought/Action.
+    await browser.evaluate(`localStorage.setItem("timem-web-stream-archive-v1", "true")`);
     const completeEvents = Array.from({length: 80}, (_, i) => i % 2
       ? toolEvent(`archive-tool-${i}`, i + 1) : thoughtEvent(`archive-${i}`, `ARCHIVE_PROGRESS_${i}`, i + 1));
     const historyRecords = completeEvents.map(event => ({ type: "event", role: "system", turn_id: "turn-1",
@@ -720,7 +723,7 @@ async function main() {
     assert(await browser.evaluate(`!document.querySelector('.stream-working-trailer')`), "terminal turn retained working trailer");
     const workExpanded = () => browser.evaluate(`document.querySelector('button.work-title-chip')?.getAttribute('aria-expanded')`);
     for (const streamMode of [false, true]) {
-      await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", ${JSON.stringify(String(streamMode))});`);
+      await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", ${JSON.stringify(String(streamMode))}); localStorage.setItem("timem-web-stream-archive-v1", ${JSON.stringify(String(streamMode))});`);
       for (const terminal of ["finished", "interrupted"]) {
         const base = host.getSession();
         const workingSession = { ...base, state: "working", active_turn_id: "turn-1",
@@ -755,7 +758,7 @@ async function main() {
 
       }
     }
-    await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", "true")`);
+    await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", "true"); localStorage.setItem("timem-web-stream-archive-v1", "true")`);
     const interimSession = { ...host.getSession(), state: "working", active_turn_id: "turn-1", turns: [{
       ...turn("turn-1"), events: [thoughtEvent("prior", "Prior thought archived", 1)] ,
       preview: { attempt: 3, revision: 1, response: null },
@@ -829,6 +832,7 @@ async function main() {
     host.setSession(nextLong); host.send({type:"hello", snapshot:makeSnapshot(nextLong)});
     await waitFor(() => contains(".stream-thought-text", "Next round stays below"), "next round missing");
     assert(await browser.evaluate(`window.stableThought === document.querySelector('.stream-thought-text')`), "next round remounted old text");
+    await browser.evaluate(`localStorage.setItem("timem-web-stream-archive-v1", "true")`);
     for (const terminal of ["finished", "interrupted"]) {
       await setRound(longEvents, longThought);
       const current = host.getSession();
@@ -857,7 +861,7 @@ async function main() {
     for (const reducedMotion of [false, true]) {
     await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: reducedMotion ? "reduce" : "no-preference" }] });
     for (const streamMode of [true, false]) {
-      await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", ${JSON.stringify(String(streamMode))})`);
+      await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", ${JSON.stringify(String(streamMode))}); localStorage.setItem("timem-web-stream-archive-v1", ${JSON.stringify(String(streamMode))})`);
       const manyTools = Array.from({length: 80}, (_, i) => toolEvent(`handoff-tool-${i}`, 3 + i));
       await setRound([thoughtEvent("handoff-thought", longThought, 1), ...manyTools], longThought);
       await browser.evaluate(`document.querySelector('.chat-scroll').scrollTop = document.querySelector('.chat-scroll').scrollHeight`);
@@ -1076,6 +1080,41 @@ async function main() {
     // stays a bare xN count under the new collapsed-state contract.
     await waitFor(() => contains(".stream-tool-run-toggle", "x2"), "result preference did not update mounted rows");
     assert(await browser.evaluate(`document.querySelectorAll('.stream-tool-status').length===0 && document.querySelectorAll('.tool-failure-icon .lucide-circle-x').length===1`), "result preference introduced a redundant row verdict");
+    // Archive sub-setting: default off keeps the interim conversation expanded.
+    {
+      await browser.evaluate(`localStorage.removeItem("timem-web-stream-archive-v1"); localStorage.setItem("timem-web-stream-ui-mode-v1", "true")`);
+      const subEvents = [thoughtEvent("archive-sub-thought", "Archive sub-setting thought", 1), toolEvent("archive-sub-tool", 2)];
+      await setRound(subEvents, "Archive sub-setting preview");
+      await waitFor(() => contains(".stream-tool-row", "archive-sub-tool"), "archive sub-setting tool row missing");
+      const currentSub = host.getSession();
+      const subDone = {...currentSub, state: "ready", active_turn_id: null, workers: [worker("ready")], turns: currentSub.turns.map(t => ({...t, state: "finished", final_answer: "Archive sub-setting final"}))};
+      host.setSession(subDone); host.send({type: "hello", snapshot: makeSnapshot(subDone)});
+      await waitFor(() => contains(".turn-final-delivery", "Archive sub-setting final"), "archive default lost final");
+      await sleep(600);
+      assert(await browser.evaluate(`!!document.querySelector('.stream-continuous-process') && !document.querySelector('.stream-continuous-process.archiving') && !document.querySelector('.turn-assistant-frame.collapsed-work')`), "default archive=off collapsed the interim conversation");
+      await browser.call("Page.reload", {ignoreCache: true});
+      await waitFor(() => contains(".stream-thought-text", "Archive sub-setting thought"), "reload with archive off lost interim content");
+      assert(await browser.evaluate(`!!document.querySelector('.stream-continuous-process') && !document.querySelector('.stream-continuous-process.archiving')`), "reload re-collapsed interim conversation despite archive off");
+      // Settings: sub-switch nests under the enabled parent and defaults off.
+      await browser.evaluate(`document.querySelector('.sidebar-settings-button').click()`);
+      await waitFor(() => browser.evaluate(`!!document.querySelector('.settings-center')`), "settings center missing");
+      await browser.evaluate(`[...document.querySelectorAll('.settings-center-nav button')].find(b => b.textContent.includes('系统')).click()`);
+      await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-archive-subsetting')`), "archive sub-setting not rendered under enabled parent");
+      const subSwitch = `document.querySelector('.stream-archive-subsetting button[role="switch"]')`;
+      assert(await browser.evaluate(`${subSwitch}.getAttribute('aria-checked') === 'false'`), "archive sub-setting default is not off");
+      // Live toggle on archives the completed turn.
+      await browser.evaluate(`${subSwitch}.click()`);
+      await waitFor(() => browser.evaluate(`!document.querySelector('.stream-continuous-process') && !!document.querySelector('.turn-assistant-frame.collapsed-work')`), "live archive-on did not collapse the completed turn");
+      // Parent off hides the sub-setting; re-enabling keeps the explicit choice.
+      await browser.evaluate(`document.querySelector('.settings-group.system-feature-card > .settings-group-heading > button[role="switch"]').click()`);
+      await waitFor(() => browser.evaluate(`!document.querySelector('.stream-archive-subsetting')`), "sub-setting still visible with parent off");
+      await browser.evaluate(`document.querySelector('.settings-group.system-feature-card > .settings-group-heading > button[role="switch"]').click()`);
+      await waitFor(() => browser.evaluate(`document.querySelector('.stream-archive-subsetting button[role="switch"]')?.getAttribute('aria-checked') === 'true'`), "sub-setting choice did not persist");
+      await browser.evaluate(`document.querySelector('button[aria-label="关闭设置"]').click()`);
+      // Restore the archive-on default for any later assertions and clean the round.
+      await browser.evaluate(`localStorage.setItem("timem-web-stream-archive-v1", "true")`);
+      console.log("PASS Chrome archive sub-setting: default expanded, nested settings switch, live toggle, reload consistency");
+    }
     console.log("PASS Chrome visual interaction: stable completed groups, selection protection, failure toggle, 390/768px overflow");
     console.log("PASS Chrome continuous stream: multi-round DOM stability, completed adjacency merge/reopen, terminal animation and interruption archive");
     console.log("PASS Chrome interim continuity: deduplicated deliveries, earlier thought/answers retained, reload and typography");

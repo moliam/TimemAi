@@ -474,7 +474,7 @@ async function main() {
     // localStorage access is denied; wait until the app origin is live.
     await waitFor(async () => {
       try {
-        await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1",${JSON.stringify(String(streamMode))})`);
+        await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1",${JSON.stringify(String(streamMode))}); localStorage.setItem("timem-web-stream-archive-v1","true")`);
         return true;
       } catch { return false; }
     }, "app origin never became storage-capable");

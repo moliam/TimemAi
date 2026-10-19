@@ -149,7 +149,7 @@ describe("splitMarkdownBlocks incremental stability", () => {
  it("uses the trailer instead of a typing caret and archives only after working ends", () => {
    const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
    expect(css).not.toContain("stream-caret-pulse");
-   expect(mainSource).toContain('<StreamProcess closing={turn.state !== "working"}');
+   expect(mainSource).toContain('<StreamProcess closing={turn.state !== "working" && streamArchive}');
    expect(mainSource).toContain('className="stream-working-wrench"');
     // Model waiting/streaming keeps the breathing star; local work uses a
     // side-to-side wrench so the phases differ by shape AND color.
