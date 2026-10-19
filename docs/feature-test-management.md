@@ -246,6 +246,21 @@ unit tests and Chrome continuous-stream acceptance (multi-round retention, adjac
 reopening, terminal/interruption animation and reduced-motion). Subjective visual quality
 still needs user review; automated tests verify behavior rather than aesthetic preference.
 
+### Stream archive sub-setting
+
+While "Show answers as they arrive" is enabled, its settings card nests the
+browser-local sub-setting "Collapse interim conversation after the task finishes"
+(`timem-web-stream-archive-v1`, default off). Default off keeps the interim
+conversation and tool rows expanded beside the final answer after the
+authoritative turn state ends, including after reload; enabling it restores the
+classic height/opacity fold into collapsed Thought/Action. Toggling applies live
+in both directions without disturbing an in-flight working turn, and Host debug
+defaults never force it on. Coverage: `beta_preferences.test.ts` (storage,
+debug-default exemption), `beta_settings_ui.test.ts` (nested rendering and
+persistence), `stream_reveal.test.ts`, `view_model.test.ts`, and the Chrome
+archive sub-setting acceptance scenario (default expanded, nested settings
+switch, live toggle, reload consistency) in `stream-preview-acceptance.mjs`.
+
 ### Action 状态局部更新
 
 - Web 同一 action 的生命周期合并保留首次可见的展示 ID 与排序时间；权威事件 ID、执行时间及耗时计算不变。
