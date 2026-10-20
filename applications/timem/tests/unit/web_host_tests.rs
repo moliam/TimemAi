@@ -13,6 +13,27 @@ use std::time::{Duration, Instant};
 
 const TEST_PORT: u16 = 12345;
 
+fn remote_client() -> ConnectInfo<SocketAddr> {
+    ConnectInfo(SocketAddr::from(([192, 168, 0, 10], 41000)))
+}
+
+fn loopback_client() -> ConnectInfo<SocketAddr> {
+    ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 41000)))
+}
+
+fn loopback_host_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:12345"));
+    headers
+}
+
+fn rebound_host_headers() -> HeaderMap {
+    // DNS rebinding: a public domain resolving to 127.0.0.1 keeps a non-loopback Host.
+    let mut headers = HeaderMap::new();
+    headers.insert(header::HOST, HeaderValue::from_static("evil.example:12345"));
+    headers
+}
+
 fn confirmed_xml_response(body: &str) -> String {
     format!(
         "<ASSISTANT><finish_confirm>{} verified</finish_confirm>{body}</ASSISTANT>",
@@ -2132,6 +2153,7 @@ async fn upgrade_endpoints_report_idle_status_and_gate_restart_on_pending() {
         State((state.clone(), TEST_PORT)),
         Query(AuthQuery { token: None }),
         headers.clone(),
+        loopback_client(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -2150,6 +2172,7 @@ async fn upgrade_endpoints_report_idle_status_and_gate_restart_on_pending() {
         State((state.clone(), TEST_PORT)),
         Query(AuthQuery { token: None }),
         headers.clone(),
+        loopback_client(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::CONFLICT);
@@ -2166,6 +2189,7 @@ async fn upgrade_endpoints_report_idle_status_and_gate_restart_on_pending() {
         State((state.clone(), TEST_PORT)),
         Query(AuthQuery { token: None }),
         headers,
+        loopback_client(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
@@ -2182,6 +2206,7 @@ async fn public_mode_upgrade_endpoints_require_the_access_token() {
         State((state.clone(), TEST_PORT)),
         Query(AuthQuery { token: None }),
         headers.clone(),
+        remote_client(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -2190,6 +2215,7 @@ async fn public_mode_upgrade_endpoints_require_the_access_token() {
         State((state.clone(), TEST_PORT)),
         Query(AuthQuery { token: None }),
         headers.clone(),
+        remote_client(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -2198,6 +2224,7 @@ async fn public_mode_upgrade_endpoints_require_the_access_token() {
         State((state.clone(), TEST_PORT)),
         Query(AuthQuery { token: None }),
         headers.clone(),
+        remote_client(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -2206,6 +2233,7 @@ async fn public_mode_upgrade_endpoints_require_the_access_token() {
         State((state.clone(), TEST_PORT)),
         Query(AuthQuery { token: None }),
         headers,
+        remote_client(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -2693,6 +2721,116 @@ fn launch_parent_monitor_detects_shell_exit_and_ignores_a_live_parent() {
 }
 
 #[test]
+fn public_mode_trusts_loopback_callers_like_local_mode() {
+    let mut state = routing_test_state();
+    state.public_access = true;
+
+    // Remote callers keep the strict token/cookie semantics.
+    assert!(!authorized(
+        &state,
+        &AuthQuery { token: None },
+        &HeaderMap::new()
+    ));
+
+    // Loopback callers are trusted exactly like the default loopback bind.
+    assert!(authorized_token_or_cookie(
+        &state,
+        None,
+        &loopback_host_headers(),
+        SocketAddr::from(([127, 0, 0, 1], 41000))
+    ));
+    // IPv6 loopback is equally local.
+    assert!(authorized_token_or_cookie(
+        &state,
+        None,
+        &loopback_host_headers(),
+        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 41000))
+    ));
+    // The exemption fails closed without an inspectable Host header.
+    assert!(!authorized_token_or_cookie(
+        &state,
+        None,
+        &HeaderMap::new(),
+        SocketAddr::from(([127, 0, 0, 1], 41000))
+    ));
+    // Same-machine non-loopback addresses stay remote for auth purposes.
+    assert!(!authorized_token_or_cookie(
+        &state,
+        None,
+        &HeaderMap::new(),
+        SocketAddr::from(([192, 168, 0, 104], 41000))
+    ));
+    // A stale token left in local browser storage after a runtime restart
+    // must not lock the loopback UI out: loopback trust ignores tokens.
+    assert!(authorized_token_or_cookie(
+        &state,
+        Some("rotated-away-old-token"),
+        &loopback_host_headers(),
+        SocketAddr::from(([127, 0, 0, 1], 41000))
+    ));
+    // Remote callers presenting the same stale token stay rejected.
+    assert!(!authorized_token_or_cookie(
+        &state,
+        Some("rotated-away-old-token"),
+        &HeaderMap::new(),
+        SocketAddr::from(([192, 168, 0, 104], 41000))
+    ));
+}
+
+#[tokio::test]
+async fn public_mode_loopback_requests_skip_the_token_but_keep_origin_guard() {
+    let mut state = routing_test_state();
+    state.public_access = true;
+
+    // Loopback static entry serves without any token, like local mode.
+    let response = static_asset(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery { token: None }),
+        loopback_host_headers(),
+        loopback_client(),
+        Uri::from_static("/"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = health(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery { token: None }),
+        loopback_host_headers(),
+        loopback_client(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // DNS rebinding: a loopback-sourced request whose Host names a public
+    // domain must not ride the tokenless loopback exemption.
+    let response = health(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery { token: None }),
+        rebound_host_headers(),
+        loopback_client(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // The loopback exemption must not bypass the cross-origin guard.
+    let mut cross_origin = HeaderMap::new();
+    cross_origin.insert(header::HOST, HeaderValue::from_static("127.0.0.1:12345"));
+    cross_origin.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("http://evil.example"),
+    );
+    let response = health(
+        State((state, TEST_PORT)),
+        Query(AuthQuery { token: None }),
+        cross_origin,
+        loopback_client(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[test]
 fn public_web_launch_keeps_token_auth_and_reports_bind_mode() {
     let mut state = routing_test_state();
     assert!(!state.public_access);
@@ -2786,6 +2924,7 @@ async fn local_static_web_entry_needs_no_token_and_public_entry_sets_auth_cookie
         State((local_state, TEST_PORT)),
         Query(AuthQuery { token: None }),
         HeaderMap::new(),
+        remote_client(),
         Uri::from_static("/"),
     )
     .await;
@@ -2798,6 +2937,7 @@ async fn local_static_web_entry_needs_no_token_and_public_entry_sets_auth_cookie
         State((state.clone(), TEST_PORT)),
         Query(AuthQuery { token: None }),
         HeaderMap::new(),
+        remote_client(),
         Uri::from_static("/"),
     )
     .await;
@@ -2809,6 +2949,7 @@ async fn local_static_web_entry_needs_no_token_and_public_entry_sets_auth_cookie
             token: Some("test".to_string()),
         }),
         HeaderMap::new(),
+        remote_client(),
         Uri::from_static("/"),
     )
     .await;
@@ -2831,6 +2972,7 @@ async fn local_static_web_entry_needs_no_token_and_public_entry_sets_auth_cookie
         State((state, TEST_PORT)),
         Query(AuthQuery { token: None }),
         headers,
+        remote_client(),
         Uri::from_static("/assets/index-Dt1y9Jrn.js"),
     )
     .await;
@@ -2847,6 +2989,7 @@ async fn reuses_the_same_authenticated_url_after_closing_and_reopening_a_page() 
                 token: Some("test".to_string()),
             }),
             HeaderMap::new(),
+            loopback_client(),
             Uri::from_static("/"),
         )
         .await;
@@ -2879,6 +3022,7 @@ async fn explicit_partial_public_static_token_does_not_fallback_to_cookie() {
             token: Some("te".to_string()),
         }),
         headers,
+        remote_client(),
         Uri::from_static("/"),
     )
     .await;
@@ -2929,6 +3073,7 @@ async fn api_routes_reject_cross_origin_even_with_valid_token() {
             token: Some("test".to_string()),
         }),
         headers,
+        remote_client(),
     )
     .await;
 
@@ -16878,6 +17023,7 @@ async fn performance_trace_endpoint_authenticates_validates_and_records_browser_
         State((state.clone(), 13764)),
         Query(AuthQuery { token: None }),
         HeaderMap::new(),
+        remote_client(),
         Json(ClientPerformanceTrace {
             stage: "browser_turn_updated".to_string(),
             session_id: "session_a".to_string(),
@@ -16897,6 +17043,7 @@ async fn performance_trace_endpoint_authenticates_validates_and_records_browser_
             token: Some("test".to_string()),
         }),
         HeaderMap::new(),
+        remote_client(),
         Json(ClientPerformanceTrace {
             stage: "browser_turn_updated".to_string(),
             session_id: "session_a".to_string(),
@@ -16920,6 +17067,7 @@ async fn performance_trace_endpoint_authenticates_validates_and_records_browser_
             token: Some("test".to_string()),
         }),
         HeaderMap::new(),
+        remote_client(),
         Json(ClientPerformanceTrace {
             stage: "server_forgery".to_string(),
             session_id: "session_a".to_string(),
@@ -17137,6 +17285,7 @@ async fn static_assets_cache_by_path_class_and_negotiate_gzip() {
             token: Some("test".to_string()),
         }),
         HeaderMap::new(),
+        loopback_client(),
         Uri::try_from(hashed_path.as_str()).unwrap(),
     )
     .await;
@@ -17158,6 +17307,7 @@ async fn static_assets_cache_by_path_class_and_negotiate_gzip() {
             token: Some("test".to_string()),
         }),
         HeaderMap::new(),
+        loopback_client(),
         Uri::from_static("/"),
     )
     .await;
@@ -17179,6 +17329,7 @@ async fn static_assets_cache_by_path_class_and_negotiate_gzip() {
             token: Some("test".to_string()),
         }),
         gzip_headers,
+        loopback_client(),
         Uri::try_from(hashed_path.as_str()).unwrap(),
     )
     .await;

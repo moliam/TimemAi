@@ -255,7 +255,9 @@ timem
 ```
 
 The loopback-only local UI opens without an access token or model credentials at
-process startup. Only `--public` access requires the token printed in its URL.
+process startup. `--public` binds on all interfaces and requires the token printed
+in its URL for every remote client; requests from the same machine over loopback
+(`127.0.0.1` / `::1`) stay tokenless, exactly like the default local mode.
 Click the current model name in the upper-left header and configure
 the API key, model, API protocol, Base URL, and token limits for the selected
 Session. Configuration is Session-owned: changing one Session does not change

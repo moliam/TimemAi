@@ -33,8 +33,8 @@ reusable semantics in Core, and presentation in an Interface.
 The Web host:
 
 - binds to `127.0.0.1` unless `--public` is explicit;
-- uses tokenless access only for loopback-local mode;
-- requires a rotating access token for public browser, API, upload, and WebSocket access;
+- trusts tokenless loopback callers, including in `--public` mode;
+- requires a rotating access token for remote browser, API, upload, and WebSocket access in `--public` mode;
 - selects an automatic port unless `--port` is provided;
 - opens a browser only when a local graphical session is available;
 - keeps credentials, model calls, prompts, tools, memory, and response parsing
