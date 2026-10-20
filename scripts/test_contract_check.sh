@@ -320,7 +320,7 @@ fi
 
 private_fixture_hits="$(
   search_lines_regex '默默|李默|儿子|son birthday|6月12|蓝色雨伞|绿色雨衣|fangchang|/Users/limo3|/Users/fangchang|v0\.6 发布检查|AURORA' \
-    core/agent/tests core/session/tests interfaces/shell/src resources docs README.md CHANGELOG.md scripts \
+    core/agent/tests core/session/tests interfaces/web/tests interfaces/shell/src resources docs README.md CHANGELOG.md scripts \
     | grep -v 'scripts/test_contract_check.sh' \
     || true
 )"

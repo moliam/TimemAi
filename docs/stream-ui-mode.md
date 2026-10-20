@@ -2,6 +2,15 @@
 
 Settings → System → **Show answers as they arrive** is a standard presentation setting. It is disabled by default and stored only in the browser. Existing choices continue to use the `timem-web-stream-ui-mode-v1` key so upgrading does not reset the preference.
 
+While the parent setting is enabled, its card shows a nested sub-setting
+**Collapse interim conversation after the task finishes** (`timem-web-stream-archive-v1`).
+It defaults to off: after the authoritative turn state ends, the stream area
+stays expanded next to the final answer, including after reload. Turning it on
+restores the classic archive behavior — the terminal animation folds the whole
+process area into the collapsed Thought/Action frame. The sub-setting is
+browser-local presentation only, is never forced on by Host debug defaults, and
+toggling it live applies in both directions without waiting for the next task.
+
 Core emits a provisional `core.model.preview` snapshot scoped to the current response attempt. The Host validates the active Core Turn and primary Worker, maps it to the existing Web turn, and retains only the latest preview. Preview chunks do not become chat history events. Browser reload restores the Host snapshot; a Host restart is not a resumable model request.
 
 Public response text (`free_talk` / `final_answer`) streams into a provisional response preview. Tool arguments and reasoning are not display content. Provisional display never permits tool execution. Complete protocol validation remains the execution gate. Invalid responses retract their provisional preview; network interruption and Stop retain partial text with an interruption notice.
@@ -52,7 +61,9 @@ keeps its existing Chat behavior. This is browser presentation, not a delivery o
 Turn lifecycle change.
 
 Regression: Chrome `stream-preview-acceptance.mjs` checks next-reply folding,
-manual reopen/collapse, completed-history reload and provisional streaming.
+manual reopen/collapse, completed-history reload and provisional streaming, and
+the archive sub-setting scenario (default expanded, nested settings switch, live
+toggle, reload consistency).
 
 Execution dots are shown only for `running` and `background_running`, never for
 completed, failed, timed-out or cancelled tools. This applies to all stream tool

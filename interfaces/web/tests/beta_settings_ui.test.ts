@@ -125,6 +125,21 @@ describe("System settings UI contract", () => {
     expect(betaHeadingPosition).toBeLessThan(betaSwitchPosition);
   });
 
+  it("nests the archive sub-setting under answer streaming, default off", () => {
+    expect(zh.system.streamArchiveTitle).toBe("任务完成后收起中间对话");
+    expect(zh.system.streamArchiveDesc).toBe("任务结束后将过程内容收进折叠面板；关闭时过程内容保持展开。");
+    expect(zh.system.streamArchiveAria).toBe("任务完成后收起中间对话");
+    expect(en.system.streamArchiveTitle).toBe("Collapse interim conversation after the task finishes");
+    expect(en.system.streamArchiveDesc).toBe("Fold process content into the collapsed panel once the task ends; keep it expanded when off.");
+    expect("streamArchiveTitle" in zh.beta).toBe(false);
+    expect("streamArchiveTitle" in en.beta).toBe(false);
+    expect(streamSettingsSource).toContain("useStreamArchive");
+    expect(streamSettingsSource).toContain('t("system.streamArchiveTitle")');
+    expect(streamSettingsSource).toContain("stream-archive-subsetting");
+    expect(streamSettingsSource).toMatch(/\{active &&/);
+    expect(protocolSource).not.toContain("stream-archive");
+  });
+
   it("describes settings by user benefit without implementation details", () => {
     expect(zh.beta.toolResultTitle).toBe("工具执行状态");
     expect(zh.beta.toolResultDesc).toBe("显示工具执行是否成功。");

@@ -1504,10 +1504,10 @@ describe("web topic view model", () => {
   });
 
   it("keeps the complete workspace directory name in compact session labels", () => {
-    expect(workspacePathLabel("/Users/limo3/my_code/timem_shell")).toBe(
+    expect(workspacePathLabel("/Users/dev/my_code/timem_shell")).toBe(
       "…/timem_shell",
     );
-    expect(workspacePathLabel("/Users/limo3/my_code/timem_shell/")).toBe(
+    expect(workspacePathLabel("/Users/dev/my_code/timem_shell/")).toBe(
       "…/timem_shell",
     );
     expect(workspacePathLabel("timem_shell")).toBe("timem_shell");

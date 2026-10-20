@@ -5,11 +5,12 @@ import { persistComposerDraftTexts, readComposerDraftTexts } from "./composer_dr
 import { createComposerWriteThrough, type ComposerWriteThrough } from "./composer_input";
 import type { CatalogModel } from "./model_endpoints";
 import { applyBetaDebugDefault } from "./beta_preferences";
-import { StreamUiModeSetting, useStreamUiMode, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
+import { StreamUiModeSetting, useStreamArchive, useStreamUiMode, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
 import { SelfUpgradeSetting } from "./self_upgrade";
 import { StreamText } from "./stream_reveal";
 import { FlippingTime } from "./flipping_time";
 import { UserText } from "./user_text";
+import { formatUserEntryTime } from "./user_entry_time";
 import {
   AssistantRuntimeProvider,
   ThreadMessageLike,
@@ -10897,13 +10898,25 @@ const TurnInteraction = memo(function TurnInteraction({
   );
   const isWorking = turn.state === "working" && !isCancelling;
   const streamUiMode = useStreamUiMode();
+  // 「任务完成后收起中间对话」：默认不收起。关闭时终态后的过程内容保持
+  // 在流式区可见；开启时保持既有归档动画，把过程收进折叠的 Thought/Action 帧。
+  const streamArchive = useStreamArchive();
   // 整段归档与单项折叠是两件事：容器在 Turn 结束才归档，但 StreamToolRun
   // 必须在新逻辑时序进入时逐项收起旧工具。不可把单项折叠也绑定到 streamArchived，
   // 否则重新出现工具平铺积高、最终一次性大幅收起的问题。
   // Archive only after the authoritative working state ends, never at a round boundary.
-  const [streamArchived, setStreamArchived] = useState(turn.state !== "working");
+  const [streamArchived, setStreamArchived] = useState(turn.state !== "working" && streamArchive);
   const archiveStream = useCallback(() => setStreamArchived(true), []);
   useEffect(() => { if (turn.state === "working") setStreamArchived(false); }, [turn.state]);
+  // 偏好切换必须双向生效且与重载一致：重新打开时由 StreamProcess 的
+  // closing 动画完成收起；关闭时立即恢复展开。只在偏好真正变化时同步，
+  // 不能在 working→终态转换时触发。
+  const previousStreamArchiveRef = useRef(streamArchive);
+  useEffect(() => {
+    if (previousStreamArchiveRef.current === streamArchive) return;
+    previousStreamArchiveRef.current = streamArchive;
+    if (!streamArchive) setStreamArchived(false);
+  }, [streamArchive]);
   const streamRetentionActive = streamUiMode && !streamArchived;
   const latestThoughtTime = lifecycleItems.reduce((time, item) => item.activity?.kind === "free_talk" ? Math.max(time, item.createdAt) : time, -1);
   const streamRetention = useMemo(
@@ -11140,13 +11153,19 @@ const TurnInteraction = memo(function TurnInteraction({
                       ))}
                     </div>
                   )}
+                  <time
+                    className="turn-entry-time"
+                    dateTime={new Date(entry.created_at_ms).toISOString()}
+                    data-time={formatUserEntryTime(entry.created_at_ms)}
+                    aria-label={formatUserEntryTime(entry.created_at_ms)}
+                  />
                 </div>
                 );
               })}
           </div>
         </section>
       )}
-      {showWorkFrame && (!streamRetentionActive || turn.state !== "working" || decisions.length > 0) && (
+      {showWorkFrame && (!streamRetentionActive || (turn.state !== "working" && streamArchive) || decisions.length > 0) && (
         <section
           className={`turn-assistant-frame ${isWorking ? "working" : interrupted ? "interrupted" : turn.state} ${workStreamVisible ? "" : "collapsed-work"}`}
         >
@@ -11798,6 +11817,7 @@ function TurnAnswerDelivery({
 }) {
   useT();
   const streamUiMode = useStreamUiMode();
+  const streamArchive = useStreamArchive();
   const preview = streamUiMode ? turn.preview : undefined;
   const retainedThought = [...streamTools].reverse().find((activity) => activity.kind === "free_talk");
   const intermediate = preview?.response?.status === "intermediate";
@@ -11817,7 +11837,7 @@ function TurnAnswerDelivery({
   const phaseTimerKey = `${phase}:${phaseBoundary.id}`;
   return (
     <section className="turn-answer-delivery">
-      {streamRetained && <StreamProcess closing={turn.state !== "working"} onArchived={onStreamArchived}>
+      {streamRetained && <StreamProcess closing={turn.state !== "working" && streamArchive} onArchived={onStreamArchived}>
         <StreamActivityPresentation
           thoughtText={intermediate && !retainedThought ? thoughtText : ""}
           thoughtTimelineSeq={preview?.timeline_seq}
