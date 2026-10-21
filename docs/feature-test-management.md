@@ -344,6 +344,11 @@ layout-change event keyed by `timelineOutlineShapeKey` (pure tests in
 `interfaces/web/tests/thread_follow_latest.test.ts`); each outline re-measures
 synchronously on that event so the connect-time hydration storm paints no stale
 outline tops (flicker regression covered by the same wiring contract).
+In the portaled outline card, Start and Summary are delivery anchors rather
+than text chapters: both rows carry a persistent tinted fill and inner keyline
+in both themes while plain chapter rows stay transparent, so the directory
+reads anchor rows vs chapter rows at a glance (source contract in
+`interfaces/web/tests/outline_anchor_style.test.ts`).
 Chrome stream acceptance covers 80 tools plus a multi-section final answer in both UI modes
 and with/without reduced motion, asserting actual answer/viewport intersection and less than
 150px trailing scroll space after archive. The fixture failed before the fix with an invisible

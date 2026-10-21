@@ -3144,6 +3144,9 @@ body {
 .final-answer-outline-card nav > button.final-answer-outline-start > svg { flex: none; color: #6f9489; }
 .final-answer-outline-card nav > button.final-answer-outline-start.active { background: linear-gradient(90deg, #75b8a31a, transparent); color: #d8eee7; }
 .final-answer-outline-card nav > button.final-answer-outline-start.active > svg { color: #8bc9b7; filter: drop-shadow(0 0 5px #73b9a470); }
+/* Start and Summary are delivery anchors, not text chapters: both carry a
+   persistent tinted fill so the outline reads anchor rows vs plain chapters. */
+.final-answer-outline-card nav > button.final-answer-outline-start, .final-answer-outline-card nav > button.outline-summary { background: linear-gradient(90deg, #75b8a318, #75b8a30d); box-shadow: inset 0 0 0 1px #75b8a312; }
 
 .final-answer-outline-card nav > button { position: relative; flex: 0 0 auto; min-width: 0; overflow: hidden; border: 0; border-radius: 7px; padding: 6px 7px 6px 11px; background: transparent; color: #8b9691; font-size: 11px; font-weight: 530; line-height: 1.42; text-align: left; text-overflow: ellipsis; white-space: nowrap; transition: color .16s ease, background .16s ease, transform .16s ease; }
 .final-answer-outline-card nav > button::before { position: absolute; z-index: 1; top: 50%; left: 4px; width: 4px; height: 4px; border-radius: 50%; background: #68736f; box-shadow: 0 0 0 3px #232825; content: ""; transform: translate(-50%, -50%); transition: width .16s ease, height .16s ease, background .16s ease, box-shadow .16s ease; }
@@ -3175,6 +3178,9 @@ body {
 :root[data-theme="light"] .final-answer-outline-card nav > button.final-answer-outline-start > svg { color: #5f887d; }
 :root[data-theme="light"] .final-answer-outline-card nav > button.final-answer-outline-start.active { color: #185f50; }
 :root[data-theme="light"] .final-answer-outline-card nav > button.final-answer-outline-start.active > svg { color: #287e68; filter: drop-shadow(0 0 4px #287e6840); }
+:root[data-theme="light"] .final-answer-outline-card nav > button.final-answer-outline-start, :root[data-theme="light"] .final-answer-outline-card nav > button.outline-summary { background: linear-gradient(90deg, #287e6816, #287e6809); box-shadow: inset 0 0 0 1px #287e6812; }
+:root[data-theme="light"] .final-answer-outline-card nav > button.outline-summary { border-top-color: #31564b12; color: #647a73; }
+:root[data-theme="light"] .final-answer-outline-card nav > button.outline-summary > svg { color: #5f887d; }
 :root[data-theme="light"] .final-answer-outline-card nav > button::before { background: #a6b4af; box-shadow: 0 0 0 3px #f6f9f7; }
 :root[data-theme="light"] .final-answer-outline-card nav > button.level-3 { color: #899690; }
 :root[data-theme="light"] .final-answer-outline-card nav > button:hover { background: #31564b0d; color: #304a42; }
