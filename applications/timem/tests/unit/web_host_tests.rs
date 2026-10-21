@@ -1536,6 +1536,7 @@ fn restored_interrupted_session_marks_every_unfinished_turn() {
             events: Vec::new(),
             final_answer: None,
             completion: None,
+            events_slimmed: false,
         },
         WebTurn {
             preview: None,
@@ -1547,6 +1548,7 @@ fn restored_interrupted_session_marks_every_unfinished_turn() {
             events: Vec::new(),
             final_answer: None,
             completion: None,
+            events_slimmed: false,
         },
     ];
 
@@ -1573,6 +1575,7 @@ fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn(
         events: Vec::new(),
         final_answer: None,
         completion: Some(json!({"stop_reason": "model_error"})),
+        events_slimmed: false,
     };
     let unfinished = WebTurn {
         preview: None,
@@ -1584,6 +1587,7 @@ fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn(
         events: Vec::new(),
         final_answer: None,
         completion: None,
+        events_slimmed: false,
     };
     let mut turns = vec![unfinished, terminal];
 
@@ -1602,6 +1606,7 @@ fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn(
         events: Vec::new(),
         final_answer: None,
         completion: None,
+        events_slimmed: false,
     }];
     mark_restored_interrupted_turn(
         &mut ready_turns,
@@ -1676,6 +1681,7 @@ fn interrupted_session_persists_without_an_active_or_pending_turn() {
         events: Vec::new(),
         final_answer: None,
         completion: None,
+        events_slimmed: false,
     });
 
     let stored = stored_session_from_web_session(&state, &session);
@@ -1706,6 +1712,7 @@ fn stale_turn_started_without_command_id_cannot_revive_an_interrupted_session() 
             events: Vec::new(),
             final_answer: None,
             completion: None,
+            events_slimmed: false,
         });
     }
 
@@ -1775,6 +1782,7 @@ fn stale_turn_started_cannot_revive_an_interrupted_turn_but_new_pending_turn_can
             events: Vec::new(),
             final_answer: None,
             completion: None,
+            events_slimmed: false,
         });
     }
 
@@ -4287,6 +4295,7 @@ fn session_runtime_update_is_allowed_during_an_active_turn() {
             events: Vec::new(),
             final_answer: None,
             completion: None,
+            events_slimmed: false,
         });
     }
 
@@ -4351,6 +4360,7 @@ fn session_api_key_update_is_rejected_during_an_active_turn() {
         events: Vec::new(),
         final_answer: None,
         completion: None,
+        events_slimmed: false,
     });
     drop(sessions);
     let error = update_session_api_key(&state, "session_a", "new-secret".to_string()).unwrap_err();
@@ -4770,6 +4780,103 @@ fn legacy_session_roles_migrate_into_the_mem_scoped_global_library() {
     drop(sessions);
 
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn restart_cwd_paths_hide_windows_verbatim_prefixes_from_users() {
+    assert_eq!(
+        windows_verbatim_path_for_user_display(r"\\?\D:\TimemAi\target\release"),
+        r"D:\TimemAi\target\release"
+    );
+    assert_eq!(
+        windows_verbatim_path_for_user_display(r"\\?\UNC\server\share\TimemAi"),
+        r"\\server\share\TimemAi"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_canonical_restart_cwd_path_keeps_identity_but_hides_verbatim_prefix() {
+    let root = std::env::temp_dir().join(unique_web_id("restart_cwd_windows_display"));
+    std::fs::create_dir_all(&root).unwrap();
+
+    let canonical = std::fs::canonicalize(&root).unwrap();
+    let canonical_text = canonical.to_string_lossy();
+    assert!(
+        canonical_text.starts_with(r"\\?\"),
+        "Windows canonicalize should exercise a verbatim path, got {canonical_text}"
+    );
+
+    let displayed = path_for_user_display(&canonical);
+    assert!(!displayed.starts_with(r"\\?\"), "{displayed}");
+    assert_eq!(std::fs::canonicalize(&displayed).unwrap(), canonical);
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn browser_cwd_projections_hide_verbatim_paths_without_mutating_host_state() {
+    let internal = r"\\?\D:\TimemAi\target\release".to_string();
+    let context = WebContext {
+        context_id: "context_1".to_string(),
+        current_dir: internal.clone(),
+        worker_ids: vec!["worker_1".to_string()],
+    };
+    let attach = AttachSessionSummary {
+        session_id: "session_1".to_string(),
+        display_name: "Session".to_string(),
+        ordinal: 1,
+        state: "ready".to_string(),
+        working: false,
+        active_turn_id: None,
+        current_dir: internal.clone(),
+        restart_cwd_decision: None,
+        worker_count: 1,
+    };
+
+    assert_eq!(
+        serde_json::to_value(&context).unwrap()["current_dir"],
+        r"D:\TimemAi\target\release"
+    );
+    assert_eq!(
+        serde_json::to_value(&attach).unwrap()["current_dir"],
+        r"D:\TimemAi\target\release"
+    );
+    assert_eq!(context.current_dir, internal);
+    assert_eq!(attach.current_dir, internal);
+}
+
+#[test]
+fn restart_cwd_decision_serializes_only_browser_facing_paths() {
+    let decision = RestartCwdDecision {
+        runtime_cwd: r"D:\TimemAi\target\release".to_string(),
+        session_cwd: r"D:\TimemAi".to_string(),
+        session_cwd_available: true,
+        runtime_cwd_path: PathBuf::from(r"\\?\D:\TimemAi\target\release"),
+    };
+
+    assert_eq!(
+        serde_json::to_value(decision).unwrap(),
+        json!({
+            "runtime_cwd": r"D:\TimemAi\target\release",
+            "session_cwd": r"D:\TimemAi",
+            "session_cwd_available": true,
+        })
+    );
+}
+
+#[test]
+fn restart_cwd_path_display_preserves_non_verbatim_and_special_namespace_paths() {
+    for path in [
+        r"D:\TimemAi",
+        r"\\server\share\TimemAi",
+        "/home/user/TimemAi",
+        r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\TimemAi",
+        r"\\?\UNC\",
+        r"\\?\relative",
+    ] {
+        assert_eq!(windows_verbatim_path_for_user_display(path), path);
+    }
 }
 
 #[test]
@@ -12615,6 +12722,7 @@ fn background_exit_event_is_appended_to_its_original_turn() {
             events: Vec::new(),
             final_answer: None,
             completion: None,
+            events_slimmed: false,
         });
         session.active_turn_id = Some("turn_newer".to_string());
     }
@@ -16725,6 +16833,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
             final_answer: None,
             preview: None,
             completion: None,
+            events_slimmed: false,
         });
     }
     let mut updated = previous.clone();
@@ -17423,8 +17532,13 @@ fn bounded_turn_history_pages_recover_all_events_beyond_snapshot_tail() {
             > 600
     );
     let sessions = state.sessions.lock().unwrap();
-    let slim = slim_restored_turn_for_snapshot(sessions[id].turns.last().unwrap());
+    let live = sessions[id].turns.last().unwrap();
+    assert!(!live.events_slimmed);
+    let slim = slim_restored_turn_for_snapshot(live);
     assert_eq!(slim.events.len(), 40);
+    // Both the 256-byte string cap and the snapshot tail cap slim this turn;
+    // the projection must tell clients the events are previews.
+    assert!(slim.events_slimmed);
     assert_eq!(
         store
             .read_turn_history_page(id, "missing-turn", 0)
@@ -17432,6 +17546,59 @@ fn bounded_turn_history_pages_recover_all_events_beyond_snapshot_tail() {
             .0
             .len(),
         0
+    );
+}
+
+#[test]
+fn restored_history_events_mark_events_slimmed_only_when_slimmed() {
+    let state = routing_test_state();
+    let long_turn = start_web_turn(&state, "session_a", "long events").unwrap();
+    // A second session avoids the active-turn guard on the first session.
+    let short_turn = start_web_turn(&state, "session_b", "short events").unwrap();
+    append_turn_event(
+        &state,
+        "session_a",
+        Some(&long_turn.turn_id),
+        "core_topic",
+        json!({
+            "topic": {"name":"core.model.response"},
+            "payload": {"free_talk": "你说得对——".to_string() + &"很长的过程文本".repeat(80)}
+        }),
+    )
+    .unwrap();
+    append_turn_event(
+        &state,
+        "session_b",
+        Some(&short_turn.turn_id),
+        "core_topic",
+        json!({
+            "topic": {"name":"core.model.response"},
+            "payload": {"free_talk": "fits"}
+        }),
+    )
+    .unwrap();
+    let store = current_session_store(&state).unwrap();
+    let mut restored = restored_turns_from_history_records(
+        &read_all_history_records(&store.history_path_for_session("session_a")).unwrap(),
+    );
+    restored.extend(restored_turns_from_history_records(
+        &read_all_history_records(&store.history_path_for_session("session_b")).unwrap(),
+    ));
+    let long = restored
+        .iter()
+        .find(|turn| turn.turn_id == long_turn.turn_id)
+        .unwrap();
+    let short = restored
+        .iter()
+        .find(|turn| turn.turn_id == short_turn.turn_id)
+        .unwrap();
+    assert!(
+        long.events_slimmed,
+        "oversized restored event must be flagged"
+    );
+    assert!(
+        !short.events_slimmed,
+        "turns whose restored events fit the preview budget must stay unflagged"
     );
 }
 

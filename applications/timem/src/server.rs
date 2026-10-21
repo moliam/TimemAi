@@ -564,6 +564,11 @@ struct RestartCwdDecision {
     runtime_cwd: String,
     session_cwd: String,
     session_cwd_available: bool,
+    /// Canonical filesystem path retained separately from its browser-facing
+    /// representation. Windows canonicalization may add a `\\?\` namespace
+    /// prefix that is valid internally but should not leak into ordinary UI.
+    #[serde(skip)]
+    runtime_cwd_path: PathBuf,
 }
 
 /// Host-authoritative scheduled timer. `spec` carries the Core-owned
@@ -594,6 +599,7 @@ struct WebSession {
     group_id: Option<String>,
     ordinal: u32,
     state: String,
+    #[serde(serialize_with = "serialize_path_for_user_display")]
     current_dir: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     restart_cwd_decision: Option<RestartCwdDecision>,
@@ -681,6 +687,7 @@ fn initial_mcp_revisions(server_ids: &[String]) -> (u64, u64) {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct WebContext {
     context_id: String,
+    #[serde(serialize_with = "serialize_path_for_user_display")]
     current_dir: String,
     worker_ids: Vec<String>,
 }
@@ -734,6 +741,16 @@ struct WebTurn {
     events: Vec<WebTurnEvent>,
     final_answer: Option<String>,
     completion: Option<Value>,
+    /// True when restored/snapshot events were slimmed (256-byte string cap,
+    /// core.action skeleton, snapshot tail cap). Live turns keep full events.
+    /// Clients use this flag to pull full detail via `turn_history_page`
+    /// instead of rendering `…[truncated]` previews.
+    #[serde(skip_serializing_if = "is_false")]
+    events_slimmed: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2669,6 +2686,7 @@ struct AttachSessionSummary {
     state: String,
     working: bool,
     active_turn_id: Option<String>,
+    #[serde(serialize_with = "serialize_path_for_user_display")]
     current_dir: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     restart_cwd_decision: Option<RestartCwdDecision>,
@@ -6244,9 +6262,10 @@ fn restart_cwd_decision(
     let runtime_cwd = std::fs::canonicalize(&state.template.current_dir).ok()?;
     let session_cwd = std::fs::canonicalize(session_cwd).ok()?;
     (runtime_cwd != session_cwd).then(|| RestartCwdDecision {
-        runtime_cwd: runtime_cwd.display().to_string(),
-        session_cwd: session_cwd.display().to_string(),
+        runtime_cwd: path_for_user_display(&runtime_cwd),
+        session_cwd: path_for_user_display(&session_cwd),
         session_cwd_available: true,
+        runtime_cwd_path: runtime_cwd,
     })
 }
 
@@ -6256,10 +6275,46 @@ fn missing_session_cwd_decision(
 ) -> Option<RestartCwdDecision> {
     let runtime_cwd = std::fs::canonicalize(&state.template.current_dir).ok()?;
     Some(RestartCwdDecision {
-        runtime_cwd: runtime_cwd.display().to_string(),
-        session_cwd: session_cwd.display().to_string(),
+        runtime_cwd: path_for_user_display(&runtime_cwd),
+        session_cwd: path_for_user_display(session_cwd),
         session_cwd_available: false,
+        runtime_cwd_path: runtime_cwd,
     })
+}
+
+fn path_for_user_display(path: &Path) -> String {
+    windows_verbatim_path_for_user_display(&path.to_string_lossy())
+}
+
+fn serialize_path_for_user_display<S>(path: &str, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&windows_verbatim_path_for_user_display(path))
+}
+
+/// Converts canonical Windows drive and UNC paths out of the Win32 verbatim
+/// namespace for presentation. Other namespace paths remain untouched because
+/// removing their prefix could change their meaning.
+fn windows_verbatim_path_for_user_display(path: &str) -> String {
+    if let Some(unc_path) = path.strip_prefix(r"\\?\UNC\") {
+        if !unc_path.is_empty() {
+            return format!(r"\\{}", unc_path);
+        }
+    }
+
+    if let Some(drive_path) = path.strip_prefix(r"\\?\") {
+        let bytes = drive_path.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/')
+        {
+            return drive_path.to_string();
+        }
+    }
+
+    path.to_string()
 }
 
 fn ensure_restart_cwd_resolved(state: &AppState, session_id: &str) -> Result<(), String> {
@@ -6331,7 +6386,7 @@ fn resolve_restart_cwd_decision(
                     .map(|worker| worker.worker_id.clone())
                     .collect::<Vec<_>>()
             };
-            let runtime_cwd = PathBuf::from(&pending.runtime_cwd);
+            let runtime_cwd = pending.runtime_cwd_path.clone();
             let manager = state
                 .manager
                 .lock()
@@ -6350,10 +6405,11 @@ fn resolve_restart_cwd_decision(
             let session = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| "session_not_found".to_string())?;
+            let runtime_cwd = pending.runtime_cwd_path.display().to_string();
             for context in &mut session.contexts {
-                context.current_dir = pending.runtime_cwd.clone();
+                context.current_dir = runtime_cwd.clone();
             }
-            session.current_dir = pending.runtime_cwd;
+            session.current_dir = runtime_cwd;
             session.restart_cwd_decision = None;
             drop(sessions);
             persist_web_session(state, session_id)
@@ -6407,6 +6463,7 @@ fn interrupted_turn_from_queued_message(
             events: Vec::new(),
             final_answer: None,
             completion: None,
+            events_slimmed: false,
         },
     )
 }
@@ -6995,6 +7052,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     events: Vec::new(),
                     final_answer: None,
                     completion: None,
+                    events_slimmed: false,
                 });
                 turn.created_at_ms = turn.created_at_ms.min(created_at_ms as u128);
                 match role {
@@ -7080,10 +7138,14 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                 let completion = (kind == ChatHistoryEventKind::Stats)
                     .then(|| extra.get("completion").cloned())
                     .flatten();
-                let payload = extra
+                let raw_payload = extra
                     .remove("payload")
                     .unwrap_or_else(|| json!({"kind": format!("{kind:?}")}));
-                let payload = slim_restored_action_event(truncate_restored_event_value(payload, 0));
+                let payload = slim_restored_action_event(truncate_restored_event_value(
+                    raw_payload.clone(),
+                    0,
+                ));
+                let events_slimmed = payload != raw_payload;
                 let source = extra
                     .remove("source")
                     .and_then(|value| value.as_str().map(str::to_string))
@@ -7098,12 +7160,14 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     events: Vec::new(),
                     final_answer: None,
                     completion: None,
+                    events_slimmed: false,
                 });
                 turn.created_at_ms = turn.created_at_ms.min(created_at_ms as u128);
                 if let Some(completion) = completion {
                     turn.state = "completed".to_string();
                     turn.completion = Some(completion);
                 }
+                turn.events_slimmed = turn.events_slimmed || events_slimmed;
                 turn.events.push(WebTurnEvent {
                     event_id: format!(
                         "history_event_{turn_id}_{created_at_ms}_{}",
@@ -11034,6 +11098,7 @@ fn start_web_turn_with_selected_attachments_and_roles(
         events: Vec::new(),
         final_answer: None,
         completion: None,
+        events_slimmed: false,
     };
     session.pending_turn_id = Some(turn.turn_id.clone());
     session.turns.push(turn.clone());
@@ -11205,6 +11270,7 @@ fn start_web_toolgen_turn(
         events: Vec::new(),
         final_answer: None,
         completion: None,
+        events_slimmed: false,
     };
     session.pending_turn_id = Some(turn.turn_id.clone());
     session.pending_completion_message_id = None;
@@ -12379,6 +12445,7 @@ fn activate_core_started_turn(
                 events: Vec::new(),
                 final_answer: None,
                 completion: None,
+                events_slimmed: false,
             };
             session.turns.push(turn);
             if session.turns.len() > MAX_SESSION_TURNS {
@@ -13450,6 +13517,7 @@ fn submit_unconsumed_supplement_handoff(
             events: Vec::new(),
             final_answer: None,
             completion: None,
+            events_slimmed: false,
         };
         session.pending_turn_id = Some(turn.turn_id.clone());
         session.turns.push(turn.clone());
@@ -13599,25 +13667,30 @@ fn set_worker_state(state: &AppState, session_id: &str, worker_id: &str, worker_
 /// small hello frame. The active/working turn keeps full fidelity.
 fn slim_restored_turn_for_snapshot(turn: &WebTurn) -> WebTurn {
     let mut slim = turn.clone();
+    let mut events_slimmed = slim.events_slimmed;
     slim.events = slim
         .events
         .iter()
-        .map(|event| WebTurnEvent {
-            event_id: event.event_id.clone(),
-            source: event.source.clone(),
-            payload: slim_restored_action_event(truncate_restored_event_value(
-                event.payload.clone(),
-                0,
-            )),
-            created_at_ms: event.created_at_ms,
-            timeline_seq: event.timeline_seq,
+        .map(|event| {
+            let payload =
+                slim_restored_action_event(truncate_restored_event_value(event.payload.clone(), 0));
+            events_slimmed = events_slimmed || payload != event.payload;
+            WebTurnEvent {
+                event_id: event.event_id.clone(),
+                source: event.source.clone(),
+                payload,
+                created_at_ms: event.created_at_ms,
+                timeline_seq: event.timeline_seq,
+            }
         })
         .collect();
     const SNAPSHOT_TURN_EVENT_LIMIT: usize = 40;
     if slim.events.len() > SNAPSHOT_TURN_EVENT_LIMIT {
         let excess = slim.events.len() - SNAPSHOT_TURN_EVENT_LIMIT;
         slim.events.drain(0..excess);
+        events_slimmed = true;
     }
+    slim.events_slimmed = events_slimmed;
     slim
 }
 
