@@ -332,8 +332,6 @@ import { reconcileSessionTimelineCache } from "./session_timeline_cache";
 import { requestTimelineNavigationWork } from "./timeline_navigation_work";
 import { selectedUserMessageText, useTimedClipboardCopy } from "./clipboard_copy";
 import "./styles.css";
-import "highlight.js/styles/github-dark.css";
-import "katex/dist/katex.min.css";
 
 const STORED_HISTORY_PAGE_SIZE = 200;
 const MAX_MOUNTED_SESSION_TIMELINES = 2;

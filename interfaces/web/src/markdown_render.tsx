@@ -5,6 +5,7 @@ import remarkMath from "remark-math";
 import { CheckCheck, Copy } from "lucide-react";
 import { useTimedClipboardCopy } from "./clipboard_copy";
 import { normalizeMarkdownMath } from "./markdown_math";
+import { markdownNeedsHeavyEnhancement } from "./markdown_heavy";
 import { extractMarkdownOutline, markdownHeadingId } from "./markdown_outline";
 import { safeMarkdownImageUrl, safeMarkdownLinkUrl } from "./markdown_security";
 
@@ -29,8 +30,18 @@ function loadHeavyPlugins() {
 }
 
 export const MarkdownContent = memo(function MarkdownContent({ text, headingIdPrefix }: { text: string; headingIdPrefix?: string }) {
-  const [heavyPlugins, setHeavyPlugins] = useState<readonly unknown[] | null>(heavyPluginsLoaded);
+  // Normalize once per text change; both the content gate below and the
+  // rendered markdown below consume the same result.
+  const normalized = normalizeMarkdownMath(text);
+  // Content gate: only sessions whose markdown actually contains code fences
+  // or math delimiters request the several-hundred-KB enhancement chunk.
+  // Plain text never downloads highlight.js or KaTeX at all.
+  const needsHeavy = markdownNeedsHeavyEnhancement(normalized);
+  const [heavyPlugins, setHeavyPlugins] = useState<readonly unknown[] | null>(
+    needsHeavy ? heavyPluginsLoaded : null,
+  );
   useEffect(() => {
+    if (!needsHeavy) return;
     if (heavyPluginsLoaded) {
       setHeavyPlugins(heavyPluginsLoaded);
       return;
@@ -39,7 +50,7 @@ export const MarkdownContent = memo(function MarkdownContent({ text, headingIdPr
     heavyPluginWaiters.push((plugins) => { if (alive) setHeavyPlugins(plugins); });
     void loadHeavyPlugins();
     return () => { alive = false; };
-  }, []);
+  }, [needsHeavy]);
   const headingOccurrences = new Map<string, number>();
   const outlineIds = headingIdPrefix ? extractMarkdownOutline(text).map((item) => item.id) : [];
   let outlineIndex = 0;
@@ -54,9 +65,12 @@ export const MarkdownContent = memo(function MarkdownContent({ text, headingIdPr
     const Tag = `h${level}` as const;
     return <Tag {...props} id={id}>{children}</Tag>;
   };
+  // The gate also scopes rendering: once plugins are loaded they stay cached
+  // module-wide, but a plain-text render never passes them to the pipeline.
+  const rehypePlugins = ((needsHeavy ? heavyPlugins : null) ?? []) as never[];
   return <div className="markdown-body"><ReactMarkdown
     remarkPlugins={[remarkGfm, remarkMath]}
-    rehypePlugins={(heavyPlugins ?? []) as never[]}
+    rehypePlugins={rehypePlugins}
     components={{
       h1: heading(1),
       h2: heading(2),
@@ -72,7 +86,7 @@ export const MarkdownContent = memo(function MarkdownContent({ text, headingIdPr
       pre: CodeBlock,
       table: ({ node: _node, ...props }) => <div className="table-scroll" role="region" tabIndex={0} aria-label="Scrollable table. Use horizontal scroll to inspect all columns."><table {...props}/></div>,
     }}
-  >{normalizeMarkdownMath(text)}</ReactMarkdown></div>;
+  >{normalized}</ReactMarkdown></div>;
 });
 
 export function CodeBlock({ children }: React.ComponentPropsWithoutRef<"pre">) {

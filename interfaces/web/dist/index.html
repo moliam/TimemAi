@@ -6,19 +6,40 @@
     <meta name="color-scheme" content="dark light" />
     <link rel="icon" type="image/png" href="/timem_logo.png" />
     <title>Timem</title>
-    <script type="module" crossorigin src="/assets/index-CMVhlC76.js"></script>
+    <style>
+      .app-loading { box-sizing: border-box; min-height: 100vh; display: grid; place-items: center; align-content: center; gap: 14px; padding: 24px; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #8d9aa7; background: #0c1117; }
+      .app-loading-mark { width: 48px; height: 48px; border-radius: 12px; display: grid; place-items: center; background: #111a23; box-shadow: 0 12px 32px #0006; }
+      .app-loading-spinner { width: 22px; height: 22px; border-radius: 50%; border: 2px solid #2a3947; border-top-color: #8bc8ba; animation: app-loading-spin 0.9s linear infinite; }
+      /* preload.ts sets data-theme before first paint, but module scripts are
+         deferred: a system-preference fallback avoids a one-frame dark shell
+         for light-theme users. Explicit [data-theme] rules win on specificity. */
+      @media (prefers-color-scheme: light) {
+        .app-loading { color: #425466; background: #f6f8fa; }
+        .app-loading-mark { background: #ffffff; box-shadow: 0 12px 28px #29434d24; }
+        .app-loading-spinner { border-color: #d5e2e6; border-top-color: #287e68; }
+      }
+      :root[data-theme=light] .app-loading { color: #425466; background: #f6f8fa; }
+      :root[data-theme=light] .app-loading-mark { background: #ffffff; box-shadow: 0 12px 28px #29434d24; }
+      :root[data-theme=light] .app-loading-spinner { border-color: #d5e2e6; border-top-color: #287e68; }
+      :root[data-theme=dark] .app-loading { color: #8d9aa7; background: #0c1117; }
+      :root[data-theme=dark] .app-loading-mark { background: #111a23; box-shadow: 0 12px 32px #0006; }
+      :root[data-theme=dark] .app-loading-spinner { border-color: #2a3947; border-top-color: #8bc8ba; }
+      @keyframes app-loading-spin { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) { .app-loading-spinner { animation: none; } }
+    </style>
+    <script type="module" crossorigin src="/assets/index-hWEmPqOJ.js"></script>
     <link rel="modulepreload" crossorigin href="/assets/icons-CK6GGeh8.js">
-    <link rel="modulepreload" crossorigin href="/assets/markdown-BJIPTLLU.js">
-    <link rel="modulepreload" crossorigin href="/assets/assistantUi-DB_75CJ7.js">
-    <link rel="modulepreload" crossorigin href="/assets/highlighting-DdV3nXlr.js">
-    <link rel="modulepreload" crossorigin href="/assets/math-OUm6E-_T.js">
-    <link rel="modulepreload" crossorigin href="/assets/dndKit-CrvJyI7l.js">
-    <link rel="stylesheet" crossorigin href="/assets/index-BY-seWnH.css">
+    <link rel="modulepreload" crossorigin href="/assets/markdown-CGEURW9f.js">
+    <link rel="modulepreload" crossorigin href="/assets/assistantUi-YfU0E5W8.js">
+    <link rel="modulepreload" crossorigin href="/assets/dndKit-BzGPb3Kp.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-D1nmcQRR.css">
   </head>
   <body>
     <div id="root">
-      <div class="app-loading">
-        Timem is loading...
+      <div class="app-loading" role="status" aria-label="Timem is loading">
+        <span class="app-loading-mark"><img src="/timem_logo.png" alt="" width="42" height="42" draggable="false" /></span>
+        <span class="app-loading-spinner" aria-hidden="true"></span>
+        <span class="app-loading-text">Timem is loading&hellip;</span>
       </div>
     </div>
   </body>

@@ -459,6 +459,20 @@ counts, and reopening results. Individual terminal failure labels remain `✗`.
 The `tools` label is lowercase without a colon; the entire summary row,
 including success/failure counts, uses normal font weight (400).
 
+### Content-gated markdown enhancement
+
+- The several-hundred-KB enhancement chunk (highlight.js + KaTeX, JS and vendor
+  CSS) downloads only when the normalized markdown contains a code fence or a
+  math delimiter; plain-prose sessions never request it, and the chunk stays
+  off the static modulepreload list (`remark-math` rides with the static
+  markdown chunk so the lazy group remains lazy).
+- The first-paint loading shell is themed inline in `index.html`: system
+  preference fallback before `data-theme` lands, explicit `[data-theme]`
+  overrides, `prefers-reduced-motion` safe, and announced via `role="status"`.
+- Regression: `interfaces/web/tests/markdown_heavy.test.ts` (gate function),
+  `interfaces/web/tests/markdown_lazy.test.ts` (source/build contracts), plus
+  the full web suite and production build.
+
 ### Low-cost stream rendering
 
 - `interfaces/web/tests/stream_reveal.test.ts`: 40ms refresh-independent reveal

@@ -211,6 +211,31 @@ STREAM_CPU_BENCH=1 TIMEM_PERF_GUARD=1 node interfaces/web/tests/browser/stream-p
 node interfaces/web/tests/browser/stream-preview-acceptance.mjs
 ```
 
+### Content-gated markdown enhancement
+
+The heavy enhancement chunk (highlight.js + KaTeX: `markdown_plugins-*.js`
+~183 KB before gzip) and its vendor CSS only download when the
+normalized markdown actually contains a code fence or a math delimiter
+(`markdownNeedsHeavyEnhancement` in `src/markdown_heavy.ts`, wired through
+`MarkdownContent`); plain-prose sessions never request it. Two build rules keep
+that gate effective: `remark-math` rides with the statically loaded markdown
+chunk instead of the lazy group (statically reachable chunks must not drag the
+lazy group in), and `modulePreload.resolveDependencies` drops the gated lazy
+chunk from the static preload list, which would otherwise download the whole
+chunk on every first paint. The enhancement packages deliberately have no
+`manualChunks` entries: forcing them into separate manual chunks while
+`markdown_plugins.ts` imports them dynamically split the shared
+unified-ecosystem modules across static and lazy chunks and produced a circular
+chunk dependency whose execution order crashed page load with
+`ReferenceError: Cannot access 'Ta' before initialization` (the app stayed on
+the loading screen). Rollup's default grouping keeps the whole dynamic subtree
+in one acyclic chunk. The highlight theme and KaTeX CSS ship inside the lazy
+chunk, removing ~30 KB from the first-paint stylesheet. The loading shell in
+`index.html` is themed inline (system-preference fallback, `prefers-reduced-motion`
+safe) so the first paint matches the user's theme. Contracts:
+`tests/markdown_heavy.test.ts` (gate function), `tests/markdown_lazy.test.ts`
+(source/build contracts).
+
 The CPU scenario publishes 120 provisional updates, 40ms apart, and reports CDP
 main-thread/style/layout work. It is a synthetic fixed-window test, not a full
 text-drain benchmark or macOS WindowServer/thermal measurement. Compare repeated
