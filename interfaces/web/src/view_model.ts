@@ -1,4 +1,5 @@
 import { memorySearchPresentation, readFilePresentation, runBashEditPresentation, selfToolPresentation, timerPresentation } from "./tool_presentation";
+import type { MarkdownOutlineItem } from "./markdown_outline";
 import {
   Activity,
   ChatHistoryRecord,
@@ -18,6 +19,7 @@ import {
   humanizeToolStatus,
   TOOL_STATUS_BACKGROUND_RUNNING,
 } from "./tool_status";
+import { extractMarkdownOutline, markdownHeadingId, markdownHeadingText, MAX_OUTLINE_HEADINGS } from "./markdown_outline";
 import { t } from "./i18n";
 
 export const MAX_RENDERED_MESSAGES = 1000;
@@ -94,6 +96,117 @@ export type TurnTimelinePlacement = {
   createdAtMs: number;
   resumedAfterRestart: boolean;
 };
+
+/**
+ * Stream UI with stream retention (not folded/archived) renders a completed
+ * turn's inline stream process directly, so slimmed restored events (the
+ * `…[truncated]` preview skeleton) must be hydrated with full detail via
+ * turn_history_page. Classic folded mode keeps previews until the user
+ * expands, and hidden timeline panes wait until they become active.
+ */
+export function turnNeedsFullEventFetch(
+  turn: WebTurn,
+  options: { streamUiMode: boolean; streamArchive: boolean; timelineActive: boolean },
+): boolean {
+  if (!options.streamUiMode || options.streamArchive) return false;
+  if (!options.timelineActive) return false;
+  if (turn.state === "working") return false;
+  return turn.events_slimmed === true;
+}
+
+/**
+ * Slimmed-turn hydration priority: newest turn first. The landing view shows
+ * the newest turn of the active timeline, and its reading outline depends on
+ * hydrated free-talk detail; an oldest-first request order makes the most
+ * visible directory wait behind every older turn's chained pages.
+ */
+export function turnHistoryHydrationOrder(
+  turns: readonly WebTurn[],
+  options: { streamUiMode: boolean; streamArchive: boolean; timelineActive: boolean },
+): WebTurn[] {
+  const ordered: WebTurn[] = [];
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index]!;
+    if (turnNeedsFullEventFetch(turn, options)) ordered.push(turn);
+  }
+  return ordered;
+}
+
+/**
+ * Stream retention process chapters for the reading outline: only retained
+ * free_talk blocks that carry a model-written markdown heading produce an
+ * entry (titled and leveled by that heading); plain narrative blocks produce
+ * none. Anchors are assigned positionally by the caller (the free_talk block
+ * order in the retained stream presentation).
+ */
+export type StreamProcessOutlineSection = MarkdownOutlineItem & {
+  /** Index among non-empty free_talk blocks; matches data-stream-chapter. */
+  sourceIndex: number;
+};
+
+export function streamProcessOutlineSections(texts: readonly string[]): StreamProcessOutlineSection[] {
+  const sections: StreamProcessOutlineSection[] = [];
+  const occurrences = new Map<string, number>();
+  let sourceIndex = -1;
+  let lastTitle = "";
+  for (const text of texts) {
+    if (sections.length >= MAX_OUTLINE_HEADINGS) break;
+    const trimmed = (text ?? "").trim();
+    if (!trimmed) continue;
+    sourceIndex += 1;
+    // Chapters come only from model-written markdown headings. Plain narrative
+    // blocks create none: one chapter per model turn would flood the outline.
+    const heading = extractMarkdownOutline(trimmed)[0];
+    if (!heading) continue;
+    const title = markdownHeadingText(heading.title);
+    // Consecutive same-title entries are snapshots of one growing thought;
+    // anchor the chapter at the run start instead of stacking duplicates.
+    if (!title || title === lastTitle) continue;
+    lastTitle = title;
+    sections.push({ id: markdownHeadingId(title, occurrences), level: heading.level, title, sourceIndex });
+  }
+  return sections;
+}
+
+/**
+ * FNV-1a content-weight signature over the rendered timeline. `events.length`
+ * alone cannot see restored-turn hydration (events_slimmed -> full events
+ * keeps the count stable while the DOM grows), which would otherwise strand
+ * the bottom follower mid-history after a restart.
+ */
+export function timelineEventsSignature(turns: readonly WebTurn[]): string {
+  let hash = 0x811c9dc5;
+  const mix = (text: string) => {
+    for (let index = 0; index < text.length; index += 1) {
+      hash = Math.imul(hash ^ text.charCodeAt(index), 0x01000193) >>> 0;
+    }
+  };
+  for (const turn of turns) {
+    mix(
+      `${turn.turn_id}\u0000${turn.events.length}\u0000${turn.events_slimmed ? 1 : 0}\u0000` +
+        `${turn.final_answer?.length ?? 0}\u0000${turn.user_entries.length}\u0000` +
+        `${turn.completion ? 1 : 0}\u0000${turn.preview?.revision ?? 0}\u0000`,
+    );
+  }
+  return hash.toString(16);
+}
+
+/**
+ * Structural timeline shape that can move portaled outlines: completed
+ * turns' hydration flag and event volume. Live streaming (preview revisions,
+ * working-turn events) only grows the newest turn and never moves content
+ * above it, so it stays out of the key; a restored-turn hydration commit or
+ * a history prepend changes the key and must invalidate every outline's
+ * measured geometry, because nothing inside those outline owners resizes.
+ */
+export function timelineOutlineShapeKey(turns: readonly WebTurn[]): string {
+  let key = "";
+  for (const turn of turns) {
+    if (turn.state === "working") continue;
+    key += `${turn.turn_id}:${turn.events_slimmed ? 1 : 0}:${turn.events.length};`;
+  }
+  return key;
+}
 
 export function turnShouldRenderInTimeline(turn: WebTurn): boolean {
   if (turn.state !== "pending") return true;

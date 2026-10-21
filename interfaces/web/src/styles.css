@@ -3157,6 +3157,11 @@ body {
 
 .final-answer-outline-card nav > button { position: relative; flex: 0 0 auto; min-width: 0; overflow: hidden; border: 0; border-radius: 7px; padding: 6px 7px 6px 11px; background: transparent; color: #8b9691; font-size: 11px; font-weight: 530; line-height: 1.42; text-align: left; text-overflow: ellipsis; white-space: nowrap; transition: color .16s ease, background .16s ease, transform .16s ease; }
 .final-answer-outline-card nav > button::before { position: absolute; z-index: 1; top: 50%; left: 4px; width: 4px; height: 4px; border-radius: 50%; background: #68736f; box-shadow: 0 0 0 3px #232825; content: ""; transform: translate(-50%, -50%); transition: width .16s ease, height .16s ease, background .16s ease, box-shadow .16s ease; }
+.final-answer-outline-card nav > button.outline-summary { display: flex; align-items: center; gap: 7px; margin: 7px 2px 4px 2px; border-top: 1px solid #ffffff0c; border-radius: 7px 7px 4px 4px; padding: 6px 7px 6px 4px; color: #95aaa3; font-size: 8px; font-weight: 720; letter-spacing: .06em; text-transform: uppercase; }
+.final-answer-outline-card nav > button.outline-summary::before { display: none; }
+.final-answer-outline-card nav > button.outline-summary > svg { flex: none; color: #6f9489; }
+.final-answer-outline-card nav > button.outline-summary.active { background: linear-gradient(90deg, #75b8a31a, transparent); color: #d8eee7; }
+.final-answer-outline-card nav > button.outline-summary.active > svg { color: #8bc9b7; filter: drop-shadow(0 0 5px #73b9a470); }
 .final-answer-outline-card nav > button.level-2 { padding-left: 18px; }
 .final-answer-outline-card nav > button.level-2::before { left: 10px; width: 3px; height: 3px; }
 .final-answer-outline-card nav > button.level-3 { padding-left: 25px; color: #747e79; font-size: 10px; }

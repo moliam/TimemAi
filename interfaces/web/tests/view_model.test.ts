@@ -43,6 +43,11 @@ import {
   hasOnlyFreeTalkActivity,
   manualToolGenCommand,
   MAX_CLIENT_TURNS,
+  timelineEventsSignature,
+  timelineOutlineShapeKey,
+  turnNeedsFullEventFetch,
+  turnHistoryHydrationOrder,
+  streamProcessOutlineSections,
   messagesFromHistoryRecords,
   MAX_RENDERED_MESSAGES,
   normalizeCopiedUserMessageText,
@@ -4941,5 +4946,136 @@ describe("parseTimerEntryText", () => {
   it("does not strip a prefix that is not at the start", () => {
     const text = "正文 [timer:late] 不是前缀";
     expect(parseTimerEntryText(text)).toEqual({ name: null, prompt: text });
+  });
+});
+
+
+describe("turnNeedsFullEventFetch", () => {
+  const slimmed = { state: "completed", events_slimmed: true } as unknown as WebTurn;
+  const full = { state: "completed", events_slimmed: false } as unknown as WebTurn;
+  const unflagged = { state: "completed" } as unknown as WebTurn;
+  const working = { state: "working", events_slimmed: true } as unknown as WebTurn;
+
+  it("hydrates slimmed restored turns in stream UI without archive", () => {
+    expect(turnNeedsFullEventFetch(slimmed, { streamUiMode: true, streamArchive: false, timelineActive: true })).toBe(true);
+  });
+
+  it("keeps classic folded mode and archived stream on slim previews", () => {
+    expect(turnNeedsFullEventFetch(slimmed, { streamUiMode: false, streamArchive: false, timelineActive: true })).toBe(false);
+    expect(turnNeedsFullEventFetch(slimmed, { streamUiMode: true, streamArchive: true, timelineActive: true })).toBe(false);
+  });
+
+  it("skips working turns, hidden panes, and turns without the host flag", () => {
+    expect(turnNeedsFullEventFetch(working, { streamUiMode: true, streamArchive: false, timelineActive: true })).toBe(false);
+    expect(turnNeedsFullEventFetch(slimmed, { streamUiMode: true, streamArchive: false, timelineActive: false })).toBe(false);
+    expect(turnNeedsFullEventFetch(full, { streamUiMode: true, streamArchive: false, timelineActive: true })).toBe(false);
+    expect(turnNeedsFullEventFetch(unflagged, { streamUiMode: true, streamArchive: false, timelineActive: true })).toBe(false);
+  });
+});
+
+describe("turnHistoryHydrationOrder", () => {
+  const options = { streamUiMode: true, streamArchive: false, timelineActive: true };
+  const slimmedTurn = (turnId: string) => ({ turn_id: turnId, state: "completed", events_slimmed: true } as unknown as WebTurn);
+  const hydratedTurn = (turnId: string) => ({ turn_id: turnId, state: "completed", events_slimmed: false } as unknown as WebTurn);
+
+  it("hydrates the newest slimmed turn first so the landing directory appears first", () => {
+    const ordered = turnHistoryHydrationOrder(
+      [slimmedTurn("old"), hydratedTurn("middle"), slimmedTurn("new")],
+      options,
+    );
+    expect(ordered.map((turn) => turn.turn_id)).toEqual(["new", "old"]);
+  });
+
+  it("returns an empty order in classic folded or archived stream mode", () => {
+    const turns = [slimmedTurn("old"), slimmedTurn("new")];
+    expect(turnHistoryHydrationOrder(turns, { ...options, streamUiMode: false })).toEqual([]);
+    expect(turnHistoryHydrationOrder(turns, { ...options, streamArchive: true })).toEqual([]);
+  });
+});
+describe("timelineEventsSignature", () => {
+  it("changes when a restored turn hydrates slimmed events without a count change", () => {
+    const slimmed = turn("t1", "completed");
+    slimmed.events_slimmed = true;
+    const hydrated = { ...slimmed, events_slimmed: false };
+    // Same event count: a length-only version would stay identical.
+    expect(hydrated.events.length).toBe(slimmed.events.length);
+    expect(timelineEventsSignature([slimmed])).not.toBe(timelineEventsSignature([hydrated]));
+  });
+
+  it("stays stable for identical turn sets and reacts to count/answer changes", () => {
+    const base = turn("t1", "completed");
+    const a = timelineEventsSignature([base, turn("t2", "completed")]);
+    const b = timelineEventsSignature([base, turn("t2", "completed")]);
+    expect(a).toBe(b);
+    const grown = { ...turn("t2", "completed"), events: [{ event_id: "e1", source: "history", payload: { kind: "x" }, created_at_ms: 1 }] };
+    expect(timelineEventsSignature([base, grown])).not.toBe(a);
+    const answered = { ...turn("t2", "completed"), final_answer: "done" };
+    expect(timelineEventsSignature([base, answered])).not.toBe(a);
+  });
+});
+
+describe("timelineOutlineShapeKey", () => {
+  it("changes exactly when a completed turn hydrates or changes event volume", () => {
+    const slimmed = turn("t1", "completed");
+    slimmed.events_slimmed = true;
+    const hydrated = { ...slimmed, events_slimmed: false };
+    expect(timelineOutlineShapeKey([slimmed])).not.toBe(timelineOutlineShapeKey([hydrated]));
+    const grown = { ...hydrated, events: [{ event_id: "e1", source: "history", payload: { kind: "x" }, created_at_ms: 1 }] };
+    expect(timelineOutlineShapeKey([hydrated])).not.toBe(timelineOutlineShapeKey([grown]));
+  });
+
+  it("ignores live-streaming growth so a working turn never invalidates outlines", () => {
+    const working = { ...turn("t1", "working"), events: [{ event_id: "e1", source: "worker_activity", payload: { kind: "model_request" }, created_at_ms: 1 }] };
+    const workingMore = { ...turn("t1", "working"), events: [...working.events, { event_id: "e2", source: "worker_activity", payload: { kind: "model_response" }, created_at_ms: 2 }] };
+    expect(timelineOutlineShapeKey([working])).toBe(timelineOutlineShapeKey([workingMore]));
+  });
+
+  it("sees a history prepend as a shape change and stays stable otherwise", () => {
+    const earlier = { ...turn("t0", "completed"), events_slimmed: true };
+    const base = timelineOutlineShapeKey([turn("t1", "completed")]);
+    expect(timelineOutlineShapeKey([earlier, turn("t1", "completed")])).not.toBe(base);
+    expect(timelineOutlineShapeKey([turn("t1", "completed")])).toBe(base);
+  });
+});
+
+describe("streamProcessOutlineSections", () => {
+  it("titles chapters from the first markdown heading with its own level", () => {
+    const sections = streamProcessOutlineSections([
+      "## 排查结果\n\n证据……",
+      "先修复依赖再验证\n\n正文",
+      "# 总结\n\n正文",
+    ]);
+    expect(sections).toHaveLength(2);
+    expect(sections[0].title).toBe("排查结果");
+    expect(sections[0].level).toBe(2);
+    expect(sections[0].sourceIndex).toBe(0);
+    expect(sections[1].title).toBe("总结");
+    expect(sections[1].level).toBe(1);
+    expect(sections[1].sourceIndex).toBe(2);
+  });
+
+  it("keeps plain narrative blocks chapter-free", () => {
+    // One chapter per model turn would flood the outline with N interactions;
+    // only model-written headings describe chapters.
+    const sections = streamProcessOutlineSections([
+      "先修复依赖再验证\n\n正文",
+      "继续推进，已完成第二步。",
+    ]);
+    expect(sections).toEqual([]);
+  });
+
+  it("deduplicates consecutive same-title thought snapshots and skips empty blocks", () => {
+    const sections = streamProcessOutlineSections([
+      "## 现状",
+      "## 现状\n\n更新后的现状",
+      "",
+      "## 结论",
+    ]);
+    expect(sections.map((section) => section.title)).toEqual(["现状", "结论"]);
+    expect(sections[1].sourceIndex).toBe(2);
+  });
+
+  it("never invents a chapter from code-fence-only blocks", () => {
+    expect(streamProcessOutlineSections(["```bash\nls\n```"])).toEqual([]);
   });
 });

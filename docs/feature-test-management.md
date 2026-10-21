@@ -321,11 +321,29 @@ Scope: module tests and applicable architecture/performance/browser guards do no
 
 ### Final-answer handoff scroll geometry
 
-The portaled final-answer outline observes its enclosing Turn size as well as answer size.
+The portaled final-answer outline observes its enclosing Turn size as well as answer size. In Stream UI with the process area retained (not folded), the outline spans the whole delivery: start anchor at the process top, chapters only from retained free-talk blocks carrying a model-written markdown heading (no plain-text fallback, consecutive snapshot dedup), a Summary anchor at the answer top, then the answer's headings; `streamProcessOutlineSections` in `interfaces/web/tests/view_model.test.ts` owns the pure chapter logic.
 Collapsing preceding tools changes the answer offset without changing the answer height;
 leaving the outline at its old absolute top creates phantom scroll space and can hide the
 answer above the viewport. Resize invalidation remains frame-coalesced and observers are
 cleaned up; it does not introduce unconditional scrolling or override the reader's position.
+Restored-turn hydration changes event content while counts stay equal: the bottom
+follower keys on `timelineEventsSignature` (content-weight timeline signature in
+`interfaces/web/tests/view_model.test.ts`) instead of a bare `events.length`, and the
+outline active highlight survives identical-id rebuilds via
+`markdownOutlineFallbackActiveId` (`interfaces/web/tests/markdown_outline.test.ts`),
+only dropping to Start when the active id truly disappears. The outline's
+delivery scope is decoupled from process chapters (`markdownOutlineDeliveryScope`
+in `interfaces/web/tests/markdown_outline.test.ts`): while the process area is
+retained, Start and the Summary anchor cover the whole delivery even without
+chapters, and restored-turn hydration is requested newest-first
+(`turnHistoryHydrationOrder` in `interfaces/web/tests/view_model.test.ts`) so
+the landing directory appears first. Sibling hydration and prepends move
+outlines without resizing their owners, so the thread broadcasts the shared
+layout-change event keyed by `timelineOutlineShapeKey` (pure tests in
+`interfaces/web/tests/view_model.test.ts`, wiring contract in
+`interfaces/web/tests/thread_follow_latest.test.ts`); each outline re-measures
+synchronously on that event so the connect-time hydration storm paints no stale
+outline tops (flicker regression covered by the same wiring contract).
 Chrome stream acceptance covers 80 tools plus a multi-section final answer in both UI modes
 and with/without reduced motion, asserting actual answer/viewport intersection and less than
 150px trailing scroll space after archive. The fixture failed before the fix with an invisible

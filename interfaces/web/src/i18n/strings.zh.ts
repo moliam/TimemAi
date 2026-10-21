@@ -790,6 +790,8 @@ export const zh = {
   },
   outline: {
     start: "Start",
+    summary: "总结",
+    goToSummary: "跳转到总结",
     goToStart: "跳转到本回答开头",
     contents: "目录",
   },

@@ -285,6 +285,10 @@ export type WebTurn = {
   interrupted_at_ms?: number | null;
   user_entries: WebTurnUserEntry[];
   events: WebTurnEvent[];
+  /** Host flag: restored events were slimmed to previews (256-byte strings,
+   * action skeletons, snapshot tail). Clients fetch full detail via
+   * turn_history_page instead of rendering `…[truncated]` previews. */
+  events_slimmed?: boolean;
   final_answer?: string | null;
   completion?: TurnCompletion | null;
 };

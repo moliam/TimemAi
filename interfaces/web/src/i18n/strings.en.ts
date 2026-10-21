@@ -793,6 +793,8 @@ export const en: Strings = {
   },
   outline: {
     start: "Start",
+    summary: "Summary",
+    goToSummary: "Go to the summary",
     goToStart: "Go to the start of this answer",
     contents: "Contents",
   },

@@ -57,6 +57,7 @@ import {
   Clock3,
   Clock8,
   Copy,
+  CornerDownRight,
   CornerUpLeft,
   Cpu,
   Database,
@@ -230,12 +231,17 @@ import {
   sessionVisuallyWorking,
   sessionWorkerTreeRows,
   setSessionDraft,
+  streamProcessOutlineSections,
+  StreamProcessOutlineSection,
   tailPath,
   toolActivityDisplayName,
   toolDisplayName,
   turnElapsedMs,
+  turnHistoryHydrationOrder,
   turnWorkPhaseBoundary,
   turnLiveUsage,
+  timelineEventsSignature,
+  timelineOutlineShapeKey,
   turnShouldRenderInTimeline,
   turnTimelinePlacement,
   updateSessionWorkerState,
@@ -245,15 +251,16 @@ import {
 } from "./view_model";
 import {
   extractMarkdownOutline,
-  finalAnswerNeedsOutline,
   markdownHeadingId,
   markdownFloatingNavigationLayout,
   markdownOutlineActiveId,
   markdownOutlineAnimationPosition,
+  markdownOutlineDeliveryScope,
+  markdownOutlineFallbackActiveId,
   markdownOutlineRailScrollTop,
   MARKDOWN_OUTLINE_START_ID,
+  MARKDOWN_OUTLINE_SUMMARY_ID,
   markdownOutlineTargetScrollTop,
-  MarkdownOutlineItem,
 } from "./markdown_outline";
 import {
   createMcpTransportDrafts,
@@ -2638,7 +2645,7 @@ function TimemApp() {
           turnHistoryPagesRef.current.delete(key);
           if (restored) setSessions((current) => current.map((session) => session.session_id !== event.session_id ? session : {
             ...session, turns: session.turns.map((turn) => turn.turn_id === event.turn_id && turn.state !== "working"
-              ? { ...turn, events: restored.events, user_entries: turn.user_entries.map((entry) => ({ ...entry, timeline_seq: undefined })) } : turn),
+              ? { ...turn, events: restored.events, events_slimmed: false, user_entries: turn.user_entries.map((entry) => ({ ...entry, timeline_seq: undefined })) } : turn),
           }));
         }
         return;
@@ -8480,6 +8487,26 @@ const SessionTimelinePane = memo(function SessionTimelinePane({
     () => renderedSession.turns.filter(turnShouldRenderInTimeline),
     [renderedSession.turns],
   );
+  // Stream UI keeps completed turns' inline stream process visible instead of
+  // the folded frame. Slimmed restored previews (…[truncated]) must hydrate
+  // from turn_history_page so the visible stream never shows previews; hidden
+  // panes wait until they become the active timeline.
+  const streamUiMode = useStreamUiMode();
+  const streamArchive = useStreamArchive();
+  const requestTurnHistory = useContext(TurnHistoryRequestContext);
+  const requestTurnHistoryRef = useRef(requestTurnHistory);
+  requestTurnHistoryRef.current = requestTurnHistory;
+  const sessionId = renderedSession.session_id;
+  useEffect(() => {
+    if (!streamUiMode || streamArchive || !active) return;
+    // Hydrate newest turn first: the landing view and its reading outline
+    // belong to the newest turn, and each request chains further pages on
+    // the Host; oldest-first order made the directory the user is looking
+    // at wait behind every older turn's chained history pages.
+    for (const turn of turnHistoryHydrationOrder(visibleTurns, { streamUiMode, streamArchive, timelineActive: true })) {
+      requestTurnHistoryRef.current(sessionId, turn.turn_id);
+    }
+  }, [streamUiMode, streamArchive, active, visibleTurns, sessionId]);
   const restartMarkers = useMemo(
     () =>
       visibleRuntimeRestartMarkers(
@@ -8715,6 +8742,9 @@ function TimemThread({
   );
   const renderedSessionIdRef = useRef<string | undefined>(undefined);
   const restoredSessionIdRef = useRef<string | undefined>(undefined);
+  // Set by the history-prepend restore effect; the timeline-signature follow
+  // effect consumes it so a prepend commit keeps its restored scroll position.
+  const preservedPrependFrameRef = useRef(false);
   const followThreadLatest = useRef(true);
   const [threadAwayFromBottom, setThreadAwayFromBottom] = useState(false);
   const workingAwayButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -8940,7 +8970,10 @@ function TimemThread({
       ? "Loading earlier history…"
       : `Load ${STORED_HISTORY_PAGE_SIZE} older stored tasks`;
   const latestTurn = turns.at(-1);
-  const latestTurnVersion = `${latestTurn?.turn_id ?? ""}:${latestTurn?.events.length ?? 0}:${latestTurn?.user_entries.length ?? 0}:${latestTurn?.final_answer?.length ?? 0}:${latestTurn?.completion ? 1 : 0}:${latestTurn?.preview?.revision ?? 0}`;
+  // The version must see restored-turn hydration (events_slimmed -> full
+  // events): count-stable growth otherwise strands the bottom follower
+  // mid-history after a restart.
+  const latestTurnVersion = `${latestTurn?.turn_id ?? ""}:${timelineEventsSignature(turns)}`;
   const liveSessionKey = sessionIds.join("\u0000");
   const liveSessionIds = useMemo(() => new Set(sessionIds), [liveSessionKey]);
   const [recentTimelineSessionIds, setRecentTimelineSessionIds] = useState<
@@ -9566,6 +9599,9 @@ function TimemThread({
       viewport.scrollHeight,
     );
     previousScrollMetrics.current = null;
+    // The same commit also changes the timeline signature; the bottom
+    // follower must not override this restored position one effect later.
+    preservedPrependFrameRef.current = true;
   }, [turns.length]);
 
   useLayoutEffect(() => {
@@ -9586,6 +9622,10 @@ function TimemThread({
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
+    if (preservedPrependFrameRef.current) {
+      preservedPrependFrameRef.current = false;
+      return;
+    }
     if (
       !viewport ||
       !followThreadLatest.current ||
@@ -9594,6 +9634,17 @@ function TimemThread({
       return;
     viewport.scrollTop = viewport.scrollHeight;
   }, [latestTurnVersion]);
+
+  // Completed-turn hydration (events_slimmed -> full events) and history
+  // prepends move every turn below the changed one. Nothing inside those
+  // outline owners resizes on such a commit, so portaled outlines keep stale
+  // absolute tops until the user happens to scroll. The shape key changes
+  // exactly on those commits; broadcasting the existing layout-change event
+  // orders every outline to re-measure before paint.
+  const timelineOutlineShape = timelineOutlineShapeKey(turns);
+  useLayoutEffect(() => {
+    window.dispatchEvent(new Event("markdown-outline-layout-change"));
+  }, [timelineOutlineShape]);
 
   const loadEarlierTurns = () => {
     if (sessionInteractionLocked) return;
@@ -11440,8 +11491,8 @@ function subscribeStreamInteraction(update: () => void) {
 }
 
 /** Height collapse keeps the live nodes mounted until the final handoff finishes. */
-function StreamProcess({ closing, onArchived, children }: {
-  closing: boolean; onArchived: () => void; children: ReactNode;
+function StreamProcess({ closing, onArchived, hostId, children }: {
+  closing: boolean; onArchived: () => void; hostId?: string; children: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -11478,7 +11529,7 @@ function StreamProcess({ closing, onArchived, children }: {
     animation.onfinish = () => { cancelAnimationFrame(frame); onArchived(); };
     return () => { cancelAnimationFrame(frame); animation.cancel(); viewport?.removeEventListener("wheel", stopFollowing); viewport?.removeEventListener("touchstart", stopFollowing); viewport?.removeEventListener("keydown", stopOnKey); };
   }, [closing, onArchived]);
-  return <div ref={ref} className={`stream-continuous-process${closing ? " archiving" : ""}`}>{children}</div>;
+  return <div ref={ref} id={hostId} className={`stream-continuous-process${closing ? " archiving" : ""}`}>{children}</div>;
 }
 
 function ModelRetryStatusPill({ status }: { status: ActiveModelRetryStatus }) {
@@ -11543,6 +11594,9 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
     }
   }
   const handoffIds = streamToolHandoffIds(activities);
+  // Process chapters are index-anchored: the outline counts only free_talk
+  // blocks that carry text, so the index here matches streamProcessOutlineSections.
+  let streamChapterIndex = 0;
   return <section className="turn-stream-tools" aria-label="Live model activity">
     {groups.map((group, index) => {
       const { key, activity } = group[0];
@@ -11562,8 +11616,10 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
       const previewText = group[0].thoughtText;
       if (previewText)
         return <div key={key} className="stream-thought-text" aria-label="Model thought preview"><StreamText text={previewText} /></div>;
+      const isProcessChapter = activity?.kind === "free_talk" && !!(activity.detail ?? "").trim();
+      const chapterIndex = isProcessChapter ? streamChapterIndex++ : -1;
       return activity?.kind === "free_talk"
-          ? <div key={key} className="stream-thought-text"><MarkdownContent text={activity.detail ?? ""} /></div>
+          ? <div key={key} className="stream-thought-text" {...(chapterIndex >= 0 ? { "data-stream-chapter": chapterIndex } : {})}><MarkdownContent text={activity.detail ?? ""} /></div>
           : activity ? <ActivityView key={key} activity={activity} /> : null;
     })}
   </section>;
@@ -11835,9 +11891,25 @@ function TurnAnswerDelivery({
     [phaseBoundary.id, phaseBoundary.startedAtMs],
   );
   const phaseTimerKey = `${phase}:${phaseBoundary.id}`;
+  // Stream retention keeps the process area expanded next to the answer, so
+  // the reading outline covers the whole delivery: start anchor at the process
+  // top, one chapter per retained free_talk block, summary anchor at the final
+  // answer top, then the answer's own markdown headings.
+  const outlineScopeId = useId().replaceAll(":", "");
+  const processHostId = `stream-process-${outlineScopeId}`;
+  const processSections = useMemo(
+    () => streamRetained
+      ? streamProcessOutlineSections(
+          streamTools
+            .filter((activity) => activity.kind === "free_talk")
+            .map((activity) => activity.detail ?? ""),
+        )
+      : [],
+    [streamRetained, streamTools],
+  );
   return (
     <section className="turn-answer-delivery">
-      {streamRetained && <StreamProcess closing={turn.state !== "working" && streamArchive} onArchived={onStreamArchived}>
+      {streamRetained && <StreamProcess closing={turn.state !== "working" && streamArchive} onArchived={onStreamArchived} hostId={processHostId}>
         <StreamActivityPresentation
           thoughtText={intermediate && !retainedThought ? thoughtText : ""}
           thoughtTimelineSeq={preview?.timeline_seq}
@@ -11850,6 +11922,8 @@ function TurnAnswerDelivery({
         <FinalAnswerDelivery
           text={turn.final_answer || previewText}
           layoutKey={`${streamRetained}:${workExpanded}`}
+          processSections={processSections}
+          processHostId={streamRetained ? processHostId : undefined}
           provisional={!hasFinal}
           streaming={!hasFinal && preview?.response?.status === "streaming"}
           completion={turn.completion}
@@ -11900,6 +11974,8 @@ function TurnAnswerDelivery({
 function FinalAnswerDelivery({
   text,
   layoutKey,
+  processSections = [],
+  processHostId,
   provisional = false,
   streaming = false,
   completion,
@@ -11913,6 +11989,8 @@ function FinalAnswerDelivery({
 }: {
   text: string;
   layoutKey: string;
+  processSections?: StreamProcessOutlineSection[];
+  processHostId?: string;
   provisional?: boolean;
   streaming?: boolean;
   completion: WebTurn["completion"];
@@ -11984,7 +12062,7 @@ function FinalAnswerDelivery({
   );
   return (
     <section className={provisional ? `response-preview${streaming ? " streaming" : ""}` : "turn-final-delivery"}>
-      <FinalAnswerContent text={text} provisional={provisional} layoutKey={layoutKey} />
+      <FinalAnswerContent text={text} provisional={provisional} layoutKey={layoutKey} processSections={processSections} processHostId={processHostId} />
       {provisional ? null : completion ? (
         <CompletionCard
           completion={completion}
@@ -12009,7 +12087,15 @@ const FINAL_ANSWER_OUTLINE_EDGE_GUARD = 12;
 const FINAL_ANSWER_OUTLINE_VIEWPORT_RATIO = 0.15;
 const FINAL_ANSWER_OUTLINE_TOGGLE_HEIGHT = 52;
 
-function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: string; provisional?: boolean; layoutKey: string }) {
+type OutlineNavItem = {
+  id: string;
+  title: string;
+  level: number;
+  kind: "process" | "summary" | "heading";
+  sourceIndex?: number;
+};
+
+function FinalAnswerContent({ text, provisional = false, layoutKey, processSections, processHostId }: { text: string; provisional?: boolean; layoutKey: string; processSections?: StreamProcessOutlineSection[]; processHostId?: string }) {
   const timelineActive = useContext(SessionTimelineActiveContext);
   const outline = useMemo(() => {
     try {
@@ -12018,6 +12104,36 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
       return [];
     }
   }, [text]);
+  const outlineScope = markdownOutlineDeliveryScope(
+    outline.length,
+    !!processHostId && !!processSections,
+    processSections?.length ?? 0,
+  );
+  const hasProcess = outlineScope.hasProcessChapters;
+  const showSummaryAnchor = outlineScope.showsSummary;
+  const outlineSectionCount = outlineScope.sectionCount;
+  // Reading outline over the whole turn delivery: process chapters (start
+  // anchored at the stream process top), the summary anchor at the final
+  // answer top, then the answer's own markdown headings.
+  const outlineNavItems = useMemo<OutlineNavItem[]>(() => {
+    const items: OutlineNavItem[] = [];
+    if (hasProcess)
+      for (const section of processSections!)
+        items.push({
+          id: `stream-${section.sourceIndex}`,
+          title: section.title,
+          level: 1,
+          kind: "process",
+          sourceIndex: section.sourceIndex,
+        });
+    if (showSummaryAnchor)
+      items.push({ id: MARKDOWN_OUTLINE_SUMMARY_ID, title: "", level: 1, kind: "summary" });
+    for (const item of outline)
+      items.push({ id: item.id, title: item.title, level: item.level, kind: "heading" });
+    return items;
+  }, [hasProcess, processSections, showSummaryAnchor, outline]);
+  const outlineItemLabel = (item: OutlineNavItem) =>
+    item.kind === "summary" ? t("outline.summary") : item.title;
   const reactId = useId();
   const stableId = reactId.replaceAll(":", "");
   const headingPrefix = `final-heading-${stableId}`;
@@ -12053,7 +12169,11 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
     setShowOutline(false);
   }, [timelineActive]);
 
-  useEffect(() => setActiveId(MARKDOWN_OUTLINE_START_ID), [outline]);
+  // Hydration rebuilds the outline items on every commit while chapter ids
+  // stay stable; only a real disappearance may drop the highlight to Start.
+  useEffect(() => {
+    setActiveId((current) => markdownOutlineFallbackActiveId(current, outlineNavItems));
+  }, [outlineNavItems]);
 
   useLayoutEffect(() => {
     if (outlineCollapsed || !showOutline) return;
@@ -12091,13 +12211,19 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
       !content ||
       !viewport ||
       !chatShell ||
-      outline.length < FINAL_ANSWER_OUTLINE_MIN_SECTIONS
+      outlineSectionCount < FINAL_ANSWER_OUTLINE_MIN_SECTIONS
     ) {
       setShowOutline(false);
       return;
     }
     const update = () => {
       const contentRect = content.getBoundingClientRect();
+      const processRectNow = outlineScope.spansProcess
+        ? document.getElementById(processHostId!)?.getBoundingClientRect()
+        : undefined;
+      const scopeRect = processRectNow && processRectNow.top < contentRect.top && processRectNow.height > 0
+        ? { top: processRectNow.top, height: contentRect.bottom - processRectNow.top }
+        : contentRect;
       const viewportRect = viewport.getBoundingClientRect();
       const bodyInset = Math.max(0, contentRect.left - viewportRect.left);
       const configuredWidth = Number.parseFloat(
@@ -12107,8 +12233,8 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
         Number.isFinite(configuredWidth) && configuredWidth > 0
           ? configuredWidth
           : 0;
-      const nextTop = contentRect.top - viewportRect.top + viewport.scrollTop;
-      const nextHeight = contentRect.height;
+      const nextTop = scopeRect.top - viewportRect.top + viewport.scrollTop;
+      const nextHeight = scopeRect.height;
       const targetWindowTop =
         window.innerHeight * FINAL_ANSWER_OUTLINE_VIEWPORT_RATIO;
       const targetViewportTop = targetWindowTop - viewportRect.top;
@@ -12131,19 +12257,34 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
           : "overlay",
       );
       setShowOutline(
-        finalAnswerNeedsOutline(
-          content.offsetHeight,
-          viewport.clientHeight,
-          outline.length,
-        ),
+        outlineSectionCount >= FINAL_ANSWER_OUTLINE_MIN_SECTIONS &&
+        scopeRect.height > viewport.clientHeight,
       );
     };
     // A stale portaled top can itself extend scrollHeight after sibling work
     // collapses. Repair geometry even when the display stops delivering rAF.
     const layoutTask = createFrameTask({ run: update, fallbackMs: 100 });
-    const scheduleUpdate = () => layoutTask.request();
+    const scheduleUpdate = () => {
+      layoutTask.request();
+      // Process chapters live outside the answer content node; a turn resize
+      // must also refresh anchor offsets, or active tracking lags one change.
+      outlineGeometryTaskRef.current?.request();
+    };
     update();
     window.addEventListener("resize", scheduleUpdate);
+    // Sibling turns hydrating or being prepended move this outline's anchor
+    // without resizing any observed node here; the timeline broadcasts the
+    // shared layout-change event on exactly those commits. That broadcast is
+    // emitted from layout effects, before the committing paint: re-measure
+    // synchronously so this portaled outline is already correct in that same
+    // paint. A rAF-deferred correction paints one stale top per commit, and
+    // the connect-time hydration storm (one broadcast per restored turn)
+    // makes that backlog visible as outline flicker.
+    const handleSharedLayoutChange = () => {
+      update();
+      outlineGeometryTaskRef.current?.request();
+    };
+    window.addEventListener("markdown-outline-layout-change", handleSharedLayoutChange);
     const observer =
       typeof ResizeObserver === "undefined"
         ? undefined
@@ -12159,10 +12300,11 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
     if (turnContainer) observer?.observe(turnContainer);
     return () => {
       window.removeEventListener("resize", scheduleUpdate);
+      window.removeEventListener("markdown-outline-layout-change", handleSharedLayoutChange);
       observer?.disconnect();
       layoutTask.dispose();
     };
-  }, [outline, outlineCollapsed, text, timelineActive, provisional, layoutKey]);
+  }, [outline, outlineSectionCount, outlineScope.spansProcess, hasProcess, processHostId, outlineCollapsed, text, timelineActive, provisional, layoutKey]);
 
   useEffect(() => {
     setOutlineCollapsed(outlinePlacement === "overlay");
@@ -12180,12 +12322,12 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
       return;
     const threshold = viewport.scrollTop + FINAL_ANSWER_OUTLINE_SCROLL_OFFSET;
     const next = markdownOutlineActiveId(
-      outline,
+      outlineNavItems,
       outlineHeadingOffsetsRef.current,
       threshold,
     );
     setActiveId((current) => (current === next ? current : next));
-  }, [outline]);
+  }, [outlineNavItems]);
 
   const refreshOutlineGeometry = useCallback(() => {
     const root = rootRef.current;
@@ -12196,6 +12338,24 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
     const viewportTop = viewport.getBoundingClientRect().top;
     const scrollTop = viewport.scrollTop;
     const offsets = new Map<string, number>();
+    if (hasProcess && processHostId) {
+      const host = document.getElementById(processHostId);
+      for (const section of processSections!) {
+        const anchor = host?.querySelector<HTMLElement>(
+          `[data-stream-chapter="${section.sourceIndex}"]`,
+        );
+        if (anchor)
+          offsets.set(
+            `stream-${section.sourceIndex}`,
+            scrollTop + anchor.getBoundingClientRect().top - viewportTop,
+          );
+      }
+    }
+    if (showSummaryAnchor && root)
+      offsets.set(
+        MARKDOWN_OUTLINE_SUMMARY_ID,
+        scrollTop + root.getBoundingClientRect().top - viewportTop,
+      );
     for (const item of outline) {
       const heading = document.getElementById(`${headingPrefix}-${item.id}`);
       if (heading && root.contains(heading))
@@ -12206,7 +12366,7 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
     }
     outlineHeadingOffsetsRef.current = offsets;
     updateOutlineActive();
-  }, [headingPrefix, outline, updateOutlineActive]);
+  }, [headingPrefix, outline, outlineNavItems, updateOutlineActive, hasProcess, processHostId, processSections, showSummaryAnchor]);
 
   useLayoutEffect(() => {
     const activeTask = createFrameTask({ run: updateOutlineActive });
@@ -12335,25 +12495,41 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
     const root = rootRef.current;
     const viewport = root?.closest<HTMLElement>(".chat-scroll");
     if (!root || !viewport) return;
+    const startTarget =
+      (outlineScope.spansProcess && processHostId
+        ? document.getElementById(processHostId)
+        : null) ?? root;
     const viewportTop = viewport.getBoundingClientRect().top;
     const targetTop = markdownOutlineTargetScrollTop(
       viewport.scrollTop,
-      root.getBoundingClientRect().top,
+      startTarget.getBoundingClientRect().top,
       viewportTop,
       FINAL_ANSWER_OUTLINE_SCROLL_OFFSET,
     );
     animateOutlineNavigation(viewport, targetTop, MARKDOWN_OUTLINE_START_ID);
   };
 
-  const navigate = (item: MarkdownOutlineItem) => {
+  const navigate = (item: OutlineNavItem) => {
     const root = rootRef.current;
     const viewport = root?.closest<HTMLElement>(".chat-scroll");
-    const heading = document.getElementById(`${headingPrefix}-${item.id}`);
-    if (!root || !viewport || !heading || !root.contains(heading)) return;
+    const processHost =
+      item.kind === "process" && processHostId
+        ? document.getElementById(processHostId)
+        : null;
+    const target =
+      item.kind === "process"
+        ? processHost?.querySelector<HTMLElement>(
+            `[data-stream-chapter="${item.sourceIndex}"]`,
+          ) ?? null
+        : item.kind === "summary"
+          ? root
+          : document.getElementById(`${headingPrefix}-${item.id}`);
+    if (!root || !viewport || !target) return;
+    if (item.kind === "heading" && !root.contains(target)) return;
     const viewportTop = viewport.getBoundingClientRect().top;
     const targetTop = markdownOutlineTargetScrollTop(
       viewport.scrollTop,
-      heading.getBoundingClientRect().top,
+      target.getBoundingClientRect().top,
       viewportTop,
       FINAL_ANSWER_OUTLINE_SCROLL_OFFSET,
     );
@@ -12434,18 +12610,21 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
                       <CornerUpLeft size={11} aria-hidden="true" />
                       <span>{t("outline.start")}</span>
                     </button>
-                    {outline.map((item) => (
+                    {outlineNavItems.map((item) => (
                       <button
                         type="button"
                         key={item.id}
-                        className={`${activeId === item.id ? "active " : ""}level-${item.level}`}
+                        className={`${activeId === item.id ? "active " : ""}level-${item.level} outline-${item.kind}`}
                         aria-current={
                           activeId === item.id ? "location" : undefined
                         }
-                        title={item.title}
+                        title={item.kind === "summary" ? t("outline.goToSummary") : outlineItemLabel(item)}
                         onClick={() => navigate(item)}
                       >
-                        {item.title}
+                        {item.kind === "summary" && (
+                          <CornerDownRight size={11} aria-hidden="true" />
+                        )}
+                        {outlineItemLabel(item)}
                       </button>
                     ))}
                   </nav>
@@ -12473,7 +12652,7 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
         <MarkdownContent
           text={text}
           headingIdPrefix={
-            outline.length >= FINAL_ANSWER_OUTLINE_MIN_SECTIONS
+            outlineSectionCount >= FINAL_ANSWER_OUTLINE_MIN_SECTIONS
               ? headingPrefix
               : undefined
           }
