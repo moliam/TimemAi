@@ -18868,6 +18868,7 @@ fn web_timer_fixture(name: &str, mode: &str, next_fire_ms: u64) -> WebTimer {
             after_ms: Some(1000),
             at: None,
             interval_ms: if mode == "repeat" { Some(60_000) } else { None },
+            deliver_immediately: false,
             created_by: "user".to_string(),
         },
         created_at_ms: now_ms(),
@@ -18888,6 +18889,7 @@ fn web_timer_compute_next_fire_ms_parses_at_and_rejects_invalid() {
         after_ms: Some(1500),
         at: None,
         interval_ms: None,
+        deliver_immediately: false,
         created_by: "user".into(),
     };
     assert_eq!(compute_next_fire_ms(&spec, 10_000).unwrap(), 11_500);
@@ -18953,7 +18955,8 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
         None,
         Some(1000),
         None,
-        None
+        None,
+        false
     )
     .unwrap_err()
     .contains("prompt_required"));
@@ -18967,6 +18970,7 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
         Some(1000),
         None,
         None,
+        false,
     )
     .unwrap();
     create_session_timer(
@@ -18978,6 +18982,7 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
         None,
         Some("2030-01-01T00:00:00Z".to_string()),
         None,
+        false,
     )
     .unwrap();
     {
@@ -18998,7 +19003,8 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
         None,
         Some(1000),
         None,
-        None
+        None,
+        false
     )
     .unwrap_err()
     .contains("name_exists"));
@@ -19021,6 +19027,7 @@ fn web_timer_toggle_and_delete() {
         Some(1000),
         None,
         None,
+        false,
     )
     .unwrap();
     let timer_id = state.sessions.lock().unwrap()["session_a"].timers[0]
@@ -19073,6 +19080,7 @@ fn web_timer_merge_from_core_preserves_host_metadata() {
         after_ms: Some(2000),
         at: None,
         interval_ms: None,
+        deliver_immediately: false,
         created_by: "model".into(),
     };
     merge_session_timers_from_core(&state, "session_a", &[updated, model_timer]).unwrap();
@@ -19109,6 +19117,7 @@ fn web_timer_fire_due_enqueues_into_active_turn() {
         Some(1000),
         None,
         None,
+        false,
     )
     .unwrap();
     // Simulate a turn in flight: pending_turn_id alone satisfies the
@@ -19141,6 +19150,7 @@ fn web_timer_fire_due_enqueues_into_active_turn() {
         Some(1000),
         None,
         Some(60_000),
+        false,
     )
     .unwrap();
     {
@@ -19171,6 +19181,7 @@ fn web_timer_fire_due_idle_session_starts_new_timer_turn() {
         Some(1000),
         None,
         None,
+        false,
     )
     .unwrap();
     {
@@ -19379,6 +19390,7 @@ fn real_worker_timer_fire_delivers_prompt_and_completes_turn() {
         Some(1000),
         None,
         None,
+        false,
     )
     .unwrap();
     // Force the timer due on the next scheduler tick.
@@ -19544,6 +19556,7 @@ fn web_timer_update_prompt_preserves_schedule_and_persists() {
         Some(1000),
         None,
         None,
+        false,
     )
     .unwrap();
     let (timer_id, next_fire, enabled) = {
@@ -19586,4 +19599,99 @@ fn web_timer_update_prompt_preserves_schedule_and_persists() {
     // persisted projection carries the new prompt.
     let persisted = load_session_timers(&state, "session_a");
     assert_eq!(persisted[0].spec.prompt, "revised prompt");
+}
+
+#[test]
+fn web_timer_fire_immediate_contrasts_with_queue_delivery() {
+    // Same scenario for both modes: idle session, one message already queued.
+    // Without a live worker the submit dispatch falls back to the queue
+    // (environment detail, not pinned); the product difference pinned here is
+    // the turn: immediate mode puts the prompt into the conversation right
+    // away instead of waiting behind queued messages.
+    let state = routing_test_state();
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("urgent".into()),
+        "urgent job".into(),
+        None,
+        Some(1000),
+        None,
+        None,
+        true,
+    )
+    .unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session
+            .message_queue
+            .enqueue(
+                "queued_1",
+                WebNextTurnPayload {
+                    send_after_cancel: false,
+                    turn_id: "web_turn_q1".into(),
+                    created_at_ms: now_ms(),
+                    text: "queued work".into(),
+                    attachments: Vec::new(),
+                    worker_roles: Vec::new(),
+                },
+            )
+            .unwrap();
+        session.timers[0].next_fire_ms = 0;
+    }
+    fire_due_timers(&state);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions["session_a"];
+        assert!(session.timers.is_empty(), "once timer consumed");
+        let urgent_turn = session.turns.iter().any(|turn| {
+            turn.user_entries
+                .iter()
+                .any(|entry| entry.kind == "timer" && entry.text == "[timer:urgent] urgent job")
+        });
+        assert!(urgent_turn, "immediate timer must enter the conversation");
+    }
+
+    // Default mode under the same conditions only enqueues behind the queue.
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("patient".into()),
+        "patient job".into(),
+        None,
+        Some(1000),
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.timers[0].next_fire_ms = 0;
+    }
+    fire_due_timers(&state);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions["session_a"];
+        assert!(session.timers.is_empty(), "once timer consumed");
+        let patient_turn = session.turns.iter().any(|turn| {
+            turn.user_entries
+                .iter()
+                .any(|entry| entry.text == "[timer:patient] patient job")
+        });
+        assert!(
+            !patient_turn,
+            "queued delivery must not create a turn behind the queue"
+        );
+        let texts: Vec<&str> = session
+            .message_queue
+            .projection()
+            .items
+            .iter()
+            .map(|item| item.payload.text.as_str())
+            .collect();
+        assert!(texts.contains(&"[timer:patient] patient job"), "{texts:?}");
+    }
 }

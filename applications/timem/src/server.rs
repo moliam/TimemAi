@@ -1312,6 +1312,8 @@ enum ClientCommand {
         at: Option<String>,
         #[serde(default)]
         interval_ms: Option<u64>,
+        #[serde(default)]
+        deliver_immediately: bool,
     },
     TimerDelete {
         session_id: String,
@@ -3812,6 +3814,7 @@ fn handle_command_with_id(
             after_ms,
             at,
             interval_ms,
+            deliver_immediately,
         } => {
             create_session_timer(
                 state,
@@ -3822,6 +3825,7 @@ fn handle_command_with_id(
                 after_ms,
                 at,
                 interval_ms,
+                deliver_immediately,
             )?;
         }
         ClientCommand::TimerDelete {
@@ -7544,6 +7548,7 @@ fn create_session_timer(
     after_ms: Option<u64>,
     at: Option<String>,
     interval_ms: Option<u64>,
+    deliver_immediately: bool,
 ) -> Result<(), String> {
     let prompt = prompt.trim().to_string();
     if prompt.is_empty() {
@@ -7566,6 +7571,7 @@ fn create_session_timer(
         after_ms,
         at,
         interval_ms,
+        deliver_immediately,
         created_by: "user".to_string(),
     };
     let next_fire_ms = compute_next_fire_ms(&spec, now)?;
@@ -7726,8 +7732,8 @@ fn fire_due_timers(state: &AppState) {
         return;
     }
     let now = now_ms();
-    // (session_id, timer_id, fire_text)
-    let due: Vec<(String, String, String)> = {
+    // (session_id, timer_id, fire_text, deliver_immediately)
+    let due: Vec<(String, String, String, bool)> = {
         let Ok(sessions) = state.sessions.lock() else {
             return;
         };
@@ -7744,13 +7750,20 @@ fn fire_due_timers(state: &AppState) {
                             session.session_id.clone(),
                             timer.spec.timer_id.clone(),
                             format!("[timer:{}] {}", timer.spec.name, timer.spec.prompt),
+                            timer.spec.deliver_immediately,
                         )
                     })
             })
             .collect()
     };
-    for (session_id, timer_id, fire_text) in due {
-        let delivered = deliver_timer_fire(state, &session_id, &timer_id, &fire_text);
+    for (session_id, timer_id, fire_text, deliver_immediately) in due {
+        let delivered = deliver_timer_fire(
+            state,
+            &session_id,
+            &timer_id,
+            &fire_text,
+            deliver_immediately,
+        );
         let fired_at = now_ms();
         {
             let Ok(mut sessions) = state.sessions.lock() else {
@@ -7793,17 +7806,84 @@ fn fire_due_timers(state: &AppState) {
     }
 }
 
-fn deliver_timer_fire(state: &AppState, session_id: &str, timer_id: &str, fire_text: &str) -> bool {
-    let idle = state
+fn deliver_timer_fire(
+    state: &AppState,
+    session_id: &str,
+    timer_id: &str,
+    fire_text: &str,
+    deliver_immediately: bool,
+) -> bool {
+    let turn_active = state
         .sessions
         .lock()
         .ok()
         .and_then(|sessions| {
-            sessions.get(session_id).map(|session| {
-                current_turn_id(session).is_none() && session.message_queue.is_empty()
-            })
+            sessions
+                .get(session_id)
+                .map(|session| current_turn_id(session).is_some())
         })
         .unwrap_or(false);
+    if deliver_immediately {
+        // Immediate mode mirrors the user typing right now: an active turn
+        // receives the prompt as a supplement; an idle session starts a new
+        // turn even when queued messages are still waiting.
+        if turn_active {
+            match try_append_turn_supplement(
+                state,
+                session_id,
+                fire_text.to_string(),
+                None,
+                None,
+                Vec::new(),
+            ) {
+                Ok(Some(turn)) => {
+                    publish_semantic(
+                        state,
+                        WireEvent::TurnUpdated {
+                            session_id: session_id.to_string(),
+                            turn,
+                        },
+                    );
+                    return true;
+                }
+                // The turn closed between the check and the append: fall
+                // through and start a fresh turn below.
+                Ok(None) => {}
+                Err(error) => {
+                    log_timer_fire_failure(state, session_id, timer_id, &error);
+                    return enqueue_timer_fire(state, session_id, timer_id, fire_text.to_string());
+                }
+            }
+        }
+        return match submit_turn_with_selected_attachments_and_kind(
+            state,
+            session_id,
+            fire_text.to_string(),
+            None,
+            None,
+            Vec::new(),
+            "timer",
+        ) {
+            Ok(_) => true,
+            Err(error) => {
+                log_timer_fire_failure(state, session_id, timer_id, &error);
+                // Never drop or park the fired prompt behind a delivery
+                // hiccup; queue delivery is the lossless fallback.
+                enqueue_timer_fire(state, session_id, timer_id, fire_text.to_string())
+            }
+        };
+    }
+    let idle = !turn_active
+        && state
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|sessions| {
+                sessions
+                    .get(session_id)
+                    .map(|session| session.message_queue.is_empty())
+            })
+            .unwrap_or(false);
     if idle {
         return match submit_turn_with_selected_attachments_and_kind(
             state,

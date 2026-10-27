@@ -11,6 +11,9 @@ description: |
 
   ops:
   - new: create a timer. `prompt` is required. `mode` is "once" (default) or "repeat".
+    `deliver_immediately` (boolean, default false) makes the fired prompt skip the message
+    queue: an active turn receives it as an immediate supplement and an idle session starts
+    a new turn directly, instead of waiting behind already queued messages.
     For "once", exactly one of `after_ms` (relative delay from creation) or `at` (absolute
     ISO-RFC3339 UTC instant) is required. For "repeat", one of `after_ms`/`at` plus `interval_ms`
     is required; the prompt refires every interval_ms. `name` is optional and auto-generated as
@@ -36,7 +39,8 @@ input_schema: |
       "mode": {"type":"string","enum":["once","repeat"],"description":"once fires a single time (default); repeat refires every interval_ms."},
       "after_ms": {"type":"integer","description":"Relative delay from creation in milliseconds for the first fire."},
       "at": {"type":"string","description":"Absolute first-fire instant as ISO-RFC3339 UTC, e.g. 2026-01-01T09:00:00Z."},
-      "interval_ms": {"type":"integer","description":"Refire period in milliseconds. Required for repeat; invalid for once."}
+      "interval_ms": {"type":"integer","description":"Refire period in milliseconds. Required for repeat; invalid for once."},
+      "deliver_immediately": {"type":"boolean","description":"Optional, default false. When true the fired prompt bypasses the message queue: an active turn receives it as an immediate supplement, an idle session starts a new turn directly."}
     },
     "required": ["op"]
   }

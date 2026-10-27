@@ -300,6 +300,7 @@ fn timer_confirmation_line_marks_created_by() {
         after_ms: Some(5000),
         at: None,
         interval_ms: Some(900000),
+        deliver_immediately: false,
         created_by: "user".into(),
     };
     let mut timers = core.timers().to_vec();
@@ -311,6 +312,25 @@ fn timer_confirmation_line_marks_created_by() {
     // Empty set produces no line at all.
     core.replace_timers(vec![]);
     assert!(core.active_timers_confirmation_line().is_empty());
+    drop(core);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn timer_new_accepts_deliver_immediately_flag() {
+    let (mut core, dir) = setup("immediate_flag");
+    let out = run(
+        &mut core,
+        json!({"op": "new", "prompt": "urgent check", "name": "now1", "after_ms": 1000, "deliver_immediately": true}),
+    );
+    assert!(out.contains("Immediate delivery is enabled"), "{out}");
+    assert!(core.timers()[0].deliver_immediately);
+    // Default stays false (queue delivery) for compatibility.
+    run(
+        &mut core,
+        json!({"op": "new", "prompt": "patient check", "name": "later1", "after_ms": 1000}),
+    );
+    assert!(!core.timers()[1].deliver_immediately);
     drop(core);
     std::fs::remove_dir_all(dir).unwrap();
 }

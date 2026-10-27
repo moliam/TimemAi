@@ -35,6 +35,7 @@ fn execute_new(
     let after_ms = u64_field(action, "after_ms");
     let at = str_field(action, "at");
     let interval_ms = u64_field(action, "interval_ms");
+    let deliver_immediately = action.input_bool("deliver_immediately");
 
     // The tool validates shape only; the host parses `at` with its clock.
     match mode.as_str() {
@@ -74,6 +75,7 @@ fn execute_new(
         after_ms,
         at: if at.is_empty() { None } else { Some(at) },
         interval_ms,
+        deliver_immediately,
         created_by: "model".to_string(),
     };
     match core.add_timer(spec) {
@@ -88,10 +90,15 @@ fn execute_new(
                 core.timers(),
             )]);
             ActionExecution::Completed(ActionOutcome::completed(format!(
-                "Timer created: [{}|{}|model] {}. The runtime will deliver this prompt when due; it survives compression and restart. Active timers: {}.",
+                "Timer created: [{}|{}|model] {}. The runtime will deliver this prompt when due; it survives compression and restart.{}. Active timers: {}.",
                 added.name,
                 added.mode,
                 added.prompt,
+                if added.deliver_immediately {
+                    " Immediate delivery is enabled: the fired prompt bypasses queued messages (active turn gets an immediate supplement, idle session starts a new turn)"
+                } else {
+                    ""
+                },
                 core.timers().len()
             )))
         }
