@@ -17984,6 +17984,69 @@ fn task_finished_hands_manual_compact_off_to_direct_resume() {
 }
 
 #[test]
+fn idle_manual_compact_broadcasts_requested_event_inside_turn_snapshot() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "compact-idle-snapshot");
+    let mut receiver = state.events.subscribe();
+    request_session_context_compress(&state, &session_id).unwrap();
+    let mut saw_requested_topic = false;
+    let mut snapshot_turn_kind = None;
+    let mut snapshot_carries_event = false;
+    while let Ok(event) = receiver.try_recv() {
+        let WireEvent::SemanticEvent { event, .. } = event else {
+            continue;
+        };
+        match *event {
+            WireEvent::CoreTopic { turn_id, event, .. } => {
+                if event["topic"]["name"] == CORE_TOPIC_CONTEXT_COMPRESS
+                    && event["payload"]["phase"] == "requested"
+                {
+                    saw_requested_topic = true;
+                    assert!(
+                        turn_id.is_some(),
+                        "the requested notice must anchor to its host turn"
+                    );
+                }
+            }
+            WireEvent::TurnUpdated { turn, .. } => {
+                if turn
+                    .user_entries
+                    .iter()
+                    .any(|entry| entry.kind == "resume_directly")
+                {
+                    snapshot_turn_kind = Some("resume_directly".to_string());
+                    snapshot_carries_event = turn.events.iter().any(|turn_event| {
+                        turn_event.source == "core_topic"
+                            && turn_event.payload["topic"]["name"] == CORE_TOPIC_CONTEXT_COMPRESS
+                            && turn_event.payload["payload"]["phase"] == "requested"
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        saw_requested_topic,
+        "the idle manual compaction must publish the requested notice"
+    );
+    assert_eq!(
+        snapshot_turn_kind.as_deref(),
+        Some("resume_directly"),
+        "the idle resume turn must be broadcast"
+    );
+    assert!(
+        snapshot_carries_event,
+        "the broadcast turn snapshot must already carry the requested event; a \
+         stale pre-append snapshot is filtered out by the web timeline"
+    );
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+}
+
+#[test]
 fn live_worker_wire_preserves_snapshot_timeline_metadata() {
     let state = routing_test_state();
     let id = "session_a";
