@@ -9193,6 +9193,27 @@ fn request_session_context_compress(
             event: wire_payload,
         },
     );
+    // Re-read the idle resume turn after the "requested" event append: the
+    // pre-append snapshot carries no events and the web timeline filters
+    // empty pending turns out, which dropped the visible "compacting" notice.
+    let idle_turn = if idle_turn.is_some() {
+        state
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|sessions| {
+                let session = sessions.get(session_id)?;
+                let turn_id = current_turn_id(session)?;
+                session
+                    .turns
+                    .iter()
+                    .find(|turn| turn.turn_id == turn_id)
+                    .cloned()
+            })
+            .or(idle_turn)
+    } else {
+        None
+    };
     if let Some(turn) = idle_turn {
         publish_semantic(
             state,

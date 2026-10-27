@@ -625,6 +625,21 @@ describe("web topic view model", () => {
         user_entries: [],
       }),
     ).toBe(false);
+    // The idle manual-compaction resume turn carries an empty
+    // "resume_directly" entry and must render so the "compacting" notice
+    // has a timeline anchor.
+    expect(
+      turnShouldRenderInTimeline({
+        ...pending,
+        user_entries: [
+          {
+            kind: "resume_directly",
+            text: "",
+            created_at_ms: 3,
+          },
+        ],
+      }),
+    ).toBe(true);
     expect(turnShouldRenderInTimeline({ ...pending, state: "working" })).toBe(
       true,
     );

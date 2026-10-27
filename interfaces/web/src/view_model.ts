@@ -218,6 +218,9 @@ export function turnShouldRenderInTimeline(turn: WebTurn): boolean {
     turn.user_entries.some(
       (entry) => entry.kind === "task" && !!entry.text.trim(),
     ) ||
+    // The idle manual-compaction resume turn has empty user text; it must
+    // stay visible so the "compacting" notice keeps a timeline anchor.
+    turn.user_entries.some((entry) => entry.kind === "resume_directly") ||
     turn.events.length > 0 ||
     turn.user_entries.some((entry) => entry.kind === "approval") ||
     !!turn.final_answer ||
