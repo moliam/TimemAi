@@ -1336,7 +1336,7 @@ fn builtin_tool_schemas_render_per_protocol_without_weakening_registry_validatio
         .iter()
         .find(|tool| tool.name == "run_bash")
         .expect("run_bash builtin");
-    assert!(original_run_bash.input_schema.get("oneOf").is_some());
+    assert!(original_run_bash.input_schema.get("oneOf").is_none());
     assert!(original_run_bash.input_schema.get("allOf").is_some());
 
     let request = ModelInteractionRequest {

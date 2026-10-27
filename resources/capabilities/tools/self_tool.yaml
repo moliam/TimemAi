@@ -33,13 +33,7 @@ input_schema: |
         "description": "Optional new prompt-context directory for type=cwd. Omit to query the current directory. Relative paths resolve from the current prompt-context cwd."
       }
     },
-    "required": ["type"],
-    "allOf": [
-      {
-        "if": {"properties": {"type": {"enum": ["path", "params"]}}, "required": ["type"]},
-        "then": {"not": {"required": ["new_path"]}}
-      }
-    ]
+    "required": ["type"]
   }
 example_json: |
   {

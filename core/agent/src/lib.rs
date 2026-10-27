@@ -7071,7 +7071,9 @@ Runtime tool_call ids:",
                     if is_regular_command {
                         action.timeout_ms_i64(5000)
                     } else {
-                        action.input_i64("loop_timeout_ms").unwrap_or(600_000)
+                        action
+                            .input_i64("loop_timeout_ms")
+                            .unwrap_or(shell_exec::DEFAULT_LOOP_TIMEOUT_MS)
                     },
                     action.input_u64("interval_ms"),
                     action.input_u64("once_timeout_ms").unwrap_or(5000),

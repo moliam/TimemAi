@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 static SHELL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const LONG_RUNNING_COMMAND_PROMPT_AFTER: Duration = Duration::from_secs(60);
 /// Default total polling wait budget (loop_timeout_ms) when loop_cmd is present.
-const DEFAULT_LOOP_TIMEOUT_MS: i64 = 60_000;
+pub(crate) const DEFAULT_LOOP_TIMEOUT_MS: i64 = 60_000;
 
 pub(crate) fn is_local_shell_action(action: &str) -> bool {
     matches!(action, "run_bash" | "run_powershell")

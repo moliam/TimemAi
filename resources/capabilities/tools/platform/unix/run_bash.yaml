@@ -72,29 +72,13 @@ input_schema: |
       "tail_out": {"type": "boolean", "description": "Controls which side of oversized output is retained. True retains the ending; false retains the beginning. Default: true. Truncation facts are reported in runtime metadata, not inserted into stdout or stderr."},
       "edit": {"description": "Absolute paths of every file this command creates, modifies, or writes. Accept a single path string or an array of path strings. Required whenever the command writes files (sed -i, >>, >, tee, cp/mv onto a file, patch, formatters --write, heredocs like cat > file <<'EOF', etc.); list each file once, even inside compound commands. Omit entirely for read-only commands.", "oneOf": [{"type": "string", "minLength": 1, "pattern": "\\S"}, {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1, "pattern": "\\S"}}]}
     },
-    "x-required-any": [["cmd", "loop_cmd"]],
-    "oneOf": [
-      {"required": ["cmd"]},
-      {"required": ["loop_cmd"]}
-    ],
-    "allOf": [
-      {
-        "if": {"required": ["loop_cmd"]},
-        "then": {
-          "required": ["interval_ms"],
-          "properties": {"background": {"enum": [false]}}
-        }
-      },
-      {
-        "if": {"required": ["interval_ms"]},
-        "then": {"required": ["loop_cmd"]}
-      }
-    ]
+    "x-required-any": [["cmd", "loop_cmd"]]
   }
 example_json: |
   {
     "run_bash": {
-      "cmd": "rg --files | wc -l",
-      "timeout_ms": 5000
+      "loop_cmd": "test -f /tmp/done.flag",
+      "interval_ms": 2000,
+      "loop_timeout_ms": 60000
     }
   }

@@ -56,12 +56,6 @@ input_schema: |
     "x-required-when": [
       {"field": "op", "values": ["load"], "required": ["kind", "id"]},
       {"field": "op", "values": ["job_status", "job_cancel"], "required": ["job_id"]}
-    ],
-    "oneOf": [
-      {"properties": {"op": {"enum": ["list"]}, "kind": {"enum": ["all", "tool", "skill"]}}},
-      {"properties": {"op": {"enum": ["load"]}, "kind": {"enum": ["tool", "skill"]}}, "required": ["kind", "id"]},
-      {"properties": {"op": {"enum": ["job_status"]}}, "required": ["job_id"]},
-      {"properties": {"op": {"enum": ["job_cancel"]}}, "required": ["job_id"]}
     ]
   }
 example_json: |

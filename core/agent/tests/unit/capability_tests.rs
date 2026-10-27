@@ -49,10 +49,7 @@ fn windows_local_command_catalog_is_powershell_specific() {
         .expect("run_powershell catalog section");
 
     assert!(section.contains("PowerShell"), "{section}");
-    assert!(
-        section.contains("Get-ChildItem -Recurse -File"),
-        "{section}"
-    );
+    assert!(section.contains("loop_cmd"), "{section}");
     assert!(section.contains("Test-Path"), "{section}");
     for unix_only_text in [
         "run_bash",
@@ -331,7 +328,7 @@ fn readfile_synopsis_is_rendered_in_the_active_response_protocol() {
     );
     assert!(
         xml.contains(
-            "<run_bash><cmd>rg --files | wc -l</cmd><timeout_ms>5000</timeout_ms></run_bash>"
+            "<run_bash><loop_cmd>test -f /tmp/done.flag</loop_cmd><interval_ms>2000</interval_ms><loop_timeout_ms>60000</loop_timeout_ms></run_bash>"
         ),
         "{xml}"
     );
@@ -778,7 +775,7 @@ fn run_bash_idl_uses_cmd_loop_cmd_without_removed_expect_fields() {
     }));
 
     let prompt = registry.render_tool_catalog_markdown();
-    assert!(prompt.contains(r#"{"run_bash":{"cmd":"rg --files | wc -l","timeout_ms":5000}}"#));
+    assert!(prompt.contains(r#"{"run_bash":{"loop_cmd":"test -f /tmp/done.flag","interval_ms":2000,"loop_timeout_ms":60000}}"#));
     assert!(prompt.contains("`loop_cmd`:"));
     assert!(prompt.contains("loop_timeout_ms"));
     assert!(prompt.contains("once_timeout_ms"));
@@ -813,7 +810,7 @@ fn capmgr_can_list_and_load_skill_content() {
     assert!(loaded_tool.contains("manual:"));
     assert!(loaded_tool.contains("#### `run_bash`"));
     assert!(loaded_tool.contains("**Options**"));
-    assert!(loaded_tool.contains(r#"{"run_bash":{"cmd":"rg --files | wc -l","timeout_ms":5000}}"#));
+    assert!(loaded_tool.contains(r#"{"run_bash":{"loop_cmd":"test -f /tmp/done.flag","interval_ms":2000,"loop_timeout_ms":60000}}"#));
     assert!(!loaded_tool.contains("read_back_command"));
     assert!(!loaded_tool.contains("large_readback"));
     assert!(!loaded_tool.contains("expect_timeout_ms"));
@@ -1206,29 +1203,23 @@ fn context_compress_guidance_is_action_oriented_without_runtime_implementation_d
 }
 
 #[test]
-fn native_schema_generation_avoids_redundant_required_any_expansion() {
+fn native_schema_generation_synthesizes_required_any_without_decoration() {
     let tools =
         CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution())
             .native_tool_definitions();
     let run_bash = tools.iter().find(|tool| tool.name == "run_bash").unwrap();
 
-    assert_eq!(
-        run_bash.input_schema["oneOf"],
-        serde_json::json!([
-            {"required": ["cmd"]},
-            {"required": ["loop_cmd"]}
-        ])
+    assert!(
+        run_bash.input_schema.get("oneOf").is_none(),
+        "manifest decoration layer must not leak into native schemas"
     );
-    assert!(run_bash.input_schema["oneOf"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|branch| branch.get("not").is_none()));
-    assert!(run_bash.input_schema["allOf"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|rule| rule.get("anyOf").is_none()));
+    assert_eq!(
+        run_bash.input_schema["allOf"],
+        serde_json::json!([
+            {"anyOf": [{"required": ["cmd"]}, {"required": ["loop_cmd"]}]}
+        ]),
+        "cmd/loop_cmd exclusivity must survive via the synthesized x-required-any rule"
+    );
 
     let compact = tools
         .iter()
@@ -1284,7 +1275,8 @@ fn builtin_native_schemas_preserve_runtime_constraints_and_argument_examples() {
     assert!(!readfile.description.contains(r#"{"readfile":{"#));
 
     let run_bash = tools.iter().find(|tool| tool.name == "run_bash").unwrap();
-    assert_eq!(run_bash.input_schema["oneOf"].as_array().unwrap().len(), 2);
+    assert!(run_bash.input_schema.get("oneOf").is_none());
+    assert!(run_bash.input_schema.get("allOf").is_some());
     assert_eq!(
         run_bash.input_schema["properties"]["interval_ms"]["minimum"],
         1
