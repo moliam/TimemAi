@@ -1286,6 +1286,15 @@ pub fn parse_model_response(
                 .get("completion_tokens")
                 .and_then(Value::as_u64)
                 .unwrap_or(0) as u32;
+            let reasoning_tokens = [
+                "/completion_tokens_details/reasoning_tokens",
+                "/output_tokens_details/reasoning_tokens",
+                "/reasoning_tokens",
+                "/thinking_tokens",
+            ]
+            .into_iter()
+            .find_map(|path| usage.pointer(path).and_then(Value::as_u64))
+            .unwrap_or(0) as u32;
             let total_tokens = usage
                 .get("total_tokens")
                 .and_then(Value::as_u64)
@@ -1316,6 +1325,7 @@ pub fn parse_model_response(
                     llm_calls: 1,
                     prompt_tokens,
                     completion_tokens,
+                    reasoning_tokens,
                     total_tokens,
                     cached_tokens,
                     cache_created_tokens,
@@ -1340,6 +1350,14 @@ pub fn parse_model_response(
                 .get("output_tokens")
                 .and_then(Value::as_u64)
                 .unwrap_or(0) as u32;
+            let reasoning_tokens = [
+                "/output_tokens_details/reasoning_tokens",
+                "/completion_tokens_details/reasoning_tokens",
+                "/reasoning_tokens",
+            ]
+            .into_iter()
+            .find_map(|path| usage.pointer(path).and_then(Value::as_u64))
+            .unwrap_or(0) as u32;
             let total_tokens = usage
                 .get("total_tokens")
                 .and_then(Value::as_u64)
@@ -1355,6 +1373,7 @@ pub fn parse_model_response(
                     llm_calls: 1,
                     prompt_tokens,
                     completion_tokens,
+                    reasoning_tokens,
                     total_tokens,
                     cached_tokens,
                     cache_created_tokens: 0,
@@ -1392,6 +1411,10 @@ pub fn parse_model_response(
                 .get("output_tokens")
                 .and_then(Value::as_u64)
                 .unwrap_or(0) as u32;
+            let reasoning_tokens = ["/reasoning_tokens", "/thinking_tokens"]
+                .into_iter()
+                .find_map(|path| usage.pointer(path).and_then(Value::as_u64))
+                .unwrap_or(0) as u32;
             let billed_prompt_tokens = prompt_tokens + cache_read_tokens + cache_creation_tokens;
             (
                 content,
@@ -1399,6 +1422,7 @@ pub fn parse_model_response(
                     llm_calls: 1,
                     prompt_tokens: billed_prompt_tokens,
                     completion_tokens,
+                    reasoning_tokens,
                     total_tokens: billed_prompt_tokens + completion_tokens,
                     cached_tokens: cache_read_tokens,
                     cache_created_tokens: cache_creation_tokens,

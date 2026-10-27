@@ -34,6 +34,7 @@ export type UsageStats = {
   mem_writes?: number;
   prompt_tokens?: number;
   completion_tokens?: number;
+  reasoning_tokens?: number;
   total_tokens?: number;
   cached_tokens?: number;
   cache_created_tokens?: number;
@@ -277,8 +278,14 @@ export type SessionWorker = {
 
 export type ResponsePreview = {
   attempt: number;
+  round?: number;
   timeline_seq?: number;
   revision: number;
+  thinking_words?: number;
+  thinking_elapsed_ms?: number | null;
+  ttft_ms?: number | null;
+  reasoning_tokens?: number | null;
+  stream_phase?: "thinking" | "responding" | null;
   interruption?: string | null;
   response?: { attempt: number; revision: number; text: string; status: "streaming" | "intermediate" | "final" } | null;
 };

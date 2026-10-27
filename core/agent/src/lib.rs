@@ -293,6 +293,8 @@ pub struct UsageStats {
     pub mem_writes: u32,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    #[serde(default)]
+    pub reasoning_tokens: u32,
     pub total_tokens: u32,
     pub cached_tokens: u32,
     pub cache_created_tokens: u32,
@@ -308,6 +310,7 @@ impl UsageStats {
             mem_writes: 0,
             prompt_tokens: 0,
             completion_tokens: 0,
+            reasoning_tokens: 0,
             total_tokens: 0,
             cached_tokens: 0,
             cache_created_tokens: 0,
@@ -322,6 +325,7 @@ impl UsageStats {
         self.mem_writes += other.mem_writes;
         self.prompt_tokens += other.prompt_tokens;
         self.completion_tokens += other.completion_tokens;
+        self.reasoning_tokens += other.reasoning_tokens;
         self.total_tokens += other.total_tokens;
         self.cached_tokens += other.cached_tokens;
         self.cache_created_tokens += other.cache_created_tokens;
@@ -750,6 +754,13 @@ pub fn validate_context_compress_threshold_percent(percent: u8) -> Result<u8, St
         .ok_or_else(|| "context_compress_threshold_percent_invalid".to_string())
 }
 pub const MAX_PROTOCOL_REPAIR_ATTEMPTS: u32 = 20;
+
+/// Maximum consecutive model responses that ignore the automatic threshold
+/// compaction requirement before Core abandons it. A model that never runs
+/// `context_compress` must not loop model requests (and their cost) forever;
+/// the Exhausted latch afterwards blocks only new automatic cycles. Explicit
+/// user compaction requests are never abandoned by this gate.
+pub const MAX_CONSECUTIVE_FORCED_COMPACTION_REFUSALS: u32 = 2;
 const RUNTIME_CONFIG_CHANGED_NOTICE: &str =
     "User changes some runtime config, retrieve again when you need it.";
 const MEM_GUARD_WAIT_STEP: Duration = Duration::from_millis(25);
@@ -1928,6 +1939,10 @@ pub struct AgentCore {
     context_compress_threshold_percent: u8,
     last_observed_prompt_tokens: u32,
     context_compress_required: bool,
+    /// Consecutive model responses that ignored the forced-compaction
+    /// requirement. Reaching MAX_CONSECUTIVE_FORCED_COMPACTION_REFUSALS
+    /// abandons the automatic requirement instead of looping forever.
+    forced_compaction_refusals: u32,
     /// True only when automatic context sizing crossed the forced-compaction
     /// threshold. This is the sole Core scheduling signal for an H1 request;
     /// manual compaction remains at the normal H0 baseline.
@@ -2083,6 +2098,7 @@ impl AgentCore {
             context_compress_threshold_percent: DEFAULT_CONTEXT_COMPRESS_THRESHOLD_PERCENT,
             last_observed_prompt_tokens: 0,
             context_compress_required: false,
+            forced_compaction_refusals: 0,
             threshold_compaction_reasoning_required: false,
             manual_compact_trailer_pending: false,
             pending_compact_request_notice: None,
@@ -2835,6 +2851,7 @@ impl AgentCore {
                 != ThresholdCompactionFollowupState::FollowupPending
         {
             self.context_compress_required = false;
+            self.forced_compaction_refusals = 0;
             self.threshold_compaction_reasoning_required = false;
             self.pending_compact_request_notice = None;
             self.require_context_compress_if_needed(0);
@@ -3432,6 +3449,7 @@ impl AgentCore {
         self.touched_paths.clear();
         self.last_observed_prompt_tokens = 0;
         self.context_compress_required = false;
+        self.forced_compaction_refusals = 0;
         self.threshold_compaction_reasoning_required = false;
         self.manual_compact_trailer_pending = false;
         self.pending_compact_request_notice = None;
@@ -3961,24 +3979,53 @@ impl AgentCore {
         if self.context_compress_required
             && (parsed.context_compresses.len() != 1 || parsed.repair_issue.is_some())
         {
-            self.current_round = self.current_round.saturating_sub(1);
-            let mut prompt = self.render_prompt();
-            let (body, response_trailer) = prompt_render::split_formatted_response_trailer(&prompt);
-            prompt = body.trim_end().to_string();
-            prompt.push_str("\n\n");
-            if self.manual_compact_trailer_pending {
-                prompt.push_str(prompt_render::MANUAL_CONTEXT_COMPRESS_TRAILER);
-            } else {
-                prompt.push_str(prompt_render::CONTEXT_COMPRESS_REQUIRED_TRAILER);
+            // A user-initiated request keeps its manual wording across retries
+            // unconditionally; only the automatic threshold requirement is
+            // bounded, so a non-compliant model cannot loop requests forever.
+            if !self.manual_compact_trailer_pending {
+                self.forced_compaction_refusals = self.forced_compaction_refusals.saturating_add(1);
             }
-            if let Some(response_trailer) = response_trailer {
+            if self.manual_compact_trailer_pending
+                || self.forced_compaction_refusals < MAX_CONSECUTIVE_FORCED_COMPACTION_REFUSALS
+            {
+                self.current_round = self.current_round.saturating_sub(1);
+                let mut prompt = self.render_prompt();
+                let (body, response_trailer) =
+                    prompt_render::split_formatted_response_trailer(&prompt);
+                prompt = body.trim_end().to_string();
                 prompt.push_str("\n\n");
-                prompt.push_str(&response_trailer);
+                if self.manual_compact_trailer_pending {
+                    prompt.push_str(prompt_render::MANUAL_CONTEXT_COMPRESS_TRAILER);
+                } else {
+                    prompt.push_str(prompt_render::CONTEXT_COMPRESS_REQUIRED_TRAILER);
+                }
+                if let Some(response_trailer) = response_trailer {
+                    prompt.push_str("\n\n");
+                    prompt.push_str(&response_trailer);
+                }
+                return CoreStep::NeedModel {
+                    prompt,
+                    rounds_remaining: self.remaining_rounds(),
+                };
             }
-            return CoreStep::NeedModel {
-                prompt,
-                rounds_remaining: self.remaining_rounds(),
-            };
+            // The model keeps refusing to run context_compress. Abandon the
+            // automatic requirement instead of looping model requests (and
+            // their cost) forever: honoring the response beats an unbounded
+            // forced-compaction loop. The Exhausted latch afterwards blocks
+            // only new automatic cycles; an explicit user compaction request
+            // stays allowed, so its pending state is dropped here.
+            self.forced_compaction_refusals = 0;
+            self.context_compress_required = false;
+            self.threshold_compaction_reasoning_required = false;
+            self.manual_compact_trailer_pending = false;
+            self.post_compaction_verification = None;
+            self.threshold_compaction_followup_state = ThresholdCompactionFollowupState::Exhausted;
+            self.submit_prompt_component(
+                PromptComponentRole::system(),
+                "forced_compaction_abandoned",
+                "The model did not run context_compress as required, so the automatic compression requirement was dropped. Keep context small during later work or request a manual compression.",
+                "turn_runtime",
+            );
         }
         if response.truncated && self.repair_attempts < MAX_PROTOCOL_REPAIR_ATTEMPTS {
             let instruction = protocol_suite
@@ -4265,6 +4312,7 @@ impl AgentCore {
             // be quantified reliably by the model, so depth guidance lives in
             // the compact trailers (discard stale deltas/tool noise, extract
             // a valuable short summary) rather than a numeric gate.
+            self.forced_compaction_refusals = 0;
             self.context_compress_required = threshold_followup_required;
             self.threshold_compaction_reasoning_required = threshold_followup_required;
             self.manual_compact_trailer_pending = false;

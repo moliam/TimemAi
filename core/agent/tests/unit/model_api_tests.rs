@@ -2679,3 +2679,41 @@ fn catalog_required_tool_choice_downgrades_to_auto_on_documented_rejections() {
             .body;
     assert_eq!(body["tool_choice"], json!("required"));
 }
+
+#[test]
+fn provider_usage_reasoning_tokens_are_normalized_and_missing_fields_are_safe() {
+    let cases = [
+        (
+            ApiProtocol::OpenAiCompatible,
+            json!({
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"completion_tokens": 12, "completion_tokens_details": {"reasoning_tokens": 7}}
+            }),
+        ),
+        (
+            ApiProtocol::OpenAiResponses,
+            json!({
+                "output_text": "ok",
+                "usage": {"input_tokens": 3, "output_tokens": 12, "output_tokens_details": {"reasoning_tokens": 7}}
+            }),
+        ),
+        (
+            ApiProtocol::Anthropic,
+            json!({
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {"input_tokens": 3, "output_tokens": 12, "thinking_tokens": 7}
+            }),
+        ),
+    ];
+    for (protocol, raw) in cases {
+        let response = parse_model_response(&config(protocol), &raw).unwrap();
+        assert_eq!(response.usage.reasoning_tokens, 7, "{protocol:?}");
+        assert_eq!(response.usage.completion_tokens, 12, "{protocol:?}");
+    }
+    let response = parse_model_response(
+        &config(ApiProtocol::OpenAiCompatible),
+        &json!({"choices": [{"message": {"content": "ok"}}], "custom_usage": {"opaque": true}}),
+    )
+    .unwrap();
+    assert_eq!(response.usage.reasoning_tokens, 0);
+}

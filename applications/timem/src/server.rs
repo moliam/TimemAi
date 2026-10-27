@@ -13983,12 +13983,28 @@ fn handle_scoped_worker_event(
                 json!({"kind":"reasoning_upgrade", "from":upgrade.from, "to":upgrade.to}),
             );
         }
-        CoreSessionWorkerEvent::ModelRequestCompleted { latency } => {
+        CoreSessionWorkerEvent::ModelRequestCompleted {
+            round,
+            latency,
+            ttft,
+        } => {
             if let Some(debug) = state.debug.as_ref() {
                 if let Err(error) = debug.record_llm_latency(session_id, worker_id, latency) {
                     eprintln!("[timem_web_debug_error] session_id={session_id:?} reason={error}");
                 }
             }
+            emit_worker_activity(
+                state,
+                session_id,
+                context_id,
+                worker_id,
+                json!({
+                    "kind": "model_request_completed",
+                    "round": round,
+                    "latency_ms": latency.as_millis(),
+                    "ttft_ms": ttft.map(|value| value.as_millis()),
+                }),
+            );
         }
         CoreSessionWorkerEvent::ModelResponseParsed { tool_count } => {
             if let Some(debug) = state.debug.as_ref() {

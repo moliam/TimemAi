@@ -10961,9 +10961,24 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
         &state,
         session_id,
         CoreSessionWorkerEvent::ModelRequestCompleted {
+            round: 1,
             latency: Duration::from_millis(425),
+            ttft: Some(Duration::from_millis(180)),
         },
     );
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[session_id];
+        let event = session
+            .turns
+            .last()
+            .and_then(|turn| turn.events.last())
+            .expect("model completion telemetry should be appended to the turn");
+        assert_eq!(event.payload["kind"], "model_request_completed");
+        assert_eq!(event.payload["round"], 1);
+        assert_eq!(event.payload["latency_ms"], 425);
+        assert_eq!(event.payload["ttft_ms"], 180);
+    }
     handle_worker_event(
         &state,
         session_id,

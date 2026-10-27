@@ -64,6 +64,8 @@ import {
   runtimeConnectionLabel,
   sessionCacheHitPercent,
   sessionCacheTokenTotals,
+  sessionModelTelemetry,
+  turnLatestModelTelemetry,
   sessionContextUsage,
   sessionContextCompressPending,
   sessionCreateDecision,
@@ -5077,5 +5079,40 @@ describe("streamProcessOutlineSections", () => {
 
   it("never invents a chapter from code-fence-only blocks", () => {
     expect(streamProcessOutlineSections(["```bash\nls\n```"])).toEqual([]);
+  });
+});
+
+describe("model response telemetry", () => {
+  const modelTurn = (): WebTurn => ({
+    ...turn("turn-model-telemetry"),
+    events: [
+      { event_id: "complete-2", source: "worker_activity", created_at_ms: 20, payload: { kind: "model_request_completed", round: 2, latency_ms: 4_000, ttft_ms: 1_000 } },
+      { event_id: "response-1", source: "worker_activity", created_at_ms: 10, payload: { kind: "model_response", round: 1, usage: { completion_tokens: 100, reasoning_tokens: 30 } } },
+      { event_id: "complete-1", source: "worker_activity", created_at_ms: 9, payload: { kind: "model_request_completed", round: 1, latency_ms: 2_000, ttft_ms: 0 } },
+      { event_id: "response-2", source: "worker_activity", created_at_ms: 21, payload: { kind: "model_response", round: 2, usage: { completion_tokens: 200, reasoning_tokens: 70 } } },
+    ],
+  });
+
+  it("pairs usage and timing by explicit round rather than arrival order", () => {
+    const value = modelTurn();
+    expect(turnLatestModelTelemetry(value, 1)).toEqual({ reasoningTokens: 30, latencyMs: 2_000, ttftMs: 0 });
+    expect(turnLatestModelTelemetry(value, 2)).toEqual({ reasoningTokens: 70, latencyMs: 4_000, ttftMs: 1_000 });
+  });
+
+  it("uses only model latency for speed and Welford population deviation for TTFT", () => {
+    const value = session("telemetry-session");
+    value.turns = [modelTurn()];
+    // Include an incomplete third response: it cannot contaminate the aggregates.
+    value.turns[0].events.push({ event_id: "response-3", source: "worker_activity", created_at_ms: 30, payload: { kind: "model_response", round: 3, usage: { completion_tokens: 999 } } });
+    expect(sessionModelTelemetry(value)).toEqual({ tokensPerSecond: 50, ttftMeanSeconds: 0.5, ttftStdDevSeconds: 0.5, samples: 2 });
+  });
+
+  it("degrades safely when provider usage or timing is absent", () => {
+    const value = modelTurn();
+    value.events = value.events.filter(event => event.event_id !== "complete-1" && event.event_id !== "complete-2");
+    expect(turnLatestModelTelemetry(value, 1)).toEqual({ reasoningTokens: 30, latencyMs: undefined, ttftMs: undefined });
+    const current = session("missing-telemetry");
+    current.turns = [value];
+    expect(sessionModelTelemetry(current)).toEqual({ samples: 0 });
   });
 });

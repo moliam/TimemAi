@@ -430,6 +430,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
     let mut reminders = TurnReminderSchedules::new(&turn_id, core.reminder_tips_config());
     let mut progress_reminder = TurnProgressReminder::default();
     let mut response_preview = TurnResponsePreview::default();
+    let mut last_round_for_preview: u32 = 0;
     // Consecutive model failures on the active endpoint within this Turn;
     // drives threshold-based failover while an ordered chain is available.
     let mut consecutive_endpoint_failures: u32 = 0;
@@ -636,6 +637,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
                 );
                 ui.on_reasoning_upgrade(reasoning_upgrade);
                 ui.on_model_api_request(rounds, &interaction_request, &api_payload);
+                last_round_for_preview = rounds;
                 let model_call = call_model_with_system_retries(
                     model_client,
                     config,
@@ -648,6 +650,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     &mut response_preview,
                     !failover.is_empty(),
                     &mut consecutive_endpoint_failures,
+                    rounds,
                 );
                 match model_call {
                     Ok(response) => {
@@ -1012,7 +1015,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
         // immediately instead of showing an empty answer area. An optimistically
         // streamed summary that already settled Final with the same text skips
         // the redundant replacement publish.
-        response_preview.begin();
+        response_preview.begin(last_round_for_preview);
         if response_preview
             .append(PublicTextTarget::Response, &outcome.text)
             .is_ok()
@@ -1187,6 +1190,7 @@ fn call_model_with_system_retries(
     preview: &mut TurnResponsePreview,
     failover_available: bool,
     consecutive_failures: &mut u32,
+    round: u32,
 ) -> Result<ModelCallOutcome<LlmResponse>, String> {
     let retry_policy = model_system_retry_policy();
     let mut total_model_wait = Duration::ZERO;
@@ -1195,7 +1199,7 @@ fn call_model_with_system_retries(
     let mut parallel_tool_control_omitted = false;
     for attempt in 0..=retry_policy.max_attempts {
         let model_wait_start = Instant::now();
-        preview.begin();
+        preview.begin(round);
         let mut json = JsonPublicTextStream::default();
         let mut xml = XmlPublicTextStream::default();
         let mut finish = NativeFinishSummaryStream::default();
@@ -1210,19 +1214,13 @@ fn call_model_with_system_retries(
                 if preview_error {
                     return;
                 }
-                let mut changed = false;
+                let mut changed = preview.observe_stream_event(event);
                 let mut append_error = false;
                 let mut emit = |target, text: &str| match preview.append(target, text) {
                     Ok(value) => changed |= value,
                     Err(_) => append_error = true,
                 };
-                let content = event
-                    .pointer("/choices/0/delta/content")
-                    .or_else(|| {
-                        (event["type"] == "response.output_text.delta").then(|| &event["delta"])
-                    })
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("");
+                let content = crate::model_stream::public_text_delta(event).unwrap_or("");
                 let parsed = if effective_request.is_native() {
                     emit(PublicTextTarget::Response, content);
                     // Optimistic finish: stream the task_finished summary out
@@ -1283,7 +1281,7 @@ fn call_model_with_system_retries(
         match result {
             Ok(response) => {
                 *consecutive_failures = 0;
-                ui.on_model_request_completed(model_wait);
+                ui.on_model_request_completed(round, model_wait, preview.ttft());
                 if let Some(profiler) = profiler.as_deref_mut() {
                     profiler.record_model_wait(&response.model_name, &response.usage, model_wait);
                 }

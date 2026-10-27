@@ -232,12 +232,12 @@ fn interrupted_projection_survives_retry_until_first_visible_text() {
     use agent_core::model_stream::{PublicTextTarget, TurnResponsePreview};
     let mut state = TurnResponsePreview::default();
     let mut ui = PreviewCapture::default();
-    state.begin();
+    state.begin(1);
     state
         .append(PublicTextTarget::Response, "partial response")
         .unwrap();
     state.interrupt("network_error");
-    state.begin();
+    state.begin(1);
     state.publish(&mut ui, "session", "turn");
     let snapshot = ui.0.last().unwrap();
     assert_eq!(snapshot["response"]["text"], "partial response");
@@ -369,4 +369,65 @@ fn finish_summary_stream_responses_api_events() {
         stream.push_event(&event, &mut |text| output.push_str(text));
     }
     assert_eq!(output, "response");
+}
+
+#[test]
+fn preview_streams_reasoning_telemetry_across_provider_shapes() {
+    use agent_core::model_stream::{PublicTextTarget, TurnResponsePreview};
+    let mut state = TurnResponsePreview::default();
+    let mut ui = PreviewCapture::default();
+    state.begin(2);
+    state.observe_stream_event(&serde_json::json!({
+        "choices": [{"delta": {"reasoning_content": "让我 think"}}]
+    }));
+    state.publish(&mut ui, "session", "turn");
+    let snapshot = ui.0.last().unwrap();
+    assert_eq!(snapshot["round"], 2);
+    assert_eq!(snapshot["stream_phase"], "thinking");
+    assert_eq!(
+        snapshot["thinking_words"], 3,
+        "two CJK chars + one latin word"
+    );
+    assert!(snapshot["ttft_ms"].is_u64());
+    // OpenAI Responses reasoning summary delta
+    state.observe_stream_event(&serde_json::json!({
+        "type": "response.reasoning_summary_text.delta", "delta": " next"
+    }));
+    // Anthropic thinking delta
+    state.observe_stream_event(&serde_json::json!({
+        "type": "content_block_delta",
+        "delta": {"type": "thinking_delta", "thinking": "进一步"}
+    }));
+    // usage reasoning tokens (OpenAI-style details)
+    state.observe_stream_event(&serde_json::json!({
+        "usage": {"completion_tokens_details": {"reasoning_tokens": 512}}
+    }));
+    state
+        .append(PublicTextTarget::Response, "final answer")
+        .unwrap();
+    state.publish(&mut ui, "session", "turn");
+    let snapshot = ui.0.last().unwrap();
+    assert_eq!(snapshot["stream_phase"], "responding");
+    assert_eq!(snapshot["reasoning_tokens"], 512);
+    assert_eq!(snapshot["thinking_words"], 7);
+}
+
+#[test]
+fn preview_unknown_event_shapes_are_ignored_safely() {
+    use agent_core::model_stream::{PublicTextTarget, TurnResponsePreview};
+    let mut state = TurnResponsePreview::default();
+    let mut ui = PreviewCapture::default();
+    state.begin(1);
+    assert!(!state.observe_stream_event(&serde_json::json!({
+        "type": "custom.vendor.event", "payload": {"opaque": true}
+    })));
+    state.observe_stream_event(&serde_json::json!({
+        "choices": [{"delta": {"content": "ok"}}]
+    }));
+    state.append(PublicTextTarget::Response, "ok").unwrap();
+    state.publish(&mut ui, "session", "turn");
+    let snapshot = ui.0.last().unwrap();
+    assert_eq!(snapshot["stream_phase"], "responding");
+    assert_eq!(snapshot["thinking_words"], 0);
+    assert!(snapshot["reasoning_tokens"].is_null());
 }

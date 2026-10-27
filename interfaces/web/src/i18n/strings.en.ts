@@ -309,6 +309,10 @@ export const en: Strings = {
     running: "running",
     waitingModel: "Waiting for model response",
     localWorking: "Working locally",
+    thinkingWords: "{count} words",
+    thinkingModel: "Model is thinking",
+    waitingNetwork: "Waiting for network recovery",
+
     runningWith: "running ({parts})",
     fgCount: "fg {count}",
     bgCount: "bg {count}",
@@ -772,6 +776,10 @@ export const en: Strings = {
     task: "Task",
     latest: "Latest",
     kvc: "KVC",
+    reasoning: "Thinking",
+    reasoningAria: "Thinking {count} Tokens",
+    speedTitle: "Output tokens (including reasoning) / model request time; local tool time excluded",
+    ttftTitle: "TTFT mean ~population standard deviation across {count} samples",
   },
   context: {
     reasoningUpgrade: "Reasoning boost (this call only): {from} → {to}",

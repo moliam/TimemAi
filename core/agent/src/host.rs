@@ -1947,7 +1947,13 @@ pub trait TurnUi {
     ) {
     }
 
-    fn on_model_request_completed(&mut self, _latency: Duration) {}
+    fn on_model_request_completed(
+        &mut self,
+        _round: u32,
+        _latency: Duration,
+        _ttft: Option<Duration>,
+    ) {
+    }
 
     fn on_model_response(&mut self, _round: u32, _usage: &UsageStats, _content: &str) {}
 

@@ -306,6 +306,10 @@ export const zh = {
     running: "运行中",
     waitingModel: "等待模型回复",
     localWorking: "本地工作中",
+    thinkingWords: "{count} words",
+    thinkingModel: "模型正在思考",
+    waitingNetwork: "等待网络恢复",
+
     runningWith: "运行中（{parts}）",
     fgCount: "前台 {count}",
     bgCount: "后台 {count}",
@@ -769,6 +773,10 @@ export const zh = {
     task: "Task",
     latest: "Latest",
     kvc: "KVC",
+    reasoning: "思考",
+    reasoningAria: "思考 {count} Tokens",
+    speedTitle: "输出 tokens（含 reasoning）÷ 模型请求耗时；不含本地工具时间",
+    ttftTitle: "TTFT 平均值 ~总体标准差，{count} 个有效样本",
   },
   context: {
     reasoningUpgrade: "(仅本次)推理加强: {from} → {to}",

@@ -7,6 +7,21 @@ const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
 const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 
 describe("header endpoint selector", () => {
+  it("keeps the host-confirmed failover endpoint after the turn settles", () => {
+    expect(source).toMatch(/activeSession\?\.runtime_profile\?\.active_model_endpoint_id\s+\?\? activeSession\?\.runtime_profile\?\.model_endpoint_id/);
+    expect(source).not.toMatch(/activeSession\?\.state === "working"\s+\? activeSession\.runtime_profile\?\.active_model_endpoint_id/);
+  });
+
+  it("replaces the context meter with model-only telemetry and puts MCP beside Timer", () => {
+    expect(source).not.toContain('className="header-context-meter"');
+    expect(source).toContain('className="header-model-speed"');
+    expect(source).toContain('className="header-ttft"');
+    expect(source).toContain('<Gauge size={12} strokeWidth={1.8}');
+    const actions = source.slice(source.indexOf('<div className="header-actions">'), source.indexOf('</header>'));
+    expect(actions.indexOf('ref={mcpButtonRef}')).toBeGreaterThan(0);
+    expect(actions.indexOf('ref={mcpButtonRef}')).toBeLessThan(actions.indexOf('ref={timersButtonRef}'));
+  });
+
   it("renders the endpoint name and folding control inside one button", () => {
     expect(source).toMatch(
       /className={`header-model[\s\S]*<span title={headerModelLabel}>{headerModelLabel}<\/span>[\s\S]*<ChevronDown/,

@@ -14,6 +14,7 @@ import {
   VersionedTurnProjection,
   WebTurn,
   WebTurnEvent,
+  UsageStats,
 } from "./protocol";
 import {
   humanizeToolStatus,
@@ -36,6 +37,7 @@ const USAGE_FIELDS = [
   "mem_writes",
   "prompt_tokens",
   "completion_tokens",
+  "reasoning_tokens",
   "total_tokens",
   "cached_tokens",
   "cache_created_tokens",
@@ -2181,6 +2183,107 @@ export function completionStopReasonText(reason: string): string {
   return key ? t(key) : trimmed;
 }
 
+export type SessionModelTelemetry = {
+  tokensPerSecond?: number;
+  ttftMeanSeconds?: number;
+  ttftStdDevSeconds?: number;
+  samples: number;
+};
+
+export type TurnModelTelemetry = {
+  reasoningTokens?: number;
+  ttftMs?: number;
+  latencyMs?: number;
+};
+
+function finitePayloadNumber(
+  payload: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const value = payload[key];
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+/** Pair timing and usage by their explicit Core round, never by event order. */
+export function turnLatestModelTelemetry(
+  turn: WebTurn,
+  round?: number,
+): TurnModelTelemetry | undefined {
+  for (let index = turn.events.length - 1; index >= 0; index -= 1) {
+    const event = turn.events[index];
+    if (event.source !== "worker_activity" || event.payload.kind !== "model_response") continue;
+    const usage = event.payload.usage;
+    if (!usage || typeof usage !== "object") continue;
+    const responseRound = finitePayloadNumber(event.payload, "round");
+    if (round !== undefined && responseRound !== round) continue;
+    const matchedRound = round ?? responseRound;
+    let latencyMs: number | undefined;
+    let ttftMs: number | undefined;
+    if (matchedRound !== undefined) {
+      for (const candidate of turn.events) {
+        if (candidate.source !== "worker_activity" ||
+            candidate.payload.kind !== "model_request_completed" ||
+            finitePayloadNumber(candidate.payload, "round") !== matchedRound) continue;
+        latencyMs = finitePayloadNumber(candidate.payload, "latency_ms");
+        ttftMs = finitePayloadNumber(candidate.payload, "ttft_ms");
+        break;
+      }
+    }
+    return {
+      reasoningTokens: finitePayloadNumber(usage as UsageStats, "reasoning_tokens"),
+      latencyMs,
+      ttftMs,
+    };
+  }
+  return undefined;
+}
+
+/** Streaming Welford aggregation over completed model requests only. */
+export function sessionModelTelemetry(session: Session): SessionModelTelemetry {
+  let completionTokens = 0;
+  let modelLatencyMs = 0;
+  let samples = 0;
+  let ttftMean = 0;
+  let ttftM2 = 0;
+  for (const turn of session.turns) {
+    for (const response of turn.events) {
+      if (response.source !== "worker_activity" || response.payload.kind !== "model_response") continue;
+      const round = finitePayloadNumber(response.payload, "round");
+      if (round === undefined) continue;
+      const usage = response.payload.usage;
+      if (!usage || typeof usage !== "object") continue;
+      const completed = turn.events.find((event) =>
+        event.source === "worker_activity" &&
+        event.payload.kind === "model_request_completed" &&
+        finitePayloadNumber(event.payload, "round") === round
+      );
+      if (!completed) continue;
+      const latencyMs = finitePayloadNumber(completed.payload, "latency_ms");
+      const outputTokens = finitePayloadNumber(usage as UsageStats, "completion_tokens");
+      if (latencyMs !== undefined && latencyMs > 0 && outputTokens !== undefined) {
+        completionTokens += outputTokens;
+        modelLatencyMs += latencyMs;
+      }
+      const ttftMs = finitePayloadNumber(completed.payload, "ttft_ms");
+      if (ttftMs !== undefined) {
+        samples += 1;
+        const seconds = ttftMs / 1000;
+        const delta = seconds - ttftMean;
+        ttftMean += delta / samples;
+        ttftM2 += delta * (seconds - ttftMean);
+      }
+    }
+  }
+  return {
+    tokensPerSecond: modelLatencyMs > 0 ? completionTokens * 1000 / modelLatencyMs : undefined,
+    ttftMeanSeconds: samples > 0 ? ttftMean : undefined,
+    ttftStdDevSeconds: samples > 0 ? Math.sqrt(ttftM2 / samples) : undefined,
+    samples,
+  };
+}
+
 export type ActiveModelRetryStatus = {
   kind:
     | "network-error"
@@ -2191,6 +2294,7 @@ export type ActiveModelRetryStatus = {
   label: string;
   progress?: string;
   detail: string;
+  startedAtMs?: number;
 };
 
 type ModelSystemRetryDisplay = Pick<
@@ -2300,7 +2404,13 @@ export function activeModelRetryStatus(
       ]
         .filter(Boolean)
         .join("\n\n");
-      status = { kind: display.kind, label: display.label, progress, detail };
+      status = {
+        kind: display.kind,
+        label: display.label,
+        progress,
+        detail,
+        startedAtMs: event.created_at_ms,
+      };
       continue;
     }
 

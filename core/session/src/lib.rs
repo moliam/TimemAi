@@ -304,7 +304,9 @@ pub enum CoreSessionWorkerEvent {
     },
     ReasoningUpgrade(agent_core::model_requirements::ReasoningUpgrade),
     ModelRequestCompleted {
+        round: u32,
         latency: Duration,
+        ttft: Option<Duration>,
     },
     ModelResponseParsed {
         tool_count: usize,
@@ -2780,10 +2782,19 @@ impl TurnUi for WorkerTurnUi {
         }
     }
 
-    fn on_model_request_completed(&mut self, latency: Duration) {
+    fn on_model_request_completed(
+        &mut self,
+        round: u32,
+        latency: Duration,
+        ttft: Option<Duration>,
+    ) {
         let _ = self
             .event_tx
-            .send(CoreSessionWorkerEvent::ModelRequestCompleted { latency });
+            .send(CoreSessionWorkerEvent::ModelRequestCompleted {
+                round,
+                latency,
+                ttft,
+            });
     }
 
     fn on_model_response_parsed(&mut self, tool_count: usize) {

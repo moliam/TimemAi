@@ -231,6 +231,7 @@ import {
   runtimeConnectionLabel,
   sessionCacheHitPercent,
   sessionCacheTokenTotals,
+  sessionModelTelemetry,
   sessionCancellationApplies,
   shouldRenderTurnWorkFrame,
   sessionContextUsage,
@@ -251,6 +252,7 @@ import {
   turnHistoryHydrationOrder,
   turnWorkPhaseBoundary,
   turnLiveUsage,
+  turnLatestModelTelemetry,
   timelineEventsSignature,
   timelineOutlineShapeKey,
   turnShouldRenderInTimeline,
@@ -3551,9 +3553,8 @@ function TimemApp() {
       : t("nav.settingsOpen");
   const modelEndpointsUnavailable =
     !!server && server.model_endpoints.length === 0;
-  const activeEndpointId = activeSession?.state === "working"
-    ? activeSession.runtime_profile?.active_model_endpoint_id
-    : activeSession?.runtime_profile?.model_endpoint_id;
+  const activeEndpointId = activeSession?.runtime_profile?.active_model_endpoint_id
+    ?? activeSession?.runtime_profile?.model_endpoint_id;
   const headerModelLabel = activeEndpointId
     ? (server?.model_endpoints ?? []).find((endpoint) => endpoint.id === activeEndpointId)?.name
       ?? t("modelService.endpointDeleted")
@@ -4823,40 +4824,6 @@ function TimemApp() {
                     : null
                 }
               />
-              <button
-                type="button"
-                ref={mcpButtonRef}
-                title={mcpLabel}
-                aria-label={mcpLabel}
-                className={`icon-button mcp-button ${connectedMcpCount > 0 ? "enabled" : ""} ${failedMcpCount > 0 ? "has-failures" : ""} ${showMcp ? "selected" : ""}`}
-                aria-expanded={showMcp}
-                aria-controls="mcp-panel"
-                onClick={() => {
-                  setShowAppearance(false);
-                  setShowRuntime(false);
-                  setShowToolRepo(false);
-                  if (showMcp) closeMcpPanel();
-                  else setShowMcp(true);
-                }}
-              >
-                <span className="mcp-button-stack" aria-hidden="true">
-                  <span className="mcp-button-label">MCP</span>
-                  <Plug size={11} />
-                </span>
-                {connectedMcpCount > 0 && (
-                  <span
-                    className="mcp-count mcp-count-connected"
-                    aria-hidden="true"
-                  >
-                    {connectedMcpCount}
-                  </span>
-                )}
-                {failedMcpCount > 0 && (
-                  <span className="mcp-failure-indicator" aria-hidden="true">
-                    <TriangleAlert size={9} />
-                  </span>
-                )}
-              </button>
             </div>
             <div className="header-session-cluster">
               <div className="header-session-model-row">
@@ -4990,6 +4957,40 @@ function TimemApp() {
                   </span>
                 </button>
               )}
+              <button
+                type="button"
+                ref={mcpButtonRef}
+                title={mcpLabel}
+                aria-label={mcpLabel}
+                className={`icon-button mcp-button ${connectedMcpCount > 0 ? "enabled" : ""} ${failedMcpCount > 0 ? "has-failures" : ""} ${showMcp ? "selected" : ""}`}
+                aria-expanded={showMcp}
+                aria-controls="mcp-panel"
+                onClick={() => {
+                  setShowAppearance(false);
+                  setShowRuntime(false);
+                  setShowToolRepo(false);
+                  if (showMcp) closeMcpPanel();
+                  else setShowMcp(true);
+                }}
+              >
+                <span className="mcp-button-stack" aria-hidden="true">
+                  <span className="mcp-button-label">MCP</span>
+                  <Plug size={11} />
+                </span>
+                {connectedMcpCount > 0 && (
+                  <span
+                    className="mcp-count mcp-count-connected"
+                    aria-hidden="true"
+                  >
+                    {connectedMcpCount}
+                  </span>
+                )}
+                {failedMcpCount > 0 && (
+                  <span className="mcp-failure-indicator" aria-hidden="true">
+                    <TriangleAlert size={9} />
+                  </span>
+                )}
+              </button>
               <button
                 type="button"
                 ref={timersButtonRef}
@@ -12009,6 +12010,10 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
     JSON.stringify(a.run_bash_edit) === JSON.stringify(b.run_bash_edit);
 });
 
+function modelPhaseForStream(waitingModel: boolean, status?: string): boolean {
+  return waitingModel || status === "streaming";
+}
+
 function TurnAnswerDelivery({
   streamRetained,
   workExpanded,
@@ -12056,7 +12061,12 @@ function TurnAnswerDelivery({
     (streamWorking && intermediate ? preview?.response?.text ?? "" : "");
   const hasPreview = !!previewText;
   const hasFinal = !!turn.final_answer;
-  const modelPhase = waitingModel || preview?.response?.status === "streaming";
+  const responseTelemetry = turnLatestModelTelemetry(turn, preview?.round);
+  const reasoningTokens = responseTelemetry?.reasoningTokens ?? preview?.reasoning_tokens ?? 0;
+  const isThinking = modelPhaseForStream(waitingModel, preview?.response?.status) &&
+    preview?.stream_phase === "thinking";
+  const isWaiting = !!modelRetryStatus && waitingModel && !preview?.stream_phase;
+  const modelPhase = modelPhaseForStream(waitingModel, preview?.response?.status);
   const phase = modelPhase ? "model" : "local";
   const phaseBoundary = turnWorkPhaseBoundary(turn, phase);
   const phaseStartedAt = useMemo(
@@ -12091,6 +12101,14 @@ function TurnAnswerDelivery({
         />
       </StreamProcess>}
       {hasPreview && preview?.interruption && <div className="response-preview-interruption" role="status">{preview.interruption === "cancelled" ? t("interim.previewStopped") : preview.interruption === "network_error" ? t("interim.previewNetworkError") : t("interim.previewModelError")}</div>}
+      {(hasFinal || !!previewText) && reasoningTokens > 0 && (
+        <div className="answer-reasoning-usage" aria-label={t("usage.reasoningAria", { count: reasoningTokens })}>
+          <span aria-hidden="true">&lt;+</span>
+          <span>{t("usage.reasoning")}</span>
+          <span className="answer-reasoning-count">{reasoningTokens} Tokens</span>
+          <span aria-hidden="true">&gt;</span>
+        </div>
+      )}
       {(hasFinal || !!previewText) && (
         <FinalAnswerDelivery
           text={turn.final_answer || previewText}
@@ -12116,22 +12134,46 @@ function TurnAnswerDelivery({
         <div
           className={`stream-working-trailer${modelPhase ? " model-waiting" : " tool-active"}`}
           role="status"
-          title={modelPhase ? t("tools.waitingModel") : t("tools.localWorking")}
-          aria-label={modelPhase ? t("tools.waitingModel") : t("tools.localWorking")}
+          title={isWaiting ? t("tools.waitingNetwork") : isThinking ? t("tools.thinkingModel") : modelPhase ? t("tools.waitingModel") : t("tools.localWorking")}
+          aria-label={isWaiting ? t("tools.waitingNetwork") : isThinking ? t("tools.thinkingModel") : modelPhase ? t("tools.waitingModel") : t("tools.localWorking")}
         >
-          <span className="stream-working-current">
+          <span className={`stream-working-current${isWaiting ? " is-waiting" : isThinking ? " is-thinking" : ""}`}>
             {modelPhase ? (
               <span className="stream-working-star" aria-hidden="true">✦</span>
             ) : (
               <Wrench className="stream-working-wrench" size={13} strokeWidth={1.65} aria-hidden="true" />
             )}
-            <WorkingElapsed
-              key={phaseTimerKey}
-              createdAtMs={phaseStartedAt}
-              hideBeforeMs={1_000}
-              liveFormat
-              className="stream-working-phase-elapsed"
-            />
+            {isWaiting ? (
+              <span className="stream-working-detail">
+                <span>waiting</span>
+                <WorkingElapsed
+                  key={`waiting:${modelRetryStatus?.startedAtMs ?? phaseStartedAt}`}
+                  createdAtMs={modelRetryStatus?.startedAtMs ?? phaseStartedAt}
+                  hideBeforeMs={0}
+                  liveFormat
+                  className="stream-working-phase-elapsed"
+                />
+              </span>
+            ) : isThinking ? (
+              <span className="stream-working-detail">
+                <span>thinking</span>
+                <strong>{t("tools.thinkingWords", { count: preview?.thinking_words ?? 0 })}</strong>
+                <WorkingElapsed
+                  createdAtMs={Date.now() - (preview?.thinking_elapsed_ms ?? 0)}
+                  hideBeforeMs={0}
+                  liveFormat
+                  className="stream-working-phase-elapsed"
+                />
+              </span>
+            ) : (
+              <WorkingElapsed
+                key={phaseTimerKey}
+                createdAtMs={phaseStartedAt}
+                hideBeforeMs={1_000}
+                liveFormat
+                className="stream-working-phase-elapsed"
+              />
+            )}
           </span>
           <span className="stream-working-total" aria-hidden="true">
             <Clock8 size={12} />
@@ -12878,6 +12920,15 @@ function HeaderContextUsage({
     : `${cachePercentLabel}, input: ${cacheInputLabel}, output: ${cacheOutputLabel}`;
   const cacheRateBasis =
     "Cache rate excludes the first model request after a detected runtime restart; input/output totals still include it.";
+  const telemetry = session ? sessionModelTelemetry(session) : undefined;
+  const speedLabel = telemetry?.tokensPerSecond === undefined
+    ? "—"
+    : telemetry.tokensPerSecond < 10
+      ? telemetry.tokensPerSecond.toFixed(1)
+      : Math.round(telemetry.tokensPerSecond).toLocaleString();
+  const ttftLabel = telemetry?.ttftMeanSeconds === undefined
+    ? "—"
+    : `${telemetry.ttftMeanSeconds.toFixed(2)} ~${(telemetry.ttftStdDevSeconds ?? 0).toFixed(2)} sec`;
   const contextUsageLabel = limit
     ? `Context usage ${ratio}% · ${formatTokens(usage?.prompt_tokens ?? 0)} / ${formatTokens(limit)} input tokens · ${cacheLabel}. ${cacheRateBasis}`
     : `Context usage waiting for runtime usage · ${cacheLabel}. ${cacheRateBasis}`;
@@ -12889,10 +12940,16 @@ function HeaderContextUsage({
     >
       <span className="header-context-main">
         <span aria-hidden="true">· ctx</span>
-        <span className="header-context-meter" aria-hidden="true">
-          <span style={{ width: `${ratio}%` }} />
-        </span>
         <span>{limit ? `${ratio}%/${formatTokens(limit)}` : "—"}</span>
+        <span className="header-model-speed" title={t("usage.speedTitle")}>
+          <Gauge size={12} strokeWidth={1.8} aria-hidden="true" />
+          <span>{speedLabel}</span>
+          <span className="header-telemetry-unit">Tokens/sec</span>
+        </span>
+        <span className="header-ttft" title={t("usage.ttftTitle", { count: telemetry?.samples ?? 0 })}>
+          <span>TTFT</span>
+          <span>{ttftLabel}</span>
+        </span>
         {(onClear || onCompact) && (
           <span className="context-actions-menu" ref={menuRef}>
             <button
@@ -13433,6 +13490,7 @@ function activityFromTurnEvent(
   if (
     kind === "model_request" ||
     kind === "model_response" ||
+    kind === "model_request_completed" ||
     kind === "model_retry"
   )
     return null;

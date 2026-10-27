@@ -159,7 +159,7 @@ describe("splitMarkdownBlocks incremental stability", () => {
     expect(mainSource).toContain('const phaseTimerKey = `${phase}:${phaseBoundary.id}`');
     expect(mainSource).toContain('key={phaseTimerKey}');
     expect(mainSource).toContain('hideBeforeMs={1_000}');
-    expect(mainSource).toContain('className="stream-working-current"');
+    expect(mainSource).toMatch(/className=\{`stream-working-current\$\{isWaiting/);
     expect(mainSource).toContain('className="stream-working-total"');
     expect(mainSource).toContain('<Clock8 size={12} />');
     expect(mainSource).toContain('createdAtMs={turn.created_at_ms} liveFormat className="stream-working-turn-elapsed"');
