@@ -7530,3 +7530,157 @@ fn explicit_parallel_enabled_does_not_silently_downgrade() {
     assert!(config.interaction.persisted_capability_probe.is_none());
     let _ = fs::remove_dir_all(dir);
 }
+
+/// Fake client that answers the primary endpoint with HTTP 429 and the
+/// failover endpoint with a normal JSON final answer.
+struct RateLimitFailoverModel {
+    limited_model: String,
+    healthy_model: String,
+    calls: Vec<String>,
+}
+
+impl ModelClient for RateLimitFailoverModel {
+    fn call_model(
+        &mut self,
+        config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.calls.push(config.model.clone());
+        if config.model == self.limited_model {
+            Err("model_http_429: rate limit exceeded".to_string())
+        } else if config.model == self.healthy_model {
+            Ok(llm(
+                r#"{"status":"ALL_FINISHED","final_answer":"failover answer"}"#,
+                1_000,
+                false,
+            ))
+        } else {
+            Err("model_http_500: unexpected endpoint".to_string())
+        }
+    }
+}
+
+struct RateLimitEverywhereModel {
+    calls: usize,
+}
+
+impl ModelClient for RateLimitEverywhereModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.calls += 1;
+        Err("model_http_429: rate limit exceeded".to_string())
+    }
+}
+
+#[test]
+fn rate_limited_endpoint_switches_to_failover_chain_and_finishes() {
+    let dir = tmp_dir("failover_switch");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    config.model = "endpoint-a".to_string();
+    let mut backup = test_config();
+    backup.model = "endpoint-b".to_string();
+    backup.interaction.model_endpoint_id = Some("endpoint-b-id".to_string());
+    let mut model = RateLimitFailoverModel {
+        limited_model: "endpoint-a".to_string(),
+        healthy_model: "endpoint-b".to_string(),
+        calls: Vec::new(),
+    };
+    let mut ui = RetryRecordingUi::default();
+    let mut failover = vec![backup];
+
+    let outcome = run_session_turn_with_model_client_and_failover(
+        &mut core,
+        &mut config,
+        &mut failover,
+        TurnInput {
+            input: "run the task",
+            session: "failover_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "failover answer");
+    // Rate-limit quota windows recover on hour scales: the endpoint backs off
+    // in place below the threshold, then hands over after three strikes.
+    assert_eq!(
+        model.calls,
+        vec!["endpoint-a", "endpoint-a", "endpoint-a", "endpoint-b"]
+    );
+    assert!(
+        failover.is_empty(),
+        "the failover entry must be consumed by the switch"
+    );
+    assert_eq!(config.model, "endpoint-b");
+    assert_eq!(
+        ui.retries.len(),
+        2,
+        "rate-limit failover must trigger after exactly three consecutive strikes: {:?}",
+        ui.retries
+    );
+    let switching = ui
+        .events
+        .iter()
+        .find(|event| event.topic.name == crate::CORE_TOPIC_MODEL_ENDPOINT_FAILOVER)
+        .expect("failover topic event must be published");
+    assert_eq!(switching.payload["phase"], "switching");
+    assert_eq!(switching.payload["model"], "endpoint-a");
+    let switched = ui
+        .events
+        .iter()
+        .filter(|event| event.topic.name == crate::CORE_TOPIC_MODEL_ENDPOINT_FAILOVER)
+        .nth(1)
+        .expect("the committed failover route must be published");
+    assert_eq!(switched.payload["phase"], "switched");
+    assert_eq!(switched.payload["endpoint_id"], "endpoint-b-id");
+    assert_eq!(switched.payload["model"], "endpoint-b");
+}
+
+#[test]
+fn exhausted_failover_chain_surfaces_model_error() {
+    let dir = tmp_dir("failover_exhausted");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    config.model = "endpoint-a".to_string();
+    let mut backup = test_config();
+    backup.model = "endpoint-b".to_string();
+    let mut model = RateLimitEverywhereModel { calls: 0 };
+    let mut ui = RetryRecordingUi::default();
+
+    let outcome = run_session_turn_with_model_client_and_failover(
+        &mut core,
+        &mut config,
+        &mut vec![backup],
+        TurnInput {
+            input: "run the task",
+            session: "failover_exhausted_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.stop_reason, Some(TurnStopReason::ModelError));
+    assert!(model.calls >= 2, "primary and failover must both be tried");
+}

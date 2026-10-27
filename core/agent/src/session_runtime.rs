@@ -4,14 +4,15 @@ use crate::model_stream::{
 };
 use crate::turn_state::{allocate_turn_token, TurnProjectionState};
 use crate::{
-    append_audit_event, is_model_input_too_large_error, model_input_overflow_recovery_audit_event,
-    model_retry_audit_event, model_retry_decision, normalize_user_supplements_with_context,
-    ActionRuntime, AgentCore, CoreStep, CoreTopicEvent, HostDecisionRequest, HttpModelClient,
-    LlmResponse, LongRunningCommandDecision, LongRunningCommandStatus, ModelCallOutcome,
-    ModelInteractionRequest, ModelServiceConfig, ModelSystemRetryPolicy, PromptComponentRole,
-    RoundLimitDecisionRequest, RoundLimitResolution, RuntimeProfiler, StoppedTurn, TurnActivity,
-    TurnInput, TurnOutcome, TurnProjection, TurnProjectionOutcome, TurnStopReason, TurnStopSummary,
-    TurnUi, UsageStats, UserSupplement,
+    append_audit_event, is_model_input_too_large_error, is_retryable_model_system_error,
+    model_failover_failure_threshold, model_failover_strike_delay,
+    model_input_overflow_recovery_audit_event, model_retry_audit_event, model_retry_decision,
+    normalize_user_supplements_with_context, ActionRuntime, AgentCore, CoreStep, CoreTopicEvent,
+    HostDecisionRequest, HttpModelClient, LlmResponse, LongRunningCommandDecision,
+    LongRunningCommandStatus, ModelCallOutcome, ModelInteractionRequest, ModelServiceConfig,
+    ModelSystemRetryPolicy, PromptComponentRole, RoundLimitDecisionRequest, RoundLimitResolution,
+    RuntimeProfiler, StoppedTurn, TurnActivity, TurnInput, TurnOutcome, TurnProjection,
+    TurnProjectionOutcome, TurnStopReason, TurnStopSummary, TurnUi, UsageStats, UserSupplement,
 };
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash, Hasher};
@@ -246,6 +247,29 @@ pub fn run_direct_resume_turn_with_model_client(
         model_client,
         None,
         true,
+        &mut Vec::new(),
+    )
+}
+
+pub fn run_direct_resume_turn_with_model_client_and_failover(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    failover: &mut Vec<ModelServiceConfig>,
+    request: TurnInput<'_>,
+    ui: &mut dyn TurnUi,
+    profiler: Option<&mut RuntimeProfiler>,
+    model_client: &mut dyn ModelClient,
+) -> TurnOutcome {
+    run_session_turn_with_model_client_and_reminder_override(
+        core,
+        config,
+        request,
+        ui,
+        profiler,
+        model_client,
+        None,
+        true,
+        failover,
     )
 }
 
@@ -266,6 +290,29 @@ pub fn run_session_turn_with_model_client(
         model_client,
         None,
         false,
+        &mut Vec::new(),
+    )
+}
+
+pub fn run_session_turn_with_model_client_and_failover(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    failover: &mut Vec<ModelServiceConfig>,
+    request: TurnInput<'_>,
+    ui: &mut dyn TurnUi,
+    profiler: Option<&mut RuntimeProfiler>,
+    model_client: &mut dyn ModelClient,
+) -> TurnOutcome {
+    run_session_turn_with_model_client_and_reminder_override(
+        core,
+        config,
+        request,
+        ui,
+        profiler,
+        model_client,
+        None,
+        false,
+        failover,
     )
 }
 
@@ -288,6 +335,7 @@ fn run_session_turn_with_model_client_and_focus_interval(
         model_client,
         Some(focus_reminder_interval),
         false,
+        &mut Vec::new(),
     )
 }
 
@@ -372,6 +420,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
     model_client: &mut dyn ModelClient,
     focus_reminder_interval: Option<Duration>,
     direct_resume: bool,
+    failover: &mut Vec<ModelServiceConfig>,
 ) -> TurnOutcome {
     core.set_response_protocol(config.response_protocol);
     let turn_token = allocate_turn_token(request.session, epoch_millis());
@@ -381,6 +430,9 @@ fn run_session_turn_with_model_client_and_reminder_override(
     let mut reminders = TurnReminderSchedules::new(&turn_id, core.reminder_tips_config());
     let mut progress_reminder = TurnProgressReminder::default();
     let mut response_preview = TurnResponsePreview::default();
+    // Consecutive model failures on the active endpoint within this Turn;
+    // drives threshold-based failover while an ordered chain is available.
+    let mut consecutive_endpoint_failures: u32 = 0;
     if let Some(interval) = focus_reminder_interval {
         reminders.override_first_time_interval(interval);
     }
@@ -444,7 +496,11 @@ fn run_session_turn_with_model_client_and_reminder_override(
         }
         match step {
             CoreStep::NeedModel { ref prompt, .. } => {
-                if ui.apply_pending_runtime_updates(core, config) {
+                let route_changed = ui.apply_pending_model_service_route(core, config, failover);
+                if route_changed {
+                    consecutive_endpoint_failures = 0;
+                }
+                if route_changed || ui.apply_pending_runtime_updates(core, config) {
                     core.set_response_protocol(config.response_protocol);
                     profile = negotiate_interaction_for_turn(
                         model_client,
@@ -590,6 +646,8 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     request.session,
                     &turn_id,
                     &mut response_preview,
+                    !failover.is_empty(),
+                    &mut consecutive_endpoint_failures,
                 );
                 match model_call {
                     Ok(response) => {
@@ -703,6 +761,55 @@ fn run_session_turn_with_model_client_and_reminder_override(
                         );
                         if take_cancel_request(ui, &mut turn_projection) {
                             break cancelled_turn_parts();
+                        }
+                        // A failing endpoint must not burn unbounded backoff
+                        // when an ordered failover chain is available: once the
+                        // consecutive-failure threshold is reached (tight for
+                        // rate-limit quota windows, looser for transient system
+                        // errors), switch and retry this round on the next
+                        // endpoint.
+                        if !failover.is_empty() && is_retryable_model_system_error(&err) {
+                            ui.on_core_topic_events(&[
+                                crate::host::model_endpoint_failover_topic_event(
+                                    request.session,
+                                    "switching",
+                                    config.interaction.model_endpoint_id.as_deref(),
+                                    Some(config.model.as_str()),
+                                    Some(config.base_url.as_str()),
+                                    Some(&err),
+                                ),
+                            ]);
+                            *config = failover.remove(0);
+                            consecutive_endpoint_failures = 0;
+                            ui.on_core_topic_events(&[
+                                crate::host::model_endpoint_failover_topic_event(
+                                    request.session,
+                                    "switched",
+                                    config.interaction.model_endpoint_id.as_deref(),
+                                    Some(config.model.as_str()),
+                                    Some(config.base_url.as_str()),
+                                    None,
+                                ),
+                            ]);
+                            core.set_response_protocol(config.response_protocol);
+                            core.set_max_llm_input_tokens(config.max_llm_input_tokens);
+                            profile = negotiate_interaction_for_turn(
+                                model_client,
+                                config,
+                                request.audit_file,
+                                ui,
+                                request.session,
+                                false,
+                            )
+                            .profile;
+                            core.set_interaction_profile(&profile);
+                            ui.on_interaction_profile(&profile);
+                            rounds = rounds.saturating_sub(1);
+                            step = CoreStep::NeedModel {
+                                prompt: core.build_next_prompt(),
+                                rounds_remaining: core.remaining_rounds(),
+                            };
+                            continue;
                         }
                         if is_model_input_too_large_error(&err) {
                             if let Some(recovery) = core.recover_from_model_input_too_large(&err) {
@@ -1078,6 +1185,8 @@ fn call_model_with_system_retries(
     session: &str,
     turn_id: &str,
     preview: &mut TurnResponsePreview,
+    failover_available: bool,
+    consecutive_failures: &mut u32,
 ) -> Result<ModelCallOutcome<LlmResponse>, String> {
     let retry_policy = model_system_retry_policy();
     let mut total_model_wait = Duration::ZERO;
@@ -1173,6 +1282,7 @@ fn call_model_with_system_retries(
         total_model_wait = total_model_wait.saturating_add(model_wait);
         match result {
             Ok(response) => {
+                *consecutive_failures = 0;
                 ui.on_model_request_completed(model_wait);
                 if let Some(profiler) = profiler.as_deref_mut() {
                     profiler.record_model_wait(&response.model_name, &response.usage, model_wait);
@@ -1200,6 +1310,39 @@ fn call_model_with_system_retries(
                 }
                 if let Some(profiler) = profiler.as_deref_mut() {
                     profiler.record_model_wait(&config.model, &UsageStats::zero(), model_wait);
+                }
+                if failover_available && is_retryable_model_system_error(&err) {
+                    // Threshold failover: rate-limit errors switch after a few
+                    // consecutive strikes (hour-scale quota windows); other
+                    // retryable system errors after a longer run. Between
+                    // strikes the endpoint waits only the short strike cadence,
+                    // and a single-endpoint chain keeps the full retry policy.
+                    *consecutive_failures = consecutive_failures.saturating_add(1);
+                    let threshold = model_failover_failure_threshold(&err);
+                    if *consecutive_failures >= threshold {
+                        // Hand the raw error to the caller so the ordered
+                        // endpoint failover chain can take over.
+                        return Err(err);
+                    }
+                    let strike_delay = model_failover_strike_delay(&err);
+                    ui.on_model_retry(*consecutive_failures, threshold, strike_delay, &err);
+                    let _ = append_audit_event(
+                        audit_file,
+                        &model_retry_audit_event(
+                            session,
+                            turn_id,
+                            *consecutive_failures,
+                            threshold,
+                            strike_delay,
+                            &err,
+                        ),
+                    );
+                    let waited = wait_retry_delay(ui, strike_delay);
+                    total_retry_wait = total_retry_wait.saturating_add(waited);
+                    if ui.is_cancel_requested() {
+                        return Err("cancelled_by_user".to_string());
+                    }
+                    continue;
                 }
                 let Some(decision) =
                     model_retry_decision(&err, attempt, retry_policy, ui.is_cancel_requested())

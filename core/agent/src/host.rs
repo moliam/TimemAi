@@ -378,6 +378,7 @@ pub struct CoreTopicEvent {
 pub const CORE_TOPIC_MODEL_RESPONSE: &str = "core.model.response";
 pub const CORE_TOPIC_MODEL_REPAIR: &str = "core.model.repair";
 pub const CORE_TOPIC_MODEL_CAPABILITY_NEGOTIATION: &str = "core.model.capability_negotiation";
+pub const CORE_TOPIC_MODEL_ENDPOINT_FAILOVER: &str = "core.model.endpoint_failover";
 pub const CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP: &str = "core.runtime_root_repair_help";
 pub const CORE_TOPIC_ACTION: &str = "core.action";
 pub const CORE_TOPIC_CONTEXT_COMPRESS: &str = "core.context.compress";
@@ -798,6 +799,34 @@ pub fn capability_negotiation_topic_event(
             "identity": identity,
             "profile": profile,
             "reason": reason,
+        }),
+    )
+}
+
+pub fn model_endpoint_failover_topic_event(
+    session_id: impl Into<String>,
+    phase: &str,
+    endpoint_id: Option<&str>,
+    model_name: Option<&str>,
+    base_url: Option<&str>,
+    error: Option<&str>,
+) -> CoreTopicEvent {
+    CoreTopicEvent::new(
+        session_id,
+        CoreTopic::new(
+            CORE_TOPIC_MODEL_ENDPOINT_FAILOVER,
+            json!({
+                "name": CORE_TOPIC_MODEL_ENDPOINT_FAILOVER,
+                "phase": phase,
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "phase": phase,
+            "endpoint_id": endpoint_id,
+            "model": model_name,
+            "base_url": base_url,
+            "error": error,
         }),
     )
 }
@@ -1861,6 +1890,19 @@ pub trait TurnUi {
     /// turn and the host can resubmit the late input as a distinct follow-up.
     fn continue_supplements_after_final_answer(&self) -> bool {
         true
+    }
+
+    /// Takes the newest complete model-route snapshot, if the Host changed it
+    /// while this Turn was running. Core polls this immediately before each
+    /// model API dispatch so an in-flight request is left alone while the next
+    /// request best-effort uses the new active endpoint and failover chain.
+    fn apply_pending_model_service_route(
+        &mut self,
+        _core: &mut crate::AgentCore,
+        _config: &mut crate::ModelServiceConfig,
+        _failover: &mut Vec<crate::ModelServiceConfig>,
+    ) -> bool {
+        false
     }
 
     fn apply_pending_runtime_updates(

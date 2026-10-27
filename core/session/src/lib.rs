@@ -2,7 +2,8 @@ pub mod message_queue;
 
 use agent_core::{
     core_initialized_topic_event_with_worker, run_direct_resume_turn_with_model_client,
-    run_session_turn_with_model_client, AgentCore, CoreGlobalWorkerStatus,
+    run_direct_resume_turn_with_model_client_and_failover, run_session_turn_with_model_client,
+    run_session_turn_with_model_client_and_failover, AgentCore, CoreGlobalWorkerStatus,
     CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopicEvent, HostDecision,
     HostDecisionRequest, HttpModelClient, ModelClient, ModelServiceConfig, ResponseProtocolKind,
     RuntimeProfiler, TopicReply, TurnInput, TurnOutcome, TurnStopDetail, TurnStopSummary, TurnUi,
@@ -376,10 +377,7 @@ enum CoreSessionWorkerCommand {
     UpdateModelHttpTransport {
         options: agent_core::ModelHttpTransportOptions,
     },
-    ReplaceModelServiceConfig {
-        config: Box<ModelServiceConfig>,
-        result_tx: Sender<Result<(), String>>,
-    },
+    ModelServiceRouteUpdated,
     UpdateMcp {
         base_capabilities: agent_core::capability::CapabilityRegistry,
         runtime: agent_core::mcp::McpRuntime,
@@ -464,6 +462,10 @@ enum PendingRuntimeUpdate {
     ClaudeCodexToolDiscovery(bool),
     ModelToolResultBytes(usize),
     ContextCompressThresholdPercent(u8),
+    ModelServiceRoute {
+        config: Box<ModelServiceConfig>,
+        failover: Vec<ModelServiceConfig>,
+    },
 }
 
 const CORE_COMMAND_ID_CAPACITY: usize = 1_024;
@@ -1174,19 +1176,28 @@ impl CoreSessionWorkerHandle {
     /// command. The response channel is a barrier: after this returns, every
     /// subsequently queued turn observes the new snapshot.
     pub fn replace_model_service_config(&self, config: ModelServiceConfig) -> Result<(), String> {
+        self.replace_model_service_config_with_failover(config, Vec::new())
+    }
+
+    /// Replaces the active model-service configuration together with its
+    /// ordered failover chain. A running Turn consumes the newest complete
+    /// snapshot immediately before its next model API request; an in-flight
+    /// request is never interrupted.
+    pub fn replace_model_service_config_with_failover(
+        &self,
+        config: ModelServiceConfig,
+        failover: Vec<ModelServiceConfig>,
+    ) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
         }
-        let (result_tx, result_rx) = mpsc::channel();
-        self.command_tx
-            .send(CoreSessionWorkerCommand::ReplaceModelServiceConfig {
+        self.enqueue_runtime_update(
+            PendingRuntimeUpdate::ModelServiceRoute {
                 config: Box::new(config),
-                result_tx,
-            })
-            .map_err(|_| "core_session_worker_stopped".to_string())?;
-        result_rx
-            .recv()
-            .map_err(|_| "core_session_worker_stopped".to_string())?
+                failover,
+            },
+            CoreSessionWorkerCommand::ModelServiceRouteUpdated,
+        )
     }
 
     pub fn update_mcp(
@@ -1806,6 +1817,9 @@ impl CoreSessionWorker {
                 let _ = exit_event_tx.send(CoreSessionWorkerEvent::Topics(vec![event]));
             });
 
+            // Ordered failover chain snapshot; replaced with each
+            // ReplaceModelServiceConfig command at a turn boundary.
+            let mut model_service_failover: Vec<ModelServiceConfig> = Vec::new();
             let mut has_running_shell_jobs = false;
             loop {
                 let command = if has_running_shell_jobs {
@@ -1843,7 +1857,7 @@ impl CoreSessionWorker {
                     | CoreSessionWorkerCommand::UpdateHttpHeaders { .. }
                     | CoreSessionWorkerCommand::UpdateRequestFields { .. }
                     | CoreSessionWorkerCommand::UpdateModelHttpTransport { .. }
-                    | CoreSessionWorkerCommand::ReplaceModelServiceConfig { .. }
+                    | CoreSessionWorkerCommand::ModelServiceRouteUpdated
                     | CoreSessionWorkerCommand::UpdateMcp { .. }
                     | CoreSessionWorkerCommand::ExportContext { .. }
                     | CoreSessionWorkerCommand::ClearContext
@@ -1905,27 +1919,49 @@ impl CoreSessionWorker {
                             });
                             ui.current_turn_active = Some(working.active_handle());
                             let outcome = loop {
-                                let run_turn = if direct_resume {
-                                    run_direct_resume_turn_with_model_client
+                                let mut turn_failover = model_service_failover.clone();
+                                let main_outcome = if direct_resume {
+                                    run_direct_resume_turn_with_model_client_and_failover(
+                                        &mut core,
+                                        &mut config,
+                                        &mut turn_failover,
+                                        TurnInput {
+                                            input: &input,
+                                            session: &identity.session_id,
+                                            audit_file: &workspace.audit_file,
+                                            runtime: &workspace.runtime,
+                                            run_bash_target: &workspace.run_bash_target,
+                                            additional_context: additional_context.as_deref(),
+                                            images: &turn_images,
+                                        },
+                                        &mut ui,
+                                        Some(&mut profiler),
+                                        &mut model_client,
+                                    )
                                 } else {
-                                    run_session_turn_with_model_client
+                                    run_session_turn_with_model_client_and_failover(
+                                        &mut core,
+                                        &mut config,
+                                        &mut turn_failover,
+                                        TurnInput {
+                                            input: &input,
+                                            session: &identity.session_id,
+                                            audit_file: &workspace.audit_file,
+                                            runtime: &workspace.runtime,
+                                            run_bash_target: &workspace.run_bash_target,
+                                            additional_context: additional_context.as_deref(),
+                                            images: &turn_images,
+                                        },
+                                        &mut ui,
+                                        Some(&mut profiler),
+                                        &mut model_client,
+                                    )
                                 };
-                                let main_outcome = run_turn(
-                                    &mut core,
-                                    &mut config,
-                                    TurnInput {
-                                        input: &input,
-                                        session: &identity.session_id,
-                                        audit_file: &workspace.audit_file,
-                                        runtime: &workspace.runtime,
-                                        run_bash_target: &workspace.run_bash_target,
-                                        additional_context: additional_context.as_deref(),
-                                        images: &turn_images,
-                                    },
-                                    &mut ui,
-                                    Some(&mut profiler),
-                                    &mut model_client,
-                                );
+                                // The Turn may consume a Host route update or
+                                // fail over between API requests. Preserve the
+                                // resulting chain for any continuation and the
+                                // next Turn.
+                                model_service_failover = turn_failover;
                                 if main_outcome.stop_summary.is_some()
                                     || !ui.continue_supplements_after_final_answer
                                 {
@@ -2115,12 +2151,12 @@ impl CoreSessionWorker {
                         config.http_transport = options;
                         core.notify_runtime_config_changed();
                     }
-                    CoreSessionWorkerCommand::ReplaceModelServiceConfig {
-                        config: replacement,
-                        result_tx,
-                    } => {
-                        replace_worker_model_service_config(&mut core, &mut config, *replacement);
-                        let _ = result_tx.send(Ok(()));
+                    CoreSessionWorkerCommand::ModelServiceRouteUpdated => {
+                        ui.apply_pending_model_service_route(
+                            &mut core,
+                            &mut config,
+                            &mut model_service_failover,
+                        );
                     }
                     CoreSessionWorkerCommand::UpdateMcp {
                         base_capabilities,
@@ -2571,11 +2607,31 @@ fn apply_worker_runtime_update(
         PendingRuntimeUpdate::ContextCompressThresholdPercent(percent) => {
             let _ = core.set_context_compress_threshold_percent(percent);
         }
+        // Model routes are consumed atomically by the dedicated request-boundary
+        // hook and are never passed through this field-by-field updater.
+        PendingRuntimeUpdate::ModelServiceRoute { .. } => {}
     }
     core.notify_runtime_config_changed();
 }
 
 impl WorkerTurnUi {
+    fn take_pending_model_service_route(
+        &mut self,
+    ) -> Option<(ModelServiceConfig, Vec<ModelServiceConfig>)> {
+        let Ok(mut updates) = self.pending_runtime_updates.lock() else {
+            return None;
+        };
+        let mut newest = None;
+        updates.retain(|update| match update {
+            PendingRuntimeUpdate::ModelServiceRoute { config, failover } => {
+                newest = Some(((**config).clone(), failover.clone()));
+                false
+            }
+            _ => true,
+        });
+        newest
+    }
+
     fn take_model_tool_result_bytes_update(&mut self) -> Option<usize> {
         let Ok(mut updates) = self.pending_runtime_updates.lock() else {
             return None;
@@ -2593,6 +2649,22 @@ impl WorkerTurnUi {
 }
 
 impl TurnUi for WorkerTurnUi {
+    fn apply_pending_model_service_route(
+        &mut self,
+        core: &mut AgentCore,
+        config: &mut ModelServiceConfig,
+        failover: &mut Vec<ModelServiceConfig>,
+    ) -> bool {
+        let Some((replacement, replacement_failover)) =
+            WorkerTurnUi::take_pending_model_service_route(self)
+        else {
+            return false;
+        };
+        replace_worker_model_service_config(core, config, replacement);
+        *failover = replacement_failover;
+        true
+    }
+
     fn on_turn_projection(&mut self, projection: &agent_core::TurnProjection) {
         let _ = self
             .event_tx
@@ -2611,7 +2683,11 @@ impl TurnUi for WorkerTurnUi {
                     let (deferred, applicable) = std::mem::take(&mut *updates)
                         .into_iter()
                         .partition(|update| {
-                            matches!(update, PendingRuntimeUpdate::ModelToolResultBytes(_))
+                            matches!(
+                                update,
+                                PendingRuntimeUpdate::ModelToolResultBytes(_)
+                                    | PendingRuntimeUpdate::ModelServiceRoute { .. }
+                            )
                         });
                     *updates = deferred;
                     applicable

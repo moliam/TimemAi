@@ -108,6 +108,10 @@ pub struct PersistedCapabilityProbe {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InteractionConfig {
+    /// Stable Host-owned route identity. Unlike capability-probe metadata this
+    /// is present for known native-tool endpoints too, so failover can report
+    /// the actual in-flight route without guessing from mutable definitions.
+    pub model_endpoint_id: Option<String>,
     pub tool_call_mode: ToolCallMode,
     pub parallel_tool_calls: ParallelToolCalls,
     pub max_tool_calls_per_response: usize,
@@ -126,6 +130,7 @@ pub struct InteractionConfig {
 impl Default for InteractionConfig {
     fn default() -> Self {
         Self {
+            model_endpoint_id: None,
             // Direct programmatic construction keeps the historical inline
             // behavior. Host configuration explicitly selects Auto so test
             // doubles and embedders never trigger unexpected network probes.

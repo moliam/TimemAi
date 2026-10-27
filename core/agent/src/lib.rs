@@ -149,10 +149,11 @@ pub use host::{
     RoundLimitResolution, StoppedTurn, TopicReply, TopicReplyError, TurnInput, TurnOutcome,
     TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi, UserSupplement, CORE_TOPIC_ACTION,
     CORE_TOPIC_CONTEXT_COMPRESS, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST,
-    CORE_TOPIC_MEMO, CORE_TOPIC_MODEL_CAPABILITY_NEGOTIATION, CORE_TOPIC_MODEL_REPAIR,
-    CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
-    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TIMER,
-    CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    CORE_TOPIC_MEMO, CORE_TOPIC_MODEL_CAPABILITY_NEGOTIATION, CORE_TOPIC_MODEL_ENDPOINT_FAILOVER,
+    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST,
+    CORE_TOPIC_ROUND_LIMIT_REQUEST, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP,
+    CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TIMER, CORE_TOPIC_TOOLGEN,
+    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
     DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT, USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT,
 };
 pub use interaction::{
@@ -212,9 +213,12 @@ use response_protocol::{
 };
 pub use retry_policy::{
     is_explicit_native_tools_unsupported, is_model_input_too_large_error,
-    is_retryable_model_system_error, model_retry_decision, ModelCallOutcome, ModelRetryDecision,
+    is_model_rate_limited_error, is_retryable_model_system_error, model_failover_failure_threshold,
+    model_failover_strike_delay, model_retry_decision, ModelCallOutcome, ModelRetryDecision,
     ModelSystemRetryPolicy, DEFAULT_MODEL_SYSTEM_ERROR_RETRIES,
-    DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY,
+    DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY, MODEL_ENDPOINT_FAILOVER_RATE_LIMIT_FAILURES,
+    MODEL_ENDPOINT_FAILOVER_RATE_LIMIT_STRIKE_DELAY, MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_FAILURES,
+    MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_STRIKE_DELAY,
 };
 pub use runtime_context::{
     local_datetime_label, local_time_label, runtime_time_context, LocalTimeParts,
@@ -222,7 +226,9 @@ pub use runtime_context::{
 use self_tool::{SelfToolAbout, SelfToolPaths, SelfToolProcess, SelfToolState};
 pub use session_runtime::{
     cancelled_turn_result, run_direct_resume_turn, run_direct_resume_turn_with_model_client,
-    run_session_turn, run_session_turn_with_model_client, ModelClient,
+    run_direct_resume_turn_with_model_client_and_failover, run_session_turn,
+    run_session_turn_with_model_client, run_session_turn_with_model_client_and_failover,
+    ModelClient,
 };
 use shell_exec::ShellJobManager;
 pub use shell_exec::{RunningShellJob, ShellJobExitUpdate};

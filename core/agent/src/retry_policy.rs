@@ -7,6 +7,47 @@ pub const DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY: Duration = Duration::from_secs
 #[cfg(test)]
 pub const DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY: Duration = Duration::ZERO;
 
+/// Consecutive rate-limit failures on the active endpoint that trigger a
+/// switch to the next chain entry. Rate-limit windows recover on hour scales,
+/// so extended in-place backoff only burns wall-clock time.
+pub const MODEL_ENDPOINT_FAILOVER_RATE_LIMIT_FAILURES: u32 = 3;
+
+/// Consecutive retryable system failures on the active endpoint that trigger
+/// a switch when an ordered failover chain exists. A chain with a single
+/// endpoint keeps the full in-place backoff policy instead.
+pub const MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_FAILURES: u32 = 10;
+
+/// In-place wait between consecutive strikes while an ordered failover chain
+/// exists. Rate-limit strikes wait nothing (quota windows need hours); other
+/// retryable system errors use a short probe cadence instead of the full
+/// single-endpoint backoff.
+pub const MODEL_ENDPOINT_FAILOVER_RATE_LIMIT_STRIKE_DELAY: Duration = Duration::ZERO;
+#[cfg(not(test))]
+pub const MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_STRIKE_DELAY: Duration = Duration::from_secs(1);
+#[cfg(test)]
+pub const MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_STRIKE_DELAY: Duration = Duration::ZERO;
+
+/// The wait applied before the next in-place strike when a failover chain is
+/// available. See the two constants above.
+pub fn model_failover_strike_delay(error: &str) -> Duration {
+    if is_model_rate_limited_error(error) {
+        MODEL_ENDPOINT_FAILOVER_RATE_LIMIT_STRIKE_DELAY
+    } else {
+        MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_STRIKE_DELAY
+    }
+}
+
+/// The consecutive-failure count after which the active endpoint hands control
+/// to the ordered failover chain. Rate-limit errors get the tighter threshold;
+/// every other retryable error uses the system-error threshold.
+pub fn model_failover_failure_threshold(error: &str) -> u32 {
+    if is_model_rate_limited_error(error) {
+        MODEL_ENDPOINT_FAILOVER_RATE_LIMIT_FAILURES
+    } else {
+        MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_FAILURES
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelSystemRetryPolicy {
     pub max_attempts: u32,
@@ -218,6 +259,23 @@ pub fn is_model_input_too_large_error(error: &str) -> bool {
         || lower.contains("request body too large")
         || lower.contains("payload too large")
         || (input_subject && size_subject && exceeds_limit)
+}
+
+/// True when the model error is an explicit provider rate/quota rejection
+/// (HTTP 429 or a Responses-protocol rate-limit terminal event). This is the
+/// trigger for endpoint-chain failover: the endpoint's quota is exhausted and
+/// in-place backoff retries would only burn wall-clock time.
+pub fn is_model_rate_limited_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    if lower.starts_with("model_http_429:") {
+        return true;
+    }
+    if let Some(details) = lower.strip_prefix("model_responses_stream_failed:") {
+        return ["rate_limit_exceeded", "rate_limited", "quota"]
+            .iter()
+            .any(|signal| details.contains(signal));
+    }
+    false
 }
 
 #[cfg(test)]

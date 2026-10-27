@@ -449,6 +449,24 @@ fn run_probe(
     }
 }
 
+/// Minimal no-tool text request used by host-side availability probes.
+/// It intentionally skips capability negotiation: a plain completion is enough
+/// to distinguish endpoint availability from rate-limiting.
+pub fn model_availability_probe_request() -> ModelInteractionRequest {
+    ModelInteractionRequest {
+        rendered_prompt: "Reply with the single word: ok".to_string(),
+        images: Vec::new(),
+        static_tool_count: 0,
+        tools: Vec::new(),
+        native_exchanges: Vec::new(),
+        resolved_mode: ToolCallMode::Inline,
+        parallel_tool_calls: false,
+        send_parallel_tool_calls: false,
+        tool_choice: NativeToolChoice::Auto,
+        critical_reasoning: false,
+    }
+}
+
 fn probe_request(prompt: &str, parallel: bool) -> ModelInteractionRequest {
     ModelInteractionRequest {
         rendered_prompt: prompt.to_string(),

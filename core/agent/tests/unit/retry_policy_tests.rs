@@ -179,3 +179,57 @@ fn retry_decision_is_structured_and_ui_neutral() {
         );
     }
 }
+
+#[test]
+fn rate_limit_errors_trigger_endpoint_failover_classification() {
+    for error in [
+        "model_http_429: rate limit exceeded",
+        "model_http_429: Too Many Requests",
+        "model_responses_stream_failed: event_type=response.failed code=rate_limit_exceeded type=server_error message=retry later",
+        "model_responses_stream_failed: event_type=error code=rate_limited message=slow down",
+        "model_responses_stream_failed: event_type=response.failed code=insufficient_quota type=server_error message=quota exceeded",
+    ] {
+        assert!(is_model_rate_limited_error(error), "{error}");
+    }
+    for error in [
+        "model_http_428: precondition",
+        "model_http_4290: malformed",
+        "model_http_500: overloaded",
+        "model_http_408: timeout",
+        "cancelled_by_user",
+        "model_network_error: connection reset",
+        "model_responses_stream_failed: event_type=response.failed code=server_is_overloaded type=server_error message=overloaded",
+        "model_responses_stream_failed: event_type=response.failed code=invalid_request_error type=invalid_request_error message=bad tools",
+        "model_responses_stream_failed",
+    ] {
+        assert!(!is_model_rate_limited_error(error), "{error}");
+    }
+}
+
+#[test]
+fn failover_failure_thresholds_match_tight_rate_limit_contract() {
+    assert_eq!(
+        model_failover_failure_threshold("model_http_429: The usage limit has been reached"),
+        MODEL_ENDPOINT_FAILOVER_RATE_LIMIT_FAILURES
+    );
+    assert_eq!(MODEL_ENDPOINT_FAILOVER_RATE_LIMIT_FAILURES, 3);
+    assert_eq!(
+        model_failover_failure_threshold("model_http_500: overloaded"),
+        MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_FAILURES
+    );
+    assert_eq!(
+        model_failover_failure_threshold("model_network_error: connection reset"),
+        MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_FAILURES
+    );
+    assert_eq!(MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_FAILURES, 10);
+    // Rate-limit strikes wait nothing between attempts (hour-scale quota
+    // windows); other retryable errors probe on the short cadence.
+    assert_eq!(
+        model_failover_strike_delay("model_http_429: quota"),
+        Duration::ZERO
+    );
+    assert_eq!(
+        model_failover_strike_delay("model_timeout: slow"),
+        MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_STRIKE_DELAY
+    );
+}
