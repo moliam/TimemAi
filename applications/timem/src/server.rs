@@ -55,16 +55,17 @@ use agent_core::session_store::{
 use agent_core::{
     apply_runtime_config_value, combine_additional_contexts,
     context_compress_requested_topic_event, create_memory_dir, default_memory_dir,
-    load_workspace_dirs_from_path, model_service_config_from_sources_allow_missing_api_key,
-    resolve_memory_dir, runtime_config_menu_report, validate_api_key, work_instruction_load_report,
+    is_model_rate_limited_error, load_workspace_dirs_from_path,
+    model_service_config_from_sources_allow_missing_api_key, resolve_memory_dir,
+    runtime_config_menu_report, validate_api_key, work_instruction_load_report,
     work_instruction_load_request, work_instruction_mode_from_sources, AgentCore, BashApprovalMode,
-    CoreSessionWorkerWorkspace, HostDecision, HostDecisionRequest, InterfacePreferences,
-    ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind, RuntimeDataLayout,
-    SessionToolRepo, TimerSpec, ToolDetail, ToolSummary, TopicReply, TurnProjection,
-    WorkInstructionLoadMode, CORE_TOPIC_ACTION, CORE_TOPIC_CONTEXT_COMPRESS,
-    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP,
-    CORE_TOPIC_TIMER, CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST,
-    CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    CoreSessionWorkerWorkspace, HostDecision, HostDecisionRequest, HttpModelClient,
+    InterfacePreferences, ModelClient, ModelServiceConfig, ModelServiceConfigSource,
+    ResponseProtocolKind, RuntimeDataLayout, SessionToolRepo, TimerSpec, ToolDetail, ToolSummary,
+    TopicReply, TurnProjection, WorkInstructionLoadMode, CORE_TOPIC_ACTION,
+    CORE_TOPIC_CONTEXT_COMPRESS, CORE_TOPIC_MODEL_ENDPOINT_FAILOVER, CORE_TOPIC_MODEL_REPAIR,
+    CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_TIMER,
+    CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use agent_core::{
     capability::CapabilityRegistry, rolling_file_store::RollingCapacity, self_tool::SelfToolPaths,
@@ -159,6 +160,27 @@ const MAX_BROWSER_COMMAND_BYTES: usize = 1024 * 1024;
 const BROWSER_COMMAND_QUEUE_CAPACITY: usize = 32;
 const MAX_COMMAND_ID_BYTES: usize = 256;
 const MAX_MODEL_ENDPOINT_DELETE_IDS: usize = 100;
+const MAX_MODEL_ENDPOINT_CHAIN: usize = 20;
+/// A rate-limited endpoint is skipped when selecting the active chain endpoint.
+const MODEL_ENDPOINT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(30 * 60);
+/// Background scan cadence for endpoints marked rate-limited long ago.
+const MODEL_ENDPOINT_HEALTH_SCAN_INTERVAL: Duration = Duration::from_secs(60);
+/// Endpoints unavailable for at least this long are probed proactively.
+const MODEL_ENDPOINT_AUTO_PROBE_AFTER: Duration = Duration::from_secs(60 * 60);
+/// Session env keys fully owned by the currently selected model endpoint.
+const ENDPOINT_OWNED_ENV_KEYS: [&str; 11] = [
+    "TIMEM_MODEL",
+    "TIMEM_API_PROTOCOL",
+    "TIMEM_RESPONSE_PROTOCOL",
+    "TIMEM_BASE_URL",
+    "TIMEM_MAX_LLM_INPUT",
+    "TIMEM_MAX_LLM_OUTPUT",
+    "TIMEM_MODEL_CATALOG_ID",
+    "TIMEM_MODEL_REQUIREMENTS",
+    "TIMEM_ENABLE_THINKING",
+    "TIMEM_REASONING_EFFORT",
+    "TIMEM_STREAM",
+];
 const WORK_INSTRUCTION_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 const INSTANCE_HANDOFF_TIMEOUT: Duration = Duration::from_secs(3);
 const INSTANCE_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -178,6 +200,9 @@ struct AppState {
     template: Arc<WorkerTemplate>,
     mem: Arc<Mutex<WebMemState>>,
     model_endpoint_imports: Arc<Mutex<Vec<ModelEndpointImportCandidate>>>,
+    /// In-memory availability state per model endpoint. Never persisted: a
+    /// process restart gives every endpoint a clean slate.
+    model_endpoint_health: Arc<Mutex<BTreeMap<String, ModelEndpointHealthState>>>,
     events: broadcast::Sender<WireEvent>,
     sessions: Arc<Mutex<BTreeMap<String, WebSession>>>,
     command_dedup: Arc<Mutex<CommandDedupCache>>,
@@ -213,6 +238,14 @@ struct WorkerTemplate {
     current_dir: PathBuf,
     workspace_dirs: Vec<PathBuf>,
     reminder_tips_config: agent_core::ReminderTipsConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ModelEndpointHealthState {
+    /// When the endpoint last answered with a rate-limit/quota error.
+    rate_limited_since_ms: Option<u128>,
+    /// An availability probe is currently in flight for this endpoint.
+    probing: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -370,6 +403,10 @@ struct ModelEndpointReport {
     private_ca_configured: bool,
     reasoning_effort: Option<String>,
     function_calling: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rate_limited_since_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    probing: bool,
 }
 
 impl From<&ModelEndpointConfig> for ModelEndpointReport {
@@ -401,6 +438,8 @@ impl From<&ModelEndpointConfig> for ModelEndpointReport {
             private_ca_configured: !endpoint.private_ca_pem.is_empty(),
             reasoning_effort: endpoint.reasoning_effort.clone(),
             function_calling: endpoint.function_calling,
+            rate_limited_since_ms: None,
+            probing: false,
         }
     }
 }
@@ -705,6 +744,12 @@ struct WebWorker {
 #[derive(Debug, Clone)]
 struct WebSessionRuntime {
     model_endpoint_id: Option<String>,
+    /// Host-observed in-flight route. This is runtime-only, not a durable binding.
+    active_model_endpoint_id: Option<String>,
+    /// Ordered failover chain; the first entry is the user's first preference.
+    model_endpoint_ids: Vec<String>,
+    /// Session-only choice layered over compatible endpoint route snapshots.
+    reasoning_effort_override: Option<String>,
     settings: RuntimeSettings,
     env: BTreeMap<String, String>,
     env_overrides: BTreeMap<String, String>,
@@ -714,6 +759,13 @@ struct WebSessionRuntime {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct WebSessionRuntimeProfile {
     model_endpoint_id: Option<String>,
+    /// Host-observed route; pending binding snapshots apply before the next model API request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_model_endpoint_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    model_endpoint_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
     model: String,
     api_protocol: String,
     response_protocol: String,
@@ -1489,6 +1541,10 @@ enum ClientCommand {
         key: String,
         value: String,
     },
+    SessionReasoningEffortUpdate {
+        session_id: String,
+        reasoning_effort: String,
+    },
     ModelEndpointShareExport {
         request_id: String,
         endpoint_id: String,
@@ -1513,6 +1569,11 @@ enum ClientCommand {
         session_id: String,
         endpoint_id: String,
     },
+    ModelEndpointChainApply {
+        session_id: String,
+        endpoint_ids: Vec<String>,
+    },
+    ModelEndpointAvailabilityRefresh,
     ModelEndpointSecretReveal {
         endpoint_id: String,
     },
@@ -1606,6 +1667,7 @@ impl ClientCommand {
             | Self::ModelEndpointImportScan { .. }
             | Self::ModelEndpointImportApply { .. }
             | Self::ModelEndpointShareImport { .. }
+            | Self::ModelEndpointAvailabilityRefresh
             | Self::WorkerRoleCreate { .. }
             | Self::WorkerRoleUpdate { .. }
             | Self::WorkerRoleDelete { .. }
@@ -1648,7 +1710,9 @@ impl ClientCommand {
             | Self::ToolRepoOpenTerminal { session_id, .. }
             | Self::TopicReply { session_id, .. }
             | Self::SessionRuntimeUpdate { session_id, .. }
+            | Self::SessionReasoningEffortUpdate { session_id, .. }
             | Self::ModelEndpointApply { session_id, .. }
+            | Self::ModelEndpointChainApply { session_id, .. }
             | Self::McpSessionToggle { session_id, .. }
             | Self::McpServerReconnect { session_id, .. }
             | Self::TimerCreate { session_id, .. }
@@ -1677,6 +1741,7 @@ impl ClientCommand {
                 | Self::ModelEndpointImportScan { .. }
                 | Self::ModelEndpointImportApply { .. }
                 | Self::ModelEndpointShareImport { .. }
+                | Self::ModelEndpointAvailabilityRefresh
                 | Self::WorkerRoleCreate { .. }
                 | Self::WorkerRoleUpdate { .. }
                 | Self::WorkerRoleDelete { .. }
@@ -1859,6 +1924,7 @@ pub async fn run(
         template: Arc::new(template),
         mem,
         model_endpoint_imports: Arc::new(Mutex::new(Vec::new())),
+        model_endpoint_health: Arc::new(Mutex::new(BTreeMap::new())),
         events: events.clone(),
         sessions,
         command_dedup: Arc::new(Mutex::new(CommandDedupCache::default())),
@@ -1963,6 +2029,7 @@ pub async fn run(
     // commands may run them explicitly. The fallback checkpoints a tiny cumulative
     // runtime counter every 15 minutes and scans only when due and fully idle.
     spawn_idle_temporary_maintenance_loop(state.clone());
+    spawn_model_endpoint_health_scanner(state.clone());
     let shutdown_reason = Arc::new(Mutex::new(None));
     let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(
@@ -4718,6 +4785,21 @@ fn handle_command_with_id(
                 },
             );
         }
+        ClientCommand::SessionReasoningEffortUpdate {
+            session_id,
+            reasoning_effort,
+        } => {
+            let reasoning_effort = nonempty_text(reasoning_effort, "reasoning effort")?;
+            let runtime_profile =
+                update_session_reasoning_effort(state, &session_id, &reasoning_effort)?;
+            publish_semantic(
+                state,
+                WireEvent::SessionRuntimeUpdated {
+                    session_id,
+                    runtime_profile,
+                },
+            );
+        }
         ClientCommand::ModelEndpointShareExport {
             request_id,
             endpoint_id,
@@ -4775,6 +4857,7 @@ fn handle_command_with_id(
         }
         ClientCommand::ModelEndpointDelete { endpoint_id } => {
             delete_model_endpoint(state, &endpoint_id)?;
+            prune_deleted_model_endpoint_bindings(state, &BTreeSet::from([endpoint_id.clone()]))?;
             let event = WireEvent::ModelEndpointsUpdated {
                 endpoints: model_endpoint_reports(state)?,
             };
@@ -4783,6 +4866,10 @@ fn handle_command_with_id(
         }
         ClientCommand::ModelEndpointDeleteMany { endpoint_ids } => {
             delete_model_endpoints(state, &endpoint_ids)?;
+            prune_deleted_model_endpoint_bindings(
+                state,
+                &endpoint_ids.iter().cloned().collect::<BTreeSet<_>>(),
+            )?;
             let event = WireEvent::ModelEndpointsUpdated {
                 endpoints: model_endpoint_reports(state)?,
             };
@@ -4801,6 +4888,23 @@ fn handle_command_with_id(
                     runtime_profile,
                 },
             );
+        }
+        ClientCommand::ModelEndpointChainApply {
+            session_id,
+            endpoint_ids,
+        } => {
+            let runtime_profile = apply_model_endpoint_chain(state, &session_id, &endpoint_ids)?;
+            publish_semantic(
+                state,
+                WireEvent::SessionRuntimeUpdated {
+                    session_id,
+                    runtime_profile,
+                },
+            );
+        }
+        ClientCommand::ModelEndpointAvailabilityRefresh => {
+            refresh_model_endpoint_availability(state)?;
+            return Ok(None);
         }
         ClientCommand::ModelEndpointSecretReveal { endpoint_id } => {
             let secrets = model_endpoint_secrets(state, &endpoint_id)?;
@@ -5901,6 +6005,9 @@ fn create_session_in_group(
     let session_env = state.template.session_env(&settings, &env_overrides);
     let runtime = WebSessionRuntime {
         model_endpoint_id: None,
+        active_model_endpoint_id: None,
+        model_endpoint_ids: Vec::new(),
+        reasoning_effort_override: None,
         settings,
         env: session_env,
         env_overrides,
@@ -6529,6 +6636,9 @@ fn restore_stored_session(
     let session_env = state.template.session_env(&settings, &cached_env);
     let runtime = WebSessionRuntime {
         model_endpoint_id: stored.model_endpoint_id.clone(),
+        active_model_endpoint_id: stored.model_endpoint_id.clone(),
+        model_endpoint_ids: stored.model_endpoint_ids.clone(),
+        reasoning_effort_override: stored.reasoning_effort_override.clone(),
         settings,
         env: session_env,
         env_overrides: stored.env_overrides.clone().unwrap_or_default(),
@@ -8460,6 +8570,8 @@ fn stored_session_from_web_session_with_store(
 ) -> StoredSession {
     StoredSession {
         model_endpoint_id: session.runtime.model_endpoint_id.clone(),
+        model_endpoint_ids: session.runtime.model_endpoint_ids.clone(),
+        reasoning_effort_override: session.runtime.reasoning_effort_override.clone(),
         session_id: session.session_id.clone(),
         display_name: session.display_name.clone(),
         created_at_ms: session
@@ -9907,10 +10019,21 @@ fn model_endpoint_reports(state: &AppState) -> Result<Vec<ModelEndpointReport>, 
         .mem
         .lock()
         .map_err(|_| "mem_state_poisoned".to_string())?;
+    let health = state
+        .model_endpoint_health
+        .lock()
+        .map_err(|_| "model_endpoint_health_poisoned".to_string())?;
     Ok(mem
         .model_endpoints
         .iter()
-        .map(ModelEndpointReport::from)
+        .map(|endpoint| {
+            let mut report = ModelEndpointReport::from(endpoint);
+            if let Some(health_state) = health.get(&endpoint.id) {
+                report.rate_limited_since_ms = health_state.rate_limited_since_ms;
+                report.probing = health_state.probing;
+            }
+            report
+        })
         .collect())
 }
 
@@ -10084,6 +10207,17 @@ fn model_endpoint_config(
 
 fn session_uses_model_endpoint(session: &WebSession, endpoint: &ModelEndpointConfig) -> bool {
     let config = &session.runtime.settings.config;
+    let mut expected_reasoning = endpoint.reasoning_effort.clone();
+    if let Some(reasoning_override) = session.runtime.reasoning_effort_override.as_deref() {
+        let mut expected = config.clone();
+        if project_endpoint_onto_config(&mut expected, endpoint).is_ok()
+            && supported_reasoning_levels(&expected)
+                .iter()
+                .any(|level| level == reasoning_override)
+        {
+            expected_reasoning = Some(reasoning_override.to_string());
+        }
+    }
     config.model == endpoint.model
         && config.openai_compatible.catalog_id == endpoint.catalog_id
         && config.openai_compatible.requirements == endpoint.requirements
@@ -10094,7 +10228,7 @@ fn session_uses_model_endpoint(session: &WebSession, endpoint: &ModelEndpointCon
         && config.max_llm_output_tokens == endpoint.max_llm_output_tokens
         && config.openai_compatible.stream == endpoint.stream
         && config.openai_compatible.enable_thinking.is_none()
-        && config.openai_compatible.reasoning_effort == endpoint.reasoning_effort
+        && config.openai_compatible.reasoning_effort == expected_reasoning
         && config.api_key == endpoint.api_key
         && config.http_headers == endpoint.http_headers
         && config.request_fields == endpoint.request_fields
@@ -10120,7 +10254,7 @@ fn sync_endpoint_runtime_fields(
             .cloned()
             .collect::<Vec<_>>()
     };
-    let session_ids = {
+    let session_bindings = {
         let sessions = state
             .sessions
             .lock()
@@ -10129,30 +10263,34 @@ fn sync_endpoint_runtime_fields(
             .iter()
             .filter(|(_, session)| {
                 session.runtime.model_endpoint_id.as_deref() == Some(previous.id.as_str())
+                    || session.runtime.model_endpoint_ids.contains(&previous.id)
                     || (session.runtime.model_endpoint_id.is_none()
                         && session_uses_model_endpoint(session, previous)
                         && !other_endpoints
                             .iter()
                             .any(|endpoint| session_uses_model_endpoint(session, endpoint)))
             })
-            .map(|(id, _)| id.clone())
+            .map(|(id, session)| (id.clone(), session.runtime.model_endpoint_ids.clone()))
             .collect::<Vec<_>>()
     };
     let mut updates = Vec::new();
-    for session_id in session_ids {
-        updates.push((
-            session_id.clone(),
-            apply_model_endpoint(state, &session_id, &updated.id)?,
-        ));
+    for (session_id, chain) in session_bindings {
+        // Editing an endpoint must never collapse or otherwise rewrite the
+        // user's chain. Busy Sessions take the durable-only path; idle Workers
+        // receive a full fresh chain snapshot.
+        let runtime_profile = if chain.is_empty() {
+            apply_model_endpoint(state, &session_id, &updated.id)?
+        } else {
+            apply_model_endpoint_chain(state, &session_id, &chain)?
+        };
+        updates.push((session_id, runtime_profile));
     }
     Ok(updates)
 }
 
-// Resolve the binding at the new-Turn boundary, never during an active request.
+// Resolve and publish the latest binding snapshot. A running worker applies
+// it best-effort immediately before its next model API request.
 fn refresh_bound_model_endpoint(state: &AppState, session_id: &str) -> Result<(), String> {
-    if session_has_active_turn(state, session_id)? {
-        return Ok(());
-    }
     let unbound = {
         let sessions = state
             .sessions
@@ -10164,6 +10302,9 @@ fn refresh_bound_model_endpoint(state: &AppState, session_id: &str) -> Result<()
             .runtime
             .model_endpoint_id
             .is_none()
+            && sessions
+                .get(session_id)
+                .is_some_and(|session| session.runtime.active_model_endpoint_id.is_none())
     };
     let mut migrated = false;
     if unbound {
@@ -10200,6 +10341,49 @@ fn refresh_bound_model_endpoint(state: &AppState, session_id: &str) -> Result<()
             .model_endpoint_id
             .clone()
     };
+    let chain = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions.get(session_id).ok_or("session_not_found")?;
+        session.runtime.model_endpoint_ids.clone()
+    };
+    if !chain.is_empty() {
+        // The primary equality check cannot observe edits to standby entries:
+        // their configs live only in the Worker failover snapshot. Rebuild the
+        // complete chain whenever the binding is refreshed.
+        let runtime_profile = apply_model_endpoint_chain(state, session_id, &chain)?;
+        publish_semantic(
+            state,
+            WireEvent::SessionRuntimeUpdated {
+                session_id: session_id.to_string(),
+                runtime_profile,
+            },
+        );
+        return Ok(());
+    }
+    if id.is_none() {
+        let needs_unbind = {
+            let sessions = state
+                .sessions
+                .lock()
+                .map_err(|_| "session_store_poisoned".to_string())?;
+            sessions
+                .get(session_id)
+                .is_some_and(|session| session.runtime.active_model_endpoint_id.is_some())
+        };
+        if needs_unbind {
+            let runtime_profile = unbind_session_model_endpoint(state, session_id)?;
+            publish_semantic(
+                state,
+                WireEvent::SessionRuntimeUpdated {
+                    session_id: session_id.to_string(),
+                    runtime_profile,
+                },
+            );
+        }
+    }
     if let Some(id) = id {
         if migrated {
             persist_web_session(state, session_id)?;
@@ -10350,6 +10534,7 @@ fn project_model_endpoint_capability(
 ) {
     let knowledge = model_endpoint_native_tools_knowledge(endpoint);
     config.interaction.native_tools_supported = knowledge;
+    config.interaction.model_endpoint_id = Some(endpoint.id.clone());
     config.interaction.capability_probe_endpoint_id =
         knowledge.is_none().then(|| endpoint.id.clone());
     let identity = agent_core::capability_probe_identity(config);
@@ -10373,51 +10558,74 @@ fn model_endpoint_capability_projection_matches(
             == expected.interaction.persisted_capability_probe
 }
 
+fn project_endpoint_onto_config(
+    config: &mut ModelServiceConfig,
+    endpoint: &ModelEndpointConfig,
+) -> Result<(), String> {
+    config.model = endpoint.model.clone();
+    config.api_protocol = agent_core::parse_api_protocol(&endpoint.api_protocol)?;
+    config.response_protocol = ResponseProtocolKind::from_name(&endpoint.response_protocol);
+    config.base_url = endpoint.base_url.clone();
+    config.max_llm_input_tokens = endpoint.max_llm_input_tokens;
+    config.max_llm_output_tokens = endpoint.max_llm_output_tokens;
+    config.openai_compatible.catalog_id = endpoint.catalog_id.clone();
+    config.openai_compatible.requirements = endpoint.requirements.clone();
+    config.openai_compatible.enable_thinking = None;
+    config.openai_compatible.reasoning_effort = endpoint.reasoning_effort.clone();
+    config.openai_compatible.stream = endpoint.stream;
+    config.api_key = endpoint.api_key.clone();
+    config.http_headers = endpoint.http_headers.clone();
+    config.request_fields = endpoint.request_fields.clone();
+    config.http_transport = agent_core::ModelHttpTransportOptions {
+        allow_cross_origin_redirects: endpoint.allow_cross_origin_redirects,
+        private_ca_pem: (!endpoint.private_ca_pem.is_empty())
+            .then_some(endpoint.private_ca_pem.clone()),
+    };
+    project_model_endpoint_capability(config, endpoint);
+    Ok(())
+}
+
+fn supported_reasoning_levels(config: &ModelServiceConfig) -> Vec<String> {
+    if let Some(levels) = &config.openai_compatible.requirements.allowed_reasoning {
+        return levels.clone();
+    }
+    agent_core::model_requirements::capabilities(config)
+        .map(|model| model.efforts.clone())
+        .unwrap_or_default()
+}
+
+fn apply_session_reasoning_override(
+    config: &mut ModelServiceConfig,
+    reasoning_effort_override: Option<&str>,
+) {
+    let Some(effort) = reasoning_effort_override else {
+        return;
+    };
+    if supported_reasoning_levels(config)
+        .iter()
+        .any(|level| level == effort)
+    {
+        config.openai_compatible.enable_thinking = None;
+        config.openai_compatible.reasoning_effort = Some(effort.to_string());
+    }
+}
+
 fn model_endpoint_session_candidate(
     session: &WebSession,
     endpoint: &ModelEndpointConfig,
 ) -> Result<WebSession, String> {
     let mut candidate = session.clone();
-    {
-        let config = &mut candidate.runtime.settings.config;
-        config.model = endpoint.model.clone();
-        config.api_protocol = agent_core::parse_api_protocol(&endpoint.api_protocol)?;
-        config.response_protocol = ResponseProtocolKind::from_name(&endpoint.response_protocol);
-        config.base_url = endpoint.base_url.clone();
-        config.max_llm_input_tokens = endpoint.max_llm_input_tokens;
-        config.max_llm_output_tokens = endpoint.max_llm_output_tokens;
-        config.openai_compatible.catalog_id = endpoint.catalog_id.clone();
-        config.openai_compatible.requirements = endpoint.requirements.clone();
-        config.openai_compatible.enable_thinking = None;
-        config.openai_compatible.reasoning_effort = endpoint.reasoning_effort.clone();
-        config.openai_compatible.stream = endpoint.stream;
-        config.api_key = endpoint.api_key.clone();
-        config.http_headers = endpoint.http_headers.clone();
-        config.request_fields = endpoint.request_fields.clone();
-        config.http_transport = agent_core::ModelHttpTransportOptions {
-            allow_cross_origin_redirects: endpoint.allow_cross_origin_redirects,
-            private_ca_pem: (!endpoint.private_ca_pem.is_empty())
-                .then_some(endpoint.private_ca_pem.clone()),
-        };
-        project_model_endpoint_capability(config, endpoint);
-    }
+    project_endpoint_onto_config(&mut candidate.runtime.settings.config, endpoint)?;
+    apply_session_reasoning_override(
+        &mut candidate.runtime.settings.config,
+        candidate.runtime.reasoning_effort_override.as_deref(),
+    );
 
     candidate.runtime.model_endpoint_id = Some(endpoint.id.clone());
+    candidate.runtime.active_model_endpoint_id = Some(endpoint.id.clone());
     let endpoint_env = session_cached_env_values(&candidate.runtime.settings);
     candidate.runtime.env.extend(endpoint_env.clone());
-    for key in [
-        "TIMEM_MODEL",
-        "TIMEM_API_PROTOCOL",
-        "TIMEM_RESPONSE_PROTOCOL",
-        "TIMEM_BASE_URL",
-        "TIMEM_MAX_LLM_INPUT",
-        "TIMEM_MAX_LLM_OUTPUT",
-        "TIMEM_MODEL_CATALOG_ID",
-        "TIMEM_MODEL_REQUIREMENTS",
-        "TIMEM_ENABLE_THINKING",
-        "TIMEM_REASONING_EFFORT",
-        "TIMEM_STREAM",
-    ] {
+    for key in ENDPOINT_OWNED_ENV_KEYS {
         if let Some(value) = endpoint_env.get(key).cloned() {
             candidate
                 .runtime
@@ -10436,13 +10644,54 @@ fn model_endpoint_session_candidate(
     Ok(candidate)
 }
 
+#[derive(Clone)]
+struct WorkerModelServiceRoute {
+    config: ModelServiceConfig,
+    failover: Vec<ModelServiceConfig>,
+}
+
+fn worker_model_service_route_for_session(
+    state: &AppState,
+    session: &WebSession,
+) -> Result<WorkerModelServiceRoute, String> {
+    let config = session.runtime.settings.config.clone();
+    let active_endpoint_id = config.interaction.model_endpoint_id.as_deref();
+    let endpoints = state
+        .mem
+        .lock()
+        .map_err(|_| "mem_state_poisoned".to_string())?
+        .model_endpoints
+        .clone();
+    let mut failover = Vec::new();
+    for endpoint_id in &session.runtime.model_endpoint_ids {
+        if active_endpoint_id == Some(endpoint_id.as_str()) {
+            continue;
+        }
+        let endpoint = endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == *endpoint_id)
+            .ok_or_else(|| "model_endpoint_not_found".to_string())?;
+        let mut fallback = config.clone();
+        project_endpoint_onto_config(&mut fallback, endpoint)?;
+        apply_session_reasoning_override(
+            &mut fallback,
+            session.runtime.reasoning_effort_override.as_deref(),
+        );
+        failover.push(fallback);
+    }
+    Ok(WorkerModelServiceRoute { config, failover })
+}
+
 fn rollback_worker_model_service_configs(
     handles: &[timem_session::CoreSessionWorkerHandle],
-    config: &ModelServiceConfig,
+    route: &WorkerModelServiceRoute,
 ) -> Result<(), String> {
     let mut first_error = None;
     for handle in handles.iter().rev() {
-        if let Err(error) = handle.replace_model_service_config(config.clone()) {
+        if let Err(error) = handle.replace_model_service_config_with_failover(
+            route.config.clone(),
+            route.failover.clone(),
+        ) {
             first_error.get_or_insert(error);
         }
     }
@@ -10451,7 +10700,7 @@ fn rollback_worker_model_service_configs(
 
 fn endpoint_apply_error_with_rollback(
     handles: &[timem_session::CoreSessionWorkerHandle],
-    previous: &ModelServiceConfig,
+    previous: &WorkerModelServiceRoute,
     error: String,
 ) -> String {
     match rollback_worker_model_service_configs(handles, previous) {
@@ -10464,7 +10713,7 @@ fn commit_model_endpoint_candidate(
     state: &AppState,
     session_id: &str,
     candidate: WebSession,
-    previous_config: ModelServiceConfig,
+    previous_route: WorkerModelServiceRoute,
     handles: &[timem_session::CoreSessionWorkerHandle],
 ) -> Result<WebSessionRuntimeProfile, String> {
     let mut sessions = state
@@ -10474,14 +10723,14 @@ fn commit_model_endpoint_candidate(
     if !sessions.contains_key(session_id) {
         return Err(endpoint_apply_error_with_rollback(
             handles,
-            &previous_config,
+            &previous_route,
             "session_not_found".to_string(),
         ));
     }
     if let Err(error) = persist_web_session_candidate(state, &candidate) {
         return Err(endpoint_apply_error_with_rollback(
             handles,
-            &previous_config,
+            &previous_route,
             error,
         ));
     }
@@ -10500,57 +10749,267 @@ fn apply_model_endpoint(
     session_id: &str,
     endpoint_id: &str,
 ) -> Result<WebSessionRuntimeProfile, String> {
-    let endpoint = state
-        .mem
-        .lock()
-        .map_err(|_| "mem_state_poisoned".to_string())?
-        .model_endpoints
+    let chain = vec![endpoint_id.to_string()];
+    apply_model_endpoint_chain(state, session_id, &chain)
+}
+
+fn endpoint_in_rate_limit_cooldown(health: &ModelEndpointHealthState, now: u128) -> bool {
+    health.rate_limited_since_ms.is_some_and(|since| {
+        now.saturating_sub(since) < MODEL_ENDPOINT_RATE_LIMIT_COOLDOWN.as_millis()
+    })
+}
+
+/// First chain entry that exists and is outside its rate-limit cooldown.
+/// When every entry is cooling down, the first existing entry is returned so
+/// the turn still attempts the user's first preference (and surfaces its
+/// error) instead of failing without a model call.
+fn first_available_chain_endpoint<'a>(
+    chain: &[String],
+    endpoints: &'a [ModelEndpointConfig],
+    health: &BTreeMap<String, ModelEndpointHealthState>,
+    now: u128,
+) -> Option<&'a ModelEndpointConfig> {
+    let mut first_existing = None;
+    let mut first_available = None;
+    for endpoint in chain
         .iter()
-        .find(|item| item.id == endpoint_id)
-        .cloned()
-        .ok_or_else(|| "model_endpoint_not_found".to_string())?;
-    let (candidate, previous_config) = {
+        .filter_map(|id| endpoints.iter().find(|candidate| candidate.id == *id))
+    {
+        if first_existing.is_none() {
+            first_existing = Some(endpoint);
+        }
+        let cooled_down = health
+            .get(&endpoint.id)
+            .is_none_or(|state| !endpoint_in_rate_limit_cooldown(state, now));
+        if first_available.is_none() && cooled_down {
+            first_available = Some(endpoint);
+        }
+    }
+    first_available.or(first_existing)
+}
+
+fn apply_model_endpoint_chain(
+    state: &AppState,
+    session_id: &str,
+    endpoint_ids: &[String],
+) -> Result<WebSessionRuntimeProfile, String> {
+    if endpoint_ids.is_empty() {
+        return unbind_session_model_endpoint(state, session_id);
+    }
+    if endpoint_ids.len() > MAX_MODEL_ENDPOINT_CHAIN
+        || endpoint_ids.iter().collect::<BTreeSet<_>>().len() != endpoint_ids.len()
+    {
+        return Err("model_endpoint_chain_invalid".to_string());
+    }
+    let endpoints = {
+        let mem = state
+            .mem
+            .lock()
+            .map_err(|_| "mem_state_poisoned".to_string())?;
+        endpoint_ids
+            .iter()
+            .map(|endpoint_id| {
+                mem.model_endpoints
+                    .iter()
+                    .find(|item| &item.id == endpoint_id)
+                    .cloned()
+                    .ok_or_else(|| "model_endpoint_not_found".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let active = {
+        let health = state
+            .model_endpoint_health
+            .lock()
+            .map_err(|_| "model_endpoint_health_poisoned".to_string())?;
+        let Some(active) =
+            first_available_chain_endpoint(endpoint_ids, &endpoints, &health, now_ms())
+        else {
+            return Err("model_endpoint_not_found".to_string());
+        };
+        active.clone()
+    };
+    let (mut candidate, previous_route, base_config) = {
         let sessions = state
             .sessions
             .lock()
             .map_err(|_| "session_store_poisoned".to_string())?;
         let session = sessions.get(session_id).ok_or("session_not_found")?;
         (
-            model_endpoint_session_candidate(session, &endpoint)?,
+            model_endpoint_session_candidate(session, &active)?,
+            worker_model_service_route_for_session(state, session)?,
             session.runtime.settings.config.clone(),
         )
     };
+    candidate.runtime.model_endpoint_ids = endpoint_ids.to_vec();
+    candidate.runtime_profile = WebSessionRuntimeProfile::from_runtime(&candidate.runtime);
+    let mut failover = Vec::new();
+    for endpoint in &endpoints {
+        if endpoint.id == active.id {
+            continue;
+        }
+        let mut config = base_config.clone();
+        project_endpoint_onto_config(&mut config, endpoint)?;
+        apply_session_reasoning_override(
+            &mut config,
+            candidate.runtime.reasoning_effort_override.as_deref(),
+        );
+        failover.push(config);
+    }
 
-    if session_has_active_turn(state, session_id)? {
-        // Switching while a Turn is active changes only the durable binding.
-        // The running Turn keeps its complete start snapshot; the normal
-        // new-Turn refresh applies this endpoint before the next request.
-        let mut binding_candidate = {
-            let sessions = state
-                .sessions
-                .lock()
-                .map_err(|_| "session_store_poisoned".to_string())?;
-            sessions.get(session_id).ok_or("session_not_found")?.clone()
-        };
-        binding_candidate.runtime.model_endpoint_id = Some(endpoint.id.clone());
-        binding_candidate.runtime_profile =
-            WebSessionRuntimeProfile::from_runtime(&binding_candidate.runtime);
-        let profile = binding_candidate.runtime_profile.clone();
-        let mut sessions = state
+    let worker_ids = session_worker_ids(state, session_id)?;
+    let handles = {
+        let manager = state
+            .manager
+            .lock()
+            .map_err(|_| "worker_manager_poisoned".to_string())?;
+        worker_ids
+            .iter()
+            .map(|worker_id| {
+                manager
+                    .handle(worker_id)
+                    .ok_or_else(|| "session_worker_not_found".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut applied = Vec::new();
+    for handle in &handles {
+        if let Err(error) = handle.replace_model_service_config_with_failover(
+            candidate.runtime.settings.config.clone(),
+            failover.clone(),
+        ) {
+            return Err(endpoint_apply_error_with_rollback(
+                &applied,
+                &previous_route,
+                error,
+            ));
+        }
+        applied.push(handle.clone());
+    }
+    commit_model_endpoint_candidate(state, session_id, candidate, previous_route, &applied)
+}
+
+fn update_session_reasoning_effort(
+    state: &AppState,
+    session_id: &str,
+    reasoning_effort: &str,
+) -> Result<WebSessionRuntimeProfile, String> {
+    let (mut candidate, previous_route, active_endpoint) = {
+        let sessions = state
             .sessions
             .lock()
             .map_err(|_| "session_store_poisoned".to_string())?;
-        if !sessions.contains_key(session_id) {
-            return Err("session_not_found".to_string());
-        }
-        persist_web_session_candidate(state, &binding_candidate)?;
-        let session = sessions
-            .get_mut(session_id)
-            .expect("session presence checked before persistence");
-        session.runtime.model_endpoint_id = Some(endpoint.id);
-        session.runtime_profile = profile.clone();
-        return Ok(profile);
+        let session = sessions.get(session_id).ok_or("session_not_found")?;
+        let active_endpoint_id = session
+            .runtime
+            .active_model_endpoint_id
+            .as_deref()
+            .or(session.runtime.model_endpoint_id.as_deref())
+            .ok_or("session_model_endpoint_not_bound")?;
+        let endpoint = state
+            .mem
+            .lock()
+            .map_err(|_| "mem_state_poisoned".to_string())?
+            .model_endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == active_endpoint_id)
+            .cloned()
+            .ok_or("model_endpoint_not_found")?;
+        (
+            session.clone(),
+            worker_model_service_route_for_session(state, session)?,
+            endpoint,
+        )
+    };
+
+    let mut active_config = candidate.runtime.settings.config.clone();
+    project_endpoint_onto_config(&mut active_config, &active_endpoint)?;
+    if !supported_reasoning_levels(&active_config)
+        .iter()
+        .any(|level| level == reasoning_effort)
+    {
+        return Err("session_reasoning_effort_unsupported".to_string());
     }
+    candidate.runtime.reasoning_effort_override = Some(reasoning_effort.to_string());
+    apply_session_reasoning_override(
+        &mut active_config,
+        candidate.runtime.reasoning_effort_override.as_deref(),
+    );
+    candidate.runtime.settings.config = active_config;
+    candidate
+        .runtime
+        .env
+        .extend(session_cached_env_values(&candidate.runtime.settings));
+    candidate.runtime_profile = WebSessionRuntimeProfile::from_runtime(&candidate.runtime);
+    let next_route = worker_model_service_route_for_session(state, &candidate)?;
+
+    let worker_ids = session_worker_ids(state, session_id)?;
+    let handles = {
+        let manager = state
+            .manager
+            .lock()
+            .map_err(|_| "worker_manager_poisoned".to_string())?;
+        worker_ids
+            .iter()
+            .map(|worker_id| {
+                manager
+                    .handle(worker_id)
+                    .ok_or_else(|| "session_worker_not_found".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut applied = Vec::new();
+    for handle in &handles {
+        if let Err(error) = handle.replace_model_service_config_with_failover(
+            next_route.config.clone(),
+            next_route.failover.clone(),
+        ) {
+            return Err(endpoint_apply_error_with_rollback(
+                &applied,
+                &previous_route,
+                error,
+            ));
+        }
+        applied.push(handle.clone());
+    }
+    commit_model_endpoint_candidate(state, session_id, candidate, previous_route, &applied)
+}
+
+/// Removes any endpoint binding and restores the template default
+/// model-service configuration for the Session.
+fn unbind_session_model_endpoint(
+    state: &AppState,
+    session_id: &str,
+) -> Result<WebSessionRuntimeProfile, String> {
+    let (previous_route, mut candidate, overrides) = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions.get(session_id).ok_or("session_not_found")?;
+        (
+            worker_model_service_route_for_session(state, session)?,
+            session.clone(),
+            session.runtime.env_overrides.clone(),
+        )
+    };
+    let mut filtered_overrides = overrides;
+    for key in ENDPOINT_OWNED_ENV_KEYS {
+        filtered_overrides.remove(key);
+    }
+    let settings = state.template.session_settings(&filtered_overrides)?;
+    let session_env = state.template.session_env(&settings, &filtered_overrides);
+    candidate.runtime.settings = settings;
+    candidate.runtime.env = session_env;
+    candidate.runtime.env_overrides = filtered_overrides;
+    for key in CACHED_MODEL_HTTP_TRANSPORT_ENV_KEYS {
+        candidate.runtime.forward_compatible_cache.remove(*key);
+    }
+    candidate.runtime.model_endpoint_id = None;
+    candidate.runtime.active_model_endpoint_id = None;
+    candidate.runtime.model_endpoint_ids = Vec::new();
+    candidate.max_llm_input_tokens = candidate.runtime.settings.config.max_llm_input_tokens;
+    candidate.runtime_profile = WebSessionRuntimeProfile::from_runtime(&candidate.runtime);
 
     let worker_ids = session_worker_ids(state, session_id)?;
     let handles = {
@@ -10574,13 +11033,288 @@ fn apply_model_endpoint(
         {
             return Err(endpoint_apply_error_with_rollback(
                 &applied,
-                &previous_config,
+                &previous_route,
                 error,
             ));
         }
         applied.push(handle.clone());
     }
-    commit_model_endpoint_candidate(state, session_id, candidate, previous_config, &applied)
+    commit_model_endpoint_candidate(state, session_id, candidate, previous_route, &applied)
+}
+
+fn mark_endpoint_rate_limited(state: &AppState, endpoint_id: &str, now: u128) -> bool {
+    match state.model_endpoint_health.lock() {
+        Ok(mut health) => {
+            let entry = health.entry(endpoint_id.to_string()).or_default();
+            let changed = entry.rate_limited_since_ms != Some(now);
+            entry.rate_limited_since_ms = Some(now);
+            entry.probing = false;
+            changed
+        }
+        Err(_) => false,
+    }
+}
+
+/// Probes one endpoint. Ok(true) = available, Ok(false) = rate-limited,
+/// Err = other transport error (availability judgement unchanged).
+fn probe_model_endpoint(
+    endpoint: &ModelEndpointConfig,
+    base_config: &ModelServiceConfig,
+) -> Result<bool, String> {
+    let mut config = base_config.clone();
+    project_endpoint_onto_config(&mut config, endpoint)?;
+    let mut client = HttpModelClient::default();
+    let request = agent_core::negotiation::model_availability_probe_request();
+    let audit_file =
+        std::env::temp_dir().join(format!("timem_model_endpoint_probe_{}.jsonl", endpoint.id));
+    match client.call_model_interaction(&config, &request, &audit_file, &mut || false) {
+        Ok(_) => Ok(true),
+        Err(error) => {
+            if is_model_rate_limited_error(&error) {
+                Ok(false)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+fn apply_model_endpoint_probe_result(
+    state: &AppState,
+    endpoint_id: &str,
+    result: Result<bool, String>,
+) {
+    let now = now_ms();
+    if let Ok(mut health) = state.model_endpoint_health.lock() {
+        let entry = health.entry(endpoint_id.to_string()).or_default();
+        entry.probing = false;
+        match result {
+            Ok(true) => entry.rate_limited_since_ms = None,
+            Ok(false) => entry.rate_limited_since_ms = Some(now),
+            Err(_) => {}
+        }
+    }
+}
+
+fn refresh_sessions_bound_to_endpoints(state: &AppState, endpoint_ids: &[String]) {
+    let session_ids = state
+        .sessions
+        .lock()
+        .ok()
+        .map(|sessions| {
+            sessions
+                .iter()
+                .filter(|(_, session)| {
+                    session
+                        .runtime
+                        .model_endpoint_ids
+                        .iter()
+                        .any(|id| endpoint_ids.contains(id))
+                })
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for session_id in session_ids {
+        let _ = refresh_bound_model_endpoint(state, &session_id);
+    }
+}
+
+/// Marks every endpoint as probing, broadcasts, and probes them
+/// sequentially on a dedicated thread. Completion re-broadcasts the merged
+/// availability report and refreshes bound Sessions.
+fn refresh_model_endpoint_availability(state: &AppState) -> Result<(), String> {
+    let endpoints = {
+        let mem = state
+            .mem
+            .lock()
+            .map_err(|_| "mem_state_poisoned".to_string())?;
+        mem.model_endpoints.clone()
+    };
+    {
+        let mut health = state
+            .model_endpoint_health
+            .lock()
+            .map_err(|_| "model_endpoint_health_poisoned".to_string())?;
+        for endpoint in &endpoints {
+            health.entry(endpoint.id.clone()).or_default().probing = true;
+        }
+    }
+    publish_semantic(
+        state,
+        WireEvent::ModelEndpointsUpdated {
+            endpoints: model_endpoint_reports(state)?,
+        },
+    );
+    let state = state.clone();
+    std::thread::Builder::new()
+        .name("timem-model-endpoint-probe".to_string())
+        .spawn(move || {
+            let base_config = state
+                .template
+                .settings
+                .lock()
+                .map(|settings| settings.config.clone())
+                .ok();
+            for endpoint in &endpoints {
+                let result = base_config
+                    .as_ref()
+                    .ok_or_else(|| "template_settings_poisoned".to_string())
+                    .and_then(|base| probe_model_endpoint(endpoint, base));
+                apply_model_endpoint_probe_result(&state, &endpoint.id, result);
+                if let Ok(updated) = model_endpoint_reports(&state) {
+                    publish_semantic(
+                        &state,
+                        WireEvent::ModelEndpointsUpdated { endpoints: updated },
+                    );
+                }
+            }
+            refresh_sessions_bound_to_endpoints(
+                &state,
+                &endpoints
+                    .iter()
+                    .map(|endpoint| endpoint.id.clone())
+                    .collect::<Vec<_>>(),
+            );
+        })
+        .map_err(|_| "model_endpoint_probe_spawn_failed".to_string())?;
+    Ok(())
+}
+
+/// Periodically re-probes endpoints that have stayed rate-limited long past
+/// the auto-probe threshold so recovered endpoints return to rotation.
+fn spawn_model_endpoint_health_scanner(state: AppState) {
+    let _ = std::thread::Builder::new()
+        .name("timem-model-endpoint-health".to_string())
+        .spawn(move || loop {
+            std::thread::sleep(MODEL_ENDPOINT_HEALTH_SCAN_INTERVAL);
+            let candidate_ids = state
+                .model_endpoint_health
+                .lock()
+                .ok()
+                .map(|health| {
+                    let now = now_ms();
+                    health
+                        .iter()
+                        .filter(|(_, entry)| {
+                            !entry.probing
+                                && entry.rate_limited_since_ms.is_some_and(|since| {
+                                    now.saturating_sub(since)
+                                        >= MODEL_ENDPOINT_AUTO_PROBE_AFTER.as_millis()
+                                })
+                        })
+                        .map(|(id, _)| id.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if candidate_ids.is_empty() {
+                continue;
+            }
+            {
+                let Ok(mut health) = state.model_endpoint_health.lock() else {
+                    continue;
+                };
+                for id in &candidate_ids {
+                    health.entry(id.clone()).or_default().probing = true;
+                }
+            }
+            if let Ok(updated) = model_endpoint_reports(&state) {
+                publish_semantic(
+                    &state,
+                    WireEvent::ModelEndpointsUpdated { endpoints: updated },
+                );
+            }
+            let base_config = state
+                .template
+                .settings
+                .lock()
+                .ok()
+                .map(|settings| settings.config.clone());
+            for endpoint_id in &candidate_ids {
+                let endpoint = match model_endpoint_config_if_exists(&state, endpoint_id) {
+                    Ok(Some(endpoint)) => endpoint,
+                    Ok(None) => {
+                        apply_model_endpoint_probe_result(&state, endpoint_id, Ok(true));
+                        continue;
+                    }
+                    Err(_) => continue,
+                };
+                let result = base_config
+                    .as_ref()
+                    .ok_or_else(|| "template_settings_poisoned".to_string())
+                    .and_then(|base| probe_model_endpoint(&endpoint, base));
+                apply_model_endpoint_probe_result(&state, endpoint_id, result);
+                if let Ok(updated) = model_endpoint_reports(&state) {
+                    publish_semantic(
+                        &state,
+                        WireEvent::ModelEndpointsUpdated { endpoints: updated },
+                    );
+                }
+            }
+            refresh_sessions_bound_to_endpoints(&state, &candidate_ids);
+        });
+}
+
+/// Removes deleted endpoint ids from every bound Session chain and re-applies
+/// the remaining chain (or unbinds when the chain empties).
+fn prune_deleted_model_endpoint_bindings(
+    state: &AppState,
+    deleted: &BTreeSet<String>,
+) -> Result<(), String> {
+    let affected = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        sessions
+            .iter()
+            .filter(|(_, session)| {
+                session
+                    .runtime
+                    .model_endpoint_ids
+                    .iter()
+                    .any(|id| deleted.contains(id))
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>()
+    };
+    for session_id in affected {
+        let remaining = {
+            let sessions = state
+                .sessions
+                .lock()
+                .map_err(|_| "session_store_poisoned".to_string())?;
+            sessions
+                .get(&session_id)
+                .map(|session| {
+                    session
+                        .runtime
+                        .model_endpoint_ids
+                        .iter()
+                        .filter(|id| !deleted.contains(*id))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        // Best-effort: a busy Session keeps its durable-only binding update
+        // path, and the next turn boundary reconciles the worker chain.
+        let profile = if remaining.is_empty() {
+            unbind_session_model_endpoint(state, &session_id).ok()
+        } else {
+            apply_model_endpoint_chain(state, &session_id, &remaining).ok()
+        };
+        if let Some(runtime_profile) = profile {
+            publish_semantic(
+                state,
+                WireEvent::SessionRuntimeUpdated {
+                    session_id,
+                    runtime_profile,
+                },
+            );
+        }
+    }
+    Ok(())
 }
 
 fn update_session_api_key(
@@ -12804,6 +13538,74 @@ fn handle_scoped_worker_event(
                         }
                     }
                 }
+                if event.topic.name == CORE_TOPIC_MODEL_ENDPOINT_FAILOVER {
+                    if event.payload.get("phase").and_then(Value::as_str) == Some("switched")
+                        && is_primary_worker(state, session_id, worker_id)
+                    {
+                        if let Some(endpoint_id) =
+                            event.payload.get("endpoint_id").and_then(Value::as_str)
+                        {
+                            let profile = state.sessions.lock().ok().and_then(|mut sessions| {
+                                let session = sessions.get_mut(session_id)?;
+                                session.runtime.active_model_endpoint_id =
+                                    Some(endpoint_id.to_string());
+                                session.runtime_profile.active_model_endpoint_id =
+                                    Some(endpoint_id.to_string());
+                                Some(session.runtime_profile.clone())
+                            });
+                            if let Some(runtime_profile) = profile {
+                                publish_semantic(
+                                    state,
+                                    WireEvent::SessionRuntimeUpdated {
+                                        session_id: session_id.to_string(),
+                                        runtime_profile,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    let endpoint_id = event
+                        .payload
+                        .get("endpoint_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or_else(|| {
+                            let model = event.payload.get("model").and_then(Value::as_str)?;
+                            let base_url = event.payload.get("base_url").and_then(Value::as_str)?;
+                            state
+                                .mem
+                                .lock()
+                                .ok()?
+                                .model_endpoints
+                                .iter()
+                                .find(|endpoint| {
+                                    endpoint.model == model && endpoint.base_url == base_url
+                                })
+                                .map(|endpoint| endpoint.id.clone())
+                        });
+                    if event.payload.get("phase").and_then(Value::as_str) == Some("switching") {
+                        if let Some(endpoint_id) = endpoint_id {
+                            // Only rate-limit failures mark the cooldown state;
+                            // transient system errors switch without cooling the
+                            // endpoint out of future chains.
+                            let rate_limit_switch = event
+                                .payload
+                                .get("error")
+                                .and_then(Value::as_str)
+                                .is_some_and(is_model_rate_limited_error);
+                            if rate_limit_switch
+                                && mark_endpoint_rate_limited(state, &endpoint_id, now_ms())
+                            {
+                                if let Ok(endpoints) = model_endpoint_reports(state) {
+                                    publish_semantic(
+                                        state,
+                                        WireEvent::ModelEndpointsUpdated { endpoints },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
                 if event.topic.name == CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP {
                     if let Some(debug) = state.debug.as_ref() {
                         if let Err(error) =
@@ -14556,12 +15358,17 @@ impl WebSessionRuntimeProfile {
     fn from_runtime(runtime: &WebSessionRuntime) -> Self {
         let mut profile = Self::from_settings(&runtime.settings);
         profile.model_endpoint_id = runtime.model_endpoint_id.clone();
+        profile.active_model_endpoint_id = runtime.active_model_endpoint_id.clone();
+        profile.model_endpoint_ids = runtime.model_endpoint_ids.clone();
         profile
     }
 
     fn from_settings(settings: &RuntimeSettings) -> Self {
         Self {
             model_endpoint_id: None,
+            active_model_endpoint_id: None,
+            model_endpoint_ids: Vec::new(),
+            reasoning_effort: settings.config.openai_compatible.reasoning_effort.clone(),
             model: settings.config.model.clone(),
             api_protocol: settings.config.api_protocol.label().to_string(),
             response_protocol: settings.config.response_protocol.name().to_string(),

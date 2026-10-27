@@ -18,6 +18,13 @@ pub struct StoredSession {
     pub display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_endpoint_id: Option<String>,
+    /// Ordered failover chain of model endpoint ids. The first entry is the
+    /// currently applied endpoint (mirrored into `model_endpoint_id`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_endpoint_ids: Vec<String>,
+    /// Session-only reasoning selection. It never mutates a shared endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_override: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub current_dir: String,
@@ -1531,6 +1538,8 @@ pub fn new_stored_session(
     let now = now_ms();
     StoredSession {
         model_endpoint_id: None,
+        model_endpoint_ids: Vec::new(),
+        reasoning_effort_override: None,
         session_id: session_id.into(),
         display_name: display_name.into(),
         created_at_ms: now,

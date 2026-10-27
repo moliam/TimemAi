@@ -2322,6 +2322,8 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
     };
     let stored = StoredSession {
         model_endpoint_id: None,
+        model_endpoint_ids: Vec::new(),
+        reasoning_effort_override: None,
         session_id: "web_session_1".to_string(),
         display_name: "Recovered Web".to_string(),
         group_id: None,
@@ -2402,6 +2404,8 @@ fn shell_start_recovers_valid_session_from_partially_corrupt_index() {
     };
     let stored = StoredSession {
         model_endpoint_id: None,
+        model_endpoint_ids: Vec::new(),
+        reasoning_effort_override: None,
         session_id: "shell_recovered".to_string(),
         display_name: "Recovered".to_string(),
         group_id: None,
@@ -2472,6 +2476,8 @@ fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
     store
         .upsert_session(&StoredSession {
             model_endpoint_id: None,
+            model_endpoint_ids: Vec::new(),
+            reasoning_effort_override: None,
             session_id: "web_session_cwd".to_string(),
             display_name: "Recovered Web".to_string(),
             group_id: None,
@@ -2540,6 +2546,8 @@ fn shell_resume_prefers_non_empty_launch_env_then_cli_over_stored_session_env() 
     ]);
     let session = StoredSession {
         model_endpoint_id: None,
+        model_endpoint_ids: Vec::new(),
+        reasoning_effort_override: None,
         session_id: "web_session_env".to_string(),
         display_name: "Recovered Web".to_string(),
         group_id: None,
@@ -2609,6 +2617,8 @@ fn shell_resume_ignores_empty_launch_env_values_instead_of_clearing_cache() {
     let workspace = std::env::current_dir().unwrap();
     let session = StoredSession {
         model_endpoint_id: None,
+        model_endpoint_ids: Vec::new(),
+        reasoning_effort_override: None,
         session_id: "cached_session".to_string(),
         display_name: "Cached Session".to_string(),
         group_id: None,
@@ -2776,6 +2786,8 @@ fn shell_can_resume_web_style_session_history() {
     store
         .upsert_session(&StoredSession {
             model_endpoint_id: None,
+            model_endpoint_ids: Vec::new(),
+            reasoning_effort_override: None,
             session_id: session_id.to_string(),
             display_name: "Session0".to_string(),
             group_id: None,

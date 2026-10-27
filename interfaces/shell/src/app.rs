@@ -672,6 +672,8 @@ fn new_shell_session(
     let session_id = "shell_default".to_string();
     StoredSession {
         model_endpoint_id: None,
+        model_endpoint_ids: Vec::new(),
+        reasoning_effort_override: None,
         session_id: session_id.clone(),
         display_name: "ShellSession".to_string(),
         group_id: None,

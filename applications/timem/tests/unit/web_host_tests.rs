@@ -791,6 +791,8 @@ fn corrupt_session_index_record_is_backed_up_while_valid_sessions_remain_usable(
     std::fs::create_dir_all(store.sessions_dir()).unwrap();
     let valid = StoredSession {
         model_endpoint_id: None,
+        model_endpoint_ids: Vec::new(),
+        reasoning_effort_override: None,
         session_id: "session-valid".to_string(),
         display_name: "Recovered".to_string(),
         created_at_ms: 1,
@@ -4600,6 +4602,8 @@ fn missing_workspace_session_uses_locked_fallback_without_losing_metadata_or_his
     store
         .upsert_session(&StoredSession {
             model_endpoint_id: None,
+            model_endpoint_ids: Vec::new(),
+            reasoning_effort_override: None,
             session_id: session_id.to_string(),
             display_name: original_display_name.to_string(),
             created_at_ms: 1,
@@ -6850,6 +6854,8 @@ fn corrupt_snapshot_degrades_to_history_only_restore_without_blocking_session() 
     store
         .upsert_session(&StoredSession {
             model_endpoint_id: None,
+            model_endpoint_ids: Vec::new(),
+            reasoning_effort_override: None,
             session_id: session_id.to_string(),
             display_name: "Corrupt snapshot session".to_string(),
             created_at_ms: 1,
@@ -8191,6 +8197,7 @@ fn routing_test_state() -> AppState {
         )),
         template: Arc::new(template),
         model_endpoint_imports: Arc::new(Mutex::new(Vec::new())),
+        model_endpoint_health: Arc::new(Mutex::new(BTreeMap::new())),
         events: events.clone(),
         sessions: Arc::new(Mutex::new(sessions)),
         command_dedup: Arc::new(Mutex::new(CommandDedupCache::default())),
@@ -8361,6 +8368,9 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         pending_work_instruction_turn: None,
         runtime: WebSessionRuntime {
             model_endpoint_id: None,
+            active_model_endpoint_id: None,
+            model_endpoint_ids: Vec::new(),
+            reasoning_effort_override: None,
             settings,
             env: BTreeMap::new(),
             env_overrides: BTreeMap::new(),
@@ -8403,6 +8413,9 @@ fn test_runtime_settings() -> RuntimeSettings {
 fn test_runtime_profile() -> WebSessionRuntimeProfile {
     WebSessionRuntimeProfile {
         model_endpoint_id: None,
+        active_model_endpoint_id: None,
+        model_endpoint_ids: Vec::new(),
+        reasoning_effort: None,
         model: "model".to_string(),
         api_protocol: "openai-compatible".to_string(),
         response_protocol: "xml".to_string(),
@@ -15945,6 +15958,8 @@ struct EndpointRequestBoundaryModel {
     entered: std::sync::mpsc::Sender<usize>,
     release: std::sync::mpsc::Receiver<()>,
     calls: usize,
+    protocol_repair_calls: usize,
+    rate_limited_models: Vec<String>,
 }
 
 impl ModelClient for EndpointRequestBoundaryModel {
@@ -15963,9 +15978,17 @@ impl ModelClient for EndpointRequestBoundaryModel {
         self.release
             .recv_timeout(Duration::from_secs(5))
             .map_err(|error| format!("endpoint_boundary_release_failed:{error}"))?;
+        if self.rate_limited_models.contains(&config.model) {
+            return Err("model_http_429: endpoint boundary rate limited".to_string());
+        }
+        let content = if self.calls <= self.protocol_repair_calls {
+            "not protocol compliant".to_string()
+        } else {
+            confirmed_xml_response("<final_answer>request complete</final_answer>")
+        };
         Ok(LlmResponse {
             tool_calls: Vec::new(),
-            content: confirmed_xml_response("<final_answer>request complete</final_answer>"),
+            content,
             model_name: config.model.clone(),
             usage: UsageStats::zero(),
             truncated: false,
@@ -16072,6 +16095,8 @@ fn register_endpoint_boundary_worker(
                 entered,
                 release,
                 calls: 0,
+                protocol_repair_calls: 2,
+                rate_limited_models: Vec::new(),
             },
         )
         .unwrap();
@@ -16124,7 +16149,7 @@ fn drive_endpoint_boundary_turn_until_ready(state: &AppState, session_id: &str) 
 }
 
 #[test]
-fn endpoint_edits_and_switches_apply_at_the_next_new_request_boundary() {
+fn endpoint_edits_and_switches_apply_at_the_next_api_request_boundary() {
     let state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_boundary"));
     set_test_mem(&state, root.clone(), ".test_mem");
@@ -16163,7 +16188,14 @@ fn endpoint_edits_and_switches_apply_at_the_next_new_request_boundary() {
     )
     .unwrap();
 
-    submit_turn(&state, &session_id, "first request".to_string()).unwrap();
+    // One Turn deliberately makes three protocol-repair requests. Changes made
+    // while request N is in flight must affect request N+1, never request N.
+    submit_turn(
+        &state,
+        &session_id,
+        "three requests in one Turn".to_string(),
+    )
+    .unwrap();
     assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
     {
         let calls = captured.lock().unwrap();
@@ -16174,8 +16206,6 @@ fn endpoint_edits_and_switches_apply_at_the_next_new_request_boundary() {
         );
     }
 
-    // Editing only the daily effort used to be missed by endpoint equality.
-    // The in-flight request keeps medium; the following new Turn must use high.
     handle_command(
         &state,
         TEST_PORT,
@@ -16184,23 +16214,6 @@ fn endpoint_edits_and_switches_apply_at_the_next_new_request_boundary() {
         },
     )
     .unwrap();
-    {
-        let session = &state.sessions.lock().unwrap()[&session_id];
-        assert_eq!(
-            session
-                .runtime
-                .settings
-                .config
-                .openai_compatible
-                .reasoning_effort
-                .as_deref(),
-            Some("medium")
-        );
-        assert_eq!(
-            session.runtime.model_endpoint_id.as_deref(),
-            Some("endpoint-boundary-a")
-        );
-    }
     assert_eq!(
         captured.lock().unwrap()[0]
             .openai_compatible
@@ -16209,27 +16222,25 @@ fn endpoint_edits_and_switches_apply_at_the_next_new_request_boundary() {
         Some("medium")
     );
     release_tx.send(()).unwrap();
-    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
 
-    submit_turn(&state, &session_id, "second request".to_string()).unwrap();
     assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
     {
         let calls = captured.lock().unwrap();
-        assert_eq!(calls[1].model, "boundary-model-a");
-        assert_eq!(calls[1].base_url, "https://boundary-a.example.test/v1");
-        assert_eq!(calls[1].api_key, "boundary-secret-a");
+        let config = &calls[1];
+        assert_eq!(config.model, "boundary-model-a");
+        assert_eq!(config.base_url, "https://boundary-a.example.test/v1");
+        assert_eq!(config.api_key, "boundary-secret-a");
         assert_eq!(
-            calls[1].http_headers.get("X-Boundary").map(String::as_str),
+            config.http_headers.get("X-Boundary").map(String::as_str),
             Some("a")
         );
-        assert_eq!(calls[1].request_fields.get("route"), Some(&json!("a")));
+        assert_eq!(config.request_fields.get("route"), Some(&json!("a")));
         assert_eq!(
-            calls[1].openai_compatible.reasoning_effort.as_deref(),
+            config.openai_compatible.reasoning_effort.as_deref(),
             Some("high")
         );
     }
 
-    // Switching while this request is active changes only the durable binding.
     handle_command(
         &state,
         TEST_PORT,
@@ -16239,29 +16250,9 @@ fn endpoint_edits_and_switches_apply_at_the_next_new_request_boundary() {
         },
     )
     .unwrap();
-    {
-        let session = &state.sessions.lock().unwrap()[&session_id];
-        assert_eq!(
-            session.runtime.model_endpoint_id.as_deref(),
-            Some("endpoint-boundary-b")
-        );
-        assert_eq!(session.runtime.settings.config.model, "boundary-model-a");
-        assert_eq!(
-            session
-                .runtime
-                .settings
-                .config
-                .openai_compatible
-                .reasoning_effort
-                .as_deref(),
-            Some("high")
-        );
-    }
     assert_eq!(captured.lock().unwrap()[1].model, "boundary-model-a");
     release_tx.send(()).unwrap();
-    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
 
-    submit_turn(&state, &session_id, "third request".to_string()).unwrap();
     assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 3);
     {
         let calls = captured.lock().unwrap();
@@ -16294,6 +16285,468 @@ fn endpoint_edits_and_switches_apply_at_the_next_new_request_boundary() {
     }
     release_tx.send(()).unwrap();
     drive_endpoint_boundary_turn_until_ready(&state, &session_id);
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn session_reasoning_effort_applies_at_the_next_api_request_without_mutating_endpoints() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_reasoning_boundary"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let worker_dir = root.join("worker");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let session_id = register_endpoint_boundary_worker(
+        &state,
+        Arc::clone(&captured),
+        entered_tx,
+        release_rx,
+        &worker_dir,
+    );
+
+    for endpoint in [
+        endpoint_boundary_input("endpoint-boundary-a", "medium"),
+        endpoint_boundary_input("endpoint-boundary-b", "low"),
+    ] {
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::ModelEndpointUpsert {
+                endpoint: Box::new(endpoint),
+            },
+        )
+        .unwrap();
+    }
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointApply {
+            session_id: session_id.clone(),
+            endpoint_id: "endpoint-boundary-a".to_string(),
+        },
+    )
+    .unwrap();
+
+    submit_turn(
+        &state,
+        &session_id,
+        "change Session reasoning during one Turn".to_string(),
+    )
+    .unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+    assert_eq!(
+        captured.lock().unwrap()[0]
+            .openai_compatible
+            .reasoning_effort
+            .as_deref(),
+        Some("medium")
+    );
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionReasoningEffortUpdate {
+            session_id: session_id.clone(),
+            reasoning_effort: "high".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        captured.lock().unwrap()[0]
+            .openai_compatible
+            .reasoning_effort
+            .as_deref(),
+        Some("medium"),
+        "the in-flight request must retain its original config"
+    );
+    {
+        let mem = state.mem.lock().unwrap();
+        assert_eq!(
+            mem.model_endpoints
+                .iter()
+                .find(|endpoint| endpoint.id == "endpoint-boundary-a")
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some("medium"),
+            "Session selection must not rewrite endpoint A"
+        );
+    }
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::SessionReasoningEffortUpdate {
+                session_id: session_id.clone(),
+                reasoning_effort: "low".to_string(),
+            },
+        )
+        .unwrap_err(),
+        "session_reasoning_effort_unsupported"
+    );
+    release_tx.send(()).unwrap();
+
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+    assert_eq!(
+        captured.lock().unwrap()[1]
+            .openai_compatible
+            .reasoning_effort
+            .as_deref(),
+        Some("high"),
+        "the next API request must use the Session selection"
+    );
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointApply {
+            session_id: session_id.clone(),
+            endpoint_id: "endpoint-boundary-b".to_string(),
+        },
+    )
+    .unwrap();
+    release_tx.send(()).unwrap();
+
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 3);
+    {
+        let calls = captured.lock().unwrap();
+        assert_eq!(calls[2].model, "boundary-model-b");
+        assert_eq!(
+            calls[2].openai_compatible.reasoning_effort.as_deref(),
+            Some("high"),
+            "the Session selection must survive an endpoint switch when supported"
+        );
+    }
+    {
+        let mem = state.mem.lock().unwrap();
+        assert_eq!(
+            mem.model_endpoints
+                .iter()
+                .find(|endpoint| endpoint.id == "endpoint-boundary-b")
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some("low"),
+            "Session selection must not rewrite endpoint B"
+        );
+    }
+    let stored = current_session_store(&state)
+        .unwrap()
+        .load_session(&session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.reasoning_effort_override.as_deref(), Some("high"));
+    assert_eq!(
+        state.sessions.lock().unwrap()[&session_id]
+            .runtime_profile
+            .reasoning_effort
+            .as_deref(),
+        Some("high")
+    );
+
+    release_tx.send(()).unwrap();
+    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn chain_standby_edits_and_cooldown_apply_at_the_next_api_request_boundary() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_chain_boundary"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let worker_dir = root.join("worker");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let session_id = register_endpoint_boundary_worker(
+        &state,
+        Arc::clone(&captured),
+        entered_tx,
+        release_rx,
+        &worker_dir,
+    );
+    upsert_model_endpoint(
+        &state,
+        endpoint_boundary_input("endpoint-boundary-a", "medium"),
+    )
+    .unwrap();
+    upsert_model_endpoint(
+        &state,
+        endpoint_boundary_input("endpoint-boundary-b", "low"),
+    )
+    .unwrap();
+    apply_model_endpoint(&state, &session_id, "endpoint-boundary-a").unwrap();
+
+    submit_turn(
+        &state,
+        &session_id,
+        "change route during one Turn".to_string(),
+    )
+    .unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+    state.model_endpoint_health.lock().unwrap().insert(
+        "endpoint-boundary-a".to_string(),
+        ModelEndpointHealthState {
+            rate_limited_since_ms: Some(now_ms()),
+            probing: false,
+        },
+    );
+    apply_model_endpoint_chain(
+        &state,
+        &session_id,
+        &[
+            "endpoint-boundary-a".to_string(),
+            "endpoint-boundary-b".to_string(),
+        ],
+    )
+    .unwrap();
+    let mut latest_b = endpoint_boundary_input("endpoint-boundary-b", "high");
+    latest_b.base_url = "https://latest-b.example.test/v1".to_string();
+    latest_b.max_llm_input_tokens = 91_000;
+    latest_b.max_llm_output_tokens = 9_000;
+    latest_b.api_key = Some("latest-secret-b".to_string());
+    latest_b
+        .http_headers
+        .insert("X-Boundary".to_string(), "latest-b".to_string());
+    latest_b
+        .request_fields
+        .insert("route".to_string(), json!("latest-b"));
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointUpsert {
+            endpoint: Box::new(latest_b),
+        },
+    )
+    .unwrap();
+    assert_eq!(captured.lock().unwrap()[0].model, "boundary-model-a");
+    release_tx.send(()).unwrap();
+
+    // Both queued snapshots are coalesced; the immediately following API
+    // request gets the latest complete B config rather than an intermediate one.
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+    {
+        let calls = captured.lock().unwrap();
+        let config = &calls[1];
+        assert_eq!(config.model, "boundary-model-b");
+        assert_eq!(config.base_url, "https://latest-b.example.test/v1");
+        assert_eq!(config.api_key, "latest-secret-b");
+        assert_eq!(config.max_llm_input_tokens, 91_000);
+        assert_eq!(config.max_llm_output_tokens, 9_000);
+        assert_eq!(
+            config.http_headers.get("X-Boundary").map(String::as_str),
+            Some("latest-b")
+        );
+        assert_eq!(config.request_fields.get("route"), Some(&json!("latest-b")));
+        assert_eq!(
+            config.openai_compatible.reasoning_effort.as_deref(),
+            Some("high")
+        );
+    }
+    release_tx.send(()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 3);
+    release_tx.send(()).unwrap();
+    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn clearing_chain_during_a_turn_restores_unbound_config_on_the_next_api_request() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_unbind_boundary"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let worker_dir = root.join("worker");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let session_id = register_endpoint_boundary_worker(
+        &state,
+        Arc::clone(&captured),
+        entered_tx,
+        release_rx,
+        &worker_dir,
+    );
+    let unbound_config = state
+        .template
+        .session_settings(&BTreeMap::new())
+        .unwrap()
+        .config;
+    upsert_model_endpoint(
+        &state,
+        endpoint_boundary_input("endpoint-boundary-a", "medium"),
+    )
+    .unwrap();
+    apply_model_endpoint(&state, &session_id, "endpoint-boundary-a").unwrap();
+
+    submit_turn(&state, &session_id, "unbind during one Turn".to_string()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+    apply_model_endpoint_chain(&state, &session_id, &[]).unwrap();
+    assert_eq!(captured.lock().unwrap()[0].model, "boundary-model-a");
+    release_tx.send(()).unwrap();
+
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+    assert_eq!(captured.lock().unwrap()[1], unbound_config);
+    release_tx.send(()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 3);
+    assert_eq!(captured.lock().unwrap()[2], unbound_config);
+    release_tx.send(()).unwrap();
+    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert!(session.runtime.active_model_endpoint_id.is_none());
+        assert!(session.runtime_profile.active_model_endpoint_id.is_none());
+        assert_eq!(session.runtime.settings.config, unbound_config);
+    }
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn rate_limit_failover_projects_the_committed_current_endpoint() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_failover_projection"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let worker_dir = root.join("worker");
+    std::fs::create_dir_all(&worker_dir).unwrap();
+    let session_id = unique_web_id("endpoint_failover_session");
+    let context_id = test_context_id(&session_id);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &worker_dir,
+    );
+    let worker_id = state
+        .manager
+        .lock()
+        .unwrap()
+        .spawn_worker_in_session_with_model_client(
+            core,
+            state.template.settings.lock().unwrap().config.clone(),
+            CoreSessionWorkerWorkspace::new(
+                &worker_dir,
+                worker_dir.join("audit.json"),
+                "test-web",
+                "local",
+            ),
+            session_id.clone(),
+            context_id.clone(),
+            Some("Endpoint failover".to_string()),
+            None,
+            EndpointRequestBoundaryModel {
+                captured: Arc::clone(&captured),
+                entered: entered_tx,
+                release: release_rx,
+                calls: 0,
+                protocol_repair_calls: 0,
+                rate_limited_models: vec!["boundary-model-a".to_string()],
+            },
+        )
+        .unwrap();
+    let mut session = test_web_session(&session_id, 0, "Endpoint failover".to_string());
+    session.current_dir = worker_dir.display().to_string();
+    session.contexts[0] = WebContext {
+        context_id: context_id.clone(),
+        current_dir: worker_dir.display().to_string(),
+        worker_ids: vec![worker_id.clone()],
+    };
+    session.workers[0].worker_id = worker_id.clone();
+    session.workers[0].context_id = context_id.clone();
+    session.active_context_id = context_id;
+    session.primary_worker_id = worker_id;
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session);
+    persist_web_session(&state, &session_id).unwrap();
+    upsert_model_endpoint(
+        &state,
+        endpoint_boundary_input("endpoint-boundary-a", "medium"),
+    )
+    .unwrap();
+    upsert_model_endpoint(
+        &state,
+        endpoint_boundary_input("endpoint-boundary-b", "low"),
+    )
+    .unwrap();
+    apply_model_endpoint_chain(
+        &state,
+        &session_id,
+        &[
+            "endpoint-boundary-a".to_string(),
+            "endpoint-boundary-b".to_string(),
+        ],
+    )
+    .unwrap();
+
+    submit_turn(&state, &session_id, "fail over A".to_string()).unwrap();
+    // Three consecutive rate-limit strikes on the primary, then the ordered
+    // chain hands control to the standby for the same formal round.
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+    release_tx.send(()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+    release_tx.send(()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 3);
+    release_tx.send(()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 4);
+    release_tx.send(()).unwrap();
+    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
+
+    let calls = captured.lock().unwrap();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|config| config.model.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "boundary-model-a",
+            "boundary-model-a",
+            "boundary-model-a",
+            "boundary-model-b"
+        ]
+    );
+    drop(calls);
+    let session = &state.sessions.lock().unwrap()[&session_id];
+    assert_eq!(
+        session.runtime.model_endpoint_id.as_deref(),
+        Some("endpoint-boundary-a")
+    );
+    assert_eq!(
+        session.runtime_profile.model_endpoint_id.as_deref(),
+        Some("endpoint-boundary-a")
+    );
+    assert_eq!(
+        session.runtime_profile.active_model_endpoint_id.as_deref(),
+        Some("endpoint-boundary-b")
+    );
 
     let manager = {
         let mut guard = state.manager.lock().unwrap();
@@ -16422,6 +16875,14 @@ fn model_endpoint_apply_persistence_failure_rolls_back_worker_memory_and_disk() 
         assert_eq!(calls[0].request_fields.get("route"), Some(&json!("a")));
     }
     release_tx.send(()).unwrap();
+    for expected_call in 2..=3 {
+        assert_eq!(
+            entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            expected_call
+        );
+        assert_eq!(captured.lock().unwrap()[expected_call - 1], before_config);
+        release_tx.send(()).unwrap();
+    }
     drive_endpoint_boundary_turn_until_ready(&state, &session_id);
 
     apply_model_endpoint(&state, &session_id, "endpoint-boundary-b").unwrap();
@@ -16431,10 +16892,10 @@ fn model_endpoint_apply_persistence_failure_rolls_back_worker_memory_and_disk() 
         "request after successful retry".to_string(),
     )
     .unwrap();
-    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 4);
     {
         let calls = captured.lock().unwrap();
-        let config = &calls[1];
+        let config = &calls[3];
         assert_eq!(config.model, "boundary-model-b");
         assert_eq!(config.api_protocol.label(), "openai-responses");
         assert_eq!(config.base_url, "https://boundary-b.example.test/v1");
@@ -16816,8 +17277,9 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     assert!(!restored[0].stream);
     assert_eq!(restored[0].api_key, "secret-endpoint-key");
 
-    // Editing during an active Turn must retain the old complete route until
-    // the following new-Turn boundary, then apply secrets and headers as well.
+    // Editing during an active Turn commits the newest complete route snapshot.
+    // A request already in flight retains its immutable copy; the Worker polls
+    // this snapshot immediately before its next model API request.
     let previous = model_endpoint_config(&state, "endpoint-one").unwrap();
     {
         let mut sessions = state.sessions.lock().unwrap();
@@ -16850,7 +17312,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     {
         let mut sessions = state.sessions.lock().unwrap();
         let session = sessions.get_mut(&session_id).unwrap();
-        assert!(session_uses_model_endpoint(session, &previous));
+        assert!(session_uses_model_endpoint(session, &updated));
         session.active_turn_id = None;
     }
     refresh_bound_model_endpoint(&state, &session_id).unwrap();
@@ -16887,10 +17349,16 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     assert!(load_model_endpoints_resilient(&memory_dir)
         .unwrap()
         .is_empty());
-    assert_eq!(
-        refresh_bound_model_endpoint(&state, &session_id).unwrap_err(),
-        "model_endpoint_not_found"
-    );
+    // Deleting the endpoint prunes every bound Session chain immediately; the
+    // Session falls back to the template default instead of keeping a
+    // dangling endpoint reference.
+    refresh_bound_model_endpoint(&state, &session_id).unwrap();
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert!(session.runtime.model_endpoint_id.is_none());
+        assert!(session.runtime.model_endpoint_ids.is_empty());
+    }
     let manager = {
         let mut guard = state.manager.lock().unwrap();
         std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
@@ -18180,6 +18648,182 @@ fn zhipu_catalog_endpoints_roundtrip_and_reject_forbidden_efforts() {
         } else {
             assert!(normalize_model_endpoint_input(None, switched).is_err());
         }
+        endpoints.push(endpoint);
+    }
+    save_model_endpoints(&root, &endpoints).unwrap();
+    let restored = load_model_endpoints_resilient(&root).unwrap();
+    assert_eq!(
+        serde_json::to_value(&restored).unwrap(),
+        serde_json::to_value(&endpoints).unwrap()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn every_catalog_template_default_is_saveable_with_versioned_requirements() {
+    for model in agent_core::model_catalog::models() {
+        let protocol = model
+            .protocols
+            .iter()
+            .find(|protocol| protocol.disabled_reason.is_none())
+            .expect("catalog parser requires an enabled protocol");
+        // Mirror Web templateBudgetSuggestion. This end-to-end contract catches
+        // both catalog/provider drift and defaults that the Host would reject.
+        let output_budget = 20_000u32
+            .min(model.max_output)
+            .min(model.context_window - model.min_input);
+        let input_budget = 256_000u32
+            .min(model.max_input)
+            .min(model.context_window - output_budget);
+        let effort = protocol
+            .fixed_effort
+            .as_deref()
+            .unwrap_or(&model.default_effort);
+        let input: ModelEndpointInput = serde_json::from_value(json!({
+            "name": model.label,
+            "catalog_id": model.id,
+            "model": model.model,
+            "api_protocol": protocol.protocol,
+            "response_protocol": "xml",
+            "base_url": protocol.base_url,
+            "max_llm_input_tokens": input_budget,
+            "max_llm_output_tokens": output_budget,
+            "reasoning_effort": effort,
+            "stream": true,
+            "function_calling": protocol.protocol == "openai-responses"
+                || protocol.function_calling
+                    != agent_core::model_catalog::FunctionCallingSupport::Unsupported,
+            "requirements": {
+                "version": 1,
+                "provider": model.provider,
+                "allowed_reasoning": model.efforts,
+                "adaptive_reasoning": model.default_effort != "none",
+                "field_sources": {
+                    "name": "template",
+                    "model": "template",
+                    "provider": "template",
+                    "api_protocol": "template",
+                    "base_url": "template",
+                    "function_calling": "template",
+                    "stream": "template",
+                    "reasoning_effort": "template",
+                    "allowed_reasoning": "template",
+                    "adaptive_reasoning": "template",
+                    "max_llm_input_tokens": "template",
+                    "max_llm_output_tokens": "template"
+                }
+            }
+        }))
+        .unwrap();
+        normalize_model_endpoint_input(None, input).unwrap_or_else(|error| {
+            panic!(
+                "catalog template {} ({}) must be saveable: {error}",
+                model.id, model.provider
+            )
+        });
+    }
+}
+
+#[test]
+fn kimi_catalog_endpoints_roundtrip_and_reject_forbidden_efforts() {
+    let root = std::env::temp_dir().join(unique_web_id("kimi_catalog"));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut endpoints = Vec::new();
+    for (catalog_id, model_id, effort, input_budget) in [
+        ("k-k3.1-pro", "kimi-k3.1-pro", "max", 200000u32),
+        (
+            "k-k3.1-pro-highspeed",
+            "kimi-k3.1-pro-highspeed",
+            "max",
+            200000,
+        ),
+        ("k-k3", "kimi-k3", "max", 200000),
+        // K2 context window is 256k: input+output must fit.
+        ("k-k2.6", "kimi-k2.6", "high", 120000),
+        ("k-k2.7-code", "kimi-k2.7-code", "high", 120000),
+    ] {
+        let value = json!({"name":catalog_id,"catalog_id":catalog_id,
+            "model":model_id,"api_protocol":"openai-compatible","response_protocol":"xml",
+            "base_url":"https://api.moonshot.cn/v1","max_llm_input_tokens":input_budget,
+            "max_llm_output_tokens":131072,"reasoning_effort":effort,"stream":true});
+        let input: ModelEndpointInput = serde_json::from_value(value).unwrap();
+        let endpoint = normalize_model_endpoint_input(None, input.clone()).unwrap();
+        assert_eq!(endpoint.catalog_id.as_deref(), Some(catalog_id));
+        assert_eq!(endpoint.reasoning_effort.as_deref(), Some(effort));
+        let mut wrong = input.clone();
+        wrong.reasoning_effort = Some("none".into());
+        assert_eq!(
+            normalize_model_endpoint_input(None, wrong).is_err(),
+            catalog_id != "k-k2.6"
+        );
+        let mut switched = input.clone();
+        switched.api_protocol = "openai-responses".into();
+        // K2 templates are Chat-only: the Responses protocol is not admitted.
+        assert_eq!(
+            normalize_model_endpoint_input(None, switched.clone()).is_err(),
+            catalog_id.starts_with("k-k2")
+        );
+        if catalog_id.starts_with("k-k3") {
+            let admitted = normalize_model_endpoint_input(None, switched.clone()).unwrap();
+            assert_eq!(admitted.api_protocol, "openai-responses");
+            switched.reasoning_effort = Some("medium".into());
+            assert!(normalize_model_endpoint_input(None, switched).is_err());
+        }
+        let mut forbidden = input.clone();
+        forbidden.reasoning_effort = Some("medium".into());
+        assert!(normalize_model_endpoint_input(None, forbidden).is_err());
+        endpoints.push(endpoint);
+    }
+    save_model_endpoints(&root, &endpoints).unwrap();
+    let restored = load_model_endpoints_resilient(&root).unwrap();
+    assert_eq!(
+        serde_json::to_value(&restored).unwrap(),
+        serde_json::to_value(&endpoints).unwrap()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn kimi_code_catalog_endpoints_roundtrip_and_protocol_defaults() {
+    let root = std::env::temp_dir().join(unique_web_id("kimi_code_catalog"));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut endpoints = Vec::new();
+    for (catalog_id, model_id, effort, input_budget) in [
+        ("kimicode_k3.1-pro", "k3.1-pro", "high", 200000u32),
+        (
+            "kimicode_k3.1-pro-highspeed",
+            "k3.1-pro-highspeed",
+            "high",
+            200000,
+        ),
+        ("kimicode_k3", "k3", "high", 200000),
+        ("kimicode_k3-256k", "k3-256k", "high", 120000),
+        ("kimicode_kimi-for-coding", "kimi-for-coding", "max", 200000),
+    ] {
+        // Match the browser template submission: versioned requirements name
+        // kimi_code explicitly instead of relying on the legacy catalog_id path.
+        let value = json!({"name":catalog_id,"catalog_id":catalog_id,
+            "model":model_id,"api_protocol":"openai-responses","response_protocol":"xml",
+            "base_url":"https://api.kimi.com/coding/v1","max_llm_input_tokens":input_budget,
+            "max_llm_output_tokens":131072,"reasoning_effort":effort,"stream":true,
+            "requirements":{"version":1,"provider":"kimi_code",
+                "allowed_reasoning":["low","high","max"],"adaptive_reasoning":true,
+                "field_sources":{"provider":"template","model":"template",
+                    "api_protocol":"template","base_url":"template",
+                    "reasoning_effort":"template","allowed_reasoning":"template",
+                    "adaptive_reasoning":"template","max_llm_input_tokens":"template",
+                    "max_llm_output_tokens":"template"}}});
+        let input: ModelEndpointInput = serde_json::from_value(value).unwrap();
+        let endpoint = normalize_model_endpoint_input(None, input.clone()).unwrap();
+        assert_eq!(endpoint.catalog_id.as_deref(), Some(catalog_id));
+        assert_eq!(endpoint.reasoning_effort.as_deref(), Some(effort));
+        let mut wrong = input.clone();
+        wrong.reasoning_effort = Some("none".into());
+        assert!(normalize_model_endpoint_input(None, wrong).is_err());
+        let mut chat = input.clone();
+        chat.api_protocol = "openai-compatible".into();
+        let admitted = normalize_model_endpoint_input(None, chat).unwrap();
+        assert_eq!(admitted.api_protocol, "openai-compatible");
         endpoints.push(endpoint);
     }
     save_model_endpoints(&root, &endpoints).unwrap();
