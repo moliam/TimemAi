@@ -33,21 +33,25 @@ describe("endpoint chain selection panel", () => {
     expect(source).toContain('type: "model_endpoint_chain_apply"');
     expect(panel).toContain('aria-pressed={inChain}');
     expect(panel).toContain('className={`endpoint-chain-checkbox ${inChain ? "selected" : ""}`}');
-    expect(panel).toContain('t(working ? "endpoints.chainWorkingHint" : "endpoints.chainSelectionHint")');
-    expect(panel).toContain('t("endpoints.chainPending")');
-    expect(panel).toContain('"endpoints.chainSynced"');
+    expect(panel).not.toContain('t(working ? "endpoints.chainWorkingHint" : "endpoints.chainSelectionHint")');
+    expect(panel).not.toContain('t("endpoints.chainPending")');
+    expect(panel).not.toContain('"endpoints.chainSynced"');
     expect(panel).toContain('t("endpoints.selectedCount", { count: chain.length })');
+    expect(panel).toContain('className="endpoint-chain-col available"');
+    expect(panel).toContain('className="endpoint-chain-col selected"');
   });
 
-  it("keeps the status strip visible above the lists on desktop and mobile", () => {
+  it("keeps the selected-count strip visible above the lists on desktop and mobile", () => {
     expect(styles).toContain(".endpoint-chain-actions { display: flex;");
     expect(styles).not.toContain(".endpoint-chain-apply");
     expect(styles).toContain(".endpoint-chain-checkbox.selected {");
     expect(styles).toContain("@media (max-width: 720px) { .endpoint-chain-actions { align-items: stretch; flex-direction: column; }");
-    expect(zhCatalog.endpoints.chainSelectionHint).toContain("点击即选择");
-    expect(zhCatalog.endpoints.chainSelectionHint).toContain("立即生效");
-    expect(enCatalog.endpoints.chainSelectionHint).toContain("immediately");
-    expect(enCatalog.endpoints.chainPending).toBe("Updating chain…");
+    expect(styles).toContain(".endpoint-chain-col.available .endpoint-chain-row { padding: 5px 7px; }");
+    expect(styles).toContain(".endpoint-chain-col.selected { border: 1px dashed var(--management-border); border-radius: 8px; padding: 8px; }");
+    expect(zhCatalog.endpoints.chainSelectionHint).toBeUndefined();
+    expect(zhCatalog.endpoints.chainWorkingHint).toBeUndefined();
+    expect(enCatalog.endpoints.chainSelectionHint).toBeUndefined();
+    expect(enCatalog.endpoints.chainPending).toBeUndefined();
   });
 
   it("separates the Host-observed current route from the next-Turn preference", () => {
@@ -55,7 +59,7 @@ describe("endpoint chain selection panel", () => {
     expect(panel).toContain("model_endpoint_id ?? null");
     expect(source).toContain('t(working ? "endpoints.chainCurrent" : "endpoints.chainPreferred")');
     expect(source).toContain('t("endpoints.chainNextPreferred")');
-    expect(panel).toContain('t(working ? "endpoints.chainNextApplied" : "endpoints.chainSynced")');
+    expect(panel).not.toContain('t(working ? "endpoints.chainNextApplied" : "endpoints.chainSynced")');
     expect(panel).not.toContain("effectiveEndpointForProfile");
   });
 

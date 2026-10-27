@@ -2042,12 +2042,13 @@ body {
 .endpoint-chain-actions.has-changes { border-color: var(--management-accent-border); }
 .endpoint-chain-action-copy { min-width: 0; display: grid; gap: 4px; }
 .endpoint-chain-action-copy strong { color: var(--management-text); font-size: 12px; }
-.endpoint-chain-action-copy small { color: var(--management-muted); font-size: 10.5px; line-height: 1.45; }
-.endpoint-chain-action-controls { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
-.endpoint-chain-draft-status { flex: none; font-size: 10px; font-weight: 650; white-space: nowrap; }
-.endpoint-chain-draft-status.pending { color: #e3bb73; }
-.endpoint-chain-draft-status.synced { color: var(--management-muted); }
 .endpoint-chain-col { display: grid; gap: 6px; align-content: start; min-width: 0; }
+.endpoint-chain-col.available .endpoint-chain-row { padding: 5px 7px; }
+.endpoint-chain-col.available .endpoint-chain-checkbox { width: 15px; height: 15px; }
+.endpoint-chain-col.available .endpoint-chain-pick strong { font-size: 11px; }
+.endpoint-chain-col.available .endpoint-chain-pick small { font-size: 10px; }
+.endpoint-chain-col.selected { border: 1px dashed var(--management-border); border-radius: 8px; padding: 8px; }
+.endpoint-chain-col.selected .endpoint-chain-title { color: var(--management-text); }
 .endpoint-chain-title { color: var(--management-muted); font-size: 11px; font-weight: 750; letter-spacing: .08em; }
 .endpoint-chain-sub { color: var(--management-muted); font-size: 10.5px; line-height: 1.45; }
 .endpoint-chain-list { display: grid; gap: 6px; align-content: start; }
@@ -2076,7 +2077,7 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: var(--ma
 .endpoint-menu-refresh:disabled { opacity: .7; }
 .endpoint-chain-probing-flag { color: #8fc1e8; display: inline-flex; align-items: center; }
 @media (max-width: 720px) { .endpoint-chain { grid-template-columns: 1fr; } }
-@media (max-width: 720px) { .endpoint-chain-actions { align-items: stretch; flex-direction: column; } .endpoint-chain-action-controls { justify-content: space-between; } }
+@media (max-width: 720px) { .endpoint-chain-actions { align-items: stretch; flex-direction: column; } }
 :root[data-theme="light"] .endpoint-chain-row { border-color: var(--management-border); background: var(--management-card); }
 :root[data-theme="light"] .endpoint-chain-row.in-chain { border-color: var(--management-accent-border); background: var(--management-accent-surface); }
 :root[data-theme="light"] .endpoint-chain-row.in-chain .endpoint-chain-pick strong { color: var(--management-text); }
@@ -2086,7 +2087,6 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: var(--ma
 :root[data-theme="light"] .endpoint-chain-pick small { color: #4a6774; }
 :root[data-theme="light"] .endpoint-chain-empty { color: #4a6774; border-color: var(--management-accent-border); background: var(--management-panel-soft); }
 :root[data-theme="light"] .endpoint-chain-active-badge { border-color: #1f7a5f; background: rgba(31, 122, 95, .12); color: #14614b; }
-:root[data-theme="light"] .endpoint-chain-draft-status.pending { color: #8a5f1d; }
 :root[data-theme="light"] .endpoint-chain-checkbox.selected { color: #fff; }
 :root[data-theme="light"] .endpoint-rate-flag { color: #8a5f1d; }
 :root[data-theme="light"] .endpoint-chain-probing-flag { color: #1f5e8a; }

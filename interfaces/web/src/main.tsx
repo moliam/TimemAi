@@ -16717,23 +16717,10 @@ function ModelEndpointPanel({
           <strong>
             {t("endpoints.selectedCount", { count: chain.length })}
           </strong>
-          <small>
-            {t(working ? "endpoints.chainWorkingHint" : "endpoints.chainSelectionHint")}
-          </small>
-        </div>
-        <div className="endpoint-chain-action-controls">
-          <span
-            className={`endpoint-chain-draft-status ${dirty ? "pending" : "synced"}`}
-            role="status"
-          >
-            {dirty
-              ? t("endpoints.chainPending")
-              : t(working ? "endpoints.chainNextApplied" : "endpoints.chainSynced")}
-          </span>
         </div>
       </div>
       <div className="endpoint-chain">
-        <div className="endpoint-chain-col">
+        <div className="endpoint-chain-col available">
           <span className="endpoint-chain-title">
             {t("endpoints.chainAvailable")}
           </span>
@@ -16777,7 +16764,7 @@ function ModelEndpointPanel({
             )}
           </div>
         </div>
-        <div className="endpoint-chain-col">
+        <div className="endpoint-chain-col selected">
           <span className="endpoint-chain-title">
             {t("endpoints.chainSelected")}
           </span>

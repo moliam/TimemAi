@@ -165,8 +165,9 @@ const MAX_MODEL_ENDPOINT_CHAIN: usize = 20;
 const MODEL_ENDPOINT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(30 * 60);
 /// Background scan cadence for endpoints marked rate-limited long ago.
 const MODEL_ENDPOINT_HEALTH_SCAN_INTERVAL: Duration = Duration::from_secs(60);
-/// Endpoints unavailable for at least this long are probed proactively.
-const MODEL_ENDPOINT_AUTO_PROBE_AFTER: Duration = Duration::from_secs(60 * 60);
+/// Endpoints unavailable for at least this long are probed proactively so a
+/// recovered endpoint drops its stale rate-limited state within minutes.
+const MODEL_ENDPOINT_AUTO_PROBE_AFTER: Duration = Duration::from_secs(5 * 60);
 /// Session env keys fully owned by the currently selected model endpoint.
 const ENDPOINT_OWNED_ENV_KEYS: [&str; 11] = [
     "TIMEM_MODEL",
