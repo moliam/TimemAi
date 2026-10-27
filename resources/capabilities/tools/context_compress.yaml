@@ -17,6 +17,9 @@ description: |
   * **Curr state**: Current work status, progress, artifacts, uncommitted changes, running jobs, and temporary targets to clean.
   * **Next work**: The next concrete action.
 
+  Then, you should give a pivotal keywords dict, titled "Keyword Index":
+     Keyword Index: Comma-separated keywords and short phrases only, no complete sentences; harnessing the essence of every working rule and direction. Better no more than 1024 words, hard cap 1200. Index every active work direction: entities, paths, ids, important names, user criticism, key numbers, settled decisions, failed approaches, etc. Each keyword must independently trigger recall of the work or lessons it names; a reader seeing only this list must still steer all remaining work. On re-compression, merge and update this index in place instead of appending duplicates.
+
   Before calling, check that every useful fact from each non-kept delta is represented in `summary`, all ids were provided by the runtime, and `keep` and `offload` do not overlap.
   Provide a non-empty `summary` and use only runtime-provided dynamic delta ids.
   `keep` and `offload` are optional. Prefer summary-only compression; add `keep`
