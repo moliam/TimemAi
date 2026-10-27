@@ -548,7 +548,7 @@ fn context_compress_resets_readfile_first_touch_tracking() {
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"context_compress":{"summary":"reset first touch tracking"}}"#),
+        content: scored(r#"{"context_compress":{"summary":"reset first touch tracking","keywords":"checkpoint keywords"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -749,7 +749,7 @@ fn manual_context_compress_request_carries_manual_trailer_and_clears_after_compa
     let after = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(
-            r#"{"status":"working","free_talk":"压缩完成。","context_compress":{"summary":"保留目标"}}"#,
+            r#"{"status":"working","free_talk":"压缩完成。","context_compress":{"summary":"保留目标","keywords":"checkpoint keywords"}}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -826,7 +826,7 @@ fn manual_compact_succeeds_on_any_successful_compaction() {
     let after = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"status":"working","free_talk":"压缩完成。","context_compress":{{"keep":{retained},"summary":"保留任务状态"}}}}"#
+            r#"{{"status":"working","free_talk":"压缩完成。","context_compress":{{"keep":{retained},"summary":"保留任务状态","keywords":"checkpoint keywords"}}}}"#
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -2238,8 +2238,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
     assert!(estimated >= threshold);
     assert_eq!(threshold, 2_700);
 
-    let compact_response =
-        r#"{"context_compress":{"summary":"retain runtime configuration test state"}}"#;
+    let compact_response = r#"{"context_compress":{"summary":"retain runtime configuration test state","keywords":"checkpoint keywords"}}"#;
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(compact_response),
@@ -2453,7 +2452,7 @@ fn worker_role_is_expanded_again_after_its_delta_is_removed_by_compression() {
 
     let compacted = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"context_compress":{"summary":"role description was removed"}}"#),
+        content: scored(r#"{"context_compress":{"summary":"role description was removed","keywords":"checkpoint keywords"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2748,7 +2747,7 @@ fn context_compress_summary_only_removes_all_existing_deltas() {
     }
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"context_compress":{"summary":"remove stale test delta"}}"#),
+        content: scored(r#"{"context_compress":{"summary":"remove stale test delta","keywords":"checkpoint keywords"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2808,7 +2807,7 @@ fn extracted_replay_keeps_compact_summary_once_as_assistant_before_system_result
     }
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"context_compress":{"summary":"retain extracted compact state"}}"#),
+        content: scored(r#"{"context_compress":{"summary":"retain extracted compact state","keywords":"checkpoint keywords"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2859,7 +2858,7 @@ fn prompt_delta_ids_are_simple_global_sequence_and_not_reused_after_compression(
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"context_compress":{"keep":["pd_2"],"summary":"drop first delta"}}"#),
+        content: scored(r#"{"context_compress":{"keep":["pd_2"],"summary":"drop first delta","keywords":"checkpoint keywords"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2919,7 +2918,7 @@ fn response_context_compress_hides_refs_and_appends_summary_slice() {
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"free_talk":"整理旧上下文。","context_compress":{"summary":"旧任务已经完成，只保留 compact 后的测试摘要。"}}"#),
+        content: scored(r#"{"free_talk":"整理旧上下文。","context_compress":{"summary":"旧任务已经完成，只保留 compact 后的测试摘要。","keywords":"checkpoint keywords"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2977,7 +2976,7 @@ fn response_context_compress_does_not_append_redundant_mcp_summary() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(
-            r#"{"free_talk":"整理旧上下文。","context_compress":{"summary":"保留当前任务状态。"}}"#,
+            r#"{"free_talk":"整理旧上下文。","context_compress":{"summary":"保留当前任务状态。","keywords":"checkpoint keywords"}}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -3010,7 +3009,7 @@ fn context_compress_summary_only_removes_visible_delta() {
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"context_compress":{"summary":"remove visible test delta"}}"#),
+        content: scored(r#"{"context_compress":{"summary":"remove visible test delta","keywords":"checkpoint keywords"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3263,7 +3262,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
     delta_ids.dedup();
     assert!(!delta_ids.is_empty());
 
-    let shrink_response = r#"{"context_compress":{"summary":"compact old prompt context and keep current task state"}}"#;
+    let shrink_response = r#"{"context_compress":{"summary":"compact old prompt context and keep current task state","keywords":"checkpoint keywords"}}"#;
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(shrink_response),
@@ -3763,7 +3762,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     assert!(compact_ids.len() >= 2);
     let compact_keep = serde_json::to_string(&compact_ids[2..]).unwrap();
     let compact_response = scored(format!(
-        r#"{{"status":"working","free_talk":"将测试 delta ids 移出活跃上下文。","context_compress":{{"keep":{compact_keep},"offload":[{}],"summary":"保留测试状态摘要"}}}}"#,
+        r#"{{"status":"working","free_talk":"将测试 delta ids 移出活跃上下文。","context_compress":{{"keep":{compact_keep},"offload":[{}],"summary":"保留测试状态摘要","keywords":"checkpoint keywords"}}}}"#,
         serde_json::to_string(&compact_ids[1]).unwrap(),
     ));
     let prompt = match core.apply_model_response(LlmResponse {
@@ -5344,7 +5343,7 @@ fn json_context_compress_runs_before_later_action_in_same_response() {
         content: serde_json::json!({
             "free_talk": "compact first, then continue",
             "context_compress": {
-                "summary": "KEEP JSON ACTIVE STATE"
+                "summary": "KEEP JSON ACTIVE STATE","keywords":"checkpoint keywords"
                 },
             "working_still_action": {
                 "self_tool": {"type": "cwd"}
@@ -5380,7 +5379,7 @@ fn json_failed_context_compress_blocks_later_action() {
         content: serde_json::json!({
             "context_compress": {
                 "keep": ["prompt_0"],
-                "summary": "INVALID JSON COMPACT"
+                "summary": "INVALID JSON COMPACT","keywords":"checkpoint keywords"
             },
             "working_still_action": {
                 "self_tool": {"type": "cwd"}
@@ -5429,7 +5428,7 @@ fn context_compress_offload_stores_runtime_prompt_delta_by_id() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compress":{{"offload":["{}"],"summary":"large investigation context is offloaded; keep the current task active"}}}}"#,
+            r#"{{"context_compress":{{"offload":["{}"],"summary":"large investigation context is offloaded; keep the current task active","keywords":"checkpoint keywords"}}}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -5501,7 +5500,7 @@ fn context_compress_offload_rejects_invalid_prompt_refs_without_writing() {
     let _ = core.begin_turn("seed context", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"free_talk":"checking compact refs","context_compress":{"offload":["prompt_0"],"summary":"bad refs should not write scratch"}}"#),
+        content: scored(r#"{"free_talk":"checking compact refs","context_compress":{"offload":["prompt_0"],"summary":"bad refs should not write scratch","keywords":"checkpoint keywords"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5550,7 +5549,7 @@ fn context_compress_summary_only_replaces_all_live_deltas() {
     let _ = core.begin_turn("seed context", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"context_compress":{"summary":"summary-only replacement"}}"#),
+        content: scored(r#"{"context_compress":{"summary":"summary-only replacement","keywords":"checkpoint keywords"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -7020,7 +7019,7 @@ fn still_running_table_survives_removal_of_the_original_action_delta() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compress":{{"keep":["{}"],"summary":"hide running job delta but keep job status"}}}}"#,
+            r#"{{"context_compress":{{"keep":["{}"],"summary":"hide running job delta but keep job status","keywords":"checkpoint keywords"}}}}"#,
             user_delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -7104,7 +7103,7 @@ fn still_running_table_is_universal_when_only_the_action_delta_is_kept() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compress":{{"keep":["{}"],"summary":"hide unrelated user delta only"}}}}"#,
+            r#"{{"context_compress":{{"keep":["{}"],"summary":"hide unrelated user delta only","keywords":"checkpoint keywords"}}}}"#,
             running_delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -7173,7 +7172,7 @@ fn still_running_table_survives_offload_of_the_original_action_delta() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compress":{{"offload":["{}"],"summary":"running job context is offloaded and its status must remain visible"}}}}"#,
+            r#"{{"context_compress":{{"offload":["{}"],"summary":"running job context is offloaded and its status must remain visible","keywords":"checkpoint keywords"}}}}"#,
             running_delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -7245,7 +7244,7 @@ fn still_running_table_survives_summary_only_compaction_of_the_original_action_d
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"free_talk":"压缩旧上下文。","context_compress":{"summary":"后台任务仍在运行，需要保留运行状态。"}}"#),
+        content: scored(r#"{"free_talk":"压缩旧上下文。","context_compress":{"summary":"后台任务仍在运行，需要保留运行状态。","keywords":"checkpoint keywords"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,

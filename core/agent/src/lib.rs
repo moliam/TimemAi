@@ -4093,6 +4093,7 @@ impl AgentCore {
         let compact_result_slice_start = slices.len();
         let mut compacted_successfully = false;
         let mut successful_compact_summaries = Vec::new();
+        let mut successful_compact_keywords = Vec::new();
         let threshold_compaction_requested = self.threshold_compaction_reasoning_required;
         let mut threshold_followup_required = false;
         for compact in &parsed.context_compresses {
@@ -4173,7 +4174,8 @@ impl AgentCore {
                     ));
                 }
                 let estimated_after = self.dynamic_context_token_estimate();
-                let summary_tokens = estimate_prompt_tokens(&compact.summary);
+                let summary_tokens = estimate_prompt_tokens(&compact.summary)
+                    .saturating_add(estimate_prompt_tokens(&compact.keywords));
                 let estimated_before_tokens = estimated_before.total_tokens();
                 let estimated_after_tokens = estimated_after
                     .total_tokens()
@@ -4226,6 +4228,7 @@ impl AgentCore {
                     slices.push(("runtime_note".to_string(), note));
                 }
                 successful_compact_summaries.push(compact.summary.trim().to_string());
+                successful_compact_keywords.push(compact.keywords.trim().to_string());
                 compacted_successfully = true;
             } else {
                 let outcome = ActionOutcome::failed(format!(
@@ -4271,10 +4274,20 @@ impl AgentCore {
                     parsed.thought.trim().to_string(),
                 ));
             }
+            // The keyword index is echoed back by the runtime as its own
+            // section. The model supplied it via the dedicated `keywords`
+            // argument; rendering it here keeps the next prompt's checkpoint
+            // self-contained without trusting summary-embedded copies.
             assistant_slices.extend(
                 successful_compact_summaries
                     .into_iter()
-                    .map(|summary| ("context_compression_summary".to_string(), summary)),
+                    .zip(successful_compact_keywords)
+                    .map(|(summary, keywords)| {
+                        (
+                            "context_compression_summary".to_string(),
+                            format!("{summary}\n\nThought pieces: {keywords}"),
+                        )
+                    }),
             );
             slices.splice(
                 compact_result_slice_start..compact_result_slice_start,
@@ -5834,10 +5847,12 @@ Runtime tool_call ids:",
                     }
                     for compact in &parsed.context_compresses {
                         if !compact.summary.trim().is_empty() {
-                            slices.push((
-                                "llm_response".to_string(),
-                                compact.summary.trim().to_string(),
-                            ));
+                            let mut text = compact.summary.trim().to_string();
+                            if !compact.keywords.trim().is_empty() {
+                                text.push_str("\n\nThought pieces: ");
+                                text.push_str(compact.keywords.trim());
+                            }
+                            slices.push(("llm_response".to_string(), text));
                         }
                     }
                 }

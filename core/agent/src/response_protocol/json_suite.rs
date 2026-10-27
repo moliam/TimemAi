@@ -304,6 +304,18 @@ fn parse_context_compresses(
             }
             break;
         }
+        let keywords = object
+            .get("keywords")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if keywords.is_empty() {
+            if repair_issue.is_none() {
+                *repair_issue = Some(format!("context_compress[{idx}].keywords_required"));
+            }
+            break;
+        }
         compacts.push(ParsedContextCompress {
             call_id: super::generated_inline_tool_call_id(),
             keep_delta_ids,
@@ -311,6 +323,7 @@ fn parse_context_compresses(
             delta_ids,
             slice_ids: Vec::new(),
             summary,
+            keywords,
         });
     }
     compacts
@@ -372,6 +385,9 @@ pub fn protocol_repair_instruction(issue: &str) -> &'static str {
             && issue.ends_with("_unsupported") =>
         {
             "context_compress 包含当前 tool schema 未定义的参数。请仅使用当前 schema 中定义的参数。Return exactly one valid JSON object. Do not use markdown fences."
+        }
+        issue if issue.starts_with("context_compress[") && issue.ends_with(".keywords_required") => {
+            "检查到 context_compress 缺少独立的 keywords 参数。请在 context_compress 中单独提供非空 keywords（逗号分隔的 Thought pieces），不要把它嵌入 summary。Return exactly one valid JSON object. Do not use markdown fences."
         }
         _ => {
             "Return exactly one valid JSON object. Omitted status defaults to working; include working_still_action when working. Use status:\"ALL_FINISHED\" together with final_answer when all user's open and pending requests are complete. Do not use markdown fences."

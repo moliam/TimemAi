@@ -15,6 +15,13 @@ pub(crate) fn from_action(action: &ParsedAction) -> Result<ParsedContextCompress
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "context_compress.summary_required".to_string())?
         .to_string();
+    let keywords = input
+        .get("keywords")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "context_compress.keywords_required".to_string())?
+        .to_string();
     reject_overlap(&keep_delta_ids, &offload_delta_ids)?;
     let mut delta_ids = keep_delta_ids.clone();
     for id in &offload_delta_ids {
@@ -29,6 +36,7 @@ pub(crate) fn from_action(action: &ParsedAction) -> Result<ParsedContextCompress
         delta_ids,
         slice_ids: Vec::new(),
         summary,
+        keywords,
     })
 }
 

@@ -26,7 +26,7 @@ CONFIRM_PREFIX: "Now let me think seriously twice before I announce stop. Review
 Two mutually-exclusive state branches:
 - `<actions>`: work should continue, generate actions. Refer to `Actions` for available actions.
   Tool actions may include a short, descriptive `name` attribute of at most 128 characters. If omitted, runtime may use the tool name for display. The runtime—not the model—assigns the tool-call id used to correlate results and still-running reminders. Example: `<run_bash name="check git diff"><cmd>git diff</cmd></run_bash>`.
-- `<context_compress>` creates the checkpoint used for future work. Follow the `context_compress` capability instructions when choosing its non-empty `<summary>` and optional repeated `<keep>`/`<offload>` delta-id elements. Use only runtime-provided ids and never place one id in both lists. When combined with other capabilities inside `<actions>`, put it first; later actions run only after compression succeeds.
+- `<context_compress>` creates the checkpoint used for future work. Follow the `context_compress` capability instructions when choosing its non-empty `<summary>`, its non-empty `<keywords>` comma-separated keyword index (standalone, never embedded inside `<summary>`; the runtime validates it and echoes it back as the next prompt Thought pieces section), and optional repeated `<keep>`/`<offload>` delta-id elements. Use only runtime-provided ids and never place one id in both lists. When combined with other capabilities inside `<actions>`, put it first; later actions run only after compression succeeds.
 - `<final_answer>`: the work summary for user, by default in raw Markdown(by default). To be valid, it MUST be preceeded with `<finish_confirm>`. Runtime will stop this turn's loop on a valid final_answer, BE RESPONSIBLE.
 
 Note: inside xml label, if strings containing such as `<`, `>`, or `&` special characters/complex content, should use `<![CDATA[...]]>` to wrap it.
@@ -89,6 +89,7 @@ EXAMPLE4: context compress
 
     Valuable runtime info: ....
       ]]></summary>
+      <keywords>task A finished, task B active, fixture port 18991, apply close reopen</keywords>
     </context_compress>
   </actions>
 </ASSISTANT>

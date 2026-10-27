@@ -309,6 +309,7 @@ struct ContextCompressFields {
     keep: String,
     offload: String,
     summary: String,
+    keywords: String,
     field_names: Vec<String>,
 }
 
@@ -501,6 +502,7 @@ fn parse_context_compress_fields(body: &str) -> ContextCompressFields {
         keep: extract_tag_text(body, "keep", false).unwrap_or_default(),
         offload: extract_tag_text(body, "offload", false).unwrap_or_default(),
         summary: extract_tag_text(body, "summary", true).unwrap_or_default(),
+        keywords: extract_tag_text(body, "keywords", true).unwrap_or_default(),
         field_names: context_compress_field_names(body),
     }
 }
@@ -1426,6 +1428,13 @@ fn parse_context_compresses_from_fields(
             }
             break;
         }
+        let keywords = item.keywords.trim().to_string();
+        if keywords.is_empty() {
+            if repair_issue.is_none() {
+                *repair_issue = Some(format!("context_compress[{idx}].keywords_required"));
+            }
+            break;
+        }
         compacts.push(ParsedContextCompress {
             call_id: super::generated_inline_tool_call_id(),
             keep_delta_ids,
@@ -1433,6 +1442,7 @@ fn parse_context_compresses_from_fields(
             delta_ids,
             slice_ids: Vec::new(),
             summary,
+            keywords,
         });
     }
     compacts
@@ -1567,6 +1577,9 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
         }
         issue if issue.starts_with("context_compress[") && issue.ends_with(".summary_required") => {
             "The <context_compress> block is missing a non-empty <summary> describing the essential retained task state."
+        }
+        issue if issue.starts_with("context_compress[") && issue.ends_with(".keywords_required") => {
+            "The <context_compress> block is missing the standalone <keywords> element. Provide a non-empty comma-separated thought pieces list; do not embed it inside <summary>."
         }
         _ => {
             "Use one XML <ASSISTANT>. If tools are needed, write XML-native <actions> with exact tool-id elements; if the current request is complete, write <final_answer>."

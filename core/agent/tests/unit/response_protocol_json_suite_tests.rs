@@ -101,7 +101,7 @@ fn rejects_legacy_context_compact_field() {
 #[test]
 fn parses_context_compress_summary_only_as_full_replacement() {
     let env = parse_envelope(
-        r#"{"free_talk":"整理上下文","context_compress":{"summary":"keep important state"},"working_still_action":{"run_bash":{"cmd":"pwd"}}}"#,
+        r#"{"free_talk":"整理上下文","context_compress":{"summary":"keep important state","keywords":"checkpoint keywords"},"working_still_action":{"run_bash":{"cmd":"pwd"}}}"#,
         &caps(),
     );
 
@@ -117,7 +117,7 @@ fn parses_context_compress_summary_only_as_full_replacement() {
 #[test]
 fn parses_context_compress_keep_and_offload_fields() {
     let env = parse_envelope(
-        r#"{"free_talk":"整理上下文","context_compress":{"keep":["pd_a"],"offload":["pd_b"],"summary":"keep important state"},"working_still_action":{"run_bash":{"cmd":"pwd"}}}"#,
+        r#"{"free_talk":"整理上下文","context_compress":{"keep":["pd_a"],"offload":["pd_b"],"summary":"keep important state","keywords":"checkpoint keywords"},"working_still_action":{"run_bash":{"cmd":"pwd"}}}"#,
         &caps(),
     );
 
@@ -131,7 +131,9 @@ fn parses_context_compress_keep_and_offload_fields() {
 #[test]
 fn rejects_all_unknown_context_compress_fields_uniformly() {
     for field in ["discard", "throw", "remove"] {
-        let raw = format!(r#"{{"context_compress":{{"{field}":["pd_a"],"summary":"state"}}}}"#);
+        let raw = format!(
+            r#"{{"context_compress":{{"{field}":["pd_a"],"summary":"state","keywords":"checkpoint keywords"}}}}"#
+        );
         let env = parse_envelope(&raw, &caps());
         let expected = format!("context_compress[0].input.{field}_unsupported");
         assert_eq!(
@@ -150,7 +152,7 @@ fn rejects_all_unknown_context_compress_fields_uniformly() {
 #[test]
 fn rejects_context_compress_keep_offload_overlap() {
     let env = parse_envelope(
-        r#"{"context_compress":{"keep":["pd_a"],"offload":["pd_a"],"summary":"state"}}"#,
+        r#"{"context_compress":{"keep":["pd_a"],"offload":["pd_a"],"summary":"state","keywords":"checkpoint keywords"}}"#,
         &caps(),
     );
     assert_eq!(
@@ -258,7 +260,7 @@ fn diverse_confusing_json_responses_keep_strict_execution_boundary() {
             json!({
                 "free_talk": "compact before continuing",
                 "free_talk": "compacting",
-                "context_compress": {"keep": ["pd_a", "pd_b"], "summary": "keep active task, progress, todo"},
+                "context_compress": {"keep": ["pd_a", "pd_b"], "summary": "keep active task, progress, todo","keywords":"checkpoint keywords"},
                 "working_still_action": {"run_bash": {"cmd": "pwd"}}
             }),
             vec!["run_bash"],

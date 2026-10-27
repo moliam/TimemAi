@@ -1944,7 +1944,7 @@ fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
             false,
         )),
         Ok(llm(
-            r#"{"context_compress":{"summary":"保留用户要求和大输出已被预算保护的信息。"}}"#,
+            r#"{"context_compress":{"summary":"保留用户要求和大输出已被预算保护的信息。","keywords":"checkpoint keywords"}}"#,
             2_800,
             false,
         )),
@@ -4345,7 +4345,7 @@ impl ModelClient for ShrinkReplayModel {
                 .contains("Please compress it now (see the `context_compress` tool description)"));
             assert!(!prompt.contains("Long-context maintenance:"));
             return Ok(llm(
-                r#"{"free_talk":"","context_compress":{"summary":"discard stale context and keep current task state"}}"#,
+                r#"{"free_talk":"","context_compress":{"summary":"discard stale context and keep current task state","keywords":"checkpoint keywords"}}"#,
                 13_253,
                 false,
             ));
@@ -5615,7 +5615,7 @@ impl ModelClient for ScratchOffloadReplayModel {
             delta_ids.dedup();
             assert!(!delta_ids.is_empty());
             let content = format!(
-                r#"{{"free_talk":"","context_compress":{{"offload":{},"summary":"offload old context and keep the current task active"}}}}"#,
+                r#"{{"free_talk":"","context_compress":{{"offload":{},"summary":"offload old context and keep the current task active","keywords":"checkpoint keywords"}}}}"#,
                 serde_json::to_string(&delta_ids).unwrap()
             );
             return Ok(llm(content, 4_000, false));
@@ -5704,7 +5704,7 @@ impl ModelClient for CompactThenFinishModel {
         self.calls += 1;
         if self.calls == 1 {
             Ok(llm(
-                r#"{"free_talk":"整理旧上下文。","context_compress":{"summary":"保留当前任务目标和下一步。"}}"#,
+                r#"{"free_talk":"整理旧上下文。","context_compress":{"summary":"保留当前任务目标和下一步。","keywords":"checkpoint keywords"}}"#,
                 3_000,
                 false,
             ))
@@ -5825,7 +5825,7 @@ impl ModelClient for StoryReplayModel {
                 delta_ids.sort();
                 delta_ids.dedup();
                 let content = format!(
-                    r#"{{"context_compress":{{"offload":{},"summary":"offload the long context and retain the memory lookup task"}}}}"#,
+                    r#"{{"context_compress":{{"offload":{},"summary":"offload the long context and retain the memory lookup task","keywords":"checkpoint keywords"}}}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 Ok(llm(content, 7_500, false))
@@ -5854,7 +5854,7 @@ impl ModelClient for StoryReplayModel {
                 ));
                 assert!(!prompt.contains("Long-context maintenance:"));
                 Ok(llm(
-                    r#"{"context_compress":{"summary":"keep active task state after the memory lookup"}}"#,
+                    r#"{"context_compress":{"summary":"keep active task state after the memory lookup","keywords":"checkpoint keywords"}}"#,
                     7_650,
                     false,
                 ))
@@ -6821,7 +6821,7 @@ fn memo_survives_context_compression_and_rides_next_prompt() {
                     false,
                 )),
                 2 => Ok(llm(
-                    r#"{"free_talk":"整理上下文。","context_compress":{"summary":"保留任务目标。"}}"#,
+                    r#"{"free_talk":"整理上下文。","context_compress":{"summary":"保留任务目标。","keywords":"checkpoint keywords"}}"#,
                     3_000,
                     false,
                 )),
@@ -6935,7 +6935,7 @@ fn restart_then_manual_compact_leads_with_notice_and_compact_trailer() {
     // then a final answer closes the turn.
     let mut model = ReplayModel::new([
         Ok(llm(
-            r#"{"working_still_action":{"context_compress":{"summary":"restart compact summary"}}}"#,
+            r#"{"working_still_action":{"context_compress":{"summary":"restart compact summary","keywords":"checkpoint keywords"}}}"#,
             1_000,
             false,
         )),
@@ -7016,7 +7016,7 @@ fn mailbox_only_manual_compact_is_consumed_before_model_dispatch() {
     let mut config = test_config();
     let mut model = ReplayModel::new([
         Ok(llm(
-            r#"{"working_still_action":{"context_compress":{"summary":"compacted"}}}"#,
+            r#"{"working_still_action":{"context_compress":{"summary":"compacted","keywords":"checkpoint keywords"}}}"#,
             1000,
             false,
         )),

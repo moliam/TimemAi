@@ -1235,9 +1235,11 @@ fn native_schema_generation_avoids_redundant_required_any_expansion() {
         .find(|tool| tool.name == "context_compress")
         .unwrap();
     assert!(compact.input_schema.get("allOf").is_none());
+    // The keyword index is a standalone required argument: the runtime
+    // validates it separately and echoes it back as the next prompt section.
     assert_eq!(
         compact.input_schema["required"],
-        serde_json::json!(["summary"])
+        serde_json::json!(["summary", "keywords"])
     );
     assert!(compact.input_schema["properties"].get("discard").is_none());
     assert_eq!(compact.input_schema["properties"]["keep"]["minItems"], 1);

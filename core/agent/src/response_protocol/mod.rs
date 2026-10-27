@@ -490,6 +490,11 @@ pub struct ParsedContextCompress {
     pub delta_ids: Vec<String>,
     pub slice_ids: Vec<String>,
     pub summary: String,
+    /// Standalone keyword index for the checkpoint. Provided as its own
+    /// argument, never embedded in `summary`; the runtime validates it is
+    /// present and echoes it back into the next prompt as a dedicated
+    /// "Thought pieces" section.
+    pub keywords: String,
 }
 
 /// Trait for response protocol implementations.
