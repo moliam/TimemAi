@@ -1,0 +1,30 @@
+{
+  "retrieved_at": "2026-10-24T05:25:00+00:00",
+  "sources": {
+    "models": {
+      "url": "https://www.kimi.com/code/docs/kimi-code/models.html",
+      "sha256": "e63835b85c1c903b1cd98db37e2533fd1f60673887adc96cb468c7dba3ccc8f9",
+      "excerpt": "Kimi Code 提供 k3.1-pro、k3.1-pro-highspeed、k3、k3-256k、kimi-for-coding、kimi-for-coding-highspeed 六个模型；思考程度 reasoning_effort low/high/max，K3.1 Pro 系列默认 max 且关闭思考会被拒绝，K3 系列默认 high；关闭思考会路由到 K2.8 Preview 无思考版；K2.7 Code Highspeed 不支持调整思考程度；OpenAI 协议 Base URL 国内 https://api.kimi.com/coding/v1 海外 https://api.kimi.ai/coding/v1，Anthropic 兼容 /coding/；模型 ID 填错会兜底到 K2.8 Preview 无思考版。"
+    },
+    "codex": {
+      "url": "https://www.kimi.com/code/docs/third-party-tools/codex.html",
+      "sha256": "1c6b9181a7e1d3075cad970804a94fa277baf5efdc102232326477714c2cd72d",
+      "excerpt": "Codex 直连 Kimi Code：wire_api=responses，base_url https://api.kimi.com/coding/v1，env_key 存放 API Key；Responses API 支持文本和图片输入暂不支持视频；模型目录声明 context_window 1048576 与 input_modalities text/image；会员档位决定可用模型与 1M 上下文权限（403=套餐不含，400=关闭思考或超上下文）。"
+    },
+    "claude-code": {
+      "url": "https://www.kimi.com/code/docs/third-party-tools/claude-code.html",
+      "sha256": "c973659d6193763717bb9985897cebb994777953c1d291835b55e22d6de0abf4",
+      "excerpt": "在 Kimi Code 控制台新建 API Key（sk-kimi- 前缀）接入 Claude Code；订阅 Kimi 会员并开通 Kimi Code 权益后方可使用；通过环境变量把 Anthropic 协议请求转发到 https://api.kimi.com/coding/。"
+    },
+    "opencode": {
+      "url": "https://www.kimi.com/code/docs/third-party-tools/opencode.html",
+      "sha256": "d50cf3ea4a4f25bfd50af559719824e21a6b440bd227ace36390359bd60e5079",
+      "excerpt": "OpenCode 通过自定义 provider 接入 Kimi Code：Base URL https://api.kimi.com/coding/v1，OpenAI Responses/Chat Completions 与 Anthropic 协议均支持；K3.1 Pro 系列关闭思考返回 400，K3/K2.8 Preview/K2.7 Code HighSpeed 关闭 thinking 后路由到 K2.8 Preview 无思考版；K2.7 Code HighSpeed 无需配置思考字段。"
+    },
+    "api-models": {
+      "url": "https://api.kimi.com/coding/v1/models",
+      "sha256": "0fcc213735fe7b40f7829c9eb60c0cb3eeead5bfcbbc189453c8aed012f20995",
+      "excerpt": "GET /v1/models 实测（2026-10-24，订阅 key）：k3.1-pro 与 k3.1-pro-highspeed default_effort=high（文档规格表写 max，以端点为准）；k3/k3-256k default=high；kimi-for-coding default=max ctx=1048576；kimi-for-coding-highspeed 无 effort 维度、ctx=262144、不支持 dynamic tools，印证 fail-closed 不入目录。"
+    }
+  }
+}

@@ -2,7 +2,7 @@ use agent_core::model_catalog::{models, parse, validate};
 
 #[test]
 fn catalog_defaults_and_protocol_constraints_are_admissible() {
-    assert_eq!(models().len(), 12);
+    assert_eq!(models().len(), 22);
     for m in models() {
         for p in &m.protocols {
             let effort = p.fixed_effort.as_deref().unwrap_or(&m.default_effort);
@@ -90,7 +90,7 @@ fn external_catalog_rejects_unknown_fields_handlers_and_duplicate_identity() {
     assert!(parse(&bad.to_string()).is_err());
     let dir = FixtureDir::new();
     std::fs::write(dir.path().join("future.json"), fixture.to_string()).unwrap();
-    assert_eq!(load_catalog(Some(dir.path())).unwrap().len(), 13);
+    assert_eq!(load_catalog(Some(dir.path())).unwrap().len(), 23);
     let mut duplicate = fixture;
     duplicate["models"][0]["id"] = serde_json::json!("fixture/different-id");
     std::fs::write(dir.path().join("duplicate.json"), duplicate.to_string()).unwrap();
@@ -106,7 +106,7 @@ fn external_catalog_json_only_extension_reaches_payload_in_fresh_process() {
         use agent_core::model_api::{build_model_request_with_reasoning, StructuredOutputHint};
         use agent_core::{ApiProtocol, ModelServiceConfig};
         agent_core::model_catalog::ensure_loaded().unwrap();
-        assert_eq!(models().len(), 14);
+        assert_eq!(models().len(), 24);
         for provider in ["openai", "zhipu"] {
             let model = models()
                 .iter()
@@ -268,10 +268,43 @@ fn protocol_urls_override_connection_defaults_and_are_projected() {
 }
 
 #[test]
+fn every_registered_provider_is_admitted_by_endpoint_requirements() {
+    for provider in agent_core::model_catalog::PROVIDERS {
+        let requirements = agent_core::model_requirements::EndpointRequirements {
+            version: 1,
+            provider: Some(provider.id.to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            requirements.validate(),
+            Ok(()),
+            "registered provider {} must be accepted by endpoint requirements",
+            provider.id
+        );
+    }
+    let unknown = agent_core::model_requirements::EndpointRequirements {
+        version: 1,
+        provider: Some("unregistered-provider".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        unknown.validate().unwrap_err(),
+        "model_provider_adapter_not_implemented"
+    );
+}
+
+#[test]
 fn provider_registry_declares_closed_admission() {
     let zhipu = agent_core::model_catalog::provider_spec("zhipu").expect("zhipu registered");
     assert!(zhipu.requires_catalog);
     assert!(!zhipu.allowed_protocols.contains(&"anthropic"));
+    let kimi = agent_core::model_catalog::provider_spec("kimi").expect("kimi registered");
+    assert!(kimi.requires_catalog);
+    assert!(!kimi.allowed_protocols.contains(&"anthropic"));
+    let kimi_code =
+        agent_core::model_catalog::provider_spec("kimi_code").expect("kimi_code registered");
+    assert!(kimi_code.requires_catalog);
+    assert!(!kimi_code.allowed_protocols.contains(&"anthropic"));
     let openai = agent_core::model_catalog::provider_spec("openai").expect("openai registered");
     assert!(!openai.requires_catalog);
     assert!(!openai.allowed_protocols.contains(&"anthropic"));
@@ -318,4 +351,23 @@ fn catalog_rejects_invalid_input_modalities() {
         parse(&value.to_string()).unwrap_err(),
         "catalog_invalid_input_modalities"
     );
+}
+
+#[test]
+fn catalog_required_tool_choice_marks_documented_rejections_only() {
+    for m in models() {
+        for p in &m.protocols {
+            let k2_chat = m.provider == "kimi"
+                && matches!(m.model.as_str(), "kimi-k2.6" | "kimi-k2.7-code")
+                && p.protocol == "openai-compatible";
+            let coding_responses = m.provider == "kimi_code" && p.protocol == "openai-responses";
+            assert_eq!(
+                p.required_tool_choice,
+                !(k2_chat || coding_responses),
+                "{} {}",
+                m.id,
+                p.protocol
+            );
+        }
+    }
 }

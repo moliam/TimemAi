@@ -63,7 +63,7 @@ impl EndpointRequirements {
             return Err("unsupported_model_requirements_version".into());
         }
         if let Some(provider) = &self.provider {
-            if !matches!(provider.as_str(), "openai" | "zhipu") {
+            if crate::model_catalog::provider_spec(provider).is_none() {
                 return Err("model_provider_adapter_not_implemented".into());
             }
         }

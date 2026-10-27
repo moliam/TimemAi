@@ -521,6 +521,16 @@ fn apply_native_interaction(
     body: &mut Value,
     interaction: &ModelInteractionRequest,
 ) {
+    // Catalog-documented `required` rejections (Kimi coding Responses, K2 chat)
+    // answer 400 on the wire field; downgrade to auto and let the textual
+    // compression trailer carry the must-call-tool semantics instead.
+    let tool_choice = if interaction.tool_choice == crate::NativeToolChoice::Required
+        && !crate::model_catalog::supports_required_tool_choice(config)
+    {
+        crate::NativeToolChoice::Auto
+    } else {
+        interaction.tool_choice
+    };
     match config.api_protocol {
         ApiProtocol::OpenAiCompatible => {
             body["tools"] = Value::Array(
@@ -533,7 +543,7 @@ fn apply_native_interaction(
                     })
                     .collect(),
             );
-            body["tool_choice"] = json!(native_tool_choice_label(interaction.tool_choice));
+            body["tool_choice"] = json!(native_tool_choice_label(tool_choice));
             if interaction.send_parallel_tool_calls {
                 body["parallel_tool_calls"] = json!(interaction.parallel_tool_calls);
             }
@@ -555,7 +565,7 @@ fn apply_native_interaction(
                     })
                     .collect(),
             );
-            body["tool_choice"] = json!(native_tool_choice_label(interaction.tool_choice));
+            body["tool_choice"] = json!(native_tool_choice_label(tool_choice));
             if interaction.send_parallel_tool_calls {
                 body["parallel_tool_calls"] = json!(interaction.parallel_tool_calls);
             }
@@ -583,12 +593,12 @@ fn apply_native_interaction(
             body["tools"] = Value::Array(tools);
             body["tool_choice"] = if interaction.send_parallel_tool_calls {
                 json!({
-                    "type": anthropic_tool_choice_label(interaction.tool_choice),
+                    "type": anthropic_tool_choice_label(tool_choice),
                     "disable_parallel_tool_use": !interaction.parallel_tool_calls,
                 })
             } else {
                 json!({
-                    "type": anthropic_tool_choice_label(interaction.tool_choice),
+                    "type": anthropic_tool_choice_label(tool_choice),
                 })
             };
             if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
@@ -690,7 +700,7 @@ fn openai_chat_exchange_messages(
     let mut messages = vec![
         json!({"role":"assistant","content":optional_text(&exchange.assistant_text),"tool_calls":exchange.calls.iter().map(|call| json!({"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.raw_arguments}})).collect::<Vec<_>>()}),
     ];
-    if crate::model_catalog::uses_zhipu_chat(config) {
+    if crate::model_catalog::chat_preserves_reasoning(config) {
         if let Some(metadata) = exchange
             .calls
             .first()
@@ -1413,7 +1423,7 @@ pub fn parse_model_response(
             config.interaction.max_tool_calls_per_response
         ));
     }
-    if crate::model_catalog::uses_zhipu_chat(config) {
+    if crate::model_catalog::chat_preserves_reasoning(config) {
         if let (Some(call), Some(reasoning)) = (
             tool_calls.first_mut(),
             raw.pointer("/choices/0/message/reasoning_content")
@@ -1806,7 +1816,7 @@ fn interpret_openai_compatible_sse(
     let mut event_count = 0_u64;
     let mut reasoning_chunk_count = 0_u64;
     let mut reasoning_content = String::new();
-    let preserve_reasoning = crate::model_catalog::uses_zhipu_chat(config);
+    let preserve_reasoning = crate::model_catalog::chat_preserves_reasoning(config);
     let mut parse_error = None;
     let mut streamed_calls: Vec<(String, String, String)> = Vec::new();
 

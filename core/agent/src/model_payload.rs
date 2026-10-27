@@ -19,7 +19,46 @@ pub(crate) fn apply_reasoning(
     body: &mut Value,
     reasoning: &EffectiveReasoning,
 ) {
-    if adapter(config) == Some(crate::model_catalog::ReasoningAdapter::ZhipuChatReasoning) {
+    if adapter(config) == Some(crate::model_catalog::ReasoningAdapter::KimiChatReasoning) {
+        // Kimi K3 always reasons; top-level reasoning_effort is the documented
+        // strength switch (low/high/max). No thinking/enable_thinking wire.
+        let default = crate::model_requirements::capabilities(config)
+            .map(|m| m.default_effort.as_str())
+            .unwrap_or("max");
+        let effort = match reasoning {
+            EffectiveReasoning::Enabled {
+                intensity: Some(value),
+            } => value,
+            _ => default,
+        };
+        let object = body.as_object_mut().expect("request object");
+        object.remove("enable_thinking");
+        object.insert("reasoning_effort".into(), json!(effort));
+    } else if adapter(config) == Some(crate::model_catalog::ReasoningAdapter::KimiK2Thinking) {
+        // K2-era Kimi Chat: the documented switch is the `thinking` object.
+        // Models without a `none`档 (kimi-k2.7-code) cannot disable thinking,
+        // so the field is omitted and the server default (always-on) applies.
+        let allow_disable = crate::model_requirements::capabilities(config)
+            .is_some_and(|m| m.efforts.iter().any(|e| e == "none"));
+        let object = body.as_object_mut().expect("request object");
+        object.remove("enable_thinking");
+        object.remove("reasoning_effort");
+        if allow_disable {
+            // kimi-k2.6: explicit off sends disabled; any enabled state sends
+            // the preserved-thinking form because assistant reasoning is
+            // replayed verbatim on continuation rounds.
+            object.insert(
+                "thinking".into(),
+                if matches!(reasoning, EffectiveReasoning::Disabled) {
+                    json!({"type": "disabled"})
+                } else {
+                    json!({"type": "enabled", "keep": "all"})
+                },
+            );
+        }
+        // kimi-k2.7-code cannot disable thinking and the docs say the field
+        // should be omitted entirely; the server default (always-on) applies.
+    } else if adapter(config) == Some(crate::model_catalog::ReasoningAdapter::ZhipuChatReasoning) {
         let default = crate::model_requirements::capabilities(config)
             .map(|m| m.default_effort.as_str())
             .unwrap_or("max");

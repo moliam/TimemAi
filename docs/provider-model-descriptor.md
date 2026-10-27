@@ -3,7 +3,7 @@
 ## 1. 范围与权威文件
 
 机器格式：`resources/provider_model_catalog.schema.json`（JSON Schema Draft 2020-12）。
-首批目录：`resources/openai_model_catalog.json`、`resources/zhipu_model_catalog.json`。证据快照：同目录 `.sources.json`。
+首批目录：`resources/openai_model_catalog.json`、`resources/zhipu_model_catalog.json`、`resources/kimi_model_catalog.json`、`resources/kimi_code_model_catalog.json`。证据快照：同目录 `.sources.json`。
 `activation=runtime_supported` 表示 Core 已实现本文限定的加载、约束及映射，不代表远端 API 实测。
 profile 的 `binding_status` 独立记录官方 API 文档审核状态，不能因本地回归通过而改成已审核。
 接入点分层与来源优先级见 [模型接入点架构](model-endpoint-architecture.md)。
@@ -109,11 +109,21 @@ profiles.bindings 由严格注册处理器执行，目前仅允许：
 路径是 JSON Pointer，必须与所选协议的准许路径匹配；不能覆盖 model/messages/input/tools
 或凭据。最终请求须再次检查，用户扩展字段不得覆盖受管值。
 智谱使用 `zhipu_chat_reasoning`，仅支持 Chat：同时写入 `reasoning_effort` 和 `thinking.type`、`thinking.clear_thinking=true`；不发送 `enable_thinking`／`stream_options`。工具续轮中的不透明 `reasoning_content` 仅在相同能力身份下回传，不展示为正文。
+Kimi 使用 `kimi_chat_reasoning`，仅支持 Chat：顶层写入 `reasoning_effort`（low/high/max，默认 max），
+不发送 `thinking`／`enable_thinking`。K3 系列多轮对话与工具调用要求把上一轮 assistant message
+（含 `reasoning_content`）原样回传；该语义与智谱一致，仅在同一能力身份下回传，不展示为正文。
+`stream_options`（include_usage）按官方文档允许。Kimi Code（订阅制 Coding Plan，base `https://api.kimi.com/coding/v1`，海外 `https://api.kimi.ai/coding/v1`）单独为 provider `kimi_code`：Responses 优先、Chat 复用 `kimi_chat_reasoning`，档位 low/high/max，目录不含 none 档——关闭思考会被 K3.1 Pro 拒绝或静默路由到 K2.8 Preview 无思考版，因此 fail-closed；`kimi-for-coding-highspeed` 思考程度不可调，无法用现行绑定表达，不入目录。
+Kimi 开放平台 K2 系列（kimi-k2.6/kimi-k2.7-code）经 `kimi_k2_thinking` 适配器入目录：kimi-k2.6 的档位映射 `thinking` 对象（none→disabled、high→{enabled,keep:all}），kimi-k2.7-code 恒思考不发送该字段；两者仅 Chat 协议，不支持 `reasoning_effort` 与 `tool_choice:required`（profile 标记 `required_tool_choice:false`，发送层降级为 auto，压缩语义由文本 trailer 承载）。Coding Plan 网关 Responses 实测同样拒绝 `required`（400 invalid_request），五模板 Responses profile 一并标记 false；其 Chat 协议与开放平台 K3 系遵循官方参数表保持默认支持。
 上述映射已接入本地请求链路；文档审核状态与远端可用性仍独立。
+Provider 准入以 `model_catalog::PROVIDERS` 为唯一注册表；requirements 校验不得复制 Provider 名称白名单。CI 遍历全部注册 Provider，并把全部目录模型按 Web 默认模板结构送入 Host 校验，保证新增 Provider/模型时不会出现“模板已展示但默认配置无法保存”。模板 token 默认值还必须同时满足各字段上限与 `input + output <= context_window`；当 `max_input` 等于完整上下文窗口时，输入建议需为输出建议预留空间。
 
 Timem 原生工具（如 run_bash）对应 Function calling；网页内置 web_search、code_interpreter
 等平台工具不等于 Timem 工具。本目录不据此开放本地工具。
 function_calling=conditional 必须有对应规则；unsupported 在原生工具模式下必须有禁用规则。
+profile 级 `required_tool_choice`（布尔，缺省 true）记录该线路是否接受 `tool_choice:"required"`：
+仅由文档或实测证据置 false（开放平台 K2 参数表、Coding 网关 Responses 实测 400）。发送层据此把
+Required 降级为 auto 并依赖文本 trailer 保证压缩必调工具；`validate_request` fail-closed 拒绝
+标记 false 的线路仍携带 required 出网。
 
 ## 7. 输入输出与扩展边界
 
