@@ -12488,6 +12488,54 @@ fn queue_continuation_is_driven_by_authoritative_projection_outcome() {
 }
 
 #[test]
+fn legacy_queue_file_with_smaller_capacity_still_loads_after_capacity_raise() {
+    // A persisted legacy Bridge FIFO recorded the historical capacity (8).
+    // Raising MAX_NEXT_TURN_INTENTS must not orphan or corrupt those files:
+    // the queue loads with the new capacity and keeps its items.
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("legacy_queue_capacity"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let space = "legacy_queue_capacity_mem";
+    set_test_mem(&state, data_dir.clone(), space);
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template);
+    let session_id = create_session(
+        &state,
+        Some("Legacy queue".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let mut legacy = NextTurnIntentQueue::new(8);
+    legacy.enqueue(
+        "legacy-command".to_string(),
+        WebNextTurnPayload {
+            send_after_cancel: false,
+            turn_id: unique_web_id("web_turn"),
+            created_at_ms: 1,
+            text: "legacy intent survives".to_string(),
+            attachments: Vec::new(),
+            worker_roles: Vec::new(),
+        },
+    );
+    let path = next_turn_intents_path(&state, &session_id).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+    let queue = load_message_queue(&state, &session_id).unwrap();
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.capacity(), MAX_NEXT_TURN_INTENTS);
+    assert_eq!(
+        queue.projection().items[0].payload.text,
+        "legacy intent survives"
+    );
+}
+
+#[test]
 fn full_message_queue_rejects_without_consuming_attachment_or_creating_turn() {
     let state = routing_test_state();
     let session_id = "session_a";

@@ -117,8 +117,8 @@ use tokio::{
 
 include!(concat!(env!("OUT_DIR"), "/embedded_web_assets.rs"));
 
-const MAX_NEXT_TURN_INTENTS: usize = 8;
-const MAX_NEXT_TURN_INTENT_FILE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_NEXT_TURN_INTENTS: usize = 128;
+const MAX_NEXT_TURN_INTENT_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
 const STATIC_PROMPT: &str = include_str!("../../../resources/system_prompt/system_prompt.md");
 const PORT_START: u16 = 12_345;
@@ -8271,7 +8271,10 @@ fn load_message_queue(
     // One-time migration from the former Bridge-owned transport FIFO.
     let legacy: NextTurnIntentQueue<WebNextTurnPayload> = serde_json::from_slice(&raw)
         .map_err(|error| format!("message_queue_parse_failed:{error}"))?;
-    if legacy.capacity() != MAX_NEXT_TURN_INTENTS || legacy.len() > MAX_NEXT_TURN_INTENTS {
+    // A persisted legacy Bridge FIFO may carry any historical capacity
+    // (e.g. 8); only an oversized queue is invalid. A smaller legacy capacity
+    // must not orphan previously persisted user intents.
+    if legacy.capacity() > MAX_NEXT_TURN_INTENTS || legacy.len() > MAX_NEXT_TURN_INTENTS {
         return Err("message_queue_shape_invalid".to_string());
     }
     let snapshot = legacy.snapshot();
