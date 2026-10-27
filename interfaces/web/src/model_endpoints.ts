@@ -45,6 +45,7 @@ export type ModelEndpointDraft = {
 
 type ModelEndpointProfile = {
   model_endpoint_id?: string | null;
+  model_endpoint_ids?: string[];
   model: string;
   api_protocol: string;
   response_protocol: string;
@@ -54,6 +55,40 @@ type ModelEndpointProfile = {
   stream: boolean;
   api_key_configured: boolean;
 };
+
+/** Upper bound mirrors the host-side MAX_MODEL_ENDPOINT_CHAIN guard. */
+export const MAX_ENDPOINT_CHAIN_LENGTH = 20;
+
+/** Adds an endpoint at the tail of the chain, or removes it when present. */
+export function toggleEndpointInChain(
+  chain: readonly string[],
+  endpointId: string,
+): string[] {
+  return chain.includes(endpointId)
+    ? chain.filter((id) => id !== endpointId)
+    : [...chain, endpointId];
+}
+
+/** Moves a chain entry from one position to another; invalid moves no-op. */
+export function moveEndpointInChain(
+  chain: readonly string[],
+  from: number,
+  to: number,
+): string[] {
+  if (
+    from === to ||
+    from < 0 ||
+    to < 0 ||
+    from >= chain.length ||
+    to >= chain.length
+  ) {
+    return [...chain];
+  }
+  const next = [...chain];
+  const [moved] = next.splice(from, 1);
+  next.splice(to, 0, moved);
+  return next;
+}
 
 export const MODEL_CONTEXT_WINDOW_OPTIONS = [
   100_000, 200_000, 300_000, 1_000_000,
@@ -104,11 +139,10 @@ export function apiProtocolShort(protocol: string): string {
   }
 }
 
-export function endpointMatchesProfile(
+export function endpointMatchesEffectiveProfile(
   endpoint: ModelEndpoint,
   profile: ModelEndpointProfile | undefined,
 ): boolean {
-  if (profile?.model_endpoint_id) return endpoint.id === profile.model_endpoint_id;
   return (
     !!profile &&
     endpoint.model === profile.model &&
@@ -120,6 +154,14 @@ export function endpointMatchesProfile(
     endpoint.stream === profile.stream &&
     endpoint.api_key_configured === profile.api_key_configured
   );
+}
+
+export function endpointMatchesProfile(
+  endpoint: ModelEndpoint,
+  profile: ModelEndpointProfile | undefined,
+): boolean {
+  if (profile?.model_endpoint_id) return endpoint.id === profile.model_endpoint_id;
+  return endpointMatchesEffectiveProfile(endpoint, profile);
 }
 
 export function endpointNameForProfile(
@@ -220,6 +262,7 @@ export type CatalogModel = {
   input_modalities?: string[];
   protocols: { protocol: string; base_url?: string; disabled_reason: string | null;
     function_calling: "supported" | "conditional" | "unsupported" | "unknown";
+    required_tool_choice?: boolean;
     fixed_effort: string | null; fixed_reason: string | null }[];
 };
 
@@ -269,6 +312,18 @@ export function effectiveAllowedReasoning(
   daily: string | null | undefined,
 ): string[] {
   return [...new Set(allowed ?? modelEfforts ?? (daily ? [daily] : []))];
+}
+
+// The Session selector must expose only explicitly known model capabilities.
+// Unlike endpoint editing, an endpoint default is not evidence that a model
+// supports a selectable set of reasoning levels.
+export function sessionReasoningOptions(
+  endpoint: ModelEndpoint | undefined,
+  catalog: readonly CatalogModel[],
+): string[] {
+  if (!endpoint) return [];
+  const model = endpointCatalogModel(endpoint, catalog);
+  return [...new Set(endpoint.requirements?.allowed_reasoning ?? model?.efforts ?? [])];
 }
 
 const CUSTOM_REASONING_LEVEL_ORDER = ["none", ...REASONING_EFFORT_OPTIONS] as const;
@@ -529,9 +584,17 @@ export function templateBaseUrl(model: CatalogModel | undefined, protocol: strin
 /** Template-suggested token budgets: capped defaults shared by apply and restore. */
 export function templateBudgetSuggestion(model: CatalogModel | undefined): { input: number; output: number } | undefined {
   if (!model) return undefined;
+  // Reserve the model's minimum input before choosing the output suggestion,
+  // then cap input by the remaining context. A displayed template must never
+  // start in a state that the Host will reject as an impossible token budget.
+  const output = Math.min(
+    20_000,
+    model.max_output,
+    model.context_window - model.min_input,
+  );
   return {
-    input: Math.min(256_000, model.max_input),
-    output: Math.min(20_000, model.max_output),
+    input: Math.min(256_000, model.max_input, model.context_window - output),
+    output,
   };
 }
 

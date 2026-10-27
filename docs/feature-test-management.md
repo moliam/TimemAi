@@ -528,19 +528,29 @@ for bash/readfile and both running states, plus reduced-motion behavior.
 
 ## Model endpoint binding regression coverage
 
-`shared_model_endpoints_are_persisted_redacted_editable_and_deletable` covers stable
-Session endpoint IDs, full route edits, renames, persistence round trips, active
-Turn deferral, next-Turn resolution and deleted-binding rejection.
-`endpoint_edits_and_switches_apply_at_the_next_new_request_boundary` uses a
-blocking model client to capture the complete configuration of three real model
-requests: an in-flight request retains its reasoning level after an endpoint-only
-edit, the next new Turn receives that edit, an active endpoint switch updates only
-the durable binding, and the following new Turn receives the selected endpoint's
-model, URL, protocol, token limits, stream mode, credentials, headers, request
-fields, transport policy, reasoning level and requirements. Web
-`model_endpoints.test.ts` covers ID-based labels/selection and deleted bindings;
-`endpoint_header_button.test.ts` guards basic-field-first editor order and keeps
-endpoint selection available while a request is working with next-request copy.
+`shared_model_endpoints_are_persisted_redacted_editable_and_deletable` covers
+stable Session endpoint IDs, full route edits, renames, persistence round trips
+and deleted-binding rejection. `endpoint_edits_and_switches_apply_at_the_next_api_
+request_boundary` uses one Turn with three blocking model requests: the in-flight
+request retains its immutable configuration, while endpoint edits and switches
+are visible to the immediately following API request in that same Turn.
+`chain_standby_edits_and_cooldown_apply_at_the_next_api_request_boundary` proves
+that coalescing chooses the newest complete primary/standby route snapshot.
+`clearing_chain_during_a_turn_restores_unbound_config_on_the_next_api_request`
+proves unbind uses the same boundary. `rate_limit_failover_projects_the_committed_
+current_endpoint` keeps the observed active endpoint separate from the user's
+ordered chain.
+
+`session_reasoning_effort_applies_at_the_next_api_request_without_mutating_
+endpoints` proves that the Web header selection is Session-owned, rejects levels
+outside the active model's declared capabilities, leaves shared endpoint defaults
+unchanged, persists the override, applies it to the next request in an active
+Turn, and retains it across an endpoint switch when the new model supports the
+same level. Web `model_endpoints.test.ts` covers capability-derived selector
+options and the unsupported empty state; `endpoint_header_button.test.ts` guards
+`推理：[selector]`, the absence of a protocol chip in this header metadata row,
+and dispatch of the Session-only command. `endpoint_chain_panel.test.ts` covers
+click-to-commit chain selection and in-flight update feedback.
 
 Browser endpoint layout acceptance is included in
 `interfaces/web/tests/browser/stop-ui-acceptance.mjs`: real Chrome checks dark/light
@@ -758,6 +768,21 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - Host: `zhipu_catalog_endpoints_roundtrip_and_reject_forbidden_efforts`.
 - Web: `endpoint_header_button.test.ts` and isolated-host `catalog-endpoint-e2e.mjs` verify no budget steppers, direct entry, template listing and persisted editing.
 - Coverage boundary: local HTTP fixtures, not paid remote provider calls; no full million-token or Coding Plan qualification claim.
+
+## Kimi templates（含 Kimi Code 订阅制）
+
+- Contract/evidence: `docs/kimi-model-catalog.md`、`scripts/validate_kimi_model_catalog.py`、`scripts/validate_kimi_code_model_catalog.py`。
+- Kimi Code（provider `kimi_code`，base `https://api.kimi.com/coding/v1`）: Core `model_api::tests::kimi_code_responses_and_chat_wire`（Responses 枚举体字段 + Chat 顶层 reasoning_effort + none 档拒绝）；Host `kimi_code_catalog_endpoints_roundtrip_and_protocol_defaults` 使用 Web 实际提交的 versioned requirements（含 `provider=kimi_code`）验证保存和磁盘往返。
+- 跨 Provider 防漂移门禁：`every_registered_provider_is_admitted_by_endpoint_requirements` 遍历唯一 Provider 注册表，保证 requirements 准入不再维护第二份白名单；`every_catalog_template_default_is_saveable_with_versioned_requirements` 遍历所有目录模型，以 Web 模板同构请求进入 Host 规范化/保存校验，保证“模板可见”必然意味着默认草稿可保存。Web `model_endpoints.test.ts` 另验证 256K 等 `max_input=context_window` 模型会为 20K 输出预留上下文，而不是生成天然不可保存的 256K+20K 组合。
+- 语义:目录不含 none 档（关闭思考被拒或静默路由 K2.8 Preview,fail-closed）;`kimi-for-coding-highspeed` 思考不可调不入目录;模型 ID 填错官方会静默兜底,故 catalog 模型 ID 与 wire 断言双向校验。
+- 覆盖边界:CI 内为本地 fixture 契约验证;另用用户提供的 Coding Plan key（sk-kimi-）做过一次性真机验证：`GET /v1/models` 实测确认各模型 effort 档位/默认值/上下文（据此把 k3.1-pro 系列默认档由文档规格表的 max 修正为端点实测的 high，证据存 api-models 来源），k3.1-pro 经 Responses 协议在独立临时空间完成纯文本+readfile 工具轮全链路（turn 4-9s）；开放平台 K2 亦已真机验证（见上节）。真机验证不作为 CI 常驻用例，key 不入库。
+
+- Contract/evidence: `docs/kimi-model-catalog.md`, `scripts/validate_kimi_model_catalog.py`.
+- Core: `model_api::tests::kimi_chat_reasoning_wire_and_guards`、`model_api::tests::kimi_k2_thinking_wire_and_guards`（K2 thinking 映射/guard/恒思考省略）、`model_api::tests::kimi_chat_stream_preserves_reasoning_content_in_tool_continuation`、`model_catalog_tests`（kimi 目录计数/准入/契约）。
+- Host: `kimi_catalog_endpoints_roundtrip_and_reject_forbidden_efforts`。
+- Web: 模板厂商标签 zh/en "Kimi"（strings + providerLabels）。
+- 语义：K3 系列多轮/工具续轮回传含 `reasoning_content` 的 assistant message（同智谱语义）；Chat 顶层 `reasoning_effort`（low/high/max 默认 max），不发送 `thinking`/`enable_thinking`；`stream_options`（include_usage）允许。K2 系列（k-k2.6/k-k2.7-code）经 `kimi_k2_thinking` 适配器入目录：k2.6 none→`thinking:disabled`、high→`{enabled,keep:all}`；k2.7-code 恒思考不发送 thinking；均为 Chat-only。
+- Coverage boundary: CI 内为本地 HTTP fixture 契约验证；另用用户提供 key 在独立临时空间做过一次性真机验证（kimi-k2.6 纯文本+readfile 工具轮真实打通，turn 3s 内完成），不作为 CI 常驻用例，key 不入库。
 
 ## 接入点需求与 payload 分层（v1）
 

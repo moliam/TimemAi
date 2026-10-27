@@ -11,8 +11,10 @@ describe("header endpoint selector", () => {
     expect(source).toMatch(
       /className={`header-model[\s\S]*<span title={headerModelLabel}>{headerModelLabel}<\/span>[\s\S]*<ChevronDown/,
     );
-    expect(source).toMatch(/headerModelEndpoint[\s\S]*apiProtocolShort\(headerModelEndpoint\.api_protocol\)/);
-    expect(source).toMatch(/headerModelEndpoint\.reasoning_effort &&/);
+    expect(source).toContain('className="header-reasoning-select"');
+    expect(source).toContain('type: "session_reasoning_effort_update"');
+    expect(source).toContain('t("modelService.reasoningUnavailable")');
+    expect(source).not.toMatch(/headerModelEndpoint[\s\S]{0,300}apiProtocolShort\(headerModelEndpoint\.api_protocol\)/);
     expect(source).toMatch(/className="header-model-meta"/);
     expect(source).toContain("aria-expanded={showRuntime}");
   });
@@ -247,12 +249,13 @@ it("allows endpoint selection while a request is working and explains the reques
   const panelStart = source.indexOf("function ModelEndpointPanel");
   const panelEnd = source.indexOf("function ModelEndpointEditor", panelStart);
   const panel = source.slice(panelStart, panelEnd);
-  const applyStart = source.indexOf("onApply={(endpointId) => {");
+  const applyStart = source.indexOf("onApply={(endpointIds) => {");
   const applyEnd = source.indexOf("}}", applyStart);
   const apply = source.slice(applyStart, applyEnd);
   expect(panel).toContain("disabled={!session}");
   expect(panel).not.toContain('disabled={!session || session.state === "working"}');
   expect(apply).toContain("if (!activeSession) return;");
+  expect(apply).toContain('type: "model_endpoint_chain_apply"');
   expect(apply).not.toContain('activeSession.state === "working"');
   expect(zhCatalog.endpoints.workingNote).toContain("下一次请求生效");
   expect(enCatalog.endpoints.workingNote).toContain("next request");

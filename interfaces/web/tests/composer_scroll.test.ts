@@ -39,12 +39,12 @@ describe("fixed composer scroll ownership", () => {
     expect(styles).toMatch(
       /\.attachment-strip \{[^}]*flex: none;[^}]*max-height: min\(22dvh, 144px\);[^}]*overflow-y: auto;/,
     );
+    // One collapse level only: the item list itself is capped near four rows
+    // and scrolls; no second row-level collapsed/expanded queue state exists.
     expect(styles).toMatch(
-      /\.queued-message-list\.expanded \{[^}]*grid-template-rows: auto minmax\(0, 1fr\);[^}]*overflow: hidden;/,
+      /\.queued-message-items \{[^}]*max-height: 224px;[^}]*overflow-y: auto;[^}]*overscroll-behavior: contain;/,
     );
-    expect(styles).toMatch(
-      /\.queued-message-list\.expanded \.queued-message-items \{[^}]*overflow-y: auto;[^}]*overscroll-behavior: contain;/,
-    );
+    expect(styles).not.toMatch(/\.queued-message-list\.(?:collapsed|expanded)/);
   });
 
   it("uses the formal interface font for the CWD and debug paths", () => {

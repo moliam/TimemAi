@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches, clearQueuedMessagesPause, loadQueuedMessagesPause, queuedMessagesPauseSessionId, queuedMessagesPauseStorageKey, saveQueuedMessagesPause, shouldDirectManualMessage, stopQueuedAutoSend, unclaimedQueuedMessages } from "../src/queued_messages";
+import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches, clearQueuedMessagesPause, loadQueuedMessagesPause, queuedMessagesPauseSessionId, queuedMessagesPauseStorageKey, saveQueuedMessagesPause, shouldDirectManualMessage, stopQueuedAutoSend, unclaimedQueuedMessages } from "../src/queued_messages";
 
 const messages: QueuedMessage[] = ["a", "b", "c", "d", "e"].map((id, index) => ({
   id,
@@ -90,10 +90,6 @@ describe("queued messages", () => {
  ]);
  expect(ids).toEqual(new Set(["upload-a", "upload-b", "upload-c"]));
  });
-  it("limits the collapsed queue to four rows", () => {
-    expect(COLLAPSED_QUEUE_LIMIT).toBe(4);
-    expect(messages.slice(0, COLLAPSED_QUEUE_LIMIT).map(({ id }) => id)).toEqual(["a", "b", "c", "d"]);
-  });
 
   it("moves a dragged message to the sortable target position without mutation", () => {
     expect(reorderQueuedMessages(messages, "d", "b").map(({ id }) => id)).toEqual(["a", "d", "b", "c", "e"]);

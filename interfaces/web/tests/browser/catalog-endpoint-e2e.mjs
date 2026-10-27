@@ -5,6 +5,30 @@ import { tmpdir } from "node:os";
 const URL = process.env.TIMEM_CATALOG_TEST_URL;
 if (!URL) throw new Error("TIMEM_CATALOG_TEST_URL must identify an isolated test host");
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const waitForExit = (child, timeout) => new Promise((resolve) => {
+  if (!child || child.exitCode !== null || child.signalCode !== null) {
+    resolve(true);
+    return;
+  }
+  const onExit = () => {
+    clearTimeout(timer);
+    resolve(true);
+  };
+  const timer = setTimeout(() => {
+    child.off("exit", onExit);
+    resolve(false);
+  }, timeout);
+  child.once("exit", onExit);
+});
+const terminateChrome = async (child) => {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const gracefulExit = waitForExit(child, 3000);
+  child.kill("SIGTERM");
+  if (await gracefulExit) return;
+  const forcedExit = waitForExit(child, 3000);
+  child.kill("SIGKILL");
+  if (!await forcedExit) throw new Error("chrome did not exit after SIGKILL");
+};
 const fixtureRoot = await mkdtemp(tmpdir() + "/timem-catalog-e2e-");
 const runId = Date.now().toString(36);
 const assert = (c, m) => { if (!c) throw new Error(m); };
@@ -42,38 +66,64 @@ await new Promise((resolve, reject) => {
 });
 
 ws = new WebSocket(devtoolsUrl);
-await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
+await new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error("chrome devtools websocket open timeout")), 10000);
+  ws.onopen = () => { clearTimeout(timer); resolve(); };
+  ws.onerror = (error) => { clearTimeout(timer); reject(error); };
+});
 let msgId = 0;
 const pending = new Map();
 ws.onmessage = (event) => {
   const msg = JSON.parse(event.data);
-  if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id); }
+  if (!msg.id) return;
+  const settle = pending.get(msg.id);
+  if (!settle) return;
+  pending.delete(msg.id);
+  settle(msg);
 };
-const send = (method, params = {}) => new Promise((resolve, reject) => {
+const cdpRequest = (method, params = {}, sessionId, unwrapResult = false) => new Promise((resolve, reject) => {
   const id = ++msgId;
-  pending.set(id, resolve);
-  ws.send(JSON.stringify({ id, method, params }));
-  setTimeout(() => reject(new Error("cdp timeout: " + method)), 15000);
+  const timer = setTimeout(() => {
+    if (!pending.delete(id)) return;
+    reject(new Error("cdp timeout: " + method));
+  }, 15000);
+  pending.set(id, (msg) => {
+    clearTimeout(timer);
+    if (msg.error) {
+      reject(new Error(method + ": " + JSON.stringify(msg.error)));
+      return;
+    }
+    resolve(unwrapResult ? msg.result : msg);
+  });
+  try {
+    ws.send(JSON.stringify(sessionId === undefined
+      ? { id, method, params }
+      : { id, method, params, sessionId }));
+  } catch (error) {
+    clearTimeout(timer);
+    pending.delete(id);
+    reject(error);
+  }
 });
-const raw = (method, params = {}) => new Promise((resolve, reject) => {
-  const id = ++msgId; pending.set(id, resolve);
-  ws.send(JSON.stringify({ id, method, params }));
-  setTimeout(() => reject(new Error("cdp timeout: " + method)), 15000);
-});
+const raw = (method, params = {}) => cdpRequest(method, params);
 const targets = (await raw("Target.getTargets")).result.targetInfos;
-const page = targets.find((t) => t.type === "page");
+const page = targets.find((target) => target.type === "page" && target.url === URL)
+  ?? targets.find((target) => target.type === "page");
+assert(page, "chrome page target not found");
 const sessionId = (await raw("Target.attachToTarget", { targetId: page.targetId, flatten: true })).result.sessionId;
-const call = (method, params = {}) => new Promise((resolve, reject) => {
-  const id = ++msgId;
-  pending.set(id, (msg) => msg.error ? reject(new Error(method + ": " + JSON.stringify(msg.error))) : resolve(msg.result));
-  ws.send(JSON.stringify({ id, method, params, sessionId }));
-});
+const call = (method, params = {}) => cdpRequest(method, params, sessionId, true);
 
 const evaluate = async (expression) => {
   const r = await call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
   if (r.exceptionDetails) throw new Error("eval failed: " + JSON.stringify(r.exceptionDetails));
   return r.result.value;
 };
+await call("Page.enable");
+await call("Runtime.enable");
+await waitFor(
+  () => evaluate(`location.href === ${JSON.stringify(URL)}`),
+  "isolated catalog test page navigation",
+);
 const hitTest = async (selector, label) => {
   const hit = await evaluate(`(() => {
     const expected = ${selector};
@@ -130,7 +180,7 @@ await evaluate(`document.querySelector('.endpoint-settings-toolbar button.primar
 await waitFor(() => evaluate("!!document.querySelector('.endpoint-catalog-picker select')"), "catalog editor");
 const choose = async (id) => {await evaluate(`(() => {const e=document.querySelector('.endpoint-catalog-picker select');e.value=${JSON.stringify(id)};e.dispatchEvent(new Event('change',{bubbles:true}));})()`);await sleep(150);};
 await choose('openai/gpt-6-astra');
-assert(await evaluate(`(() => {const options=[...document.querySelector('.endpoint-catalog-picker select').options];return options.filter(o=>o.value).every(o=>o.textContent.includes(': ')) && options.find(o=>o.value==='openai/gpt-6-astra').textContent==='OpenAI: GPT-6 Astra' && options.find(o=>o.value==='z-glm5.3').textContent==='智谱: z-glm5.3' && options[0].textContent==='无';})()`),'template labels include provider and preserve none');
+assert(await evaluate(`(() => {const options=[...document.querySelector('.endpoint-catalog-picker select').options];return options.filter(o=>o.value).every(o=>o.textContent.includes(': ')) && options.find(o=>o.value==='openai/gpt-6-astra').textContent==='OpenAI: GPT-6 Astra' && options.find(o=>o.value==='z-glm5.3').textContent==='智谱: z-glm5.3' && options.find(o=>o.value==='kimicode_k3.1-pro').textContent==='Kimi Code: k3.1-pro' && options[0].textContent==='无';})()`),'template labels include provider and preserve none');
 
 assert(await evaluate("document.querySelector('.endpoint-catalog-picker select').value === 'openai/gpt-6-astra'"), 'Astra selected');
 console.log(await evaluate("document.querySelector('.endpoint-editor').innerText"));
@@ -182,6 +232,27 @@ const fresh = async () => {
 };
 await fresh();
 const baseUrl = '.endpoint-editor-grid input[placeholder="https://api.example.com/v1"]';
+
+// Regression for the real Kimi Code failure: the catalog option must survive
+// the complete browser -> WebSocket -> Host validation -> persistence path with
+// the same versioned requirements emitted by the editor.
+await choose('kimicode_k3.1-pro');
+assert(await evaluate(`document.querySelector('.endpoint-catalog-picker select').value==='kimicode_k3.1-pro'`),'Kimi Code k3.1-pro listed');
+assert(await evaluate(`document.querySelector(${JSON.stringify(protocol)}).value==='openai-responses'`),'Kimi Code suggests Responses');
+assert(await evaluate(`document.querySelector('.endpoint-editor-grid input:nth-of-type(2)').value==='k3.1-pro'`),'Kimi Code model id populated');
+await setField('.endpoint-editor-grid input', 'Kimi Code E2E '+runId);
+await setField('.endpoint-api-key input', 'sk-kimi-e2e-placeholder');
+assert(await evaluate(`!document.querySelector('.endpoint-editor button.primary').disabled`),'Kimi Code template is saveable after API key entry');
+await evaluate(`document.querySelector('.endpoint-editor-topbar').scrollIntoView({block:'start'})`);
+const kimiSave = await hitTest("document.querySelector('.endpoint-editor-buttons button.primary')",'Kimi Code save');
+await realMouseClick(kimiSave.x,kimiSave.y);
+await waitFor(()=>evaluate(`!document.querySelector('.endpoint-editor')`),'Kimi Code endpoint saved');
+assert(await evaluate(`document.querySelector('.endpoint-settings-pane').textContent.includes('Kimi Code E2E '+${JSON.stringify(runId)})`),'Kimi Code endpoint appears in authoritative list');
+await evaluate(`([...document.querySelectorAll('.endpoint-settings-edit')].find(b=>b.closest('.endpoint-settings-row')?.textContent.includes('Kimi Code E2E '+${JSON.stringify(runId)}))).click()`);
+await waitFor(()=>evaluate(`!!document.querySelector('.endpoint-catalog-picker')`),'Kimi Code endpoint reopened');
+assert(await evaluate(`document.querySelector('.endpoint-catalog-picker select').value==='kimicode_k3.1-pro' && document.querySelector('.endpoint-editor-grid input:nth-of-type(2)').value==='k3.1-pro' && document.querySelector(${JSON.stringify(protocol)}).value==='openai-responses'`),'Kimi Code template, model and protocol persisted');
+console.log('PASS Kimi Code k3.1-pro API-key save and reopen through real Host');
+await fresh();
 if (process.env.TIMEM_CATALOG_TEST_PROTOCOL_TEMPLATE) {
   await choose(process.env.TIMEM_CATALOG_TEST_PROTOCOL_TEMPLATE);
   const url = () => evaluate(`document.querySelector(${JSON.stringify(baseUrl)}).value`);
@@ -439,11 +510,7 @@ console.log('PASS catalog constraints, save, edit, custom, narrow viewport');
 console.log('PASS three Zhipu templates, direct budget typing, no spinner/arrow stepping');
 } finally {
   ws?.close();
-  if (chrome && chrome.exitCode === null) {
-    const exited = new Promise(resolve => chrome.once('exit',resolve));
-    chrome.kill();
-    await exited;
-  }
+  await terminateChrome(chrome);
   await rm(fixtureRoot,{recursive:true,force:true});
   await rm(chromeProfile,{recursive:true,force:true});
 }

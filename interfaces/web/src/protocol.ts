@@ -162,6 +162,10 @@ export type Session = {
   mcp_server_ids: string[];
   runtime_profile?: {
     model_endpoint_id?: string | null;
+    /** Host-observed route for the current request; pending snapshots apply before the next model API request. */
+    active_model_endpoint_id?: string | null;
+    model_endpoint_ids?: string[];
+    reasoning_effort?: string | null;
     model: string;
     api_protocol: string;
     response_protocol: string;
@@ -211,6 +215,8 @@ export type TimerInfo = {
   after_ms?: number | null;
   at?: string | null;
   interval_ms?: number | null;
+  /** When true the fired prompt bypasses the message queue. */
+  deliver_immediately?: boolean;
   created_by: "user" | "model" | string;
   created_at_ms: number;
   enabled: boolean;
@@ -421,6 +427,8 @@ export type ModelEndpoint = {
   allow_cross_origin_redirects: boolean;
   private_ca_configured: boolean;
   reasoning_effort?: string | null;
+  rate_limited_since_ms?: number | null;
+  probing?: boolean;
 };
 
 export type ModelEndpointImportCandidate = {
@@ -887,6 +895,11 @@ export type ClientCommand =
       value: string;
     }
   | {
+      type: "session_reasoning_effort_update";
+      session_id: string;
+      reasoning_effort: string;
+    }
+  | {
       type: "model_endpoint_upsert";
       endpoint: {
         id?: string;
@@ -912,6 +925,8 @@ export type ClientCommand =
   | { type: "model_endpoint_delete"; endpoint_id: string }
   | { type: "model_endpoint_delete_many"; endpoint_ids: string[] }
   | { type: "model_endpoint_apply"; session_id: string; endpoint_id: string }
+  | { type: "model_endpoint_chain_apply"; session_id: string; endpoint_ids: string[] }
+  | { type: "model_endpoint_availability_refresh" }
   | {
       type: "model_endpoint_import_scan";
       codex_dir?: string | null;
@@ -933,6 +948,7 @@ export type ClientCommand =
       after_ms?: number;
       at?: string;
       interval_ms?: number;
+      deliver_immediately?: boolean;
     }
   | { type: "timer_delete"; session_id: string; timer_id: string }
   | {

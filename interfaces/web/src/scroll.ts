@@ -65,3 +65,38 @@ export function adjacentUserMessageIndex(
   }
   return anchorTops.findIndex((top) => top > referenceTop + epsilon);
 }
+
+export type ViewportTurnAnchor = { turnId: string; viewportTop: number };
+
+/**
+ * First restored turn whose bottom edge reaches the viewport. Anchoring its
+ * top pins the reading position while later turns hydrate and grow: a
+ * hydration commit that expands content above the anchored turn is cancelled
+ * by an equal scrollTop correction, and expansion below it needs no change.
+ */
+export function pickViewportTurnAnchor(
+  turns: ReadonlyArray<{ turnId: string; top: number; bottom: number }>,
+  viewportTop: number,
+  epsilon = 1,
+): ViewportTurnAnchor | null {
+  for (const turn of turns) {
+    if (turn.bottom > viewportTop + epsilon) {
+      return { turnId: turn.turnId, viewportTop: turn.top - viewportTop };
+    }
+  }
+  return null;
+}
+
+/**
+ * ScrollTop correction that pins the anchored turn back to its captured
+ * viewport offset after a commit moved content above it. Returns 0 when the
+ * anchor already sits where the reader left it.
+ */
+export function anchorScrollDelta(
+  anchor: ViewportTurnAnchor,
+  elementViewportTop: number,
+  epsilon = 1,
+): number {
+  const delta = elementViewportTop - anchor.viewportTop;
+  return Math.abs(delta) <= epsilon ? 0 : delta;
+}

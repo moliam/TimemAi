@@ -1,6 +1,6 @@
 import { MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation, TimerInvocation, TimerToolIcon } from "./tool_invocation";
 import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
-import { initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
+import { initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, sessionReasoningOptions, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
 import { persistComposerDraftTexts, readComposerDraftTexts } from "./composer_drafts";
 import { createComposerWriteThrough, type ComposerWriteThrough } from "./composer_input";
 import type { CatalogModel } from "./model_endpoints";
@@ -54,6 +54,7 @@ import {
   CircleStop,
   CircleX,
   ClipboardCheck,
+  ClockAlert,
   Clock3,
   Clock8,
   Copy,
@@ -121,6 +122,13 @@ import {
 import { createPortal } from "react-dom";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { getLocale, setLocale, t, useT } from "./i18n";
+import {
+  createTurnHistoryHydrationQueue,
+  enqueueTurnHistoryHydration,
+  finishTurnHistoryHydrationChain,
+  markTurnHistoryMissing,
+  pumpTurnHistoryHydration,
+} from "./turn_history_hydration";
 import { RestartCwdGate } from "./restart_cwd_gate";
 import {
   MemSwitchCandidate,
@@ -167,12 +175,15 @@ import {
 } from "./worker_roles_ui";
 import {
   adjacentUserMessageIndex,
+  anchorScrollDelta,
   canScrollInDirection,
   isNearScrollBottom,
+  pickViewportTurnAnchor,
   preservePrependScrollTop,
   restoreSessionScrollTop,
   scrollEdgeFades,
   ScrollMetrics,
+  ViewportTurnAnchor,
   SessionScrollPosition,
   UserMessageNavigationDirection,
   wheelDeltaPixels,
@@ -292,7 +303,10 @@ import {
   formatContextWindowTokens,
   MODEL_CONTEXT_WINDOW_OPTIONS,
   MODEL_OUTPUT_TOKEN_OPTIONS,
+  MAX_ENDPOINT_CHAIN_LENGTH,
   ModelEndpointDraft,
+  moveEndpointInChain,
+  toggleEndpointInChain,
 } from "./model_endpoints";
 import { createFrameEventQueue } from "./frame_event_queue";
 import { formatTokens, formatTokensCoarse } from "./token_format";
@@ -303,7 +317,6 @@ import {
   ToolActivitySummary,
 } from "./activity_groups";
 import {
-  COLLAPSED_QUEUE_LIMIT,
   QueuedMessage,
   reorderQueuedMessages,
   reservedQueuedAttachmentIds,
@@ -781,6 +794,8 @@ function TimemApp() {
   const pendingEndpointDeleteIdsRef = useRef<Set<string>>(new Set());
   const pendingEndpointDeleteCommandRef = useRef("");
   const turnHistoryPagesRef = useRef(new Map<string, { records: ChatHistoryRecord[]; offset: number }>());
+  const turnHydrationQueueRef = useRef(createTurnHistoryHydrationQueue());
+  const turnHydrationMissingRef = useRef(new Set<string>());
   const pendingHistorySessionIdsRef = useRef<Set<string>>(new Set());
   const pendingUploadSessionIdsRef = useRef<Set<string>>(new Set());
   const pendingToolgenRequestsRef = useRef<Set<string>>(new Set());
@@ -1096,6 +1111,18 @@ function TimemApp() {
 
   const sendCommandRef = useRef(sendCommand);
   sendCommandRef.current = sendCommand;
+
+  // One turn_history_page chain = one scheduler slot. The bounded queue keeps
+  // restored-timeline hydration from flooding the Host command channel.
+  const startTurnHistoryChain = useCallback((sessionId: string, turnId: string) => {
+    const key = sessionTurnKey(sessionId, turnId);
+    turnHistoryPagesRef.current.set(key, { records: [], offset: 0 });
+    if (!sendCommandRef.current({ type: "turn_history_page", session_id: sessionId, turn_id: turnId, offset: 0 })) {
+      turnHistoryPagesRef.current.delete(key);
+      return false;
+    }
+    return true;
+  }, []);
 
   const closeSettingsCenter = useCallback(() => {
     if (
@@ -1732,6 +1759,7 @@ function TimemApp() {
       if (!fromSemantic) {
         if (event.type === "hello") {
           turnHistoryPagesRef.current.clear();
+          turnHydrationQueueRef.current = createTurnHistoryHydrationQueue();
           // A reconnect may intentionally target an older Host, so Hello resets
           // rather than only ever enabling this connection-level capability.
           semanticDeliveryRef.current = enablesSemanticDelivery(event);
@@ -1818,6 +1846,16 @@ function TimemApp() {
               next.add(event.command_id);
               return next;
             });
+            if (event.error === "message_queue_full") {
+              pushActivity({
+                id: clientId(),
+                sessionId: commandSessionId(completed) ?? activeSessionIdRef.current ?? "system",
+                tone: "notice",
+                title: t("composer.queueFullTitle"),
+                detail: t("composer.queueFullNotice"),
+                createdAt: Date.now(),
+              });
+            }
           }
           if (pendingWorkerRoleMutationsRef.current.delete(event.command_id)) {
             const visibleLibrary = replayWorkerRoleMutations(
@@ -2010,6 +2048,7 @@ function TimemApp() {
       }
       if (event.type === "hello") {
         turnHistoryPagesRef.current.clear();
+        turnHydrationQueueRef.current = createTurnHistoryHydrationQueue();
         // Hello carries the complete authoritative baseline. Adopt its exact
         // sequence before any later semantic event is reduced; reconnecting to
         // a Host that has already emitted events must not look like a gap from
@@ -2439,6 +2478,7 @@ function TimemApp() {
       }
       if (event.type === "host_error") {
         turnHistoryPagesRef.current.clear();
+        turnHydrationQueueRef.current = createTurnHistoryHydrationQueue();
         clearAllPendingCommands();
         pushActivity({
           id: clientId(),
@@ -2637,14 +2677,34 @@ function TimemApp() {
         if (event.next_offset !== null) {
           pending.offset = event.next_offset;
           if (!sendCommandRef.current({ type: "turn_history_page", session_id: event.session_id,
-            turn_id: event.turn_id, offset: event.next_offset })) turnHistoryPagesRef.current.delete(key);
+            turn_id: event.turn_id, offset: event.next_offset })) {
+            turnHistoryPagesRef.current.delete(key);
+            finishTurnHistoryHydrationChain(turnHydrationQueueRef.current, key, startTurnHistoryChain);
+          }
         } else {
           const restored = turnsFromHistoryRecords(pending.records).find((turn) => turn.turn_id === event.turn_id);
+          // Hydration grows restored turns (sometimes by thousands of pixels)
+          // while the reader may be anywhere in the timeline. The chat viewport
+          // disables native scroll anchoring, so ask the timeline viewport to
+          // capture the topmost visible turn before this commit; its layout
+          // effect pins the anchor back afterwards.
+          if (restored && event.session_id === activeSessionIdRef.current) {
+            window.dispatchEvent(new CustomEvent(HYDRATION_ANCHOR_CAPTURE_EVENT, {
+              detail: { sessionId: event.session_id },
+            }));
+          }
           turnHistoryPagesRef.current.delete(key);
           if (restored) setSessions((current) => current.map((session) => session.session_id !== event.session_id ? session : {
             ...session, turns: session.turns.map((turn) => turn.turn_id === event.turn_id && turn.state !== "working"
               ? { ...turn, events: restored.events, events_slimmed: false, user_entries: turn.user_entries.map((entry) => ({ ...entry, timeline_seq: undefined })) } : turn),
           }));
+          else {
+            // No stored records survived retention rotation for this turn; it
+            // can never hydrate. Cache the miss so the timeline effect stops
+            // re-requesting it forever.
+            markTurnHistoryMissing(turnHydrationMissingRef.current, key);
+          }
+          finishTurnHistoryHydrationChain(turnHydrationQueueRef.current, key, startTurnHistoryChain);
         }
         return;
       }
@@ -3491,14 +3551,26 @@ function TimemApp() {
       : t("nav.settingsOpen");
   const modelEndpointsUnavailable =
     !!server && server.model_endpoints.length === 0;
-  const headerModelLabel =
-    endpointLabelForProfile(
-      server?.model_endpoints ?? [],
-      activeSession?.runtime_profile,
-    );
-  const headerModelEndpoint = (server?.model_endpoints ?? []).find(
-    (endpoint) => endpointMatchesProfile(endpoint, activeSession?.runtime_profile),
+  const activeEndpointId = activeSession?.state === "working"
+    ? activeSession.runtime_profile?.active_model_endpoint_id
+    : activeSession?.runtime_profile?.model_endpoint_id;
+  const headerModelLabel = activeEndpointId
+    ? (server?.model_endpoints ?? []).find((endpoint) => endpoint.id === activeEndpointId)?.name
+      ?? t("modelService.endpointDeleted")
+    : endpointLabelForProfile(
+        server?.model_endpoints ?? [],
+        activeSession?.runtime_profile,
+      );
+  const headerModelEndpoint = activeEndpointId
+    ? (server?.model_endpoints ?? []).find((endpoint) => endpoint.id === activeEndpointId)
+    : (server?.model_endpoints ?? []).find(
+        (endpoint) => endpointMatchesProfile(endpoint, activeSession?.runtime_profile),
+      );
+  const headerReasoningOptions = sessionReasoningOptions(
+    headerModelEndpoint,
+    server?.model_catalog ?? [],
   );
+  const headerReasoningValue = activeSession?.runtime_profile?.reasoning_effort ?? "";
   // Documented catalog facts decide the image warning; custom endpoints
   // (unknown modalities) stay permissive to avoid false alarms.
   const activeImageUnsupportedEndpoint =
@@ -3803,12 +3875,19 @@ function TimemApp() {
     return () => document.body.classList.remove("workspace-modal-open");
   }, [workspaceModalOpen]);
   return (
-    <TurnHistoryRequestContext.Provider value={(sessionId, turnId) => {
-      const key = sessionTurnKey(sessionId, turnId);
-      if (turnHistoryPagesRef.current.has(key)) return;
-      turnHistoryPagesRef.current.set(key, { records: [], offset: 0 });
-      if (!sendCommand({ type: "turn_history_page", session_id: sessionId, turn_id: turnId, offset: 0 }))
-        turnHistoryPagesRef.current.delete(key);
+    <TurnHistoryRequestContext.Provider value={(sessionId, turnId, priority = false) => {
+      const queue = turnHydrationQueueRef.current;
+      enqueueTurnHistoryHydration(
+        queue,
+        {
+          alreadyRequested: (key) => turnHistoryPagesRef.current.has(key),
+          knownMissing: (key) => turnHydrationMissingRef.current.has(key),
+        },
+        sessionId,
+        turnId,
+        priority,
+      );
+      pumpTurnHistoryHydration(queue, startTurnHistoryChain);
     }}>
     <AssistantRuntimeProvider runtime={runtime}>
       <div
@@ -4270,11 +4349,17 @@ function TimemApp() {
                                         );
                                       const visuallyWorking =
                                         sessionVisuallyWorking(session);
-                                      const sessionEndpointName =
-                                        endpointLabelForProfile(
-                                          server?.model_endpoints ?? [],
-                                          session.runtime_profile,
-                                        );
+                                      const sessionActiveEndpointId = session.state === "working"
+                                        ? session.runtime_profile?.active_model_endpoint_id
+                                        : session.runtime_profile?.model_endpoint_id;
+                                      const sessionEndpointName = sessionActiveEndpointId
+                                        ? (server?.model_endpoints ?? []).find(
+                                            (endpoint) => endpoint.id === sessionActiveEndpointId,
+                                          )?.name ?? t("modelService.endpointDeleted")
+                                        : endpointLabelForProfile(
+                                            server?.model_endpoints ?? [],
+                                            session.runtime_profile,
+                                          );
                                       return (
                                         <Fragment key={session.session_id}>
                                           <SortableSessionRow
@@ -4821,13 +4906,36 @@ function TimemApp() {
                     {headerModelEndpoint.model}
                   </span>
                   <div className="header-model-meta-row">
-                    <span className="endpoint-chip endpoint-chip-protocol">
-                      {apiProtocolShort(headerModelEndpoint.api_protocol)}
-                    </span>
-                    {headerModelEndpoint.reasoning_effort && (
-                      <span className="endpoint-chip endpoint-chip-effort">
-                        {headerModelEndpoint.reasoning_effort}
-                      </span>
+                    <span className="header-reasoning-label">{t("modelService.reasoningLabel")}：</span>
+                    {headerReasoningOptions.length > 0 ? (
+                      <select
+                        className="header-reasoning-select"
+                        aria-label={t("modelService.reasoningLabel")}
+                        value={headerReasoningOptions.includes(headerReasoningValue)
+                          ? headerReasoningValue
+                          : headerReasoningOptions[0]}
+                        disabled={runtimeLocked || !activeSession}
+                        onChange={(event) => {
+                          if (!activeSession) return;
+                          if (!sendCommand({
+                            type: "session_reasoning_effort_update",
+                            session_id: activeSession.session_id,
+                            reasoning_effort: event.target.value,
+                          })) {
+                            reportUiError(
+                              "Reasoning update failed",
+                              t("errors.checkConnection"),
+                              activeSession.session_id,
+                            );
+                          }
+                        }}
+                      >
+                        {headerReasoningOptions.map((effort) => (
+                          <option key={effort} value={effort}>{effort}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span className="header-reasoning-none">{t("modelService.reasoningUnavailable")}</span>
                     )}
                   </div>
                 </div>
@@ -5016,13 +5124,16 @@ function TimemApp() {
               server={server}
               session={activeSession}
               onEdit={openEndpointSettings}
-              onApply={(endpointId) => {
+              onApply={(endpointIds) => {
                 if (!activeSession) return;
                 sendCommand({
-                  type: "model_endpoint_apply",
+                  type: "model_endpoint_chain_apply",
                   session_id: activeSession.session_id,
-                  endpoint_id: endpointId,
+                  endpoint_ids: endpointIds,
                 });
+              }}
+              onRefreshAvailability={() => {
+                sendCommand({ type: "model_endpoint_availability_refresh" });
               }}
             />
           )}
@@ -7378,6 +7489,7 @@ function TimerPanel({
   const [delayMinutes, setDelayMinutes] = useState("");
   const [atValue, setAtValue] = useState("");
   const [intervalMinutes, setIntervalMinutes] = useState("");
+  const [deliverImmediately, setDeliverImmediately] = useState(false);
   useEffect(() => {
     setCreateOpen(false);
     setPrompt("");
@@ -7387,6 +7499,7 @@ function TimerPanel({
     setDelayMinutes("");
     setAtValue("");
     setIntervalMinutes("");
+    setDeliverImmediately(false);
     setEditingTimerId(null);
     setEditDraft("");
     setExpandedPrompts(new Set());
@@ -7421,6 +7534,7 @@ function TimerPanel({
     setDelayMinutes("");
     setAtValue("");
     setIntervalMinutes("");
+    setDeliverImmediately(false);
   };
   const submitCreate = (event: React.FormEvent) => {
     event.preventDefault();
@@ -7437,6 +7551,7 @@ function TimerPanel({
       ...(mode === "repeat"
         ? { interval_ms: Math.round(Number(intervalMinutes) * 60_000) }
         : {}),
+      ...(deliverImmediately ? { deliver_immediately: true } : {}),
     };
     if (!sendCommand.current(command)) return;
     setCreateOpen(false);
@@ -7494,6 +7609,11 @@ function TimerPanel({
                     ? t("timer.modeRepeat")
                     : t("timer.modeOnce")}
                 </span>
+                {timer.deliver_immediately && (
+                  <span className="timer-item-origin immediate" title={t("timer.immediateHint")}>
+                    {t("timer.immediate")}
+                  </span>
+                )}
               </div>
               {editingTimerId === timer.timer_id ? (
                 <div className="timer-item-edit">
@@ -7747,6 +7867,14 @@ function TimerPanel({
             </label>
           )}
         </div>
+        <label className="timer-create-checkbox">
+          <input
+            type="checkbox"
+            checked={deliverImmediately}
+            onChange={(event) => setDeliverImmediately(event.target.checked)}
+          />
+          {t("timer.immediateLabel")}
+        </label>
         {showInvalidHint && (
           <div className="timer-form-hint error">
             {t("timer.invalidInput")}
@@ -8266,8 +8394,44 @@ function ToolRepoPanel({
 }
 
 const EMPTY_DECISIONS: Decision[] = [];
-const TurnHistoryRequestContext = createContext<(sessionId: string, turnId: string) => void>(() => {});
+const TurnHistoryRequestContext = createContext<(sessionId: string, turnId: string, priority?: boolean) => void>(() => {});
 const SessionTimelineActiveContext = createContext(false);
+
+/**
+ * Captures the topmost visible turn as a hydration scroll anchor. Turn
+ * articles stack in DOM order, so a binary search over their rects finds the
+ * first one reaching the viewport without measuring every element.
+ */
+const HYDRATION_ANCHOR_CAPTURE_EVENT = "timem-hydration-anchor-capture";
+
+function captureViewportTurnAnchor(viewport: HTMLElement): ViewportTurnAnchor | null {
+  const viewportTop = viewport.getBoundingClientRect().top;
+  const turns = Array.from(
+    viewport.querySelectorAll<HTMLElement>(
+      '[data-session-timeline-active="true"] article[data-turn-id]',
+    ),
+  );
+  if (turns.length === 0) return null;
+  let low = 0;
+  let high = turns.length - 1;
+  let found = -1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    const rect = turns[mid]!.getBoundingClientRect();
+    if (rect.bottom > viewportTop) {
+      found = mid;
+      high = mid - 1;
+    } else {
+      low = mid + 1;
+    }
+  }
+  if (found < 0) return null;
+  const rect = turns[found]!.getBoundingClientRect();
+  return pickViewportTurnAnchor(
+    [{ turnId: turns[found]!.dataset.turnId ?? "", top: rect.top, bottom: rect.bottom }],
+    viewportTop,
+  );
+}
 
 /**
  * Working-indicator memo tooltip rendered through a portal with
@@ -8743,6 +8907,7 @@ function TimemThread({
   // Set by the history-prepend restore effect; the timeline-signature follow
   // effect consumes it so a prepend commit keeps its restored scroll position.
   const preservedPrependFrameRef = useRef(false);
+  const hydrationAnchorRef = useRef<{ sessionId: string; anchor: ViewportTurnAnchor } | null>(null);
   const followThreadLatest = useRef(true);
   const [threadAwayFromBottom, setThreadAwayFromBottom] = useState(false);
   const workingAwayButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -8753,11 +8918,10 @@ function TimemThread({
     Record<string, string>
   >(() => readComposerDraftTexts());
   const [composerExpanded, setComposerExpanded] = useState(false);
-  const [expandedQueueSessionIds, setExpandedQueueSessionIds] = useState<
-    Set<string>
-  >(() => new Set());
   const [collapsedQueuePanelSessionIds, setCollapsedQueuePanelSessionIds] =
     useState<Set<string>>(() => new Set());
+  const queuedItemsRef = useRef<HTMLDivElement | null>(null);
+  const prevQueuedCountRef = useRef(0);
   const [draggedQueueMessageId, setDraggedQueueMessageId] = useState<string>();
   const [queuedMessageOverId, setQueuedMessageOverId] = useState<string>();
   const queueDragSensors = useSensors(
@@ -8864,20 +9028,11 @@ function TimemThread({
       roleIds: item.payload.worker_roles.map((role) => role.id),
     })) ?? [];
   const displayQueuedMessages = queuedMessages;
-  const queueExpanded =
-    !!activeSessionId && expandedQueueSessionIds.has(activeSessionId);
   const queuePanelCollapsed =
     !!activeSessionId && collapsedQueuePanelSessionIds.has(activeSessionId);
   const firstQueuedMessage = displayQueuedMessages[0];
-  const visibleQueuedMessages = queueExpanded
-    ? displayQueuedMessages
-    : displayQueuedMessages.slice(0, COLLAPSED_QUEUE_LIMIT);
-  const hiddenQueuedMessageCount = Math.max(
-    0,
-    displayQueuedMessages.length - COLLAPSED_QUEUE_LIMIT,
-  );
   const draggedQueuedMessage = draggedQueueMessageId
-    ? visibleQueuedMessages.find(
+    ? displayQueuedMessages.find(
         (message) => message.id === draggedQueueMessageId,
       )
     : undefined;
@@ -9475,14 +9630,6 @@ function TimemThread({
         everLiveSessionIdsRef.current,
       ),
     );
-    setExpandedQueueSessionIds(
-      (current) =>
-        new Set(
-          Array.from(current).filter((sessionId) =>
-            liveSessionIds.has(sessionId),
-          ),
-        ),
-    );
     setCollapsedQueuePanelSessionIds(
       (current) =>
         new Set(
@@ -9633,6 +9780,61 @@ function TimemThread({
     viewport.scrollTop = viewport.scrollHeight;
   }, [latestTurnVersion]);
 
+  // Pin the captured hydration anchor back to its viewport offset. Growth
+  // above the anchor is cancelled by an equal scrollTop correction; growth at
+  // or below it leaves the delta at zero. A bottom follower is already pinned
+  // by the effect above and never fights this correction.
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    const captured = hydrationAnchorRef.current;
+    hydrationAnchorRef.current = null;
+    if (!viewport || !captured) return;
+    if (
+      captured.sessionId !== activeSessionId
+      || followThreadLatest.current
+      || previousScrollMetrics.current
+    )
+      return;
+    const element = viewport.querySelector<HTMLElement>(
+      `[data-session-timeline-active="true"] article[data-turn-id="${globalThis.CSS.escape(captured.anchor.turnId)}"]`,
+    );
+    if (!element) return;
+    const delta = anchorScrollDelta(
+      captured.anchor,
+      element.getBoundingClientRect().top - viewport.getBoundingClientRect().top,
+    );
+    if (delta === 0) return;
+    const previousBehavior = viewport.style.scrollBehavior;
+    viewport.style.scrollBehavior = "auto";
+    viewport.scrollTop += delta;
+    viewport.style.scrollBehavior = previousBehavior;
+  }, [latestTurnVersion, activeSessionId]);
+
+  // The hydration event handler lives in the App shell and commits through
+  // session state; the viewport captures its anchor synchronously on request
+  // so the correction effect above sees pre-commit geometry.
+  useEffect(() => {
+    const capture = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionId?: string }>).detail;
+      const sessionId = activeSessionId;
+      if (!detail || !sessionId || detail.sessionId !== sessionId || followThreadLatest.current) {
+        hydrationAnchorRef.current = null;
+        return;
+      }
+      const viewport = viewportRef.current;
+      if (!viewport) {
+        hydrationAnchorRef.current = null;
+        return;
+      }
+      const anchor = captureViewportTurnAnchor(viewport);
+      hydrationAnchorRef.current = anchor
+        ? { sessionId, anchor }
+        : null;
+    };
+    window.addEventListener(HYDRATION_ANCHOR_CAPTURE_EVENT, capture);
+    return () => window.removeEventListener(HYDRATION_ANCHOR_CAPTURE_EVENT, capture);
+  }, [activeSessionId]);
+
   // Completed-turn hydration (events_slimmed -> full events) and history
   // prepends move every turn below the changed one. Nothing inside those
   // outline owners resizes on such a commit, so portaled outlines keep stale
@@ -9749,15 +9951,17 @@ function TimemThread({
     setDraftsBySession(nextDrafts);
   };
 
-  const toggleQueuedMessages = () => {
-    if (!activeSessionId) return;
-    setExpandedQueueSessionIds((current) => {
-      const next = new Set(current);
-      if (next.has(activeSessionId)) next.delete(activeSessionId);
-      else next.add(activeSessionId);
-      return next;
-    });
-  };
+  // Newly enqueued messages land at the bottom of the queued-message list;
+  // once the list scrolls (beyond its max-height), keep the latest item
+  // visible so the user sees their submission arrived.
+  useLayoutEffect(() => {
+    const node = queuedItemsRef.current;
+    const count = queuedMessages.length;
+    const grew = count > prevQueuedCountRef.current;
+    prevQueuedCountRef.current = count;
+    if (!node || !grew) return;
+    node.scrollTop = node.scrollHeight;
+  }, [queuedMessages.length]);
 
   const toggleQueuedMessagePanel = () => {
     if (!activeSessionId) return;
@@ -9898,7 +10102,7 @@ function TimemThread({
       <div className="composer-wrap aui-thread-footer">
           {!!activeSession && displayQueuedMessages.length > 0 && (
             <section
-              className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPaused ? "paused" : ""}`}
+              className={`queued-message-list ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPaused ? "paused" : ""}`}
               aria-label={`${displayQueuedMessages.length} queued message${displayQueuedMessages.length === 1 ? "" : "s"}`}
               aria-live="polite"
             >
@@ -9955,30 +10159,6 @@ function TimemThread({
                       <span className="queued-auto-send-thumb" />
                     </button>
                   </label>
-                  {!queuePanelCollapsed && hiddenQueuedMessageCount > 0 && (
-                    <button
-                      type="button"
-                      className="queued-message-toggle"
-                      aria-expanded={queueExpanded}
-                      title={
-                        queueExpanded
-                          ? t("composer.collapseQueue")
-                          : t("composer.expandAllQueue", { count: displayQueuedMessages.length })
-                      }
-                      onClick={toggleQueuedMessages}
-                    >
-                      {queueExpanded ? (
-                        <ChevronDown size={13} />
-                      ) : (
-                        <ChevronUp size={13} />
-                      )}
-                      <span>
-                        {queueExpanded
-                          ? t("composer.collapseOne")
-                          : t("composer.expandCount", { count: hiddenQueuedMessageCount })}
-                      </span>
-                    </button>
-                  )}
                   <button
                     type="button"
                     className="queued-message-panel-toggle"
@@ -10016,14 +10196,15 @@ function TimemThread({
                   onDragEnd={finishQueuedMessageDrag}
                 >
                   <SortableContext
-                    items={visibleQueuedMessages.map(({ id }) => id)}
+                    items={displayQueuedMessages.map(({ id }) => id)}
                     strategy={verticalListSortingStrategy}
                   >
                     <div
                       id={`queued-message-items-${activeSession.session_id}`}
                       className="queued-message-items"
+                      ref={queuedItemsRef}
                     >
-                      {visibleQueuedMessages.map((message) => {
+                      {displayQueuedMessages.map((message) => {
                         const index = queuedMessages.findIndex(
                           (candidate) => candidate.id === message.id,
                         );
@@ -10199,12 +10380,6 @@ function TimemThread({
                                             id: message.id,
                                             text: message.text,
                                           });
-                                          setExpandedQueueSessionIds(
-                                            (current) =>
-                                              new Set(current).add(
-                                                activeSession.session_id,
-                                              ),
-                                          );
                                         }}
                                       >
                                         <Pencil size={12} />
@@ -11231,7 +11406,7 @@ const TurnInteraction = memo(function TurnInteraction({
                 }
                 aria-expanded={showWorkStream}
                 onClick={() => {
-                  if (!showWorkStream && !isWorking) requestTurnHistory(sessionId, turn.turn_id);
+                  if (!showWorkStream && !isWorking) requestTurnHistory(sessionId, turn.turn_id, true);
                   setShowWorkStream((visible) => !visible);
                 }}
               >
@@ -15771,7 +15946,10 @@ function EndpointSettingsPane({
             const endpointDetails = (
               <>
                 <span>
-                  <strong>{endpoint.name}</strong>
+                  <strong>
+                    {endpoint.name}
+                    <EndpointChainRateFlag endpoint={endpoint} />
+                  </strong>
                 </span>
                 <small>
                   {endpoint.model} · {apiProtocolShort(endpoint.api_protocol)}
@@ -16054,23 +16232,163 @@ function formatResultBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
+function EndpointChainRateFlag({ endpoint }: { endpoint: ModelEndpoint }) {
+  useT();
+  if (endpoint.probing) {
+    return (
+      <span
+        className="endpoint-chain-probing-flag"
+        title={t("endpoints.probing")}
+      >
+        <LoaderCircle size={12} aria-hidden="true" />
+      </span>
+    );
+  }
+  if (endpoint.rate_limited_since_ms) {
+    return (
+      <span className="endpoint-rate-flag" title={t("endpoints.rateLimited")}>
+        <ClockAlert size={12} aria-hidden="true" />
+      </span>
+    );
+  }
+  return null;
+}
+
+function SortableEndpointChainRow({
+  endpoint,
+  current,
+  nextPreferred,
+  working,
+  onRemove,
+}: {
+  endpoint: ModelEndpoint;
+  current: boolean;
+  nextPreferred: boolean;
+  working: boolean;
+  onRemove: (endpointId: string) => void;
+}) {
+  useT();
+  const sortable = useSortable({ id: endpoint.id });
+  return (
+    <div
+      ref={sortable.setNodeRef}
+      className={`endpoint-chain-row in-chain ${sortable.isDragging ? "dragging" : ""}`}
+      style={{
+        transform: CSS.Transform.toString(sortable.transform),
+        transition: sortable.transition,
+        zIndex: sortable.isDragging ? 5 : undefined,
+      }}
+    >
+      <button
+        type="button"
+        className="endpoint-chain-grip"
+        aria-label={t("endpoints.chainGrip")}
+        {...sortable.attributes}
+        {...sortable.listeners}
+      >
+        <GripVertical size={13} aria-hidden="true" />
+      </button>
+      <span className="endpoint-chain-pick">
+        <strong>
+          <span>{endpoint.name}</span>
+          <EndpointChainRateFlag endpoint={endpoint} />
+        </strong>
+        <small>
+          {endpoint.model} · {apiProtocolShort(endpoint.api_protocol)}
+        </small>
+      </span>
+      {(working ? current : nextPreferred) && (
+        <span className="endpoint-chain-active-badge">
+          {t(working ? "endpoints.chainCurrent" : "endpoints.chainPreferred")}
+        </span>
+      )}
+      {working && !current && nextPreferred && (
+        <span className="endpoint-chain-next-badge">
+          {t("endpoints.chainNextPreferred")}
+        </span>
+      )}
+      <button
+        type="button"
+        className="endpoint-chain-remove"
+        aria-label={t("endpoints.chainRemove")}
+        onClick={() => onRemove(endpoint.id)}
+      >
+        <X size={12} />
+      </button>
+    </div>
+  );
+}
+
 function ModelEndpointPanel({
   panelRef,
   server,
   session,
   onEdit,
   onApply,
+  onRefreshAvailability,
 }: {
   panelRef: MutableRefObject<HTMLElement | null>;
   server: Snapshot["server"] | null;
   session: Session | undefined;
   onEdit: () => void;
-  onApply: (endpointId: string) => void;
+  onApply: (endpointIds: string[]) => void;
+  onRefreshAvailability: () => void;
 }) {
+  useT();
   const endpoints = server?.model_endpoints ?? [];
-  const selected = endpoints.find((endpoint) =>
-    endpointMatchesProfile(endpoint, session?.runtime_profile),
+  const boundChain = session?.runtime_profile?.model_endpoint_ids ?? [];
+  const [chain, setChain] = useState<string[]>(boundChain);
+  const boundChainKey = boundChain.join(",");
+  useEffect(() => {
+    setChain(boundChainKey ? boundChainKey.split(",") : []);
+  }, [boundChainKey]);
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
   );
+  const working = session?.state === "working";
+  const nextEndpointId = session?.runtime_profile?.model_endpoint_id ?? null;
+  const currentEndpointId = working
+    ? session?.runtime_profile?.active_model_endpoint_id ?? null
+    : nextEndpointId;
+  const anyProbing = endpoints.some((endpoint) => endpoint.probing);
+  const dirty = chain.join(",") !== boundChainKey;
+  // Selection is commit-on-click: every toggle, reorder, or removal applies
+  // immediately. There is no separate confirm button; the status badge shows
+  // the in-flight state until the Host projection confirms the new chain.
+  const applyImmediately = (next: string[]) => {
+    if (!session || next.join(",") === boundChainKey) return;
+    onApply(next);
+  };
+  const toggleChainMember = (endpointId: string) => {
+    if (
+      !chain.includes(endpointId) &&
+      chain.length >= MAX_ENDPOINT_CHAIN_LENGTH
+    ) {
+      return;
+    }
+    const next = toggleEndpointInChain(chain, endpointId);
+    setChain(next);
+    applyImmediately(next);
+  };
+  const handleChainDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const next = moveEndpointInChain(
+      chain,
+      chain.indexOf(String(active.id)),
+      chain.indexOf(String(over.id)),
+    );
+    setChain(next);
+    applyImmediately(next);
+  };
+  const chainEndpoints = chain
+    .map((endpointId) =>
+      endpoints.find((endpoint) => endpoint.id === endpointId),
+    )
+    .filter((endpoint): endpoint is ModelEndpoint => !!endpoint);
   return (
     <section
       id="runtime-panel"
@@ -16085,79 +16403,125 @@ function ModelEndpointPanel({
             {session ? t("sessions.applyForSession", { name: session.display_name }) : t("sessions.applyNeedSession")}
           </strong>
         </div>
-        <button type="button" className="endpoint-menu-edit" onClick={onEdit}>
-          <Pencil size={13} />
-          <span>{t("common.edit")}</span>
-        </button>
+        <div>
+          <button
+            type="button"
+            className={`endpoint-menu-edit endpoint-menu-refresh ${anyProbing ? "probing" : ""}`}
+            disabled={anyProbing}
+            onClick={onRefreshAvailability}
+          >
+            <RefreshCw size={13} />
+            <span>{t("endpoints.refreshAvailability")}</span>
+          </button>
+          <button type="button" className="endpoint-menu-edit" onClick={onEdit}>
+            <Pencil size={13} />
+            <span>{t("common.edit")}</span>
+          </button>
+        </div>
       </div>
-      <div className="endpoint-list">
-        {endpoints.length === 0 ? (
-          <div className="endpoint-empty">
-            {t("endpoints.empty")}
-          </div>
-        ) : (
-          endpoints.map((endpoint) => {
-            const active = selected?.id === endpoint.id;
-            return (
-              <div
-                className={`endpoint-row ${active ? "active" : ""}`}
-                key={endpoint.id}
-              >
-                <button
-                  type="button"
-                  className="endpoint-select"
-                  aria-pressed={active}
-                  disabled={!session}
-                  onClick={() => onApply(endpoint.id)}
-                >
-                  <span className="endpoint-copy">
-                    <span className="endpoint-name-line">
-                      <strong>{endpoint.name}</strong>
-                      <span className="endpoint-chip endpoint-chip-protocol">
-                        {apiProtocolShort(endpoint.api_protocol)}
-                      </span>
-                      {endpoint.reasoning_effort && (
-                        <span className="endpoint-chip endpoint-chip-effort">
-                          {endpoint.reasoning_effort}
-                        </span>
-                      )}
-                    </span>
-                    <small className="endpoint-model-summary">
-                      <Sparkles
-                        size={11}
-                        className="session-model-icon"
-                        aria-hidden="true"
-                      />
-                      <span>{endpoint.model}</span>
-                      <span className="endpoint-meta-sep" aria-hidden="true">
-                        ·
-                      </span>
-                      <span>
-                        {formatContextWindowTokens(
-                          endpoint.max_llm_input_tokens,
-                        )}{" "}
-                        / {endpoint.max_llm_output_tokens / 1_000}K
-                      </span>
-                    </small>
-                    <small title={endpoint.base_url}>{endpoint.base_url}</small>
-                  </span>
-                  <span
-                    className={`endpoint-choice-box ${active ? "selected" : ""}`}
-                    aria-hidden="true"
-                  >
-                    {active && <Check size={11} strokeWidth={2.25} />}
-                  </span>
-                </button>
+      <div className={`endpoint-chain-actions ${dirty ? "has-changes" : ""}`}>
+        <div className="endpoint-chain-action-copy">
+          <strong>
+            {t("endpoints.selectedCount", { count: chain.length })}
+          </strong>
+          <small>
+            {t(working ? "endpoints.chainWorkingHint" : "endpoints.chainSelectionHint")}
+          </small>
+        </div>
+        <div className="endpoint-chain-action-controls">
+          <span
+            className={`endpoint-chain-draft-status ${dirty ? "pending" : "synced"}`}
+            role="status"
+          >
+            {dirty
+              ? t("endpoints.chainPending")
+              : t(working ? "endpoints.chainNextApplied" : "endpoints.chainSynced")}
+          </span>
+        </div>
+      </div>
+      <div className="endpoint-chain">
+        <div className="endpoint-chain-col">
+          <span className="endpoint-chain-title">
+            {t("endpoints.chainAvailable")}
+          </span>
+          <div className="endpoint-chain-list" role="list">
+            {endpoints.length === 0 ? (
+              <div className="endpoint-chain-empty">
+                {t("endpoints.empty")}
               </div>
-            );
-          })
-        )}
+            ) : (
+              endpoints.map((endpoint) => {
+                const inChain = chain.includes(endpoint.id);
+                return (
+                  <button
+                    type="button"
+                    key={endpoint.id}
+                    role="listitem"
+                    aria-pressed={inChain}
+                    disabled={!session}
+                    className={`endpoint-chain-row ${inChain ? "in-chain" : ""}`}
+                    onClick={() => toggleChainMember(endpoint.id)}
+                  >
+                    <span
+                      className={`endpoint-chain-checkbox ${inChain ? "selected" : ""}`}
+                      aria-hidden="true"
+                    >
+                      {inChain && <Check size={12} strokeWidth={2.5} />}
+                    </span>
+                    <span className="endpoint-chain-pick">
+                      <strong>
+                        <span>{endpoint.name}</span>
+                        <EndpointChainRateFlag endpoint={endpoint} />
+                      </strong>
+                      <small>
+                        {endpoint.model} ·{" "}
+                        {apiProtocolShort(endpoint.api_protocol)}
+                      </small>
+                    </span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+        <div className="endpoint-chain-col">
+          <span className="endpoint-chain-title">
+            {t("endpoints.chainSelected")}
+          </span>
+          <span className="endpoint-chain-sub">
+            {t("endpoints.chainSelectedHint")}
+          </span>
+          {chainEndpoints.length === 0 ? (
+            <div className="endpoint-chain-empty">
+              {t("endpoints.chainEmptyHint")}
+            </div>
+          ) : (
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              onDragEnd={handleChainDragEnd}
+            >
+              <SortableContext
+                items={chain}
+                strategy={verticalListSortingStrategy}
+              >
+                <div className="endpoint-chain-list" role="list">
+                  {chainEndpoints.map((endpoint) => (
+                    <SortableEndpointChainRow
+                      key={endpoint.id}
+                      endpoint={endpoint}
+                      current={endpoint.id === currentEndpointId}
+                      nextPreferred={endpoint.id === nextEndpointId}
+                      working={working}
+                      onRemove={toggleChainMember}
+                    />
+                  ))}
+                </div>
+              </SortableContext>
+            </DndContext>
+          )}
+        </div>
       </div>
-      {session?.state === "working" && (
-        <p className="endpoint-note">
-          {t("endpoints.workingNote")}
-        </p>
-      )}
     </section>
   );
 }
@@ -16286,7 +16650,7 @@ function ModelEndpointEditor({
     }
     return updated;
   });
-  const providerLabels: Record<string, string> = { openai: "OpenAI", zhipu: t("endpoints.zhipu") };
+  const providerLabels: Record<string, string> = { openai: "OpenAI", zhipu: t("endpoints.zhipu"), kimi: t("endpoints.kimi"), kimi_code: t("endpoints.kimiCode") };
   const capabilityIssue = endpointCapabilityIssue(draft, selectedModel, providers);
   const templateBudget = templateBudgetSuggestion(selectedModel);
   const inputBudgetInvalid = !!selectedModel && (capabilityIssue?.code === "input_budget" || capabilityIssue?.code === "context_budget");

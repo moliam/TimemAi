@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { adjacentUserMessageIndex, canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, scrollEdgeFades, wheelDeltaPixels } from "../src/scroll";
+import { adjacentUserMessageIndex, anchorScrollDelta, canScrollInDirection, isNearScrollBottom, pickViewportTurnAnchor, preservePrependScrollTop, restoreSessionScrollTop, scrollEdgeFades, wheelDeltaPixels } from "../src/scroll";
 
 describe("progressive history scroll anchoring", () => {
   it("keeps the same content under the viewport after older content is prepended", () => {
@@ -109,5 +109,33 @@ describe("user message navigation", () => {
     expect(adjacentUserMessageIndex([12, 240], 0, "previous")).toBe(-1);
     expect(adjacentUserMessageIndex([-400, -20], 0, "next")).toBe(-1);
     expect(adjacentUserMessageIndex([], 0, "next")).toBe(-1);
+  });
+});
+
+describe("hydration scroll anchoring", () => {
+  it("anchors the first turn whose bottom edge reaches the viewport", () => {
+    const turns = [
+      { turnId: "a", top: -600, bottom: -100 },
+      { turnId: "b", top: -100, bottom: 300 },
+      { turnId: "c", top: 300, bottom: 900 },
+    ];
+    // Viewport top at document y=0: turn b is the first reaching it.
+    const anchor = pickViewportTurnAnchor(turns, 0)!;
+    expect(anchor).toEqual({ turnId: "b", viewportTop: -100 });
+    expect(pickViewportTurnAnchor([], 0)).toBeNull();
+  });
+
+  it("skips turns entirely above the viewport, even fully scrolled past ones", () => {
+    const turns = [{ turnId: "a", top: -2000, bottom: -50 }];
+    expect(pickViewportTurnAnchor(turns, 0)).toBeNull();
+  });
+
+  it("reports a correction only when content above the anchor grew", () => {
+    // Anchor captured at viewport y = 20; after the commit the same turn sits
+    // at y = 1240 because an earlier turn hydrated and grew by 1220px.
+    expect(anchorScrollDelta({ turnId: "t", viewportTop: 20 }, 1240)).toBe(1220);
+    // Growth at or below the anchor leaves it in place: no correction.
+    expect(anchorScrollDelta({ turnId: "t", viewportTop: 20 }, 20)).toBe(0);
+    expect(anchorScrollDelta({ turnId: "t", viewportTop: 20 }, 20.5)).toBe(0);
   });
 });

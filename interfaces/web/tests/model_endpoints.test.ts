@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { capabilityModelForDraft, effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointLabelForProfile, endpointDraftValid, endpointMatchesProfile, endpointNameForProfile, endpointSaveErrorMessage, formatContextWindowTokens, isValidMaxLlmInputTokens, MODEL_CONTEXT_WINDOW_OPTIONS, REASONING_EFFORT_OPTIONS, toggleAllowedReasoning } from "../src/model_endpoints";
+import { capabilityModelForDraft, effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointLabelForProfile, endpointDraftValid, endpointMatchesProfile, endpointNameForProfile, endpointSaveErrorMessage, formatContextWindowTokens, isValidMaxLlmInputTokens, MODEL_CONTEXT_WINDOW_OPTIONS, MAX_ENDPOINT_CHAIN_LENGTH, moveEndpointInChain, REASONING_EFFORT_OPTIONS, sessionReasoningOptions, toggleAllowedReasoning, toggleEndpointInChain } from "../src/model_endpoints";
 import { setLocale } from "../src/i18n";
 
 const endpoint = { id: "one", name: "Production", model: "gpt-4.1", api_protocol: "openai-compatible", response_protocol: "xml", base_url: "https://api.example/v1", max_llm_input_tokens: 100_000, max_llm_output_tokens: 10_000, stream: false, function_calling: true, api_key_configured: true };
@@ -171,6 +171,20 @@ describe("editable endpoint templates", () => {
     });
     expect(small.max_llm_input_tokens).toBe(64_000);
     expect(small.max_llm_output_tokens).toBe(8_000);
+
+    const fullWindowModel: CatalogModel = {
+      ...template,
+      id: "fixture/full-window-input",
+      max_input: 262_144,
+      max_output: 131_072,
+      context_window: 262_144,
+    };
+    const fullWindowInput = applyEndpointTemplate(blank(), fullWindowModel);
+    expect(fullWindowInput.max_llm_input_tokens).toBe(242_144);
+    expect(fullWindowInput.max_llm_output_tokens).toBe(20_000);
+    expect(fullWindowInput.max_llm_input_tokens + fullWindowInput.max_llm_output_tokens)
+      .toBeLessThanOrEqual(fullWindowModel.context_window);
+    expect(endpointCapabilityIssue(fullWindowInput, fullWindowModel, providerSpecs)).toBeNull();
   });
 
   it("suggests a 20K output default and restores either budget field on demand", () => {
@@ -767,5 +781,38 @@ describe("documented image input modalities", () => {
     expect(isImageFileName("anim.gif")).toBe(true);
     expect(isImageFileName("notes.txt")).toBe(false);
     expect(isImageFileName(undefined)).toBe(false);
+  });
+});
+
+describe("endpoint chain helpers", () => {
+  it("toggles an endpoint in and out of the chain", () => {
+    expect(toggleEndpointInChain(["a", "b"], "c")).toEqual(["a", "b", "c"]);
+    expect(toggleEndpointInChain(["a", "b", "c"], "b")).toEqual(["a", "c"]);
+    expect(toggleEndpointInChain([], "a")).toEqual(["a"]);
+  });
+
+  it("moves chain entries and ignores invalid moves", () => {
+    expect(moveEndpointInChain(["a", "b", "c"], 0, 2)).toEqual(["b", "c", "a"]);
+    expect(moveEndpointInChain(["a", "b", "c"], 2, 0)).toEqual(["c", "a", "b"]);
+    expect(moveEndpointInChain(["a", "b"], -1, 0)).toEqual(["a", "b"]);
+    expect(moveEndpointInChain(["a", "b"], 0, 5)).toEqual(["a", "b"]);
+    expect(moveEndpointInChain([], 0, 1)).toEqual([]);
+  });
+
+  it("caps the chain length at the host guard", () => {
+    expect(MAX_ENDPOINT_CHAIN_LENGTH).toBe(20);
+  });
+});
+
+
+describe("Session reasoning selector", () => {
+  it("uses declared endpoint levels before catalog levels", () => {
+    const declared = { ...endpoint, requirements: { version: 1, allowed_reasoning: ["low", "high"], field_sources: {} } };
+    const catalog = [{ id: "catalog", provider: "openai", model: "gpt-4.1", label: "GPT", base_url: "", efforts: ["minimal", "low", "high"], default_effort: "low", max_input_tokens: 100000, max_output_tokens: 10000, protocols: [] }];
+    expect(sessionReasoningOptions(declared, catalog)).toEqual(["low", "high"]);
+  });
+
+  it("shows no selectable levels when model capability is unknown", () => {
+    expect(sessionReasoningOptions(endpoint, [])).toEqual([]);
   });
 });

@@ -1,5 +1,4 @@
 import { t } from "./i18n";
-export const COLLAPSED_QUEUE_LIMIT = 4;
 
 export type QueuedMessage = {
  id: string;
