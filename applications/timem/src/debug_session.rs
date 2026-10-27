@@ -17,6 +17,12 @@ const LLM_LATENCY_BOUNDARIES_MS: [u64; 8] =
 const LLM_LATENCY_LABELS: [&str; 9] = [
     "500 ms", "1 s", "3 s", "5 s", "10 s", "15 s", "20 s", "30 s", "30 s+",
 ];
+/// TTFT is the time to first token; its scale is far below the end-to-end
+/// request latency, so it uses its own finer histogram boundaries.
+const LLM_TTFT_BOUNDARIES_MS: [u64; 7] = [50, 100, 200, 400, 800, 1600, 3200];
+const LLM_TTFT_LABELS: [&str; 8] = [
+    "50 ms", "100 ms", "200 ms", "400 ms", "800 ms", "1.6 s", "3.2 s", "3.2 s+",
+];
 const MAX_LLM_RESPONSE_DUMP_ENTRIES: usize = 10;
 const STATISTICS_REFRESH_MS: u64 = 2_000;
 static NEXT_DEBUG_STORE_ID: AtomicU64 = AtomicU64::new(0);
@@ -36,6 +42,7 @@ struct PersistedEndpoint {
     action_cpu_ns: Vec<u64>,
     action_cpu_unavailable: u64,
     llm_latency_ms: Vec<u64>,
+    llm_ttft_ms: Vec<u64>,
     length_finish_response_bytes: Vec<u64>,
     tools_per_response: Vec<u64>,
     repairs: BTreeMap<String, u64>,
@@ -132,6 +139,7 @@ struct EndpointDebug {
     action_cpu_ns: VecDeque<u64>,
     action_cpu_unavailable: u64,
     llm_latency_ms: VecDeque<u64>,
+    llm_ttft_ms: VecDeque<u64>,
     length_finish_response_bytes: VecDeque<u64>,
     tools_per_response: [u64; 11],
     repairs: BTreeMap<String, u64>,
@@ -288,6 +296,7 @@ impl DebugStore {
                                             action_cpu_ns: endpoint.action_cpu_ns.into(),
                                             action_cpu_unavailable: endpoint.action_cpu_unavailable,
                                             llm_latency_ms: endpoint.llm_latency_ms.into(),
+                                            llm_ttft_ms: endpoint.llm_ttft_ms.into(),
                                             length_finish_response_bytes: endpoint
                                                 .length_finish_response_bytes
                                                 .into(),
@@ -348,6 +357,11 @@ impl DebugStore {
                                             action_cpu_unavailable: endpoint.action_cpu_unavailable,
                                             llm_latency_ms: endpoint
                                                 .llm_latency_ms
+                                                .iter()
+                                                .copied()
+                                                .collect(),
+                                            llm_ttft_ms: endpoint
+                                                .llm_ttft_ms
                                                 .iter()
                                                 .copied()
                                                 .collect(),
@@ -599,6 +613,7 @@ impl DebugStore {
         session_id: &str,
         worker_id: &str,
         latency: Duration,
+        ttft: Option<Duration>,
     ) -> Result<(), String> {
         self.update(session_id, |stats| {
             if let Some(endpoint_key) = take_in_flight_endpoint(stats, worker_id) {
@@ -608,6 +623,12 @@ impl DebugStore {
                     .llm_latency_ms
                     .push_back(latency.as_millis().min(u64::MAX as u128) as u64);
                 endpoint.llm_latency_ms.truncate(MAX_METRIC_SAMPLES);
+                if let Some(ttft) = ttft {
+                    endpoint
+                        .llm_ttft_ms
+                        .push_back(ttft.as_millis().min(u64::MAX as u128) as u64);
+                    endpoint.llm_ttft_ms.truncate(MAX_METRIC_SAMPLES);
+                }
             }
         })
     }
@@ -1331,6 +1352,30 @@ fn render_endpoint_panel(
     render_horizontal_histogram(out, &latency_counts, |bucket| {
         LLM_LATENCY_LABELS[bucket].to_string()
     });
+    let ttft_values: Vec<u64> = endpoint.llm_ttft_ms.iter().copied().collect();
+    let ttft_total_ms: u64 = ttft_values.iter().copied().sum();
+    let ttft_counts = ttft_histogram(&ttft_values);
+    out.push_str("<div class=\"mini-kpis\">");
+    mini_kpi(
+        out,
+        "TTFT Mean",
+        &format_mean_ms(ttft_total_ms, ttft_values.len()),
+    );
+    mini_kpi(
+        out,
+        "TTFT Max",
+        &ttft_values
+            .iter()
+            .copied()
+            .max()
+            .map(format_duration_ms)
+            .unwrap_or_else(|| "n/a".to_string()),
+    );
+    mini_kpi(out, "TTFT Samples", &ttft_values.len().to_string());
+    out.push_str("</div>");
+    render_horizontal_histogram(out, &ttft_counts, |bucket| {
+        LLM_TTFT_LABELS[bucket].to_string()
+    });
     out.push_str("</article></div><div class=\"metric-pair lower\"><article class=\"panel metric-panel\"><div class=\"section-head compact\"><div><p class=\"eyebrow\">PROTOCOL QUALITY</p><h3>Repair error categories</h3></div></div>");
     render_named_bars(out, &endpoint.repairs);
     if endpoint.runtime_root_repair_help > 0 {
@@ -1402,6 +1447,15 @@ fn latency_histogram(values: &[u64]) -> Vec<u64> {
     let mut counts = vec![0_u64; LLM_LATENCY_LABELS.len()];
     for value in values {
         let index = LLM_LATENCY_BOUNDARIES_MS.partition_point(|boundary| value > boundary);
+        counts[index] = counts[index].saturating_add(1);
+    }
+    counts
+}
+
+fn ttft_histogram(values: &[u64]) -> Vec<u64> {
+    let mut counts = vec![0_u64; LLM_TTFT_LABELS.len()];
+    for value in values {
+        let index = LLM_TTFT_BOUNDARIES_MS.partition_point(|boundary| value > boundary);
         counts[index] = counts[index].saturating_add(1);
     }
     counts
@@ -1935,7 +1989,12 @@ mod tests {
             .record_prompt(session, "worker_0", 1, "successful", None, None)
             .unwrap();
         store
-            .record_llm_latency(session, "worker_0", Duration::from_millis(450))
+            .record_llm_latency(
+                session,
+                "worker_0",
+                Duration::from_millis(450),
+                Some(Duration::from_millis(120)),
+            )
             .unwrap();
         store
             .record_llm_response(
@@ -1976,7 +2035,7 @@ mod tests {
             .unwrap();
         store.record_model_failure(session, "worker_0").unwrap();
         store
-            .record_llm_latency(session, "worker_0", Duration::from_millis(999))
+            .record_llm_latency(session, "worker_0", Duration::from_millis(999), None)
             .unwrap();
         store.record_model_failure(session, "worker_0").unwrap();
 
@@ -1989,6 +2048,7 @@ mod tests {
                 (2, 1, 1)
             );
             assert_eq!(endpoint.llm_latency_ms, vec![450]);
+            assert_eq!(endpoint.llm_ttft_ms, vec![120]);
             assert_eq!(endpoint.action_cpu_ns, vec![30_000_000]);
             assert_eq!(endpoint.action_cpu_unavailable, 1);
             assert_eq!(endpoint.tools_per_response[2], 1);
@@ -2009,6 +2069,8 @@ mod tests {
             "KVC create",
             "Action on-CPU time",
             "LLM API latency",
+            "TTFT Mean",
+            "<span>TTFT Samples</span><strong>1</strong>",
             "<span>Unavailable</span><strong>1</strong>",
             "missing_or_invalid_response_root",
             "unknown_protocol_error",
@@ -2207,6 +2269,7 @@ mod tests {
                                 session,
                                 &worker_id,
                                 Duration::from_millis(u64::from(round)),
+                                None,
                             )
                             .unwrap();
                         store
@@ -2331,7 +2394,7 @@ mod tests {
             .record_prompt(session, "worker_0", 1, "prompt", None, None)
             .unwrap();
         store
-            .record_llm_latency(session, "worker_0", Duration::from_millis(125))
+            .record_llm_latency(session, "worker_0", Duration::from_millis(125), None)
             .unwrap();
         store
             .record_interaction_profile(

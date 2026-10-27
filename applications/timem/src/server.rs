@@ -14113,7 +14113,7 @@ fn handle_scoped_worker_event(
             ttft,
         } => {
             if let Some(debug) = state.debug.as_ref() {
-                if let Err(error) = debug.record_llm_latency(session_id, worker_id, latency) {
+                if let Err(error) = debug.record_llm_latency(session_id, worker_id, latency, ttft) {
                     eprintln!("[timem_web_debug_error] session_id={session_id:?} reason={error}");
                 }
             }

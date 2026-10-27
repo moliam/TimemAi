@@ -11096,6 +11096,14 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
     assert!(statistics.contains("badge-native"), "{statistics}");
     assert!(statistics.contains("Action on-CPU time"), "{statistics}");
     assert!(statistics.contains("LLM API latency"), "{statistics}");
+    assert!(
+        statistics.contains("<span>TTFT Mean</span><strong>180 ms</strong>"),
+        "{statistics}"
+    );
+    assert!(
+        statistics.contains("<span>TTFT Samples</span><strong>1</strong>"),
+        "{statistics}"
+    );
     assert!(statistics.contains("Finish reason: length"), "{statistics}");
     assert!(
         statistics.contains("<span>Count</span><strong>1</strong>"),
