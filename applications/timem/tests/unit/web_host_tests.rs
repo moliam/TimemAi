@@ -19723,6 +19723,132 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
 }
 
 #[test]
+fn web_timer_update_edits_prompt_schedule_name_and_delivery() {
+    let state = routing_test_state();
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("alpha".into()),
+        "work".into(),
+        Some("once".into()),
+        Some(60_000),
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("beta".into()),
+        "other".into(),
+        None,
+        Some(1000),
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    let timer_id = state.sessions.lock().unwrap()["session_a"].timers[0]
+        .spec
+        .timer_id
+        .clone();
+    let next_fire_before = state.sessions.lock().unwrap()["session_a"].timers[0].next_fire_ms;
+
+    // Prompt-only edits keep the calendar untouched.
+    update_session_timer(
+        &state,
+        "session_a",
+        &timer_id,
+        "work2",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let timer = &sessions["session_a"].timers[0];
+        assert_eq!(timer.spec.prompt, "work2");
+        assert_eq!(timer.next_fire_ms, next_fire_before);
+        assert!(!timer.spec.deliver_immediately);
+    }
+
+    // Renaming onto a sibling is rejected.
+    assert!(update_session_timer(
+        &state,
+        "session_a",
+        &timer_id,
+        "work2",
+        Some("beta".into()),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap_err()
+    .contains("name_exists"));
+
+    // Full schedule replacement validates, clears omitted members, renames,
+    // flips delivery, and recomputes the next fire from now.
+    let update_started = now_ms() as u64;
+    update_session_timer(
+        &state,
+        "session_a",
+        &timer_id,
+        "work2",
+        Some("gamma".into()),
+        Some("repeat".into()),
+        Some(30_000),
+        None,
+        Some(120_000),
+        Some(true),
+    )
+    .unwrap();
+    let update_finished = now_ms() as u64;
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let timer = &sessions["session_a"].timers[0];
+        assert_eq!(timer.spec.name, "gamma");
+        assert_eq!(timer.spec.mode, "repeat");
+        assert_eq!(timer.spec.after_ms, Some(30_000));
+        assert_eq!(timer.spec.at, None);
+        assert_eq!(timer.spec.interval_ms, Some(120_000));
+        assert!(timer.spec.deliver_immediately);
+        assert!(timer.next_fire_ms >= update_started + 30_000);
+        assert!(timer.next_fire_ms <= update_finished + 30_000);
+    }
+
+    // A rejected edit leaves no partial mutation behind. once without any
+    // first-fire anchor is schedule_invalid (an interval alone would be
+    // interval_requires_repeat).
+    assert!(update_session_timer(
+        &state,
+        "session_a",
+        &timer_id,
+        "work3",
+        None,
+        Some("once".into()),
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap_err()
+    .contains("schedule_invalid"));
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let timer = &sessions["session_a"].timers[0];
+        assert_eq!(timer.spec.prompt, "work2");
+        assert_eq!(timer.spec.mode, "repeat");
+    }
+}
+
+#[test]
 fn web_timer_toggle_and_delete() {
     let state = routing_test_state();
     create_session_timer(
@@ -20276,24 +20402,69 @@ fn web_timer_update_prompt_preserves_schedule_and_persists() {
         )
     };
     // Empty and whitespace-only prompts are rejected.
-    assert!(update_session_timer(&state, "session_a", &timer_id, "  ")
-        .unwrap_err()
-        .contains("prompt_required"));
+    assert!(update_session_timer(
+        &state,
+        "session_a",
+        &timer_id,
+        "  ",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None
+    )
+    .unwrap_err()
+    .contains("prompt_required"));
     // Oversized prompts are rejected.
-    assert!(
-        update_session_timer(&state, "session_a", &timer_id, &"x".repeat(8001))
-            .unwrap_err()
-            .contains("timer_prompt_too_long")
-    );
+    assert!(update_session_timer(
+        &state,
+        "session_a",
+        &timer_id,
+        &"x".repeat(8001),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None
+    )
+    .unwrap_err()
+    .contains("timer_prompt_too_long"));
     // Unknown timer/session ids fail closed.
-    assert!(update_session_timer(&state, "session_a", "missing", "p")
-        .unwrap_err()
-        .contains("timer_not_found"));
-    assert!(update_session_timer(&state, "missing", &timer_id, "p")
-        .unwrap_err()
-        .contains("session_not_found"));
+    assert!(update_session_timer(
+        &state,
+        "session_a",
+        "missing",
+        "p",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None
+    )
+    .unwrap_err()
+    .contains("timer_not_found"));
+    assert!(update_session_timer(
+        &state, "missing", &timer_id, "p", None, None, None, None, None, None
+    )
+    .unwrap_err()
+    .contains("session_not_found"));
     // Valid edit trims, persists, and keeps schedule state untouched.
-    update_session_timer(&state, "session_a", &timer_id, "  revised prompt  ").unwrap();
+    update_session_timer(
+        &state,
+        "session_a",
+        &timer_id,
+        "  revised prompt  ",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     {
         let sessions = state.sessions.lock().unwrap();
         let timer = &sessions["session_a"].timers[0];
@@ -20302,7 +20473,19 @@ fn web_timer_update_prompt_preserves_schedule_and_persists() {
         assert_eq!(timer.enabled, enabled);
     }
     // Identical prompt is a no-op success (no churn).
-    update_session_timer(&state, "session_a", &timer_id, "revised prompt").unwrap();
+    update_session_timer(
+        &state,
+        "session_a",
+        &timer_id,
+        "revised prompt",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     // persisted projection carries the new prompt.
     let persisted = load_session_timers(&state, "session_a");
     assert_eq!(persisted[0].spec.prompt, "revised prompt");

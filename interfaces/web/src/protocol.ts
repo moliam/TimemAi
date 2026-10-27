@@ -969,6 +969,12 @@ export type ClientCommand =
       session_id: string;
       timer_id: string;
       prompt: string;
+      name?: string;
+      mode?: "once" | "repeat";
+      after_ms?: number | null;
+      at?: string | null;
+      interval_ms?: number | null;
+      deliver_immediately?: boolean;
     }
   | { type: "mcp_server_upsert"; session_id: string; config: McpServerConfig }
   | { type: "mcp_server_delete"; server_id: string }

@@ -1380,6 +1380,18 @@ enum ClientCommand {
         session_id: String,
         timer_id: String,
         prompt: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default)]
+        after_ms: Option<u64>,
+        #[serde(default)]
+        at: Option<String>,
+        #[serde(default)]
+        interval_ms: Option<u64>,
+        #[serde(default)]
+        deliver_immediately: Option<bool>,
     },
     SessionDelete {
         session_id: String,
@@ -3912,8 +3924,25 @@ fn handle_command_with_id(
             session_id,
             timer_id,
             prompt,
+            name,
+            mode,
+            after_ms,
+            at,
+            interval_ms,
+            deliver_immediately,
         } => {
-            update_session_timer(state, &session_id, &timer_id, &prompt)?;
+            update_session_timer(
+                state,
+                &session_id,
+                &timer_id,
+                &prompt,
+                name,
+                mode,
+                after_ms,
+                at,
+                interval_ms,
+                deliver_immediately,
+            )?;
         }
         ClientCommand::SessionDelete { session_id } => {
             let worker_ids = session_worker_ids(state, &session_id)?;
@@ -7780,14 +7809,25 @@ fn toggle_session_timer(
     Ok(())
 }
 
-/// Prompt-only edits keep schedule state (enabled/next_fire) untouched: the
-/// firing payload changes, not the calendar. Re-projects into Core so the
-/// timer tool view and compression confirmations stay truthful.
+/// Edits keep unspecified fields untouched, so a prompt-only client keeps the
+/// old contract. Providing any schedule field (mode/after_ms/at/interval_ms)
+/// replaces the whole schedule: omitted members are cleared, the combined
+/// input is validated before anything mutates, and the next fire is
+/// recomputed from now. Name and delivery changes never touch the calendar;
+/// enabled state and fire history survive every edit. Re-projects into Core
+/// so the timer tool view and compression confirmations stay truthful.
+#[allow(clippy::too_many_arguments)]
 fn update_session_timer(
     state: &AppState,
     session_id: &str,
     timer_id: &str,
     prompt: &str,
+    name: Option<String>,
+    mode: Option<String>,
+    after_ms: Option<u64>,
+    at: Option<String>,
+    interval_ms: Option<u64>,
+    deliver_immediately: Option<bool>,
 ) -> Result<(), String> {
     let prompt = prompt.trim().to_string();
     if prompt.is_empty() {
@@ -7796,6 +7836,11 @@ fn update_session_timer(
     if prompt.len() > 8000 {
         return Err("timer_prompt_too_long".to_string());
     }
+    let schedule_update =
+        mode.is_some() || after_ms.is_some() || at.is_some() || interval_ms.is_some();
+    let at = at
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     {
         let mut sessions = state
             .sessions
@@ -7804,15 +7849,63 @@ fn update_session_timer(
         let session = sessions
             .get_mut(session_id)
             .ok_or_else(|| "session_not_found".to_string())?;
+        // A renamed timer must not collide with a sibling (itself excluded).
+        let desired_name = name
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if let Some(new_name) = &desired_name {
+            if session
+                .timers
+                .iter()
+                .any(|timer| timer.spec.timer_id != timer_id && timer.spec.name == *new_name)
+            {
+                return Err(format!("name_exists:{new_name}"));
+            }
+        }
         let timer = session
             .timers
             .iter_mut()
             .find(|timer| timer.spec.timer_id == timer_id)
             .ok_or_else(|| "timer_not_found".to_string())?;
-        if timer.spec.prompt == prompt {
+        let new_mode = mode.unwrap_or_else(|| timer.spec.mode.clone());
+        if schedule_update {
+            // Validate before mutating so a rejected edit leaves no partial
+            // in-memory change behind.
+            validate_user_timer_input(&new_mode, after_ms, at.as_deref(), interval_ms)?;
+        }
+        let mut changed = false;
+        if timer.spec.prompt != prompt {
+            timer.spec.prompt = prompt;
+            changed = true;
+        }
+        if let Some(new_name) = desired_name {
+            if timer.spec.name != new_name {
+                timer.spec.name = new_name;
+                changed = true;
+            }
+        }
+        if let Some(deliver_immediately) = deliver_immediately {
+            if timer.spec.deliver_immediately != deliver_immediately {
+                timer.spec.deliver_immediately = deliver_immediately;
+                changed = true;
+            }
+        }
+        if schedule_update
+            && (timer.spec.mode != new_mode
+                || timer.spec.after_ms != after_ms
+                || timer.spec.at != at
+                || timer.spec.interval_ms != interval_ms)
+        {
+            timer.spec.mode = new_mode;
+            timer.spec.after_ms = after_ms;
+            timer.spec.at = at;
+            timer.spec.interval_ms = interval_ms;
+            timer.next_fire_ms = compute_next_fire_ms(&timer.spec, now_ms())?;
+            changed = true;
+        }
+        if !changed {
             return Ok(());
         }
-        timer.spec.prompt = prompt;
     }
     persist_timers(state, session_id)?;
     sync_worker_timers(state, session_id);
@@ -10927,13 +11020,22 @@ fn update_session_reasoning_effort(
 
     let mut active_config = candidate.runtime.settings.config.clone();
     project_endpoint_onto_config(&mut active_config, &active_endpoint)?;
-    if !supported_reasoning_levels(&active_config)
-        .iter()
-        .any(|level| level == reasoning_effort)
+    // An empty selection means "follow the model default": drop the session
+    // override instead of validating it as a concrete level. Re-projecting
+    // above already restored the endpoint's own reasoning configuration.
+    let clear_override = reasoning_effort.trim().is_empty();
+    if !clear_override
+        && !supported_reasoning_levels(&active_config)
+            .iter()
+            .any(|level| level == reasoning_effort)
     {
         return Err("session_reasoning_effort_unsupported".to_string());
     }
-    candidate.runtime.reasoning_effort_override = Some(reasoning_effort.to_string());
+    candidate.runtime.reasoning_effort_override = if clear_override {
+        None
+    } else {
+        Some(reasoning_effort.to_string())
+    };
     apply_session_reasoning_override(
         &mut active_config,
         candidate.runtime.reasoning_effort_override.as_deref(),

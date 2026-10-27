@@ -3572,6 +3572,9 @@ function TimemApp() {
     server?.model_catalog ?? [],
   );
   const headerReasoningValue = activeSession?.runtime_profile?.reasoning_effort ?? "";
+  const headerDefaultEffort =
+    endpointCatalogModel(headerModelEndpoint, server?.model_catalog ?? [])
+      ?.default_effort ?? "";
   // Documented catalog facts decide the image warning; custom endpoints
   // (unknown modalities) stay permissive to avoid false alarms.
   const activeImageUnsupportedEndpoint =
@@ -3683,10 +3686,18 @@ function TimemApp() {
   const toolRepoLabel = showToolRepo
     ? "Close ToolRepo"
     : `Open ToolRepo · ${activeToolCount} reusable tools`;
-  const activeTimerCount = activeSession?.timers?.length ?? 0;
+  const totalTimerCount = activeSession?.timers?.length ?? 0;
+  const workingTimerCount =
+    activeSession?.timers?.filter(
+      (timer) => timer.enabled && !timer.parked_reason,
+    ).length ?? 0;
+  const timerCountLabel =
+    totalTimerCount > 0
+      ? `${workingTimerCount}/${totalTimerCount}`
+      : "0";
   const timersLabel = showTimers
     ? t("timer.ariaLabel")
-    : `${t("timer.ariaLabel")} · ${activeTimerCount}`;
+    : `${t("timer.ariaLabel")} · ${timerCountLabel}`;
   const mobileSessionsLabel = showMobileSessions
     ? "Close session navigation"
     : "Open session navigation";
@@ -4878,9 +4889,14 @@ function TimemApp() {
                       <select
                         className="header-reasoning-select"
                         aria-label={t("modelService.reasoningLabel")}
-                        value={headerReasoningOptions.includes(headerReasoningValue)
-                          ? headerReasoningValue
-                          : headerReasoningOptions[0]}
+                        value={
+                          headerReasoningValue &&
+                          headerReasoningOptions.includes(headerReasoningValue)
+                            ? headerReasoningValue
+                            : headerReasoningOptions.includes(headerDefaultEffort)
+                              ? headerDefaultEffort
+                              : headerReasoningOptions[0]
+                        }
                         disabled={runtimeLocked || !activeSession}
                         onChange={(event) => {
                           if (!activeSession) return;
@@ -4898,7 +4914,12 @@ function TimemApp() {
                         }}
                       >
                         {headerReasoningOptions.map((effort) => (
-                          <option key={effort} value={effort}>{effort}</option>
+                          <option key={effort} value={effort}>
+                            {effort}
+                            {effort === headerDefaultEffort
+                              ? t("endpoints.defaultSuffix")
+                              : ""}
+                          </option>
                         ))}
                       </select>
                     ) : (
@@ -4996,7 +5017,7 @@ function TimemApp() {
                 ref={timersButtonRef}
                 title={t("timer.title")}
                 aria-label={timersLabel}
-                className={`icon-button timer-header-button ${showTimers ? "selected" : ""} ${activeTimerCount > 0 ? "has-timers" : ""}`}
+                className={`icon-button timer-header-button ${showTimers ? "selected" : ""} ${totalTimerCount > 0 ? "has-timers" : ""}`}
                 aria-expanded={showTimers}
                 aria-controls="timer-panel"
                 onClick={() => {
@@ -5009,9 +5030,9 @@ function TimemApp() {
                 }}
               >
                 <AlarmClock size={17} />
-                {activeTimerCount > 0 && (
+                {totalTimerCount > 0 && (
                   <span className="timer-header-count" aria-hidden="true">
-                    {activeTimerCount}
+                    {timerCountLabel}
                   </span>
                 )}
               </button>
@@ -7442,6 +7463,21 @@ function formatChatLibraryDate(value: number) {
   });
 }
 
+function useThrottledValue<T>(value: T, intervalMs: number): T {
+  const [shown, setShown] = useState(value);
+  const latestRef = useRef(value);
+  latestRef.current = value;
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setShown((current) =>
+        Object.is(current, latestRef.current) ? current : latestRef.current,
+      );
+    }, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [intervalMs]);
+  return shown;
+}
+
 function timerRelativeTime(targetMs: number): string {
   const delta = targetMs - Date.now();
   const formatter = new Intl.RelativeTimeFormat(undefined, {
@@ -7455,6 +7491,46 @@ function timerRelativeTime(targetMs: number): string {
   if (abs < 86_400_000)
     return formatter.format(Math.round(delta / 3_600_000), "hour");
   return formatter.format(Math.round(delta / 86_400_000), "day");
+}
+
+type TimerEditForm = {
+  prompt: string;
+  name: string;
+  mode: "once" | "repeat";
+  trigger: "delay" | "at";
+  delayMinutes: string;
+  atValue: string;
+  intervalMinutes: string;
+  queueOnFire: boolean;
+};
+
+function timerAtToLocalInput(at: string | null | undefined): string {
+  if (!at) return "";
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) return "";
+  // datetime-local expects the local wall clock without a timezone suffix.
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000)
+    .toISOString()
+    .slice(0, 16);
+}
+
+function timerToEditForm(timer: TimerInfo): TimerEditForm {
+  return {
+    prompt: timer.prompt,
+    name: timer.name,
+    mode: timer.mode === "repeat" ? "repeat" : "once",
+    trigger: timer.after_ms != null ? "delay" : "at",
+    delayMinutes:
+      timer.after_ms != null
+        ? String(Math.max(1, Math.round(timer.after_ms / 60_000)))
+        : "",
+    atValue: timerAtToLocalInput(timer.at),
+    intervalMinutes:
+      timer.interval_ms != null
+        ? String(Math.max(1, Math.round(timer.interval_ms / 60_000)))
+        : "",
+    queueOnFire: !(timer.deliver_immediately ?? false),
+  };
 }
 
 function TimerPanel({
@@ -7475,7 +7551,7 @@ function TimerPanel({
   useT();
   const timers = session?.timers ?? [];
   const [editingTimerId, setEditingTimerId] = useState<string | null>(null);
-  const [editDraft, setEditDraft] = useState("");
+  const [editForm, setEditForm] = useState<TimerEditForm | null>(null);
   const [expandedPrompts, setExpandedPrompts] = useState<ReadonlySet<string>>(
     new Set(),
   );
@@ -7490,7 +7566,7 @@ function TimerPanel({
   const [delayMinutes, setDelayMinutes] = useState("");
   const [atValue, setAtValue] = useState("");
   const [intervalMinutes, setIntervalMinutes] = useState("");
-  const [deliverImmediately, setDeliverImmediately] = useState(false);
+  const [queueOnFire, setQueueOnFire] = useState(false);
   useEffect(() => {
     setCreateOpen(false);
     setPrompt("");
@@ -7500,9 +7576,9 @@ function TimerPanel({
     setDelayMinutes("");
     setAtValue("");
     setIntervalMinutes("");
-    setDeliverImmediately(false);
+    setQueueOnFire(false);
     setEditingTimerId(null);
-    setEditDraft("");
+    setEditForm(null);
     setExpandedPrompts(new Set());
   }, [session?.session_id]);
   // Disclosure focus contract: expanding moves focus into the first field;
@@ -7523,6 +7599,48 @@ function TimerPanel({
   const intervalValid = mode === "once" || Number(intervalMinutes) > 0;
   const canCreate =
     !!session && !!prompt.trim() && triggerValid && intervalValid;
+  const editTriggerValid =
+    editForm == null
+      ? false
+      : editForm.trigger === "delay"
+        ? Number(editForm.delayMinutes) > 0
+        : !!editForm.atValue &&
+          !Number.isNaN(new Date(editForm.atValue).getTime());
+  const editIntervalValid =
+    editForm == null ||
+    editForm.mode === "once" ||
+    Number(editForm.intervalMinutes) > 0;
+  const canEditSave =
+    editForm != null &&
+    !!editForm.prompt.trim() &&
+    editTriggerValid &&
+    editIntervalValid;
+  const submitEdit = () => {
+    if (!canEditSave || !session || !editForm || !editingTimerId) return;
+    // Full-form edit: schedule members are always sent so a switched trigger
+    // clears the other side, and once-mode clears the repeat interval.
+    const command: ClientCommand = {
+      type: "timer_update",
+      session_id: session.session_id,
+      timer_id: editingTimerId,
+      prompt: editForm.prompt.trim(),
+      name: editForm.name.trim(),
+      mode: editForm.mode,
+      ...(editForm.trigger === "delay"
+        ? {
+            after_ms: Math.round(Number(editForm.delayMinutes) * 60_000),
+            at: null,
+          }
+        : { after_ms: null, at: new Date(editForm.atValue).toISOString() }),
+      ...(editForm.mode === "repeat"
+        ? { interval_ms: Math.round(Number(editForm.intervalMinutes) * 60_000) }
+        : { interval_ms: null }),
+      deliver_immediately: !editForm.queueOnFire,
+    };
+    if (!sendCommand.current(command)) return;
+    setEditingTimerId(null);
+    setEditForm(null);
+  };
   const showInvalidHint =
     !canCreate &&
     (prompt.trim().length > 0 ||
@@ -7535,7 +7653,7 @@ function TimerPanel({
     setDelayMinutes("");
     setAtValue("");
     setIntervalMinutes("");
-    setDeliverImmediately(false);
+    setQueueOnFire(false);
   };
   const submitCreate = (event: React.FormEvent) => {
     event.preventDefault();
@@ -7552,7 +7670,7 @@ function TimerPanel({
       ...(mode === "repeat"
         ? { interval_ms: Math.round(Number(intervalMinutes) * 60_000) }
         : {}),
-      ...(deliverImmediately ? { deliver_immediately: true } : {}),
+      deliver_immediately: !queueOnFire,
     };
     if (!sendCommand.current(command)) return;
     setCreateOpen(false);
@@ -7610,37 +7728,144 @@ function TimerPanel({
                     ? t("timer.modeRepeat")
                     : t("timer.modeOnce")}
                 </span>
-                {timer.deliver_immediately && (
-                  <span className="timer-item-origin immediate" title={t("timer.immediateHint")}>
-                    {t("timer.immediate")}
+                {!(timer.deliver_immediately ?? true) && (
+                  <span className="timer-item-origin queued" title={t("timer.queueHint")}>
+                    {t("timer.queued")}
                   </span>
                 )}
               </div>
-              {editingTimerId === timer.timer_id ? (
-                <div className="timer-item-edit">
-                  <textarea
-                    rows={4}
-                    value={editDraft}
-                    placeholder={t("timer.editPlaceholder")}
-                    aria-label={t("timer.editTimer")}
-                    onChange={(event) => setEditDraft(event.target.value)}
-                  />
+              {editingTimerId === timer.timer_id && editForm ? (
+                <div className="timer-item-edit timer-edit-form">
+                  <label>
+                    {t("timer.workLabel")}
+                    <textarea
+                      rows={3}
+                      value={editForm.prompt}
+                      placeholder={t("timer.editPlaceholder")}
+                      aria-label={t("timer.editTimer")}
+                      onChange={(event) =>
+                        setEditForm({ ...editForm, prompt: event.target.value })
+                      }
+                    />
+                  </label>
+                  <label>
+                    {t("timer.nameLabel")}
+                    <input
+                      value={editForm.name}
+                      placeholder={t("timer.namePlaceholder")}
+                      onChange={(event) =>
+                        setEditForm({ ...editForm, name: event.target.value })
+                      }
+                    />
+                  </label>
+                  <div className="timer-create-row">
+                    <label>
+                      {t("timer.modeLabel")}
+                      <select
+                        value={editForm.mode}
+                        onChange={(event) =>
+                          setEditForm({
+                            ...editForm,
+                            mode: event.target.value as "once" | "repeat",
+                          })
+                        }
+                      >
+                        <option value="once">{t("timer.modeOnce")}</option>
+                        <option value="repeat">{t("timer.modeRepeat")}</option>
+                      </select>
+                    </label>
+                    <label>
+                      {t("timer.triggerLabel")}
+                      <select
+                        value={editForm.trigger}
+                        onChange={(event) =>
+                          setEditForm({
+                            ...editForm,
+                            trigger: event.target.value as "delay" | "at",
+                          })
+                        }
+                      >
+                        <option value="delay">{t("timer.triggerDelay")}</option>
+                        <option value="at">{t("timer.triggerAt")}</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="timer-create-row">
+                    {editForm.trigger === "delay" ? (
+                      <label>
+                        {t("timer.triggerDelay")}
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={editForm.delayMinutes}
+                          onChange={(event) =>
+                            setEditForm({
+                              ...editForm,
+                              delayMinutes: event.target.value,
+                            })
+                          }
+                        />
+                      </label>
+                    ) : (
+                      <label>
+                        {t("timer.triggerAt")}
+                        <input
+                          type="datetime-local"
+                          value={editForm.atValue}
+                          onChange={(event) =>
+                            setEditForm({
+                              ...editForm,
+                              atValue: event.target.value,
+                            })
+                          }
+                        />
+                      </label>
+                    )}
+                    {editForm.mode === "repeat" && (
+                      <label>
+                        {t("timer.intervalLabel")}
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={editForm.intervalMinutes}
+                          onChange={(event) =>
+                            setEditForm({
+                              ...editForm,
+                              intervalMinutes: event.target.value,
+                            })
+                          }
+                        />
+                      </label>
+                    )}
+                  </div>
+                  <label className="timer-create-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={editForm.queueOnFire}
+                      title={t("timer.queueHint")}
+                      onChange={(event) =>
+                        setEditForm({
+                          ...editForm,
+                          queueOnFire: event.target.checked,
+                        })
+                      }
+                    />
+                    {t("timer.queueLabel")}
+                  </label>
+                  {!canEditSave && (
+                    <div className="timer-form-hint error">
+                      {t("timer.invalidInput")}
+                    </div>
+                  )}
                   <div className="timer-edit-buttons">
                     <button
                       type="button"
                       className="timer-edit-save"
-                      disabled={!editDraft.trim()}
+                      disabled={!canEditSave}
                       title={t("timer.editSave")}
-                      onClick={() => {
-                        if (!session || !editDraft.trim()) return;
-                        sendCommand.current({
-                          type: "timer_update",
-                          session_id: session.session_id,
-                          timer_id: timer.timer_id,
-                          prompt: editDraft.trim(),
-                        });
-                        setEditingTimerId(null);
-                      }}
+                      onClick={submitEdit}
                     >
                       {t("timer.editSave")}
                     </button>
@@ -7648,7 +7873,10 @@ function TimerPanel({
                       type="button"
                       className="timer-edit-cancel"
                       title={t("timer.editCancel")}
-                      onClick={() => setEditingTimerId(null)}
+                      onClick={() => {
+                        setEditingTimerId(null);
+                        setEditForm(null);
+                      }}
                     >
                       {t("timer.editCancel")}
                     </button>
@@ -7739,7 +7967,7 @@ function TimerPanel({
                     aria-label={t("timer.editTimer")}
                     onClick={() => {
                       setEditingTimerId(timer.timer_id);
-                      setEditDraft(timer.prompt);
+                      setEditForm(timerToEditForm(timer));
                     }}
                   >
                     <Pencil size={13} />
@@ -7871,10 +8099,11 @@ function TimerPanel({
         <label className="timer-create-checkbox">
           <input
             type="checkbox"
-            checked={deliverImmediately}
-            onChange={(event) => setDeliverImmediately(event.target.checked)}
+            checked={queueOnFire}
+            title={t("timer.queueHint")}
+            onChange={(event) => setQueueOnFire(event.target.checked)}
           />
-          {t("timer.immediateLabel")}
+          {t("timer.queueLabel")}
         </label>
         {showInvalidHint && (
           <div className="timer-form-hint error">
@@ -12063,6 +12292,12 @@ function TurnAnswerDelivery({
   const hasFinal = !!turn.final_answer;
   const responseTelemetry = turnLatestModelTelemetry(turn, preview?.round);
   const reasoningTokens = responseTelemetry?.reasoningTokens ?? preview?.reasoning_tokens ?? 0;
+  // Reasoning deltas arrive far faster than reading speed; refresh the word
+  // count once per second instead of on every delta.
+  const thinkingWordsShown = useThrottledValue(
+    preview?.thinking_words ?? 0,
+    1000,
+  );
   const isThinking = modelPhaseForStream(waitingModel, preview?.response?.status) &&
     preview?.stream_phase === "thinking";
   const isWaiting = !!modelRetryStatus && waitingModel && !preview?.stream_phase;
@@ -12157,7 +12392,7 @@ function TurnAnswerDelivery({
             ) : isThinking ? (
               <span className="stream-working-detail">
                 <span>thinking</span>
-                <strong>{t("tools.thinkingWords", { count: preview?.thinking_words ?? 0 })}</strong>
+                <strong>{t("tools.thinkingWords", { count: thinkingWordsShown })}</strong>
                 <WorkingElapsed
                   createdAtMs={Date.now() - (preview?.thinking_elapsed_ms ?? 0)}
                   hideBeforeMs={0}
@@ -16976,16 +17211,21 @@ function ModelEndpointEditor({
             <label className="endpoint-reasoning-daily">
               <span>{t("endpoints.dailyReasoningLevel")}</span>
               <select
-                value={draft.reasoning_effort ?? ""}
+                value={draft.reasoning_effort ?? selectedModel?.default_effort ?? dailyReasoningOptions[0] ?? ""}
                 disabled={
                   (draft.api_protocol !== "openai-compatible" &&
                   draft.api_protocol !== "openai-responses")
                 }
                 onChange={(event) =>
-                  edit({ reasoning_effort: event.target.value || null })
+                  edit({
+                    reasoning_effort:
+                      selectedModel != null &&
+                      event.target.value === selectedModel.default_effort
+                        ? null
+                        : event.target.value || null,
+                  })
                 }
               >
-                {<option value="">{t("endpoints.reasoningEffortDefault")}</option>}
                 {dailyReasoningOptions.map((effort) => (
                   <option key={effort} value={effort}>{effort}{selectedModel?.default_effort === effort && !selectedProtocol?.fixed_effort ? t("endpoints.defaultSuffix") : ""}</option>
                 ))}
