@@ -15,3 +15,15 @@ export function formatTokensCoarse(value: number | undefined) {
   if (value >= 1_000) return `${(value / 1_000).toFixed(1)}K`;
   return String(value);
 }
+
+// Turn completion status bar: "24K(Think 0.6K)" — the think annotation only
+// appears when the turn actually reported reasoning tokens.
+export function formatOutputWithThink(
+  output: number | undefined,
+  think: number | undefined,
+) {
+  const outputText = formatTokens(output);
+  if (!output || !outputText) return undefined;
+  const thinkText = think ? formatTokens(think) : undefined;
+  return thinkText ? `${outputText}(Think ${thinkText})` : outputText;
+}

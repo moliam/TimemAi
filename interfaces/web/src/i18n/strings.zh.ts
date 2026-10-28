@@ -767,8 +767,6 @@ export const zh = {
     task: "Task",
     latest: "Latest",
     kvc: "KVC",
-    reasoning: "思考",
-    reasoningAria: "思考 {count} Tokens",
     speedTitle: "输出 tokens（含 reasoning）÷ 模型请求耗时；不含本地工具时间",
     ttftTitle: "TTFT 平均值 ~总体标准差，{count} 个有效样本",
   },

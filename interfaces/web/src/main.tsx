@@ -252,7 +252,6 @@ import {
   turnHistoryHydrationOrder,
   turnWorkPhaseBoundary,
   turnLiveUsage,
-  turnLatestModelTelemetry,
   timelineEventsSignature,
   timelineOutlineShapeKey,
   turnShouldRenderInTimeline,
@@ -311,7 +310,11 @@ import {
   toggleEndpointInChain,
 } from "./model_endpoints";
 import { createFrameEventQueue } from "./frame_event_queue";
-import { formatTokens, formatTokensCoarse } from "./token_format";
+import {
+  formatOutputWithThink,
+  formatTokens,
+  formatTokensCoarse,
+} from "./token_format";
 import {
   computeStreamRetention,
   streamToolHandoffIds,
@@ -12290,8 +12293,6 @@ function TurnAnswerDelivery({
     (streamWorking && intermediate ? preview?.response?.text ?? "" : "");
   const hasPreview = !!previewText;
   const hasFinal = !!turn.final_answer;
-  const responseTelemetry = turnLatestModelTelemetry(turn, preview?.round);
-  const reasoningTokens = responseTelemetry?.reasoningTokens ?? preview?.reasoning_tokens ?? 0;
   // Reasoning deltas arrive far faster than reading speed; refresh the word
   // count once per second instead of on every delta.
   const thinkingWordsShown = useThrottledValue(
@@ -12336,14 +12337,6 @@ function TurnAnswerDelivery({
         />
       </StreamProcess>}
       {hasPreview && preview?.interruption && <div className="response-preview-interruption" role="status">{preview.interruption === "cancelled" ? t("interim.previewStopped") : preview.interruption === "network_error" ? t("interim.previewNetworkError") : t("interim.previewModelError")}</div>}
-      {(hasFinal || !!previewText) && reasoningTokens > 0 && (
-        <div className="answer-reasoning-usage" aria-label={t("usage.reasoningAria", { count: reasoningTokens })}>
-          <span aria-hidden="true">&lt;+</span>
-          <span>{t("usage.reasoning")}</span>
-          <span className="answer-reasoning-count">{reasoningTokens} Tokens</span>
-          <span aria-hidden="true">&gt;</span>
-        </div>
-      )}
       {(hasFinal || !!previewText) && (
         <FinalAnswerDelivery
           text={turn.final_answer || previewText}
@@ -16372,7 +16365,7 @@ function CompletionCard({
     ],
     ["LLM", stats.llm_calls],
     ["Input", formatOptionalTokens(stats.prompt_tokens)],
-    ["Output", formatOptionalTokens(stats.completion_tokens)],
+    ["Output", formatOutputWithThink(stats.completion_tokens, stats.reasoning_tokens)],
     ["KVC read", formatOptionalTokens(stats.cached_tokens)],
     ["KVC created", formatOptionalTokens(stats.cache_created_tokens)],
     ["Tools", stats.tool_calls],

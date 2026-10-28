@@ -770,8 +770,6 @@ export const en: Strings = {
     task: "Task",
     latest: "Latest",
     kvc: "KVC",
-    reasoning: "Thinking",
-    reasoningAria: "Thinking {count} Tokens",
     speedTitle: "Output tokens (including reasoning) / model request time; local tool time excluded",
     ttftTitle: "TTFT mean ~population standard deviation across {count} samples",
   },
