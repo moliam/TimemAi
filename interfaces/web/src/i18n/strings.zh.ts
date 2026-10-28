@@ -446,8 +446,6 @@ export const zh = {
     chainAvailable: "全部接入点",
     chainSelected: "已选接入点链",
     chainCurrent: "本轮配置",
-    chainNextPreferred: "下一轮首选",
-    chainPreferred: "首选",
     chainSelectedHint: "拖动调整顺序，第 1 个优先使用；限流时自动切换下一个",
     chainEmptyHint: "从左侧选择接入点加入链",
     chainActive: "使用中",

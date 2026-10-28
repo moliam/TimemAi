@@ -16650,8 +16650,8 @@ function EndpointChainRateFlag({ endpoint }: { endpoint: ModelEndpoint }) {
 
 function SortableEndpointChainRow({
   endpoint,
+  index,
   current,
-  nextPreferred,
   working,
   onRemove,
   reasoningValue,
@@ -16661,8 +16661,8 @@ function SortableEndpointChainRow({
   onMaxInputCommit,
 }: {
   endpoint: ModelEndpoint;
+  index: number;
   current: boolean;
-  nextPreferred: boolean;
   working: boolean;
   onRemove: (endpointId: string) => void;
   reasoningValue: string;
@@ -16683,6 +16683,9 @@ function SortableEndpointChainRow({
         zIndex: sortable.isDragging ? 5 : undefined,
       }}
     >
+      <span className="endpoint-chain-index" aria-hidden="true">
+        {index}
+      </span>
       <button
         type="button"
         className="endpoint-chain-grip"
@@ -16751,14 +16754,9 @@ function SortableEndpointChainRow({
           />
         </span>
       </span>
-      {(working ? current : nextPreferred) && (
+      {working && current && (
         <span className="endpoint-chain-active-badge">
-          {t(working ? "endpoints.chainCurrent" : "endpoints.chainPreferred")}
-        </span>
-      )}
-      {working && !current && nextPreferred && (
-        <span className="endpoint-chain-next-badge">
-          {t("endpoints.chainNextPreferred")}
+          {t("endpoints.chainCurrent")}
         </span>
       )}
       <button
@@ -16986,12 +16984,12 @@ function ModelEndpointPanel({
                 strategy={verticalListSortingStrategy}
               >
                 <div className="endpoint-chain-list" role="list">
-                  {chainEndpoints.map((endpoint) => (
+                  {chainEndpoints.map((endpoint, index) => (
                     <SortableEndpointChainRow
                       key={endpoint.id}
                       endpoint={endpoint}
+                      index={index + 1}
                       current={endpoint.id === currentEndpointId}
-                      nextPreferred={endpoint.id === nextEndpointId}
                       working={working}
                       onRemove={toggleChainMember}
                       reasoningValue={

@@ -453,8 +453,6 @@ export const en: Strings = {
     chainAvailable: "All endpoints",
     chainSelected: "Selected chain",
     chainCurrent: "Current request",
-    chainNextPreferred: "Next preference",
-    chainPreferred: "Preferred",
     chainSelectedHint: "Drag to reorder; the first endpoint is preferred and rate-limited endpoints fail over",
     chainEmptyHint: "Pick endpoints from the left",
     chainActive: "In use",

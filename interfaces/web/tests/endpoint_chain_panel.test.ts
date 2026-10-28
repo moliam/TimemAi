@@ -57,8 +57,10 @@ describe("endpoint chain selection panel", () => {
   it("separates the Host-observed current route from the next-Turn preference", () => {
     expect(panel).toContain("active_model_endpoint_id");
     expect(panel).toContain("model_endpoint_id ?? null");
-    expect(source).toContain('t(working ? "endpoints.chainCurrent" : "endpoints.chainPreferred")');
-    expect(source).toContain('t("endpoints.chainNextPreferred")');
+    expect(source).toContain('t("endpoints.chainCurrent")');
+    expect(source).not.toContain("endpoints.chainPreferred");
+    expect(source).not.toContain("endpoints.chainNextPreferred");
+    expect(source).toContain("endpoint-chain-index");
     expect(panel).not.toContain('t(working ? "endpoints.chainNextApplied" : "endpoints.chainSynced")');
     expect(panel).not.toContain("effectiveEndpointForProfile");
   });
