@@ -45,6 +45,7 @@ import {
   ArrowLeftRight,
   BriefcaseBusiness,
   BookText,
+  Bot,
   Check,
   CheckCheck,
   ChevronDown,
@@ -74,6 +75,7 @@ import {
   LoaderCircle,
   Maximize2,
   Menu,
+  MessageSquareText,
   Minimize2,
   Palette,
   FolderInput,
@@ -4887,7 +4889,6 @@ function TimemApp() {
                     {headerModelEndpoint.model}
                   </span>
                   <div className="header-model-meta-row">
-                    <span className="header-reasoning-label">{t("modelService.reasoningLabel")}：</span>
                     {headerReasoningOptions.length > 0 ? (
                       <select
                         className="header-reasoning-select"
@@ -16723,9 +16724,14 @@ function ModelEndpointPanel({
             <RefreshCw size={13} />
             <span>{t("endpoints.refreshAvailability")}</span>
           </button>
-          <button type="button" className="endpoint-menu-edit" onClick={onEdit}>
-            <Pencil size={13} />
-            <span>{t("common.edit")}</span>
+          <button
+            type="button"
+            className="endpoint-menu-edit endpoint-menu-edit-icon"
+            onClick={onEdit}
+            aria-label={t("endpoints.editEndpoint")}
+            title={t("endpoints.editEndpoint")}
+          >
+            <Settings size={13} />
           </button>
         </div>
       </div>
@@ -16772,7 +16778,33 @@ function ModelEndpointPanel({
                       </strong>
                       <small>
                         {endpoint.model} ·{" "}
-                        {apiProtocolShort(endpoint.api_protocol)}
+                        <span
+                          className="endpoint-chain-protocol"
+                          title={t(
+                            endpoint.api_protocol === "openai-responses"
+                              ? "endpoints.protocolResponsesHint"
+                              : "endpoints.protocolChatHint",
+                          )}
+                        >
+                          {endpoint.api_protocol === "openai-responses" ? (
+                            <Bot size={11} aria-hidden="true" />
+                          ) : (
+                            <MessageSquareText size={11} aria-hidden="true" />
+                          )}
+                        </span>
+                        {" · "}
+                        <span
+                          className="endpoint-chain-token-cap"
+                          title={t("endpoints.tokenCapHint", {
+                            input:
+                              formatTokens(endpoint.max_llm_input_tokens) ?? "?",
+                            output:
+                              formatTokens(endpoint.max_llm_output_tokens) ?? "?",
+                          })}
+                        >
+                          {formatTokens(endpoint.max_llm_input_tokens) ?? "?"}/
+                          {formatTokens(endpoint.max_llm_output_tokens) ?? "?"}
+                        </span>
                       </small>
                     </span>
                   </button>
