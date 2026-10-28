@@ -1105,7 +1105,13 @@ button:disabled { cursor: not-allowed; }
 .timer-create-toggle:hover { border-color: #4a7183; background: #17242e; color: #d5e1e8; }
 .timer-create-form .timer-create-checkbox, .timer-edit-form .timer-create-checkbox { display: flex; align-items: center; gap: 7px; padding: 6px 8px; border: 1px solid #2c3b49; border-radius: 5px; background: #131c26; color: #8fa2af; font-size: 11px; font-weight: 650; cursor: pointer; transition: border-color .15s ease, color .15s ease; }
 .timer-create-form .timer-create-checkbox:hover, .timer-edit-form .timer-create-checkbox:hover { border-color: #3d6b7d; color: #c4d2dc; }
-.timer-create-checkbox input { width: 13px; height: 13px; flex: none; margin: 0; accent-color: #2f6d5d; cursor: pointer; }
+.timer-create-checkbox input { appearance: none; -webkit-appearance: none; width: 13px; height: 13px; flex: none; margin: 0; border: 1px solid #3a5461; border-radius: 4px; background: #0d1b22; cursor: pointer; display: inline-grid; place-items: center; transition: background-color .12s ease, border-color .12s ease; }
+.timer-create-checkbox input::after { content: ""; width: 9px; height: 9px; transform: scale(0); transition: transform .12s ease; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23eafff7' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center/contain no-repeat; }
+.timer-create-checkbox input:checked { background-color: #2f6d5d; border-color: #2f6d5d; }
+.timer-create-checkbox input:checked::after { transform: scale(1); }
+.timer-create-checkbox input:focus-visible { outline: 1px solid #4a9c8a; outline-offset: 1px; }
+:root[data-theme="light"] .timer-create-checkbox input { border-color: #bfd3d8; background: #f7fbfc; }
+:root[data-theme="light"] .timer-create-checkbox input:checked { background-color: #2d8068; border-color: #2d8068; }
 .timer-item-origin.immediate { background: #3a2f1d; color: #d9b96a; }
 .timer-create-actions { display: flex; gap: 8px; }
 .timer-create-actions .timer-create-submit { flex: 1; }

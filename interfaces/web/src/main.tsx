@@ -16420,7 +16420,10 @@ function CompletionCard({
           {formatOptionalTokens(stats.prompt_tokens)}
           {!!stats.cached_tokens && (
             <span className="completion-fact-detail">
-              {" "}(cache {formatTokens(stats.cached_tokens)})
+              {" "}(cache {formatTokens(stats.cached_tokens)}
+              {!!stats.prompt_tokens &&
+                `, ${Math.min(100, (stats.cached_tokens * 100) / stats.prompt_tokens).toFixed(1)}%`}
+              )
             </span>
           )}
         </span>
