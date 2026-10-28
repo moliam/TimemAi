@@ -426,6 +426,7 @@ export const zh = {
     budgetInvalidHint: "当前值超出模板支持范围，已保留但可能无法保存（模板默认 {value}）",
     baseOverrideHint: "支持覆盖为自己的代理地址；请确认凭据属于该服务。",
     defaultSuffix: "（默认）",
+    defaultOptionTitle: "端点默认档位",
     inputBudget: "输入 token 预算",
     middleDefaultNote: "注：官方未注明默认值，已选择中间档",
     protocolUnavailable: "当前配置不支持",

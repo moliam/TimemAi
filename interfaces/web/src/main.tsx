@@ -4889,6 +4889,11 @@ function TimemApp() {
                       <select
                         className="header-reasoning-select"
                         aria-label={t("modelService.reasoningLabel")}
+                        title={
+                          headerDefaultEffort
+                            ? `${t("modelService.reasoningLabel")} · ${t("endpoints.defaultOptionTitle")}: ${headerDefaultEffort}`
+                            : t("modelService.reasoningLabel")
+                        }
                         value={
                           headerReasoningValue &&
                           headerReasoningOptions.includes(headerReasoningValue)
@@ -4914,11 +4919,12 @@ function TimemApp() {
                         }}
                       >
                         {headerReasoningOptions.map((effort) => (
-                          <option key={effort} value={effort}>
+                          <option
+                            key={effort}
+                            value={effort}
+                            title={effort === headerDefaultEffort ? t("endpoints.defaultOptionTitle") : undefined}
+                          >
                             {effort}
-                            {effort === headerDefaultEffort
-                              ? t("endpoints.defaultSuffix")
-                              : ""}
                           </option>
                         ))}
                       </select>

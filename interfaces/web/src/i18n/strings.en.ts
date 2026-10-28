@@ -429,6 +429,7 @@ export const en: Strings = {
     budgetInvalidHint: "This value is outside the template range; kept but may not save (template default {value})",
     baseOverrideHint: "You may use your proxy URL. Confirm credentials belong to this service.",
     defaultSuffix: " (default)",
+    defaultOptionTitle: "Endpoint default effort",
     inputBudget: "Input token budget",
     middleDefaultNote: "Note: No official default is documented; the middle level is selected.",
     protocolUnavailable: "Unsupported by this configuration",

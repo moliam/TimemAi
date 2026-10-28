@@ -3404,14 +3404,13 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .chat-header { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: 7px; }
 .header-context-actions { min-width: 0; display: flex; align-items: center; gap: 5px; grid-column: 2; grid-row: 1; justify-self: start; }
 .header-session-cluster { width: fit-content; max-width: 420px; min-width: 0; display: grid; grid-column: 1; grid-row: 1; align-self: end; justify-items: start; justify-self: start; text-align: left; }
-.header-model-meta-row { min-width: 0; display: flex; align-items: center; gap: 6px; margin-top: 2px; margin-left: 2px; }
+.header-model-meta-row { min-width: 0; display: flex; align-items: center; gap: 5px; margin-top: 2px; margin-left: 2px; }
 .header-session-model-row { min-width: 0; display: flex; align-items: center; gap: 8px; }
 .header-model-guide-anchor { position: relative; }
 .header-model-meta { min-width: 0; flex: 0 1 auto; display: grid; justify-items: start; gap: 1px; margin: 0; padding-left: 2px; white-space: nowrap; line-height: 1.2; }
-.header-model-meta-row { min-width: 0; display: flex; align-items: center; gap: 5px; }
 .header-model-meta-model { min-width: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; color: #8a9aa1; font-size: 11px; line-height: 1.2; }
 .header-model-meta .endpoint-chip { padding: 0 5px; font-size: 9px; line-height: 1.5; border-width: 1px; }
-.header-reasoning-select { max-width: 112px; height: 20px; padding: 0 18px 0 6px; border: 1px solid #315044; border-radius: 6px; background: #10241a; color: #9ed6b5; font: inherit; font-size: 10px; line-height: 18px; }
+.header-reasoning-select { max-width: 96px; height: 20px; padding: 0 16px 0 6px; border: 1px solid #315044; border-radius: 6px; background: #10241a; color: #9ed6b5; font: inherit; font-size: 10px; line-height: 18px; }
 .header-reasoning-select:disabled { opacity: .55; }
 .header-reasoning-none { min-width: 34px; padding: 0 6px; border: 1px solid #3a4642; border-radius: 6px; color: #84918d; font-size: 10px; line-height: 18px; text-align: center; }
 :root[data-theme="light"] .header-reasoning-select { border-color: #b9d6c7; background: #eef8f1; color: #33764f; }
