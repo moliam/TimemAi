@@ -1700,7 +1700,10 @@ export function sessionContextUsage(
 export function sessionRuntimeUsage(
   session: Session,
 ): import("./protocol").UsageStats | undefined {
-  const runtimeRestartAtMs = sessionRuntimeRestartAtMs(session);
+  // Whole-history accounting, matching sessionModelTelemetry (speed & TTFT):
+  // restored turns and pre-restart requests still describe real model work,
+  // so the token/call readout stays consistent with the telemetry readout
+  // across runtime restarts instead of dropping to zero.
   const total: import("./protocol").UsageStats = {};
   let found = false;
 
@@ -1715,19 +1718,11 @@ export function sessionRuntimeUsage(
   };
 
   for (const turn of session.turns) {
-    if (turn.state === "restored") continue;
-    const live = turnLiveUsageSince(turn, runtimeRestartAtMs);
+    const live = turnLiveUsage(turn);
     if (live) {
       add(live.total);
       continue;
     }
-    // Completion stats have no independent timestamp, so they count only when
-    // the complete turn started in this runtime instance.
-    if (
-      runtimeRestartAtMs !== undefined &&
-      turn.created_at_ms < runtimeRestartAtMs
-    )
-      continue;
     add(turn.completion?.stats);
   }
   return found ? total : undefined;

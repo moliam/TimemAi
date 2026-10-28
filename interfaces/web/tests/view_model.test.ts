@@ -3040,10 +3040,11 @@ describe("web topic view model", () => {
     restarted.turns.push(resumed);
 
     expect(sessionCacheHitPercent(restarted)).toBeCloseTo(90, 8);
-    // Cold-start exclusion affects only the percentage. Token totals still
-    // include every request in the live runtime instance.
+    // Cold-start exclusion affects only the percentage. Token totals follow
+    // the whole-history readout so they stay consistent with the telemetry
+    // (speed & TTFT) across runtime restarts.
     expect(sessionCacheTokenTotals(restarted)).toEqual({
-      prompt_tokens: 35_000,
+      prompt_tokens: 45_000,
       completion_tokens: 0,
     });
   });
