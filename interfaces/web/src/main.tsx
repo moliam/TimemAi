@@ -13246,7 +13246,8 @@ function HeaderContextUsage({
           <span>TTFT</span>
           <span>{ttftLabel}</span>
         </span>
-        <span className="header-context-secondary">
+      </span>
+      <span className="header-context-secondary">
         <span className="header-cache-token header-usage-llm" title={t("completion.llmCallsTitle")}>
           <Sparkles size={12} strokeWidth={1.8} aria-hidden="true" />
           {formatTokensCoarse(runtimeTotals?.llm_calls) ?? "0"}
@@ -13270,7 +13271,6 @@ function HeaderContextUsage({
         <span className="header-cache-token header-usage-tools" title={t("completion.toolCallsTitle")}>
           <Wrench size={12} strokeWidth={1.8} aria-hidden="true" />
           {formatTokensCoarse(runtimeTotals?.tool_calls) ?? "0"}
-        </span>
         </span>
       </span>
     </span>
