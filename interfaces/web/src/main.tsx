@@ -13172,7 +13172,11 @@ function HeaderTelemetryBoard({
     ? "\u2014"
     : `${telemetry.ttftMeanSeconds.toFixed(2)} ~${(telemetry.ttftStdDevSeconds ?? 0).toFixed(2)} sec`;
   return (
-    <span className="header-telemetry-board">
+    <span
+      className="header-telemetry-board"
+      title={t("usage.boardTitle")}
+      aria-label={t("usage.boardTitle")}
+    >
       <span className="header-telemetry-main">
         <span className="header-model-speed" title={t("usage.speedTitle")}>
           <Gauge size={12} strokeWidth={1.8} aria-hidden="true" />

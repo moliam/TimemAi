@@ -777,6 +777,7 @@ export const en: Strings = {
     kvc: "KVC",
     speedTitle: "Output tokens (including reasoning) / model request time; local tool time excluded",
     resetTitle: "Reset dashboard statistics and start a fresh count",
+    boardTitle: "Model data board: generation speed, TTFT, token usage and call stats; hover an item for details",
     ttftTitle: "TTFT mean ~population standard deviation across {count} samples",
   },
   context: {
