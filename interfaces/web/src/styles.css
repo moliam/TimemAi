@@ -1103,15 +1103,17 @@ button:disabled { cursor: not-allowed; }
 .timer-edit-form { display: grid; gap: 8px; padding-top: 2px; }
 .timer-create-toggle { display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px dashed #365363; border-radius: 5px; padding: 8px 10px; background: transparent; color: #91a5b1; font-size: 12px; font-weight: 700; }
 .timer-create-toggle:hover { border-color: #4a7183; background: #17242e; color: #d5e1e8; }
-.timer-create-checkbox { display: flex; align-items: center; gap: 6px; color: #8fa2af; font-size: 11px; font-weight: 650; }
-.timer-create-checkbox input { width: auto; accent-color: #2f6d5d; }
+.timer-create-form .timer-create-checkbox, .timer-edit-form .timer-create-checkbox { display: flex; align-items: center; gap: 7px; padding: 6px 8px; border: 1px solid #2c3b49; border-radius: 5px; background: #131c26; color: #8fa2af; font-size: 11px; font-weight: 650; cursor: pointer; transition: border-color .15s ease, color .15s ease; }
+.timer-create-form .timer-create-checkbox:hover, .timer-edit-form .timer-create-checkbox:hover { border-color: #3d6b7d; color: #c4d2dc; }
+.timer-create-checkbox input { width: 13px; height: 13px; flex: none; margin: 0; accent-color: #2f6d5d; cursor: pointer; }
 .timer-item-origin.immediate { background: #3a2f1d; color: #d9b96a; }
 .timer-create-actions { display: flex; gap: 8px; }
 .timer-create-actions .timer-create-submit { flex: 1; }
 .timer-create-collapse { border: 1px solid #365363; border-radius: 5px; padding: 7px 12px; background: transparent; color: #91a5b1; font-size: 12px; }
 .timer-create-collapse:hover { color: #d5e1e8; }
 .timer-create-form label, .timer-edit-form label { display: grid; gap: 4px; min-width: 0; color: #8fa2af; font-size: 11px; font-weight: 650; }
-.timer-create-form input, .timer-create-form select, .timer-create-form textarea, .timer-edit-form input, .timer-edit-form select, .timer-edit-form textarea { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid #2c3b49; border-radius: 5px; padding: 6px 8px; background: #131c26; color: #d5e1e8; font-size: 12px; font-family: inherit; resize: vertical; }
+.timer-create-form input, .timer-create-form select, .timer-create-form textarea, .timer-edit-form input, .timer-edit-form select, .timer-edit-form textarea { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid #2c3b49; border-radius: 5px; padding: 6px 8px; background: #131c26; color: #d5e1e8; font-size: 12px; font-family: inherit; resize: vertical; transition: border-color .15s ease; }
+.timer-create-form input:focus, .timer-create-form select:focus, .timer-create-form textarea:focus, .timer-edit-form input:focus, .timer-edit-form select:focus, .timer-edit-form textarea:focus { border-color: #3d6b7d; outline: none; }
 .timer-create-form textarea { line-height: 1.5; }
 .timer-create-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
 .timer-create-submit { border: 0; border-radius: 5px; padding: 7px 10px; background: #1f443c; color: #b9ecd9; font-size: 12px; font-weight: 700; }
@@ -1133,6 +1135,8 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .timer-create-area { border-color: #d3dde2; }
 :root[data-theme="light"] .timer-create-toggle { border-color: #bfd3d8; color: #5f7480; }
 :root[data-theme="light"] .timer-create-toggle:hover { border-color: #9fb9c1; background: #eef4f6; color: #263b43; }
+:root[data-theme="light"] .timer-create-form .timer-create-checkbox, :root[data-theme="light"] .timer-edit-form .timer-create-checkbox { border-color: #bfd3d8; background: #f7fbfc; color: #526872; }
+:root[data-theme="light"] .timer-create-form .timer-create-checkbox:hover, :root[data-theme="light"] .timer-edit-form .timer-create-checkbox:hover { border-color: #9fb9c1; color: #263b43; }
 :root[data-theme="light"] .timer-create-collapse { border-color: #bfd3d8; color: #5f7480; }
 :root[data-theme="light"] .timer-create-collapse:hover { color: #263b43; }
 :root[data-theme="light"] .timer-create-form input, :root[data-theme="light"] .timer-create-form select, :root[data-theme="light"] .timer-edit-form input, :root[data-theme="light"] .timer-edit-form select { background: #ffffff; border-color: #c6d2da; color: #2c3a44; }
