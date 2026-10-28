@@ -1145,7 +1145,14 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .timer-create-form .timer-create-checkbox:hover, :root[data-theme="light"] .timer-edit-form .timer-create-checkbox:hover { border-color: #9fb9c1; color: #263b43; }
 :root[data-theme="light"] .timer-create-collapse { border-color: #bfd3d8; color: #5f7480; }
 :root[data-theme="light"] .timer-create-collapse:hover { color: #263b43; }
-:root[data-theme="light"] .timer-create-form input, :root[data-theme="light"] .timer-create-form select, :root[data-theme="light"] .timer-edit-form input, :root[data-theme="light"] .timer-edit-form select { background: #ffffff; border-color: #c6d2da; color: #2c3a44; }
+:root[data-theme="light"] .timer-create-form input, :root[data-theme="light"] .timer-create-form select, :root[data-theme="light"] .timer-create-form textarea, :root[data-theme="light"] .timer-edit-form input, :root[data-theme="light"] .timer-edit-form select, :root[data-theme="light"] .timer-edit-form textarea { background: #ffffff; border-color: #c6d2da; color: #2c3a44; }
+:root[data-theme="light"] .timer-create-form input:focus, :root[data-theme="light"] .timer-create-form select:focus, :root[data-theme="light"] .timer-create-form textarea:focus, :root[data-theme="light"] .timer-edit-form input:focus, :root[data-theme="light"] .timer-edit-form select:focus, :root[data-theme="light"] .timer-edit-form textarea:focus { border-color: #3d8ba1; }
+:root[data-theme="light"] .timer-create-form label, :root[data-theme="light"] .timer-edit-form label { color: #526872; }
+:root[data-theme="light"] .timer-form-hint { color: #647a85; }
+:root[data-theme="light"] .timer-form-hint.error { color: #b0574a; }
+:root[data-theme="light"] .timer-edit-cancel:hover { color: #263b43; background: #eef4f6; }
+:root[data-theme="light"] .timer-create-submit { background: #2d8068; color: #ffffff; }
+:root[data-theme="light"] .timer-create-submit:not(:disabled):hover { background: #256e59; }
 :root[data-theme="light"] .timer-toggle { background: #eef2f5; color: #4d5f6a; border-color: #c6d2da; }
 .toolrepo-header-button:hover .toolrepo-header-count, .toolrepo-header-button.selected .toolrepo-header-count { color: currentColor; }
 .toolrepo-header-button.count-pulse .toolrepo-header-count { animation: tool-count-pulse .7s ease-in-out 3; }
