@@ -3985,6 +3985,11 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
   border-color: #9aa8a2;
   color: #33413c;
 }
+/* Instant global tooltip for every native `title` attribute: browsers delay
+   native title bubbles ~1s; GlobalTitleTip captures hover/focus and shows the
+   same text immediately through this portal node. */
+.global-title-tip { position: fixed; z-index: 90; max-width: 340px; padding: 6px 9px; border: 1px solid #33473f99; border-radius: 7px; background: #1c2220f2; color: #cfd6db; font-size: 11px; line-height: 1.5; text-align: left; white-space: pre-line; word-break: break-word; box-shadow: 0 2px 10px #00000052; pointer-events: none; }
+:root[data-theme="light"] .global-title-tip { background: #ffffffef; border-color: #9aa8a2; color: #33413c; }
 .thread-working-core {
   position: relative;
   z-index: 1;

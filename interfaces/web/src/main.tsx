@@ -18957,8 +18957,175 @@ function InlineDecision({
   );
 }
 
+/* Instant global tooltip for every native `title` attribute in the app.
+   Browsers delay native title bubbles by roughly one second, which hides the
+   hints from users; GlobalTitleTip captures hover/focus on any element that
+   carries a `title`, temporarily removes the attribute so the native bubble
+   can never appear, and renders the same text immediately through a portal.
+   The attribute is restored whenever the tip hides. */
+const GLOBAL_TITLE_TIP_MARGIN = 8;
+const GLOBAL_TITLE_TIP_GAP = 8;
+
+function GlobalTitleTip() {
+  const [tip, setTip] = useState<{ text: string; rect: DOMRect } | null>(null);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const activeRef = useRef<{ el: Element; title: string } | null>(null);
+  const tipRef = useRef<HTMLDivElement | null>(null);
+
+  const deactivate = useCallback(() => {
+    const active = activeRef.current;
+    if (!active) return;
+    activeRef.current = null;
+    setTip(null);
+    setPos(null);
+    if (active.el.isConnected) active.el.setAttribute("title", active.title);
+  }, []);
+
+  const activate = useCallback((el: Element) => {
+    const active = activeRef.current;
+    if (active?.el === el) return;
+    if (active?.el.isConnected) active.el.setAttribute("title", active.title);
+    const title = el.getAttribute("title") ?? "";
+    if (!title.trim()) {
+      activeRef.current = null;
+      setTip(null);
+      setPos(null);
+      return;
+    }
+    el.removeAttribute("title");
+    activeRef.current = { el, title };
+    setTip({ text: title, rect: el.getBoundingClientRect() });
+  }, []);
+
+  useEffect(() => {
+    const titleHolder = (node: EventTarget | null): Element | null =>
+      node instanceof Element ? node.closest("[title]") : null;
+
+    const onPointerOver = (event: PointerEvent) => {
+      const active = activeRef.current;
+      if (
+        active &&
+        event.target instanceof Node &&
+        (event.target === active.el || active.el.contains(event.target))
+      ) {
+        // Still inside the active element: keep the current tip.
+        return;
+      }
+      const el = titleHolder(event.target);
+      if (el) activate(el);
+    };
+    const onPointerOut = (event: PointerEvent) => {
+      const active = activeRef.current;
+      if (!active) return;
+      const left = event.target;
+      if (left !== active.el && !(left instanceof Node && active.el.contains(left))) return;
+      const next = event.relatedTarget;
+      if (next instanceof Node && active.el.contains(next)) return;
+      deactivate();
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      const active = activeRef.current;
+      if (!active) return;
+      if (!active.el.isConnected) {
+        deactivate();
+        return;
+      }
+      const r = active.el.getBoundingClientRect();
+      if (
+        event.clientX < r.left - 1 ||
+        event.clientX > r.right + 1 ||
+        event.clientY < r.top - 1 ||
+        event.clientY > r.bottom + 1
+      ) {
+        deactivate();
+        return;
+      }
+      // React re-renders may rewrite `title` while hovering; keep it removed
+      // so the delayed native bubble can never fight the instant one.
+      if (active.el.hasAttribute("title")) active.el.removeAttribute("title");
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      const el = titleHolder(event.target);
+      if (el) activate(el);
+    };
+    const onFocusOut = (event: FocusEvent) => {
+      const active = activeRef.current;
+      if (!active) return;
+      if (
+        event.target !== active.el &&
+        !(event.target instanceof Node && active.el.contains(event.target))
+      ) {
+        return;
+      }
+      if (event.relatedTarget instanceof Node && active.el.contains(event.relatedTarget)) return;
+      deactivate();
+    };
+    const hideForViewportChange = () => {
+      if (activeRef.current) deactivate();
+    };
+
+    document.addEventListener("pointerover", onPointerOver, true);
+    document.addEventListener("pointerout", onPointerOut, true);
+    document.addEventListener("pointermove", onPointerMove, true);
+    document.addEventListener("focusin", onFocusIn, true);
+    document.addEventListener("focusout", onFocusOut, true);
+    document.addEventListener("scroll", hideForViewportChange, true);
+    window.addEventListener("resize", hideForViewportChange);
+    window.addEventListener("blur", hideForViewportChange);
+    return () => {
+      deactivate();
+      document.removeEventListener("pointerover", onPointerOver, true);
+      document.removeEventListener("pointerout", onPointerOut, true);
+      document.removeEventListener("pointermove", onPointerMove, true);
+      document.removeEventListener("focusin", onFocusIn, true);
+      document.removeEventListener("focusout", onFocusOut, true);
+      document.removeEventListener("scroll", hideForViewportChange, true);
+      window.removeEventListener("resize", hideForViewportChange);
+      window.removeEventListener("blur", hideForViewportChange);
+    };
+  }, [activate, deactivate]);
+
+  useLayoutEffect(() => {
+    if (!tip) return;
+    const node = tipRef.current;
+    if (!node) return;
+    const m = GLOBAL_TITLE_TIP_MARGIN;
+    const gap = GLOBAL_TITLE_TIP_GAP;
+    const tw = node.offsetWidth;
+    const th = node.offsetHeight;
+    let left = tip.rect.left + tip.rect.width / 2 - tw / 2;
+    left = Math.min(Math.max(left, m), Math.max(m, window.innerWidth - m - tw));
+    let top = tip.rect.top - gap - th;
+    if (top < m) top = tip.rect.bottom + gap;
+    if (top + th > window.innerHeight - m) top = Math.max(m, window.innerHeight - m - th);
+    setPos({ left, top });
+  }, [tip]);
+
+  if (!tip) return null;
+  return createPortal(
+    <div
+      ref={tipRef}
+      className="global-title-tip"
+      role="tooltip"
+      style={
+        pos
+          ? { left: pos.left, top: pos.top, visibility: "visible" }
+          : { left: -10000, top: -10000, visibility: "hidden" }
+      }
+    >
+      {tip.text}
+    </div>,
+    document.body,
+  );
+}
+
 export default function Root() {
-  return <TimemApp />;
+  return (
+    <>
+      <GlobalTitleTip />
+      <TimemApp />
+    </>
+  );
 }
 
 import { createRoot } from "react-dom/client";
