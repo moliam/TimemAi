@@ -13237,6 +13237,16 @@ function HeaderContextUsage({
             )}
           </span>
         )}
+        <span className="header-model-speed" title={t("usage.speedTitle")}>
+          <Gauge size={12} strokeWidth={1.8} aria-hidden="true" />
+          <span>{speedLabel}</span>
+          <span className="header-telemetry-unit">Tokens/sec</span>
+        </span>
+        <span className="header-ttft" title={t("usage.ttftTitle", { count: telemetry?.samples ?? 0 })}>
+          <span>TTFT</span>
+          <span>{ttftLabel}</span>
+        </span>
+        <span className="header-context-secondary">
         <span className="header-cache-token header-usage-llm" title={t("completion.llmCallsTitle")}>
           <Sparkles size={12} strokeWidth={1.8} aria-hidden="true" />
           {formatTokensCoarse(runtimeTotals?.llm_calls) ?? "0"}
@@ -13261,14 +13271,6 @@ function HeaderContextUsage({
           <Wrench size={12} strokeWidth={1.8} aria-hidden="true" />
           {formatTokensCoarse(runtimeTotals?.tool_calls) ?? "0"}
         </span>
-        <span className="header-model-speed" title={t("usage.speedTitle")}>
-          <Gauge size={12} strokeWidth={1.8} aria-hidden="true" />
-          <span>{speedLabel}</span>
-          <span className="header-telemetry-unit">Tokens/sec</span>
-        </span>
-        <span className="header-ttft" title={t("usage.ttftTitle", { count: telemetry?.samples ?? 0 })}>
-          <span>TTFT</span>
-          <span>{ttftLabel}</span>
         </span>
       </span>
     </span>

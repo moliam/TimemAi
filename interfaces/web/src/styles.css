@@ -1331,6 +1331,7 @@ button:disabled { cursor: not-allowed; }
 .header-model { flex: 0 1 auto; }
 .header-context { min-width: 0; display: grid; align-items: center; gap: 2px; }
 .header-context-main { min-width: 0; display: inline-flex; align-items: center; gap: 6px; }
+.header-context-secondary { min-width: 0; display: inline-flex; align-items: center; gap: 6px; }
 .header-model-speed, .header-ttft {
   display: inline-flex;
   align-items: center;
