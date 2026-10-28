@@ -751,6 +751,11 @@ struct WebSessionRuntime {
     model_endpoint_ids: Vec<String>,
     /// Session-only choice layered over compatible endpoint route snapshots.
     reasoning_effort_override: Option<String>,
+    /// Per-endpoint session reasoning selections keyed by endpoint id; they
+    /// take precedence over the session-wide override.
+    endpoint_reasoning_efforts: BTreeMap<String, String>,
+    /// Per-endpoint session input-token window overrides keyed by endpoint id.
+    endpoint_max_input_tokens: BTreeMap<String, u32>,
     settings: RuntimeSettings,
     env: BTreeMap<String, String>,
     env_overrides: BTreeMap<String, String>,
@@ -767,6 +772,10 @@ struct WebSessionRuntimeProfile {
     model_endpoint_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    endpoint_reasoning_efforts: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    endpoint_max_input_tokens: BTreeMap<String, u32>,
     model: String,
     api_protocol: String,
     response_protocol: String,
@@ -1558,6 +1567,16 @@ enum ClientCommand {
         session_id: String,
         reasoning_effort: String,
     },
+    SessionEndpointReasoningEffortUpdate {
+        session_id: String,
+        endpoint_id: String,
+        reasoning_effort: String,
+    },
+    SessionEndpointMaxInputTokensUpdate {
+        session_id: String,
+        endpoint_id: String,
+        max_input_tokens: Option<u32>,
+    },
     ModelEndpointShareExport {
         request_id: String,
         endpoint_id: String,
@@ -1724,6 +1743,8 @@ impl ClientCommand {
             | Self::TopicReply { session_id, .. }
             | Self::SessionRuntimeUpdate { session_id, .. }
             | Self::SessionReasoningEffortUpdate { session_id, .. }
+            | Self::SessionEndpointReasoningEffortUpdate { session_id, .. }
+            | Self::SessionEndpointMaxInputTokensUpdate { session_id, .. }
             | Self::ModelEndpointApply { session_id, .. }
             | Self::ModelEndpointChainApply { session_id, .. }
             | Self::McpSessionToggle { session_id, .. }
@@ -4830,6 +4851,45 @@ fn handle_command_with_id(
                 },
             );
         }
+        ClientCommand::SessionEndpointReasoningEffortUpdate {
+            session_id,
+            endpoint_id,
+            reasoning_effort,
+        } => {
+            let reasoning_effort = nonempty_text(reasoning_effort, "reasoning effort")?;
+            let runtime_profile = update_session_endpoint_reasoning_effort(
+                state,
+                &session_id,
+                &endpoint_id,
+                &reasoning_effort,
+            )?;
+            publish_semantic(
+                state,
+                WireEvent::SessionRuntimeUpdated {
+                    session_id,
+                    runtime_profile,
+                },
+            );
+        }
+        ClientCommand::SessionEndpointMaxInputTokensUpdate {
+            session_id,
+            endpoint_id,
+            max_input_tokens,
+        } => {
+            let runtime_profile = update_session_endpoint_max_input_tokens(
+                state,
+                &session_id,
+                &endpoint_id,
+                max_input_tokens,
+            )?;
+            publish_semantic(
+                state,
+                WireEvent::SessionRuntimeUpdated {
+                    session_id,
+                    runtime_profile,
+                },
+            );
+        }
         ClientCommand::ModelEndpointShareExport {
             request_id,
             endpoint_id,
@@ -6038,6 +6098,8 @@ fn create_session_in_group(
         active_model_endpoint_id: None,
         model_endpoint_ids: Vec::new(),
         reasoning_effort_override: None,
+        endpoint_reasoning_efforts: BTreeMap::new(),
+        endpoint_max_input_tokens: BTreeMap::new(),
         settings,
         env: session_env,
         env_overrides,
@@ -6669,6 +6731,8 @@ fn restore_stored_session(
         active_model_endpoint_id: stored.model_endpoint_id.clone(),
         model_endpoint_ids: stored.model_endpoint_ids.clone(),
         reasoning_effort_override: stored.reasoning_effort_override.clone(),
+        endpoint_reasoning_efforts: stored.endpoint_reasoning_efforts.clone(),
+        endpoint_max_input_tokens: stored.endpoint_max_input_tokens.clone(),
         settings,
         env: session_env,
         env_overrides: stored.env_overrides.clone().unwrap_or_default(),
@@ -8669,6 +8733,8 @@ fn stored_session_from_web_session_with_store(
         model_endpoint_id: session.runtime.model_endpoint_id.clone(),
         model_endpoint_ids: session.runtime.model_endpoint_ids.clone(),
         reasoning_effort_override: session.runtime.reasoning_effort_override.clone(),
+        endpoint_reasoning_efforts: session.runtime.endpoint_reasoning_efforts.clone(),
+        endpoint_max_input_tokens: session.runtime.endpoint_max_input_tokens.clone(),
         session_id: session.session_id.clone(),
         display_name: session.display_name.clone(),
         created_at_ms: session
@@ -10728,15 +10794,50 @@ fn apply_session_reasoning_override(
     }
 }
 
+/// Effective session reasoning selection for one endpoint: the per-endpoint
+/// override wins, then falls back to the session-wide choice.
+fn session_endpoint_reasoning_override<'a>(
+    runtime: &'a WebSessionRuntime,
+    endpoint_id: &str,
+) -> Option<&'a str> {
+    runtime
+        .endpoint_reasoning_efforts
+        .get(endpoint_id)
+        .map(String::as_str)
+        .or(runtime.reasoning_effort_override.as_deref())
+}
+
+/// Per-endpoint session input-token window; keeps the projected endpoint
+/// default when no session override exists.
+fn apply_session_endpoint_input_override(
+    config: &mut ModelServiceConfig,
+    runtime: &WebSessionRuntime,
+    endpoint_id: &str,
+) {
+    if let Some(tokens) = runtime.endpoint_max_input_tokens.get(endpoint_id) {
+        config.max_llm_input_tokens = *tokens;
+    }
+}
+
 fn model_endpoint_session_candidate(
     session: &WebSession,
     endpoint: &ModelEndpointConfig,
 ) -> Result<WebSession, String> {
     let mut candidate = session.clone();
     project_endpoint_onto_config(&mut candidate.runtime.settings.config, endpoint)?;
+    let max_input_override = candidate
+        .runtime
+        .endpoint_max_input_tokens
+        .get(&endpoint.id)
+        .copied();
+    let reasoning_override =
+        session_endpoint_reasoning_override(&candidate.runtime, &endpoint.id).map(str::to_string);
+    if let Some(tokens) = max_input_override {
+        candidate.runtime.settings.config.max_llm_input_tokens = tokens;
+    }
     apply_session_reasoning_override(
         &mut candidate.runtime.settings.config,
-        candidate.runtime.reasoning_effort_override.as_deref(),
+        reasoning_override.as_deref(),
     );
 
     candidate.runtime.model_endpoint_id = Some(endpoint.id.clone());
@@ -10791,9 +10892,10 @@ fn worker_model_service_route_for_session(
             .ok_or_else(|| "model_endpoint_not_found".to_string())?;
         let mut fallback = config.clone();
         project_endpoint_onto_config(&mut fallback, endpoint)?;
+        apply_session_endpoint_input_override(&mut fallback, &session.runtime, endpoint_id);
         apply_session_reasoning_override(
             &mut fallback,
-            session.runtime.reasoning_effort_override.as_deref(),
+            session_endpoint_reasoning_override(&session.runtime, endpoint_id),
         );
         failover.push(fallback);
     }
@@ -10968,9 +11070,10 @@ fn apply_model_endpoint_chain(
         }
         let mut config = base_config.clone();
         project_endpoint_onto_config(&mut config, endpoint)?;
+        apply_session_endpoint_input_override(&mut config, &candidate.runtime, &endpoint.id);
         apply_session_reasoning_override(
             &mut config,
-            candidate.runtime.reasoning_effort_override.as_deref(),
+            session_endpoint_reasoning_override(&candidate.runtime, &endpoint.id),
         );
         failover.push(config);
     }
@@ -11060,7 +11163,7 @@ fn update_session_reasoning_effort(
     };
     apply_session_reasoning_override(
         &mut active_config,
-        candidate.runtime.reasoning_effort_override.as_deref(),
+        session_endpoint_reasoning_override(&candidate.runtime, &active_endpoint.id),
     );
     candidate.runtime.settings.config = active_config;
     candidate
@@ -11100,6 +11203,182 @@ fn update_session_reasoning_effort(
         applied.push(handle.clone());
     }
     commit_model_endpoint_candidate(state, session_id, candidate, previous_route, &applied)
+}
+
+/// Shared apply path for per-endpoint session overrides: refreshes the live
+/// route of the targeted endpoint when it is active and persists the updated
+/// runtime. The override must target an endpoint in the session chain.
+fn update_session_endpoint_override(
+    state: &AppState,
+    session_id: &str,
+    endpoint_id: &str,
+    mutate: impl FnOnce(&mut WebSession) -> Result<(), String>,
+) -> Result<WebSessionRuntimeProfile, String> {
+    let endpoint_id = endpoint_id.to_string();
+    let (mut candidate, previous_route, active_endpoint) = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions.get(session_id).ok_or("session_not_found")?;
+        if !session.runtime.model_endpoint_ids.contains(&endpoint_id) {
+            return Err("session_model_endpoint_not_in_chain".to_string());
+        }
+        let active_id = session
+            .runtime
+            .active_model_endpoint_id
+            .as_deref()
+            .or(session.runtime.model_endpoint_id.as_deref())
+            .ok_or("session_model_endpoint_not_bound")?;
+        let endpoint = state
+            .mem
+            .lock()
+            .map_err(|_| "mem_state_poisoned".to_string())?
+            .model_endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == active_id)
+            .cloned()
+            .ok_or("model_endpoint_not_found")?;
+        (
+            session.clone(),
+            worker_model_service_route_for_session(state, session)?,
+            endpoint,
+        )
+    };
+
+    mutate(&mut candidate)?;
+
+    // Re-project the live config when the override targets the active route so
+    // the change takes effect before the next model API request.
+    let active_id = candidate
+        .runtime
+        .active_model_endpoint_id
+        .as_deref()
+        .or(candidate.runtime.model_endpoint_id.as_deref());
+    if active_id == Some(endpoint_id.as_str()) {
+        let mut active_config = candidate.runtime.settings.config.clone();
+        project_endpoint_onto_config(&mut active_config, &active_endpoint)?;
+        apply_session_endpoint_input_override(&mut active_config, &candidate.runtime, &endpoint_id);
+        apply_session_reasoning_override(
+            &mut active_config,
+            session_endpoint_reasoning_override(&candidate.runtime, &endpoint_id),
+        );
+        candidate.runtime.settings.config = active_config;
+        candidate
+            .runtime
+            .env
+            .extend(session_cached_env_values(&candidate.runtime.settings));
+    }
+    candidate.max_llm_input_tokens = candidate.runtime.settings.config.max_llm_input_tokens;
+    candidate.runtime_profile = WebSessionRuntimeProfile::from_runtime(&candidate.runtime);
+    let next_route = worker_model_service_route_for_session(state, &candidate)?;
+
+    let worker_ids = session_worker_ids(state, session_id)?;
+    let handles = {
+        let manager = state
+            .manager
+            .lock()
+            .map_err(|_| "worker_manager_poisoned".to_string())?;
+        worker_ids
+            .iter()
+            .map(|worker_id| {
+                manager
+                    .handle(worker_id)
+                    .ok_or_else(|| "session_worker_not_found".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut applied = Vec::new();
+    for handle in &handles {
+        if let Err(error) = handle.replace_model_service_config_with_failover(
+            next_route.config.clone(),
+            next_route.failover.clone(),
+        ) {
+            return Err(endpoint_apply_error_with_rollback(
+                &applied,
+                &previous_route,
+                error,
+            ));
+        }
+        applied.push(handle.clone());
+    }
+    commit_model_endpoint_candidate(state, session_id, candidate, previous_route, &applied)
+}
+
+/// Per-endpoint session reasoning effort. An empty selection clears the
+/// per-endpoint override so the endpoint falls back to the session-wide
+/// choice, mirroring `update_session_reasoning_effort`.
+fn update_session_endpoint_reasoning_effort(
+    state: &AppState,
+    session_id: &str,
+    endpoint_id: &str,
+    reasoning_effort: &str,
+) -> Result<WebSessionRuntimeProfile, String> {
+    let effort = reasoning_effort.trim().to_string();
+    let endpoint_id_owned = endpoint_id.to_string();
+    update_session_endpoint_override(state, session_id, endpoint_id, |candidate| {
+        let clear_override = effort.is_empty();
+        if !clear_override {
+            // Validate against a freshly projected config for this endpoint.
+            let endpoint = state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .model_endpoints
+                .iter()
+                .find(|endpoint| endpoint.id == endpoint_id_owned.as_str())
+                .cloned()
+                .ok_or("model_endpoint_not_found")?;
+            let mut projected = candidate.runtime.settings.config.clone();
+            project_endpoint_onto_config(&mut projected, &endpoint)?;
+            if !supported_reasoning_levels(&projected).contains(&effort) {
+                return Err("session_reasoning_effort_unsupported".to_string());
+            }
+        }
+        if clear_override {
+            candidate
+                .runtime
+                .endpoint_reasoning_efforts
+                .remove(&endpoint_id_owned);
+        } else {
+            candidate
+                .runtime
+                .endpoint_reasoning_efforts
+                .insert(endpoint_id_owned, effort.clone());
+        }
+        Ok(())
+    })
+}
+
+/// Per-endpoint session input-token window. `None` clears the override so the
+/// endpoint falls back to its configured default.
+fn update_session_endpoint_max_input_tokens(
+    state: &AppState,
+    session_id: &str,
+    endpoint_id: &str,
+    max_input_tokens: Option<u32>,
+) -> Result<WebSessionRuntimeProfile, String> {
+    if max_input_tokens == Some(0) {
+        return Err("session_max_input_tokens_invalid".to_string());
+    }
+    let endpoint_id_owned = endpoint_id.to_string();
+    update_session_endpoint_override(state, session_id, endpoint_id, |candidate| {
+        match max_input_tokens {
+            Some(tokens) => {
+                candidate
+                    .runtime
+                    .endpoint_max_input_tokens
+                    .insert(endpoint_id_owned, tokens);
+            }
+            None => {
+                candidate
+                    .runtime
+                    .endpoint_max_input_tokens
+                    .remove(&endpoint_id_owned);
+            }
+        }
+        Ok(())
+    })
 }
 
 /// Removes any endpoint binding and restores the template default
@@ -15503,6 +15782,8 @@ impl WebSessionRuntimeProfile {
         profile.model_endpoint_id = runtime.model_endpoint_id.clone();
         profile.active_model_endpoint_id = runtime.active_model_endpoint_id.clone();
         profile.model_endpoint_ids = runtime.model_endpoint_ids.clone();
+        profile.endpoint_reasoning_efforts = runtime.endpoint_reasoning_efforts.clone();
+        profile.endpoint_max_input_tokens = runtime.endpoint_max_input_tokens.clone();
         profile
     }
 
@@ -15511,6 +15792,8 @@ impl WebSessionRuntimeProfile {
             model_endpoint_id: None,
             active_model_endpoint_id: None,
             model_endpoint_ids: Vec::new(),
+            endpoint_reasoning_efforts: BTreeMap::new(),
+            endpoint_max_input_tokens: BTreeMap::new(),
             reasoning_effort: settings.config.openai_compatible.reasoning_effort.clone(),
             model: settings.config.model.clone(),
             api_protocol: settings.config.api_protocol.label().to_string(),

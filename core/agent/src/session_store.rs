@@ -25,6 +25,12 @@ pub struct StoredSession {
     /// Session-only reasoning selection. It never mutates a shared endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort_override: Option<String>,
+    /// Per-endpoint session reasoning selections keyed by endpoint id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub endpoint_reasoning_efforts: BTreeMap<String, String>,
+    /// Per-endpoint session input-token window overrides keyed by endpoint id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub endpoint_max_input_tokens: BTreeMap<String, u32>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub current_dir: String,
@@ -1540,6 +1546,8 @@ pub fn new_stored_session(
         model_endpoint_id: None,
         model_endpoint_ids: Vec::new(),
         reasoning_effort_override: None,
+        endpoint_reasoning_efforts: BTreeMap::new(),
+        endpoint_max_input_tokens: BTreeMap::new(),
         session_id: session_id.into(),
         display_name: display_name.into(),
         created_at_ms: now,

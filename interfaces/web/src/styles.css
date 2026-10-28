@@ -2079,6 +2079,11 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: var(--ma
 .endpoint-chain-protocol { display: inline-flex; align-items: center; vertical-align: -1px; }
 .endpoint-chain-protocol svg { display: block; }
 .endpoint-chain-token-cap { font-variant-numeric: tabular-nums; }
+.endpoint-chain-tuning { display: flex; gap: 4px; align-items: center; }
+.endpoint-chain-effort { min-width: 0; max-width: 96px; min-height: 22px; font-size: 10.5px; border: 1px solid #35505b; border-radius: 4px; background: #0d1b22; color: var(--management-text); padding: 1px 3px; }
+.endpoint-chain-maxinput { width: 76px; min-height: 22px; font-size: 10.5px; border: 1px solid #35505b; border-radius: 4px; background: #0d1b22; color: var(--management-text); padding: 1px 5px; font-variant-numeric: tabular-nums; }
+.endpoint-chain-effort:focus, .endpoint-chain-maxinput:focus { border-color: #4a9c8a; outline: none; }
+:root[data-theme="light"] .endpoint-chain-effort, :root[data-theme="light"] .endpoint-chain-maxinput { border-color: #bfd0d6; background: #f7fafb; }
 .endpoint-chain-grip { flex: none; color: #7d95a3; cursor: grab; display: grid; place-items: center; touch-action: none; border: 0; background: transparent; padding: 2px; border-radius: 4px; }
 .endpoint-chain-grip:hover { color: #b7cedb; }
 .endpoint-chain-remove { flex: none; border: 0; background: transparent; color: #93a7b3; display: grid; place-items: center; padding: 3px; border-radius: 4px; }

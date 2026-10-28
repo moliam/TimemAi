@@ -5158,6 +5158,24 @@ function TimemApp() {
                   endpoint_ids: endpointIds,
                 });
               }}
+              onEndpointReasoning={(endpointId, effort) => {
+                if (!activeSession) return;
+                sendCommand({
+                  type: "session_endpoint_reasoning_effort_update",
+                  session_id: activeSession.session_id,
+                  endpoint_id: endpointId,
+                  reasoning_effort: effort,
+                });
+              }}
+              onEndpointMaxInput={(endpointId, tokens) => {
+                if (!activeSession) return;
+                sendCommand({
+                  type: "session_endpoint_max_input_tokens_update",
+                  session_id: activeSession.session_id,
+                  endpoint_id: endpointId,
+                  max_input_tokens: tokens,
+                });
+              }}
               onRefreshAvailability={() => {
                 sendCommand({ type: "model_endpoint_availability_refresh" });
               }}
@@ -16571,12 +16589,22 @@ function SortableEndpointChainRow({
   nextPreferred,
   working,
   onRemove,
+  reasoningValue,
+  reasoningOptions,
+  maxInputValue,
+  onReasoningChange,
+  onMaxInputCommit,
 }: {
   endpoint: ModelEndpoint;
   current: boolean;
   nextPreferred: boolean;
   working: boolean;
   onRemove: (endpointId: string) => void;
+  reasoningValue: string;
+  reasoningOptions: string[];
+  maxInputValue: string;
+  onReasoningChange: (endpointId: string, effort: string) => void;
+  onMaxInputCommit: (endpointId: string, tokens: number | null) => void;
 }) {
   useT();
   const sortable = useSortable({ id: endpoint.id });
@@ -16607,6 +16635,50 @@ function SortableEndpointChainRow({
         <small>
           {endpoint.model} · {apiProtocolShort(endpoint.api_protocol)}
         </small>
+        <span className="endpoint-chain-tuning">
+          <select
+            className="endpoint-chain-effort"
+            aria-label={t("endpoints.chainEffortLabel")}
+            title={t("endpoints.chainEffortLabel")}
+            value={reasoningValue}
+            onChange={(event) =>
+              onReasoningChange(endpoint.id, event.target.value)
+            }
+          >
+            <option value="">{t("endpoints.chainEffortDefault")}</option>
+            {reasoningOptions.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+          </select>
+          <input
+            type="number"
+            className="endpoint-chain-maxinput"
+            aria-label={t("endpoints.chainMaxInputLabel")}
+            title={t("endpoints.chainMaxInputLabel")}
+            min={1}
+            step={1}
+            defaultValue={maxInputValue}
+            key={`${endpoint.id}:${maxInputValue}`}
+            onBlur={(event) => {
+              const raw = event.target.value.trim();
+              if (raw === "") {
+                onMaxInputCommit(endpoint.id, null);
+                return;
+              }
+              const parsed = Number(raw);
+              if (Number.isInteger(parsed) && parsed >= 1) {
+                onMaxInputCommit(endpoint.id, parsed);
+              } else {
+                event.target.value = maxInputValue;
+              }
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") event.currentTarget.blur();
+            }}
+          />
+        </span>
       </span>
       {(working ? current : nextPreferred) && (
         <span className="endpoint-chain-active-badge">
@@ -16637,6 +16709,8 @@ function ModelEndpointPanel({
   onEdit,
   onApply,
   onRefreshAvailability,
+  onEndpointReasoning,
+  onEndpointMaxInput,
 }: {
   panelRef: MutableRefObject<HTMLElement | null>;
   server: Snapshot["server"] | null;
@@ -16644,10 +16718,16 @@ function ModelEndpointPanel({
   onEdit: () => void;
   onApply: (endpointIds: string[]) => void;
   onRefreshAvailability: () => void;
+  onEndpointReasoning: (endpointId: string, effort: string) => void;
+  onEndpointMaxInput: (endpointId: string, tokens: number | null) => void;
 }) {
   useT();
   const endpoints = server?.model_endpoints ?? [];
   const boundChain = session?.runtime_profile?.model_endpoint_ids ?? [];
+  const endpointReasoningEfforts =
+    session?.runtime_profile?.endpoint_reasoning_efforts ?? {};
+  const endpointMaxInputTokens =
+    session?.runtime_profile?.endpoint_max_input_tokens ?? {};
   const [chain, setChain] = useState<string[]>(boundChain);
   const boundChainKey = boundChain.join(",");
   useEffect(() => {
@@ -16843,6 +16923,19 @@ function ModelEndpointPanel({
                       nextPreferred={endpoint.id === nextEndpointId}
                       working={working}
                       onRemove={toggleChainMember}
+                      reasoningValue={
+                        endpointReasoningEfforts[endpoint.id] ?? ""
+                      }
+                      reasoningOptions={sessionReasoningOptions(
+                        endpoint,
+                        server?.model_catalog ?? [],
+                      )}
+                      maxInputValue={String(
+                        endpointMaxInputTokens[endpoint.id] ??
+                          endpoint.max_llm_input_tokens,
+                      )}
+                      onReasoningChange={onEndpointReasoning}
+                      onMaxInputCommit={onEndpointMaxInput}
                     />
                   ))}
                 </div>

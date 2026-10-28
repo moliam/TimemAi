@@ -166,6 +166,10 @@ export type Session = {
     /** Host-observed route for the current request; pending snapshots apply before the next model API request. */
     active_model_endpoint_id?: string | null;
     model_endpoint_ids?: string[];
+    /** Per-endpoint session reasoning selections keyed by endpoint id. */
+    endpoint_reasoning_efforts?: Record<string, string>;
+    /** Per-endpoint session input-token window overrides keyed by endpoint id. */
+    endpoint_max_input_tokens?: Record<string, number>;
     reasoning_effort?: string | null;
     model: string;
     api_protocol: string;
@@ -905,6 +909,18 @@ export type ClientCommand =
       type: "session_reasoning_effort_update";
       session_id: string;
       reasoning_effort: string;
+    }
+  | {
+      type: "session_endpoint_reasoning_effort_update";
+      session_id: string;
+      endpoint_id: string;
+      reasoning_effort: string;
+    }
+  | {
+      type: "session_endpoint_max_input_tokens_update";
+      session_id: string;
+      endpoint_id: string;
+      max_input_tokens: number | null;
     }
   | {
       type: "model_endpoint_upsert";

@@ -674,6 +674,8 @@ fn new_shell_session(
         model_endpoint_id: None,
         model_endpoint_ids: Vec::new(),
         reasoning_effort_override: None,
+        endpoint_reasoning_efforts: BTreeMap::new(),
+        endpoint_max_input_tokens: BTreeMap::new(),
         session_id: session_id.clone(),
         display_name: "ShellSession".to_string(),
         group_id: None,
