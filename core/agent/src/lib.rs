@@ -212,12 +212,13 @@ use response_protocol::{
     ActionGroupOrder, ParsedAction, ParsedActionGroup, ParsedContextCompress, ParsedEnvelope,
 };
 pub use retry_policy::{
-    is_explicit_native_tools_unsupported, is_model_input_too_large_error,
-    is_model_rate_limited_error, is_retryable_model_system_error, model_failover_failure_threshold,
-    model_failover_strike_delay, model_retry_decision, ModelCallOutcome, ModelRetryDecision,
-    ModelSystemRetryPolicy, DEFAULT_MODEL_SYSTEM_ERROR_RETRIES,
-    DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY, MODEL_ENDPOINT_FAILOVER_RATE_LIMIT_FAILURES,
-    MODEL_ENDPOINT_FAILOVER_RATE_LIMIT_STRIKE_DELAY, MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_FAILURES,
+    is_endpoint_unavailable_error, is_explicit_native_tools_unsupported,
+    is_model_input_too_large_error, is_model_rate_limited_error, is_retryable_model_system_error,
+    model_failover_failure_threshold, model_failover_strike_delay, model_retry_decision,
+    ModelCallOutcome, ModelRetryDecision, ModelSystemRetryPolicy,
+    DEFAULT_MODEL_SYSTEM_ERROR_RETRIES, DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY,
+    MODEL_ENDPOINT_FAILOVER_RATE_LIMIT_FAILURES, MODEL_ENDPOINT_FAILOVER_RATE_LIMIT_STRIKE_DELAY,
+    MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_FAILURES,
     MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_STRIKE_DELAY,
 };
 pub use runtime_context::{

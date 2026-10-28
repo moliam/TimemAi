@@ -7684,3 +7684,84 @@ fn exhausted_failover_chain_surfaces_model_error() {
     assert_eq!(outcome.stop_reason, Some(TurnStopReason::ModelError));
     assert!(model.calls >= 2, "primary and failover must both be tried");
 }
+
+struct MissingKeyFailoverModel {
+    broken_model: String,
+    healthy_model: String,
+    calls: Vec<String>,
+}
+
+impl ModelClient for MissingKeyFailoverModel {
+    fn call_model(
+        &mut self,
+        config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.calls.push(config.model.clone());
+        if config.model == self.broken_model {
+            Err("missing_api_key: set TIMEM_API_KEY or configure the Session API key".to_string())
+        } else if config.model == self.healthy_model {
+            Ok(llm(
+                r#"{"status":"ALL_FINISHED","final_answer":"failover answer"}"#,
+                1_000,
+                false,
+            ))
+        } else {
+            Err("model_http_500: unexpected endpoint".to_string())
+        }
+    }
+}
+
+#[test]
+fn missing_api_key_endpoint_switches_to_failover_immediately() {
+    let dir = tmp_dir("missing_key_failover");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    config.model = "endpoint-a".to_string();
+    let mut backup = test_config();
+    backup.model = "endpoint-b".to_string();
+    backup.interaction.model_endpoint_id = Some("endpoint-b-id".to_string());
+    let mut model = MissingKeyFailoverModel {
+        broken_model: "endpoint-a".to_string(),
+        healthy_model: "endpoint-b".to_string(),
+        calls: Vec::new(),
+    };
+    let mut ui = RetryRecordingUi::default();
+    let mut failover = vec![backup];
+
+    let outcome = run_session_turn_with_model_client_and_failover(
+        &mut core,
+        &mut config,
+        &mut failover,
+        TurnInput {
+            input: "run the task",
+            session: "missing_key_failover_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "failover answer");
+    // A missing credential is deterministic: the chain hands over after a
+    // single call instead of burning threshold strikes on the broken endpoint.
+    assert_eq!(model.calls, vec!["endpoint-a", "endpoint-b"]);
+    assert!(
+        failover.is_empty(),
+        "the failover entry must be consumed by the switch"
+    );
+    assert_eq!(config.model, "endpoint-b");
+    assert!(
+        ui.retries.is_empty(),
+        "missing-key failures must not record same-endpoint retries: {:?}",
+        ui.retries
+    );
+}

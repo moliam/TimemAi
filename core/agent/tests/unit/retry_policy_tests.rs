@@ -233,3 +233,22 @@ fn failover_failure_thresholds_match_tight_rate_limit_contract() {
         MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_STRIKE_DELAY
     );
 }
+
+#[test]
+fn missing_key_and_rejected_credential_mark_endpoint_unavailable() {
+    assert!(is_endpoint_unavailable_error(
+        "missing_api_key: set TIMEM_API_KEY or configure the Session API key"
+    ));
+    assert!(is_endpoint_unavailable_error(
+        "model_http_401: invalid credentials"
+    ));
+    assert!(!is_endpoint_unavailable_error(
+        "model_http_403: forbidden for this account"
+    ));
+    assert!(!is_endpoint_unavailable_error(
+        "model_http_429: rate limit exceeded"
+    ));
+    assert!(!is_endpoint_unavailable_error(
+        "model_network_error: connection reset"
+    ));
+}

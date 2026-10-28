@@ -144,6 +144,16 @@ pub fn is_retryable_model_system_error(error: &str) -> bool {
     false
 }
 
+/// Deterministic "this endpoint is currently unusable" failures: a missing
+/// credential or a rejected key cannot recover by waiting, so the ordered
+/// failover chain must hand over immediately. Kept separate from
+/// `is_retryable_model_system_error`, which also feeds same-endpoint retry
+/// decisions where burning attempts on a missing key would be pointless.
+pub fn is_endpoint_unavailable_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.starts_with("missing_api_key") || lower.starts_with("model_http_401")
+}
+
 fn is_legacy_response_header_transport_error(lower_error: &str) -> bool {
     // Older transport versions exposed send-time reqwest failures under the
     // generic request prefix. The stage is the stable semantic signal: request

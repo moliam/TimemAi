@@ -4,8 +4,8 @@ use crate::model_stream::{
 };
 use crate::turn_state::{allocate_turn_token, TurnProjectionState};
 use crate::{
-    append_audit_event, is_model_input_too_large_error, is_retryable_model_system_error,
-    model_failover_failure_threshold, model_failover_strike_delay,
+    append_audit_event, is_endpoint_unavailable_error, is_model_input_too_large_error,
+    is_retryable_model_system_error, model_failover_failure_threshold, model_failover_strike_delay,
     model_input_overflow_recovery_audit_event, model_retry_audit_event, model_retry_decision,
     normalize_user_supplements_with_context, ActionRuntime, AgentCore, CoreStep, CoreTopicEvent,
     HostDecisionRequest, HttpModelClient, LlmResponse, LongRunningCommandDecision,
@@ -771,7 +771,10 @@ fn run_session_turn_with_model_client_and_reminder_override(
                         // rate-limit quota windows, looser for transient system
                         // errors), switch and retry this round on the next
                         // endpoint.
-                        if !failover.is_empty() && is_retryable_model_system_error(&err) {
+                        if !failover.is_empty()
+                            && (is_retryable_model_system_error(&err)
+                                || is_endpoint_unavailable_error(&err))
+                        {
                             ui.on_core_topic_events(&[
                                 crate::host::model_endpoint_failover_topic_event(
                                     request.session,
@@ -1308,6 +1311,13 @@ fn call_model_with_system_retries(
                 }
                 if let Some(profiler) = profiler.as_deref_mut() {
                     profiler.record_model_wait(&config.model, &UsageStats::zero(), model_wait);
+                }
+                if failover_available && is_endpoint_unavailable_error(&err) {
+                    // A missing key or a rejected credential cannot recover by
+                    // waiting: hand the raw error to the caller so the ordered
+                    // failover chain takes over immediately instead of burning
+                    // threshold strikes on the same endpoint.
+                    return Err(err);
                 }
                 if failover_available && is_retryable_model_system_error(&err) {
                     // Threshold failover: rate-limit errors switch after a few
