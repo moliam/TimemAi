@@ -1703,7 +1703,9 @@ export function sessionRuntimeUsage(
   // Whole-history accounting, matching sessionModelTelemetry (speed & TTFT):
   // restored turns and pre-restart requests still describe real model work,
   // so the token/call readout stays consistent with the telemetry readout
-  // across runtime restarts instead of dropping to zero.
+  // across runtime restarts instead of dropping to zero. The dashboard reset
+  // button moves the boundary forward to start a fresh recording window.
+  const resetAtMs = session.telemetry_reset_at_ms ?? undefined;
   const total: import("./protocol").UsageStats = {};
   let found = false;
 
@@ -1718,7 +1720,8 @@ export function sessionRuntimeUsage(
   };
 
   for (const turn of session.turns) {
-    const live = turnLiveUsage(turn);
+    if (resetAtMs !== undefined && turn.created_at_ms < resetAtMs) continue;
+    const live = turnLiveUsageSince(turn, resetAtMs);
     if (live) {
       add(live.total);
       continue;
@@ -2245,8 +2248,10 @@ export function sessionModelTelemetry(session: Session): SessionModelTelemetry {
   let samples = 0;
   let ttftMean = 0;
   let ttftM2 = 0;
+  const resetAtMs = session.telemetry_reset_at_ms ?? undefined;
   for (const turn of session.turns) {
     for (const response of turn.events) {
+      if (resetAtMs !== undefined && response.created_at_ms < resetAtMs) continue;
       if (response.source !== "worker_activity" || response.payload.kind !== "model_response") continue;
       const round = finitePayloadNumber(response.payload, "round");
       if (round === undefined) continue;

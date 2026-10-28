@@ -773,6 +773,7 @@ export const zh = {
     latest: "Latest",
     kvc: "KVC",
     speedTitle: "输出 tokens（含 reasoning）÷ 模型请求耗时；不含本地工具时间",
+    resetTitle: "清零看板统计，重新记录",
     ttftTitle: "TTFT 平均值 ~总体标准差，{count} 个有效样本",
   },
   context: {

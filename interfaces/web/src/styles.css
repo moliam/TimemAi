@@ -1335,9 +1335,20 @@ button:disabled { cursor: not-allowed; }
 /* Final UI quality layer: stable type rhythm, bounded long content, and compact responsive controls. */
 .header-identity { flex: 1 1 auto; }
 .header-model { flex: 0 1 auto; }
-.header-context { min-width: 0; display: grid; align-items: center; gap: 2px; }
-.header-context-main { min-width: 0; display: inline-flex; align-items: center; gap: 6px; }
+.header-telemetry-board { min-width: 0; display: grid; grid-template-columns: auto auto; align-items: center; gap: 2px 8px; color: #677b86; font-size: 10px; font-weight: 650; }
+.header-telemetry-main { min-width: 0; display: inline-flex; align-items: center; gap: 6px; }
 .header-context-secondary { min-width: 0; display: inline-flex; align-items: center; gap: 6px; }
+.header-telemetry-board .header-context-secondary { grid-column: 1; }
+.header-telemetry-reset { grid-column: 2; grid-row: 1 / span 2; display: grid; place-items: center; width: 20px; height: 28px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: #7e908a; cursor: pointer; }
+.header-telemetry-reset:hover { color: #a9c3ce; border-color: #33505b; background: #132530; }
+:root[data-theme="light"] .header-telemetry-reset { color: #718791; }
+:root[data-theme="light"] .header-telemetry-reset:hover { border-color: #bfd0d6; background: #eef5f7; }
+.header-context-control { flex: none; display: inline-flex; align-items: center; gap: 6px; color: #677b86; font-size: 10px; font-weight: 650; }
+.header-context-control.warning { color: #b89157; }
+.header-context-control.critical { color: #c77c69; }
+:root[data-theme="light"] .header-context-control { color: #718791; }
+:root[data-theme="light"] .header-context-control.warning { color: #9a7334; }
+:root[data-theme="light"] .header-context-control.critical { color: #ad5145; }
 .header-model-speed, .header-ttft {
   display: inline-flex;
   align-items: center;
@@ -1536,7 +1547,7 @@ button:disabled { cursor: not-allowed; }
   .chat-header { gap: 6px; padding: 10px 12px; }
   .header-identity { gap: 5px; }
   .header-model { max-width: 144px; font-size: 14px; }
-  .header-context { gap: 4px; font-size: 9px; }
+  .header-telemetry-board, .header-context-control { gap: 4px; font-size: 9px; }
   .header-context-main > span:first-child { display: none; }
 
   .header-actions { gap: 2px; }

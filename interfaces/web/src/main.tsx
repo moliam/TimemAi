@@ -85,6 +85,7 @@ import {
   Plus,
   Minus,
   RefreshCw,
+  RotateCcw,
   Search,
   Send,
   Share2,
@@ -2133,6 +2134,16 @@ function TimemApp() {
                   context_cleared_at_ms: event.cleared_at_ms,
                   restored_context_prompt_tokens: null,
                 }
+              : session,
+          ),
+        );
+        return;
+      }
+      if (event.type === "session_usage_reset") {
+        setSessions((current) =>
+          current.map((session) =>
+            session.session_id === event.session_id
+              ? { ...session, telemetry_reset_at_ms: event.reset_at_ms }
               : session,
           ),
         );
@@ -4813,28 +4824,13 @@ function TimemApp() {
         <main className="chat-shell">
           <header className="chat-header">
             <div className="header-context-actions">
-              <HeaderContextUsage
+              <HeaderTelemetryBoard
                 session={activeSession}
-                onClear={
-                  activeSession && !sessionBusy
-                    ? () => {
-                        if (
-                          window.confirm(
-                            t("context.clearConfirm"),
-                          )
-                        )
-                          sendCommand({
-                            type: "session_clear_context",
-                            session_id: activeSession.session_id,
-                          });
-                      }
-                    : null
-                }
-                onCompact={
+                onReset={
                   activeSession
                     ? () =>
                         sendCommand({
-                          type: "session_request_context_compress",
+                          type: "session_usage_reset",
                           session_id: activeSession.session_id,
                         })
                     : null
@@ -4935,6 +4931,33 @@ function TimemApp() {
               </div>
             </div>
             <div className="header-actions">
+              <HeaderContextControl
+                session={activeSession}
+                onClear={
+                  activeSession && !sessionBusy
+                    ? () => {
+                        if (
+                          window.confirm(
+                            t("context.clearConfirm"),
+                          )
+                        )
+                          sendCommand({
+                            type: "session_clear_context",
+                            session_id: activeSession.session_id,
+                          });
+                      }
+                    : null
+                }
+                onCompact={
+                  activeSession
+                    ? () =>
+                        sendCommand({
+                          type: "session_request_context_compress",
+                          session_id: activeSession.session_id,
+                        })
+                    : null
+                }
+              />
               <button
                 type="button"
                 ref={mobileSessionButtonRef}
@@ -13124,7 +13147,85 @@ function FinalAnswerContent({ text, provisional = false, layoutKey, processSecti
   );
 }
 
-function HeaderContextUsage({
+function HeaderTelemetryBoard({
+  session,
+  onReset,
+}: {
+  session: Session | undefined;
+  onReset: (() => void) | null;
+}) {
+  useT();
+  const runtimeTotals = session ? sessionRuntimeUsage(session) : undefined;
+  const cacheHitPercent = session ? sessionCacheHitPercent(session) : undefined;
+  const telemetry = session ? sessionModelTelemetry(session) : undefined;
+  const cacheInputLabel = formatTokensCoarse(runtimeTotals?.prompt_tokens ?? 0) ?? "0";
+  const cacheOutputLabel = formatTokensCoarse(runtimeTotals?.completion_tokens ?? 0) ?? "0";
+  const cacheCachedLabel = formatTokensCoarse(runtimeTotals?.cached_tokens ?? 0) ?? "0";
+  const thinkLabel = formatTokensCoarse(runtimeTotals?.reasoning_tokens ?? 0) ?? "0";
+  const hitLabel = cacheHitPercent === undefined ? undefined : `${cacheHitPercent.toFixed(1)}%`;
+  const speedLabel = telemetry?.tokensPerSecond === undefined
+    ? "\u2014"
+    : telemetry.tokensPerSecond < 10
+      ? telemetry.tokensPerSecond.toFixed(1)
+      : Math.round(telemetry.tokensPerSecond).toLocaleString();
+  const ttftLabel = telemetry?.ttftMeanSeconds === undefined
+    ? "\u2014"
+    : `${telemetry.ttftMeanSeconds.toFixed(2)} ~${(telemetry.ttftStdDevSeconds ?? 0).toFixed(2)} sec`;
+  return (
+    <span className="header-telemetry-board">
+      <span className="header-telemetry-main">
+        <span className="header-model-speed" title={t("usage.speedTitle")}>
+          <Gauge size={12} strokeWidth={1.8} aria-hidden="true" />
+          <span>{speedLabel}</span>
+          <span className="header-telemetry-unit">Tokens/sec</span>
+        </span>
+        <span className="header-ttft" title={t("usage.ttftTitle", { count: telemetry?.samples ?? 0 })}>
+          <span>TTFT</span>
+          <span>{ttftLabel}</span>
+        </span>
+      </span>
+      <span className="header-context-secondary">
+        <span className="header-cache-token header-usage-llm" title={t("completion.llmCallsTitle")}>
+          <Sparkles size={12} strokeWidth={1.8} aria-hidden="true" />
+          {formatTokensCoarse(runtimeTotals?.llm_calls) ?? "0"}
+        </span>
+        <span className="header-cache-token header-cache-input" title={t("completion.inputTokensTitle")}>
+          <ArrowBigUp size={12} strokeWidth={1.8} />
+          {cacheInputLabel}
+          {!!runtimeTotals?.cached_tokens && (
+            <span className="header-usage-detail">
+              (cache {cacheCachedLabel}{hitLabel ? `, ${hitLabel}` : ""})
+            </span>
+          )}
+        </span>
+        <span className="header-cache-token header-cache-output" title={t("completion.outputTokensTitle")}>
+          <ArrowBigDown size={12} strokeWidth={1.8} />
+          {cacheOutputLabel}
+          {!!runtimeTotals?.reasoning_tokens && (
+            <span className="header-usage-detail">(think {thinkLabel})</span>
+          )}
+        </span>
+        <span className="header-cache-token header-usage-tools" title={t("completion.toolCallsTitle")}>
+          <Wrench size={12} strokeWidth={1.8} aria-hidden="true" />
+          {formatTokensCoarse(runtimeTotals?.tool_calls) ?? "0"}
+        </span>
+      </span>
+      {onReset && (
+        <button
+          type="button"
+          className="header-telemetry-reset"
+          title={t("usage.resetTitle")}
+          aria-label={t("usage.resetTitle")}
+          onClick={onReset}
+        >
+          <RotateCcw size={11} aria-hidden="true" />
+        </button>
+      )}
+    </span>
+  );
+}
+
+function HeaderContextControl({
   session,
   onClear,
   onCompact,
@@ -13133,6 +13234,7 @@ function HeaderContextUsage({
   onClear: (() => void) | null;
   onCompact: (() => void) | null;
 }) {
+  useT();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLSpanElement | null>(null);
   useEffect(() => {
@@ -13159,38 +13261,26 @@ function HeaderContextUsage({
     : 0;
   const level = ratio >= 90 ? "critical" : ratio >= 75 ? "warning" : "normal";
   const cachePercentLabel =
-    cacheHitPercent === undefined ? "cache: —" : `cache: ${cacheHitPercent.toFixed(1)}%`;
+    cacheHitPercent === undefined ? "cache: \u2014" : `cache: ${cacheHitPercent.toFixed(1)}%`;
   const cacheInputLabel = formatTokensCoarse(runtimeTotals?.prompt_tokens ?? 0) ?? "0";
   const cacheOutputLabel = formatTokensCoarse(runtimeTotals?.completion_tokens ?? 0) ?? "0";
-  const cacheCachedLabel = formatTokensCoarse(runtimeTotals?.cached_tokens ?? 0) ?? "0";
-  const thinkLabel = formatTokensCoarse(runtimeTotals?.reasoning_tokens ?? 0) ?? "0";
-  const hitLabel = cacheHitPercent === undefined ? undefined : `${cacheHitPercent.toFixed(1)}%`;
   const cacheLabel = cacheHitPercent === undefined
     ? cachePercentLabel
     : `${cachePercentLabel}, input: ${cacheInputLabel}, output: ${cacheOutputLabel}`;
   const cacheRateBasis =
     "Cache rate excludes the first model request after a detected runtime restart; input/output totals still include it.";
-  const telemetry = session ? sessionModelTelemetry(session) : undefined;
-  const speedLabel = telemetry?.tokensPerSecond === undefined
-    ? "—"
-    : telemetry.tokensPerSecond < 10
-      ? telemetry.tokensPerSecond.toFixed(1)
-      : Math.round(telemetry.tokensPerSecond).toLocaleString();
-  const ttftLabel = telemetry?.ttftMeanSeconds === undefined
-    ? "—"
-    : `${telemetry.ttftMeanSeconds.toFixed(2)} ~${(telemetry.ttftStdDevSeconds ?? 0).toFixed(2)} sec`;
   const contextUsageLabel = limit
-    ? `Context usage ${ratio}% · ${formatTokens(usage?.prompt_tokens ?? 0)} / ${formatTokens(limit)} input tokens · ${cacheLabel}. ${cacheRateBasis}`
-    : `Context usage waiting for runtime usage · ${cacheLabel}. ${cacheRateBasis}`;
+    ? `Context usage ${ratio}% \u00b7 ${formatTokens(usage?.prompt_tokens ?? 0)} / ${formatTokens(limit)} input tokens \u00b7 ${cacheLabel}. ${cacheRateBasis}`
+    : `Context usage waiting for runtime usage \u00b7 ${cacheLabel}. ${cacheRateBasis}`;
   return (
     <span
-      className={`header-context ${level}`}
+      className={`header-context-control ${level}`}
       title={contextUsageLabel}
       aria-label={contextUsageLabel}
     >
       <span className="header-context-main">
         <span aria-hidden="true">· ctx</span>
-        <span>{limit ? `${ratio}%/${formatTokens(limit)}` : "—"}</span>
+        <span>{limit ? `${ratio}%/${formatTokens(limit)}` : "\u2014"}</span>
         {(onClear || onCompact) && (
           <span className="context-actions-menu" ref={menuRef}>
             <button
@@ -13237,45 +13327,11 @@ function HeaderContextUsage({
             )}
           </span>
         )}
-        <span className="header-model-speed" title={t("usage.speedTitle")}>
-          <Gauge size={12} strokeWidth={1.8} aria-hidden="true" />
-          <span>{speedLabel}</span>
-          <span className="header-telemetry-unit">Tokens/sec</span>
-        </span>
-        <span className="header-ttft" title={t("usage.ttftTitle", { count: telemetry?.samples ?? 0 })}>
-          <span>TTFT</span>
-          <span>{ttftLabel}</span>
-        </span>
-      </span>
-      <span className="header-context-secondary">
-        <span className="header-cache-token header-usage-llm" title={t("completion.llmCallsTitle")}>
-          <Sparkles size={12} strokeWidth={1.8} aria-hidden="true" />
-          {formatTokensCoarse(runtimeTotals?.llm_calls) ?? "0"}
-        </span>
-        <span className="header-cache-token header-cache-input" title={t("completion.inputTokensTitle")}>
-          <ArrowBigUp size={12} strokeWidth={1.8} />
-          {cacheInputLabel}
-          {!!runtimeTotals?.cached_tokens && (
-            <span className="header-usage-detail">
-              (cache {cacheCachedLabel}{hitLabel ? `, ${hitLabel}` : ""})
-            </span>
-          )}
-        </span>
-        <span className="header-cache-token header-cache-output" title={t("completion.outputTokensTitle")}>
-          <ArrowBigDown size={12} strokeWidth={1.8} />
-          {cacheOutputLabel}
-          {!!runtimeTotals?.reasoning_tokens && (
-            <span className="header-usage-detail">(think {thinkLabel})</span>
-          )}
-        </span>
-        <span className="header-cache-token header-usage-tools" title={t("completion.toolCallsTitle")}>
-          <Wrench size={12} strokeWidth={1.8} aria-hidden="true" />
-          {formatTokensCoarse(runtimeTotals?.tool_calls) ?? "0"}
-        </span>
       </span>
     </span>
   );
 }
+
 
 function LiveTurnUsage({ turn }: { turn: WebTurn }) {
   const usage = turnLiveUsage(turn);

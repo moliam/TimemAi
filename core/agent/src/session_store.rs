@@ -31,6 +31,9 @@ pub struct StoredSession {
     /// Per-endpoint session input-token window overrides keyed by endpoint id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub endpoint_max_input_tokens: BTreeMap<String, u32>,
+    /// Usage/telemetry dashboard reset boundary (ms since epoch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry_reset_at_ms: Option<i64>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub current_dir: String,
@@ -1548,6 +1551,7 @@ pub fn new_stored_session(
         reasoning_effort_override: None,
         endpoint_reasoning_efforts: BTreeMap::new(),
         endpoint_max_input_tokens: BTreeMap::new(),
+        telemetry_reset_at_ms: None,
         session_id: session_id.into(),
         display_name: display_name.into(),
         created_at_ms: now,

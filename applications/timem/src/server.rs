@@ -688,6 +688,7 @@ struct WebSession {
     /// before it must not feed the ctx meter.
     #[serde(skip_serializing_if = "Option::is_none")]
     context_cleared_at_ms: Option<u128>,
+    telemetry_reset_at_ms: Option<u128>,
     /// Memo text saved in the restored prompt-context snapshot. A restart
     /// makes the memo inactive; this value only feeds the resume notice.
     #[serde(skip)]
@@ -928,6 +929,10 @@ enum WireEvent {
     SessionContextCleared {
         session_id: String,
         cleared_at_ms: u128,
+    },
+    SessionUsageReset {
+        session_id: String,
+        reset_at_ms: u128,
     },
     SessionRestartCwdResolved {
         session: Box<WebSession>,
@@ -1577,6 +1582,9 @@ enum ClientCommand {
         endpoint_id: String,
         max_input_tokens: Option<u32>,
     },
+    SessionUsageReset {
+        session_id: String,
+    },
     ModelEndpointShareExport {
         request_id: String,
         endpoint_id: String,
@@ -1745,6 +1753,7 @@ impl ClientCommand {
             | Self::SessionReasoningEffortUpdate { session_id, .. }
             | Self::SessionEndpointReasoningEffortUpdate { session_id, .. }
             | Self::SessionEndpointMaxInputTokensUpdate { session_id, .. }
+            | Self::SessionUsageReset { session_id }
             | Self::ModelEndpointApply { session_id, .. }
             | Self::ModelEndpointChainApply { session_id, .. }
             | Self::McpSessionToggle { session_id, .. }
@@ -4890,6 +4899,31 @@ fn handle_command_with_id(
                 },
             );
         }
+        ClientCommand::SessionUsageReset { session_id } => {
+            let reset_at_ms = now_ms();
+            {
+                let mut sessions = state
+                    .sessions
+                    .lock()
+                    .map_err(|_| "session_store_poisoned".to_string())?;
+                let session = sessions.get_mut(&session_id).ok_or("session_not_found")?;
+                session.telemetry_reset_at_ms = Some(reset_at_ms);
+            }
+            let stored = {
+                let sessions = state
+                    .sessions
+                    .lock()
+                    .map_err(|_| "session_store_poisoned".to_string())?;
+                let session = sessions.get(&session_id).ok_or("session_not_found")?;
+                stored_session_from_web_session(state, session)
+            };
+            current_session_store(state)?.upsert_session(&stored)?;
+            let event = WireEvent::SessionUsageReset {
+                session_id: session_id.clone(),
+                reset_at_ms,
+            };
+            publish_semantic(state, event.clone());
+        }
         ClientCommand::ModelEndpointShareExport {
             request_id,
             endpoint_id,
@@ -6177,6 +6211,7 @@ fn create_session_in_group(
                 active_memo: None,
                 timers: Vec::new(),
                 context_cleared_at_ms: None,
+                telemetry_reset_at_ms: None,
                 previous_memo_for_notice: None,
                 message_queue: SessionMessageQueue::new(MAX_NEXT_TURN_INTENTS),
                 pending_completion_message_id: None,
@@ -6881,6 +6916,9 @@ fn restore_stored_session(
                 active_memo: None,
                 timers,
                 context_cleared_at_ms: None,
+                telemetry_reset_at_ms: stored
+                    .telemetry_reset_at_ms
+                    .and_then(|value| u128::try_from(value).ok()),
                 previous_memo_for_notice: None,
                 message_queue,
                 pending_completion_message_id: None,
@@ -8735,6 +8773,9 @@ fn stored_session_from_web_session_with_store(
         reasoning_effort_override: session.runtime.reasoning_effort_override.clone(),
         endpoint_reasoning_efforts: session.runtime.endpoint_reasoning_efforts.clone(),
         endpoint_max_input_tokens: session.runtime.endpoint_max_input_tokens.clone(),
+        telemetry_reset_at_ms: session
+            .telemetry_reset_at_ms
+            .and_then(|value| i64::try_from(value).ok()),
         session_id: session.session_id.clone(),
         display_name: session.display_name.clone(),
         created_at_ms: session

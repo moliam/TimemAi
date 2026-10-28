@@ -209,6 +209,7 @@ export type Session = {
   timers?: TimerInfo[];
   /** Wall-clock ms of the latest explicit context clear. */
   context_cleared_at_ms?: number | null;
+  telemetry_reset_at_ms?: number | null;
 };
 
 /** Flattened host timer projection (Core TimerSpec + host scheduling state). */
@@ -573,6 +574,11 @@ export type WireEvent =
       session_id: string;
       cleared_at_ms: number;
     }
+  | {
+      type: "session_usage_reset";
+      session_id: string;
+      reset_at_ms: number;
+    }
   | { type: "session_restart_cwd_resolved"; session: Session }
   | { type: "session_deleted"; session_id: string }
   | { type: "session_groups_updated"; groups: SessionGroup[] }
@@ -922,6 +928,7 @@ export type ClientCommand =
       endpoint_id: string;
       max_input_tokens: number | null;
     }
+  | { type: "session_usage_reset"; session_id: string }
   | {
       type: "model_endpoint_upsert";
       endpoint: {

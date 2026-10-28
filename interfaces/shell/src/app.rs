@@ -676,6 +676,7 @@ fn new_shell_session(
         reasoning_effort_override: None,
         endpoint_reasoning_efforts: BTreeMap::new(),
         endpoint_max_input_tokens: BTreeMap::new(),
+        telemetry_reset_at_ms: None,
         session_id: session_id.clone(),
         display_name: "ShellSession".to_string(),
         group_id: None,
