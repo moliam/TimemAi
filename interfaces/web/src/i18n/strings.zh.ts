@@ -460,7 +460,6 @@ export const zh = {
     tokenCapHint: "最大输入 {input} tokens · 最大输出 {output} tokens",
     chainGrip: "拖动排序",
     chainEffortLabel: "本会话推理强度",
-    chainEffortDefault: "默认",
     chainMaxInputLabel: "本会话输入窗口上限",
     count: "{count} 个接入点",
     selectedCount: "已选择 {count} 个接入点",

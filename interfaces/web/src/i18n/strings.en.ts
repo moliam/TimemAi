@@ -467,7 +467,6 @@ export const en: Strings = {
     tokenCapHint: "Max input {input} tokens · Max output {output} tokens",
     chainGrip: "Drag to reorder",
     chainEffortLabel: "Session reasoning effort",
-    chainEffortDefault: "Default",
     chainMaxInputLabel: "Session input window cap",
     workingNote: "The current request keeps its existing configuration; the selected endpoint applies to the next request.",
     apiProtocol: "API protocol",

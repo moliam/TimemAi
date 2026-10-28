@@ -16640,15 +16640,21 @@ function SortableEndpointChainRow({
             className="endpoint-chain-effort"
             aria-label={t("endpoints.chainEffortLabel")}
             title={t("endpoints.chainEffortLabel")}
-            value={reasoningValue}
+            value={
+              reasoningOptions.includes(reasoningValue)
+                ? reasoningValue
+                : (reasoningOptions[0] ?? "")
+            }
             onChange={(event) =>
               onReasoningChange(endpoint.id, event.target.value)
             }
           >
-            <option value="">{t("endpoints.chainEffortDefault")}</option>
             {reasoningOptions.map((option) => (
               <option key={option} value={option}>
                 {option}
+                {option === endpoint.reasoning_effort
+                  ? t("endpoints.defaultSuffix")
+                  : ""}
               </option>
             ))}
           </select>
@@ -16924,7 +16930,9 @@ function ModelEndpointPanel({
                       working={working}
                       onRemove={toggleChainMember}
                       reasoningValue={
-                        endpointReasoningEfforts[endpoint.id] ?? ""
+                        endpointReasoningEfforts[endpoint.id] ??
+                        endpoint.reasoning_effort ??
+                        ""
                       }
                       reasoningOptions={sessionReasoningOptions(
                         endpoint,
