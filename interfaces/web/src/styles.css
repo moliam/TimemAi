@@ -225,7 +225,7 @@ button:disabled { cursor: not-allowed; }
 
 /* Syntax-aware Markdown and the compact final turn telemetry card. */
 .message-content pre .hljs { display: block; padding: 0; background: transparent; }
-.completion-card { display: flex; flex-wrap: wrap; gap: 6px 8px; margin-top: 13px; padding: 8px 10px; border: 1px solid #263d47; border-left: 3px solid #53bba5; border-radius: 5px; background: #101c22; color: #a9bbc6; font-size: 11px; line-height: 1.5; }
+.completion-card { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 13px; padding: 8px 10px; border: 1px solid #263d47; border-left: 3px solid #53bba5; border-radius: 5px; background: #101c22; color: #a9bbc6; font-size: 11px; line-height: 1.5; }
 .completion-card span { padding-right: 8px; border-right: 1px solid #29404a; white-space: nowrap; }
 .completion-card span:last-child { border-right: 0; }
 .completion-card b { color: #d2e2e7; font-weight: 650; }
