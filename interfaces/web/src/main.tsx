@@ -13170,7 +13170,7 @@ function HeaderTelemetryBoard({
       : Math.round(telemetry.tokensPerSecond).toLocaleString();
   const ttftLabel = telemetry?.ttftMeanSeconds === undefined
     ? "\u2014"
-    : `${telemetry.ttftMeanSeconds.toFixed(2)} ~${(telemetry.ttftStdDevSeconds ?? 0).toFixed(2)} sec`;
+    : `${telemetry.ttftMeanSeconds.toFixed(2)} (\u03c3 ${(telemetry.ttftStdDevSeconds ?? 0).toFixed(2)}) sec`;
   return (
     <span
       className="header-telemetry-board"
