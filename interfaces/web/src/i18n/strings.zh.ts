@@ -789,6 +789,10 @@ export const zh = {
   },
   completion: {
     statusLabel: "结束状态",
+    llmCallsTitle: "LLM 请求次数",
+    inputTokensTitle: "输入 tokens(括号内为 KVC 缓存读取)",
+    outputTokensTitle: "输出 tokens(think 为思考 tokens)",
+    toolCallsTitle: "本地工具调用次数",
     repairLabel: "最后修复",
     repairIssueExtraAfterFinalAnswer: "回复根节点外包含额外内容，最终回答无法安全采信。",
     repairIssueInvalidXml: "模型回复不是有效的 XML 协议消息。",

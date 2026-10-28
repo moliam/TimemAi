@@ -792,6 +792,10 @@ export const en: Strings = {
   },
   completion: {
     statusLabel: "Status",
+    llmCallsTitle: "LLM request count",
+    inputTokensTitle: "Input tokens (cache = KVC cached reads)",
+    outputTokensTitle: "Output tokens (think = reasoning tokens)",
+    toolCallsTitle: "Local tool call count",
     repairLabel: "Last repair",
     repairIssueExtraAfterFinalAnswer: "The reply contained extra content outside the response root; the final answer could not be trusted.",
     repairIssueInvalidXml: "The model reply was not a valid XML protocol message.",

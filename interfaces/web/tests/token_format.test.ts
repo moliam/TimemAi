@@ -50,7 +50,7 @@ describe("formatOutputWithThink", () => {
     expect(formatOutputWithThink(0, 0)).toBeUndefined();
     expect(formatOutputWithThink(24_000, undefined)).toBe("24K");
     expect(formatOutputWithThink(24_000, 0)).toBe("24K");
-    expect(formatOutputWithThink(24_000, 583)).toBe("24K(Think 583)");
-    expect(formatOutputWithThink(120_000, 6_000)).toBe("120K(Think 6.0K)");
+    expect(formatOutputWithThink(24_000, 583)).toBe("24K(think 583)");
+    expect(formatOutputWithThink(120_000, 6_000)).toBe("120K(think 6.0K)");
   });
 });

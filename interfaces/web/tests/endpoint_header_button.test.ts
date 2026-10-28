@@ -41,7 +41,7 @@ describe("header endpoint selector", () => {
     expect(source).toContain('className="header-cache-token header-cache-output"');
     expect(source).not.toContain('`cache: ${cacheHitPercent.toFixed(1)}%, in:');
     expect(source).toContain('`${cachePercentLabel}, input: ${cacheInputLabel}, output: ${cacheOutputLabel}`');
-    expect(styles).toContain('.header-cache-rate { justify-self: start; display: inline-flex; align-items: center; gap: 5px;');
+    expect(styles).not.toContain(".header-cache-rate {");
     expect(styles).toContain('.header-cache-token { display: inline-flex; align-items: center; gap: 1px; }');
   });
 

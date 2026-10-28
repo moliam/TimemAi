@@ -25,5 +25,5 @@ export function formatOutputWithThink(
   const outputText = formatTokens(output);
   if (!output || !outputText) return undefined;
   const thinkText = think ? formatTokens(think) : undefined;
-  return thinkText ? `${outputText}(Think ${thinkText})` : outputText;
+  return thinkText ? `${outputText}(think ${thinkText})` : outputText;
 }

@@ -230,7 +230,7 @@ import {
   resolveActiveSessionId,
   runtimeConnectionLabel,
   sessionCacheHitPercent,
-  sessionCacheTokenTotals,
+  sessionRuntimeUsage,
   sessionModelTelemetry,
   sessionCancellationApplies,
   shouldRenderTurnWorkFrame,
@@ -13133,7 +13133,7 @@ function HeaderContextUsage({
   }, [menuOpen]);
   const usage = session ? sessionContextUsage(session) : undefined;
   const cacheHitPercent = session ? sessionCacheHitPercent(session) : undefined;
-  const cacheTotals = session ? sessionCacheTokenTotals(session) : undefined;
+  const runtimeTotals = session ? sessionRuntimeUsage(session) : undefined;
   const limit = session?.max_llm_input_tokens || undefined;
   const ratio = limit
     ? Math.min(100, Math.ceil(((usage?.prompt_tokens ?? 0) * 100) / limit))
@@ -13141,8 +13141,11 @@ function HeaderContextUsage({
   const level = ratio >= 90 ? "critical" : ratio >= 75 ? "warning" : "normal";
   const cachePercentLabel =
     cacheHitPercent === undefined ? "cache: —" : `cache: ${cacheHitPercent.toFixed(1)}%`;
-  const cacheInputLabel = formatTokensCoarse(cacheTotals?.prompt_tokens ?? 0) ?? "0";
-  const cacheOutputLabel = formatTokensCoarse(cacheTotals?.completion_tokens ?? 0) ?? "0";
+  const cacheInputLabel = formatTokensCoarse(runtimeTotals?.prompt_tokens ?? 0) ?? "0";
+  const cacheOutputLabel = formatTokensCoarse(runtimeTotals?.completion_tokens ?? 0) ?? "0";
+  const cacheCachedLabel = formatTokensCoarse(runtimeTotals?.cached_tokens ?? 0) ?? "0";
+  const thinkLabel = formatTokensCoarse(runtimeTotals?.reasoning_tokens ?? 0) ?? "0";
+  const hitLabel = cacheHitPercent === undefined ? undefined : `${cacheHitPercent.toFixed(1)}%`;
   const cacheLabel = cacheHitPercent === undefined
     ? cachePercentLabel
     : `${cachePercentLabel}, input: ${cacheInputLabel}, output: ${cacheOutputLabel}`;
@@ -13169,15 +13172,6 @@ function HeaderContextUsage({
       <span className="header-context-main">
         <span aria-hidden="true">· ctx</span>
         <span>{limit ? `${ratio}%/${formatTokens(limit)}` : "—"}</span>
-        <span className="header-model-speed" title={t("usage.speedTitle")}>
-          <Gauge size={12} strokeWidth={1.8} aria-hidden="true" />
-          <span>{speedLabel}</span>
-          <span className="header-telemetry-unit">Tokens/sec</span>
-        </span>
-        <span className="header-ttft" title={t("usage.ttftTitle", { count: telemetry?.samples ?? 0 })}>
-          <span>TTFT</span>
-          <span>{ttftLabel}</span>
-        </span>
         {(onClear || onCompact) && (
           <span className="context-actions-menu" ref={menuRef}>
             <button
@@ -13224,21 +13218,39 @@ function HeaderContextUsage({
             )}
           </span>
         )}
-      </span>
-      <span className="header-cache-rate" aria-hidden="true">
-        <span>· {cachePercentLabel}</span>
-        {cacheHitPercent !== undefined && (
-          <>
-            <span className="header-cache-token header-cache-input">
-              <ArrowBigUp size={12} strokeWidth={1.8} />
-              {cacheInputLabel}
+        <span className="header-cache-token header-usage-llm" title={t("completion.llmCallsTitle")}>
+          <Sparkles size={12} strokeWidth={1.8} aria-hidden="true" />
+          {formatTokensCoarse(runtimeTotals?.llm_calls) ?? "0"}
+        </span>
+        <span className="header-cache-token header-cache-input" title={t("completion.inputTokensTitle")}>
+          <ArrowBigUp size={12} strokeWidth={1.8} />
+          {cacheInputLabel}
+          {!!runtimeTotals?.cached_tokens && (
+            <span className="header-usage-detail">
+              (cache {cacheCachedLabel}{hitLabel ? `, ${hitLabel}` : ""})
             </span>
-            <span className="header-cache-token header-cache-output">
-              <ArrowBigDown size={12} strokeWidth={1.8} />
-              {cacheOutputLabel}
-            </span>
-          </>
-        )}
+          )}
+        </span>
+        <span className="header-cache-token header-cache-output" title={t("completion.outputTokensTitle")}>
+          <ArrowBigDown size={12} strokeWidth={1.8} />
+          {cacheOutputLabel}
+          {!!runtimeTotals?.reasoning_tokens && (
+            <span className="header-usage-detail">(think {thinkLabel})</span>
+          )}
+        </span>
+        <span className="header-cache-token header-usage-tools" title={t("completion.toolCallsTitle")}>
+          <Wrench size={12} strokeWidth={1.8} aria-hidden="true" />
+          {formatTokensCoarse(runtimeTotals?.tool_calls) ?? "0"}
+        </span>
+        <span className="header-model-speed" title={t("usage.speedTitle")}>
+          <Gauge size={12} strokeWidth={1.8} aria-hidden="true" />
+          <span>{speedLabel}</span>
+          <span className="header-telemetry-unit">Tokens/sec</span>
+        </span>
+        <span className="header-ttft" title={t("usage.ttftTitle", { count: telemetry?.samples ?? 0 })}>
+          <span>TTFT</span>
+          <span>{ttftLabel}</span>
+        </span>
       </span>
     </span>
   );
@@ -16363,12 +16375,7 @@ function CompletionCard({
       cancelled ? "Cancelled" : "Completed",
       formatDuration(completion.elapsed_ms),
     ],
-    ["LLM", stats.llm_calls],
-    ["Input", formatOptionalTokens(stats.prompt_tokens)],
-    ["Output", formatOutputWithThink(stats.completion_tokens, stats.reasoning_tokens)],
-    ["KVC read", formatOptionalTokens(stats.cached_tokens)],
     ["KVC created", formatOptionalTokens(stats.cache_created_tokens)],
-    ["Tools", stats.tool_calls],
     ["Repair", stats.repair_calls],
     ["Memory", formatMemoryOps(stats.mem_reads, stats.mem_writes)],
     ["Compress", formatOptionalTokens(stats.shrunk_tokens)],
@@ -16380,6 +16387,35 @@ function CompletionCard({
   ) as Array<[string, string | number | undefined]>;
   return (
     <div className="completion-card" aria-label="Turn completion statistics">
+      {!!stats.llm_calls && (
+        <span className="completion-icon-fact" title={t("completion.llmCallsTitle")}>
+          <Sparkles size={12} strokeWidth={1.8} aria-hidden="true" />
+          {stats.llm_calls}
+        </span>
+      )}
+      {!!stats.prompt_tokens && (
+        <span className="completion-icon-fact" title={t("completion.inputTokensTitle")}>
+          <ArrowBigUp size={12} strokeWidth={1.8} aria-hidden="true" />
+          {formatOptionalTokens(stats.prompt_tokens)}
+          {!!stats.cached_tokens && (
+            <span className="completion-fact-detail">
+              {" "}(cache {formatTokens(stats.cached_tokens)})
+            </span>
+          )}
+        </span>
+      )}
+      {!!stats.completion_tokens && (
+        <span className="completion-icon-fact" title={t("completion.outputTokensTitle")}>
+          <ArrowBigDown size={12} strokeWidth={1.8} aria-hidden="true" />
+          {formatOutputWithThink(stats.completion_tokens, stats.reasoning_tokens)}
+        </span>
+      )}
+      {!!stats.tool_calls && (
+        <span className="completion-icon-fact" title={t("completion.toolCallsTitle")}>
+          <Wrench size={12} strokeWidth={1.8} aria-hidden="true" />
+          {stats.tool_calls}
+        </span>
+      )}
       {facts.map(([label, value]) => (
         <span
           key={label}
@@ -16437,18 +16473,6 @@ function completionFactTitle(
     return completion.elapsed_ms === undefined
       ? undefined
       : `${completion.elapsed_ms} ms`;
-  if (label === "Input")
-    return stats.prompt_tokens === undefined
-      ? undefined
-      : `${stats.prompt_tokens} input tokens`;
-  if (label === "Output")
-    return stats.completion_tokens === undefined
-      ? undefined
-      : `${stats.completion_tokens} output tokens`;
-  if (label === "KVC read")
-    return stats.cached_tokens === undefined
-      ? undefined
-      : `${stats.cached_tokens} cached input tokens`;
   if (label === "KVC created")
     return stats.cache_created_tokens === undefined
       ? undefined

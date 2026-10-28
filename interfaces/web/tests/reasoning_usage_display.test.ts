@@ -7,8 +7,10 @@ const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8
 describe("reasoning usage display", () => {
   it("integrates think tokens into the completion status bar instead of a mid-turn badge", () => {
     expect(source).toContain(
-      '["Output", formatOutputWithThink(stats.completion_tokens, stats.reasoning_tokens)]',
+      "formatOutputWithThink(stats.completion_tokens, stats.reasoning_tokens)",
     );
+    expect(source).toContain('className="completion-icon-fact"');
+    expect(source).toContain('t("completion.llmCallsTitle")');
     // The mid-turn "<+ 思考 N Tokens >" badge is retired: no marker element,
     // no badge CSS, no badge-only i18n lookups.
     expect(source).not.toContain("answer-reasoning-usage");

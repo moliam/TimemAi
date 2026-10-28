@@ -229,6 +229,11 @@ button:disabled { cursor: not-allowed; }
 .completion-card span { padding-right: 8px; border-right: 1px solid #29404a; white-space: nowrap; }
 .completion-card span:last-child { border-right: 0; }
 .completion-card b { color: #d2e2e7; font-weight: 650; }
+.completion-card span.completion-icon-fact { display: inline-flex; align-items: center; gap: 3px; }
+.completion-card .completion-icon-fact svg { flex: none; color: #6fb5a5; }
+.completion-card .completion-fact-detail { padding-right: 0; border-right: 0; color: #7a919c; }
+:root[data-theme="light"] .completion-card .completion-icon-fact svg { color: #278c7e; }
+:root[data-theme="light"] .completion-card .completion-fact-detail { color: #5c7570; }
 .completion-card .warning { color: #e4bd76; } .mcp-session-name { color: #7ec8b8; font-weight: 700; }
 .turn-completion-only { width: 100%; max-width: 760px; margin: -12px auto 28px; }
 .live-turn-usage { display: flex; flex-wrap: wrap; gap: 5px 12px; margin: 9px 0 0; padding: 8px 10px 2px 28px; border-top: 1px solid #253640; color: #8fc9f1; font-size: 11px; line-height: 1.45; }
@@ -1342,12 +1347,12 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .header-telemetry-unit,
 :root[data-theme="light"] .header-ttft > span:first-child { color: #71827c; }
 :root[data-theme="light"] .header-ttft { border-left-color: #ccd8d3; color: #61746d; }
-.header-cache-rate { justify-self: start; display: inline-flex; align-items: center; gap: 5px; color: #60747e; font-variant-numeric: tabular-nums; line-height: 1; white-space: nowrap; }
 .header-cache-token { display: inline-flex; align-items: center; gap: 1px; }
+.header-usage-detail { color: #6f8590; font-size: 10px; }
 .header-cache-token svg { flex: none; color: #789088; stroke-linecap: round; stroke-linejoin: round; }
 .header-cache-output svg { color: #8a7f92; }
-:root[data-theme="light"] .header-cache-rate { color: #718791; }
 :root[data-theme="light"] .header-cache-token svg { color: #607c73; }
+:root[data-theme="light"] .header-usage-detail { color: #607c73; }
 :root[data-theme="light"] .header-cache-output svg { color: #786d80; }
 .session-list { min-height: 0; scrollbar-gutter: stable; }
 .session-list-loading { min-height: 116px; display: flex; align-items: center; justify-content: center; gap: 9px; padding: 24px 12px; color: #7f918e; font-size: 12px; }
