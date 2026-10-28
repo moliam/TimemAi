@@ -464,7 +464,6 @@ export const en: Strings = {
     protocolChatHint: "Chat completions protocol (OpenAI-compatible / Anthropic)",
     protocolResponsesHint: "Responses protocol (agent-native, always function calling)",
     tokenCapHint: "Max input {input} tokens · Max output {output} tokens",
-    chainGrip: "Drag to reorder",
     chainEffortLabel: "Session reasoning effort",
     chainMaxInputLabel: "Session input window cap",
     workingNote: "The current request keeps its existing configuration; the selected endpoint applies to the next request.",

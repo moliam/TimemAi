@@ -16682,6 +16682,9 @@ function SortableEndpointChainRow({
   return (
     <div
       ref={sortable.setNodeRef}
+      {...sortable.attributes}
+      {...sortable.listeners}
+      role="group"
       className={`endpoint-chain-row in-chain ${sortable.isDragging ? "dragging" : ""}`}
       style={{
         transform: CSS.Transform.toString(sortable.transform),
@@ -16692,15 +16695,9 @@ function SortableEndpointChainRow({
       <span className="endpoint-chain-index" aria-hidden="true">
         {index}
       </span>
-      <button
-        type="button"
-        className="endpoint-chain-grip"
-        aria-label={t("endpoints.chainGrip")}
-        {...sortable.attributes}
-        {...sortable.listeners}
-      >
+      <span className="endpoint-chain-grip" aria-hidden="true">
         <GripVertical size={13} aria-hidden="true" />
-      </button>
+      </span>
       <span className="endpoint-chain-pick">
         <strong>
           <span>{endpoint.name}</span>
@@ -16712,6 +16709,7 @@ function SortableEndpointChainRow({
         <span className="endpoint-chain-tuning">
           <select
             className="endpoint-chain-effort"
+            onPointerDown={(event) => event.stopPropagation()}
             aria-label={t("endpoints.chainEffortLabel")}
             title={t("endpoints.chainEffortLabel")}
             value={
@@ -16735,6 +16733,7 @@ function SortableEndpointChainRow({
           <input
             type="number"
             className="endpoint-chain-maxinput"
+            onPointerDown={(event) => event.stopPropagation()}
             aria-label={t("endpoints.chainMaxInputLabel")}
             title={t("endpoints.chainMaxInputLabel")}
             min={1}
@@ -16769,6 +16768,7 @@ function SortableEndpointChainRow({
         type="button"
         className="endpoint-chain-remove"
         aria-label={t("endpoints.chainRemove")}
+        onPointerDown={(event) => event.stopPropagation()}
         onClick={() => onRemove(endpoint.id)}
       >
         <X size={12} />

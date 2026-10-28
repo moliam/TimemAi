@@ -2083,12 +2083,15 @@ body {
 .endpoint-chain-list { display: grid; gap: 6px; align-content: start; }
 .endpoint-chain-empty { color: #8ba4b0; font-size: 11px; border: 1px dashed #3d5a6a; border-radius: 6px; padding: 12px 8px; text-align: center; background: rgba(18, 33, 43, .45); }
 .endpoint-chain-row { display: flex; align-items: center; gap: 6px; border: 1px solid var(--management-border); border-radius: 6px; background: var(--management-card); padding: 7px 9px; min-width: 0; transition: border-color .15s ease, background-color .15s ease, box-shadow .15s ease; }
-.endpoint-chain-row.in-chain { border-color: var(--management-accent-border); background: var(--management-accent-surface); }
+.endpoint-chain-row.in-chain { border-color: var(--management-accent-border); background: var(--management-accent-surface); cursor: grab; touch-action: none; }
 button.endpoint-chain-row:hover:not(:disabled) { border-color: var(--management-accent-border); background: var(--management-card-hover); }
 .endpoint-chain-row.in-chain .endpoint-chain-pick strong { color: var(--management-text); }
 .endpoint-chain-row.in-chain .endpoint-chain-pick small { color: #9fbec9; }
 button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: var(--management-accent); background: var(--management-accent-surface-hover); }
 .endpoint-chain-row.dragging { opacity: .9; border-color: var(--management-accent); }
+.endpoint-chain-row.in-chain:active { cursor: grabbing; }
+.endpoint-chain-row.in-chain .endpoint-chain-effort, .endpoint-chain-row.in-chain .endpoint-chain-remove { cursor: pointer; }
+.endpoint-chain-row.in-chain .endpoint-chain-maxinput { cursor: text; }
 .endpoint-chain-checkbox { box-sizing: border-box; flex: none; width: 18px; height: 18px; display: grid; place-items: center; border: 1px solid var(--management-border); border-radius: 4px; background: var(--management-card); color: transparent; }
 .endpoint-chain-checkbox.selected { border-color: var(--management-accent); background: var(--management-accent); color: #f3fffb; }
 .endpoint-chain-pick { flex: 1; min-width: 0; text-align: left; border: 0; background: transparent; color: inherit; display: grid; gap: 3px; padding: 0; }

@@ -457,7 +457,6 @@ export const zh = {
     protocolChatHint: "对话补全协议(OpenAI-compatible / Anthropic)",
     protocolResponsesHint: "Responses 协议(Agent 原生,始终启用函数调用)",
     tokenCapHint: "最大输入 {input} tokens · 最大输出 {output} tokens",
-    chainGrip: "拖动排序",
     chainEffortLabel: "本会话推理强度",
     chainMaxInputLabel: "本会话输入窗口上限",
     count: "{count} 个接入点",
