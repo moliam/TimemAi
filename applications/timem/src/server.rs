@@ -8749,6 +8749,83 @@ fn deliver_mailbox_prompt(state: &AppState, session_id: &str, text: &str) -> boo
     .is_ok()
 }
 
+/// Reads a session's minted mailbox name without side effects: sessions that
+/// never touched their mailbox are skipped (lookup must not mint addresses).
+fn read_local_mailbox_name(state: &AppState, session_id: &str) -> Option<String> {
+    let bytes = std::fs::read(mailbox_state_path(state, session_id).ok()?).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value
+        .get("mailbox_name")?
+        .as_str()
+        .map(std::string::ToString::to_string)
+}
+
+/// Resolves a mailbox name to a session of this very instance, if any.
+fn find_local_session_by_mailbox(state: &AppState, mailbox_name: &str) -> Option<String> {
+    let session_ids: Vec<String> = {
+        let sessions = state.sessions.lock().ok()?;
+        sessions
+            .values()
+            .map(|session| session.session_id.clone())
+            .collect()
+    };
+    session_ids.into_iter().find(|session_id| {
+        read_local_mailbox_name(state, session_id).as_deref() == Some(mailbox_name)
+    })
+}
+
+/// In-process delivery for local recipients: the body never leaves .mem.
+/// Injects into the recipient's context first (injection counts as read,
+/// matching the spool intake), then records the mail in the recipient's
+/// mailbox.json with the receipt already settled — no spool envelope and no
+/// spool receipt is ever created for local mail.
+#[allow(clippy::too_many_arguments)]
+fn deliver_local_mailbox_mail(
+    state: &AppState,
+    recipient_session_id: &str,
+    sender_mailbox_name: &str,
+    mail_id: &str,
+    msg: &str,
+    created_at_ms: u128,
+    queue_timeout_secs: i64,
+) -> bool {
+    let prompt = format!(
+        "[mailbox] 收到来自 {sender_mailbox_name} 的 mail:\n{msg}\n(可用 mailbox 工具回复对方。)"
+    );
+    if !deliver_mailbox_prompt(state, recipient_session_id, &prompt) {
+        return false;
+    }
+    let Ok(mut mailbox) = load_mailbox_state(state, recipient_session_id) else {
+        return false;
+    };
+    mailbox.mails.push(WebMailboxMail {
+        id: mail_id.to_string(),
+        from: sender_mailbox_name.to_string(),
+        msg: msg.to_string(),
+        created_at_ms,
+        queue_timeout_secs,
+        kind: "mail".to_string(),
+        receipt_for: None,
+        delivered: true,
+        read: true,
+        receipt_sent: true,
+    });
+    if let Err(error) = save_mailbox_state(state, recipient_session_id, &mailbox) {
+        eprintln!(
+            "[timem_web_warning] mailbox_local_intake_save_failed session_id={recipient_session_id:?} reason={error}"
+        );
+        return false;
+    }
+    publish_semantic(
+        state,
+        WireEvent::MailboxUpdated {
+            session_id: recipient_session_id.to_string(),
+            mailbox: mailbox_snapshot(&mailbox),
+        },
+    );
+    true
+}
+
 fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde_json::Value) {
     let to = payload["to"].as_str().unwrap_or("").to_string();
     let msg = payload["msg"].as_str().unwrap_or("").to_string();
@@ -8774,24 +8851,60 @@ fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde
         status = "failed";
         msg = format!("[refused oversized body: {} bytes]", msg.len());
     }
-    if status == "sent" && !crate::mailbox::mailbox_exists(&spool_root, &to) {
-        status = "failed";
-    }
+    // Data-ownership rule: mail bodies live in .mem, never outside it. When
+    // the recipient is a session of this very instance, deliver in-process:
+    // the body goes straight into the recipient's mailbox.json and the read
+    // receipt settles there too, so no spool envelope is ever created. The
+    // spool is only the transient cross-instance hand-off — envelopes are
+    // unlinked on intake and never store history.
+    let local_recipient = if status == "sent" {
+        find_local_session_by_mailbox(state, &to)
+    } else {
+        None
+    };
     // Content-addressed id: `mail_` + 6 base36 chars hashing (body, time,
-    // recipient mailbox, per-draw secure randomness). A collision with an
-    // existing ledger entry or spool envelope must never overwrite evidence,
-    // so a taken id simply triggers a fresh draw, bounded times.
+    // recipient mailbox, per-draw secure randomness). Both delivery paths
+    // redraw on a taken id, bounded times: the ledger must never hold two
+    // entries with one id, and cross-instance envelopes must never overwrite
+    // a spool sibling.
     let created_at_ms = now_ms();
     let mut mail_id = crate::mailbox::generate_mail_id(&msg, created_at_ms, &to);
-    for _ in 0..8 {
-        let taken = sender_mailbox.sent.iter().any(|sent| sent.id == mail_id)
-            || crate::mailbox::spool_contains_mail(&spool_root, &to, &mail_id);
-        if !taken {
-            break;
+    if let Some(recipient_session_id) = local_recipient.as_deref() {
+        // Local recipient: only the ledger participates, the spool is not
+        // involved.
+        for _ in 0..8 {
+            if !sender_mailbox.sent.iter().any(|sent| sent.id == mail_id) {
+                break;
+            }
+            mail_id = crate::mailbox::generate_mail_id(&msg, created_at_ms, &to);
         }
-        mail_id = crate::mailbox::generate_mail_id(&msg, created_at_ms, &to);
-    }
-    if status == "sent" {
+        if deliver_local_mailbox_mail(
+            state,
+            recipient_session_id,
+            &sender_mailbox.mailbox_name,
+            &mail_id,
+            &msg,
+            created_at_ms,
+            queue_timeout_secs,
+        ) {
+            // Delivered and read in-process; the sender's terminal notice
+            // fires from the next tick like every other settled outcome.
+            status = "read";
+        } else {
+            status = "failed";
+        }
+    } else if status == "sent" {
+        if !crate::mailbox::mailbox_exists(&spool_root, &to) {
+            status = "failed";
+        }
+        for _ in 0..8 {
+            let taken = sender_mailbox.sent.iter().any(|sent| sent.id == mail_id)
+                || crate::mailbox::spool_contains_mail(&spool_root, &to, &mail_id);
+            if !taken {
+                break;
+            }
+            mail_id = crate::mailbox::generate_mail_id(&msg, created_at_ms, &to);
+        }
         if let Err(error) = crate::mailbox::write_mail(
             &spool_root,
             &crate::mailbox::MailboxMail {

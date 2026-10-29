@@ -21442,6 +21442,67 @@ fn corrupt_mailbox_state_is_backed_up_not_silently_discarded() {
 }
 
 #[test]
+fn local_recipient_delivery_never_touches_the_spool() {
+    let (_guard, state, sender_sid) = mailbox_e2e_setup("mailbox_e2e_local");
+    let recipient_sid = register_real_worker(&state, "mailbox_e2e_local_peer");
+    let sender_name = load_mailbox_state(&state, &sender_sid)
+        .unwrap()
+        .mailbox_name;
+    let recipient_name = load_mailbox_state(&state, &recipient_sid)
+        .unwrap()
+        .mailbox_name;
+
+    handle_mailbox_send_topic(
+        &state,
+        &sender_sid,
+        &serde_json::json!({ "to": recipient_name, "msg": "local hand-off" }),
+    );
+
+    // The body lives in .mem on both sides: the sender's ledger settles as
+    // read in-process, the recipient's mailbox.json holds the mail, and no
+    // spool envelope exists anywhere.
+    let sender = load_mailbox_state(&state, &sender_sid).unwrap();
+    assert_eq!(sender.sent.len(), 1);
+    assert_eq!(sender.sent[0].status, "read");
+    assert_eq!(sender.sent[0].to, recipient_name);
+    assert!(
+        crate::mailbox::scan_mails(&e2e_inbox(&sender_name)).is_empty(),
+        "local delivery must not leave a sender-side envelope"
+    );
+    assert!(
+        crate::mailbox::scan_mails(&e2e_inbox(&recipient_name)).is_empty(),
+        "local delivery must not leave a recipient-side envelope"
+    );
+    let recipient = load_mailbox_state(&state, &recipient_sid).unwrap();
+    assert_eq!(recipient.mails.len(), 1);
+    assert_eq!(recipient.mails[0].from, sender_name);
+    assert_eq!(recipient.mails[0].msg, "local hand-off");
+    assert!(
+        recipient.mails[0].delivered && recipient.mails[0].read && recipient.mails[0].receipt_sent,
+        "in-process delivery injects, marks read and settles the receipt at once"
+    );
+
+    // Cross-instance hand-off is unchanged: an unknown local mailbox still
+    // receives a transient spool envelope (unlinked on intake).
+    let remote = "mb-e2e-remote";
+    std::fs::create_dir_all(e2e_inbox(remote)).unwrap();
+    handle_mailbox_send_topic(
+        &state,
+        &sender_sid,
+        &serde_json::json!({ "to": remote, "msg": "cross instance" }),
+    );
+    let envelopes = crate::mailbox::scan_mails(&e2e_inbox(remote));
+    assert_eq!(
+        envelopes.len(),
+        1,
+        "unknown local mailboxes still hand off via the spool"
+    );
+    let sender = load_mailbox_state(&state, &sender_sid).unwrap();
+    assert_eq!(sender.sent[1].status, "sent");
+    assert_eq!(sender.sent[1].msg, "cross instance");
+}
+
+#[test]
 fn mailbox_send_refuses_oversized_bodies_without_touching_the_spool() {
     let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_oversize");
     let peer = "mb-e2e-peer6";
