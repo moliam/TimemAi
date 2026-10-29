@@ -106,17 +106,31 @@ pub fn generate_mailbox_name() -> String {
     format!("mb-{}", std::str::from_utf8(&suffix).unwrap_or("00000"))
 }
 
-/// Short, content-addressed mail id: `mail_` + 6 base36 chars hashed from
-/// (body, created_at_ms, recipient mailbox). 36^6 ~= 2.17 billion
-/// combinations, and senders additionally retry on a spool or ledger
-/// collision, so ids stay practically unique across instances while remaining
-/// short and typeable.
+/// Short mail id: `mail_` + 6 base36 chars hashed from (body, created_at_ms,
+/// recipient mailbox, per-draw secure randomness). Every draw mixes fresh
+/// entropy, so two instances hashing the same content for the same recipient
+/// in the same millisecond still get different ids; senders additionally
+/// retry on a spool or ledger collision, keeping ids practically unique
+/// across instances while short and typeable.
 pub fn generate_mail_id(msg: &str, created_at_ms: u128, mailbox_id: &str) -> String {
     const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     let mut hasher = DefaultHasher::new();
     msg.hash(&mut hasher);
     created_at_ms.hash(&mut hasher);
     mailbox_id.hash(&mut hasher);
+    // Per-draw secure randomness: even identical (content, time, mailbox)
+    // inputs on different instances produce different ids.
+    let mut random = [0u8; 8];
+    if agent_core::os::fill_secure_random(&mut random).is_err() {
+        // Entropy fallback: nanos mixed with the process id.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        random =
+            (nanos ^ (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)).to_le_bytes();
+    }
+    hasher.write(&random);
     let mut value = hasher.finish();
     let mut suffix = [0u8; 6];
     for slot in suffix.iter_mut() {
@@ -234,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn mail_ids_are_short_base36_hashes_of_content_time_and_mailbox() {
+    fn mail_ids_are_short_base36_and_distinct_per_draw() {
         let id = generate_mail_id("hello", 1_700_000_000_000, "mb-target");
         assert!(id.starts_with("mail_"));
         assert_eq!(id.len(), 11, "mail_ plus 6 base36 chars keeps it typeable");
@@ -244,11 +258,10 @@ mod tests {
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
             "{id}"
         );
-        // Deterministic per (content, time, mailbox); distinct across inputs.
-        assert_eq!(
-            generate_mail_id("hello", 1_700_000_000_000, "mb-target"),
-            id
-        );
+        // Every draw mixes fresh randomness, so even the same
+        // (content, time, mailbox) on another instance yields a new id.
+        let redraw = generate_mail_id("hello", 1_700_000_000_000, "mb-target");
+        assert_ne!(redraw, id);
         assert_ne!(
             generate_mail_id("hello", 1_700_000_000_001, "mb-target"),
             id

@@ -8778,10 +8778,10 @@ fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde
         status = "failed";
     }
     // Content-addressed id: `mail_` + 6 base36 chars hashing (body, time,
-    // recipient mailbox). A collision with an existing ledger entry or spool
-    // envelope must never overwrite evidence, so the timestamp is nudged by
-    // one millisecond and the id re-hashed, bounded times.
-    let mut created_at_ms = now_ms();
+    // recipient mailbox, per-draw secure randomness). A collision with an
+    // existing ledger entry or spool envelope must never overwrite evidence,
+    // so a taken id simply triggers a fresh draw, bounded times.
+    let created_at_ms = now_ms();
     let mut mail_id = crate::mailbox::generate_mail_id(&msg, created_at_ms, &to);
     for _ in 0..8 {
         let taken = sender_mailbox.sent.iter().any(|sent| sent.id == mail_id)
@@ -8789,7 +8789,6 @@ fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde
         if !taken {
             break;
         }
-        created_at_ms = created_at_ms.wrapping_add(1);
         mail_id = crate::mailbox::generate_mail_id(&msg, created_at_ms, &to);
     }
     if status == "sent" {
