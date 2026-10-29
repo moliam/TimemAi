@@ -742,6 +742,8 @@ export const en: Strings = {
     statusTimeout: "read timeout",
     statusDiscarded: "discarded",
     clear: "Clear mailbox",
+    expandBody: "Show full message",
+    collapseBody: "Collapse",
   },
   timer: {
     title: "Timers",

@@ -1110,11 +1110,17 @@ button:disabled { cursor: not-allowed; }
 .mailbox-item-state.status-read { background: #173b32; color: #6fd3c0; }
 .mailbox-item-state.status-failed { background: #40202a; color: #e08a97; }
 .mailbox-item-body { color: #a9bbc6; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; white-space: pre-wrap; }
+.mailbox-item-body.clamped { display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; max-height: calc(5 * 1.5em); }
+.mailbox-item-body-toggle { justify-self: start; display: inline-flex; align-items: center; gap: 4px; border: 1px solid #2c3f4c; border-radius: 4px; padding: 1px 8px; background: #1a2530; color: #8bc8ba; font-size: 11px; font-weight: 700; line-height: 1.6; }
+.mailbox-item-body-toggle:hover { background: #24333f; color: #d5e1e8; }
+.mailbox-item-body-toggle:focus-visible { outline: 2px solid #4d9a91; outline-offset: 1px; }
 .mailbox-clear { justify-self: start; border: 1px solid #365363; border-radius: 5px; padding: 5px 12px; background: transparent; color: #91a5b1; font-size: 11px; font-weight: 700; }
 .mailbox-clear:hover { color: #d5e1e8; border-color: #4a6a7d; }
 :root[data-theme="light"] .mailbox-address code { background: #f3f6f9; border-color: #d5dee6; color: #0f766e; }
 :root[data-theme="light"] .mailbox-item { background: #fff; border-color: #dde5ec; }
 :root[data-theme="light"] .mailbox-item-body { color: #455662; }
+:root[data-theme="light"] .mailbox-item-body-toggle { border-color: #c6d2db; background: #eef4f7; color: #2b7a68; }
+:root[data-theme="light"] .mailbox-item-body-toggle:hover { background: #e0ecf0; }
 :root[data-theme="light"] .mailbox-item-state { background: #e3ecf2; color: #47677a; }
 :root[data-theme="light"] .mailbox-item-state.status-read { background: #d9f2ea; color: #0f766e; }
 :root[data-theme="light"] .mailbox-item-state.status-failed { background: #f7e1e5; color: #b3445a; }

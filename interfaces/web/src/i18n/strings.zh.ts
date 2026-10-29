@@ -748,6 +748,8 @@ export const zh = {
     statusTimeout: "等待已读超时",
     statusDiscarded: "已丢弃",
     clear: "清空 mailbox",
+    expandBody: "展开全文",
+    collapseBody: "收起",
   },
   timer: {
     title: "定时任务",

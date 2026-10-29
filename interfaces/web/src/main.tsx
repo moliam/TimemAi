@@ -135,6 +135,7 @@ import {
   pumpTurnHistoryHydration,
 } from "./turn_history_hydration";
 import { RestartCwdGate } from "./restart_cwd_gate";
+import { MailboxBody } from "./mailbox_body";
 import {
   MemSwitchCandidate,
   MemSwitchConfirmDialog,
@@ -5415,11 +5416,7 @@ function TimemApp() {
                 ? requestActiveToolGen
                 : undefined
             }
-            favoriteBySource={
-              new Map(
-                favorites.map((favorite) => [favorite.source_key, favorite]),
-              )
-            }
+            favoriteBySource={favoriteBySource}
             pendingFavoriteSourceKeys={pendingFavoriteSourceKeys}
             onToggleFavorite={toggleFavorite}
             onRequestMessageDelete={setDeleteMessageCandidate}
@@ -7799,7 +7796,7 @@ function MailboxPanel({
               : t("mailbox.queued")}
         </span>
       </div>
-      <div className="mailbox-item-body">{mail.msg}</div>
+      <MailboxBody text={mail.msg} />
     </div>
   );
   return (
@@ -7916,7 +7913,7 @@ function MailboxPanel({
                           : t("mailbox.statusSent")}
                 </span>
               </div>
-              <div className="mailbox-item-body">{entry.msg}</div>
+              <MailboxBody text={entry.msg} />
             </div>
           ))
         )}
