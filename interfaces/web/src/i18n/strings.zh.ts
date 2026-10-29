@@ -727,6 +727,8 @@ export const zh = {
   mailbox: {
     title: "Mailbox",
     ariaLabel: "打开 Mailbox 面板",
+    addressLabel: "当前对话 MailboxID",
+    addressHint: "这是当前对话的 mailbox ID,可以请求其他对话的 AI 向这个邮箱发信息,来触发工作或交流。",
     empty: "尚未分配 mailbox",
     copyAddress: "复制 mailbox 地址",
     copied: "已复制",

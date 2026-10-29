@@ -7773,8 +7773,13 @@ function MailboxPanel({
       </header>
       <div className="mailbox-list">
         {mailboxName ? (
-          <div className="mailbox-address">
-            <code>{mailboxName}</code>
+          <div
+            className="mailbox-address-block"
+            title={t("mailbox.addressHint")}
+          >
+            <div className="mailbox-address-label">{t("mailbox.addressLabel")}</div>
+            <div className="mailbox-address">
+              <code>{mailboxName}</code>
             <button
               type="button"
               className="icon-button"
@@ -7797,8 +7802,9 @@ function MailboxPanel({
                 }
               }}
             >
-              {copied ? <Check size={14} /> : <Copy size={14} />}
-            </button>
+                {copied ? <Check size={14} /> : <Copy size={14} />}
+              </button>
+            </div>
           </div>
         ) : (
           <div className="activity-empty">

@@ -721,6 +721,8 @@ export const en: Strings = {
   mailbox: {
     title: "Mailbox",
     ariaLabel: "Open mailbox panel",
+    addressLabel: "Mailbox ID for this conversation",
+    addressHint: "This is the mailbox ID for this conversation. You can ask another conversation's AI to send mail to this mailbox to trigger work or chat.",
     empty: "No mailbox assigned yet",
     copyAddress: "Copy mailbox address",
     copied: "Copied",
