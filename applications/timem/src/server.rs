@@ -138,6 +138,8 @@ const SESSION_RESTORE_WORKERS: usize = 3;
 // earlier turns load lazily via the history_page command while scrolling.
 const SESSION_HISTORY_PAGE_LIMIT: usize = 30;
 const DEFAULT_MEM_TEMPORARY_RETENTION_DAYS: u16 = 5;
+const MEM_CAPACITY_32_MB: u64 = 32 * 1024 * 1024;
+const MEM_CAPACITY_64_MB: u64 = 64 * 1024 * 1024;
 const MEM_CAPACITY_128_MB: u64 = 128 * 1024 * 1024;
 const MEM_CAPACITY_256_MB: u64 = 256 * 1024 * 1024;
 const MEM_CAPACITY_512_MB: u64 = 512 * 1024 * 1024;
@@ -349,6 +351,7 @@ impl WebMemState {
             temporary_retention_days: self.settings.temporary_retention_days,
             temporary_capacity_bytes: self.settings.temporary_capacity_bytes,
             conversation_capacity_bytes: self.settings.conversation_capacity_bytes,
+            mailbox_capacity_bytes: self.settings.mailbox_capacity_bytes,
             claude_codex_tool_discovery: self.settings.claude_codex_tool_discovery,
             model_tool_result_bytes: self.settings.model_tool_result_bytes,
             context_compress_threshold_percent: self.settings.context_compress_threshold_percent,
@@ -1090,10 +1093,18 @@ enum WireEvent {
         temporary_retention_days: Option<u16>,
         temporary_capacity_bytes: Option<u64>,
         conversation_capacity_bytes: Option<u64>,
+        mailbox_capacity_bytes: Option<u64>,
         claude_codex_tool_discovery: bool,
         model_tool_result_bytes: usize,
         context_compress_threshold_percent: u8,
         restore_prompt_context_on_startup: bool,
+    },
+    MemStorageUsage {
+        temporary_bytes: u64,
+        conversation_bytes: u64,
+        mailbox_bytes: u64,
+        mailbox_files: u64,
+        favorite_bytes: u64,
     },
     MemTemporaryItems {
         items: Vec<MemTemporaryItem>,
@@ -1212,6 +1223,7 @@ struct WebMemInfo {
     temporary_retention_days: Option<u16>,
     temporary_capacity_bytes: Option<u64>,
     conversation_capacity_bytes: Option<u64>,
+    mailbox_capacity_bytes: Option<u64>,
     claude_codex_tool_discovery: bool,
     model_tool_result_bytes: usize,
     context_compress_threshold_percent: u8,
@@ -1691,6 +1703,10 @@ enum ClientCommand {
     MemConversationCapacityUpdate {
         max_bytes: Option<u64>,
     },
+    MemMailboxCapacityUpdate {
+        max_bytes: Option<u64>,
+    },
+    MemStorageUsageQuery,
     BetaClaudeCodexToolDiscoveryUpdate {
         enabled: bool,
     },
@@ -1718,6 +1734,7 @@ impl ClientCommand {
             | Self::FavoritesList
             | Self::ToolRepoSearch { .. }
             | Self::ToolRepoDetail { .. }
+            | Self::MemStorageUsageQuery
             | Self::SessionApiKeyReveal { .. }
             | Self::McpServerSecretsReveal { .. }
             | Self::ModelEndpointSecretReveal { .. }
@@ -1727,6 +1744,7 @@ impl ClientCommand {
             | Self::MemSwitch { .. }
             | Self::MemTemporaryRetentionUpdate { .. }
             | Self::MemConversationCapacityUpdate { .. }
+            | Self::MemMailboxCapacityUpdate { .. }
             | Self::BetaClaudeCodexToolDiscoveryUpdate { .. }
             | Self::SystemModelToolResultBytesUpdate { .. }
             | Self::SystemContextCompressThresholdUpdate { .. }
@@ -1806,6 +1824,7 @@ impl ClientCommand {
                 | Self::MemSwitch { .. }
                 | Self::MemTemporaryRetentionUpdate { .. }
                 | Self::MemConversationCapacityUpdate { .. }
+                | Self::MemMailboxCapacityUpdate { .. }
                 | Self::BetaClaudeCodexToolDiscoveryUpdate { .. }
                 | Self::SystemModelToolResultBytesUpdate { .. }
                 | Self::SystemContextCompressThresholdUpdate { .. }
@@ -1859,6 +1878,7 @@ impl ClientCommand {
                 | Self::ModelEndpointImportScan { .. }
                 | Self::MemTemporaryItemsList
                 | Self::MemTemporaryItemsDelete { .. }
+                | Self::MemStorageUsageQuery
         )
     }
 
@@ -5284,6 +5304,7 @@ fn handle_command_with_id(
                 temporary_retention_days: days,
                 temporary_capacity_bytes: max_bytes,
                 conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                mailbox_capacity_bytes: settings.mailbox_capacity_bytes,
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
@@ -5294,6 +5315,24 @@ fn handle_command_with_id(
         }
         ClientCommand::MemConversationCapacityUpdate { max_bytes } => {
             validate_mem_conversation_capacity_bytes(max_bytes)?;
+            if let Some(total_bytes) = max_bytes {
+                let stable_bytes = RollingCapacity::from_total_bytes(total_bytes)
+                    .map_err(|_| "mem_conversation_capacity_bytes_invalid".to_string())?
+                    .stable_bytes;
+                let mailbox_bytes = {
+                    let _guard = state
+                        .mem_mail_runtime
+                        .io_lock
+                        .lock()
+                        .map_err(|_| "mem_mail_runtime_poisoned")?;
+                    mem_mail_storage_usage(state)?.0
+                };
+                // Shrinking below the Mailbox footprint would leave no shared
+                // budget at all and force every piece of history to be pruned.
+                if mailbox_bytes > stable_bytes {
+                    return Err("mem_conversation_capacity_below_mailbox_usage".to_string());
+                }
+            }
             let (memory_dir, store, settings) = {
                 let mem = state
                     .mem
@@ -5314,6 +5353,7 @@ fn handle_command_with_id(
                 temporary_retention_days: settings.temporary_retention_days,
                 temporary_capacity_bytes: settings.temporary_capacity_bytes,
                 conversation_capacity_bytes: max_bytes,
+                mailbox_capacity_bytes: settings.mailbox_capacity_bytes,
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
@@ -5321,6 +5361,67 @@ fn handle_command_with_id(
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
+        }
+        ClientCommand::MemMailboxCapacityUpdate { max_bytes } => {
+            validate_mem_mailbox_capacity_bytes(max_bytes)?;
+            let (memory_dir, settings) = {
+                let mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                let mut settings = mem.settings.clone();
+                settings.mailbox_capacity_bytes = max_bytes;
+                (mem.layout.memory_dir(), settings)
+            };
+            let _guard = state
+                .mem_mail_runtime
+                .io_lock
+                .lock()
+                .map_err(|_| "mem_mail_runtime_poisoned")?;
+            let (usage_bytes, _, _) = mem_mail_storage_usage(state)?;
+            if max_bytes.is_some_and(|limit| usage_bytes > limit) {
+                return Err("mem_mailbox_capacity_below_usage".to_string());
+            }
+            save_web_mem_settings(&memory_dir, &settings)?;
+            state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .settings = settings.clone();
+            let event = WireEvent::MemSettingsUpdated {
+                temporary_retention_days: settings.temporary_retention_days,
+                temporary_capacity_bytes: settings.temporary_capacity_bytes,
+                conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                mailbox_capacity_bytes: settings.mailbox_capacity_bytes,
+                claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
+                model_tool_result_bytes: settings.model_tool_result_bytes,
+                context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
+        }
+        ClientCommand::MemStorageUsageQuery => {
+            let memory_dir = current_mem_state(state)?.layout.memory_dir();
+            let temporary_bytes = mem_temporary_usage_at(&memory_dir)?;
+            let favorite_bytes = ChatLibrary::new(&memory_dir).capacity()?.used_bytes;
+            let store = current_session_store(state)?;
+            let conversation_bytes = conversation_history_usage(&store)?;
+            let dir = mem_mail_dir(state)?;
+            let _guard = state
+                .mem_mail_runtime
+                .io_lock
+                .lock()
+                .map_err(|_| "mem_mail_runtime_poisoned")?;
+            refresh_mem_mail_usage(state, &dir)?;
+            let (mailbox_bytes, mailbox_files, _) = mem_mail_storage_usage(state)?;
+            return Ok(Some(WireEvent::MemStorageUsage {
+                temporary_bytes,
+                conversation_bytes,
+                mailbox_bytes,
+                mailbox_files,
+                favorite_bytes,
+            }));
         }
         ClientCommand::BetaClaudeCodexToolDiscoveryUpdate { enabled } => {
             let (memory_dir, settings) = {
@@ -5343,6 +5444,7 @@ fn handle_command_with_id(
                 temporary_retention_days: settings.temporary_retention_days,
                 temporary_capacity_bytes: settings.temporary_capacity_bytes,
                 conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                mailbox_capacity_bytes: settings.mailbox_capacity_bytes,
                 claude_codex_tool_discovery: enabled,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
@@ -5373,6 +5475,7 @@ fn handle_command_with_id(
                 temporary_retention_days: settings.temporary_retention_days,
                 temporary_capacity_bytes: settings.temporary_capacity_bytes,
                 conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                mailbox_capacity_bytes: settings.mailbox_capacity_bytes,
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: max_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
@@ -5403,6 +5506,7 @@ fn handle_command_with_id(
                 temporary_retention_days: settings.temporary_retention_days,
                 temporary_capacity_bytes: settings.temporary_capacity_bytes,
                 conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                mailbox_capacity_bytes: settings.mailbox_capacity_bytes,
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: percent,
@@ -5431,6 +5535,7 @@ fn handle_command_with_id(
                 temporary_retention_days: settings.temporary_retention_days,
                 temporary_capacity_bytes: settings.temporary_capacity_bytes,
                 conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                mailbox_capacity_bytes: settings.mailbox_capacity_bytes,
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
@@ -8624,12 +8729,41 @@ const MEM_MAIL_MAINTENANCE_INTERVAL_MS: u64 = 15 * 60 * 1000;
 const MEM_MAIL_CAPACITY_MAINTENANCE_INTERVAL_MS: u64 = 60 * 1000;
 const MAILBOX_STATE_CACHE_LIMIT: usize = 256;
 
+fn mem_mail_max_bytes_for(state: &AppState) -> Result<u64, String> {
+    if let Some(value) = std::env::var("TIMEM_MAILBOX_MAX_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+    {
+        return Ok(value);
+    }
+    Ok(current_mem_state(state)?
+        .settings
+        .mailbox_capacity_bytes
+        .unwrap_or(u64::MAX))
+}
+
 fn mem_mail_max_bytes() -> u64 {
     std::env::var("TIMEM_MAILBOX_MAX_BYTES")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(MEM_MAIL_DEFAULT_MAX_BYTES)
+}
+
+fn mem_mail_conversation_usage(
+    state: &AppState,
+    mailbox_bytes: u64,
+) -> Result<(u64, Option<u64>), String> {
+    let settings = current_mem_state(state)?.settings;
+    let history_bytes = conversation_history_usage(&current_session_store(state)?)?;
+    let index_bytes = mem_mail_index_usage(state)?;
+    Ok((
+        history_bytes
+            .saturating_add(mailbox_bytes)
+            .saturating_add(index_bytes),
+        settings.conversation_capacity_bytes,
+    ))
 }
 
 fn mem_mail_max_files() -> u64 {
@@ -8646,6 +8780,24 @@ fn mem_mail_orphan_grace_ms() -> u128 {
         .and_then(|value| value.parse::<u64>().ok())
         .map(|value| (value as u128).saturating_mul(1000))
         .unwrap_or((MEM_MAIL_DEFAULT_ORPHAN_GRACE_SECS as u128) * 1000)
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).ok().is_some_and(|value| {
+        let value = value.trim();
+        value == "1"
+            || value.eq_ignore_ascii_case("true")
+            || value.eq_ignore_ascii_case("yes")
+            || value.eq_ignore_ascii_case("on")
+    })
+}
+
+/// Routine maintenance runs on every start and then every fifteen minutes.
+/// Its summary is only actionable when files were actually reclaimed; the rest
+/// of the time it must stay out of the terminal. Set
+/// `TIMEM_MAILBOX_MAINTENANCE_LOG=1` to restore the full per-run summary.
+fn mailbox_maintenance_should_log(report: &MemMailMaintenanceReport, verbose: bool) -> bool {
+    verbose || report.reclaimed_files > 0
 }
 
 fn reset_mem_mail_runtime(state: &AppState) -> Result<(), String> {
@@ -8741,6 +8893,39 @@ fn scan_mem_mail_usage(dir: &Path) -> Result<(u64, u64), String> {
         files = files.saturating_add(1);
     }
     Ok((bytes, files))
+}
+
+fn mem_mail_index_usage(state: &AppState) -> Result<u64, String> {
+    let sessions_dir = current_session_store(state)?.sessions_dir();
+    let entries = match std::fs::read_dir(sessions_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(_) => return Err("mem_mail_index_usage_read_failed".to_string()),
+    };
+    let mut bytes = 0_u64;
+    for entry in entries {
+        let entry = entry.map_err(|_| "mem_mail_index_usage_read_failed".to_string())?;
+        if !entry
+            .file_type()
+            .map_err(|_| "mem_mail_index_usage_read_failed".to_string())?
+            .is_dir()
+        {
+            continue;
+        }
+        match std::fs::metadata(entry.path().join("mailbox.json")) {
+            Ok(metadata) if metadata.is_file() => bytes = bytes.saturating_add(metadata.len()),
+            Ok(_) => return Err("mem_mail_index_usage_read_failed".to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("mem_mail_index_usage_read_failed".to_string()),
+        }
+    }
+    Ok(bytes)
+}
+
+fn mem_mail_storage_usage(state: &AppState) -> Result<(u64, u64, u64), String> {
+    let (body_bytes, files) = scan_mem_mail_usage(&mem_mail_dir(state)?)?;
+    let index_bytes = mem_mail_index_usage(state)?;
+    Ok((body_bytes.saturating_add(index_bytes), files, index_bytes))
 }
 
 fn refresh_mem_mail_usage(state: &AppState, dir: &Path) -> Result<(u64, u64), String> {
@@ -9019,8 +9204,9 @@ fn maybe_maintain_mem_mail(state: &AppState, now_ms: u128) {
     let Ok(dir) = mem_mail_dir(state) else {
         return;
     };
+    let verbose = env_flag("TIMEM_MAILBOX_MAINTENANCE_LOG");
     match maintain_mem_mail_locked(state, &dir, now_ms) {
-        Ok(report) => eprintln!(
+        Ok(report) if mailbox_maintenance_should_log(&report, verbose) => eprintln!(
             "[timem_web_mailbox_maintenance] maintenance_runs={} referenced_files={} orphan_files={} reclaimed_files={} reclaimed_bytes={} usage_files={} usage_bytes={} budget_files={} budget_bytes={} capacity_rejections={} index_loads={} index_saves={} body_reads={} body_writes={}",
             state.mem_mail_runtime.maintenance_runs.load(Ordering::Relaxed),
             report.referenced_files,
@@ -9030,13 +9216,14 @@ fn maybe_maintain_mem_mail(state: &AppState, now_ms: u128) {
             report.usage_files,
             report.usage_bytes,
             mem_mail_max_files(),
-            mem_mail_max_bytes(),
+            mem_mail_max_bytes_for(state).unwrap_or(mem_mail_max_bytes()),
             state.mem_mail_runtime.capacity_rejections.load(Ordering::Relaxed),
             state.mem_mail_runtime.index_loads.load(Ordering::Relaxed),
             state.mem_mail_runtime.index_saves.load(Ordering::Relaxed),
             state.mem_mail_runtime.body_reads.load(Ordering::Relaxed),
             state.mem_mail_runtime.body_writes.load(Ordering::Relaxed)
         ),
+        Ok(_) => {}
         Err(error) => eprintln!("[timem_web_warning] mailbox_maintenance_failed reason={error}"),
     }
 }
@@ -9062,7 +9249,7 @@ fn store_mem_mail_with_budget(
     }
     let bytes =
         serde_json::to_vec_pretty(mail).map_err(|_| "mem_mail_serialize_failed".to_string())?;
-    let budget = mem_mail_max_bytes();
+    let budget = mem_mail_max_bytes_for(state)?;
     let file_budget = mem_mail_max_files();
     let mut usage = state.mem_mail_runtime.usage_bytes.load(Ordering::Relaxed);
     let mut files = state.mem_mail_runtime.usage_files.load(Ordering::Relaxed);
@@ -9086,20 +9273,38 @@ fn store_mem_mail_with_budget(
             files = state.mem_mail_runtime.usage_files.load(Ordering::Relaxed);
         }
     }
-    if enforce_budget && (usage.saturating_add(bytes.len() as u64) > budget || files >= file_budget)
-    {
+    let mailbox_index_bytes = mem_mail_index_usage(state)?;
+    let mailbox_storage_full = usage
+        .saturating_add(mailbox_index_bytes)
+        .saturating_add(bytes.len() as u64)
+        > budget;
+    let (conversation_bytes, conversation_limit) = if enforce_budget {
+        mem_mail_conversation_usage(state, usage)?
+    } else {
+        (0, None)
+    };
+    let conversation_full = conversation_limit.is_some_and(|total| {
+        RollingCapacity::from_total_bytes(total)
+            .map(|capacity| {
+                conversation_bytes.saturating_add(bytes.len() as u64) > capacity.stable_bytes
+            })
+            .unwrap_or(true)
+    });
+    if enforce_budget && (mailbox_storage_full || files >= file_budget || conversation_full) {
         state
             .mem_mail_runtime
             .capacity_rejections
             .fetch_add(1, Ordering::Relaxed);
         eprintln!(
-            "[timem_web_warning] mailbox_capacity_backpressure mail_id={:?} usage_files={} usage_bytes={} requested_bytes={} budget_files={} budget_bytes={}",
+            "[timem_web_warning] mailbox_capacity_backpressure mail_id={:?} usage_files={} usage_bytes={} requested_bytes={} budget_files={} budget_bytes={} conversation_bytes={} conversation_budget_bytes={:?}",
             mail.id,
             files,
             usage,
             bytes.len(),
             file_budget,
-            budget
+            budget,
+            conversation_bytes,
+            conversation_limit
         );
         return Err("mem_mail_capacity_exceeded".to_string());
     }
@@ -17052,6 +17257,7 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
                 MEM_CAPACITY_128_MB
             }),
             conversation_capacity_bytes: Some(MEM_CAPACITY_128_MB),
+            mailbox_capacity_bytes: default_mem_mailbox_capacity_bytes(),
             claude_codex_tool_discovery: false,
             model_tool_result_bytes: default_model_tool_result_bytes(),
             context_compress_threshold_percent: default_context_compress_threshold_percent(),

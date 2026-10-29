@@ -156,6 +156,7 @@ import {
   McpServerReport,
   McpTransport,
   MemTemporaryItem,
+  MemStorageUsage,
   ModelToolResultBytes,
   ModelEndpoint,
   ModelEndpointImportCandidate,
@@ -685,6 +686,11 @@ function TimemApp() {
   const [memTemporaryItemsDeleting, setMemTemporaryItemsDeleting] =
     useState(false);
   const [memTemporaryItemsError, setMemTemporaryItemsError] = useState("");
+  const [memStorageUsage, setMemStorageUsage] =
+    useState<MemStorageUsage | null>(null);
+  const memorySettingsOpenRef = useRef(false);
+  memorySettingsOpenRef.current =
+    showAppearance && settingsSection === "memory";
   const [showMcp, setShowMcp] = useState(false);
   const [newSessionTarget, setNewSessionTarget] = useState<{
     groupId: string | null;
@@ -764,6 +770,8 @@ function TimemApp() {
     useState<MemSwitchCandidate | null>(null);
   const [pendingMemRetention, setPendingMemRetention] = useState(false);
   const [pendingMemConversationCapacity, setPendingMemConversationCapacity] =
+    useState(false);
+  const [pendingMemMailboxCapacity, setPendingMemMailboxCapacity] =
     useState(false);
   const [pendingClaudeCodexToolDiscovery, setPendingClaudeCodexToolDiscovery] =
     useState(false);
@@ -1165,6 +1173,7 @@ function TimemApp() {
     if (
       !pendingMemRetention &&
       !pendingMemConversationCapacity &&
+      !pendingMemMailboxCapacity &&
       !pendingClaudeCodexToolDiscovery &&
       !pendingModelToolResultBytes &&
       !pendingContextCompressThreshold &&
@@ -1182,6 +1191,7 @@ function TimemApp() {
     pendingContextCompressThreshold,
     pendingModelToolResultBytes,
     pendingMemConversationCapacity,
+    pendingMemMailboxCapacity,
     pendingMemRetention,
     pendingMemSwitch,
     pendingRestorePromptContext,
@@ -1347,6 +1357,25 @@ function TimemApp() {
         reportUiError(
           "Mem settings failed",
           "Reconnect to Timem Web before updating conversation capacity.",
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand],
+  );
+  const saveMemMailboxCapacity = useCallback(
+    (maxBytes: number | null) => {
+      setPendingMemMailboxCapacity(true);
+      if (
+        !sendCommand({
+          type: "mem_mailbox_capacity_update",
+          max_bytes: maxBytes,
+        })
+      ) {
+        setPendingMemMailboxCapacity(false);
+        reportUiError(
+          "Mem settings failed",
+          "Reconnect to Timem Web before updating Mailbox capacity.",
           "system",
         );
       }
@@ -1932,6 +1961,8 @@ function TimemApp() {
             setPendingMemRetention(false);
           if (completed?.type === "mem_conversation_capacity_update")
             setPendingMemConversationCapacity(false);
+          if (completed?.type === "mem_mailbox_capacity_update")
+            setPendingMemMailboxCapacity(false);
           if (completed?.type === "beta_claude_codex_tool_discovery_update")
             setPendingClaudeCodexToolDiscovery(false);
           if (completed?.type === "system_model_tool_result_bytes_update")
@@ -2049,6 +2080,7 @@ function TimemApp() {
       if (event.type === "mem_settings_updated") {
         setPendingMemRetention(false);
         setPendingMemConversationCapacity(false);
+        setPendingMemMailboxCapacity(false);
         setPendingClaudeCodexToolDiscovery(false);
         setPendingModelToolResultBytes(false);
         setPendingContextCompressThreshold(false);
@@ -2063,6 +2095,7 @@ function TimemApp() {
                   temporary_capacity_bytes: event.temporary_capacity_bytes,
                   conversation_capacity_bytes:
                     event.conversation_capacity_bytes,
+                  mailbox_capacity_bytes: event.mailbox_capacity_bytes,
                   claude_codex_tool_discovery:
                     event.claude_codex_tool_discovery,
                   model_tool_result_bytes: event.model_tool_result_bytes,
@@ -2074,10 +2107,22 @@ function TimemApp() {
               }
             : current,
         );
+        sendCommandRef.current({ type: "mem_storage_usage_query" });
+        return;
+      }
+      if (event.type === "mem_storage_usage") {
+        setMemStorageUsage({
+          temporary_bytes: event.temporary_bytes,
+          conversation_bytes: event.conversation_bytes,
+          mailbox_bytes: event.mailbox_bytes,
+          mailbox_files: event.mailbox_files,
+          favorite_bytes: event.favorite_bytes,
+        });
         return;
       }
       if (event.type === "mem_temporary_items") {
         setMemTemporaryItems(event.items);
+        sendCommandRef.current({ type: "mem_storage_usage_query" });
         setMemTemporaryItemsError(event.error ?? "");
         setMemTemporaryItemsLoading(false);
         setMemTemporaryItemsDeleting(false);
@@ -2203,6 +2248,8 @@ function TimemApp() {
           ...current,
           [event.session_id]: event.mailbox,
         }));
+        if (memorySettingsOpenRef.current)
+          sendCommandRef.current({ type: "mem_storage_usage_query" });
         return;
       }
       if (event.type === "session_deleted") {
@@ -3932,6 +3979,8 @@ function TimemApp() {
       return;
     if (memTemporaryItemsLoadedForRef.current === memPath) return;
     memTemporaryItemsLoadedForRef.current = memPath;
+    setMemStorageUsage(null);
+    sendCommand({ type: "mem_storage_usage_query" });
     setMemTemporaryItemsLoading(true);
     setMemTemporaryItemsError("");
     if (!sendCommand({ type: "mem_temporary_items_list" })) {
@@ -5188,9 +5237,14 @@ function TimemApp() {
               conversationCapacityBytes={
                 server?.mem.conversation_capacity_bytes ?? null
               }
+              mailboxCapacityBytes={
+                server?.mem.mailbox_capacity_bytes ?? null
+              }
+              memStorageUsage={memStorageUsage}
               favoriteCapacity={favoriteCapacity}
               retentionPending={pendingMemRetention}
               conversationCapacityPending={pendingMemConversationCapacity}
+              mailboxCapacityPending={pendingMemMailboxCapacity}
               favoriteCapacityPending={favoriteCapacityUpdating}
               switchPending={pendingMemSwitch}
               temporaryItems={memTemporaryItems}
@@ -5220,6 +5274,7 @@ function TimemApp() {
               onSaveEndpoint={saveModelEndpoint}
               onSaveTemporaryPolicy={saveMemTemporaryPolicy}
               onSaveConversationCapacity={saveMemConversationCapacity}
+              onSaveMailboxCapacity={saveMemMailboxCapacity}
               onSaveFavoriteCapacity={saveMemFavoriteCapacity}
               onSwitchMemory={switchMemWorkspace}
             />
@@ -15088,9 +15143,12 @@ type SettingsCenterProps = {
   retentionDays: 1 | 5 | 10 | null;
   temporaryCapacityBytes: number | null;
   conversationCapacityBytes: number | null;
+  mailboxCapacityBytes: number | null;
+  memStorageUsage: MemStorageUsage | null;
   favoriteCapacity: ChatLibraryCapacity;
   retentionPending: boolean;
   conversationCapacityPending: boolean;
+  mailboxCapacityPending: boolean;
   favoriteCapacityPending: boolean;
   switchPending: boolean;
   temporaryItems: MemTemporaryItem[];
@@ -15116,6 +15174,7 @@ type SettingsCenterProps = {
     maxBytes: number | null,
   ) => void;
   onSaveConversationCapacity: (maxBytes: number | null) => void;
+  onSaveMailboxCapacity: (maxBytes: number | null) => void;
   onSaveFavoriteCapacity: (maxBytes: number | null) => void;
   onSwitchMemory: (path: string) => void;
   onRefreshTemporaryItems: () => void;
@@ -15158,9 +15217,12 @@ const SettingsCenter = memo(function SettingsCenter(
     retentionDays,
     temporaryCapacityBytes,
     conversationCapacityBytes,
+    mailboxCapacityBytes,
+    memStorageUsage,
     favoriteCapacity,
     retentionPending,
     conversationCapacityPending,
+    mailboxCapacityPending,
     favoriteCapacityPending,
     switchPending,
     temporaryItems,
@@ -15183,6 +15245,7 @@ const SettingsCenter = memo(function SettingsCenter(
     onClose,
     onSaveTemporaryPolicy,
     onSaveConversationCapacity,
+    onSaveMailboxCapacity,
     onSaveFavoriteCapacity,
     onSwitchMemory,
     onRefreshTemporaryItems,
@@ -15200,6 +15263,9 @@ const SettingsCenter = memo(function SettingsCenter(
   const [conversationCapacity, setConversationCapacity] = useState<
     number | null
   >(conversationCapacityBytes);
+  const [mailboxCapacity, setMailboxCapacity] = useState<number | null>(
+    mailboxCapacityBytes,
+  );
   const [favoriteCapacityLimit, setFavoriteCapacityLimit] = useState<
     number | null
   >(favoriteCapacity.limit_bytes ?? null);
@@ -15214,6 +15280,7 @@ const SettingsCenter = memo(function SettingsCenter(
   const busy =
     retentionPending ||
     conversationCapacityPending ||
+    mailboxCapacityPending ||
     modelToolResultBytesPending ||
     contextCompressThresholdPending ||
     restorePromptContextPending ||
@@ -15246,6 +15313,10 @@ const SettingsCenter = memo(function SettingsCenter(
   useEffect(
     () => setConversationCapacity(conversationCapacityBytes),
     [conversationCapacityBytes],
+  );
+  useEffect(
+    () => setMailboxCapacity(mailboxCapacityBytes),
+    [mailboxCapacityBytes],
   );
   useEffect(
     () => setFavoriteCapacityLimit(favoriteCapacity.limit_bytes ?? null),
@@ -15856,6 +15927,15 @@ const SettingsCenter = memo(function SettingsCenter(
                         <option value={5 * 1024 * 1024 * 1024}>5 GB</option>
                         <option value="unlimited">Unlimited</option>
                       </select>
+                      <small data-testid="temporary-storage-usage">
+                        Currently using{" "}
+                        {memStorageUsage
+                          ? formatFavoriteCapacityUsed(
+                              memStorageUsage.temporary_bytes,
+                            )
+                          : "…"}
+                        .
+                      </small>
                     </label>
                   </div>
                   <div className="settings-group-actions">
@@ -15925,6 +16005,22 @@ const SettingsCenter = memo(function SettingsCenter(
                       <option value={20 * 1024 * 1024 * 1024}>20 GB</option>
                       <option value="unlimited">Unlimited</option>
                     </select>
+                    <small data-testid="conversation-storage-usage">
+                      Conversations currently use{" "}
+                      {memStorageUsage
+                        ? formatFavoriteCapacityUsed(
+                            memStorageUsage.conversation_bytes,
+                          )
+                        : "…"}
+                      ; conversations and Mailbox together use{" "}
+                      {memStorageUsage
+                        ? formatFavoriteCapacityUsed(
+                            memStorageUsage.conversation_bytes +
+                              memStorageUsage.mailbox_bytes,
+                          )
+                        : "…"}
+                      .
+                    </small>
                   </label>
                   <div className="settings-group-actions">
                     <span
@@ -15953,6 +16049,79 @@ const SettingsCenter = memo(function SettingsCenter(
                       {conversationCapacityPending
                         ? "Saving…"
                         : "Save capacity"}
+                    </button>
+                  </div>
+                </section>
+                <div className="memory-overview-label">
+                  <span>Mailbox</span>
+                  <small>Independent limit, shared Conversation capacity</small>
+                </div>
+                <section className="settings-group settings-capacity-card mailbox-capacity-card">
+                  <div className="settings-group-heading">
+                    <div>
+                      <strong>Mailbox capacity</strong>
+                      <p>
+                        Mailbox bodies and indexes have their own limit. Their
+                        actual storage also counts toward Conversation capacity;
+                        the remaining shared space is available to conversation
+                        history. Pending deliveries and receipts stay protected.
+                      </p>
+                    </div>
+                  </div>
+                  <label className="settings-field">
+                    <span>Maximum capacity</span>
+                    <select
+                      aria-label="Mailbox maximum capacity"
+                      value={
+                        mailboxCapacity === null
+                          ? "unlimited"
+                          : String(mailboxCapacity)
+                      }
+                      disabled={mailboxCapacityPending || switchPending}
+                      onChange={(event) =>
+                        setMailboxCapacity(
+                          event.target.value === "unlimited"
+                            ? null
+                            : Number(event.target.value),
+                        )
+                      }
+                    >
+                      <option value={32 * 1024 * 1024}>32 MB</option>
+                      <option value={64 * 1024 * 1024}>64 MB</option>
+                      <option value={128 * 1024 * 1024}>128 MB</option>
+                      <option value={256 * 1024 * 1024}>256 MB</option>
+                      <option value={512 * 1024 * 1024}>512 MB</option>
+                      <option value={1024 * 1024 * 1024}>1 GB</option>
+                      <option value="unlimited">Unlimited</option>
+                    </select>
+                    <small data-testid="mailbox-storage-usage">
+                      Currently using{" "}
+                      {memStorageUsage
+                        ? `${formatFavoriteCapacityUsed(memStorageUsage.mailbox_bytes)} across ${memStorageUsage.mailbox_files} body files`
+                        : "…"}
+                      .
+                    </small>
+                  </label>
+                  <div className="settings-group-actions">
+                    <span
+                      className="settings-status"
+                      role="status"
+                      aria-live="polite"
+                    >
+                      {mailboxCapacityPending
+                        ? "Saving Mailbox capacity…"
+                        : ""}
+                    </span>
+                    <button
+                      type="button"
+                      className={`primary compact ${mailboxCapacityPending ? "sending" : ""}`}
+                      disabled={
+                        busy || mailboxCapacity === mailboxCapacityBytes
+                      }
+                      onClick={() => onSaveMailboxCapacity(mailboxCapacity)}
+                    >
+                      {mailboxCapacityPending && <LoaderCircle size={14} />}{" "}
+                      {mailboxCapacityPending ? "Saving…" : "Save capacity"}
                     </button>
                   </div>
                 </section>

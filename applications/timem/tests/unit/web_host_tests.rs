@@ -22012,3 +22012,481 @@ fn mem_switch_reset_clears_mailbox_cache_usage_and_maintenance_schedule() {
         "cumulative operational counters remain useful across MEM switches"
     );
 }
+
+#[test]
+fn routine_mailbox_maintenance_stays_quiet_until_files_are_reclaimed() {
+    let mut report = MemMailMaintenanceReport::default();
+    assert!(!mailbox_maintenance_should_log(&report, false));
+    report.orphan_files = 2;
+    assert!(
+        !mailbox_maintenance_should_log(&report, false),
+        "orphans within the grace window are routine"
+    );
+    report.reclaimed_files = 1;
+    assert!(
+        mailbox_maintenance_should_log(&report, false),
+        "reclaiming files is actionable and must be reported"
+    );
+    assert!(
+        mailbox_maintenance_should_log(&MemMailMaintenanceReport::default(), true),
+        "the explicit diagnostic switch keeps the full per-run summary"
+    );
+}
+
+// ===== Mailbox capacity settings, usage accounting and shared quota =====
+
+#[test]
+fn mailbox_capacity_settings_are_legacy_compatible_validated_and_persistent() {
+    let root = std::env::temp_dir().join(unique_web_id("mem_mailbox_capacity_settings"));
+    std::fs::create_dir_all(&root).unwrap();
+
+    // A settings file written before Mailbox capacity existed keeps every
+    // legacy field and adopts the independent 128 MB default.
+    std::fs::write(
+        web_mem_settings_path(&root),
+        br#"{"temporary_retention_days":10,"conversation_capacity_bytes":536870912}"#,
+    )
+    .unwrap();
+    let legacy = load_web_mem_settings(&root, false).unwrap();
+    assert_eq!(legacy.mailbox_capacity_bytes, Some(MEM_CAPACITY_128_MB));
+    assert_eq!(
+        legacy.conversation_capacity_bytes,
+        Some(MEM_CAPACITY_512_MB)
+    );
+    assert_eq!(legacy.temporary_retention_days, Some(10));
+
+    for bytes in [
+        None,
+        Some(MEM_CAPACITY_32_MB),
+        Some(MEM_CAPACITY_64_MB),
+        Some(MEM_CAPACITY_128_MB),
+        Some(MEM_CAPACITY_256_MB),
+        Some(MEM_CAPACITY_512_MB),
+        Some(MEM_CAPACITY_1_GB),
+    ] {
+        validate_mem_mailbox_capacity_bytes(bytes).unwrap();
+    }
+    for bytes in [
+        Some(0),
+        Some(1),
+        Some(MEM_CAPACITY_32_MB - 1),
+        Some(MEM_CAPACITY_1_GB + 1),
+    ] {
+        assert_eq!(
+            validate_mem_mailbox_capacity_bytes(bytes).unwrap_err(),
+            "mem_mailbox_capacity_bytes_invalid"
+        );
+    }
+
+    let mut settings = legacy;
+    settings.mailbox_capacity_bytes = Some(MEM_CAPACITY_64_MB);
+    save_web_mem_settings(&root, &settings).unwrap();
+    assert_eq!(
+        load_web_mem_settings(&root, false)
+            .unwrap()
+            .mailbox_capacity_bytes,
+        Some(MEM_CAPACITY_64_MB)
+    );
+
+    // A later writer that predates the field still reloads as the default.
+    std::fs::write(
+        web_mem_settings_path(&root),
+        br#"{"temporary_retention_days":5}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        load_web_mem_settings(&root, false)
+            .unwrap()
+            .mailbox_capacity_bytes,
+        Some(MEM_CAPACITY_128_MB)
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn mailbox_capacity_update_is_authoritative_persistent_and_rejects_below_usage() {
+    let (_guard, state, _session_id) = mailbox_e2e_setup("mailbox_e2e_capacity_cmd");
+    let memory_dir = current_mem_state(&state).unwrap().layout.memory_dir();
+    assert_eq!(
+        snapshot_for(&state, TEST_PORT)
+            .server
+            .mem
+            .mailbox_capacity_bytes,
+        Some(MEM_CAPACITY_128_MB)
+    );
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::MemMailboxCapacityUpdate {
+            max_bytes: Some(MEM_CAPACITY_64_MB),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::MemSettingsUpdated {
+        mailbox_capacity_bytes,
+        ..
+    } = event
+    else {
+        panic!("expected MEM settings event")
+    };
+    assert_eq!(mailbox_capacity_bytes, Some(MEM_CAPACITY_64_MB));
+    assert_eq!(
+        current_mem_state(&state)
+            .unwrap()
+            .settings
+            .mailbox_capacity_bytes,
+        Some(MEM_CAPACITY_64_MB)
+    );
+    assert_eq!(
+        load_web_mem_settings(&memory_dir, false)
+            .unwrap()
+            .mailbox_capacity_bytes,
+        Some(MEM_CAPACITY_64_MB)
+    );
+    assert_eq!(
+        snapshot_for(&state, TEST_PORT)
+            .server
+            .mem
+            .mailbox_capacity_bytes,
+        Some(MEM_CAPACITY_64_MB)
+    );
+
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::MemMailboxCapacityUpdate { max_bytes: Some(1) },
+        )
+        .unwrap_err(),
+        "mem_mailbox_capacity_bytes_invalid"
+    );
+
+    // A sparse body makes the footprint exceed the smallest tier without
+    // writing 32 MB of real data; the update is refused and not persisted.
+    let dir = mem_mail_dir(&state).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    let sparse = dir.join("mail_sparse_capacity.json");
+    std::fs::File::create(&sparse)
+        .unwrap()
+        .set_len(MEM_CAPACITY_32_MB + 1)
+        .unwrap();
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::MemMailboxCapacityUpdate {
+                max_bytes: Some(MEM_CAPACITY_32_MB),
+            },
+        )
+        .unwrap_err(),
+        "mem_mailbox_capacity_below_usage"
+    );
+    assert_eq!(
+        current_mem_state(&state)
+            .unwrap()
+            .settings
+            .mailbox_capacity_bytes,
+        Some(MEM_CAPACITY_64_MB)
+    );
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::MemMailboxCapacityUpdate { max_bytes: None },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::MemSettingsUpdated {
+        mailbox_capacity_bytes,
+        ..
+    } = event
+    else {
+        panic!("expected MEM settings event")
+    };
+    assert_eq!(mailbox_capacity_bytes, None);
+    std::fs::remove_file(&sparse).unwrap();
+}
+
+#[test]
+fn conversation_capacity_rejects_shrinking_below_mailbox_footprint() {
+    let (_guard, state, _session_id) = mailbox_e2e_setup("mailbox_e2e_conversation_floor");
+    let dir = mem_mail_dir(&state).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    let sparse = dir.join("mail_sparse_conversation.json");
+    // 125 MB still fits the independent Mailbox limit but exceeds the 124 MB
+    // stable Conversation budget of the smallest tier.
+    std::fs::File::create(&sparse)
+        .unwrap()
+        .set_len(125 * 1024 * 1024)
+        .unwrap();
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::MemConversationCapacityUpdate {
+                max_bytes: Some(MEM_CAPACITY_128_MB),
+            },
+        )
+        .unwrap_err(),
+        "mem_conversation_capacity_below_mailbox_usage"
+    );
+    assert_eq!(
+        current_mem_state(&state)
+            .unwrap()
+            .settings
+            .conversation_capacity_bytes,
+        Some(MEM_CAPACITY_128_MB),
+        "a rejected update must not be persisted"
+    );
+    std::fs::remove_file(&sparse).unwrap();
+}
+
+#[test]
+fn storage_usage_query_reports_temporary_conversation_mailbox_and_favorite() {
+    let (_guard, state, _session_id) = mailbox_e2e_setup("mailbox_e2e_storage_usage");
+    let memory_dir = current_mem_state(&state).unwrap().layout.memory_dir();
+    std::fs::create_dir_all(&memory_dir).unwrap();
+
+    let temporary = memory_dir.join("tmp-storage-usage.tmp");
+    std::fs::write(&temporary, vec![b't'; 4096]).unwrap();
+
+    let store = current_session_store(&state).unwrap();
+    // In-memory workers are not persisted sessions; usage accounting walks the
+    // stored index, so persist one session with a sparse history file.
+    let stored = agent_core::session_store::new_stored_session(
+        "usage_history_session",
+        "usage",
+        "/work",
+        StoredSessionProfile::default(),
+        store.history_path_for_session("usage_history_session"),
+    );
+    store.upsert_session(&stored).unwrap();
+    let history = store.history_path_for_session("usage_history_session");
+    std::fs::create_dir_all(history.parent().unwrap()).unwrap();
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&history)
+        .unwrap()
+        .set_len(3 * 1024 * 1024)
+        .unwrap();
+
+    store_mem_mail(
+        &state,
+        &MemMail {
+            id: "usage_mail".to_string(),
+            from: "mb-usage-a".to_string(),
+            to: "mb-usage-b".to_string(),
+            msg: "usage body".to_string(),
+            created_at_ms: 1,
+        },
+    )
+    .unwrap();
+    let body_path = mem_mail_dir(&state).unwrap().join("mail_usage_mail.json");
+    let expected_mailbox =
+        std::fs::metadata(&body_path).unwrap().len() + mem_mail_index_usage(&state).unwrap();
+    let expected_favorite = ChatLibrary::new(&memory_dir).capacity().unwrap().used_bytes;
+
+    let event = handle_command(&state, TEST_PORT, ClientCommand::MemStorageUsageQuery)
+        .unwrap()
+        .unwrap();
+    let WireEvent::MemStorageUsage {
+        temporary_bytes,
+        conversation_bytes,
+        mailbox_bytes,
+        mailbox_files,
+        favorite_bytes,
+    } = event
+    else {
+        panic!("expected storage usage event")
+    };
+    assert_eq!(temporary_bytes, 4096);
+    assert_eq!(conversation_bytes, 3 * 1024 * 1024);
+    assert_eq!(mailbox_bytes, expected_mailbox);
+    assert_eq!(mailbox_files, 1);
+    assert_eq!(favorite_bytes, expected_favorite);
+}
+
+#[test]
+fn mailbox_shared_conversation_quota_blocks_body_and_preserves_spool() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_shared_quota");
+    let store = current_session_store(&state).unwrap();
+    let stored = agent_core::session_store::new_stored_session(
+        "quota_history_session",
+        "quota",
+        "/work",
+        StoredSessionProfile::default(),
+        store.history_path_for_session("quota_history_session"),
+    );
+    store.upsert_session(&stored).unwrap();
+    let history = store.history_path_for_session("quota_history_session");
+    std::fs::create_dir_all(history.parent().unwrap()).unwrap();
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&history)
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::MemConversationCapacityUpdate {
+            max_bytes: Some(MEM_CAPACITY_128_MB),
+        },
+    )
+    .unwrap();
+    let stable = RollingCapacity::from_total_bytes(MEM_CAPACITY_128_MB)
+        .unwrap()
+        .stable_bytes;
+    assert_eq!(stable, 124 * 1024 * 1024);
+
+    // Fill the shared budget with sparse history: no real bytes are written.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&history)
+        .unwrap()
+        .set_len(stable)
+        .unwrap();
+
+    let self_name = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .mailbox_name;
+    let before = state
+        .mem_mail_runtime
+        .capacity_rejections
+        .load(Ordering::Relaxed);
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("shared-quota", "mb-shared-peer", &self_name, -1, -1),
+    )
+    .unwrap();
+    mailbox_tick(&state);
+
+    assert!(
+        load_mailbox_state(&state, &session_id)
+            .unwrap()
+            .entries
+            .is_empty(),
+        "a body cannot be indexed when the shared budget is exhausted"
+    );
+    assert!(!mem_mail_exists(&state, "shared-quota"));
+    assert_eq!(
+        crate::mailbox::scan_mails(&e2e_inbox(&self_name)).len(),
+        1,
+        "the rejected envelope must remain retryable in the spool"
+    );
+    assert!(
+        state
+            .mem_mail_runtime
+            .capacity_rejections
+            .load(Ordering::Relaxed)
+            > before
+    );
+
+    // Freeing history restores the shared budget; the same spool entry lands.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&history)
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.entries.len(), 1);
+    assert_eq!(mailbox.entries[0].id, "shared-quota");
+    assert_eq!(mailbox.entries[0].state, "read");
+    assert!(mem_mail_exists(&state, "shared-quota"));
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(&self_name)).is_empty());
+}
+
+#[test]
+fn mailbox_local_delivery_is_bidirectional_between_two_sessions() {
+    let (_guard, state, session_a) = mailbox_e2e_setup("mailbox_e2e_bidir_a");
+    let session_b = register_real_worker(&state, "mailbox_e2e_bidir_b");
+    let name_a = load_mailbox_state(&state, &session_a).unwrap().mailbox_name;
+    let name_b = load_mailbox_state(&state, &session_b).unwrap().mailbox_name;
+
+    handle_mailbox_send_topic(&state, &session_a, &json!({"to": name_b, "msg": "a to b"}));
+    handle_mailbox_send_topic(&state, &session_b, &json!({"to": name_a, "msg": "b to a"}));
+
+    let mailbox_a = load_mailbox_state(&state, &session_a).unwrap();
+    let mailbox_b = load_mailbox_state(&state, &session_b).unwrap();
+    assert_eq!(mailbox_a.entries.len(), 2);
+    assert_eq!(mailbox_b.entries.len(), 2);
+    let find = |mailbox: &MailboxState, dir: &str, msg: &str| -> MailboxEntry {
+        mailbox
+            .entries
+            .iter()
+            .find(|entry| entry.dir == dir && load_mem_mail(&state, &entry.id).unwrap().msg == msg)
+            .cloned()
+            .unwrap()
+    };
+    let a_out = find(&mailbox_a, "out", "a to b");
+    let b_in = find(&mailbox_b, "in", "a to b");
+    let b_out = find(&mailbox_b, "out", "b to a");
+    let a_in = find(&mailbox_a, "in", "b to a");
+    assert_eq!(a_out.state, "read");
+    assert_eq!(b_in.state, "read");
+    assert_eq!(b_out.state, "read");
+    assert_eq!(a_in.state, "read");
+    assert_eq!(b_in.peer, name_a);
+    assert_eq!(a_in.peer, name_b);
+    assert_eq!(a_out.peer, name_b);
+    assert_eq!(b_out.peer, name_a);
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(&name_a)).is_empty());
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(&name_b)).is_empty());
+}
+
+#[test]
+fn mailbox_cross_instance_receipt_updates_out_and_notifies_once() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_receipt_notice");
+    let self_name = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .mailbox_name;
+    let peer = "mb-e2e-receipt-peer";
+    std::fs::create_dir_all(e2e_inbox(peer)).unwrap();
+    handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &json!({"to": peer, "msg": "cross receipt"}),
+    );
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    let out_id = mailbox.entries[0].id.clone();
+    assert_eq!(mailbox.entries[0].dir, "out");
+    assert_eq!(mailbox.entries[0].state, "sent");
+    let envelopes = crate::mailbox::scan_mails(&e2e_inbox(peer));
+    assert_eq!(envelopes.len(), 1);
+    assert_eq!(envelopes[0].1.from, self_name);
+    assert_eq!(envelopes[0].1.to, peer);
+
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_receipt("receipt-1", peer, &self_name, &out_id),
+    )
+    .unwrap();
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.entries[0].state, "read");
+    assert!(mailbox.entries[0].notified);
+    let notices = |state: &AppState| {
+        state.sessions.lock().unwrap()[&session_id]
+            .turns
+            .iter()
+            .flat_map(|turn| turn.user_entries.iter())
+            .filter(|entry| {
+                entry.text.contains("[mailbox] 邮件")
+                    && entry.text.contains(&out_id)
+                    && entry.text.contains("读取")
+            })
+            .count()
+    };
+    assert_eq!(notices(&state), 1);
+    mailbox_tick(&state);
+    assert_eq!(notices(&state), 1, "the read notice surfaces exactly once");
+}

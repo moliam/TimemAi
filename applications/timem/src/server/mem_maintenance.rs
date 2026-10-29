@@ -105,6 +105,8 @@ pub(super) struct WebMemSettings {
     pub(super) temporary_capacity_bytes: Option<u64>,
     #[serde(default)]
     pub(super) conversation_capacity_bytes: Option<u64>,
+    #[serde(default = "default_mem_mailbox_capacity_bytes")]
+    pub(super) mailbox_capacity_bytes: Option<u64>,
     #[serde(default = "default_claude_codex_tool_discovery")]
     pub(super) claude_codex_tool_discovery: bool,
     #[serde(default = "default_model_tool_result_bytes")]
@@ -131,6 +133,7 @@ impl WebMemSettings {
                 MEM_CAPACITY_128_MB
             }),
             conversation_capacity_bytes: Some(MEM_CAPACITY_128_MB),
+            mailbox_capacity_bytes: default_mem_mailbox_capacity_bytes(),
             claude_codex_tool_discovery: default_claude_codex_tool_discovery(),
             model_tool_result_bytes: default_model_tool_result_bytes(),
             context_compress_threshold_percent: default_context_compress_threshold_percent(),
@@ -192,6 +195,28 @@ pub(super) fn validate_mem_temporary_capacity_bytes(bytes: Option<u64>) -> Resul
     }
 }
 
+pub(super) const fn default_mem_mailbox_capacity_bytes() -> Option<u64> {
+    Some(MEM_CAPACITY_128_MB)
+}
+
+pub(super) fn validate_mem_mailbox_capacity_bytes(bytes: Option<u64>) -> Result<(), String> {
+    if matches!(
+        bytes,
+        None | Some(
+            MEM_CAPACITY_32_MB
+                | MEM_CAPACITY_64_MB
+                | MEM_CAPACITY_128_MB
+                | MEM_CAPACITY_256_MB
+                | MEM_CAPACITY_512_MB
+                | MEM_CAPACITY_1_GB
+        )
+    ) {
+        Ok(())
+    } else {
+        Err("mem_mailbox_capacity_bytes_invalid".to_string())
+    }
+}
+
 pub(super) fn validate_mem_conversation_capacity_bytes(bytes: Option<u64>) -> Result<(), String> {
     if matches!(
         bytes,
@@ -213,6 +238,7 @@ fn validate_web_mem_settings(settings: &WebMemSettings) -> Result<(), String> {
     validate_mem_temporary_retention_days(settings.temporary_retention_days)?;
     validate_mem_temporary_capacity_bytes(settings.temporary_capacity_bytes)?;
     validate_mem_conversation_capacity_bytes(settings.conversation_capacity_bytes)?;
+    validate_mem_mailbox_capacity_bytes(settings.mailbox_capacity_bytes)?;
     validate_model_tool_result_bytes(settings.model_tool_result_bytes)?;
     validate_context_compress_threshold_percent(settings.context_compress_threshold_percent)
 }
@@ -386,6 +412,12 @@ fn collect_named_temporary_files(root: &Path) -> Result<Vec<MemTemporaryItem>, S
     Ok(items)
 }
 
+pub(super) fn mem_temporary_usage_at(memory_dir: &Path) -> Result<u64, String> {
+    Ok(all_mem_temporary_items_at(memory_dir)?
+        .iter()
+        .fold(0_u64, |total, item| total.saturating_add(item.bytes)))
+}
+
 fn all_mem_temporary_items_at(memory_dir: &Path) -> Result<Vec<MemTemporaryItem>, String> {
     collect_named_temporary_files(memory_dir)
 }
@@ -530,6 +562,38 @@ pub(super) fn apply_temporary_retention(
     Ok(result)
 }
 
+pub(super) fn conversation_history_usage(store: &SessionStore) -> Result<u64, String> {
+    let sessions = store.list_sessions_resilient()?.sessions;
+    let mut used = 0_u64;
+    for session in sessions {
+        match std::fs::metadata(store.history_path_for_session(&session.session_id)) {
+            Ok(metadata) if metadata.is_file() => used = used.saturating_add(metadata.len()),
+            Ok(_) => return Err("mem_conversation_usage_read_failed".to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("mem_conversation_usage_read_failed".to_string()),
+        }
+    }
+    Ok(used)
+}
+
+fn mailbox_conversation_reserve(state: &AppState) -> Result<u64, String> {
+    let _guard = state
+        .mem_mail_runtime
+        .io_lock
+        .lock()
+        .map_err(|_| "mem_mail_runtime_poisoned")?;
+    let (bytes, _, _) = mem_mail_storage_usage(state)?;
+    Ok(bytes)
+}
+
+fn conversation_stable_budget(state: &AppState, total_bytes: u64) -> Result<u64, String> {
+    let capacity = RollingCapacity::from_total_bytes(total_bytes)
+        .map_err(|_| "mem_conversation_capacity_bytes_invalid".to_string())?;
+    Ok(capacity
+        .stable_bytes
+        .saturating_sub(mailbox_conversation_reserve(state)?))
+}
+
 pub(super) fn apply_conversation_capacity(
     state: &AppState,
     store: &SessionStore,
@@ -538,9 +602,8 @@ pub(super) fn apply_conversation_capacity(
     let Some(total_bytes) = max_bytes else {
         return Ok(0);
     };
-    let capacity = RollingCapacity::from_total_bytes(total_bytes)
-        .map_err(|_| "mem_conversation_capacity_bytes_invalid".to_string())?;
-    apply_conversation_stable_capacity(state, store, capacity.stable_bytes)
+    let stable_bytes = conversation_stable_budget(state, total_bytes)?;
+    apply_conversation_stable_capacity(state, store, stable_bytes)
 }
 
 pub(super) fn apply_conversation_stable_capacity(
@@ -560,14 +623,9 @@ pub(super) fn apply_conversation_stable_capacity(
         .collect::<BTreeSet<_>>();
     let mut sessions = store.list_sessions_resilient()?.sessions;
     sessions.sort_by_key(|session| (session.updated_at_ms, session.session_id.clone()));
-    let mut used = sessions
-        .iter()
-        .map(|session| {
-            std::fs::metadata(store.history_path_for_session(&session.session_id))
-                .map(|meta| meta.len())
-                .unwrap_or(0)
-        })
-        .sum::<u64>();
+    // Fail closed: an unreadable history must abort the pass instead of
+    // under-reporting usage and leaving the shared quota overcommitted.
+    let mut used = conversation_history_usage(store)?;
     let mut removed = 0u64;
     for session in sessions {
         if used <= stable_bytes {
@@ -641,6 +699,7 @@ pub(super) async fn run_idle_temporary_maintenance(
                         now_ms_i64(),
                     )?;
                     apply_conversation_stable_capacity_if_configured(
+                        &state,
                         &store,
                         conversation_max_bytes,
                     )?;
@@ -659,34 +718,25 @@ pub(super) async fn run_idle_temporary_maintenance(
 }
 
 fn apply_conversation_stable_capacity_if_configured(
+    state: &AppState,
     store: &SessionStore,
     max_bytes: Option<u64>,
 ) -> Result<(), String> {
     let Some(total_bytes) = max_bytes else {
         return Ok(());
     };
-    let capacity = RollingCapacity::from_total_bytes(total_bytes)
-        .map_err(|_| "mem_conversation_capacity_bytes_invalid".to_string())?;
+    let stable_bytes = conversation_stable_budget(state, total_bytes)?;
     // The periodic pass runs only when no Session is active, so no active-work
     // exclusion is required after the idle check.
     let mut sessions = store.list_sessions_resilient()?.sessions;
     sessions.sort_by_key(|session| (session.updated_at_ms, session.session_id.clone()));
-    let mut used = sessions
-        .iter()
-        .map(|session| {
-            std::fs::metadata(store.history_path_for_session(&session.session_id))
-                .map(|metadata| metadata.len())
-                .unwrap_or(0)
-        })
-        .sum::<u64>();
+    let mut used = conversation_history_usage(store)?;
     for session in sessions {
-        if used <= capacity.stable_bytes {
+        if used <= stable_bytes {
             break;
         }
-        let reclaimed = store.prune_oldest_history_turns(
-            &session.session_id,
-            used.saturating_sub(capacity.stable_bytes),
-        )?;
+        let reclaimed = store
+            .prune_oldest_history_turns(&session.session_id, used.saturating_sub(stable_bytes))?;
         used = used.saturating_sub(reclaimed);
     }
     Ok(())

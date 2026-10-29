@@ -539,6 +539,14 @@ export type ChatFavorite = {
   deleted?: boolean;
 };
 
+export type MemStorageUsage = {
+  temporary_bytes: number;
+  conversation_bytes: number;
+  mailbox_bytes: number;
+  mailbox_files: number;
+  favorite_bytes: number;
+};
+
 export type ModelToolResultBytes = 8192 | 10240 | 16384 | 20480 | 30720;
 export type ContextCompressThresholdPercent = 80 | 85 | 90 | 95 | 100;
 
@@ -560,6 +568,7 @@ export type Snapshot = {
       temporary_retention_days: 1 | 5 | 10 | null;
       temporary_capacity_bytes: number | null;
       conversation_capacity_bytes: number | null;
+      mailbox_capacity_bytes: number | null;
       claude_codex_tool_discovery: boolean;
       model_tool_result_bytes: ModelToolResultBytes;
       context_compress_threshold_percent: ContextCompressThresholdPercent;
@@ -748,11 +757,13 @@ export type WireEvent =
       temporary_retention_days: 1 | 5 | 10 | null;
       temporary_capacity_bytes: number | null;
       conversation_capacity_bytes: number | null;
+      mailbox_capacity_bytes: number | null;
       claude_codex_tool_discovery: boolean;
       model_tool_result_bytes: ModelToolResultBytes;
       context_compress_threshold_percent: ContextCompressThresholdPercent;
       restore_prompt_context_on_startup: boolean;
     }
+  | ({ type: "mem_storage_usage" } & MemStorageUsage)
   | { type: "mem_temporary_items"; items: MemTemporaryItem[]; error?: string }
   | { type: "file_uploaded"; session_id: string; file: Attachment }
   | { type: "attachment_removed"; session_id: string; attachment_id: string }
@@ -1062,6 +1073,8 @@ export type ClientCommand =
       max_bytes: number | null;
     }
   | { type: "mem_conversation_capacity_update"; max_bytes: number | null }
+  | { type: "mem_mailbox_capacity_update"; max_bytes: number | null }
+  | { type: "mem_storage_usage_query" }
   | { type: "beta_claude_codex_tool_discovery_update"; enabled: boolean }
   | { type: "system_model_tool_result_bytes_update"; max_bytes: ModelToolResultBytes }
   | {
