@@ -20670,3 +20670,45 @@ fn web_timer_fire_immediate_contrasts_with_queue_delivery() {
         assert!(texts.contains(&"[timer:patient] patient job"), "{texts:?}");
     }
 }
+
+#[test]
+fn mailbox_prune_drops_consumed_receipts_and_caps_lists() {
+    let mail = |id: &str, kind: &str, delivered: bool, read: bool| WebMailboxMail {
+        id: id.to_string(),
+        from: "mb-from".to_string(),
+        msg: "m".to_string(),
+        created_at_ms: 0,
+        max_wait_secs: 0,
+        kind: kind.to_string(),
+        receipt_for: None,
+        delivered,
+        read,
+    };
+    let mut mails = vec![
+        mail("m1", "mail", true, true),
+        mail("r1", "receipt", true, true),
+        mail("r2", "receipt", false, false),
+    ];
+    let mut sent: Vec<SentMail> = (0..300)
+        .map(|i| SentMail {
+            id: format!("s{i}"),
+            to: "mb-to".to_string(),
+            msg: "m".to_string(),
+            created_at_ms: i as u128,
+            status: "read".to_string(),
+        })
+        .collect();
+    assert!(prune_mailbox_lists(&mut mails, &mut sent));
+    assert_eq!(
+        mails
+            .iter()
+            .map(|mail| mail.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["m1", "r2"]
+    );
+    assert_eq!(sent.len(), 200);
+    assert_eq!(sent.last().unwrap().id, "s299");
+
+    // Idempotent: pruning again removes nothing.
+    assert!(!prune_mailbox_lists(&mut mails, &mut sent));
+}

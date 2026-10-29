@@ -1255,7 +1255,9 @@ fn call_model_with_system_retries(
                     let due = last_preview_publish
                         .map(|last| last.elapsed() >= Duration::from_millis(100))
                         .unwrap_or(true);
-                    if due || preview.finish_pending() {
+                    // Retraction / parse-failure states must not be swallowed
+                    // by the coalescing window: nothing else republishes them.
+                    if due || preview_error || preview.finish_pending() {
                         last_preview_publish = Some(Instant::now());
                         preview.publish(&mut **shared_ui.borrow_mut(), session, turn_id);
                     }

@@ -1119,6 +1119,9 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .mailbox-item-state.status-failed { background: #f7e1e5; color: #b3445a; }
 :root[data-theme="light"] .mailbox-item-badge { background: #f5ecd7; color: #92690f; }
 :root[data-theme="light"] .mailbox-clear { color: #5a6b76; border-color: #c6d2db; }
+:root[data-theme="light"] .mailbox-item-top { color: #2c3a44; }
+:root[data-theme="light"] .mailbox-autodeliver { color: #455662; }
+:root[data-theme="light"] .mailbox-section-title { color: #6b7d88; }
 .timer-item-schedule.parked { color: #b89157; }
 .timer-form-hint { color: #6f8491; font-size: 11px; line-height: 1.5; }
 .timer-form-hint.error { color: #d29a92; }

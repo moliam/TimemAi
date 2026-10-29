@@ -3995,6 +3995,7 @@ fn handle_command_with_id(
         ClientCommand::MailboxClear { session_id } => {
             let mut mailbox = load_mailbox_state(state, &session_id)?;
             mailbox.mails.clear();
+            mailbox.sent.clear();
             save_mailbox_state(state, &session_id, &mailbox)?;
             publish_semantic(
                 state,
@@ -8248,6 +8249,25 @@ fn mailbox_snapshot(state: &MailboxState) -> MailboxSnapshot {
     }
 }
 
+/// Upper bound for the persisted mail/sent lists so long-lived mailboxes
+/// cannot grow without bound.
+const MAILBOX_LIST_LIMIT: usize = 200;
+
+/// Drops receipts that were already surfaced once (their acknowledgement
+/// lives in the sent ledger) and trims the lists to their newest entries.
+/// Returns true when anything was removed.
+fn prune_mailbox_lists(mails: &mut Vec<WebMailboxMail>, sent: &mut Vec<SentMail>) -> bool {
+    let before = (mails.len(), sent.len());
+    mails.retain(|mail| !(mail.kind == "receipt" && mail.delivered && mail.read));
+    if mails.len() > MAILBOX_LIST_LIMIT {
+        mails.drain(..mails.len() - MAILBOX_LIST_LIMIT);
+    }
+    if sent.len() > MAILBOX_LIST_LIMIT {
+        sent.drain(..sent.len() - MAILBOX_LIST_LIMIT);
+    }
+    before != (mails.len(), sent.len())
+}
+
 fn mailbox_state_path(state: &AppState, session_id: &str) -> Result<PathBuf, String> {
     let store = current_session_store(state)?;
     let metadata = store.metadata_path_for_session(session_id);
@@ -8419,6 +8439,10 @@ fn mailbox_tick(state: &AppState) {
                 });
             }
             let _ = std::fs::remove_file(&path);
+            changed = true;
+        }
+        // Consumed receipts and stale history must not accumulate forever.
+        if prune_mailbox_lists(&mut mailbox.mails, &mut mailbox.sent) {
             changed = true;
         }
         let self_name = mailbox.mailbox_name.clone();

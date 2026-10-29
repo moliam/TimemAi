@@ -3137,6 +3137,9 @@ function TimemApp() {
         setReconnectAttempt(0);
         setRuntimeEverConnected(true);
         setSnapshotReady(false);
+        // Server state may have drifted while disconnected; drop per-session
+        // mailbox caches so the active session refetches after the snapshot.
+        setMailboxBySession({});
       };
       ws.onclose = () => {
         if (socket.current === ws) socket.current = null;
@@ -5101,6 +5104,7 @@ function TimemApp() {
                   setShowRuntime(false);
                   setShowMcp(false);
                   setShowToolRepo(false);
+                  if (showMailbox) closeMailboxPanel();
                   if (showTimers) closeTimersPanel();
                   else setShowTimers(true);
                 }}
