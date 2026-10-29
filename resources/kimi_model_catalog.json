@@ -100,6 +100,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "chat-api",
             "reasoning-effort",
@@ -121,6 +122,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "responses-api",
             "reasoning-effort"
@@ -258,6 +260,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "chat-api",
             "reasoning-effort",
@@ -279,6 +282,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "responses-api",
             "reasoning-effort"
@@ -416,6 +420,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "chat-api",
             "reasoning-effort",
@@ -437,6 +442,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "responses-api",
             "reasoning-effort"

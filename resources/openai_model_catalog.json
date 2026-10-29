@@ -111,6 +111,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "gpt-5.6-sol"
           ],
@@ -130,6 +131,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "gpt-5.6-sol"
           ],
@@ -273,6 +275,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "gpt-5.6-terra"
           ],
@@ -292,6 +295,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "gpt-5.6-terra"
           ],
@@ -435,6 +439,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "gpt-5.6-luna"
           ],
@@ -454,6 +459,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "gpt-5.6-luna"
           ],
@@ -597,6 +603,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "gpt-6-sol"
           ],
@@ -616,6 +623,7 @@
             "reasoning.effort"
           ],
           "function_calling": "conditional",
+          "required_tool_choice": true,
           "source_refs": [
             "gpt-6-sol"
           ],
@@ -783,6 +791,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "gpt-6-astra"
           ],
@@ -802,6 +811,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "gpt-6-astra"
           ],
@@ -941,6 +951,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "gpt-6.1-sol"
           ],
@@ -960,6 +971,7 @@
             "reasoning.effort"
           ],
           "function_calling": "unsupported",
+          "required_tool_choice": true,
           "source_refs": [
             "gpt-6.1-sol"
           ],
@@ -1126,6 +1138,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "gpt-6-luna"
           ],
@@ -1145,6 +1158,7 @@
             "reasoning.effort"
           ],
           "function_calling": "conditional",
+          "required_tool_choice": true,
           "source_refs": [
             "gpt-6-luna"
           ],
@@ -1311,6 +1325,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "gpt-5.5"
           ],
@@ -1330,6 +1345,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "gpt-5.5"
           ],
@@ -1455,6 +1471,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "gpt-5.5-pro"
           ],

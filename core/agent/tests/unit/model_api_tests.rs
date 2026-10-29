@@ -2687,6 +2687,16 @@ fn catalog_required_tool_choice_downgrades_to_auto_on_documented_rejections() {
         .body;
     assert_eq!(body["tool_choice"], json!("auto"));
 
+    // DeepSeek chat thinking mode answers 400 on tool_choice=required
+    // (live: "Thinking mode does not support this tool_choice"): the
+    // documented-rejection downgrade applies there too.
+    let ds = deepseek_config("ds-flash", "deepseek-flash");
+    assert!(!crate::model_catalog::supports_required_tool_choice(&ds));
+    let body = prepare_model_interaction_http_request(&ds, &request)
+        .model_request
+        .body;
+    assert_eq!(body["tool_choice"], json!("auto"));
+
     // Documented-supported wires keep required: platform K3 chat and any
     // non-catalog endpoint stay on the standard contract.
     let k3 = kimi_config("k-k3", "kimi-k3");

@@ -100,6 +100,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": false,
           "source_refs": [
             "chat-api",
             "thinking-mode"
@@ -234,6 +235,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": false,
           "source_refs": [
             "chat-api",
             "thinking-mode"

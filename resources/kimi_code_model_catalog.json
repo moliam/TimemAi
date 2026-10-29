@@ -118,6 +118,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "models"
           ],
@@ -271,6 +272,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "models"
           ],
@@ -423,6 +425,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "models"
           ],
@@ -575,6 +578,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "models"
           ],
@@ -726,6 +730,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "models"
           ],

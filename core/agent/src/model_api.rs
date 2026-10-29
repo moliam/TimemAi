@@ -2082,3 +2082,9 @@ fn extract_openai_response_text(raw: &Value) -> String {
 #[cfg(test)]
 #[path = "../tests/unit/model_api_tests.rs"]
 mod tests;
+
+/// 接入点验收矩阵：新增厂商/模板必须让这里全绿。单独成模块，避免与
+/// unit 级用例混在一起时被忽略（见 docs/provider-model-descriptor.md）。
+#[cfg(test)]
+#[path = "../tests/unit/endpoint_acceptance_tests.rs"]
+mod endpoint_acceptance_checks;

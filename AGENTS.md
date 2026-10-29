@@ -134,4 +134,8 @@ scripts/performance_guard.sh
 ```
 
 测试覆盖原则和功能登记见 `docs/test-strategy.md`、`docs/feature-test-management.md`。
+新增/修改模型目录条目（Provider、模型、profile）必须让接入点验收矩阵
+`cargo test -p agent_core --lib endpoint_acceptance` 全绿：普通聊天、流式、原生工具、
+并行工具、压缩关键请求、工具续轮与每个推理档位都要能出网；常规动作清单见
+`docs/provider-model-descriptor.md` 第 11 节。
 任何适用门禁未运行或失败时，必须准确报告原因与剩余风险；不得仅凭代码审阅宣称完成。

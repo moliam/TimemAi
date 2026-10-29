@@ -74,8 +74,9 @@ pub struct CatalogProtocol {
     pub reasoning_adapter: ReasoningAdapter,
     pub function_calling: FunctionCallingSupport,
     /// Documented support for the `required` tool_choice level on this wire.
-    /// Undocumented profiles default to supported so existing behavior stays
-    /// unchanged; documented rejections downgrade at the send layer.
+    /// Bundled catalogs must state it explicitly; an absent declaration reads
+    /// as unsupported (fail-safe) so a new profile can never inherit an
+    /// optimistic assumption that shows up as a live 400 during compression.
     pub required_tool_choice: bool,
     pub disabled_reason: Option<String>,
     pub fixed_effort: Option<String>,
@@ -321,8 +322,11 @@ pub fn parse(text: &str) -> Result<Vec<CatalogModel>, String> {
                 Some("unknown") => FunctionCallingSupport::Unknown,
                 _ => return Err("catalog_function_calling_missing".into()),
             };
+            // 线路事实没有“默认支持”这回事：目录没写就是没有证据，按不支持处理，
+            // 发送层据此把 Required 降级为 auto，压缩必调工具的语义由文本 trailer
+            // 保证。缺失被读成“支持”正是 DeepSeek 思考模式 400 的成因。
             let required_tool_choice = match &p["required_tool_choice"] {
-                Value::Null => true,
+                Value::Null => false,
                 Value::Bool(flag) => *flag,
                 _ => return Err("catalog_required_tool_choice_invalid".into()),
             };
@@ -640,10 +644,13 @@ pub fn uses_kimi_chat(config: &crate::ModelServiceConfig) -> bool {
 }
 
 /// Wire-level fact: whether the active protocol accepts the `required`
-/// tool_choice level. Non-catalog endpoints stay permissive (true); catalog
-/// profiles with a documented rejection carry false and the send layer
-/// downgrades Required to auto there, keeping the textual compression
-/// trailer as the guarantee instead of the wire field.
+/// tool_choice level. A catalog profile claims it only by declaring
+/// `required_tool_choice: true` from documentation or a live audit; an absent
+/// declaration reads as false and the send layer downgrades Required to auto
+/// there, keeping the textual compression trailer as the guarantee instead of
+/// the wire field. Endpoints outside the catalog carry no documented fact at
+/// all, so they keep the standard contract (true) instead of being downgraded
+/// on a guess.
 pub fn supports_required_tool_choice(config: &crate::ModelServiceConfig) -> bool {
     crate::model_requirements::capabilities(config)
         .and_then(|m| {

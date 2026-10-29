@@ -96,6 +96,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "glm-5.2",
             "thinking",
@@ -235,6 +236,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "glm-5.3",
             "thinking",
@@ -256,6 +258,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "responses-api",
             "glm-5.3"
@@ -390,6 +393,7 @@
             "reasoning.effort"
           ],
           "function_calling": "supported",
+          "required_tool_choice": true,
           "source_refs": [
             "glm-5.3-flash",
             "thinking",

@@ -361,9 +361,10 @@ fn catalog_required_tool_choice_marks_documented_rejections_only() {
                 && matches!(m.model.as_str(), "kimi-k2.6" | "kimi-k2.7-code")
                 && p.protocol == "openai-compatible";
             let coding_responses = m.provider == "kimi_code" && p.protocol == "openai-responses";
+            let deepseek_chat = m.provider == "deepseek" && p.protocol == "openai-compatible";
             assert_eq!(
                 p.required_tool_choice,
-                !(k2_chat || coding_responses),
+                !(k2_chat || coding_responses || deepseek_chat),
                 "{} {}",
                 m.id,
                 p.protocol
@@ -393,7 +394,87 @@ fn deepseek_templates_expose_documented_thinking_wire() {
         assert_eq!(p.protocol, "openai-compatible");
         assert_eq!(p.base_url, "https://api.deepseek.com");
         assert_eq!(p.reasoning_adapter, ReasoningAdapter::DeepSeekChatThinking);
-        assert!(p.required_tool_choice);
+        // Live DeepSeek 400: "Thinking mode does not support this tool_choice"
+        // (request id f398c5e4). Chat thinking mode rejects tool_choice=
+        // required, so the send layer must downgrade it to auto.
+        assert!(!p.required_tool_choice);
         assert!(p.disabled_reason.is_none());
+    }
+}
+
+fn bundled_catalog(file: &str) -> serde_json::Value {
+    let path = format!("{}/../../resources/{file}", env!("CARGO_MANIFEST_DIR"));
+    let raw = std::fs::read_to_string(&path).expect("bundled catalog readable");
+    serde_json::from_str(&raw).expect("bundled catalog json")
+}
+
+/// 新增厂商/模板的第一道闸门：线路事实不允许“默认支持”。
+/// 目录里漏写 `required_tool_choice` 时，旧语义会把它读成“支持 required”，
+/// DeepSeek 思考模式就是这样在压缩阶段吃到 400。这里从原始 JSON 侧再兜一道，
+/// 因为 schema 只约束内置目录，手改 JSON 或外部目录都可能绕过它。
+#[test]
+fn bundled_profiles_declare_required_tool_choice() {
+    for file in [
+        "openai_model_catalog.json",
+        "zhipu_model_catalog.json",
+        "kimi_model_catalog.json",
+        "kimi_code_model_catalog.json",
+        "deepseek_model_catalog.json",
+    ] {
+        let catalog = bundled_catalog(file);
+        for model in catalog["models"].as_array().unwrap() {
+            for profile in model["profiles"].as_array().unwrap() {
+                assert!(
+                    profile
+                        .get("required_tool_choice")
+                        .is_some_and(serde_json::Value::is_boolean),
+                    "{file} {} {} 未显式声明 required_tool_choice；新增厂商/模板请按 \
+                     docs/provider-model-descriptor.md「新增厂商/模板的常规动作」提交证据",
+                    model["id"],
+                    profile["protocol"]
+                );
+            }
+        }
+    }
+}
+
+/// 第二道闸门：即使漏写，运行时也必须 fail-safe，而不是乐观放行。
+#[test]
+fn absent_required_tool_choice_reads_as_unsupported() {
+    let mut catalog = bundled_catalog("deepseek_model_catalog.json");
+    catalog["models"][0]["profiles"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("required_tool_choice");
+    let parsed = parse(&catalog.to_string()).unwrap();
+    assert!(
+        !parsed[0].protocols[0].required_tool_choice,
+        "缺省必须读作不支持：新厂商模板不能靠默认值继承“支持 required”的假设"
+    );
+}
+
+/// 第三道闸门：注册表与目录必须互相覆盖，否则“加了 provider 却没模板”只在
+/// Host 保存配置时才暴露。新增 Provider 时这里会直接失败。
+#[test]
+fn catalog_providers_are_registered_and_each_ships_usable_profiles() {
+    for model in models() {
+        assert!(
+            agent_core::model_catalog::provider_spec(&model.provider).is_some(),
+            "{} 的 provider {} 不在 PROVIDERS 注册表",
+            model.id,
+            model.provider
+        );
+        assert!(
+            model.protocols.iter().any(|p| p.disabled_reason.is_none()),
+            "{} 没有任何可用 profile",
+            model.id
+        );
+    }
+    for provider in agent_core::model_catalog::PROVIDERS {
+        assert!(
+            models().iter().any(|m| m.provider == provider.id),
+            "provider {} 已注册但目录里没有模型模板",
+            provider.id
+        );
     }
 }
