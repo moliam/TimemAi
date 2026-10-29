@@ -2041,6 +2041,28 @@ fn catalog_request_payload_obeys_each_enabled_protocol_and_effort() {
                         assert!(body.get("thinking").is_none(), "{}", model.id);
                         assert!(body.get("reasoning_effort").is_none(), "{}", model.id);
                     }
+                } else if profile.reasoning_adapter
+                    == crate::model_catalog::ReasoningAdapter::DeepSeekChatThinking
+                {
+                    // DeepSeek V4 Chat maps none -> thinking disabled without
+                    // an effort value; low/high/max keep the enabled switch
+                    // next to the effort level.
+                    let expected = if effort == "none" {
+                        json!({"type":"disabled"})
+                    } else {
+                        json!({"type":"enabled"})
+                    };
+                    assert_eq!(body.pointer("/thinking"), Some(&expected), "{}", model.id);
+                    if effort == "none" {
+                        assert!(body.get("reasoning_effort").is_none(), "{}", model.id);
+                    } else {
+                        assert_eq!(
+                            body.get("reasoning_effort").and_then(Value::as_str),
+                            Some(effort.as_str()),
+                            "{}",
+                            model.id
+                        );
+                    }
                 } else {
                     let path = if cfg.api_protocol == ApiProtocol::OpenAiResponses {
                         "/reasoning/effort"
@@ -2716,4 +2738,44 @@ fn provider_usage_reasoning_tokens_are_normalized_and_missing_fields_are_safe() 
     )
     .unwrap();
     assert_eq!(response.usage.reasoning_tokens, 0);
+}
+
+fn deepseek_config(catalog_id: &str, model_id: &str) -> ModelServiceConfig {
+    let mut cfg = config(ApiProtocol::OpenAiCompatible);
+    cfg.model = model_id.to_string();
+    cfg.openai_compatible.catalog_id = Some(catalog_id.to_string());
+    cfg.openai_compatible.stream = true;
+    cfg
+}
+
+#[test]
+fn deepseek_chat_sends_thinking_switch_and_effort() {
+    // DeepSeek V4 Chat: the thinking object toggles the mode and
+    // reasoning_effort (low/high/max) sets the strength. The unspecified
+    // state falls back to the catalog default (thinking on, high); disabled
+    // sends the explicit disabled form without an effort value.
+    for (catalog_id, model_id) in [
+        ("ds-flash", "deepseek-flash"),
+        ("ds-v4-pro", "deepseek-v4-pro"),
+    ] {
+        let cfg = deepseek_config(catalog_id, model_id);
+        let body = build_model_request_with_reasoning(&cfg, &[], StructuredOutputHint::None, false);
+        assert_eq!(body["thinking"], json!({"type": "enabled"}));
+        assert_eq!(body["reasoning_effort"], json!("high"));
+        crate::model_catalog::validate_request(&cfg, &body).unwrap();
+
+        let mut low = deepseek_config(catalog_id, model_id);
+        low.openai_compatible.reasoning_effort = Some("low".into());
+        let body = build_model_request_with_reasoning(&low, &[], StructuredOutputHint::None, false);
+        assert_eq!(body["thinking"], json!({"type": "enabled"}));
+        assert_eq!(body["reasoning_effort"], json!("low"));
+        crate::model_catalog::validate_request(&low, &body).unwrap();
+
+        let mut off = deepseek_config(catalog_id, model_id);
+        off.openai_compatible.enable_thinking = Some(false);
+        let body = build_model_request_with_reasoning(&off, &[], StructuredOutputHint::None, false);
+        assert_eq!(body["thinking"], json!({"type": "disabled"}));
+        assert!(body.get("reasoning_effort").is_none());
+        crate::model_catalog::validate_request(&off, &body).unwrap();
+    }
 }

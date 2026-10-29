@@ -437,7 +437,8 @@
                   "enum_body_field",
                   "zhipu_chat_reasoning",
                   "kimi_chat_reasoning",
-                  "kimi_k2_thinking"
+                  "kimi_k2_thinking",
+                  "deepseek_chat_thinking"
                 ]
               },
               "path": {

@@ -1,0 +1,20 @@
+{
+  "retrieved_at": "2026-10-29T05:12:30+00:00",
+  "sources": {
+    "models-pricing": {
+      "url": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing",
+      "sha256": "556097caba8adfeeed6455714bffd731c7f60db520fcee06a922eba5840663a3",
+      "excerpt": "模型 deepseek-flash deepseek-v4-pro BASE URL (OpenAI 格式) https://api.deepseek.com 模型版本 DeepSeek-V4.1-Flash-1017 DeepSeek-V4-Pro-0813 思考模式 支持非思考与思考模式（默认） 上下文长度 1M 输出长度 最大 384K Tool Calls 支持 支持 图像理解 支持 不支持"
+    },
+    "thinking-mode": {
+      "url": "https://api-docs.deepseek.com/zh-cn/guides/thinking_mode",
+      "sha256": "0b9a4c86e50c04754dcc8552789d4ab6bed58aeefb75381f7fed30943b4ccb9b",
+      "excerpt": "思考模式开关 {\"thinking\": {\"type\": \"enabled/disabled\"}} 思考强度控制 {\"reasoning_effort\": \"low/high/max\"} 思考模式默认打开，且 effort 默认为 high reasoning_effort string Possible values: [ none , low , high , max ] none 关闭思考模式； low / high / max 开启思考模式。默认强度为 high 思维链内容通过 reasoning_content 参数返回"
+    },
+    "chat-api": {
+      "url": "https://api-docs.deepseek.com/zh-cn/api/create-chat-completion",
+      "sha256": "a57733fd2622f7fe5b4a5864e91b1048761972795b875db99b8871c9bb2dfedc",
+      "excerpt": "thinking object nullable type string Possible values: [ enabled , disabled ] Default value: enabled reasoning_effort string Possible values: [ none , low , high , max ] tool_choice required 意味着模型必须调用一个或多个 tool max_tokens integer nullable 取值范围为 1 到 384K（393216）"
+    }
+  }
+}

@@ -10,6 +10,7 @@ pub enum ReasoningAdapter {
     ZhipuChatReasoning,
     KimiChatReasoning,
     KimiK2Thinking,
+    DeepSeekChatThinking,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -52,6 +53,11 @@ pub const PROVIDERS: &[ProviderSpec] = &[
     ProviderSpec {
         id: "kimi_code",
         allowed_protocols: &["openai-responses", "openai-compatible"],
+        requires_catalog: true,
+    },
+    ProviderSpec {
+        id: "deepseek",
+        allowed_protocols: &["openai-compatible"],
         requires_catalog: true,
     },
 ];
@@ -125,6 +131,7 @@ pub fn load_catalog(directory: Option<&std::path::Path>) -> Result<Vec<CatalogMo
         include_str!("../../../resources/zhipu_model_catalog.json"),
         include_str!("../../../resources/kimi_model_catalog.json"),
         include_str!("../../../resources/kimi_code_model_catalog.json"),
+        include_str!("../../../resources/deepseek_model_catalog.json"),
     ] {
         models.extend(parse(resource)?);
     }
@@ -195,7 +202,7 @@ pub fn parse(text: &str) -> Result<Vec<CatalogModel>, String> {
     for entry in entries {
         if !matches!(
             entry["provider_id"].as_str(),
-            Some("openai" | "zhipu" | "kimi" | "kimi_code")
+            Some("openai" | "zhipu" | "kimi" | "kimi_code" | "deepseek")
         ) {
             return Err("catalog_provider_adapter_not_implemented".into());
         }
@@ -256,7 +263,10 @@ pub fn parse(text: &str) -> Result<Vec<CatalogModel>, String> {
                 _ => return Err("catalog_unknown_protocol".into()),
             };
             let bindings = p["bindings"].as_array().ok_or("catalog_bindings_missing")?;
-            let expected_path = if bindings[0]["handler"] == "kimi_k2_thinking" {
+            let expected_path = if matches!(
+                bindings[0]["handler"].as_str(),
+                Some("kimi_k2_thinking" | "deepseek_chat_thinking")
+            ) {
                 "/thinking"
             } else {
                 path
@@ -296,6 +306,11 @@ pub fn parse(text: &str) -> Result<Vec<CatalogModel>, String> {
                     if entry["provider_id"] == "kimi" && protocol == "openai-compatible" =>
                 {
                     ReasoningAdapter::KimiK2Thinking
+                }
+                Some("deepseek_chat_thinking")
+                    if entry["provider_id"] == "deepseek" && protocol == "openai-compatible" =>
+                {
+                    ReasoningAdapter::DeepSeekChatThinking
                 }
                 _ => return Err("catalog_unsupported_binding".into()),
             };
@@ -569,6 +584,21 @@ pub fn validate_request(config: &crate::ModelServiceConfig, body: &Value) -> Res
             return Err("catalog_kimi_reasoning_mismatch".into());
         }
     }
+    if uses_deepseek_chat(config) {
+        // DeepSeek V4 Chat: the thinking object toggles the mode and
+        // reasoning_effort (low/high/max) sets the strength while thinking
+        // is enabled; disabled sends no effort. `enable_thinking` is not
+        // part of the documented wire.
+        let effort = body.get("reasoning_effort").and_then(Value::as_str);
+        let thinking_type = body.pointer("/thinking/type").and_then(Value::as_str);
+        let shape_ok = matches!(
+            (thinking_type, effort),
+            (Some("disabled"), None) | (Some("enabled"), Some("low" | "high" | "max"))
+        );
+        if !shape_ok || body.get("enable_thinking").is_some() {
+            return Err("catalog_deepseek_reasoning_mismatch".into());
+        }
+    }
     if !supports_required_tool_choice(config)
         && body.get("tool_choice").and_then(Value::as_str) == Some("required")
     {
@@ -638,10 +668,20 @@ pub fn uses_kimi_k2_thinking(config: &crate::ModelServiceConfig) -> bool {
     })
 }
 
+/// DeepSeek Chat (V4): the thinking object toggles the mode while
+/// reasoning_effort carries the documented strength.
+pub fn uses_deepseek_chat(config: &crate::ModelServiceConfig) -> bool {
+    crate::model_requirements::provider(config) == Some("deepseek")
+        && config.api_protocol == crate::ApiProtocol::OpenAiCompatible
+}
+
 /// Chat providers whose documented multi-turn/tool contract requires replaying
 /// the full assistant message, including opaque reasoning_content.
 pub fn chat_preserves_reasoning(config: &crate::ModelServiceConfig) -> bool {
-    uses_zhipu_chat(config) || uses_kimi_chat(config) || uses_kimi_k2_thinking(config)
+    uses_zhipu_chat(config)
+        || uses_kimi_chat(config)
+        || uses_kimi_k2_thinking(config)
+        || uses_deepseek_chat(config)
 }
 
 // Runtime admission is deliberately closed, not a general JSON transformation

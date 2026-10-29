@@ -1,8 +1,8 @@
-use agent_core::model_catalog::{models, parse, validate};
+use agent_core::model_catalog::{models, parse, validate, ReasoningAdapter};
 
 #[test]
 fn catalog_defaults_and_protocol_constraints_are_admissible() {
-    assert_eq!(models().len(), 22);
+    assert_eq!(models().len(), 24);
     for m in models() {
         for p in &m.protocols {
             let effort = p.fixed_effort.as_deref().unwrap_or(&m.default_effort);
@@ -90,7 +90,7 @@ fn external_catalog_rejects_unknown_fields_handlers_and_duplicate_identity() {
     assert!(parse(&bad.to_string()).is_err());
     let dir = FixtureDir::new();
     std::fs::write(dir.path().join("future.json"), fixture.to_string()).unwrap();
-    assert_eq!(load_catalog(Some(dir.path())).unwrap().len(), 23);
+    assert_eq!(load_catalog(Some(dir.path())).unwrap().len(), 25);
     let mut duplicate = fixture;
     duplicate["models"][0]["id"] = serde_json::json!("fixture/different-id");
     std::fs::write(dir.path().join("duplicate.json"), duplicate.to_string()).unwrap();
@@ -106,7 +106,7 @@ fn external_catalog_json_only_extension_reaches_payload_in_fresh_process() {
         use agent_core::model_api::{build_model_request_with_reasoning, StructuredOutputHint};
         use agent_core::{ApiProtocol, ModelServiceConfig};
         agent_core::model_catalog::ensure_loaded().unwrap();
-        assert_eq!(models().len(), 24);
+        assert_eq!(models().len(), 26);
         for provider in ["openai", "zhipu"] {
             let model = models()
                 .iter()
@@ -369,5 +369,31 @@ fn catalog_required_tool_choice_marks_documented_rejections_only() {
                 p.protocol
             );
         }
+    }
+}
+
+#[test]
+fn deepseek_templates_expose_documented_thinking_wire() {
+    let spec = agent_core::model_catalog::provider_spec("deepseek").expect("deepseek registered");
+    assert_eq!(spec.allowed_protocols.len(), 1);
+    assert_eq!(spec.allowed_protocols[0], "openai-compatible");
+    for (id, model_id, image) in [
+        ("ds-flash", "deepseek-flash", true),
+        ("ds-v4-pro", "deepseek-v4-pro", false),
+    ] {
+        let m = models().iter().find(|m| m.id == id).unwrap();
+        assert_eq!(m.provider, "deepseek");
+        assert_eq!(m.model, model_id);
+        assert_eq!(m.efforts, vec!["none", "low", "high", "max"]);
+        assert_eq!(m.default_effort, "high");
+        assert_eq!(m.context_window, 1_048_576);
+        assert_eq!(m.max_output, 393_216);
+        assert_eq!(m.input_modalities.contains(&"image".to_string()), image);
+        let p = &m.protocols[0];
+        assert_eq!(p.protocol, "openai-compatible");
+        assert_eq!(p.base_url, "https://api.deepseek.com");
+        assert_eq!(p.reasoning_adapter, ReasoningAdapter::DeepSeekChatThinking);
+        assert!(p.required_tool_choice);
+        assert!(p.disabled_reason.is_none());
     }
 }
