@@ -7718,7 +7718,6 @@ function MailboxPanel({
   const unreadMails = mails.filter((mail) => !mail.read);
   const archivedMails = [...mails.filter((mail) => mail.read)].reverse();
   const mailboxName = mailbox?.mailbox_name ?? "";
-  const autoDeliver = mailbox?.auto_deliver ?? true;
   const renderMail = (mail: (typeof mails)[number]) => (
     <div
       key={mail.id}
@@ -7806,24 +7805,7 @@ function MailboxPanel({
             <strong>{t("mailbox.empty")}</strong>
           </div>
         )}
-        {mailboxName && (
-          <label className="mailbox-autodeliver">
-            <input
-              type="checkbox"
-              checked={autoDeliver}
-              disabled={!sessionId}
-              onChange={(event) => {
-                if (!sessionId) return;
-                sendCommand.current({
-                  type: "mailbox_update",
-                  session_id: sessionId,
-                  auto_deliver: event.target.checked,
-                });
-              }}
-            />
-            <span>{t("mailbox.autoDeliver")}</span>
-          </label>
-        )}
+  const mailboxName = mailbox?.mailbox_name ?? "";
         <div className="mailbox-section-title">{t("mailbox.inboxTitle")}</div>
         {unreadMails.length === 0 ? (
           <div className="activity-empty">

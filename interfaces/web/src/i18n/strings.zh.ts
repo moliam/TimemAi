@@ -731,7 +731,6 @@ export const zh = {
     copyAddress: "复制 mailbox 地址",
     copied: "已复制",
     archiveTitle: "归档消息",
-    autoDeliver: "自动投递新邮件",
     inboxTitle: "收件",
     inboxEmpty: "暂无收件",
     receiptBadge: "回执",

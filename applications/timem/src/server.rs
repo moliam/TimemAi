@@ -1317,10 +1317,6 @@ struct ModelEndpointInput {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientCommand {
-    MailboxUpdate {
-        session_id: String,
-        auto_deliver: bool,
-    },
     MailboxClear {
         session_id: String,
     },
@@ -1776,7 +1772,6 @@ impl ClientCommand {
             | Self::TimerCreate { session_id, .. }
             | Self::TimerDelete { session_id, .. }
             | Self::TimerToggle { session_id, .. }
-            | Self::MailboxUpdate { session_id, .. }
             | Self::MailboxClear { session_id }
             | Self::MailboxGet { session_id }
             | Self::TimerUpdate { session_id, .. } => Some(format!("session:{session_id}")),
@@ -2698,9 +2693,6 @@ fn client_command_trace_fields(command: &ClientCommand) -> (&'static str, Option
         ClientCommand::TimerCreate { session_id, .. } => ("timer_create", Some(session_id.clone())),
         ClientCommand::TimerDelete { session_id, .. } => ("timer_delete", Some(session_id.clone())),
         ClientCommand::TimerToggle { session_id, .. } => ("timer_toggle", Some(session_id.clone())),
-        ClientCommand::MailboxUpdate { session_id, .. } => {
-            ("mailbox_update", Some(session_id.clone()))
-        }
         ClientCommand::MailboxClear { session_id, .. } => {
             ("mailbox_clear", Some(session_id.clone()))
         }
@@ -3976,21 +3968,6 @@ fn handle_command_with_id(
             enabled,
         } => {
             toggle_session_timer(state, &session_id, &timer_id, enabled)?;
-        }
-        ClientCommand::MailboxUpdate {
-            session_id,
-            auto_deliver,
-        } => {
-            let mut mailbox = load_mailbox_state(state, &session_id)?;
-            mailbox.auto_deliver = auto_deliver;
-            save_mailbox_state(state, &session_id, &mailbox)?;
-            publish_semantic(
-                state,
-                WireEvent::MailboxUpdated {
-                    session_id: session_id.clone(),
-                    mailbox: mailbox_snapshot(&mailbox),
-                },
-            );
         }
         ClientCommand::MailboxClear { session_id } => {
             let mut mailbox = load_mailbox_state(state, &session_id)?;
@@ -8262,8 +8239,6 @@ fn default_queue_timeout() -> i64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MailboxState {
     mailbox_name: String,
-    #[serde(default = "default_true")]
-    auto_deliver: bool,
     #[serde(default)]
     mails: Vec<WebMailboxMail>,
     #[serde(default)]
@@ -8274,7 +8249,6 @@ struct MailboxState {
 #[derive(Debug, Clone, Serialize)]
 struct MailboxSnapshot {
     mailbox_name: String,
-    auto_deliver: bool,
     mails: Vec<WebMailboxMail>,
     sent: Vec<SentMail>,
     unread: usize,
@@ -8288,7 +8262,6 @@ fn mailbox_snapshot(state: &MailboxState) -> MailboxSnapshot {
             .filter(|mail| mail.kind != "receipt" && !mail.read)
             .count(),
         mailbox_name: state.mailbox_name.clone(),
-        auto_deliver: state.auto_deliver,
         mails: state.mails.clone(),
         sent: state.sent.clone(),
     }
@@ -8350,7 +8323,15 @@ fn load_mailbox_state(state: &AppState, session_id: &str) -> Result<MailboxState
     let path = mailbox_state_path(state, session_id)?;
     if let Ok(bytes) = std::fs::read(&path) {
         match serde_json::from_slice::<MailboxState>(&bytes) {
-            Ok(state) => return Ok(state),
+            Ok(state) => {
+                // The spool directory is derived state: recreate it when it
+                // was removed out-of-band so the address keeps working.
+                let _ = std::fs::create_dir_all(crate::mailbox::mailbox_spool_dir(
+                    &crate::mailbox::mailbox_spool_root(),
+                    &state.mailbox_name,
+                ));
+                return Ok(state);
+            }
             Err(error) => {
                 // Persisted evidence is never silently discarded: keep the
                 // corrupt file beside the original for inspection, then mint
@@ -8365,7 +8346,6 @@ fn load_mailbox_state(state: &AppState, session_id: &str) -> Result<MailboxState
     }
     let state = MailboxState {
         mailbox_name: crate::mailbox::acquire_mailbox_name(&crate::mailbox::mailbox_spool_root()),
-        auto_deliver: true,
         mails: Vec::new(),
         sent: Vec::new(),
     };
@@ -8602,11 +8582,6 @@ fn mailbox_tick(state: &AppState) {
             .iter()
             .filter(|mail| mail.kind != "receipt" && !mail.delivered)
         {
-            let queue_due =
-                mailbox_deadline_reached(mail.created_at_ms, mail.queue_timeout_secs, now);
-            if !mailbox.auto_deliver && !queue_due {
-                continue;
-            }
             deliveries.push((
                 session_id.clone(),
                 format!(

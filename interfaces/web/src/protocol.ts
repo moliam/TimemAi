@@ -266,7 +266,6 @@ export type MailboxSentInfo = {
 /** Host-authoritative mailbox snapshot for one session. */
 export type MailboxSnapshotInfo = {
   mailbox_name: string;
-  auto_deliver: boolean;
   mails: MailboxMailInfo[];
   sent: MailboxSentInfo[];
   unread: number;
@@ -1033,11 +1032,6 @@ export type ClientCommand =
       enabled: boolean;
     }
   | { type: "mailbox_get"; session_id: string }
-  | {
-      type: "mailbox_update";
-      session_id: string;
-      auto_deliver: boolean;
-    }
   | { type: "mailbox_clear"; session_id: string }
   | {
       type: "timer_update";

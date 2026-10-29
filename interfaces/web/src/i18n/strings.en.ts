@@ -725,7 +725,6 @@ export const en: Strings = {
     copyAddress: "Copy mailbox address",
     copied: "Copied",
     archiveTitle: "Archived",
-    autoDeliver: "Auto-deliver new mail",
     inboxTitle: "Inbox",
     inboxEmpty: "Inbox is empty",
     receiptBadge: "receipt",

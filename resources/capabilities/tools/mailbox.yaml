@@ -30,10 +30,10 @@ description: |
   - `to`: recipient mailbox name. Required.
   - `msg`: mail body. Required; at most 65536 bytes (64 KiB). Mail is a
     short message, larger payloads belong in files.
-  - `queue_timeout`: max seconds the mail may wait unconsumed in the
-    recipient's inbox before its runtime forces it into the next model
-    request. `300` or `300s` syntax; `-1` waits indefinitely. Default 300.
-    Legacy alias `max_wait` is still accepted.
+  - `queue_timeout`: legacy compatibility parameter; mail is always
+    delivered immediately, so it no longer changes behavior. `300` or `300s`
+    syntax; `-1` waits indefinitely. Default 300. Legacy alias `max_wait` is
+    still accepted.
   - `resp_timeout`: max seconds your runtime waits for a read receipt before
     notifying you that the mail was not read. `-1` waits indefinitely.
     Default 600.
@@ -44,7 +44,7 @@ input_schema: |
     "properties": {
       "to": {"type":"string","description":"Recipient mailbox name, e.g. mb-1a2b3c4d."},
       "msg": {"type":"string","description":"Mail body delivered into the recipient's next model request. At most 65536 bytes (64 KiB)."},
-      "queue_timeout": {"type":"string","description":"Max seconds to wait in the recipient's inbox before forced delivery, e.g. 300 or 300s; -1 waits indefinitely. Default 300."},
+      "queue_timeout": {"type":"string","description":"Legacy compatibility parameter; mail is always delivered immediately. e.g. 300 or 300s; -1 waits indefinitely. Default 300."},
       "resp_timeout": {"type":"string","description":"Max seconds to wait for a read receipt before the sender is notified, e.g. 600 or 600s; -1 waits indefinitely. Default 600."},
       "max_wait": {"type":"string","description":"Deprecated alias of queue_timeout."}
     },

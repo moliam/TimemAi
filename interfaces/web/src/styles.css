@@ -1097,7 +1097,6 @@ button:disabled { cursor: not-allowed; }
 .mailbox-list { overflow-y: auto; padding: 10px; display: grid; gap: 8px; align-content: start; }
 .mailbox-address { display: flex; align-items: center; gap: 6px; }
 .mailbox-address code { flex: 1; min-width: 0; border: 1px solid #243040; border-radius: 6px; padding: 4px 8px; background: #131c26; color: #8fd3c0; font-size: 11px; font-weight: 700; }
-.mailbox-autodeliver { display: flex; align-items: center; gap: 7px; color: #a9bbc6; font-size: 12px; }
 .mailbox-section-title { margin-top: 4px; color: #6f8491; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .mailbox-item { border: 1px solid #243040; border-radius: 6px; padding: 8px 10px; background: #131c26; display: grid; gap: 5px; }
 .mailbox-item.read { opacity: .72; }
@@ -1131,8 +1130,7 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .mailbox-archive { border-color: #dde5ec; background: #f7fafc; }
 :root[data-theme="light"] .mailbox-archive summary { color: #5a6b76; }
 :root[data-theme="light"] .mailbox-archive-count { background: #e3ecf2; color: #47677a; }
-:root[data-theme="light"] .mailbox-autodeliver { color: #455662; }
-:root[data-theme="light"] .mailbox-section-title { color: #6b7d88; }
+:root[data-theme="light"] :root[data-theme="light"] .mailbox-section-title { color: #6b7d88; }
 .timer-item-schedule.parked { color: #b89157; }
 .timer-form-hint { color: #6f8491; font-size: 11px; line-height: 1.5; }
 .timer-form-hint.error { color: #d29a92; }

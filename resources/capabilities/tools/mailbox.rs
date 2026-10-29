@@ -15,7 +15,9 @@ pub(crate) fn execute_action(
         return failed("msg_required");
     }
     // `queue_timeout` supersedes the legacy `max_wait` name; both accept the
-    // `300s` / `300` / `-1` syntax. `resp_timeout` is new.
+    // `300s` / `300` / `-1` syntax. `resp_timeout` is new. `queue_timeout` is
+    // legacy: mail is always delivered immediately, the value is persisted
+    // with the envelope but no longer gates delivery.
     let queue_raw = str_field(action, "queue_timeout");
     let legacy_raw = str_field(action, "max_wait");
     let queue_timeout = parse_secs(if queue_raw.is_empty() {
@@ -34,18 +36,13 @@ pub(crate) fn execute_action(
         queue_timeout,
         resp_timeout,
     )]);
-    let queue_text = if queue_timeout < 0 {
-        "no queue timeout: it waits until the recipient consumes it".to_string()
-    } else {
-        format!("forced into the recipient's context after {queue_timeout}s if still queued")
-    };
     let resp_text = if resp_timeout < 0 {
         "no read-receipt deadline".to_string()
     } else {
         format!("you will be notified if it is not read within {resp_timeout}s")
     };
     ActionExecution::Completed(ActionOutcome::completed(format!(
-        "Mail queued for mailbox {to}: {queue_text}; {resp_text}. A read receipt or a timeout notice will arrive as a [mailbox] message."
+        "Mail delivered to mailbox {to}: {resp_text}. A read receipt or a timeout notice will arrive as a [mailbox] message."
     )))
 }
 
