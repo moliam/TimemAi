@@ -169,58 +169,53 @@ fn mailbox_json_path(core: &AgentCore) -> Option<std::path::PathBuf> {
     )
 }
 
-/// Load received and sent mail as merged rows, newest first. Tolerates a
-/// missing or malformed file: an absent mailbox is just an empty mailbox.
+/// Load the body-free session index and assemble bodies from the mem-wide
+/// mail ledger, newest first. Missing/malformed files behave as an empty box.
 fn load_mail_rows(core: &AgentCore) -> Vec<MailRow> {
     let mut rows: Vec<MailRow> = Vec::new();
-    if let Some(path) = mailbox_json_path(core) {
-        if let Ok(raw) = std::fs::read_to_string(path) {
-            if let Ok(state) = serde_json::from_str::<serde_json::Value>(&raw) {
-                for mail in state
-                    .get("mails")
-                    .and_then(serde_json::Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    let id = str_value(mail, "id");
-                    if id.is_empty() {
-                        continue;
-                    }
-                    rows.push(MailRow {
-                        direction: "in",
-                        peer: str_value(mail, "from"),
-                        state: if bool_value(mail, "read") {
-                            "read"
-                        } else {
-                            "unread"
-                        }
-                        .to_string(),
-                        msg: str_value(mail, "msg"),
-                        id,
-                        created_at_ms: u128_value(mail, "created_at_ms"),
-                    });
-                }
-                for mail in state
-                    .get("sent")
-                    .and_then(serde_json::Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    let id = str_value(mail, "id");
-                    if id.is_empty() {
-                        continue;
-                    }
-                    rows.push(MailRow {
-                        direction: "out",
-                        peer: str_value(mail, "to"),
-                        state: str_value(mail, "status"),
-                        msg: str_value(mail, "msg"),
-                        id,
-                        created_at_ms: u128_value(mail, "created_at_ms"),
-                    });
-                }
-            }
+    let memory_file = core.memory_file();
+    let Some(memory_dir) = memory_file.parent() else {
+        return rows;
+    };
+    let Some(path) = mailbox_json_path(core) else {
+        return rows;
+    };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return rows;
+    };
+    let Ok(state) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return rows;
+    };
+    for entry in state
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let id = str_value(entry, "id");
+        let direction = str_value(entry, "dir");
+        if id.is_empty() || !matches!(direction.as_str(), "in" | "out") {
+            continue;
         }
+        let body_path = memory_dir.join("mail").join(format!("mail_{id}.json"));
+        let msg = std::fs::read(body_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .map(|mail| str_value(&mail, "msg"))
+            .unwrap_or_default();
+        let state = str_value(entry, "state");
+        rows.push(MailRow {
+            direction: if direction == "in" { "in" } else { "out" },
+            peer: str_value(entry, "peer"),
+            state: if direction == "in" && state == "queued" {
+                "unread".to_string()
+            } else {
+                state
+            },
+            msg,
+            id,
+            created_at_ms: u128_value(entry, "created_at_ms"),
+        });
     }
     rows.sort_by_key(|row| std::cmp::Reverse(row.created_at_ms));
     rows
@@ -335,12 +330,6 @@ fn str_value(mail: &serde_json::Value, key: &str) -> String {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("")
         .to_string()
-}
-
-fn bool_value(mail: &serde_json::Value, key: &str) -> bool {
-    mail.get(key)
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
 }
 
 fn u128_value(mail: &serde_json::Value, key: &str) -> u128 {

@@ -44,15 +44,33 @@ fn write_mailbox_json(core: &AgentCore, state: serde_json::Value) {
     .unwrap();
 }
 
-fn seeded_state() -> serde_json::Value {
+fn write_mem_mail(core: &AgentCore, id: &str, msg: &str) {
+    let dir = core.memory_file().parent().unwrap().join("mail");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join(format!("mail_{id}.json")),
+        serde_json::to_string(&json!({
+            "id": id, "from": "mb-self", "to": "mb-peer", "msg": msg, "created_at_ms": 0
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+fn seeded_state(core: &AgentCore) -> serde_json::Value {
+    for (id, msg) in [
+        ("m_old", "deploy the staging cluster tonight"),
+        ("m_new", "please run the regression suite for staging"),
+        ("s_mid", "handoff: verify the spool recovery path"),
+    ] {
+        write_mem_mail(core, id, msg);
+    }
     json!({
         "mailbox_name": "mb-self",
-        "mails": [
-            {"id":"m_old","from":"mb-aaa","msg":"deploy the staging cluster tonight","created_at_ms":1000,"queue_timeout_secs":300,"kind":"mail","delivered":true,"read":false,"receipt_sent":false},
-            {"id":"m_new","from":"mb-bbb","msg":"please run the regression suite for staging","created_at_ms":2000,"queue_timeout_secs":300,"kind":"mail","delivered":true,"read":true,"receipt_sent":true}
-        ],
-        "sent": [
-            {"id":"s_mid","to":"mb-ccc","msg":"handoff: verify the spool recovery path","created_at_ms":3000,"status":"sent","resp_timeout_secs":600,"notified":false}
+        "entries": [
+            {"id":"m_old","dir":"in","peer":"mb-aaa","created_at_ms":1000,"state":"queued","receipt_sent":false},
+            {"id":"m_new","dir":"in","peer":"mb-bbb","created_at_ms":2000,"state":"read","receipt_sent":true},
+            {"id":"s_mid","dir":"out","peer":"mb-ccc","created_at_ms":3000,"state":"sent","resp_timeout_secs":600,"notified":false}
         ]
     })
 }
@@ -74,7 +92,7 @@ fn run(core: &mut AgentCore, input: serde_json::Value) -> String {
 #[test]
 fn mailbox_list_merges_in_and_out_newest_first() {
     let mut core = mailbox_test_core("list");
-    write_mailbox_json(&core, seeded_state());
+    write_mailbox_json(&core, seeded_state(&core));
     let text = run(&mut core, json!({"action": "list"}));
 
     assert!(
@@ -104,7 +122,7 @@ fn mailbox_list_merges_in_and_out_newest_first() {
 #[test]
 fn mailbox_search_matches_case_insensitively_with_word_window() {
     let mut core = mailbox_test_core("search");
-    write_mailbox_json(&core, seeded_state());
+    write_mailbox_json(&core, seeded_state(&core));
 
     let hit = run(
         &mut core,
@@ -135,14 +153,14 @@ fn mailbox_search_window_caps_at_128_words_each_side() {
     let mut core = mailbox_test_core("window");
     let mut words: Vec<String> = (0..400).map(|i| format!("w{i}")).collect();
     words[200] = "needle".to_string();
+    write_mem_mail(&core, "m_long", &words.join(" "));
     write_mailbox_json(
         &core,
         json!({
             "mailbox_name": "mb-self",
-            "mails": [
-                {"id":"m_long","from":"mb-aaa","msg": words.join(" "),"created_at_ms":1000,"queue_timeout_secs":300,"kind":"mail","delivered":true,"read":false,"receipt_sent":false}
-            ],
-            "sent": []
+            "entries": [
+                {"id":"m_long","dir":"in","peer":"mb-aaa","created_at_ms":1000,"state":"queued","receipt_sent":false}
+            ]
         }),
     );
 
@@ -161,7 +179,7 @@ fn mailbox_search_window_caps_at_128_words_each_side() {
 #[test]
 fn mailbox_read_prints_full_body_and_reports_unknown_ids() {
     let mut core = mailbox_test_core("read");
-    write_mailbox_json(&core, seeded_state());
+    write_mailbox_json(&core, seeded_state(&core));
 
     let hit = run(&mut core, json!({"action": "read", "mail_id": "s_mid"}));
     assert!(

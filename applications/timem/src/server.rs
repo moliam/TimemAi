@@ -3972,36 +3972,34 @@ fn handle_command_with_id(
         ClientCommand::MailboxClear { session_id } => {
             let mut mailbox = load_mailbox_state(state, &session_id)?;
             let self_name = mailbox.mailbox_name.clone();
-            let mut retained_mails = Vec::new();
-            for mail in mailbox.mails.drain(..) {
-                if mail.kind == "receipt" {
-                    continue;
-                }
-                if mail.read {
-                    // Keep the acknowledgement evidence until its receipt is
-                    // confirmed spooled; the scheduler retries the rest.
-                    if !mail.receipt_sent {
-                        retained_mails.push(mail);
+            let mut retained = Vec::new();
+            for entry in mailbox.entries.drain(..) {
+                if entry.dir == "out" {
+                    if entry.state == "sent" || !entry.notified {
+                        retained.push(entry);
                     }
                     continue;
                 }
-                // Explicit human discard is a terminal non-read outcome for
-                // the sender. Keep the item only while its receipt could not
-                // be spooled, so the discard is never silently lost.
-                if write_mailbox_receipt(&mail.id, &self_name, &mail.from, "discarded").is_err() {
-                    retained_mails.push(mail);
+                if entry.state == "read" {
+                    // Keep acknowledgement evidence until its receipt is spooled.
+                    if !entry.receipt_sent {
+                        retained.push(entry);
+                    }
+                    continue;
+                }
+                // Human discard is a terminal non-read outcome for the sender.
+                // The body stays in the global ledger; only the index is cleared.
+                if write_mailbox_receipt(&entry.id, &self_name, &entry.peer, "discarded").is_err() {
+                    retained.push(entry);
                 }
             }
-            mailbox.mails = retained_mails;
-            mailbox
-                .sent
-                .retain(|sent| sent.status == "sent" || !sent.notified);
+            mailbox.entries = retained;
             save_mailbox_state(state, &session_id, &mailbox)?;
             publish_semantic(
                 state,
                 WireEvent::MailboxUpdated {
                     session_id: session_id.clone(),
-                    mailbox: mailbox_snapshot(&mailbox),
+                    mailbox: mailbox_snapshot(state, &mailbox),
                 },
             );
         }
@@ -4011,7 +4009,7 @@ fn handle_command_with_id(
                 state,
                 WireEvent::MailboxUpdated {
                     session_id: session_id.clone(),
-                    mailbox: mailbox_snapshot(&mailbox),
+                    mailbox: mailbox_snapshot(state, &mailbox),
                 },
             );
         }
@@ -6168,6 +6166,41 @@ fn create_session(
     )
 }
 
+fn generate_compact_session_id(
+    state: &AppState,
+    reserved: &BTreeSet<String>,
+) -> Result<String, String> {
+    const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let store = current_session_store(state)?;
+    let spool_root = crate::mailbox::mailbox_spool_root();
+    for _ in 0..32 {
+        let mut random = [0_u8; 6];
+        agent_core::os::fill_secure_random(&mut random)
+            .map_err(|error| format!("secure_session_id_generation_failed:{error}"))?;
+        let session_id: String = random
+            .iter()
+            .map(|byte| ALPHABET[*byte as usize % ALPHABET.len()] as char)
+            .collect();
+        let live_collision = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned")?
+            .contains_key(&session_id);
+        if !live_collision
+            && !reserved.contains(&session_id)
+            && !store.sessions_dir().join(&session_id).exists()
+            && !crate::mailbox::mailbox_exists(&spool_root, &format!("mb-{session_id}"))
+        {
+            return Ok(session_id);
+        }
+    }
+    Err("session_id_collision_exhausted".to_string())
+}
+
+fn generate_session_id(state: &AppState) -> Result<String, String> {
+    generate_compact_session_id(state, &BTreeSet::new())
+}
+
 fn create_session_in_group(
     state: &AppState,
     display_name: Option<String>,
@@ -6184,7 +6217,7 @@ fn create_session_in_group(
             return Err("session_group_not_found".to_string());
         }
     }
-    let session_id = unique_web_id("session");
+    let session_id = generate_session_id(state)?;
     let tool_repo = session_tool_repo(state, &session_id)?;
     let current_dir = state
         .template
@@ -6348,12 +6381,290 @@ fn restore_stored_sessions_after_runtime_restart(state: &AppState) -> Result<usi
     restore_stored_sessions_with_runtime_restart_marker(state, true)
 }
 
+fn needs_session_id_migration(session_id: &str) -> bool {
+    let Some(suffix) = session_id.strip_prefix("session_") else {
+        return false;
+    };
+    let mut parts = suffix.split('_');
+    matches!(parts.next(), Some(part) if !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+        && matches!(parts.next(), Some(part) if !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+        && parts.next().is_none()
+}
+
+fn read_mailbox_name(path: &Path) -> Option<String> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| {
+            value
+                .get("mailbox_name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+}
+
+/// Stores a migrated body without ever overwriting a different mail that
+/// happens to have the same legacy id. Returns the id referenced by the index.
+fn store_migrated_mem_mail(state: &AppState, mail: &MemMail) -> Result<String, String> {
+    let mut candidate = mail.clone();
+    for _ in 0..32 {
+        let path = mem_mail_path(state, &candidate.id)?;
+        if !path.exists() {
+            store_mem_mail(state, &candidate)?;
+            return Ok(candidate.id);
+        }
+        if let Ok(existing) = load_mem_mail(state, &candidate.id) {
+            let same_mail_reversed = existing.id == candidate.id
+                && existing.msg == candidate.msg
+                && existing.created_at_ms == candidate.created_at_ms
+                && existing.from == candidate.to
+                && existing.to == candidate.from;
+            if existing == candidate || same_mail_reversed {
+                // Legacy sender/recipient files described the same letter
+                // from opposite sides. They must converge on one global id.
+                return Ok(candidate.id);
+            }
+        }
+        candidate.id = crate::mailbox::generate_mail_id(
+            &candidate.msg,
+            candidate.created_at_ms,
+            &candidate.to,
+        );
+    }
+    Err("mem_mail_id_collision_exhausted".to_string())
+}
+
+fn migrate_mailbox_file(
+    state: &AppState,
+    path: &Path,
+    mailbox_name: &str,
+    peer_names: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let mut mailbox = match std::fs::read(path) {
+        Ok(bytes) => {
+            let value: serde_json::Value = serde_json::from_slice(&bytes)
+                .map_err(|_| "mailbox_state_parse_failed".to_string())?;
+            parse_mailbox_value(state, &value)?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => MailboxState {
+            mailbox_name: mailbox_name.to_string(),
+            entries: Vec::new(),
+        },
+        Err(_) => return Err("mailbox_state_read_failed".to_string()),
+    };
+    mailbox.mailbox_name = mailbox_name.to_string();
+    for entry in &mut mailbox.entries {
+        if let Some(peer) = peer_names.get(&entry.peer) {
+            entry.peer = peer.clone();
+        }
+        let mut mail = load_mem_mail(state, &entry.id)?;
+        // Remap addresses without deriving direction from this entry. Sender
+        // and recipient indexes are two views of one global body, so deriving
+        // from/to here would make the final body depend on migration order.
+        if let Some(from) = peer_names.get(&mail.from) {
+            mail.from = from.clone();
+        }
+        if let Some(to) = peer_names.get(&mail.to) {
+            mail.to = to.clone();
+        }
+        // The body was collision-checked when its legacy index was converted.
+        // Address migration must keep that exact id: sender and recipient
+        // entries are two views of one global letter, not two new letters.
+        let bytes = serde_json::to_vec_pretty(&mail)
+            .map_err(|_| "mem_mail_serialize_failed".to_string())?;
+        agent_core::atomic_write_file(&mem_mail_path(state, &entry.id)?, &bytes)
+            .map_err(|_| "mem_mail_write_failed".to_string())?;
+    }
+    save_mailbox_state_at(path, &mailbox)
+}
+
+fn migrate_spool_envelopes(
+    spool_dir: &Path,
+    peer_names: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    for (_path, mut mail) in crate::mailbox::scan_mails(spool_dir) {
+        let old_from = mail.from.clone();
+        let old_to = mail.to.clone();
+        if let Some(to) = peer_names.get(&mail.to) {
+            mail.to = to.clone();
+        }
+        if let Some(from) = peer_names.get(&mail.from) {
+            mail.from = from.clone();
+        }
+        if mail.from != old_from || mail.to != old_to {
+            crate::mailbox::write_mail(&crate::mailbox::mailbox_spool_root(), &mail)?;
+        }
+    }
+    Ok(())
+}
+
+/// One-time, pre-restore conversion of ids minted by older Web Hosts. The
+/// complete old->new address map is built before any mailbox is rewritten so
+/// both sides of local conversations converge on the same new names.
+fn migrate_legacy_session_ids(
+    state: &AppState,
+    store: &SessionStore,
+    stored_sessions: &mut [StoredSession],
+) -> Result<(), String> {
+    let mut id_map = BTreeMap::new();
+    let mut peer_names = BTreeMap::new();
+    let mut reserved = BTreeSet::new();
+    for stored in stored_sessions.iter() {
+        let old_path = store.metadata_path_for_session(&stored.session_id);
+        let old_mailbox = read_mailbox_name(&old_path.with_file_name("mailbox.json"));
+        if needs_session_id_migration(&stored.session_id) {
+            let new_id = generate_compact_session_id(state, &reserved)?;
+            reserved.insert(new_id.clone());
+            if let Some(old_mailbox) = old_mailbox {
+                peer_names.insert(old_mailbox, format!("mb-{new_id}"));
+            }
+            id_map.insert(stored.session_id.clone(), new_id);
+        } else if is_compact_session_id(&stored.session_id) {
+            let new_name = format!("mb-{}", stored.session_id);
+            if let Some(old_mailbox) = old_mailbox {
+                if old_mailbox != new_name {
+                    peer_names.insert(old_mailbox, new_name);
+                }
+            }
+        }
+    }
+    let mailbox_needs_conversion = |stored: &StoredSession| {
+        let path = store
+            .metadata_path_for_session(&stored.session_id)
+            .with_file_name("mailbox.json");
+        let Ok(bytes) = std::fs::read(path) else {
+            return is_compact_session_id(&stored.session_id);
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return false;
+        };
+        value.get("entries").is_none()
+            || (is_compact_session_id(&stored.session_id)
+                && value
+                    .get("mailbox_name")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(format!("mb-{}", stored.session_id).as_str()))
+    };
+    if id_map.is_empty()
+        && peer_names.is_empty()
+        && !stored_sessions.iter().any(mailbox_needs_conversion)
+    {
+        return Ok(());
+    }
+
+    // Convert every legacy index before rewriting any address. This preserves
+    // the original sender/recipient view of shared mail; otherwise whichever
+    // session happened to migrate first could make the other side look like a
+    // different letter and trigger an unnecessary id redraw.
+    for stored in stored_sessions.iter() {
+        let path = store
+            .metadata_path_for_session(&stored.session_id)
+            .with_file_name("mailbox.json");
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| "mailbox_state_parse_failed".to_string())?;
+        if value.get("entries").is_some() {
+            continue;
+        }
+        let mailbox = parse_mailbox_value(state, &value)?;
+        save_mailbox_state_at(&path, &mailbox)?;
+    }
+
+    // Phase 1: move every legacy session and publish its new metadata. Old
+    // directories are renamed, not deleted, and a failed metadata write is
+    // rolled back before restoration starts.
+    for stored in stored_sessions.iter_mut() {
+        let Some(new_id) = id_map.get(&stored.session_id).cloned() else {
+            continue;
+        };
+        let old_id = stored.session_id.clone();
+        let old_dir = store
+            .metadata_path_for_session(&old_id)
+            .parent()
+            .ok_or_else(|| "session_data_path_invalid".to_string())?
+            .to_path_buf();
+        let new_dir = store
+            .metadata_path_for_session(&new_id)
+            .parent()
+            .ok_or_else(|| "session_data_path_invalid".to_string())?
+            .to_path_buf();
+        std::fs::rename(&old_dir, &new_dir).map_err(|error| {
+            format!("legacy_session_directory_migration_failed:{old_id}:{error}")
+        })?;
+        let mut migrated = stored.clone();
+        migrated.session_id = new_id.clone();
+        migrated.raw_chat_history_path = store
+            .history_path_for_session(&new_id)
+            .display()
+            .to_string();
+        if let Err(error) = store.upsert_session(&migrated) {
+            let _ = std::fs::rename(&new_dir, &old_dir);
+            return Err(error);
+        }
+        *stored = migrated;
+    }
+
+    // Phase 2: only now rewrite indexes/bodies, after all local peers exist at
+    // their final ids. Compact-id sessions with an older mailbox are included.
+    for stored in stored_sessions.iter() {
+        let path = store
+            .metadata_path_for_session(&stored.session_id)
+            .with_file_name("mailbox.json");
+        let compact = is_compact_session_id(&stored.session_id);
+        if !compact && !path.is_file() {
+            continue;
+        }
+        let new_name = if compact {
+            format!("mb-{}", stored.session_id)
+        } else {
+            read_mailbox_name(&path).ok_or_else(|| "mailbox_name_missing".to_string())?
+        };
+        migrate_mailbox_file(state, &path, &new_name, &peer_names)?;
+    }
+
+    // Preserve pending hand-offs while renaming their mailbox dirs. New names
+    // were collision-checked before any directory move.
+    let spool_root = crate::mailbox::mailbox_spool_root();
+    for (old_name, new_name) in &peer_names {
+        if old_name == new_name {
+            continue;
+        }
+        let old_dir = crate::mailbox::mailbox_spool_dir(&spool_root, old_name);
+        let new_dir = crate::mailbox::mailbox_spool_dir(&spool_root, new_name);
+        if old_dir.is_dir() {
+            if new_dir.exists() {
+                return Err("legacy_mailbox_spool_target_exists".to_string());
+            }
+            std::fs::rename(&old_dir, &new_dir)
+                .map_err(|_| "legacy_mailbox_spool_migration_failed".to_string())?;
+        }
+    }
+    for stored in stored_sessions.iter() {
+        let mailbox_path = store
+            .metadata_path_for_session(&stored.session_id)
+            .with_file_name("mailbox.json");
+        let Some(name) = read_mailbox_name(&mailbox_path) else {
+            continue;
+        };
+        std::fs::create_dir_all(crate::mailbox::mailbox_spool_dir(&spool_root, &name))
+            .map_err(|_| "mailbox_spool_create_failed".to_string())?;
+        migrate_spool_envelopes(
+            &crate::mailbox::mailbox_spool_dir(&spool_root, &name),
+            &peer_names,
+        )?;
+    }
+    Ok(())
+}
+
 fn restore_stored_sessions_with_runtime_restart_marker(
     state: &AppState,
     record_runtime_restart: bool,
 ) -> Result<usize, String> {
     let store = current_session_store(state)?;
     let mut stored_sessions = list_stored_sessions_resilient(&store)?;
+    migrate_legacy_session_ids(state, &store, &mut stored_sessions)?;
     // Restore newest sessions first: the user's most relevant page comes back
     // fastest while older sessions continue restoring in the background.
     // The worker queue pops from the end, so sort ascending to pop newest.
@@ -8178,30 +8489,23 @@ fn fire_due_timers(state: &AppState) {
 }
 
 /// One received mail in a session's mailbox, as surfaced to the WebUI.
+/// This remains a wire projection; persisted mail bodies live in `.mem/mail`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WebMailboxMail {
     id: String,
     from: String,
     msg: String,
     created_at_ms: u128,
-    /// Seconds the mail may wait unconsumed in this inbox before the runtime
-    /// forces it into the next model request (it then counts as read); -1
-    /// waits indefinitely.
     #[serde(default = "default_queue_timeout", alias = "max_wait_secs")]
     queue_timeout_secs: i64,
-    /// "mail" is a received letter; "receipt" acknowledges mail this session
-    /// previously sent.
     #[serde(default = "default_mail_kind")]
     kind: String,
-    /// For receipts: the id of the original sent mail being acknowledged.
     #[serde(default)]
     receipt_for: Option<String>,
     #[serde(default)]
     delivered: bool,
     #[serde(default)]
     read: bool,
-    /// Set only after the read receipt reached the sender's spool; pending
-    /// acknowledgements are retried and never pruned as stale history.
     #[serde(default)]
     receipt_sent: bool,
 }
@@ -8210,11 +8514,7 @@ fn default_mail_kind() -> String {
     "mail".to_string()
 }
 
-/// One outgoing mail in the session's sent ledger. `sent` awaits a read
-/// receipt; `read` is acknowledged; `timeout` means no read receipt arrived
-/// before the sender-side deadline (a later read can still reconcile it);
-/// `discarded`/`failed` are terminal non-read outcomes. `notified` persists
-/// whether the terminal transition was already surfaced to the sending AI.
+/// Outgoing wire projection. The persisted representation is MailboxEntry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SentMail {
     id: String,
@@ -8224,7 +8524,6 @@ struct SentMail {
     status: String,
     #[serde(default = "default_resp_timeout")]
     resp_timeout_secs: i64,
-    // Historical terminal entries must not be replayed after an upgrade.
     #[serde(default = "default_true")]
     notified: bool,
 }
@@ -8237,15 +8536,40 @@ fn default_queue_timeout() -> i64 {
     agent_core::host::MAILBOX_DEFAULT_QUEUE_TIMEOUT_SECS
 }
 
-/// Host-authoritative mailbox state persisted in the session's mailbox.json
-/// (same ownership model as timers.json; never enters Core state).
+/// The single durable home of a mail body. Both peers in one .mem may refer
+/// to the same record; the spool envelope remains only a transient hand-off.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct MemMail {
+    id: String,
+    from: String,
+    to: String,
+    msg: String,
+    created_at_ms: u128,
+}
+
+/// Body-free mailbox index. Incoming states are queued/read; outgoing states
+/// are sent/read/timeout/discarded/failed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MailboxEntry {
+    id: String,
+    dir: String,
+    peer: String,
+    created_at_ms: u128,
+    state: String,
+    #[serde(default)]
+    notified: bool,
+    #[serde(default)]
+    receipt_sent: bool,
+    #[serde(default = "default_resp_timeout")]
+    resp_timeout_secs: i64,
+}
+
+/// Host-authoritative, body-free mailbox index persisted in mailbox.json.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MailboxState {
     mailbox_name: String,
     #[serde(default)]
-    mails: Vec<WebMailboxMail>,
-    #[serde(default)]
-    sent: Vec<SentMail>,
+    entries: Vec<MailboxEntry>,
 }
 
 /// Snapshot projected to interfaces on mailbox changes.
@@ -8257,57 +8581,143 @@ struct MailboxSnapshot {
     unread: usize,
 }
 
-fn mailbox_snapshot(state: &MailboxState) -> MailboxSnapshot {
+fn mem_mail_dir(state: &AppState) -> Result<PathBuf, String> {
+    current_session_store(state)?
+        .sessions_dir()
+        .parent()
+        .map(|root| root.join("mail"))
+        .ok_or_else(|| "mem_mail_path_invalid".to_string())
+}
+
+fn mem_mail_path(state: &AppState, id: &str) -> Result<PathBuf, String> {
+    Ok(mem_mail_dir(state)?.join(format!("{id}.json")))
+}
+
+fn mem_mail_exists(state: &AppState, id: &str) -> bool {
+    mem_mail_path(state, id)
+        .map(|path| path.is_file())
+        .unwrap_or(false)
+}
+
+fn store_mem_mail(state: &AppState, mail: &MemMail) -> Result<(), String> {
+    let path = mem_mail_path(state, &mail.id)?;
+    if path.exists() {
+        return match load_mem_mail(state, &mail.id) {
+            Ok(existing) if existing == *mail => Ok(()),
+            _ => Err("mem_mail_id_conflict".to_string()),
+        };
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| "mem_mail_path_invalid".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|_| "mem_mail_dir_create_failed".to_string())?;
+    let bytes =
+        serde_json::to_vec_pretty(&mail).map_err(|_| "mem_mail_serialize_failed".to_string())?;
+    agent_core::atomic_write_file(&path, &bytes).map_err(|_| "mem_mail_write_failed".to_string())
+}
+
+fn load_mem_mail(state: &AppState, id: &str) -> Result<MemMail, String> {
+    let bytes =
+        std::fs::read(mem_mail_path(state, id)?).map_err(|_| "mem_mail_read_failed".to_string())?;
+    serde_json::from_slice(&bytes).map_err(|_| "mem_mail_parse_failed".to_string())
+}
+
+fn entry_mem_mail(state: &AppState, mailbox_name: &str, entry: &MailboxEntry) -> MemMail {
+    load_mem_mail(state, &entry.id).unwrap_or_else(|_| MemMail {
+        id: entry.id.clone(),
+        from: if entry.dir == "in" {
+            entry.peer.clone()
+        } else {
+            mailbox_name.to_string()
+        },
+        to: if entry.dir == "in" {
+            mailbox_name.to_string()
+        } else {
+            entry.peer.clone()
+        },
+        msg: format!("[mail body unavailable: {}]", entry.id),
+        created_at_ms: entry.created_at_ms,
+    })
+}
+
+fn mailbox_snapshot(state: &AppState, mailbox: &MailboxState) -> MailboxSnapshot {
+    let mut mails = Vec::new();
+    let mut sent = Vec::new();
+    let mut unread = 0;
+    for entry in &mailbox.entries {
+        let mail = entry_mem_mail(state, &mailbox.mailbox_name, entry);
+        if entry.dir == "in" {
+            if entry.state != "read" {
+                unread += 1;
+            }
+            mails.push(WebMailboxMail {
+                id: entry.id.clone(),
+                from: mail.from,
+                msg: mail.msg,
+                created_at_ms: entry.created_at_ms,
+                queue_timeout_secs: default_queue_timeout(),
+                kind: default_mail_kind(),
+                receipt_for: None,
+                delivered: entry.state == "read",
+                read: entry.state == "read",
+                receipt_sent: entry.receipt_sent,
+            });
+        } else {
+            sent.push(SentMail {
+                id: entry.id.clone(),
+                to: mail.to,
+                msg: mail.msg,
+                created_at_ms: entry.created_at_ms,
+                status: entry.state.clone(),
+                resp_timeout_secs: entry.resp_timeout_secs,
+                notified: entry.notified,
+            });
+        }
+    }
     MailboxSnapshot {
-        unread: state
-            .mails
-            .iter()
-            .filter(|mail| mail.kind != "receipt" && !mail.read)
-            .count(),
-        mailbox_name: state.mailbox_name.clone(),
-        mails: state.mails.clone(),
-        sent: state.sent.clone(),
+        mailbox_name: mailbox.mailbox_name.clone(),
+        mails,
+        sent,
+        unread,
     }
 }
 
-/// Upper bound for persisted history. Pending incoming/outgoing mail is never
-/// dropped merely to satisfy the cap: losing it would break the delivery
-/// evidence this protocol promises.
+/// Upper bound for each persisted index direction. Bodies remain in the
+/// global mail ledger even after an index entry is pruned.
 const MAILBOX_LIST_LIMIT: usize = 200;
-
-/// Hard cap for one mail body: mail is a short message, not a file channel.
-/// Oversized bodies are refused before anything touches the spool so the
-/// persisted envelope size stays bounded.
 const MAILBOX_MAX_MSG_BYTES: usize = 64 * 1024;
 
-fn prune_mailbox_lists(mails: &mut Vec<WebMailboxMail>, sent: &mut Vec<SentMail>) -> bool {
-    let before = (mails.len(), sent.len());
-    mails.retain(|mail| !(mail.kind == "receipt" && mail.delivered && mail.read));
-    if mails.len() > MAILBOX_LIST_LIMIT {
-        let mut excess = mails.len() - MAILBOX_LIST_LIMIT;
+fn prune_mailbox_entries(entries: &mut Vec<MailboxEntry>) -> bool {
+    let before = entries.len();
+    for direction in ["in", "out"] {
+        let count = entries
+            .iter()
+            .filter(|entry| entry.dir == direction)
+            .count();
+        if count <= MAILBOX_LIST_LIMIT {
+            continue;
+        }
+        let mut excess = count - MAILBOX_LIST_LIMIT;
         let mut index = 0;
-        while excess > 0 && index < mails.len() {
-            if mails[index].read && mails[index].receipt_sent {
-                mails.remove(index);
+        while excess > 0 && index < entries.len() {
+            let removable = if direction == "in" {
+                entries[index].dir == "in"
+                    && entries[index].state == "read"
+                    && entries[index].receipt_sent
+            } else {
+                entries[index].dir == "out"
+                    && entries[index].state != "sent"
+                    && entries[index].notified
+            };
+            if removable {
+                entries.remove(index);
                 excess -= 1;
             } else {
                 index += 1;
             }
         }
     }
-    if sent.len() > MAILBOX_LIST_LIMIT {
-        let mut excess = sent.len() - MAILBOX_LIST_LIMIT;
-        let mut index = 0;
-        while excess > 0 && index < sent.len() {
-            if sent[index].status != "sent" && sent[index].notified {
-                sent.remove(index);
-                excess -= 1;
-            } else {
-                index += 1;
-            }
-        }
-    }
-    before != (mails.len(), sent.len())
+    before != entries.len()
 }
 
 fn mailbox_state_path(state: &AppState, session_id: &str) -> Result<PathBuf, String> {
@@ -8319,26 +8729,151 @@ fn mailbox_state_path(state: &AppState, session_id: &str) -> Result<PathBuf, Str
         .ok_or_else(|| "mailbox_path_invalid".to_string())
 }
 
-/// Loads the session's mailbox state, minting a globally unique mailbox name
-/// (and its shared spool directory) on first touch so remote senders can
-/// already target this session.
+fn is_compact_session_id(session_id: &str) -> bool {
+    session_id.len() == 6
+        && session_id
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+}
+
+fn mint_mailbox_name(session_id: &str) -> String {
+    if is_compact_session_id(session_id) {
+        format!("mb-{session_id}")
+    } else {
+        crate::mailbox::acquire_mailbox_name(&crate::mailbox::mailbox_spool_root())
+    }
+}
+
+fn migrate_legacy_mailbox_value(
+    state: &AppState,
+    value: &serde_json::Value,
+    mailbox_name: String,
+) -> Result<MailboxState, String> {
+    let mut entries = Vec::new();
+    for mail in value
+        .get("mails")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if mail.get("kind").and_then(serde_json::Value::as_str) == Some("receipt") {
+            continue;
+        }
+        let legacy: WebMailboxMail = serde_json::from_value(mail.clone())
+            .map_err(|_| "mailbox_legacy_mail_parse_failed".to_string())?;
+        let id = store_migrated_mem_mail(
+            state,
+            &MemMail {
+                id: legacy.id,
+                from: legacy.from.clone(),
+                to: mailbox_name.clone(),
+                msg: legacy.msg,
+                created_at_ms: legacy.created_at_ms,
+            },
+        )?;
+        entries.push(MailboxEntry {
+            id,
+            dir: "in".to_string(),
+            peer: legacy.from,
+            created_at_ms: legacy.created_at_ms,
+            state: if legacy.read { "read" } else { "queued" }.to_string(),
+            notified: true,
+            receipt_sent: legacy.receipt_sent,
+            resp_timeout_secs: default_resp_timeout(),
+        });
+    }
+    for mail in value
+        .get("sent")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let legacy: SentMail = serde_json::from_value(mail.clone())
+            .map_err(|_| "mailbox_legacy_sent_parse_failed".to_string())?;
+        let id = store_migrated_mem_mail(
+            state,
+            &MemMail {
+                id: legacy.id,
+                from: mailbox_name.clone(),
+                to: legacy.to.clone(),
+                msg: legacy.msg,
+                created_at_ms: legacy.created_at_ms,
+            },
+        )?;
+        entries.push(MailboxEntry {
+            id,
+            dir: "out".to_string(),
+            peer: legacy.to,
+            created_at_ms: legacy.created_at_ms,
+            state: legacy.status,
+            notified: legacy.notified,
+            receipt_sent: true,
+            resp_timeout_secs: legacy.resp_timeout_secs,
+        });
+    }
+    Ok(MailboxState {
+        mailbox_name,
+        entries,
+    })
+}
+
+fn parse_mailbox_value(
+    state: &AppState,
+    value: &serde_json::Value,
+) -> Result<MailboxState, String> {
+    let mailbox_name = value
+        .get("mailbox_name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if value.get("entries").is_some() {
+        serde_json::from_value(value.clone()).map_err(|_| "mailbox_state_parse_failed".to_string())
+    } else if value.get("mails").is_some() || value.get("sent").is_some() {
+        migrate_legacy_mailbox_value(state, value, mailbox_name)
+    } else {
+        Err("mailbox_state_parse_failed".to_string())
+    }
+}
+
+/// Loads the body-free index, migrating legacy envelopes before treating a
+/// malformed file as corrupt. The spool remains derived, self-healing state.
 fn load_mailbox_state(state: &AppState, session_id: &str) -> Result<MailboxState, String> {
     let path = mailbox_state_path(state, session_id)?;
     if let Ok(bytes) = std::fs::read(&path) {
-        match serde_json::from_slice::<MailboxState>(&bytes) {
-            Ok(state) => {
-                // The spool directory is derived state: recreate it when it
-                // was removed out-of-band so the address keeps working.
+        let parsed = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map_err(|_| "mailbox_state_parse_failed".to_string())
+            .and_then(|value| parse_mailbox_value(state, &value));
+        match parsed {
+            Ok(mailbox) => {
+                let was_legacy = serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .ok()
+                    .is_some_and(|value| value.get("entries").is_none());
+                if was_legacy {
+                    save_mailbox_state_at(&path, &mailbox)?;
+                }
                 let _ = std::fs::create_dir_all(crate::mailbox::mailbox_spool_dir(
                     &crate::mailbox::mailbox_spool_root(),
-                    &state.mailbox_name,
+                    &mailbox.mailbox_name,
                 ));
-                return Ok(state);
+                if mailbox
+                    .entries
+                    .iter()
+                    .any(|entry| entry.dir != "in" && entry.dir != "out")
+                {
+                    return Err("mailbox_entry_direction_invalid".to_string());
+                }
+                return Ok(mailbox);
             }
             Err(error) => {
-                // Persisted evidence is never silently discarded: keep the
-                // corrupt file beside the original for inspection, then mint
-                // a fresh state below.
+                let was_legacy = serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .ok()
+                    .is_some_and(|value| {
+                        value.get("entries").is_none()
+                            && (value.get("mails").is_some() || value.get("sent").is_some())
+                    });
+                if was_legacy {
+                    return Err(error);
+                }
                 let backup = path.with_extension("json.corrupt");
                 let _ = std::fs::rename(&path, &backup);
                 eprintln!(
@@ -8347,22 +8882,21 @@ fn load_mailbox_state(state: &AppState, session_id: &str) -> Result<MailboxState
             }
         }
     }
-    let state = MailboxState {
-        mailbox_name: crate::mailbox::acquire_mailbox_name(&crate::mailbox::mailbox_spool_root()),
-        mails: Vec::new(),
-        sent: Vec::new(),
+    let mailbox = MailboxState {
+        mailbox_name: mint_mailbox_name(session_id),
+        entries: Vec::new(),
     };
     std::fs::create_dir_all(crate::mailbox::mailbox_spool_dir(
         &crate::mailbox::mailbox_spool_root(),
-        &state.mailbox_name,
+        &mailbox.mailbox_name,
     ))
     .map_err(|_| "mailbox_spool_create_failed".to_string())?;
-    save_mailbox_state_at(&path, &state)?;
-    Ok(state)
+    save_mailbox_state_at(&path, &mailbox)?;
+    Ok(mailbox)
 }
 
-fn save_mailbox_state_at(path: &Path, state: &MailboxState) -> Result<(), String> {
-    let bytes = serde_json::to_vec_pretty(state)
+fn save_mailbox_state_at(path: &Path, mailbox: &MailboxState) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(mailbox)
         .map_err(|_| "mailbox_state_serialize_failed".to_string())?;
     agent_core::atomic_write_file(path, &bytes)
         .map_err(|_| "mailbox_state_write_failed".to_string())
@@ -8377,14 +8911,6 @@ fn save_mailbox_state(
     save_mailbox_state_at(&path, mailbox)
 }
 
-fn mailbox_deadline_reached(created_at_ms: u128, timeout_secs: i64, now: u128) -> bool {
-    timeout_secs >= 0
-        && now.saturating_sub(created_at_ms) >= (timeout_secs as u128).saturating_mul(1000)
-}
-
-/// Applies a receipt to the sender ledger. A read is reconciling evidence and
-/// may supersede an earlier local timeout; duplicate or unrelated terminal
-/// receipts are idempotent. Returns whether persistent state changed.
 fn apply_mailbox_receipt(
     mailbox: &mut MailboxState,
     receipt: &crate::mailbox::MailboxMail,
@@ -8392,7 +8918,11 @@ fn apply_mailbox_receipt(
     let Some(receipt_for) = receipt.receipt_for.as_deref() else {
         return false;
     };
-    let Some(sent) = mailbox.sent.iter_mut().find(|sent| sent.id == receipt_for) else {
+    let Some(sent) = mailbox
+        .entries
+        .iter_mut()
+        .find(|entry| entry.dir == "out" && entry.id == receipt_for)
+    else {
         return false;
     };
     let status = receipt.receipt_status.as_deref().unwrap_or("read");
@@ -8400,37 +8930,35 @@ fn apply_mailbox_receipt(
         return false;
     }
     let should_update = if status == "read" {
-        sent.status != "read"
+        sent.state != "read"
     } else {
-        sent.status == "sent"
+        sent.state == "sent"
     };
     if !should_update {
         return false;
     }
-    sent.status = status.to_string();
+    sent.state = status.to_string();
     sent.notified = false;
     true
 }
 
-/// One concise, machine-correlatable notice. Mail bodies and mailbox history
-/// deliberately stay out of these reminders.
-fn mailbox_terminal_notice(sent: &SentMail) -> Option<String> {
-    if sent.notified {
+fn mailbox_terminal_notice(sent: &MailboxEntry) -> Option<String> {
+    if sent.notified || sent.dir != "out" {
         return None;
     }
-    let text = match sent.status.as_str() {
-        "read" => format!("[mailbox] 邮件 {} 已被 {} 读取。", sent.id, sent.to),
+    let text = match sent.state.as_str() {
+        "read" => format!("[mailbox] 邮件 {} 已被 {} 读取。", sent.id, sent.peer),
         "timeout" => format!(
             "[mailbox] 邮件 {} 等待 {} 已读超时;对方尚未确认读取,可按需重发。",
-            sent.id, sent.to
+            sent.id, sent.peer
         ),
         "discarded" => format!(
             "[mailbox] 邮件 {} 被 {} 丢弃,未读取;可按需重发。",
-            sent.id, sent.to
+            sent.id, sent.peer
         ),
         "failed" => format!(
             "[mailbox] 邮件 {} 投递到 {} 失败,未读取。",
-            sent.id, sent.to
+            sent.id, sent.peer
         ),
         _ => return None,
     };
@@ -8439,8 +8967,6 @@ fn mailbox_terminal_notice(sent: &SentMail) -> Option<String> {
 
 /// Injected into every model request's additional context so the session
 /// always knows its own mailbox address, even after context compression.
-/// Terminal notices are delivered as dedicated [mailbox] messages instead, so
-/// nothing mailbox-related accumulates in the standing briefing.
 fn session_mailbox_briefing(state: &AppState, session_id: &str) -> Option<String> {
     let mailbox = load_mailbox_state(state, session_id).ok()?;
     Some(format!(
@@ -8487,10 +9013,13 @@ fn write_mailbox_receipt(mail_id: &str, from: &str, to: &str, status: &str) -> R
     )
 }
 
-/// Scans every live session's spool, persists intake before unlinking the
-/// envelope, then surfaces queued mail. `queue_timeout` forces a delivery
-/// attempt when auto-delivery is off; `resp_timeout` independently expires
-/// the sender's wait for a read receipt. Neither timeout fabricates a read.
+fn mailbox_deadline_reached(created_at_ms: u128, timeout_secs: i64, now: u128) -> bool {
+    timeout_secs >= 0
+        && now.saturating_sub(created_at_ms) >= (timeout_secs as u128).saturating_mul(1000)
+}
+
+/// Scans every live session's spool, persists bodies and indexes before
+/// unlinking envelopes, then surfaces queued mail and terminal notices.
 fn mailbox_tick(state: &AppState) {
     if state
         .session_restore_in_progress
@@ -8532,33 +9061,53 @@ fn mailbox_tick(state: &AppState) {
         for (path, mail) in crate::mailbox::scan_mails(&spool_dir) {
             if mail.kind == "receipt" {
                 changed |= apply_mailbox_receipt(&mut mailbox, &mail);
-            } else if !mailbox.mails.iter().any(|known| known.id == mail.id) {
-                mailbox.mails.push(WebMailboxMail {
+            } else if !mailbox.entries.iter().any(|known| known.id == mail.id) {
+                let stored = store_mem_mail(
+                    state,
+                    &MemMail {
+                        id: mail.id.clone(),
+                        from: mail.from.clone(),
+                        to: mail.to.clone(),
+                        msg: mail.msg,
+                        created_at_ms: mail.created_at_ms,
+                    },
+                );
+                if let Err(error) = stored {
+                    eprintln!(
+                        "[timem_web_warning] mailbox_intake_body_save_failed session_id={session_id:?} mail_id={:?} reason={error}",
+                        mail.id
+                    );
+                    // Keep this envelope so the next tick retries the intake.
+                    continue;
+                }
+                mailbox.entries.push(MailboxEntry {
                     id: mail.id,
-                    from: mail.from,
-                    msg: mail.msg,
+                    dir: "in".to_string(),
+                    peer: mail.from,
                     created_at_ms: mail.created_at_ms,
-                    queue_timeout_secs: mail.queue_timeout_secs,
-                    kind: mail.kind,
-                    receipt_for: mail.receipt_for,
-                    delivered: false,
-                    read: false,
+                    state: "queued".to_string(),
+                    notified: true,
                     receipt_sent: false,
+                    resp_timeout_secs: default_resp_timeout(),
                 });
                 changed = true;
             }
             intake_paths.push(path);
         }
-        for sent in mailbox.sent.iter_mut() {
-            if sent.status == "sent"
+        for sent in mailbox
+            .entries
+            .iter_mut()
+            .filter(|entry| entry.dir == "out")
+        {
+            if sent.state == "sent"
                 && mailbox_deadline_reached(sent.created_at_ms, sent.resp_timeout_secs, now)
             {
-                sent.status = "timeout".to_string();
+                sent.state = "timeout".to_string();
                 sent.notified = false;
                 changed = true;
             }
         }
-        if prune_mailbox_lists(&mut mailbox.mails, &mut mailbox.sent) {
+        if prune_mailbox_entries(&mut mailbox.entries) {
             changed = true;
         }
         if changed {
@@ -8566,52 +9115,57 @@ fn mailbox_tick(state: &AppState) {
                 eprintln!(
                     "[timem_web_warning] mailbox_state_save_failed session_id={session_id:?} reason={error}"
                 );
-                // Keep the envelopes: the next tick retries the atomic intake.
                 continue;
             }
             events.push(WireEvent::MailboxUpdated {
                 session_id: session_id.clone(),
-                mailbox: mailbox_snapshot(&mailbox),
+                mailbox: mailbox_snapshot(state, &mailbox),
             });
         }
         for path in intake_paths {
-            // A crash between save and unlink replays the intake; the mail id
-            // dedup above makes that replay idempotent.
+            // A crash between save and unlink replays intake; id dedup makes
+            // that replay idempotent and the global body write is idempotent.
             let _ = std::fs::remove_file(path);
         }
         let self_name = mailbox.mailbox_name.clone();
-        for mail in mailbox
-            .mails
+        for entry in mailbox
+            .entries
             .iter()
-            .filter(|mail| mail.kind != "receipt" && !mail.delivered)
+            .filter(|entry| entry.dir == "in" && entry.state == "queued")
         {
-            deliveries.push((
-                session_id.clone(),
-                format!(
-                    "[mailbox] 收到来自 {} 的 mail:\n{}\n(可用 mailbox 工具回复对方。)",
-                    mail.from, mail.msg
+            match load_mem_mail(state, &entry.id) {
+                Ok(mail) => deliveries.push((
+                    session_id.clone(),
+                    format!(
+                        "[mailbox] 收到来自 {} 的 mail:\n{}\n(可用 mailbox 工具回复对方。)",
+                        mail.from, mail.msg
+                    ),
+                    entry.id.clone(),
+                    entry.peer.clone(),
+                    self_name.clone(),
+                )),
+                Err(error) => eprintln!(
+                    "[timem_web_warning] mailbox_delivery_body_load_failed session_id={session_id:?} mail_id={:?} reason={error}",
+                    entry.id
                 ),
-                mail.id.clone(),
-                mail.from.clone(),
-                self_name.clone(),
-            ));
+            }
         }
-        for mail in mailbox
-            .mails
+        for entry in mailbox
+            .entries
             .iter()
-            .filter(|mail| mail.read && !mail.receipt_sent)
+            .filter(|entry| entry.dir == "in" && entry.state == "read" && !entry.receipt_sent)
         {
             receipt_retries.push((
                 session_id.clone(),
-                mail.id.clone(),
-                mail.from.clone(),
+                entry.id.clone(),
+                entry.peer.clone(),
                 self_name.clone(),
             ));
         }
         let notices: Vec<String> = mailbox
-            .sent
+            .entries
             .iter()
-            .filter(|sent| sent.status != "sent")
+            .filter(|entry| entry.dir == "out" && entry.state != "sent")
             .filter_map(mailbox_terminal_notice)
             .collect();
         if !notices.is_empty() {
@@ -8625,15 +9179,13 @@ fn mailbox_tick(state: &AppState) {
         if !deliver_mailbox_prompt(state, &session_id, &prompt) {
             continue;
         }
-        // Persist the read before acknowledging. A crash in between can cause
-        // a retried delivery or a duplicate receipt, never a read receipt for
-        // a mail this session actually lost.
+        // Persist read before acknowledging. A crash may retry delivery or a
+        // receipt, never acknowledge a body absent from the global ledger.
         let marked = if let Ok(mut mailbox) = load_mailbox_state(state, &session_id) {
             let mut marked = false;
-            for mail in mailbox.mails.iter_mut() {
-                if mail.id == mail_id && !mail.read {
-                    mail.delivered = true;
-                    mail.read = true;
+            for entry in mailbox.entries.iter_mut() {
+                if entry.dir == "in" && entry.id == mail_id && entry.state != "read" {
+                    entry.state = "read".to_string();
                     marked = true;
                 }
             }
@@ -8642,7 +9194,7 @@ fn mailbox_tick(state: &AppState) {
                     state,
                     WireEvent::MailboxUpdated {
                         session_id: session_id.clone(),
-                        mailbox: mailbox_snapshot(&mailbox),
+                        mailbox: mailbox_snapshot(state, &mailbox),
                     },
                 );
                 true
@@ -8663,12 +9215,15 @@ fn mailbox_tick(state: &AppState) {
     }
     for (session_id, text) in notice_batches {
         if !deliver_mailbox_prompt(state, &session_id, &text) {
-            // Notices retry on a later tick until they land.
             continue;
         }
         if let Ok(mut mailbox) = load_mailbox_state(state, &session_id) {
             let mut changed = false;
-            for sent in mailbox.sent.iter_mut().filter(|sent| sent.status != "sent") {
+            for sent in mailbox
+                .entries
+                .iter_mut()
+                .filter(|entry| entry.dir == "out" && entry.state != "sent")
+            {
                 if !sent.notified {
                     sent.notified = true;
                     changed = true;
@@ -8679,7 +9234,7 @@ fn mailbox_tick(state: &AppState) {
                     state,
                     WireEvent::MailboxUpdated {
                         session_id: session_id.clone(),
-                        mailbox: mailbox_snapshot(&mailbox),
+                        mailbox: mailbox_snapshot(state, &mailbox),
                     },
                 );
             }
@@ -8692,9 +9247,10 @@ fn mark_mailbox_receipt_sent(state: &AppState, session_id: &str, mail_id: &str) 
         return;
     };
     let mut changed = false;
-    for mail in mailbox.mails.iter_mut() {
-        if mail.id == mail_id && mail.read && !mail.receipt_sent {
-            mail.receipt_sent = true;
+    for entry in mailbox.entries.iter_mut() {
+        if entry.dir == "in" && entry.id == mail_id && entry.state == "read" && !entry.receipt_sent
+        {
+            entry.receipt_sent = true;
             changed = true;
         }
     }
@@ -8704,7 +9260,7 @@ fn mark_mailbox_receipt_sent(state: &AppState, session_id: &str, mail_id: &str) 
             state,
             WireEvent::MailboxUpdated {
                 session_id: session_id.to_string(),
-                mailbox: mailbox_snapshot(&mailbox),
+                mailbox: mailbox_snapshot(state, &mailbox),
             },
         );
     }
@@ -8774,23 +9330,16 @@ fn find_local_session_by_mailbox(state: &AppState, mailbox_name: &str) -> Option
     })
 }
 
-/// In-process delivery for local recipients: the body never leaves .mem.
-/// Injects into the recipient's context first (injection counts as read,
-/// matching the spool intake), then records the mail in the recipient's
-/// mailbox.json with the receipt already settled — no spool envelope and no
-/// spool receipt is ever created for local mail.
-#[allow(clippy::too_many_arguments)]
+/// In-process delivery for local recipients: no spool envelope or receipt is
+/// created. Injection counts as read, matching the cross-instance intake.
 fn deliver_local_mailbox_mail(
     state: &AppState,
     recipient_session_id: &str,
-    sender_mailbox_name: &str,
-    mail_id: &str,
-    msg: &str,
-    created_at_ms: u128,
-    queue_timeout_secs: i64,
+    mail: &MemMail,
 ) -> bool {
     let prompt = format!(
-        "[mailbox] 收到来自 {sender_mailbox_name} 的 mail:\n{msg}\n(可用 mailbox 工具回复对方。)"
+        "[mailbox] 收到来自 {} 的 mail:\n{}\n(可用 mailbox 工具回复对方。)",
+        mail.from, mail.msg
     );
     if !deliver_mailbox_prompt(state, recipient_session_id, &prompt) {
         return false;
@@ -8798,17 +9347,15 @@ fn deliver_local_mailbox_mail(
     let Ok(mut mailbox) = load_mailbox_state(state, recipient_session_id) else {
         return false;
     };
-    mailbox.mails.push(WebMailboxMail {
-        id: mail_id.to_string(),
-        from: sender_mailbox_name.to_string(),
-        msg: msg.to_string(),
-        created_at_ms,
-        queue_timeout_secs,
-        kind: "mail".to_string(),
-        receipt_for: None,
-        delivered: true,
-        read: true,
+    mailbox.entries.push(MailboxEntry {
+        id: mail.id.clone(),
+        dir: "in".to_string(),
+        peer: mail.from.clone(),
+        created_at_ms: mail.created_at_ms,
+        state: "read".to_string(),
+        notified: true,
         receipt_sent: true,
+        resp_timeout_secs: default_resp_timeout(),
     });
     if let Err(error) = save_mailbox_state(state, recipient_session_id, &mailbox) {
         eprintln!(
@@ -8820,7 +9367,7 @@ fn deliver_local_mailbox_mail(
         state,
         WireEvent::MailboxUpdated {
             session_id: recipient_session_id.to_string(),
-            mailbox: mailbox_snapshot(&mailbox),
+            mailbox: mailbox_snapshot(state, &mailbox),
         },
     );
     true
@@ -8846,73 +9393,62 @@ fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde
     let mut msg = msg;
     let mut status = "sent";
     if msg.len() > MAILBOX_MAX_MSG_BYTES {
-        // Refuse before touching the spool and keep the ledger entry small:
-        // the persisted body must never blow up mailbox.json either.
         status = "failed";
         msg = format!("[refused oversized body: {} bytes]", msg.len());
     }
-    // Data-ownership rule: mail bodies live in .mem, never outside it. When
-    // the recipient is a session of this very instance, deliver in-process:
-    // the body goes straight into the recipient's mailbox.json and the read
-    // receipt settles there too, so no spool envelope is ever created. The
-    // spool is only the transient cross-instance hand-off — envelopes are
-    // unlinked on intake and never store history.
     let local_recipient = if status == "sent" {
         find_local_session_by_mailbox(state, &to)
     } else {
         None
     };
-    // Content-addressed id: `mail_` + 6 base36 chars hashing (body, time,
-    // recipient mailbox, per-draw secure randomness). Both delivery paths
-    // redraw on a taken id, bounded times: the ledger must never hold two
-    // entries with one id, and cross-instance envelopes must never overwrite
-    // a spool sibling.
     let created_at_ms = now_ms();
     let mut mail_id = crate::mailbox::generate_mail_id(&msg, created_at_ms, &to);
+    let mut unique = false;
+    for _ in 0..8 {
+        let taken = mem_mail_exists(state, &mail_id)
+            || sender_mailbox
+                .entries
+                .iter()
+                .any(|entry| entry.id == mail_id)
+            || crate::mailbox::spool_contains_mail(&spool_root, &to, &mail_id);
+        if !taken {
+            unique = true;
+            break;
+        }
+        mail_id = crate::mailbox::generate_mail_id(&msg, created_at_ms, &to);
+    }
+    if !unique {
+        eprintln!("[timem_web_warning] mailbox_send_failed to={to:?} reason=mail_id_collision");
+        return;
+    }
+    let mail = MemMail {
+        id: mail_id.clone(),
+        from: sender_mailbox.mailbox_name.clone(),
+        to: to.clone(),
+        msg,
+        created_at_ms,
+    };
+    if let Err(error) = store_mem_mail(state, &mail) {
+        eprintln!("[timem_web_warning] mailbox_send_failed to={to:?} reason={error}");
+        return;
+    }
     if let Some(recipient_session_id) = local_recipient.as_deref() {
-        // Local recipient: only the ledger participates, the spool is not
-        // involved.
-        for _ in 0..8 {
-            if !sender_mailbox.sent.iter().any(|sent| sent.id == mail_id) {
-                break;
-            }
-            mail_id = crate::mailbox::generate_mail_id(&msg, created_at_ms, &to);
-        }
-        if deliver_local_mailbox_mail(
-            state,
-            recipient_session_id,
-            &sender_mailbox.mailbox_name,
-            &mail_id,
-            &msg,
-            created_at_ms,
-            queue_timeout_secs,
-        ) {
-            // Delivered and read in-process; the sender's terminal notice
-            // fires from the next tick like every other settled outcome.
-            status = "read";
+        status = if deliver_local_mailbox_mail(state, recipient_session_id, &mail) {
+            "read"
         } else {
-            status = "failed";
-        }
+            "failed"
+        };
     } else if status == "sent" {
         if !crate::mailbox::mailbox_exists(&spool_root, &to) {
             status = "failed";
-        }
-        for _ in 0..8 {
-            let taken = sender_mailbox.sent.iter().any(|sent| sent.id == mail_id)
-                || crate::mailbox::spool_contains_mail(&spool_root, &to, &mail_id);
-            if !taken {
-                break;
-            }
-            mail_id = crate::mailbox::generate_mail_id(&msg, created_at_ms, &to);
-        }
-        if let Err(error) = crate::mailbox::write_mail(
+        } else if let Err(error) = crate::mailbox::write_mail(
             &spool_root,
             &crate::mailbox::MailboxMail {
-                id: mail_id.clone(),
-                from: sender_mailbox.mailbox_name.clone(),
-                to: to.clone(),
-                msg: msg.clone(),
-                created_at_ms,
+                id: mail.id.clone(),
+                from: mail.from.clone(),
+                to: mail.to.clone(),
+                msg: mail.msg.clone(),
+                created_at_ms: mail.created_at_ms,
                 queue_timeout_secs,
                 resp_timeout_secs,
                 kind: "mail".to_string(),
@@ -8924,19 +9460,17 @@ fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde
             status = "failed";
         }
     }
-    // The sent ledger drives both the WebUI status column and the reliable
-    // one-shot AI notification; `failed` is surfaced by the scheduler like
-    // every other terminal outcome.
-    sender_mailbox.sent.push(SentMail {
+    sender_mailbox.entries.push(MailboxEntry {
         id: mail_id,
-        to,
-        msg,
+        dir: "out".to_string(),
+        peer: to,
         created_at_ms,
-        status: status.to_string(),
-        resp_timeout_secs,
+        state: status.to_string(),
         notified: false,
+        receipt_sent: true,
+        resp_timeout_secs,
     });
-    prune_mailbox_lists(&mut sender_mailbox.mails, &mut sender_mailbox.sent);
+    prune_mailbox_entries(&mut sender_mailbox.entries);
     if let Err(error) = save_mailbox_state(state, session_id, &sender_mailbox) {
         eprintln!(
             "[timem_web_warning] mailbox_sent_ledger_save_failed session_id={session_id:?} reason={error}"
@@ -8946,7 +9480,7 @@ fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde
         state,
         WireEvent::MailboxUpdated {
             session_id: session_id.to_string(),
-            mailbox: mailbox_snapshot(&sender_mailbox),
+            mailbox: mailbox_snapshot(state, &sender_mailbox),
         },
     );
 }
