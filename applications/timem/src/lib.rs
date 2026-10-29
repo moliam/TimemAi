@@ -1,5 +1,6 @@
 mod debug_session;
 mod lifecycle_diagnostics;
+mod mailbox;
 mod os;
 mod runtime_log;
 mod semantic_delivery;

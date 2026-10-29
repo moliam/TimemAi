@@ -1,0 +1,32 @@
+kind: tool
+id: mailbox
+binding_type: builtin
+binding_name: mailbox
+summary: Send a mail to another session's mailbox across timem instances; the recipient's runtime surfaces it in that session's next model request.
+description: |
+  Use this tool to send mail to another session's mailbox and optionally wake
+  it up. Mailboxes work across timem instances on this machine. Each session
+  owns exactly one globally unique mailbox name (stated in the runtime prompt,
+  e.g. `mb-1a2b3c4d`); the receiving runtime proactively surfaces a new mail
+  in its next model request, or starts a fresh turn when idle.
+
+  Parameters:
+  - `to`: recipient mailbox name. Required.
+  - `msg`: mail body. Required.
+  - `max_wait`: max seconds the mail may wait unconsumed in the recipient's
+    queue before forced delivery — the recipient may be busy or have mail
+    auto-delivery disabled. `-1` waits indefinitely. Default 300; the syntax
+    `300s` is also accepted.
+input_schema: |
+  {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "to": {"type":"string","description":"Recipient mailbox name, e.g. mb-1a2b3c4d."},
+      "msg": {"type":"string","description":"Mail body delivered into the recipient's next model request."},
+      "max_wait": {"type":"string","description":"Max seconds to wait in the recipient's queue before forced delivery, e.g. 300 or 300s; -1 waits indefinitely. Default 300."}
+    },
+    "required": ["to", "msg"]
+  }
+example_json: |
+  {"mailbox":{"to":"mb-1a2b3c4d","msg":"please run the regression suite","max_wait":"300s"}}

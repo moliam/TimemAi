@@ -1,5 +1,7 @@
 use crate::response_protocol::ParsedAction;
-use crate::{capmgr, memmgr, memo, readfile, self_tool, shell_exec, task_finished, timer, toolgen};
+use crate::{
+    capmgr, mailbox, memmgr, memo, readfile, self_tool, shell_exec, task_finished, timer, toolgen,
+};
 use crate::{ActionExecution, ActionRuntime, AgentCore};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -8,6 +10,7 @@ pub(crate) const BUILTIN_TOOL_BINDINGS: &[&str] = &[
     "capmgr",
     "memo",
     "timer",
+    "mailbox",
     "context_compress",
     "readfile",
     "run_bash",
@@ -46,6 +49,7 @@ fn builtin_tool_callback(binding_name: &str) -> Option<BuiltinToolCallback> {
     match binding_name {
         "capmgr" => Some(execute_capmgr),
         "memo" => Some(execute_memo),
+        "mailbox" => Some(execute_mailbox),
         "timer" => Some(execute_timer),
         "context_compress" => Some(execute_context_compress),
         "memmgr" => Some(execute_memmgr),
@@ -119,6 +123,14 @@ fn execute_timer(
     runtime: &mut dyn crate::ActionRuntime,
 ) -> crate::ActionExecution {
     timer::execute_action(core, action, runtime)
+}
+
+fn execute_mailbox(
+    core: &mut crate::AgentCore,
+    action: &crate::response_protocol::ParsedAction,
+    runtime: &mut dyn crate::ActionRuntime,
+) -> crate::ActionExecution {
+    mailbox::execute_action(core, action, runtime)
 }
 
 fn execute_task_finished(

@@ -232,6 +232,39 @@ export type TimerInfo = {
   parked_reason?: string | null;
 };
 
+/** One received mail in a session's mailbox (receipts included). */
+export type MailboxMailInfo = {
+  id: string;
+  from: string;
+  msg: string;
+  created_at_ms: number;
+  max_wait_secs: number;
+  /** "mail" is a received letter; "receipt" acknowledges sent mail. */
+  kind?: string;
+  /** For receipts: the id of the original sent mail being acknowledged. */
+  receipt_for?: string | null;
+  delivered: boolean;
+  read: boolean;
+};
+
+/** One outgoing mail in the session's sent ledger. */
+export type MailboxSentInfo = {
+  id: string;
+  to: string;
+  msg: string;
+  created_at_ms: number;
+  status: "failed" | "sent" | "read" | string;
+};
+
+/** Host-authoritative mailbox snapshot for one session. */
+export type MailboxSnapshotInfo = {
+  mailbox_name: string;
+  auto_deliver: boolean;
+  mails: MailboxMailInfo[];
+  sent: MailboxSentInfo[];
+  unread: number;
+};
+
 export type McpTransport =
   | {
       type: "stdio";
@@ -568,6 +601,11 @@ export type WireEvent =
       type: "timers_updated";
       session_id: string;
       timers: TimerInfo[];
+    }
+  | {
+      type: "mailbox_updated";
+      session_id: string;
+      mailbox: MailboxSnapshotInfo;
     }
   | {
       type: "session_context_cleared";
@@ -987,6 +1025,13 @@ export type ClientCommand =
       timer_id: string;
       enabled: boolean;
     }
+  | { type: "mailbox_get"; session_id: string }
+  | {
+      type: "mailbox_update";
+      session_id: string;
+      auto_deliver: boolean;
+    }
+  | { type: "mailbox_clear"; session_id: string }
   | {
       type: "timer_update";
       session_id: string;

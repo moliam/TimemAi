@@ -21,6 +21,7 @@ const SELF_TOOL_MANIFEST: &str =
     include_str!("../../../resources/capabilities/tools/self_tool.yaml");
 const MEMO_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/memo.yaml");
 const TIMER_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/timer.yaml");
+const MAILBOX_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/mailbox.yaml");
 const TOOLGEN_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/toolgen.yaml");
 const TURN_FINISHED_MANIFEST: &str =
     include_str!("../../../resources/capabilities/tools/task_finished.yaml");
@@ -371,6 +372,7 @@ impl CapabilityRegistry {
                 SELF_TOOL_MANIFEST,
                 MEMO_MANIFEST,
                 TIMER_MANIFEST,
+                MAILBOX_MANIFEST,
                 TOOLGEN_MANIFEST,
                 TURN_FINISHED_MANIFEST,
             ],

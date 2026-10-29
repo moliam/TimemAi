@@ -101,6 +101,7 @@ import {
   Wrench,
   X,
   AlarmClock,
+  Mailbox,
   Pause,
   Play,
 } from "lucide-react";
@@ -331,7 +332,7 @@ import {
 } from "./queued_messages";
 
 import { commandNeedsReliableDelivery } from "./command_outbox";
-import type { TimerInfo } from "./protocol";
+import type { MailboxSnapshotInfo, TimerInfo } from "./protocol";
 import { classifyEventSequence, snapshotEventBaseline } from "./event_cursor";
 import {
   enablesSemanticDelivery,
@@ -597,6 +598,10 @@ function TimemApp() {
   >(null);
   const [showToolRepo, setShowToolRepo] = useState(false);
   const [showTimers, setShowTimers] = useState(false);
+  const [showMailbox, setShowMailbox] = useState(false);
+  const [mailboxBySession, setMailboxBySession] = useState<
+    Record<string, MailboxSnapshotInfo>
+  >({});
   const [chatLibraryMode, setChatLibraryMode] = useState<
     "search" | "favorites" | null
   >(null);
@@ -820,6 +825,8 @@ function TimemApp() {
   const toolRepoPanelRef = useRef<HTMLElement | null>(null);
   const timersButtonRef = useRef<HTMLButtonElement | null>(null);
   const timersPanelRef = useRef<HTMLElement | null>(null);
+  const mailboxButtonRef = useRef<HTMLButtonElement | null>(null);
+  const mailboxPanelRef = useRef<HTMLElement | null>(null);
   const chatLibraryPanelRef = useRef<HTMLElement | null>(null);
   const chatLibraryTriggerRef = useRef<HTMLButtonElement | null>(null);
   const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -879,6 +886,10 @@ function TimemApp() {
   const closeTimersPanel = useCallback(() => {
     setShowTimers(false);
     timersButtonRef.current?.focus({ preventScroll: true });
+  }, []);
+  const closeMailboxPanel = useCallback(() => {
+    setShowMailbox(false);
+    mailboxButtonRef.current?.focus({ preventScroll: true });
   }, []);
   const closeRuntimePanel = useCallback((restoreFocus = true) => {
     setShowRuntime(false);
@@ -1021,6 +1032,15 @@ function TimemApp() {
     document.addEventListener("keydown", dismissOnEscape);
     return () => document.removeEventListener("keydown", dismissOnEscape);
   }, [closeTimersPanel, showTimers]);
+  useEffect(() => {
+    if (!showMailbox) return;
+    mailboxPanelRef.current?.focus({ preventScroll: true });
+    const dismissOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeMailboxPanel();
+    };
+    document.addEventListener("keydown", dismissOnEscape);
+    return () => document.removeEventListener("keydown", dismissOnEscape);
+  }, [closeMailboxPanel, showMailbox]);
 
   useEffect(() => {
     if (!showMobileSessions) return;
@@ -1119,6 +1139,14 @@ function TimemApp() {
 
   const sendCommandRef = useRef(sendCommand);
   sendCommandRef.current = sendCommand;
+
+  // Fetch the active session's mailbox snapshot on first sight; later updates
+  // arrive through mailbox_updated pushes.
+  useEffect(() => {
+    const sessionId = activeSession?.session_id;
+    if (!sessionId || mailboxBySession[sessionId] !== undefined) return;
+    sendCommandRef.current({ type: "mailbox_get", session_id: sessionId });
+  }, [activeSession?.session_id, mailboxBySession]);
 
   // One turn_history_page chain = one scheduler slot. The bounded queue keeps
   // restored-timeline hydration from flooding the Host command channel.
@@ -2167,6 +2195,13 @@ function TimemApp() {
               : session,
           ),
         );
+        return;
+      }
+      if (event.type === "mailbox_updated") {
+        setMailboxBySession((current) => ({
+          ...current,
+          [event.session_id]: event.mailbox,
+        }));
         return;
       }
       if (event.type === "session_deleted") {
@@ -3714,6 +3749,14 @@ function TimemApp() {
   const timersLabel = showTimers
     ? t("timer.ariaLabel")
     : `${t("timer.ariaLabel")} · ${timerCountLabel}`;
+  const activeMailbox = activeSession
+    ? mailboxBySession[activeSession.session_id]
+    : undefined;
+  const mailboxUnread = activeMailbox?.unread ?? 0;
+  const mailboxCountLabel = mailboxUnread > 99 ? "99+" : String(mailboxUnread);
+  const mailboxLabel = showMailbox
+    ? t("mailbox.ariaLabel")
+    : `${t("mailbox.ariaLabel")} · ${mailboxCountLabel}`;
   const mobileSessionsLabel = showMobileSessions
     ? "Close session navigation"
     : "Open session navigation";
@@ -3921,7 +3964,7 @@ function TimemApp() {
       <div
         inert={workspaceModalOpen}
         aria-hidden={workspaceModalOpen || undefined}
-        className={`app-shell ${leftSidebarCollapsed ? "left-sidebar-collapsed" : ""} ${!showToolRepo && !showTimers && rightSidebarCollapsed ? "right-sidebar-collapsed" : ""}`}
+        className={`app-shell ${leftSidebarCollapsed ? "left-sidebar-collapsed" : ""} ${!showToolRepo && !showTimers && !showMailbox && rightSidebarCollapsed ? "right-sidebar-collapsed" : ""}`}
         style={
           {
             "--left-sidebar-width": `${sidebarLayout.leftWidth}px`,
@@ -5069,6 +5112,31 @@ function TimemApp() {
                   </span>
                 )}
               </button>
+              <button
+                type="button"
+                ref={mailboxButtonRef}
+                title={t("mailbox.title")}
+                aria-label={mailboxLabel}
+                className={`icon-button mailbox-header-button ${showMailbox ? "selected" : ""} ${mailboxUnread > 0 ? "has-unread" : ""}`}
+                aria-expanded={showMailbox}
+                aria-controls="mailbox-panel"
+                onClick={() => {
+                  setShowAppearance(false);
+                  setShowRuntime(false);
+                  setShowMcp(false);
+                  setShowToolRepo(false);
+                  if (showTimers) closeTimersPanel();
+                  if (showMailbox) closeMailboxPanel();
+                  else setShowMailbox(true);
+                }}
+              >
+                <Mailbox size={17} />
+                {mailboxUnread > 0 && (
+                  <span className="mailbox-header-count" aria-hidden="true">
+                    {mailboxCountLabel}
+                  </span>
+                )}
+              </button>
             </div>
           </header>
           {showAppearance && (
@@ -5325,7 +5393,7 @@ function TimemApp() {
             onDecisionReply={replyToDecision}
           />
         </main>
-        {!showToolRepo && !showTimers && showRoles && (
+        {!showToolRepo && !showTimers && !showMailbox && showRoles && (
           <button
             type="button"
             className="role-panel-backdrop"
@@ -5333,7 +5401,7 @@ function TimemApp() {
             onClick={() => setShowRoles(false)}
           />
         )}
-        {!showToolRepo && !showTimers && (
+        {!showToolRepo && !showTimers && !showMailbox && (
           <WorkerRolePanel
             key={activeSession?.session_id ?? "no-session"}
             session={activeSession}
@@ -5500,6 +5568,25 @@ function TimemApp() {
             onResizeStart={(event) => startSidebarResize("right", event)}
             onClose={closeTimersPanel}
             session={activeSession}
+            sendCommand={sendCommandRef}
+          />
+        )}
+        {showMailbox && (
+          <button
+            type="button"
+            className="side-panel-backdrop"
+            aria-label={t("common.close")}
+            onClick={closeMailboxPanel}
+          />
+        )}
+        {showMailbox && (
+          <MailboxPanel
+            key={activeSession?.session_id ?? "no-session"}
+            panelRef={mailboxPanelRef}
+            onResizeStart={(event) => startSidebarResize("right", event)}
+            onClose={closeMailboxPanel}
+            session={activeSession}
+            mailbox={activeMailbox}
             sendCommand={sendCommandRef}
           />
         )}
@@ -7582,6 +7669,179 @@ function timerToEditForm(timer: TimerInfo): TimerEditForm {
         : "",
     queueOnFire: !(timer.deliver_immediately ?? false),
   };
+}
+
+function MailboxPanel({
+  panelRef,
+  onResizeStart,
+  onClose,
+  session,
+  mailbox,
+  sendCommand,
+}: {
+  panelRef: MutableRefObject<HTMLElement | null>;
+  onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onClose: () => void;
+  session: Session | undefined;
+  mailbox: MailboxSnapshotInfo | undefined;
+  sendCommand: MutableRefObject<
+    (command: ClientCommand, requestedCommandId?: string) => boolean
+  >;
+}) {
+  useT();
+  const sessionId = session?.session_id;
+  const [copied, setCopied] = useState(false);
+  const mails = mailbox?.mails ?? [];
+  const sent = mailbox?.sent ?? [];
+  const mailboxName = mailbox?.mailbox_name ?? "";
+  const autoDeliver = mailbox?.auto_deliver ?? true;
+  return (
+    <aside
+      id="mailbox-panel"
+      ref={panelRef}
+      className="mailbox-panel toolrepo-side-panel session-side-panel"
+      aria-label={t("mailbox.title")}
+      tabIndex={-1}
+    >
+      <button
+        type="button"
+        className="sidebar-resize-handle right"
+        title="Resize mailbox"
+        aria-label="Resize mailbox"
+        onPointerDown={onResizeStart}
+      />
+      <header className="side-panel-header">
+        <div className="side-panel-title">
+          <Mailbox size={15} />
+          <strong>{t("mailbox.title")}</strong>
+        </div>
+        <button
+          type="button"
+          className="icon-button"
+          title={t("common.close")}
+          aria-label={t("common.close")}
+          onClick={onClose}
+        >
+          <X size={16} />
+        </button>
+      </header>
+      <div className="mailbox-list">
+        {mailboxName ? (
+          <div className="mailbox-address">
+            <code>{mailboxName}</code>
+            <button
+              type="button"
+              className="icon-button"
+              title={t("mailbox.copyAddress")}
+              aria-label={t("mailbox.copyAddress")}
+              onClick={() => {
+                navigator.clipboard
+                  .writeText(mailboxName)
+                  .then(() => {
+                    setCopied(true);
+                    window.setTimeout(() => setCopied(false), 1500);
+                  })
+                  .catch(() => undefined);
+              }}
+            >
+              {copied ? <Check size={14} /> : <Copy size={14} />}
+            </button>
+          </div>
+        ) : (
+          <div className="activity-empty">
+            <strong>{t("mailbox.empty")}</strong>
+          </div>
+        )}
+        {mailboxName && (
+          <label className="mailbox-autodeliver">
+            <input
+              type="checkbox"
+              checked={autoDeliver}
+              disabled={!sessionId}
+              onChange={(event) => {
+                if (!sessionId) return;
+                sendCommand.current({
+                  type: "mailbox_update",
+                  session_id: sessionId,
+                  auto_deliver: event.target.checked,
+                });
+              }}
+            />
+            <span>{t("mailbox.autoDeliver")}</span>
+          </label>
+        )}
+        <div className="mailbox-section-title">{t("mailbox.inboxTitle")}</div>
+        {mails.length === 0 ? (
+          <div className="activity-empty">
+            <strong>{t("mailbox.inboxEmpty")}</strong>
+          </div>
+        ) : (
+          mails.map((mail) => (
+            <div
+              key={mail.id}
+              className={`mailbox-item${mail.read ? " read" : ""}${mail.kind === "receipt" ? " receipt" : ""}`}
+            >
+              <div className="mailbox-item-top">
+                <b>{mail.from}</b>
+                {mail.kind === "receipt" && (
+                  <span className="mailbox-item-badge">
+                    {t("mailbox.receiptBadge")}
+                  </span>
+                )}
+                <span className="mailbox-item-state">
+                  {mail.read
+                    ? t("mailbox.read")
+                    : mail.delivered
+                      ? t("mailbox.delivered")
+                      : t("mailbox.queued")}
+                </span>
+              </div>
+              <div className="mailbox-item-body">{mail.msg}</div>
+            </div>
+          ))
+        )}
+        <div className="mailbox-section-title">{t("mailbox.sentTitle")}</div>
+        {sent.length === 0 ? (
+          <div className="activity-empty">
+            <strong>{t("mailbox.sentEmpty")}</strong>
+          </div>
+        ) : (
+          sent.map((entry) => (
+            <div
+              key={entry.id}
+              className={`mailbox-item sent ${entry.status === "read" ? "status-read" : entry.status === "failed" ? "status-failed" : ""}`}
+            >
+              <div className="mailbox-item-top">
+                <b>{entry.to}</b>
+                <span
+                  className={`mailbox-item-state${entry.status === "read" ? " status-read" : entry.status === "failed" ? " status-failed" : ""}`}
+                >
+                  {entry.status === "read"
+                    ? t("mailbox.statusRead")
+                    : entry.status === "failed"
+                      ? t("mailbox.statusFailed")
+                      : t("mailbox.statusSent")}
+                </span>
+              </div>
+              <div className="mailbox-item-body">{entry.msg}</div>
+            </div>
+          ))
+        )}
+        {sessionId && (mails.length > 0 || sent.length > 0) && (
+          <button
+            type="button"
+            className="mailbox-clear"
+            onClick={() => {
+              if (!sessionId) return;
+              sendCommand.current({ type: "mailbox_clear", session_id: sessionId });
+            }}
+          >
+            {t("mailbox.clear")}
+          </button>
+        )}
+      </div>
+    </aside>
+  );
 }
 
 function TimerPanel({

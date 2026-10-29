@@ -386,6 +386,7 @@ pub const CORE_TOPIC_TOOLGEN: &str = "core.toolgen";
 pub const CORE_TOPIC_LIFECYCLE: &str = "core.lifecycle";
 pub const CORE_TOPIC_MEMO: &str = "core.memo";
 pub const CORE_TOPIC_TIMER: &str = "core.timer";
+pub const CORE_TOPIC_MAILBOX: &str = "core.mailbox";
 pub const CORE_TOPIC_USER_APPROVAL_REQUEST: &str = "core.user.approval.request";
 pub const CORE_TOPIC_ROUND_LIMIT_REQUEST: &str = "core.user.round_limit.request";
 pub const CORE_TOPIC_OUTPUT_EXPAND_REQUEST: &str = "core.user.output_expand.request";
@@ -972,6 +973,32 @@ pub fn memo_stops_finish_topic_event(session_id: impl Into<String>, memo: &str) 
 /// Authoritative timer set for a session after a lifecycle transition.
 /// `op` is "created" | "deleted". The full timers array is the state;
 /// consumers replace their view with it.
+/// One-shot mail-send intent from the `mailbox` tool. The Web Host performs
+/// the actual cross-instance delivery through the shared spool directory.
+pub fn mailbox_send_topic_event(
+    session_id: impl Into<String>,
+    to: &str,
+    msg: &str,
+    max_wait_secs: i64,
+) -> CoreTopicEvent {
+    CoreTopicEvent::new(
+        session_id,
+        CoreTopic::new(
+            CORE_TOPIC_MAILBOX,
+            json!({
+                "name": CORE_TOPIC_MAILBOX,
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "op": "send",
+            "to": to,
+            "msg": msg,
+            "max_wait_secs": max_wait_secs,
+        }),
+    )
+}
+
 pub fn timer_topic_event(
     session_id: impl Into<String>,
     op: &str,

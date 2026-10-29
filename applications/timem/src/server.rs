@@ -63,9 +63,10 @@ use agent_core::{
     InterfacePreferences, ModelClient, ModelServiceConfig, ModelServiceConfigSource,
     ResponseProtocolKind, RuntimeDataLayout, SessionToolRepo, TimerSpec, ToolDetail, ToolSummary,
     TopicReply, TurnProjection, WorkInstructionLoadMode, CORE_TOPIC_ACTION,
-    CORE_TOPIC_CONTEXT_COMPRESS, CORE_TOPIC_MODEL_ENDPOINT_FAILOVER, CORE_TOPIC_MODEL_REPAIR,
-    CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_TIMER,
-    CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    CORE_TOPIC_CONTEXT_COMPRESS, CORE_TOPIC_MAILBOX, CORE_TOPIC_MODEL_ENDPOINT_FAILOVER,
+    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP,
+    CORE_TOPIC_TIMER, CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST,
+    CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use agent_core::{
     capability::CapabilityRegistry, rolling_file_store::RollingCapacity, self_tool::SelfToolPaths,
@@ -902,6 +903,10 @@ struct WebChatMessage {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WireEvent {
+    MailboxUpdated {
+        session_id: String,
+        mailbox: MailboxSnapshot,
+    },
     Hello {
         snapshot: WebSnapshot,
         event_cursor: u64,
@@ -1312,6 +1317,16 @@ struct ModelEndpointInput {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientCommand {
+    MailboxUpdate {
+        session_id: String,
+        auto_deliver: bool,
+    },
+    MailboxClear {
+        session_id: String,
+    },
+    MailboxGet {
+        session_id: String,
+    },
     SessionCreate {
         display_name: Option<String>,
         workspace_dir: Option<String>,
@@ -1761,6 +1776,9 @@ impl ClientCommand {
             | Self::TimerCreate { session_id, .. }
             | Self::TimerDelete { session_id, .. }
             | Self::TimerToggle { session_id, .. }
+            | Self::MailboxUpdate { session_id, .. }
+            | Self::MailboxClear { session_id }
+            | Self::MailboxGet { session_id }
             | Self::TimerUpdate { session_id, .. } => Some(format!("session:{session_id}")),
         }
     }
@@ -1999,6 +2017,7 @@ pub async fn run(
     // restore finishes.
     spawn_event_bridge(state.clone());
     spawn_timer_scheduler(state.clone());
+    spawn_mailbox_scheduler(state.clone());
 
     let listener = bind_web_listener(launch.port, launch.public_access, prefer_default_mem_port)
         .await
@@ -2679,6 +2698,13 @@ fn client_command_trace_fields(command: &ClientCommand) -> (&'static str, Option
         ClientCommand::TimerCreate { session_id, .. } => ("timer_create", Some(session_id.clone())),
         ClientCommand::TimerDelete { session_id, .. } => ("timer_delete", Some(session_id.clone())),
         ClientCommand::TimerToggle { session_id, .. } => ("timer_toggle", Some(session_id.clone())),
+        ClientCommand::MailboxUpdate { session_id, .. } => {
+            ("mailbox_update", Some(session_id.clone()))
+        }
+        ClientCommand::MailboxClear { session_id, .. } => {
+            ("mailbox_clear", Some(session_id.clone()))
+        }
+        ClientCommand::MailboxGet { session_id, .. } => ("mailbox_get", Some(session_id.clone())),
         ClientCommand::TimerUpdate { session_id, .. } => ("timer_update", Some(session_id.clone())),
         _ => ("other", None),
     }
@@ -3950,6 +3976,43 @@ fn handle_command_with_id(
             enabled,
         } => {
             toggle_session_timer(state, &session_id, &timer_id, enabled)?;
+        }
+        ClientCommand::MailboxUpdate {
+            session_id,
+            auto_deliver,
+        } => {
+            let mut mailbox = load_mailbox_state(state, &session_id)?;
+            mailbox.auto_deliver = auto_deliver;
+            save_mailbox_state(state, &session_id, &mailbox)?;
+            publish_semantic(
+                state,
+                WireEvent::MailboxUpdated {
+                    session_id: session_id.clone(),
+                    mailbox: mailbox_snapshot(&mailbox),
+                },
+            );
+        }
+        ClientCommand::MailboxClear { session_id } => {
+            let mut mailbox = load_mailbox_state(state, &session_id)?;
+            mailbox.mails.clear();
+            save_mailbox_state(state, &session_id, &mailbox)?;
+            publish_semantic(
+                state,
+                WireEvent::MailboxUpdated {
+                    session_id: session_id.clone(),
+                    mailbox: mailbox_snapshot(&mailbox),
+                },
+            );
+        }
+        ClientCommand::MailboxGet { session_id } => {
+            let mailbox = load_mailbox_state(state, &session_id)?;
+            publish_semantic(
+                state,
+                WireEvent::MailboxUpdated {
+                    session_id: session_id.clone(),
+                    mailbox: mailbox_snapshot(&mailbox),
+                },
+            );
         }
         ClientCommand::TimerUpdate {
             session_id,
@@ -8112,6 +8175,434 @@ fn fire_due_timers(state: &AppState) {
     }
 }
 
+/// One received mail in a session's mailbox, as surfaced to the WebUI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WebMailboxMail {
+    id: String,
+    from: String,
+    msg: String,
+    created_at_ms: u128,
+    max_wait_secs: i64,
+    /// "mail" is a received letter; "receipt" acknowledges mail this session
+    /// previously sent.
+    #[serde(default = "default_mail_kind")]
+    kind: String,
+    /// For receipts: the id of the original sent mail being acknowledged.
+    #[serde(default)]
+    receipt_for: Option<String>,
+    #[serde(default)]
+    delivered: bool,
+    #[serde(default)]
+    read: bool,
+}
+
+fn default_mail_kind() -> String {
+    "mail".to_string()
+}
+
+/// One outgoing mail in the session's sent ledger; `status` is
+/// "failed" | "sent" | "read".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SentMail {
+    id: String,
+    to: String,
+    msg: String,
+    created_at_ms: u128,
+    status: String,
+}
+
+/// Host-authoritative mailbox state persisted in the session's mailbox.json
+/// (same ownership model as timers.json; never enters Core state).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MailboxState {
+    mailbox_name: String,
+    #[serde(default = "default_true")]
+    auto_deliver: bool,
+    #[serde(default)]
+    mails: Vec<WebMailboxMail>,
+    #[serde(default)]
+    sent: Vec<SentMail>,
+}
+
+/// Snapshot projected to interfaces on mailbox changes.
+#[derive(Debug, Clone, Serialize)]
+struct MailboxSnapshot {
+    mailbox_name: String,
+    auto_deliver: bool,
+    mails: Vec<WebMailboxMail>,
+    sent: Vec<SentMail>,
+    unread: usize,
+}
+
+fn mailbox_snapshot(state: &MailboxState) -> MailboxSnapshot {
+    MailboxSnapshot {
+        unread: state
+            .mails
+            .iter()
+            .filter(|mail| mail.kind != "receipt" && !mail.read)
+            .count(),
+        mailbox_name: state.mailbox_name.clone(),
+        auto_deliver: state.auto_deliver,
+        mails: state.mails.clone(),
+        sent: state.sent.clone(),
+    }
+}
+
+fn mailbox_state_path(state: &AppState, session_id: &str) -> Result<PathBuf, String> {
+    let store = current_session_store(state)?;
+    let metadata = store.metadata_path_for_session(session_id);
+    metadata
+        .parent()
+        .map(|parent| parent.join("mailbox.json"))
+        .ok_or_else(|| "mailbox_path_invalid".to_string())
+}
+
+/// Loads the session's mailbox state, minting a globally unique mailbox name
+/// (and its shared spool directory) on first touch so remote senders can
+/// already target this session.
+fn load_mailbox_state(state: &AppState, session_id: &str) -> Result<MailboxState, String> {
+    let path = mailbox_state_path(state, session_id)?;
+    if let Ok(bytes) = std::fs::read(&path) {
+        if let Ok(state) = serde_json::from_slice::<MailboxState>(&bytes) {
+            return Ok(state);
+        }
+    }
+    let state = MailboxState {
+        mailbox_name: crate::mailbox::generate_mailbox_name(),
+        auto_deliver: true,
+        mails: Vec::new(),
+        sent: Vec::new(),
+    };
+    std::fs::create_dir_all(crate::mailbox::mailbox_spool_dir(
+        &crate::mailbox::mailbox_spool_root(),
+        &state.mailbox_name,
+    ))
+    .map_err(|_| "mailbox_spool_create_failed".to_string())?;
+    save_mailbox_state_at(&path, &state)?;
+    Ok(state)
+}
+
+fn save_mailbox_state_at(path: &Path, state: &MailboxState) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(state)
+        .map_err(|_| "mailbox_state_serialize_failed".to_string())?;
+    agent_core::atomic_write_file(path, &bytes)
+        .map_err(|_| "mailbox_state_write_failed".to_string())
+}
+
+fn save_mailbox_state(
+    state: &AppState,
+    session_id: &str,
+    mailbox: &MailboxState,
+) -> Result<(), String> {
+    let path = mailbox_state_path(state, session_id)?;
+    save_mailbox_state_at(&path, mailbox)
+}
+
+/// Injected into every model request's additional context so the session
+/// always knows its own mailbox address, even after context compression.
+/// Read receipts ride along here: they are surfaced exactly once, marked
+/// consumed, and never wake the session on their own.
+fn session_mailbox_briefing(state: &AppState, session_id: &str) -> Option<String> {
+    let mut mailbox = load_mailbox_state(state, session_id).ok()?;
+    let pending_receipts: Vec<String> = mailbox
+        .mails
+        .iter()
+        .filter(|mail| mail.kind == "receipt" && !mail.delivered)
+        .map(|mail| mail.msg.clone())
+        .collect();
+    let base = format!(
+        "Mailbox: {} — 你的唯一对外邮箱地址(跨 timem);收到 [mailbox] 开头的新 mail 提示时,消息来自其他 session,可用 mailbox 工具回复。",
+        mailbox.mailbox_name
+    );
+    if pending_receipts.is_empty() {
+        return Some(base);
+    }
+    for mail in mailbox.mails.iter_mut() {
+        if mail.kind == "receipt" && !mail.delivered {
+            mail.delivered = true;
+        }
+    }
+    if let Err(error) = save_mailbox_state(state, session_id, &mailbox) {
+        eprintln!(
+            "[timem_web_warning] mailbox_receipt_consume_failed session_id={session_id:?} reason={error}"
+        );
+    }
+    Some(format!(
+        "{base}\n[mailbox] {}",
+        pending_receipts.join("\n[mailbox] ")
+    ))
+}
+
+const MAILBOX_SCHEDULER_INTERVAL: std::time::Duration = std::time::Duration::from_millis(600);
+
+fn spawn_mailbox_scheduler(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            mailbox_tick(&state);
+            sleep(MAILBOX_SCHEDULER_INTERVAL).await;
+        }
+    });
+}
+
+/// Scans every live session's spool directory for delivered mail, records it,
+/// and surfaces it in the session's next model request (supplement when a
+/// turn is active, fresh turn when idle). Mails whose max_wait deadline
+/// expires unconsumed are force-delivered even when auto-delivery is off;
+/// `max_wait = -1` waits indefinitely.
+fn mailbox_tick(state: &AppState) {
+    if state
+        .session_restore_in_progress
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
+    let now = now_ms();
+    let targets: Vec<String> = {
+        let Ok(sessions) = state.sessions.lock() else {
+            return;
+        };
+        sessions
+            .values()
+            .filter(|session| !session.workers.is_empty())
+            .map(|session| session.session_id.clone())
+            .collect()
+    };
+    let mut events: Vec<WireEvent> = Vec::new();
+    let mut deliveries: Vec<(String, String, String, String, String)> = Vec::new();
+    for session_id in targets {
+        let mut mailbox = match load_mailbox_state(state, &session_id) {
+            Ok(mailbox) => mailbox,
+            Err(error) => {
+                eprintln!(
+                    "[timem_web_warning] mailbox_state_load_failed session_id={session_id:?} reason={error}"
+                );
+                continue;
+            }
+        };
+        let spool_dir = crate::mailbox::mailbox_spool_dir(
+            &crate::mailbox::mailbox_spool_root(),
+            &mailbox.mailbox_name,
+        );
+        let mut changed = false;
+        for (path, mail) in crate::mailbox::scan_mails(&spool_dir) {
+            if mail.kind == "receipt" {
+                // A read receipt for mail we previously sent: update the sent
+                // ledger and archive it for the one-shot briefing mention.
+                if let Some(receipt_for) = mail.receipt_for.as_deref() {
+                    if let Some(sent) = mailbox.sent.iter_mut().find(|sent| sent.id == receipt_for)
+                    {
+                        sent.status = "read".to_string();
+                    }
+                }
+                mailbox.mails.push(WebMailboxMail {
+                    id: mail.id,
+                    from: mail.from,
+                    msg: mail.msg,
+                    created_at_ms: mail.created_at_ms,
+                    max_wait_secs: mail.max_wait_secs,
+                    kind: mail.kind,
+                    receipt_for: mail.receipt_for,
+                    delivered: true,
+                    read: true,
+                });
+            } else {
+                mailbox.mails.push(WebMailboxMail {
+                    id: mail.id,
+                    from: mail.from,
+                    msg: mail.msg,
+                    created_at_ms: mail.created_at_ms,
+                    max_wait_secs: mail.max_wait_secs,
+                    kind: mail.kind,
+                    receipt_for: mail.receipt_for,
+                    delivered: false,
+                    read: false,
+                });
+            }
+            let _ = std::fs::remove_file(&path);
+            changed = true;
+        }
+        let self_name = mailbox.mailbox_name.clone();
+        for mail in mailbox
+            .mails
+            .iter_mut()
+            .filter(|mail| mail.kind != "receipt" && !mail.delivered)
+        {
+            let force_due = mail.max_wait_secs >= 0
+                && now.saturating_sub(mail.created_at_ms) >= (mail.max_wait_secs as u128) * 1000;
+            if !mailbox.auto_deliver && !force_due {
+                continue;
+            }
+            // `delivered` is only set after the prompt actually lands, so a
+            // failed delivery is retried on a later tick (max_wait eventually
+            // forces it through).
+            deliveries.push((
+                session_id.clone(),
+                format!(
+                    "[mailbox] 收到来自 {} 的 mail:\n{}\n(你的 mailbox 地址:{};可用 mailbox 工具回复对方。)",
+                    mail.from, mail.msg, self_name
+                ),
+                mail.id.clone(),
+                mail.from.clone(),
+                self_name.clone(),
+            ));
+        }
+        if changed {
+            if let Err(error) = save_mailbox_state(state, &session_id, &mailbox) {
+                eprintln!(
+                    "[timem_web_warning] mailbox_state_save_failed session_id={session_id:?} reason={error}"
+                );
+                continue;
+            }
+            events.push(WireEvent::MailboxUpdated {
+                session_id: session_id.clone(),
+                mailbox: mailbox_snapshot(&mailbox),
+            });
+        }
+    }
+    for event in events {
+        publish_semantic(state, event);
+    }
+    for (session_id, prompt, mail_id, mail_from, self_name) in deliveries {
+        if !deliver_mailbox_prompt(state, &session_id, &prompt) {
+            continue;
+        }
+        // Delivery succeeded: mark the mail consumed (re-read so concurrent
+        // state writes are not clobbered) and write a read receipt into the
+        // sender's spool.
+        if let Ok(mut mailbox) = load_mailbox_state(state, &session_id) {
+            let mut marked = false;
+            for mail in mailbox.mails.iter_mut() {
+                if mail.id == mail_id && !mail.delivered {
+                    mail.delivered = true;
+                    marked = true;
+                }
+            }
+            if marked && save_mailbox_state(state, &session_id, &mailbox).is_ok() {
+                publish_semantic(
+                    state,
+                    WireEvent::MailboxUpdated {
+                        session_id: session_id.clone(),
+                        mailbox: mailbox_snapshot(&mailbox),
+                    },
+                );
+            }
+        }
+        let receipt = crate::mailbox::MailboxMail {
+            id: unique_web_id("mail"),
+            from: self_name.clone(),
+            to: mail_from,
+            msg: format!("你发给 {self_name} 的 mail 已读。"),
+            created_at_ms: now_ms(),
+            max_wait_secs: 0,
+            kind: "receipt".to_string(),
+            receipt_for: Some(mail_id),
+        };
+        let _ = crate::mailbox::write_mail(&crate::mailbox::mailbox_spool_root(), &receipt);
+    }
+}
+
+/// Mailbox delivery mirrors the timer immediate branch: an active turn
+/// receives the prompt as a supplement; an idle session starts a fresh turn.
+fn deliver_mailbox_prompt(state: &AppState, session_id: &str, text: &str) -> bool {
+    let turn_active = state
+        .sessions
+        .lock()
+        .ok()
+        .and_then(|sessions| {
+            sessions
+                .get(session_id)
+                .map(|session| current_turn_id(session).is_some())
+        })
+        .unwrap_or(false);
+    if turn_active {
+        if let Ok(Some(turn)) =
+            try_append_turn_supplement(state, session_id, text.to_string(), None, None, Vec::new())
+        {
+            publish_semantic(
+                state,
+                WireEvent::TurnUpdated {
+                    session_id: session_id.to_string(),
+                    turn,
+                },
+            );
+            return true;
+        }
+    }
+    submit_turn_with_selected_attachments_and_kind(
+        state,
+        session_id,
+        text.to_string(),
+        None,
+        None,
+        Vec::new(),
+        "mailbox",
+    )
+    .is_ok()
+}
+
+fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde_json::Value) {
+    let to = payload["to"].as_str().unwrap_or("").to_string();
+    let msg = payload["msg"].as_str().unwrap_or("").to_string();
+    let max_wait_secs = payload["max_wait_secs"].as_i64().unwrap_or(300);
+    if to.is_empty() || msg.is_empty() {
+        return;
+    }
+    let Ok(mut sender_mailbox) = load_mailbox_state(state, session_id) else {
+        return;
+    };
+    let spool_root = crate::mailbox::mailbox_spool_root();
+    let mail_id = unique_web_id("mail");
+    let mut status = "sent";
+    if !crate::mailbox::mailbox_exists(&spool_root, &to) {
+        status = "failed";
+        // Bounce the failure back into the sender's next model request so the
+        // model learns the target does not exist.
+        let _ = try_append_turn_supplement(
+            state,
+            session_id,
+            format!("[mailbox] 投递失败:mailbox {to} 不存在。"),
+            None,
+            None,
+            Vec::new(),
+        );
+    } else if let Err(error) = crate::mailbox::write_mail(
+        &spool_root,
+        &crate::mailbox::MailboxMail {
+            id: mail_id.clone(),
+            from: sender_mailbox.mailbox_name.clone(),
+            to: to.clone(),
+            msg: msg.clone(),
+            created_at_ms: now_ms(),
+            max_wait_secs,
+            kind: "mail".to_string(),
+            receipt_for: None,
+        },
+    ) {
+        eprintln!("[timem_web_warning] mailbox_send_failed to={to:?} reason={error}");
+        status = "failed";
+    }
+    // The sent ledger drives the WebUI status column: failed | sent | read.
+    sender_mailbox.sent.push(SentMail {
+        id: mail_id,
+        to,
+        msg,
+        created_at_ms: now_ms(),
+        status: status.to_string(),
+    });
+    if let Err(error) = save_mailbox_state(state, session_id, &sender_mailbox) {
+        eprintln!(
+            "[timem_web_warning] mailbox_sent_ledger_save_failed session_id={session_id:?} reason={error}"
+        );
+    }
+    publish_semantic(
+        state,
+        WireEvent::MailboxUpdated {
+            session_id: session_id.to_string(),
+            mailbox: mailbox_snapshot(&sender_mailbox),
+        },
+    );
+}
+
 fn deliver_timer_fire(
     state: &AppState,
     session_id: &str,
@@ -8368,8 +8859,12 @@ fn send_queued_message_now(
     };
     let uploaded_context = uploaded_files_context(&item.payload.attachments, spec);
     let role_context = worker_roles_context(&item.payload.worker_roles);
-    let additional_context =
-        combine_additional_contexts([uploaded_context.as_deref(), role_context.as_deref()]);
+    let mailbox_briefing = session_mailbox_briefing(state, session_id);
+    let additional_context = combine_additional_contexts([
+        uploaded_context.as_deref(),
+        role_context.as_deref(),
+        mailbox_briefing.as_deref(),
+    ]);
     let mut appended = None;
     let accepted = worker.try_add_user_supplement_with_context_and_command_id_after(
         item.payload.text.clone(),
@@ -9006,8 +9501,12 @@ fn try_append_turn_supplement(
     };
     let uploaded_context = uploaded_files_context(&selected_attachments, spec);
     let role_context = worker_roles_context(&worker_roles);
-    let additional_context =
-        combine_additional_contexts([uploaded_context.as_deref(), role_context.as_deref()]);
+    let mailbox_briefing = session_mailbox_briefing(state, session_id);
+    let additional_context = combine_additional_contexts([
+        uploaded_context.as_deref(),
+        role_context.as_deref(),
+        mailbox_briefing.as_deref(),
+    ]);
     let mut appended_turn = None;
     let accepted = worker_handle.try_add_user_supplement_with_context_and_command_id_after(
         text.clone(),
@@ -14245,6 +14744,9 @@ fn handle_scoped_worker_event(
                     {
                         let _ = merge_session_timers_from_core(state, session_id, &topic_timers);
                     }
+                }
+                if event.topic.name == CORE_TOPIC_MAILBOX {
+                    handle_mailbox_send_topic(state, session_id, &event.payload);
                 }
                 if event.topic.name == CORE_TOPIC_TOOLGEN {
                     if let Ok(repo) = session_tool_repo(state, session_id) {
