@@ -10,6 +10,7 @@ import {
   VersionedTurnProjection,
   WebTurn,
   WebTurnEvent,
+  UsageStats,
 } from "../src/protocol";
 import {
   activeModelRetryStatus,
@@ -20,6 +21,7 @@ import {
   applyTurnProjection,
   appendActivityToCurrentTurn,
   appendTurnEvent,
+  sessionRuntimeUsage,
   applyChatMessageDeleted,
   applyCoreTopicToSession,
   attachTurnCompletion,
@@ -5130,5 +5132,57 @@ describe("model response telemetry", () => {
     const current = session("missing-telemetry");
     current.turns = [value];
     expect(sessionModelTelemetry(current)).toEqual({ samples: 0 });
+  });
+});
+
+
+describe("sessionRuntimeUsage", () => {
+  const modelResponseUsageEvent = (
+    id: string,
+    usage: Record<string, number>,
+  ): WebTurnEvent => ({
+    event_id: id,
+    source: "worker_activity",
+    payload: { kind: "model_response", usage },
+    created_at_ms: 1,
+  });
+
+  it("counts tool_calls from authoritative completed-turn stats, not live model usage", () => {
+    const finished: WebTurn = {
+      ...turn("t1", "finished"),
+      events: [
+        modelResponseUsageEvent("u1", {
+          llm_calls: 1,
+          tool_calls: 0,
+          prompt_tokens: 10,
+          completion_tokens: 5,
+        }),
+      ],
+      completion: {
+        stats: { llm_calls: 1, tool_calls: 3, prompt_tokens: 10, completion_tokens: 5 },
+      },
+    };
+    const usage = sessionRuntimeUsage({ ...session("session_1"), turns: [finished] });
+    expect(usage?.tool_calls).toBe(3);
+    expect(usage?.llm_calls).toBe(1);
+  });
+
+  it("keeps live aggregation for working turns", () => {
+    const working: WebTurn = {
+      ...turn("t1", "working"),
+      events: [modelResponseUsageEvent("u1", { llm_calls: 2, tool_calls: 0 })],
+    };
+    const usage = sessionRuntimeUsage({ ...session("session_1"), turns: [working] });
+    expect(usage?.llm_calls).toBe(2);
+    expect(usage?.tool_calls ?? 0).toBe(0);
+  });
+
+  it("falls back to live usage when a finished turn lacks completion stats", () => {
+    const finished: WebTurn = {
+      ...turn("t1", "finished"),
+      events: [modelResponseUsageEvent("u1", { llm_calls: 1, tool_calls: 0 })],
+    };
+    const usage = sessionRuntimeUsage({ ...session("session_1"), turns: [finished] });
+    expect(usage?.llm_calls).toBe(1);
   });
 });

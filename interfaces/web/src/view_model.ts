@@ -1721,6 +1721,13 @@ export function sessionRuntimeUsage(
 
   for (const turn of session.turns) {
     if (resetAtMs !== undefined && turn.created_at_ms < resetAtMs) continue;
+    // Completed turns carry the authoritative whole-turn stats: per-request
+    // model usage never tracks tool_calls, so the live feed alone would
+    // always report zero tools. Live aggregation only bridges working turns.
+    if (turn.state !== "working" && turn.completion?.stats) {
+      add(turn.completion.stats);
+      continue;
+    }
     const live = turnLiveUsageSince(turn, resetAtMs);
     if (live) {
       add(live.total);

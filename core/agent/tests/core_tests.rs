@@ -10593,3 +10593,55 @@ fn performance_guard_topic_generation_for_many_actions_is_bounded() {
         Duration::from_millis(500),
     );
 }
+
+#[test]
+fn serial_tool_action_counts_toward_turn_stats_tool_calls() {
+    let cwd = tmp_dir("tool_stats_cwd");
+    fs::write(cwd.join("notes.txt"), "hello world").unwrap();
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("tool_stats_mem"));
+    core.change_prompt_cwd(cwd.to_string_lossy()).unwrap();
+
+    // Baseline turn without any tool action. Other counters (e.g. the
+    // runtime memory precheck) may legitimately contribute their own
+    // tool_calls on every turn.
+    let _ = core.begin_turn("just answer", None);
+    let baseline = match core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"ok"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::Final(final_turn) => final_turn.stats.tool_calls,
+        other => panic!("expected final step, got {other:?}"),
+    };
+
+    // Tool turn: one serial readfile action executes through the generic
+    // execute_action path and must land exactly once in the whole-turn
+    // stats; this guards the serial accounting against regressions.
+    let _ = core.begin_turn("read the notes", None);
+    let _ = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"status":"working","free_talk":"reading.","working_still_action":[{"readfile":{"path":"notes.txt"}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"done"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    match final_step {
+        CoreStep::Final(final_turn) => assert!(
+            final_turn.stats.tool_calls > baseline,
+            "the serial readfile action must add tool_calls beyond the no-tool baseline (baseline={baseline}, got={})",
+            final_turn.stats.tool_calls
+        ),
+        other => panic!("expected final step, got {other:?}"),
+    }
+}
