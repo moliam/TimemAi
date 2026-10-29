@@ -18030,19 +18030,18 @@ fn idle_manual_compact_broadcasts_requested_event_inside_turn_snapshot() {
                     );
                 }
             }
-            WireEvent::TurnUpdated { turn, .. } => {
+            WireEvent::TurnUpdated { turn, .. }
                 if turn
                     .user_entries
                     .iter()
-                    .any(|entry| entry.kind == "resume_directly")
-                {
-                    snapshot_turn_kind = Some("resume_directly".to_string());
-                    snapshot_carries_event = turn.events.iter().any(|turn_event| {
-                        turn_event.source == "core_topic"
-                            && turn_event.payload["topic"]["name"] == CORE_TOPIC_CONTEXT_COMPRESS
-                            && turn_event.payload["payload"]["phase"] == "requested"
-                    });
-                }
+                    .any(|entry| entry.kind == "resume_directly") =>
+            {
+                snapshot_turn_kind = Some("resume_directly".to_string());
+                snapshot_carries_event = turn.events.iter().any(|turn_event| {
+                    turn_event.source == "core_topic"
+                        && turn_event.payload["topic"]["name"] == CORE_TOPIC_CONTEXT_COMPRESS
+                        && turn_event.payload["payload"]["phase"] == "requested"
+                });
             }
             _ => {}
         }
@@ -20673,41 +20672,48 @@ fn web_timer_fire_immediate_contrasts_with_queue_delivery() {
 
 #[test]
 fn mailbox_prune_drops_consumed_receipts_and_caps_lists() {
-    let mail = |id: &str, kind: &str, delivered: bool, read: bool| WebMailboxMail {
-        id: id.to_string(),
-        from: "mb-from".to_string(),
-        msg: "m".to_string(),
-        created_at_ms: 0,
-        max_wait_secs: 0,
-        kind: kind.to_string(),
-        receipt_for: None,
-        delivered,
-        read,
-    };
+    let mail =
+        |id: &str, kind: &str, delivered: bool, read: bool, receipt_sent: bool| WebMailboxMail {
+            id: id.to_string(),
+            from: "mb-from".to_string(),
+            msg: "m".to_string(),
+            created_at_ms: 0,
+            queue_timeout_secs: 0,
+            kind: kind.to_string(),
+            receipt_for: None,
+            delivered,
+            read,
+            receipt_sent,
+        };
+    // Consumed receipts disappear outright; capped trimming only removes mail
+    // whose read receipt reached the sender. Unread mail and pending receipts
+    // are protected delivery evidence.
     let mut mails = vec![
-        mail("m1", "mail", true, true),
-        mail("r1", "receipt", true, true),
-        mail("r2", "receipt", false, false),
+        mail("m1", "mail", true, true, true),
+        mail("r1", "receipt", true, true, false),
+        mail("m2", "mail", false, false, false),
+        mail("m3", "mail", true, true, false),
     ];
-    let mut sent: Vec<SentMail> = (0..300)
+    mails.extend((0..200).map(|i| mail(&format!("old{i}"), "mail", true, true, true)));
+    let mut sent: Vec<SentMail> = (0..205)
         .map(|i| SentMail {
             id: format!("s{i}"),
             to: "mb-to".to_string(),
             msg: "m".to_string(),
             created_at_ms: i as u128,
-            status: "read".to_string(),
+            status: if i == 0 { "sent" } else { "read" }.to_string(),
+            resp_timeout_secs: 300,
+            notified: i != 0,
         })
         .collect();
     assert!(prune_mailbox_lists(&mut mails, &mut sent));
-    assert_eq!(
-        mails
-            .iter()
-            .map(|mail| mail.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["m1", "r2"]
-    );
+    assert_eq!(mails.len(), 200);
+    assert!(mails.iter().all(|m| m.id != "m1" && m.id != "r1"));
+    assert!(mails.iter().any(|m| m.id == "m2"));
+    assert!(mails.iter().any(|m| m.id == "m3"));
     assert_eq!(sent.len(), 200);
-    assert_eq!(sent.last().unwrap().id, "s299");
+    assert!(sent.iter().any(|s| s.id == "s0"));
+    assert_eq!(sent.last().unwrap().id, "s204");
 
     // Idempotent: pruning again removes nothing.
     assert!(!prune_mailbox_lists(&mut mails, &mut sent));
@@ -20720,11 +20726,12 @@ fn mailbox_snapshot_counts_unread_and_keeps_full_lists() {
         from: "mb-from".to_string(),
         msg: "m".to_string(),
         created_at_ms: 0,
-        max_wait_secs: 0,
+        queue_timeout_secs: 0,
         kind: kind.to_string(),
         receipt_for: None,
         delivered,
         read,
+        receipt_sent: false,
     };
     let state = MailboxState {
         mailbox_name: "mb-abcd".to_string(),
@@ -20740,6 +20747,8 @@ fn mailbox_snapshot_counts_unread_and_keeps_full_lists() {
             msg: "m".to_string(),
             created_at_ms: 1,
             status: "sent".to_string(),
+            resp_timeout_secs: 300,
+            notified: false,
         }],
     };
     let snapshot = mailbox_snapshot(&state);
@@ -20791,5 +20800,736 @@ fn mailbox_commands_lane_to_their_session() {
     assert_eq!(
         get.command.mutation_lane().as_deref(),
         Some("session:session_c")
+    );
+}
+
+#[test]
+fn mailbox_receipt_application_is_idempotent_and_reconciles_timeouts() {
+    let mut mailbox = MailboxState {
+        mailbox_name: "mb-a".to_string(),
+        auto_deliver: true,
+        mails: Vec::new(),
+        sent: vec![
+            SentMail {
+                id: "t1".to_string(),
+                to: "mb-b".to_string(),
+                msg: "m".to_string(),
+                created_at_ms: 0,
+                status: "timeout".to_string(),
+                resp_timeout_secs: 300,
+                notified: true,
+            },
+            SentMail {
+                id: "w1".to_string(),
+                to: "mb-c".to_string(),
+                msg: "m".to_string(),
+                created_at_ms: 0,
+                status: "sent".to_string(),
+                resp_timeout_secs: 300,
+                notified: false,
+            },
+        ],
+    };
+    let receipt = |id: &str, status: &str| crate::mailbox::MailboxMail {
+        id: format!("r-{id}"),
+        from: "mb-a".to_string(),
+        to: "mb-b".to_string(),
+        msg: String::new(),
+        created_at_ms: 0,
+        queue_timeout_secs: 0,
+        resp_timeout_secs: -1,
+        kind: "receipt".to_string(),
+        receipt_for: Some(id.to_string()),
+        receipt_status: Some(status.to_string()),
+    };
+    // A late read supersedes the local timeout and requires a fresh notice.
+    assert!(apply_mailbox_receipt(&mut mailbox, &receipt("t1", "read")));
+    assert_eq!(mailbox.sent[0].status, "read");
+    assert!(!mailbox.sent[0].notified);
+    // Duplicate receipts are idempotent.
+    assert!(!apply_mailbox_receipt(&mut mailbox, &receipt("t1", "read")));
+    // Non-read outcomes only transition from the awaiting state.
+    assert!(apply_mailbox_receipt(
+        &mut mailbox,
+        &receipt("w1", "timeout")
+    ));
+    assert_eq!(mailbox.sent[1].status, "timeout");
+    assert!(!apply_mailbox_receipt(
+        &mut mailbox,
+        &receipt("w1", "failed")
+    ));
+    assert_eq!(mailbox.sent[1].status, "timeout");
+    // Unknown mail ids are ignored.
+    assert!(!apply_mailbox_receipt(
+        &mut mailbox,
+        &receipt("ghost", "read")
+    ));
+}
+
+#[test]
+fn mailbox_terminal_notices_surface_once() {
+    let sent = |status: &str, notified: bool| SentMail {
+        id: "m1".to_string(),
+        to: "mb-b".to_string(),
+        msg: "m".to_string(),
+        created_at_ms: 0,
+        status: status.to_string(),
+        resp_timeout_secs: 300,
+        notified,
+    };
+    // Awaiting mail has no terminal notice yet.
+    assert!(mailbox_terminal_notice(&sent("sent", false)).is_none());
+    for status in ["read", "timeout", "discarded", "failed"] {
+        let notice = mailbox_terminal_notice(&sent(status, false)).expect(status);
+        assert!(notice.starts_with("[mailbox]"), "{notice}");
+        assert!(notice.contains("m1"), "{notice}");
+    }
+    // Already-surfaced notices never replay.
+    assert!(mailbox_terminal_notice(&sent("timeout", true)).is_none());
+}
+
+#[test]
+fn mailbox_deadline_reached_honors_zero_negative_and_boundary() {
+    assert!(mailbox_deadline_reached(0, 0, 0));
+    // The deadline is created_at + timeout*1000 inclusive.
+    assert!(!mailbox_deadline_reached(1_000, 1, 1_999));
+    assert!(mailbox_deadline_reached(1_000, 1, 2_000));
+    // -1 waits indefinitely.
+    assert!(!mailbox_deadline_reached(0, -1, u128::MAX));
+}
+
+// ===== Mailbox end-to-end delivery, receipt and notice guards =====
+//
+// These tests run the real `mailbox_tick` scheduler against a spool rooted at
+// a fake HOME so envelopes, receipts and mailbox.json never touch the
+// developer's real mailbox. The lock serializes tests that mutate HOME.
+
+static MAILBOX_E2E_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct MailboxE2eGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    original_home: Option<PathBuf>,
+}
+
+impl Drop for MailboxE2eGuard {
+    fn drop(&mut self) {
+        match self.original_home.take() {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
+fn mailbox_e2e_setup(worker_label: &'static str) -> (MailboxE2eGuard, AppState, String) {
+    let lock = MAILBOX_E2E_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let original_home = std::env::var("HOME").ok().map(PathBuf::from);
+    let fake_home = std::env::temp_dir().join(unique_web_id("mailbox_e2e_home"));
+    std::fs::create_dir_all(&fake_home).unwrap();
+    std::env::set_var("HOME", &fake_home);
+    let guard = MailboxE2eGuard {
+        _lock: lock,
+        original_home,
+    };
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, worker_label);
+    (guard, state, session_id)
+}
+
+fn e2e_spool() -> PathBuf {
+    crate::mailbox::mailbox_spool_root()
+}
+
+fn e2e_mail(
+    id: &str,
+    from: &str,
+    to: &str,
+    queue_timeout_secs: i64,
+    resp_timeout_secs: i64,
+) -> crate::mailbox::MailboxMail {
+    crate::mailbox::MailboxMail {
+        id: id.to_string(),
+        from: from.to_string(),
+        to: to.to_string(),
+        msg: format!("msg-{id}"),
+        created_at_ms: 0,
+        queue_timeout_secs,
+        resp_timeout_secs,
+        kind: "mail".to_string(),
+        receipt_for: None,
+        receipt_status: None,
+    }
+}
+
+fn e2e_receipt(id: &str, from: &str, to: &str, for_id: &str) -> crate::mailbox::MailboxMail {
+    crate::mailbox::MailboxMail {
+        id: id.to_string(),
+        from: from.to_string(),
+        to: to.to_string(),
+        msg: format!("mail {for_id}: read"),
+        created_at_ms: 0,
+        queue_timeout_secs: 0,
+        resp_timeout_secs: -1,
+        kind: "receipt".to_string(),
+        receipt_for: Some(for_id.to_string()),
+        receipt_status: Some("read".to_string()),
+    }
+}
+
+fn e2e_inbox(name: &str) -> PathBuf {
+    crate::mailbox::mailbox_spool_dir(&e2e_spool(), name)
+}
+
+#[test]
+fn mailbox_tick_intake_is_idempotent_and_acknowledges_read_mail() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_intake");
+    let self_name = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .mailbox_name;
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("mail_a", "mb-peer1", &self_name, -1, -1),
+    )
+    .unwrap();
+
+    mailbox_tick(&state);
+
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.mails.len(), 1);
+    let mail = &mailbox.mails[0];
+    assert_eq!(mail.id, "mail_a");
+    assert!(
+        mail.delivered && mail.read,
+        "auto-delivery marks the mail read"
+    );
+    assert!(
+        mail.receipt_sent,
+        "the read receipt must reach the sender's spool"
+    );
+    assert!(
+        crate::mailbox::scan_mails(&e2e_inbox(&self_name)).is_empty(),
+        "the envelope is consumed after intake"
+    );
+    let back = crate::mailbox::scan_mails(&e2e_inbox("mb-peer1"));
+    assert_eq!(back.len(), 1);
+    assert_eq!(back[0].1.kind, "receipt");
+    assert_eq!(back[0].1.receipt_status.as_deref(), Some("read"));
+    assert_eq!(back[0].1.receipt_for.as_deref(), Some("mail_a"));
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert!(
+            session.turns.iter().any(|turn| turn
+                .user_entries
+                .iter()
+                .any(|entry| entry.text.contains("[mailbox] 收到来自 mb-peer1"))),
+            "the mail body is injected as a mailbox prompt"
+        );
+    }
+
+    // A crash between save and unlink replays the envelope: the id dedup keeps
+    // the intake idempotent and the replayed envelope is still consumed.
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("mail_a", "mb-peer1", &self_name, -1, -1),
+    )
+    .unwrap();
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.mails.len(), 1, "duplicate intake must dedupe by id");
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(&self_name)).is_empty());
+}
+
+#[test]
+fn mailbox_tick_queue_timeout_forces_delivery_when_auto_deliver_off() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_queue");
+    let mut mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    let self_name = mailbox.mailbox_name.clone();
+    mailbox.auto_deliver = false;
+    save_mailbox_state(&state, &session_id, &mailbox).unwrap();
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("mail_due", "mb-peer2", &self_name, 0, -1),
+    )
+    .unwrap();
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("mail_wait", "mb-peer2", &self_name, -1, -1),
+    )
+    .unwrap();
+
+    mailbox_tick(&state);
+
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    let due = mailbox.mails.iter().find(|m| m.id == "mail_due").unwrap();
+    let wait = mailbox.mails.iter().find(|m| m.id == "mail_wait").unwrap();
+    assert!(
+        due.delivered && due.read && due.receipt_sent,
+        "an expired queue timeout forces delivery even with auto-delivery off"
+    );
+    assert!(
+        !wait.delivered && !wait.read,
+        "indefinite mail keeps waiting while auto-delivery is off"
+    );
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        let delivered = session
+            .turns
+            .iter()
+            .filter(|turn| {
+                turn.user_entries
+                    .iter()
+                    .any(|entry| entry.text.contains("[mailbox] 收到来自"))
+            })
+            .count();
+        assert_eq!(delivered, 1, "only the forced mail reaches the model");
+    }
+}
+
+#[test]
+fn mailbox_resp_timeout_notifies_once_and_clear_preserves_pending_evidence() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_notice");
+    let mut mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    mailbox.sent.push(SentMail {
+        id: "s1".to_string(),
+        to: "mb-peer3".to_string(),
+        msg: "hello".to_string(),
+        created_at_ms: 0,
+        status: "sent".to_string(),
+        resp_timeout_secs: 0,
+        notified: false,
+    });
+    save_mailbox_state(&state, &session_id, &mailbox).unwrap();
+
+    mailbox_tick(&state);
+
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    let s1 = &mailbox.sent[0];
+    assert_eq!(
+        s1.status, "timeout",
+        "an expired resp timeout expires the wait"
+    );
+    assert!(
+        s1.notified,
+        "the timeout notice must be surfaced exactly once"
+    );
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert!(
+            session.turns.iter().any(|turn| turn
+                .user_entries
+                .iter()
+                .any(|entry| entry.text.contains("[mailbox] 邮件 s1"))),
+            "the timeout notice reaches the sending AI"
+        );
+    }
+    let after_first = (s1.status.clone(), s1.notified);
+
+    // A later tick neither replays the notice nor disturbs the ledger.
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(
+        (mailbox.sent[0].status.clone(), mailbox.sent[0].notified),
+        after_first,
+        "terminal notices never replay"
+    );
+
+    // Clear: receipts vanish, read mail awaiting its spooled receipt survives,
+    // unread mail is discarded with a receipt, notified history goes.
+    let mail = |id: &str, read: bool, receipt_sent: bool| WebMailboxMail {
+        id: id.to_string(),
+        from: "mb-peer3".to_string(),
+        msg: "m".to_string(),
+        created_at_ms: 0,
+        queue_timeout_secs: -1,
+        kind: "mail".to_string(),
+        receipt_for: None,
+        delivered: read,
+        read,
+        receipt_sent,
+    };
+    let mut mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    mailbox.mails = vec![
+        WebMailboxMail {
+            kind: "receipt".to_string(),
+            receipt_for: Some("x".to_string()),
+            ..mail("r1", true, true)
+        },
+        mail("m_pending", true, false),
+        mail("m_done", true, true),
+        mail("m_new", false, false),
+    ];
+    let sent_entry = |id: &str, status: &str, notified: bool| SentMail {
+        id: id.to_string(),
+        to: "mb-peer3".to_string(),
+        msg: "m".to_string(),
+        created_at_ms: 0,
+        status: status.to_string(),
+        resp_timeout_secs: -1,
+        notified,
+    };
+    mailbox.sent = vec![
+        sent_entry("s_sent", "sent", false),
+        sent_entry("s_old", "read", true),
+        sent_entry("s_late", "timeout", false),
+    ];
+    save_mailbox_state(&state, &session_id, &mailbox).unwrap();
+
+    handle_command_with_id(
+        &state,
+        TEST_PORT,
+        None,
+        ClientCommand::MailboxClear {
+            session_id: session_id.clone(),
+        },
+    )
+    .unwrap();
+
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    let mail_ids: Vec<&str> = mailbox.mails.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(
+        mail_ids,
+        vec!["m_pending"],
+        "only mail whose receipt is not yet spooled survives a clear"
+    );
+    let sent_ids: Vec<&str> = mailbox.sent.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(
+        sent_ids,
+        vec!["s_sent", "s_late"],
+        "awaiting and unnotified terminal entries survive a clear"
+    );
+    let back = crate::mailbox::scan_mails(&e2e_inbox("mb-peer3"));
+    assert!(
+        back.iter()
+            .any(|(_, m)| m.receipt_status.as_deref() == Some("discarded")
+                && m.receipt_for.as_deref() == Some("m_new")),
+        "discarding unread mail must acknowledge the sender"
+    );
+}
+
+#[test]
+fn mailbox_send_topic_resolves_timeout_args_and_failed_peers() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_send");
+    let peer = "mb-e2e-peer4";
+    std::fs::create_dir_all(e2e_inbox(peer)).unwrap();
+
+    handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &serde_json::json!({
+            "to": peer, "msg": "explicit", "queue_timeout_secs": 5, "resp_timeout_secs": 60
+        }),
+    );
+    handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &serde_json::json!({ "to": peer, "msg": "legacy alias", "max_wait_secs": 7 }),
+    );
+    handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &serde_json::json!({ "to": peer, "msg": "defaults" }),
+    );
+    handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &serde_json::json!({ "to": "mb-missing-peer", "msg": "nobody home" }),
+    );
+
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    let find = |msg: &str| mailbox.sent.iter().find(|s| s.msg == msg).unwrap();
+    let explicit = find("explicit");
+    assert_eq!(explicit.status, "sent");
+    assert_eq!(explicit.resp_timeout_secs, 60);
+    let legacy = find("legacy alias");
+    assert_eq!(legacy.status, "sent");
+    assert_eq!(
+        legacy.resp_timeout_secs,
+        agent_core::host::MAILBOX_DEFAULT_RESP_TIMEOUT_SECS
+    );
+    let defaults = find("defaults");
+    assert_eq!(defaults.status, "sent");
+    assert_eq!(find("nobody home").status, "failed", "unknown peers fail");
+
+    let envelopes = crate::mailbox::scan_mails(&e2e_inbox(peer));
+    assert_eq!(envelopes.len(), 3, "failed sends never spool an envelope");
+    let queue_of = |msg: &str| {
+        envelopes
+            .iter()
+            .find(|(_, m)| m.msg == msg)
+            .unwrap()
+            .1
+            .queue_timeout_secs
+    };
+    assert_eq!(queue_of("explicit"), 5);
+    assert_eq!(
+        queue_of("legacy alias"),
+        7,
+        "max_wait_secs alias still works"
+    );
+    assert_eq!(
+        queue_of("defaults"),
+        agent_core::host::MAILBOX_DEFAULT_QUEUE_TIMEOUT_SECS
+    );
+}
+
+#[test]
+fn mailbox_stress_burst_intake_receipts_timeouts_and_delivery() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_stress");
+    let mut mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    let self_name = mailbox.mailbox_name.clone();
+    mailbox.auto_deliver = false;
+    save_mailbox_state(&state, &session_id, &mailbox).unwrap();
+
+    // Phase 1: a 500-envelope burst intakes exactly once and consumes the spool.
+    let total = 500usize;
+    let started = Instant::now();
+    for i in 0..total {
+        crate::mailbox::write_mail(
+            &e2e_spool(),
+            &e2e_mail(&format!("burst{i}"), "mb-peer5", &self_name, -1, -1),
+        )
+        .unwrap();
+    }
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.mails.len(), total, "every burst envelope intakes");
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(&self_name)).is_empty());
+    let intake_elapsed = started.elapsed();
+
+    // Phase 2: replaying all 500 envelopes dedupes cleanly.
+    for i in 0..total {
+        crate::mailbox::write_mail(
+            &e2e_spool(),
+            &e2e_mail(&format!("burst{i}"), "mb-peer5", &self_name, -1, -1),
+        )
+        .unwrap();
+    }
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(
+        mailbox.mails.len(),
+        total,
+        "replayed envelopes must not duplicate"
+    );
+
+    // Phase 3: a 500-receipt burst flips the whole ledger with one joined notice.
+    let sent_entry = |id: &str| SentMail {
+        id: id.to_string(),
+        to: "mb-peer5".to_string(),
+        msg: "m".to_string(),
+        created_at_ms: 0,
+        status: "sent".to_string(),
+        resp_timeout_secs: -1,
+        notified: false,
+    };
+    let mut mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    mailbox.sent = (0..total).map(|i| sent_entry(&format!("s{i}"))).collect();
+    save_mailbox_state(&state, &session_id, &mailbox).unwrap();
+    for i in 0..total {
+        crate::mailbox::write_mail(
+            &e2e_spool(),
+            &e2e_receipt(&format!("rb{i}"), "mb-peer5", &self_name, &format!("s{i}")),
+        )
+        .unwrap();
+    }
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert!(
+        mailbox
+            .sent
+            .iter()
+            .all(|s| s.status == "read" && s.notified),
+        "every receipt applies and exactly one joined notice lands"
+    );
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(&self_name)).is_empty());
+
+    // Phase 4: a 500-entry timeout wave re-arms and re-notifies in one batch.
+    let mut mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    for sent in mailbox.sent.iter_mut() {
+        sent.status = "sent".to_string();
+        sent.resp_timeout_secs = 0;
+        sent.created_at_ms = 0;
+        sent.notified = true;
+    }
+    save_mailbox_state(&state, &session_id, &mailbox).unwrap();
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert!(
+        mailbox
+            .sent
+            .iter()
+            .all(|s| s.status == "timeout" && s.notified),
+        "the timeout wave expires and notifies exactly once"
+    );
+
+    // Phase 5: prune caps both lists while protecting pending evidence.
+    let mail = |id: &str, read: bool| WebMailboxMail {
+        id: id.to_string(),
+        from: "mb-peer5".to_string(),
+        msg: "m".to_string(),
+        created_at_ms: 0,
+        queue_timeout_secs: -1,
+        kind: "mail".to_string(),
+        receipt_for: None,
+        delivered: read,
+        read,
+        receipt_sent: read,
+    };
+    let mut mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    mailbox.mails = (0..300)
+        .map(|i| mail(&format!("done{i}"), true))
+        .chain((0..250).map(|i| mail(&format!("fresh{i}"), false)))
+        .collect();
+    save_mailbox_state(&state, &session_id, &mailbox).unwrap();
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(
+        mailbox.mails.len(),
+        250,
+        "consumed mail trims to the cap; unread evidence is protected"
+    );
+    assert!(mailbox.mails.iter().all(|m| !m.read));
+    assert_eq!(mailbox.sent.len(), 200, "notified history trims to the cap");
+
+    // Phase 6: delivery throughput - 100 ready mails deliver, mark read and
+    // acknowledge within a bounded budget in one tick.
+    let mut mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    mailbox.auto_deliver = true;
+    save_mailbox_state(&state, &session_id, &mailbox).unwrap();
+    for i in 0..100 {
+        crate::mailbox::write_mail(
+            &e2e_spool(),
+            &e2e_mail(&format!("deliver{i}"), "mb-peer5", &self_name, 0, -1),
+        )
+        .unwrap();
+    }
+    let deliver_started = Instant::now();
+    mailbox_tick(&state);
+    let deliver_elapsed = deliver_started.elapsed();
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    let delivered = mailbox
+        .mails
+        .iter()
+        .filter(|m| m.id.starts_with("deliver"))
+        .count();
+    assert_eq!(delivered, 100, "every ready mail delivers in the tick");
+    assert!(
+        mailbox
+            .mails
+            .iter()
+            .filter(|m| m.id.starts_with("deliver"))
+            .all(|m| m.delivered && m.read && m.receipt_sent),
+        "delivered burst mail is fully acknowledged"
+    );
+    let receipts = crate::mailbox::scan_mails(&e2e_inbox("mb-peer5"));
+    // auto-delivery drains the whole backlog: the 250 protected mails from
+    // phase 5 deliver too, each acknowledged once.
+    let deliver_receipts = receipts
+        .iter()
+        .filter(|(_, m)| {
+            m.receipt_for
+                .as_deref()
+                .map(|for_id| for_id.starts_with("deliver"))
+                .unwrap_or(false)
+        })
+        .count();
+    assert_eq!(
+        deliver_receipts, 100,
+        "the peer's spool holds one read receipt per delivered mail"
+    );
+    assert!(
+        receipts.len() >= 350,
+        "backlog deliveries are acknowledged too"
+    );
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(&self_name)).is_empty());
+    assert!(
+        intake_elapsed < std::time::Duration::from_secs(20),
+        "500-envelope intake took too long: {intake_elapsed:?}"
+    );
+    assert!(
+        deliver_elapsed < std::time::Duration::from_secs(20),
+        "100 deliveries took too long: {deliver_elapsed:?}"
+    );
+}
+
+#[test]
+fn session_upgraded_from_mailboxless_version_mints_short_address() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_upgrade");
+    // A session coming from a mailbox-less build owns neither mailbox.json
+    // nor a spool directory; the first touch must mint a short address and
+    // persist it without any migration step.
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(
+        mailbox.mailbox_name.len(),
+        8,
+        "fresh addresses use the short mb-xxxxx form"
+    );
+    assert!(mailbox.auto_deliver);
+    assert!(mailbox.mails.is_empty() && mailbox.sent.is_empty());
+    // The standing briefing carries the fresh address immediately, so the
+    // session is addressable from other instances right away.
+    assert_eq!(
+        session_mailbox_briefing(&state, &session_id),
+        Some(format!(
+            "Mailbox: {};[mailbox] 为跨实例邮件,用 mailbox 工具回复。",
+            mailbox.mailbox_name
+        ))
+    );
+}
+
+#[test]
+fn corrupt_mailbox_state_is_backed_up_not_silently_discarded() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_corrupt");
+    let path = mailbox_state_path(&state, &session_id).unwrap();
+    // A fresh test session has not been persisted yet; the store creates the
+    // directory lazily, so mirror that before placing a corrupt file.
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"{not json").unwrap();
+
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(
+        mailbox.mailbox_name.len(),
+        8,
+        "a fresh short address is minted after the backup"
+    );
+    assert!(mailbox.mails.is_empty() && mailbox.sent.is_empty());
+    let backup = path.with_extension("json.corrupt");
+    assert_eq!(
+        std::fs::read(&backup).unwrap(),
+        b"{not json",
+        "the corrupt file is preserved beside the original for inspection"
+    );
+    assert!(
+        std::fs::read(&path).unwrap().len() > 2,
+        "the live state file is a valid fresh state again"
+    );
+}
+
+#[test]
+fn mailbox_send_refuses_oversized_bodies_without_touching_the_spool() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_oversize");
+    let peer = "mb-e2e-peer6";
+    std::fs::create_dir_all(e2e_inbox(peer)).unwrap();
+
+    handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &serde_json::json!({ "to": peer, "msg": "x".repeat(64 * 1024 + 1) }),
+    );
+
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.sent.len(), 1);
+    assert_eq!(mailbox.sent[0].status, "failed");
+    assert!(
+        mailbox.sent[0].msg.starts_with("[refused oversized body:"),
+        "the ledger keeps a short placeholder instead of the huge body"
+    );
+    assert!(
+        crate::mailbox::scan_mails(&e2e_inbox(peer)).is_empty(),
+        "oversized mail never reaches the spool"
     );
 }

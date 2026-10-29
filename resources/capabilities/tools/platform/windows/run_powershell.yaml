@@ -26,7 +26,8 @@ description: |
   For the call itself: for a normal or background command provide cmd and do
   not provide loop_cmd or interval_ms; timeout_ms, background, and tail_out
   are optional. For polling, provide loop_cmd with interval_ms, omit cmd, and
-  keep background false or absent. loop_timeout_ms is the total polling wait
+  keep background false or absent. Polling must be loop_cmd, cannot be cmd;
+  providing cmd together with interval_ms is invalid and will be rejected. loop_timeout_ms is the total polling wait
   budget; once_timeout_ms is the per-check command timeout.
   Normal and polling execution use the standard structured result with lifecycle
   `status`, `exit_code`, and stdout/stderr. In polling mode, `exit_code` belongs

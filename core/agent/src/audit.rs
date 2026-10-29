@@ -211,7 +211,9 @@ fn cleanup_stale_audit_temps(audit_dir: &Path) -> std::io::Result<()> {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.starts_with('.')
-            && (name.contains(".retention.tmp-") || name.contains(".audit-compact.tmp-"))
+            && (name.contains(".retention.tmp-")
+                || name.contains(".audit-compact.tmp-")
+                || name.contains(".manifest.json.tmp-"))
         {
             let _ = fs::remove_file(entry.path());
         }

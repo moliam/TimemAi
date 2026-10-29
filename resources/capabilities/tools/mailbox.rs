@@ -14,29 +14,43 @@ pub(crate) fn execute_action(
     if msg.is_empty() {
         return failed("msg_required");
     }
-    // The user-facing syntax is `max_wait=300s`; bare `300` and `-1` are
-    // accepted too. Default 300; -1 waits indefinitely.
-    let max_wait = parse_max_wait(&str_field(action, "max_wait"));
+    // `queue_timeout` supersedes the legacy `max_wait` name; both accept the
+    // `300s` / `300` / `-1` syntax. `resp_timeout` is new.
+    let queue_raw = str_field(action, "queue_timeout");
+    let legacy_raw = str_field(action, "max_wait");
+    let queue_timeout = parse_secs(if queue_raw.is_empty() {
+        &legacy_raw
+    } else {
+        &queue_raw
+    })
+    .unwrap_or(crate::host::MAILBOX_DEFAULT_QUEUE_TIMEOUT_SECS);
+    let resp_timeout = parse_secs(&str_field(action, "resp_timeout"))
+        .unwrap_or(crate::host::MAILBOX_DEFAULT_RESP_TIMEOUT_SECS);
     let session_id = core.current_session_id().to_string();
     runtime.on_core_topic_events(&[crate::host::mailbox_send_topic_event(
-        session_id, &to, &msg, max_wait,
+        session_id,
+        &to,
+        &msg,
+        queue_timeout,
+        resp_timeout,
     )]);
-    let wait_text = if max_wait < 0 {
-        "no forced-delivery timeout: it waits until the recipient consumes it".to_string()
+    let queue_text = if queue_timeout < 0 {
+        "no queue timeout: it waits until the recipient consumes it".to_string()
     } else {
-        format!("forced delivery after {max_wait}s if still unconsumed")
+        format!("forced into the recipient's context after {queue_timeout}s if still queued")
+    };
+    let resp_text = if resp_timeout < 0 {
+        "no read-receipt deadline".to_string()
+    } else {
+        format!("you will be notified if it is not read within {resp_timeout}s")
     };
     ActionExecution::Completed(ActionOutcome::completed(format!(
-        "Mail queued for mailbox {to}: {wait_text}. The recipient's runtime will surface it in its next model request."
+        "Mail queued for mailbox {to}: {queue_text}; {resp_text}. A read receipt or a timeout notice will arrive as a [mailbox] message."
     )))
 }
 
-fn parse_max_wait(raw: &str) -> i64 {
-    raw.trim()
-        .trim_end_matches('s')
-        .trim()
-        .parse::<i64>()
-        .unwrap_or(300)
+fn parse_secs(raw: &str) -> Option<i64> {
+    raw.trim().trim_end_matches('s').trim().parse::<i64>().ok()
 }
 
 fn str_field(action: &ParsedAction, key: &str) -> String {

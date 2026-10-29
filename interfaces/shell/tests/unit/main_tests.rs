@@ -2345,6 +2345,9 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
             .history_path_for_session("web_session_1")
             .display()
             .to_string(),
+        endpoint_reasoning_efforts: BTreeMap::new(),
+        endpoint_max_input_tokens: BTreeMap::new(),
+        telemetry_reset_at_ms: None,
     };
     store.upsert_session(&stored).unwrap();
 
@@ -2423,6 +2426,9 @@ fn shell_start_recovers_valid_session_from_partially_corrupt_index() {
             .history_path_for_session("shell_recovered")
             .display()
             .to_string(),
+        endpoint_reasoning_efforts: BTreeMap::new(),
+        endpoint_max_input_tokens: BTreeMap::new(),
+        telemetry_reset_at_ms: None,
     };
     let original = format!("{}\nnot-json\n", serde_json::to_string(&stored).unwrap());
     fs::write(store.index_path(), &original).unwrap();
@@ -2499,6 +2505,9 @@ fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
                 .history_path_for_session("web_session_cwd")
                 .display()
                 .to_string(),
+            endpoint_reasoning_efforts: BTreeMap::new(),
+            endpoint_max_input_tokens: BTreeMap::new(),
+            telemetry_reset_at_ms: None,
         })
         .unwrap();
 
@@ -2582,6 +2591,9 @@ fn shell_resume_prefers_non_empty_launch_env_then_cli_over_stored_session_env() 
             .join("memory/sessions/web_session_env/raw_chat_history.jsonl")
             .display()
             .to_string(),
+        endpoint_reasoning_efforts: BTreeMap::new(),
+        endpoint_max_input_tokens: BTreeMap::new(),
+        telemetry_reset_at_ms: None,
     };
 
     let merged = shell_session_effective_env(&launch_env, &session);
@@ -2636,6 +2648,9 @@ fn shell_resume_ignores_empty_launch_env_values_instead_of_clearing_cache() {
         state: StoredSessionState::Ready,
         last_turn_id: None,
         raw_chat_history_path: String::new(),
+        endpoint_reasoning_efforts: BTreeMap::new(),
+        endpoint_max_input_tokens: BTreeMap::new(),
+        telemetry_reset_at_ms: None,
     };
     let launch_env = HashMap::from([
         ("TIMEM_API_KEY".to_string(), "".to_string()),
@@ -2809,6 +2824,9 @@ fn shell_can_resume_web_style_session_history() {
                 .history_path_for_session(session_id)
                 .display()
                 .to_string(),
+            endpoint_reasoning_efforts: BTreeMap::new(),
+            endpoint_max_input_tokens: BTreeMap::new(),
+            telemetry_reset_at_ms: None,
         })
         .unwrap();
     store

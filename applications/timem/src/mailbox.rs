@@ -22,15 +22,33 @@ pub struct MailboxMail {
     pub to: String,
     pub msg: String,
     pub created_at_ms: u128,
-    /// Max seconds the mail may wait unconsumed in the recipient's queue
-    /// before forced delivery; -1 waits indefinitely.
-    pub max_wait_secs: i64,
+    /// Max seconds the mail may wait unconsumed in the recipient's inbox
+    /// before the recipient's runtime forces it into the next model request
+    /// (the mail then counts as read); -1 waits indefinitely.
+    #[serde(default = "default_queue_timeout", alias = "max_wait_secs")]
+    pub queue_timeout_secs: i64,
+    /// Sender-side deadline for the read receipt; -1 waits indefinitely.
+    #[serde(default = "default_resp_timeout")]
+    pub resp_timeout_secs: i64,
     /// "mail" (default) or "receipt" (delivery acknowledgement).
     #[serde(default = "default_mail_kind")]
     pub kind: String,
     /// For receipts: the id of the mail this receipt acknowledges.
     #[serde(default)]
     pub receipt_for: Option<String>,
+    /// For receipts: `read` (legacy default), `timeout`, `discarded`, or
+    /// `failed`. Keeping the status structured lets the sender apply
+    /// idempotent ledger transitions instead of parsing display text.
+    #[serde(default)]
+    pub receipt_status: Option<String>,
+}
+
+fn default_queue_timeout() -> i64 {
+    agent_core::host::MAILBOX_DEFAULT_QUEUE_TIMEOUT_SECS
+}
+
+fn default_resp_timeout() -> i64 {
+    agent_core::host::MAILBOX_DEFAULT_RESP_TIMEOUT_SECS
 }
 
 fn default_mail_kind() -> String {
@@ -65,16 +83,41 @@ fn sanitize_mailbox_component(name: &str) -> String {
         .collect()
 }
 
-/// Globally unique, short and typeable: `mb-xxxxxxxx`.
+/// Machine-locally unique, short and typeable: `mb-xxxxx` (5 lowercase
+/// base36 characters, 36^5 = 60,466,176 combinations). The scheduler
+/// additionally retries when a generated name is already taken on this
+/// machine, so collisions are practically impossible while the address stays
+/// easy to read, say out loud and type.
 pub fn generate_mailbox_name() -> String {
+    const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
     let mix = nanos ^ (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    let left = (mix >> 32) as u32;
-    let right = mix as u32;
-    format!("mb-{left:04x}{right:04x}")
+    let mut value = (mix ^ (mix >> 32)) as u32;
+    let mut suffix = [0u8; 5];
+    for slot in suffix.iter_mut() {
+        *slot = ALPHABET[(value % ALPHABET.len() as u32) as usize];
+        value /= ALPHABET.len() as u32;
+    }
+    format!("mb-{}", std::str::from_utf8(&suffix).unwrap_or("00000"))
+}
+
+/// Picks a mailbox name whose spool directory is not taken yet, retrying a
+/// bounded number of times before falling back to one more draw.
+pub fn acquire_mailbox_name(spool_root: &Path) -> String {
+    acquire_mailbox_name_with(spool_root, generate_mailbox_name)
+}
+
+fn acquire_mailbox_name_with(spool_root: &Path, mut generate: impl FnMut() -> String) -> String {
+    for _ in 0..8 {
+        let name = generate();
+        if !mailbox_exists(spool_root, &name) {
+            return name;
+        }
+    }
+    generate()
 }
 
 pub fn mailbox_exists(spool_root: &Path, mailbox_name: &str) -> bool {
@@ -150,9 +193,11 @@ mod tests {
             to: to.to_string(),
             msg: "hello".to_string(),
             created_at_ms: 1,
-            max_wait_secs: 300,
+            queue_timeout_secs: 300,
+            resp_timeout_secs: -1,
             kind: "mail".to_string(),
             receipt_for: None,
+            receipt_status: None,
         }
     }
 
@@ -182,9 +227,16 @@ mod tests {
     }
 
     #[test]
-    fn generated_names_are_prefixed_and_unique() {
+    fn generated_names_are_short_prefixed_and_unique() {
         let first = generate_mailbox_name();
         assert!(first.starts_with("mb-"));
+        assert_eq!(first.len(), 8, "mb- plus 5 base36 chars keeps it typeable");
+        assert!(
+            first[3..]
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+            "{first}"
+        );
         let mut duplicate = false;
         for _ in 0..64 {
             duplicate |= generate_mailbox_name() == first;
@@ -193,16 +245,40 @@ mod tests {
     }
 
     #[test]
+    fn acquire_retries_taken_names_and_falls_back_gracefully() {
+        let root = temp_root("acquire");
+        std::fs::create_dir_all(mailbox_spool_dir(&root, "mb-taken")).unwrap();
+        let mut calls = 0u32;
+        let picked = acquire_mailbox_name_with(&root, || {
+            calls += 1;
+            if calls == 1 {
+                "mb-taken".to_string()
+            } else {
+                "mb-free".to_string()
+            }
+        });
+        assert_eq!(picked, "mb-free", "a taken name must be retried");
+        assert_eq!(calls, 2);
+
+        // Every draw taken: the last resort still returns a usable name.
+        let picked = acquire_mailbox_name_with(&root, || "mb-taken".to_string());
+        assert_eq!(picked, "mb-taken");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn receipt_kind_round_trips_and_legacy_envelopes_default_to_mail() {
         let root = temp_root("receipt");
         let mut receipt = sample("a1", "mb-target");
         receipt.kind = "receipt".to_string();
         receipt.receipt_for = Some("a0".to_string());
+        receipt.receipt_status = Some("read".to_string());
         write_mail(&root, &receipt).unwrap();
         let mails = scan_mails(&mailbox_spool_dir(&root, "mb-target"));
         assert_eq!(mails.len(), 1);
         assert_eq!(mails[0].1.kind, "receipt");
         assert_eq!(mails[0].1.receipt_for.as_deref(), Some("a0"));
+        assert_eq!(mails[0].1.receipt_status.as_deref(), Some("read"));
 
         // Envelopes written before the kind field existed keep mail semantics.
         let legacy_dir = mailbox_spool_dir(&root, "mb-legacy");
@@ -216,6 +292,14 @@ mod tests {
         assert_eq!(mails.len(), 1);
         assert_eq!(mails[0].1.kind, "mail");
         assert_eq!(mails[0].1.receipt_for, None);
+        assert_eq!(mails[0].1.receipt_status, None);
+        // Legacy envelopes carry only max_wait_secs: it maps to the queue
+        // timeout, while the sender-side read deadline takes the default.
+        assert_eq!(mails[0].1.queue_timeout_secs, -1);
+        assert_eq!(
+            mails[0].1.resp_timeout_secs,
+            agent_core::host::MAILBOX_DEFAULT_RESP_TIMEOUT_SECS
+        );
         fs::remove_dir_all(&root).ok();
     }
 }

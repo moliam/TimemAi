@@ -238,13 +238,16 @@ export type MailboxMailInfo = {
   from: string;
   msg: string;
   created_at_ms: number;
-  max_wait_secs: number;
+  /** Seconds before a forced delivery attempt; -1 waits indefinitely. */
+  queue_timeout_secs?: number;
   /** "mail" is a received letter; "receipt" acknowledges sent mail. */
   kind?: string;
   /** For receipts: the id of the original sent mail being acknowledged. */
   receipt_for?: string | null;
   delivered: boolean;
   read: boolean;
+  /** True once the read receipt reached the sender's spool. */
+  receipt_sent?: boolean;
 };
 
 /** One outgoing mail in the session's sent ledger. */
@@ -253,7 +256,11 @@ export type MailboxSentInfo = {
   to: string;
   msg: string;
   created_at_ms: number;
-  status: "failed" | "sent" | "read" | string;
+  status: "failed" | "sent" | "read" | "timeout" | "discarded" | string;
+  /** Sender-side deadline for the read receipt; -1 waits indefinitely. */
+  resp_timeout_secs?: number;
+  /** True once the terminal transition was surfaced to the sending AI. */
+  notified?: boolean;
 };
 
 /** Host-authoritative mailbox snapshot for one session. */

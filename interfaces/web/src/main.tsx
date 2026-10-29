@@ -102,7 +102,7 @@ import {
   Wrench,
   X,
   AlarmClock,
-  Mailbox,
+  Mail,
   Pause,
   Play,
 } from "lucide-react";
@@ -3757,6 +3757,10 @@ function TimemApp() {
     ? mailboxBySession[activeSession.session_id]
     : undefined;
   const mailboxUnread = activeMailbox?.unread ?? 0;
+  const mailboxPeerUnread = (activeMailbox?.sent ?? []).filter(
+    (entry) => entry.status === "sent",
+  ).length;
+  const mailboxAttention = mailboxUnread > 0 || mailboxPeerUnread > 0;
   const mailboxCountLabel = mailboxUnread > 99 ? "99+" : String(mailboxUnread);
   const mailboxLabel = showMailbox
     ? t("mailbox.ariaLabel")
@@ -5122,7 +5126,7 @@ function TimemApp() {
                 ref={mailboxButtonRef}
                 title={t("mailbox.title")}
                 aria-label={mailboxLabel}
-                className={`icon-button mailbox-header-button ${showMailbox ? "selected" : ""} ${mailboxUnread > 0 ? "has-unread" : ""}`}
+                className={`icon-button mailbox-header-button ${showMailbox ? "selected" : ""} ${mailboxAttention ? "has-unread" : ""}`}
                 aria-expanded={showMailbox}
                 aria-controls="mailbox-panel"
                 onClick={() => {
@@ -5135,7 +5139,7 @@ function TimemApp() {
                   else setShowMailbox(true);
                 }}
               >
-                <Mailbox size={17} />
+                <Mail size={17} />
                 {mailboxUnread > 0 && (
                   <span className="mailbox-header-count" aria-hidden="true">
                     {mailboxCountLabel}
@@ -7672,6 +7676,23 @@ function timerToEditForm(timer: TimerInfo): TimerEditForm {
   };
 }
 
+function fallbackCopyText(text: string, done: () => void) {
+  try {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    document.execCommand("copy");
+    area.remove();
+    done();
+  } catch {
+    // Clipboard unavailable; the button silently keeps its previous state.
+  }
+}
+
 function MailboxPanel({
   panelRef,
   onResizeStart,
@@ -7694,8 +7715,33 @@ function MailboxPanel({
   const [copied, setCopied] = useState(false);
   const mails = mailbox?.mails ?? [];
   const sent = mailbox?.sent ?? [];
+  const unreadMails = mails.filter((mail) => !mail.read);
+  const archivedMails = [...mails.filter((mail) => mail.read)].reverse();
   const mailboxName = mailbox?.mailbox_name ?? "";
   const autoDeliver = mailbox?.auto_deliver ?? true;
+  const renderMail = (mail: (typeof mails)[number]) => (
+    <div
+      key={mail.id}
+      className={`mailbox-item${mail.read ? " read" : ""}${mail.kind === "receipt" ? " receipt" : ""}`}
+    >
+      <div className="mailbox-item-top">
+        <b>{mail.from}</b>
+        {mail.kind === "receipt" && (
+          <span className="mailbox-item-badge">
+            {t("mailbox.receiptBadge")}
+          </span>
+        )}
+        <span className="mailbox-item-state">
+          {mail.read
+            ? t("mailbox.read")
+            : mail.delivered
+              ? t("mailbox.delivered")
+              : t("mailbox.queued")}
+        </span>
+      </div>
+      <div className="mailbox-item-body">{mail.msg}</div>
+    </div>
+  );
   return (
     <aside
       id="mailbox-panel"
@@ -7713,7 +7759,7 @@ function MailboxPanel({
       />
       <header className="side-panel-header">
         <div className="side-panel-title">
-          <Mailbox size={15} />
+          <Mail size={15} />
           <strong>{t("mailbox.title")}</strong>
         </div>
         <button
@@ -7733,16 +7779,23 @@ function MailboxPanel({
             <button
               type="button"
               className="icon-button"
-              title={t("mailbox.copyAddress")}
-              aria-label={t("mailbox.copyAddress")}
+              title={copied ? t("mailbox.copied") : t("mailbox.copyAddress")}
+              aria-label={copied ? t("mailbox.copied") : t("mailbox.copyAddress")}
               onClick={() => {
-                navigator.clipboard
-                  .writeText(mailboxName)
-                  .then(() => {
-                    setCopied(true);
-                    window.setTimeout(() => setCopied(false), 1500);
-                  })
-                  .catch(() => undefined);
+                const done = () => {
+                  setCopied(true);
+                  window.setTimeout(() => setCopied(false), 1500);
+                };
+                if (navigator.clipboard?.writeText) {
+                  navigator.clipboard
+                    .writeText(mailboxName)
+                    .then(done)
+                    .catch(() => fallbackCopyText(mailboxName, done));
+                } else {
+                  // Plain-http LAN contexts expose no navigator.clipboard;
+                  // the deprecated execCommand path is the only fallback.
+                  fallbackCopyText(mailboxName, done);
+                }
               }}
             >
               {copied ? <Check size={14} /> : <Copy size={14} />}
@@ -7772,34 +7825,21 @@ function MailboxPanel({
           </label>
         )}
         <div className="mailbox-section-title">{t("mailbox.inboxTitle")}</div>
-        {mails.length === 0 ? (
+        {unreadMails.length === 0 ? (
           <div className="activity-empty">
             <strong>{t("mailbox.inboxEmpty")}</strong>
           </div>
         ) : (
-          mails.map((mail) => (
-            <div
-              key={mail.id}
-              className={`mailbox-item${mail.read ? " read" : ""}${mail.kind === "receipt" ? " receipt" : ""}`}
-            >
-              <div className="mailbox-item-top">
-                <b>{mail.from}</b>
-                {mail.kind === "receipt" && (
-                  <span className="mailbox-item-badge">
-                    {t("mailbox.receiptBadge")}
-                  </span>
-                )}
-                <span className="mailbox-item-state">
-                  {mail.read
-                    ? t("mailbox.read")
-                    : mail.delivered
-                      ? t("mailbox.delivered")
-                      : t("mailbox.queued")}
-                </span>
-              </div>
-              <div className="mailbox-item-body">{mail.msg}</div>
-            </div>
-          ))
+          unreadMails.map(renderMail)
+        )}
+        {archivedMails.length > 0 && (
+          <details className="mailbox-archive">
+            <summary>
+              <span>{t("mailbox.archiveTitle")}</span>
+              <span className="mailbox-archive-count">{archivedMails.length}</span>
+            </summary>
+            {archivedMails.map(renderMail)}
+          </details>
         )}
         <div className="mailbox-section-title">{t("mailbox.sentTitle")}</div>
         {sent.length === 0 ? (
@@ -7810,18 +7850,22 @@ function MailboxPanel({
           sent.map((entry) => (
             <div
               key={entry.id}
-              className={`mailbox-item sent ${entry.status === "read" ? "status-read" : entry.status === "failed" ? "status-failed" : ""}`}
+              className={`mailbox-item sent ${entry.status === "read" ? "status-read" : entry.status === "failed" || entry.status === "timeout" || entry.status === "discarded" ? "status-failed" : ""}`}
             >
               <div className="mailbox-item-top">
                 <b>{entry.to}</b>
                 <span
-                  className={`mailbox-item-state${entry.status === "read" ? " status-read" : entry.status === "failed" ? " status-failed" : ""}`}
+                  className={`mailbox-item-state${entry.status === "read" ? " status-read" : entry.status === "failed" || entry.status === "timeout" || entry.status === "discarded" ? " status-failed" : ""}`}
                 >
                   {entry.status === "read"
                     ? t("mailbox.statusRead")
-                    : entry.status === "failed"
-                      ? t("mailbox.statusFailed")
-                      : t("mailbox.statusSent")}
+                    : entry.status === "timeout"
+                      ? t("mailbox.statusTimeout")
+                      : entry.status === "discarded"
+                        ? t("mailbox.statusDiscarded")
+                        : entry.status === "failed"
+                          ? t("mailbox.statusFailed")
+                          : t("mailbox.statusSent")}
                 </span>
               </div>
               <div className="mailbox-item-body">{entry.msg}</div>

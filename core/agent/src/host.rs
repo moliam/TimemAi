@@ -387,6 +387,11 @@ pub const CORE_TOPIC_LIFECYCLE: &str = "core.lifecycle";
 pub const CORE_TOPIC_MEMO: &str = "core.memo";
 pub const CORE_TOPIC_TIMER: &str = "core.timer";
 pub const CORE_TOPIC_MAILBOX: &str = "core.mailbox";
+
+/// Defaults for the two independent mail timeouts: queueing in the
+/// recipient's inbox and awaiting a read receipt on the sender side.
+pub const MAILBOX_DEFAULT_QUEUE_TIMEOUT_SECS: i64 = 300;
+pub const MAILBOX_DEFAULT_RESP_TIMEOUT_SECS: i64 = 600;
 pub const CORE_TOPIC_USER_APPROVAL_REQUEST: &str = "core.user.approval.request";
 pub const CORE_TOPIC_ROUND_LIMIT_REQUEST: &str = "core.user.round_limit.request";
 pub const CORE_TOPIC_OUTPUT_EXPAND_REQUEST: &str = "core.user.output_expand.request";
@@ -979,7 +984,8 @@ pub fn mailbox_send_topic_event(
     session_id: impl Into<String>,
     to: &str,
     msg: &str,
-    max_wait_secs: i64,
+    queue_timeout_secs: i64,
+    resp_timeout_secs: i64,
 ) -> CoreTopicEvent {
     CoreTopicEvent::new(
         session_id,
@@ -994,7 +1000,8 @@ pub fn mailbox_send_topic_event(
             "op": "send",
             "to": to,
             "msg": msg,
-            "max_wait_secs": max_wait_secs,
+            "queue_timeout_secs": queue_timeout_secs,
+            "resp_timeout_secs": resp_timeout_secs,
         }),
     )
 }

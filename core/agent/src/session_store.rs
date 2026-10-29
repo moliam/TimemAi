@@ -141,6 +141,10 @@ pub enum ChatHistoryEventKind {
     RuntimeNotice,
     Stats,
     Attachment,
+    /// Command delivery tracking written by the web host. Historic rows carry
+    /// a duplicated trailing `kind` key whose last value wins during
+    /// deserialization, so those rows land in this variant too.
+    CommandDelivery,
 }
 
 fn temporary_event_time(record: &ChatHistoryRecord) -> Option<i64> {
@@ -151,7 +155,9 @@ fn temporary_event_time(record: &ChatHistoryRecord) -> Option<i64> {
                 ChatHistoryEventKind::Action
                 | ChatHistoryEventKind::ActionResult
                 | ChatHistoryEventKind::ContextCompress
-                | ChatHistoryEventKind::Repair,
+                | ChatHistoryEventKind::Repair
+                | ChatHistoryEventKind::RuntimeNotice
+                | ChatHistoryEventKind::CommandDelivery,
             ..
         } => Some(*created_at_ms),
         _ => None,
@@ -1633,7 +1639,16 @@ pub fn read_all_history_records(path: &Path) -> Result<Vec<ChatHistoryRecord>, S
 }
 
 fn parse_chat_history_record_line(line: &str) -> Option<ChatHistoryRecord> {
-    serde_json::from_str::<ChatHistoryRecord>(line).ok()
+    match serde_json::from_str::<ChatHistoryRecord>(line) {
+        Ok(record) => Some(record),
+        // Historic writer bugs produced duplicated JSON keys (e.g. a trailing
+        // `kind`). Strict parsing rejects duplicates while `Value` parsing
+        // keeps the last one, so route those rows through the tolerant path
+        // instead of losing them as malformed forever.
+        Err(_) => serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .and_then(|value| serde_json::from_value::<ChatHistoryRecord>(value).ok()),
+    }
 }
 
 pub fn chat_history_prompt_format_hint(path: &Path) -> String {

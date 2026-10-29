@@ -4024,14 +4024,14 @@ fn status_finished_uses_final_answer_as_host_final_answer() {
 
 #[test]
 fn final_turn_wire_shape_uses_semantic_final_answer_field() {
-    let step = CoreStep::Final(TurnFinal {
+    let step = CoreStep::Final(Box::new(TurnFinal {
         final_answer: "这是最终结论。".to_string(),
         toolgen_retrospect: String::new(),
         stats: UsageStats::zero(),
         profile_label: "aliyun:qwen-plus".to_string(),
         repair_issue: None,
         stop_summary: None,
-    });
+    }));
 
     let payload = serde_json::to_value(&step).unwrap();
     assert_eq!(payload["Final"]["final_answer"], "这是最终结论。");

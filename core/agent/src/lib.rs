@@ -462,7 +462,9 @@ pub enum CoreStep {
     RoundLimitReached {
         max_rounds: u32,
     },
-    Final(TurnFinal),
+    /// Boxed: `TurnFinal` is by far the largest payload and `CoreStep` moves
+    /// through hot loops; boxing keeps the enum small (clippy::large_enum_variant).
+    Final(Box<TurnFinal>),
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelInputOverflowRecovery {
@@ -4080,19 +4082,19 @@ impl AgentCore {
                     Some(&final_text),
                 ));
                 self.defer_next_turn_slices(slices);
-                return CoreStep::Final(TurnFinal {
+                return CoreStep::Final(Box::new(TurnFinal {
                     final_answer: final_text,
                     toolgen_retrospect: String::new(),
                     stats: self.current_stats.clone(),
                     profile_label: self.profile.label(),
                     repair_issue: Some("invalid_json_plain_text_fallback".to_string()),
                     stop_summary: None,
-                });
+                }));
             }
             let final_text = parsed.final_text();
             let first_issue = self.last_repair_issue.as_deref().unwrap_or(&issue);
             if final_text.is_empty() {
-                return CoreStep::Final(TurnFinal {
+                return CoreStep::Final(Box::new(TurnFinal {
                     final_answer: String::new(),
                     toolgen_retrospect: String::new(),
                     stats: self.current_stats.clone(),
@@ -4106,7 +4108,7 @@ impl AgentCore {
                         self.current_stats.clone(),
                         Some(response.usage.clone()),
                     )),
-                });
+                }));
             }
             slices.extend(self.assistant_replay_slices(
                 &raw_model_output,
@@ -4114,14 +4116,14 @@ impl AgentCore {
                 Some(&final_text),
             ));
             self.defer_next_turn_slices(slices);
-            return CoreStep::Final(TurnFinal {
+            return CoreStep::Final(Box::new(TurnFinal {
                 final_answer: final_text,
                 toolgen_retrospect: parsed.toolgen_retrospect.clone(),
                 stats: self.current_stats.clone(),
                 profile_label: self.profile.label(),
                 repair_issue: Some(issue),
                 stop_summary: None,
-            });
+            }));
         }
         if parsed.context_compresses.is_empty() {
             if let Some(note) =
@@ -4458,7 +4460,7 @@ impl AgentCore {
             // delta_id places them on the same append-only context timeline, so
             // provider projection stays byte-stable and cacheable.
             self.defer_next_turn_slices(slices);
-            return CoreStep::Final(TurnFinal {
+            return CoreStep::Final(Box::new(TurnFinal {
                 final_answer: final_text,
                 toolgen_retrospect: parsed.toolgen_retrospect.clone(),
                 stats: self.current_stats.clone(),
@@ -4471,7 +4473,7 @@ impl AgentCore {
                     None
                 },
                 stop_summary: None,
-            });
+            }));
         }
 
         // Omitted status is an intentional shorthand for status:working.
@@ -4594,14 +4596,14 @@ impl AgentCore {
                     self.defer_next_turn_slices(slices);
                 }
                 let stats = self.current_stats.clone();
-                return CoreStep::Final(TurnFinal {
+                return CoreStep::Final(Box::new(TurnFinal {
                     final_answer: stop_summary.clone(),
                     toolgen_retrospect: parsed.toolgen_retrospect,
                     stats: stats.clone(),
                     profile_label: self.profile.label(),
                     repair_issue: None,
                     stop_summary: Some(TurnStopSummary::turn_finished(stop_summary, stats)),
-                });
+                }));
             }
             let native_exchange = if native_calls.is_empty() {
                 None
@@ -4701,14 +4703,14 @@ impl AgentCore {
             Some(&final_text),
         ));
         self.defer_next_turn_slices(slices);
-        CoreStep::Final(TurnFinal {
+        CoreStep::Final(Box::new(TurnFinal {
             final_answer: final_text,
             toolgen_retrospect: parsed.toolgen_retrospect,
             stats: self.current_stats.clone(),
             profile_label: self.profile.label(),
             repair_issue: None,
             stop_summary: None,
-        })
+        }))
     }
 
     pub fn record_unapplied_model_response_usage(&mut self, usage: &UsageStats) {

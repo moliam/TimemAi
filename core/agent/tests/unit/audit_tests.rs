@@ -425,6 +425,32 @@ fn audit_budget_cleanup_removes_interrupted_retention_files() {
 }
 
 #[test]
+fn audit_budget_cleanup_removes_interrupted_manifest_tmp_files() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_core_audit_manifest_tmp_cleanup_{}_{}",
+        std::process::id(),
+        audit_now_ms()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let stale = root.join(".manifest.json.tmp-1538289-write_1790518479204_125");
+    let live_manifest = root.join("manifest.json");
+    let unrelated = root.join("keep.txt");
+    std::fs::write(&stale, b"stale").unwrap();
+    std::fs::write(&live_manifest, b"{\"version\":1}").unwrap();
+    std::fs::write(&unrelated, b"keep").unwrap();
+
+    cleanup_stale_audit_temps(&root).unwrap();
+
+    assert!(
+        !stale.exists(),
+        "interrupted manifest writes must be cleaned"
+    );
+    assert!(live_manifest.exists());
+    assert!(unrelated.exists());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn legacy_base_audit_document_keeps_schema_and_latest_events_when_compacted() {
     let root = std::env::temp_dir().join(format!(
         "timem_core_legacy_base_audit_{}_{}",

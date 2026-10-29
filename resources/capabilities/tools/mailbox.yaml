@@ -2,31 +2,53 @@ kind: tool
 id: mailbox
 binding_type: builtin
 binding_name: mailbox
-summary: Send a mail to another session's mailbox across timem instances; the recipient's runtime surfaces it in that session's next model request.
+summary: Mailbox is like email, for instant bi-directional communication: send mail to another session's mailbox across timem instances; delivery actively wakes the recipient (injected into its next model request, or a fresh turn when idle), so mail can also trigger or hand off work there, and you receive read/timeout receipts.
 description: |
-  Use this tool to send mail to another session's mailbox and optionally wake
-  it up. Mailboxes work across timem instances on this machine. Each session
-  owns exactly one globally unique mailbox name (stated in the runtime prompt,
-  e.g. `mb-1a2b3c4d`); the receiving runtime proactively surfaces a new mail
-  in its next model request, or starts a fresh turn when idle.
+  Mailbox is like email, for instant bi-directional communication. Use this
+  tool to send mail to another session's mailbox; your address will be
+  automatically signed on the mail, so the recipient can reply without
+  asking. Mailboxes work across timem instances on this machine. Each session owns exactly one
+  globally unique mailbox name (stated in the runtime prompt, e.g.
+  `mb-3ybe2`); the receiving runtime proactively surfaces a new mail in its
+  next model request, or starts a fresh turn when idle. Entering the
+  recipient's model context counts as read.
+
+  Because delivery is proactive, mail is more than messaging: you can use it
+  to wake another session and trigger, assign or hand off work there. An idle
+  recipient starts working on your mail right away; a busy one receives it in
+  its running request. The recipient never needs to poll.
+
+  Delivery is acknowledged in both directions:
+  - When the mail is read, your runtime receives a read receipt and surfaces
+    it once as a `[mailbox]` message.
+  - When the mail is not read (queue or read deadline expires, or delivery
+    fails), your runtime surfaces that terminal notice once too, so you can
+    decide whether to resend. Notices persist across restarts and are never
+    replayed after being surfaced.
 
   Parameters:
   - `to`: recipient mailbox name. Required.
-  - `msg`: mail body. Required.
-  - `max_wait`: max seconds the mail may wait unconsumed in the recipient's
-    queue before forced delivery — the recipient may be busy or have mail
-    auto-delivery disabled. `-1` waits indefinitely. Default 300; the syntax
-    `300s` is also accepted.
+  - `msg`: mail body. Required; at most 65536 bytes (64 KiB). Mail is a
+    short message, larger payloads belong in files.
+  - `queue_timeout`: max seconds the mail may wait unconsumed in the
+    recipient's inbox before its runtime forces it into the next model
+    request. `300` or `300s` syntax; `-1` waits indefinitely. Default 300.
+    Legacy alias `max_wait` is still accepted.
+  - `resp_timeout`: max seconds your runtime waits for a read receipt before
+    notifying you that the mail was not read. `-1` waits indefinitely.
+    Default 600.
 input_schema: |
   {
     "type": "object",
     "additionalProperties": false,
     "properties": {
       "to": {"type":"string","description":"Recipient mailbox name, e.g. mb-1a2b3c4d."},
-      "msg": {"type":"string","description":"Mail body delivered into the recipient's next model request."},
-      "max_wait": {"type":"string","description":"Max seconds to wait in the recipient's queue before forced delivery, e.g. 300 or 300s; -1 waits indefinitely. Default 300."}
+      "msg": {"type":"string","description":"Mail body delivered into the recipient's next model request. At most 65536 bytes (64 KiB)."},
+      "queue_timeout": {"type":"string","description":"Max seconds to wait in the recipient's inbox before forced delivery, e.g. 300 or 300s; -1 waits indefinitely. Default 300."},
+      "resp_timeout": {"type":"string","description":"Max seconds to wait for a read receipt before the sender is notified, e.g. 600 or 600s; -1 waits indefinitely. Default 600."},
+      "max_wait": {"type":"string","description":"Deprecated alias of queue_timeout."}
     },
     "required": ["to", "msg"]
   }
 example_json: |
-  {"mailbox":{"to":"mb-1a2b3c4d","msg":"please run the regression suite","max_wait":"300s"}}
+  {"mailbox":{"to":"mb-3ybe2","msg":"please run the regression suite","queue_timeout":"300s","resp_timeout":"600s"}}

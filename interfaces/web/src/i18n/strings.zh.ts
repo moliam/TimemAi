@@ -729,6 +729,8 @@ export const zh = {
     ariaLabel: "打开 Mailbox 面板",
     empty: "尚未分配 mailbox",
     copyAddress: "复制 mailbox 地址",
+    copied: "已复制",
+    archiveTitle: "归档消息",
     autoDeliver: "自动投递新邮件",
     inboxTitle: "收件",
     inboxEmpty: "暂无收件",
@@ -741,6 +743,8 @@ export const zh = {
     statusSent: "已发送",
     statusRead: "已读",
     statusFailed: "发送失败",
+    statusTimeout: "等待已读超时",
+    statusDiscarded: "已丢弃",
     clear: "清空 mailbox",
   },
   timer: {

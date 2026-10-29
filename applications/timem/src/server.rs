@@ -3994,8 +3994,31 @@ fn handle_command_with_id(
         }
         ClientCommand::MailboxClear { session_id } => {
             let mut mailbox = load_mailbox_state(state, &session_id)?;
-            mailbox.mails.clear();
-            mailbox.sent.clear();
+            let self_name = mailbox.mailbox_name.clone();
+            let mut retained_mails = Vec::new();
+            for mail in mailbox.mails.drain(..) {
+                if mail.kind == "receipt" {
+                    continue;
+                }
+                if mail.read {
+                    // Keep the acknowledgement evidence until its receipt is
+                    // confirmed spooled; the scheduler retries the rest.
+                    if !mail.receipt_sent {
+                        retained_mails.push(mail);
+                    }
+                    continue;
+                }
+                // Explicit human discard is a terminal non-read outcome for
+                // the sender. Keep the item only while its receipt could not
+                // be spooled, so the discard is never silently lost.
+                if write_mailbox_receipt(&mail.id, &self_name, &mail.from, "discarded").is_err() {
+                    retained_mails.push(mail);
+                }
+            }
+            mailbox.mails = retained_mails;
+            mailbox
+                .sent
+                .retain(|sent| sent.status == "sent" || !sent.notified);
             save_mailbox_state(state, &session_id, &mailbox)?;
             publish_semantic(
                 state,
@@ -7426,9 +7449,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     }
                     continue;
                 }
-                if kind == ChatHistoryEventKind::RuntimeNotice
-                    && extra.get("kind").and_then(Value::as_str) == Some("command_delivery")
-                {
+                if kind == ChatHistoryEventKind::CommandDelivery {
                     if let (Some(command_id), Some(delivery_state)) = (
                         extra.get("command_id").and_then(Value::as_str),
                         extra
@@ -8183,7 +8204,11 @@ struct WebMailboxMail {
     from: String,
     msg: String,
     created_at_ms: u128,
-    max_wait_secs: i64,
+    /// Seconds the mail may wait unconsumed in this inbox before the runtime
+    /// forces it into the next model request (it then counts as read); -1
+    /// waits indefinitely.
+    #[serde(default = "default_queue_timeout", alias = "max_wait_secs")]
+    queue_timeout_secs: i64,
     /// "mail" is a received letter; "receipt" acknowledges mail this session
     /// previously sent.
     #[serde(default = "default_mail_kind")]
@@ -8195,14 +8220,21 @@ struct WebMailboxMail {
     delivered: bool,
     #[serde(default)]
     read: bool,
+    /// Set only after the read receipt reached the sender's spool; pending
+    /// acknowledgements are retried and never pruned as stale history.
+    #[serde(default)]
+    receipt_sent: bool,
 }
 
 fn default_mail_kind() -> String {
     "mail".to_string()
 }
 
-/// One outgoing mail in the session's sent ledger; `status` is
-/// "failed" | "sent" | "read".
+/// One outgoing mail in the session's sent ledger. `sent` awaits a read
+/// receipt; `read` is acknowledged; `timeout` means no read receipt arrived
+/// before the sender-side deadline (a later read can still reconcile it);
+/// `discarded`/`failed` are terminal non-read outcomes. `notified` persists
+/// whether the terminal transition was already surfaced to the sending AI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SentMail {
     id: String,
@@ -8210,6 +8242,19 @@ struct SentMail {
     msg: String,
     created_at_ms: u128,
     status: String,
+    #[serde(default = "default_resp_timeout")]
+    resp_timeout_secs: i64,
+    // Historical terminal entries must not be replayed after an upgrade.
+    #[serde(default = "default_true")]
+    notified: bool,
+}
+
+fn default_resp_timeout() -> i64 {
+    agent_core::host::MAILBOX_DEFAULT_RESP_TIMEOUT_SECS
+}
+
+fn default_queue_timeout() -> i64 {
+    agent_core::host::MAILBOX_DEFAULT_QUEUE_TIMEOUT_SECS
 }
 
 /// Host-authoritative mailbox state persisted in the session's mailbox.json
@@ -8249,21 +8294,42 @@ fn mailbox_snapshot(state: &MailboxState) -> MailboxSnapshot {
     }
 }
 
-/// Upper bound for the persisted mail/sent lists so long-lived mailboxes
-/// cannot grow without bound.
+/// Upper bound for persisted history. Pending incoming/outgoing mail is never
+/// dropped merely to satisfy the cap: losing it would break the delivery
+/// evidence this protocol promises.
 const MAILBOX_LIST_LIMIT: usize = 200;
 
-/// Drops receipts that were already surfaced once (their acknowledgement
-/// lives in the sent ledger) and trims the lists to their newest entries.
-/// Returns true when anything was removed.
+/// Hard cap for one mail body: mail is a short message, not a file channel.
+/// Oversized bodies are refused before anything touches the spool so the
+/// persisted envelope size stays bounded.
+const MAILBOX_MAX_MSG_BYTES: usize = 64 * 1024;
+
 fn prune_mailbox_lists(mails: &mut Vec<WebMailboxMail>, sent: &mut Vec<SentMail>) -> bool {
     let before = (mails.len(), sent.len());
     mails.retain(|mail| !(mail.kind == "receipt" && mail.delivered && mail.read));
     if mails.len() > MAILBOX_LIST_LIMIT {
-        mails.drain(..mails.len() - MAILBOX_LIST_LIMIT);
+        let mut excess = mails.len() - MAILBOX_LIST_LIMIT;
+        let mut index = 0;
+        while excess > 0 && index < mails.len() {
+            if mails[index].read && mails[index].receipt_sent {
+                mails.remove(index);
+                excess -= 1;
+            } else {
+                index += 1;
+            }
+        }
     }
     if sent.len() > MAILBOX_LIST_LIMIT {
-        sent.drain(..sent.len() - MAILBOX_LIST_LIMIT);
+        let mut excess = sent.len() - MAILBOX_LIST_LIMIT;
+        let mut index = 0;
+        while excess > 0 && index < sent.len() {
+            if sent[index].status != "sent" && sent[index].notified {
+                sent.remove(index);
+                excess -= 1;
+            } else {
+                index += 1;
+            }
+        }
     }
     before != (mails.len(), sent.len())
 }
@@ -8283,12 +8349,22 @@ fn mailbox_state_path(state: &AppState, session_id: &str) -> Result<PathBuf, Str
 fn load_mailbox_state(state: &AppState, session_id: &str) -> Result<MailboxState, String> {
     let path = mailbox_state_path(state, session_id)?;
     if let Ok(bytes) = std::fs::read(&path) {
-        if let Ok(state) = serde_json::from_slice::<MailboxState>(&bytes) {
-            return Ok(state);
+        match serde_json::from_slice::<MailboxState>(&bytes) {
+            Ok(state) => return Ok(state),
+            Err(error) => {
+                // Persisted evidence is never silently discarded: keep the
+                // corrupt file beside the original for inspection, then mint
+                // a fresh state below.
+                let backup = path.with_extension("json.corrupt");
+                let _ = std::fs::rename(&path, &backup);
+                eprintln!(
+                    "[timem_web_warning] mailbox_state_corrupt backup={backup:?} reason={error}"
+                );
+            }
         }
     }
     let state = MailboxState {
-        mailbox_name: crate::mailbox::generate_mailbox_name(),
+        mailbox_name: crate::mailbox::acquire_mailbox_name(&crate::mailbox::mailbox_spool_root()),
         auto_deliver: true,
         mails: Vec::new(),
         sent: Vec::new(),
@@ -8318,38 +8394,75 @@ fn save_mailbox_state(
     save_mailbox_state_at(&path, mailbox)
 }
 
+fn mailbox_deadline_reached(created_at_ms: u128, timeout_secs: i64, now: u128) -> bool {
+    timeout_secs >= 0
+        && now.saturating_sub(created_at_ms) >= (timeout_secs as u128).saturating_mul(1000)
+}
+
+/// Applies a receipt to the sender ledger. A read is reconciling evidence and
+/// may supersede an earlier local timeout; duplicate or unrelated terminal
+/// receipts are idempotent. Returns whether persistent state changed.
+fn apply_mailbox_receipt(
+    mailbox: &mut MailboxState,
+    receipt: &crate::mailbox::MailboxMail,
+) -> bool {
+    let Some(receipt_for) = receipt.receipt_for.as_deref() else {
+        return false;
+    };
+    let Some(sent) = mailbox.sent.iter_mut().find(|sent| sent.id == receipt_for) else {
+        return false;
+    };
+    let status = receipt.receipt_status.as_deref().unwrap_or("read");
+    if !matches!(status, "read" | "timeout" | "discarded" | "failed") {
+        return false;
+    }
+    let should_update = if status == "read" {
+        sent.status != "read"
+    } else {
+        sent.status == "sent"
+    };
+    if !should_update {
+        return false;
+    }
+    sent.status = status.to_string();
+    sent.notified = false;
+    true
+}
+
+/// One concise, machine-correlatable notice. Mail bodies and mailbox history
+/// deliberately stay out of these reminders.
+fn mailbox_terminal_notice(sent: &SentMail) -> Option<String> {
+    if sent.notified {
+        return None;
+    }
+    let text = match sent.status.as_str() {
+        "read" => format!("[mailbox] 邮件 {} 已被 {} 读取。", sent.id, sent.to),
+        "timeout" => format!(
+            "[mailbox] 邮件 {} 等待 {} 已读超时;对方尚未确认读取,可按需重发。",
+            sent.id, sent.to
+        ),
+        "discarded" => format!(
+            "[mailbox] 邮件 {} 被 {} 丢弃,未读取;可按需重发。",
+            sent.id, sent.to
+        ),
+        "failed" => format!(
+            "[mailbox] 邮件 {} 投递到 {} 失败,未读取。",
+            sent.id, sent.to
+        ),
+        _ => return None,
+    };
+    Some(text)
+}
+
 /// Injected into every model request's additional context so the session
 /// always knows its own mailbox address, even after context compression.
-/// Read receipts ride along here: they are surfaced exactly once, marked
-/// consumed, and never wake the session on their own.
+/// Terminal notices are delivered as dedicated [mailbox] messages instead, so
+/// nothing mailbox-related accumulates in the standing briefing.
 fn session_mailbox_briefing(state: &AppState, session_id: &str) -> Option<String> {
-    let mut mailbox = load_mailbox_state(state, session_id).ok()?;
-    let pending_receipts: Vec<String> = mailbox
-        .mails
-        .iter()
-        .filter(|mail| mail.kind == "receipt" && !mail.delivered)
-        .map(|mail| mail.msg.clone())
-        .collect();
-    let base = format!(
-        "Mailbox: {} — 你的唯一对外邮箱地址(跨 timem);收到 [mailbox] 开头的新 mail 提示时,消息来自其他 session,可用 mailbox 工具回复。",
-        mailbox.mailbox_name
-    );
-    if pending_receipts.is_empty() {
-        return Some(base);
-    }
-    for mail in mailbox.mails.iter_mut() {
-        if mail.kind == "receipt" && !mail.delivered {
-            mail.delivered = true;
-        }
-    }
-    if let Err(error) = save_mailbox_state(state, session_id, &mailbox) {
-        eprintln!(
-            "[timem_web_warning] mailbox_receipt_consume_failed session_id={session_id:?} reason={error}"
-        );
-    }
+    let mailbox = load_mailbox_state(state, session_id).ok()?;
     Some(format!(
-        "{base}\n[mailbox] {}",
-        pending_receipts.join("\n[mailbox] ")
+        "Mailbox: {};[mailbox] 为跨实例邮件,用 mailbox 工具回复。",
+        mailbox.mailbox_name
     ))
 }
 
@@ -8364,11 +8477,37 @@ fn spawn_mailbox_scheduler(state: AppState) {
     });
 }
 
-/// Scans every live session's spool directory for delivered mail, records it,
-/// and surfaces it in the session's next model request (supplement when a
-/// turn is active, fresh turn when idle). Mails whose max_wait deadline
-/// expires unconsumed are force-delivered even when auto-delivery is off;
-/// `max_wait = -1` waits indefinitely.
+fn mailbox_receipt(
+    mail_id: &str,
+    from: &str,
+    to: &str,
+    status: &str,
+) -> crate::mailbox::MailboxMail {
+    crate::mailbox::MailboxMail {
+        id: unique_web_id("receipt"),
+        from: from.to_string(),
+        to: to.to_string(),
+        msg: format!("mail {mail_id}: {status}"),
+        created_at_ms: now_ms(),
+        queue_timeout_secs: 0,
+        resp_timeout_secs: -1,
+        kind: "receipt".to_string(),
+        receipt_for: Some(mail_id.to_string()),
+        receipt_status: Some(status.to_string()),
+    }
+}
+
+fn write_mailbox_receipt(mail_id: &str, from: &str, to: &str, status: &str) -> Result<(), String> {
+    crate::mailbox::write_mail(
+        &crate::mailbox::mailbox_spool_root(),
+        &mailbox_receipt(mail_id, from, to, status),
+    )
+}
+
+/// Scans every live session's spool, persists intake before unlinking the
+/// envelope, then surfaces queued mail. `queue_timeout` forces a delivery
+/// attempt when auto-delivery is off; `resp_timeout` independently expires
+/// the sender's wait for a read receipt. Neither timeout fabricates a read.
 fn mailbox_tick(state: &AppState) {
     if state
         .session_restore_in_progress
@@ -8389,6 +8528,8 @@ fn mailbox_tick(state: &AppState) {
     };
     let mut events: Vec<WireEvent> = Vec::new();
     let mut deliveries: Vec<(String, String, String, String, String)> = Vec::new();
+    let mut receipt_retries: Vec<(String, String, String, String)> = Vec::new();
+    let mut notice_batches: Vec<(String, String)> = Vec::new();
     for session_id in targets {
         let mut mailbox = match load_mailbox_state(state, &session_id) {
             Ok(mailbox) => mailbox,
@@ -8404,83 +8545,99 @@ fn mailbox_tick(state: &AppState) {
             &mailbox.mailbox_name,
         );
         let mut changed = false;
+        let mut intake_paths = Vec::new();
         for (path, mail) in crate::mailbox::scan_mails(&spool_dir) {
             if mail.kind == "receipt" {
-                // A read receipt for mail we previously sent: update the sent
-                // ledger and archive it for the one-shot briefing mention.
-                if let Some(receipt_for) = mail.receipt_for.as_deref() {
-                    if let Some(sent) = mailbox.sent.iter_mut().find(|sent| sent.id == receipt_for)
-                    {
-                        sent.status = "read".to_string();
-                    }
-                }
+                changed |= apply_mailbox_receipt(&mut mailbox, &mail);
+            } else if !mailbox.mails.iter().any(|known| known.id == mail.id) {
                 mailbox.mails.push(WebMailboxMail {
                     id: mail.id,
                     from: mail.from,
                     msg: mail.msg,
                     created_at_ms: mail.created_at_ms,
-                    max_wait_secs: mail.max_wait_secs,
-                    kind: mail.kind,
-                    receipt_for: mail.receipt_for,
-                    delivered: true,
-                    read: true,
-                });
-            } else {
-                mailbox.mails.push(WebMailboxMail {
-                    id: mail.id,
-                    from: mail.from,
-                    msg: mail.msg,
-                    created_at_ms: mail.created_at_ms,
-                    max_wait_secs: mail.max_wait_secs,
+                    queue_timeout_secs: mail.queue_timeout_secs,
                     kind: mail.kind,
                     receipt_for: mail.receipt_for,
                     delivered: false,
                     read: false,
+                    receipt_sent: false,
                 });
+                changed = true;
             }
-            let _ = std::fs::remove_file(&path);
-            changed = true;
+            intake_paths.push(path);
         }
-        // Consumed receipts and stale history must not accumulate forever.
+        for sent in mailbox.sent.iter_mut() {
+            if sent.status == "sent"
+                && mailbox_deadline_reached(sent.created_at_ms, sent.resp_timeout_secs, now)
+            {
+                sent.status = "timeout".to_string();
+                sent.notified = false;
+                changed = true;
+            }
+        }
         if prune_mailbox_lists(&mut mailbox.mails, &mut mailbox.sent) {
             changed = true;
-        }
-        let self_name = mailbox.mailbox_name.clone();
-        for mail in mailbox
-            .mails
-            .iter_mut()
-            .filter(|mail| mail.kind != "receipt" && !mail.delivered)
-        {
-            let force_due = mail.max_wait_secs >= 0
-                && now.saturating_sub(mail.created_at_ms) >= (mail.max_wait_secs as u128) * 1000;
-            if !mailbox.auto_deliver && !force_due {
-                continue;
-            }
-            // `delivered` is only set after the prompt actually lands, so a
-            // failed delivery is retried on a later tick (max_wait eventually
-            // forces it through).
-            deliveries.push((
-                session_id.clone(),
-                format!(
-                    "[mailbox] 收到来自 {} 的 mail:\n{}\n(你的 mailbox 地址:{};可用 mailbox 工具回复对方。)",
-                    mail.from, mail.msg, self_name
-                ),
-                mail.id.clone(),
-                mail.from.clone(),
-                self_name.clone(),
-            ));
         }
         if changed {
             if let Err(error) = save_mailbox_state(state, &session_id, &mailbox) {
                 eprintln!(
                     "[timem_web_warning] mailbox_state_save_failed session_id={session_id:?} reason={error}"
                 );
+                // Keep the envelopes: the next tick retries the atomic intake.
                 continue;
             }
             events.push(WireEvent::MailboxUpdated {
                 session_id: session_id.clone(),
                 mailbox: mailbox_snapshot(&mailbox),
             });
+        }
+        for path in intake_paths {
+            // A crash between save and unlink replays the intake; the mail id
+            // dedup above makes that replay idempotent.
+            let _ = std::fs::remove_file(path);
+        }
+        let self_name = mailbox.mailbox_name.clone();
+        for mail in mailbox
+            .mails
+            .iter()
+            .filter(|mail| mail.kind != "receipt" && !mail.delivered)
+        {
+            let queue_due =
+                mailbox_deadline_reached(mail.created_at_ms, mail.queue_timeout_secs, now);
+            if !mailbox.auto_deliver && !queue_due {
+                continue;
+            }
+            deliveries.push((
+                session_id.clone(),
+                format!(
+                    "[mailbox] 收到来自 {} 的 mail:\n{}\n(可用 mailbox 工具回复对方。)",
+                    mail.from, mail.msg
+                ),
+                mail.id.clone(),
+                mail.from.clone(),
+                self_name.clone(),
+            ));
+        }
+        for mail in mailbox
+            .mails
+            .iter()
+            .filter(|mail| mail.read && !mail.receipt_sent)
+        {
+            receipt_retries.push((
+                session_id.clone(),
+                mail.id.clone(),
+                mail.from.clone(),
+                self_name.clone(),
+            ));
+        }
+        let notices: Vec<String> = mailbox
+            .sent
+            .iter()
+            .filter(|sent| sent.status != "sent")
+            .filter_map(mailbox_terminal_notice)
+            .collect();
+        if !notices.is_empty() {
+            notice_batches.push((session_id.clone(), notices.join("\n")));
         }
     }
     for event in events {
@@ -8490,14 +8647,15 @@ fn mailbox_tick(state: &AppState) {
         if !deliver_mailbox_prompt(state, &session_id, &prompt) {
             continue;
         }
-        // Delivery succeeded: mark the mail consumed (re-read so concurrent
-        // state writes are not clobbered) and write a read receipt into the
-        // sender's spool.
-        if let Ok(mut mailbox) = load_mailbox_state(state, &session_id) {
+        // Persist the read before acknowledging. A crash in between can cause
+        // a retried delivery or a duplicate receipt, never a read receipt for
+        // a mail this session actually lost.
+        let marked = if let Ok(mut mailbox) = load_mailbox_state(state, &session_id) {
             let mut marked = false;
             for mail in mailbox.mails.iter_mut() {
-                if mail.id == mail_id && !mail.delivered {
+                if mail.id == mail_id && !mail.read {
                     mail.delivered = true;
+                    mail.read = true;
                     marked = true;
                 }
             }
@@ -8509,19 +8667,68 @@ fn mailbox_tick(state: &AppState) {
                         mailbox: mailbox_snapshot(&mailbox),
                     },
                 );
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if marked && write_mailbox_receipt(&mail_id, &self_name, &mail_from, "read").is_ok() {
+            mark_mailbox_receipt_sent(state, &session_id, &mail_id);
+        }
+    }
+    for (session_id, mail_id, mail_from, self_name) in receipt_retries {
+        if write_mailbox_receipt(&mail_id, &self_name, &mail_from, "read").is_ok() {
+            mark_mailbox_receipt_sent(state, &session_id, &mail_id);
+        }
+    }
+    for (session_id, text) in notice_batches {
+        if !deliver_mailbox_prompt(state, &session_id, &text) {
+            // Notices retry on a later tick until they land.
+            continue;
+        }
+        if let Ok(mut mailbox) = load_mailbox_state(state, &session_id) {
+            let mut changed = false;
+            for sent in mailbox.sent.iter_mut().filter(|sent| sent.status != "sent") {
+                if !sent.notified {
+                    sent.notified = true;
+                    changed = true;
+                }
+            }
+            if changed && save_mailbox_state(state, &session_id, &mailbox).is_ok() {
+                publish_semantic(
+                    state,
+                    WireEvent::MailboxUpdated {
+                        session_id: session_id.clone(),
+                        mailbox: mailbox_snapshot(&mailbox),
+                    },
+                );
             }
         }
-        let receipt = crate::mailbox::MailboxMail {
-            id: unique_web_id("mail"),
-            from: self_name.clone(),
-            to: mail_from,
-            msg: format!("你发给 {self_name} 的 mail 已读。"),
-            created_at_ms: now_ms(),
-            max_wait_secs: 0,
-            kind: "receipt".to_string(),
-            receipt_for: Some(mail_id),
-        };
-        let _ = crate::mailbox::write_mail(&crate::mailbox::mailbox_spool_root(), &receipt);
+    }
+}
+
+fn mark_mailbox_receipt_sent(state: &AppState, session_id: &str, mail_id: &str) {
+    let Ok(mut mailbox) = load_mailbox_state(state, session_id) else {
+        return;
+    };
+    let mut changed = false;
+    for mail in mailbox.mails.iter_mut() {
+        if mail.id == mail_id && mail.read && !mail.receipt_sent {
+            mail.receipt_sent = true;
+            changed = true;
+        }
+    }
+    let _ = save_mailbox_state(state, session_id, &mailbox);
+    if changed {
+        publish_semantic(
+            state,
+            WireEvent::MailboxUpdated {
+                session_id: session_id.to_string(),
+                mailbox: mailbox_snapshot(&mailbox),
+            },
+        );
     }
 }
 
@@ -8567,7 +8774,13 @@ fn deliver_mailbox_prompt(state: &AppState, session_id: &str, text: &str) -> boo
 fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde_json::Value) {
     let to = payload["to"].as_str().unwrap_or("").to_string();
     let msg = payload["msg"].as_str().unwrap_or("").to_string();
-    let max_wait_secs = payload["max_wait_secs"].as_i64().unwrap_or(300);
+    let queue_timeout_secs = payload["queue_timeout_secs"]
+        .as_i64()
+        .or_else(|| payload["max_wait_secs"].as_i64())
+        .unwrap_or(agent_core::host::MAILBOX_DEFAULT_QUEUE_TIMEOUT_SECS);
+    let resp_timeout_secs = payload["resp_timeout_secs"]
+        .as_i64()
+        .unwrap_or(agent_core::host::MAILBOX_DEFAULT_RESP_TIMEOUT_SECS);
     if to.is_empty() || msg.is_empty() {
         return;
     }
@@ -8576,43 +8789,50 @@ fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde
     };
     let spool_root = crate::mailbox::mailbox_spool_root();
     let mail_id = unique_web_id("mail");
+    let mut msg = msg;
     let mut status = "sent";
-    if !crate::mailbox::mailbox_exists(&spool_root, &to) {
+    if msg.len() > MAILBOX_MAX_MSG_BYTES {
+        // Refuse before touching the spool and keep the ledger entry small:
+        // the persisted body must never blow up mailbox.json either.
         status = "failed";
-        // Bounce the failure back into the sender's next model request so the
-        // model learns the target does not exist.
-        let _ = try_append_turn_supplement(
-            state,
-            session_id,
-            format!("[mailbox] 投递失败:mailbox {to} 不存在。"),
-            None,
-            None,
-            Vec::new(),
-        );
-    } else if let Err(error) = crate::mailbox::write_mail(
-        &spool_root,
-        &crate::mailbox::MailboxMail {
-            id: mail_id.clone(),
-            from: sender_mailbox.mailbox_name.clone(),
-            to: to.clone(),
-            msg: msg.clone(),
-            created_at_ms: now_ms(),
-            max_wait_secs,
-            kind: "mail".to_string(),
-            receipt_for: None,
-        },
-    ) {
-        eprintln!("[timem_web_warning] mailbox_send_failed to={to:?} reason={error}");
+        msg = format!("[refused oversized body: {} bytes]", msg.len());
+    }
+    if status == "sent" && !crate::mailbox::mailbox_exists(&spool_root, &to) {
         status = "failed";
     }
-    // The sent ledger drives the WebUI status column: failed | sent | read.
+    if status == "sent" {
+        if let Err(error) = crate::mailbox::write_mail(
+            &spool_root,
+            &crate::mailbox::MailboxMail {
+                id: mail_id.clone(),
+                from: sender_mailbox.mailbox_name.clone(),
+                to: to.clone(),
+                msg: msg.clone(),
+                created_at_ms: now_ms(),
+                queue_timeout_secs,
+                resp_timeout_secs,
+                kind: "mail".to_string(),
+                receipt_for: None,
+                receipt_status: None,
+            },
+        ) {
+            eprintln!("[timem_web_warning] mailbox_send_failed to={to:?} reason={error}");
+            status = "failed";
+        }
+    }
+    // The sent ledger drives both the WebUI status column and the reliable
+    // one-shot AI notification; `failed` is surfaced by the scheduler like
+    // every other terminal outcome.
     sender_mailbox.sent.push(SentMail {
         id: mail_id,
         to,
         msg,
         created_at_ms: now_ms(),
         status: status.to_string(),
+        resp_timeout_secs,
+        notified: false,
     });
+    prune_mailbox_lists(&mut sender_mailbox.mails, &mut sender_mailbox.sent);
     if let Err(error) = save_mailbox_state(state, session_id, &sender_mailbox) {
         eprintln!(
             "[timem_web_warning] mailbox_sent_ledger_save_failed session_id={session_id:?} reason={error}"
@@ -14137,7 +14357,6 @@ fn mark_core_command_accepted(state: &AppState, session_id: &str, command_id: &s
     };
 
     let mut extra = BTreeMap::new();
-    extra.insert("kind".to_string(), json!("command_delivery"));
     extra.insert("command_id".to_string(), json!(command_id));
     extra.insert("delivery_state".to_string(), json!("core_accepted"));
     let persist_result = append_history_record(
@@ -14147,7 +14366,7 @@ fn mark_core_command_accepted(state: &AppState, session_id: &str, command_id: &s
             role: ChatHistoryRole::System,
             turn_id,
             created_at_ms: now_ms_i64(),
-            kind: ChatHistoryEventKind::RuntimeNotice,
+            kind: ChatHistoryEventKind::CommandDelivery,
             content: "Core accepted command.".to_string(),
             extra,
         },

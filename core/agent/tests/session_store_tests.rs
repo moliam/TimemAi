@@ -263,6 +263,83 @@ fn temporary_retention_prunes_only_selected_old_events() {
 }
 
 #[test]
+fn command_delivery_rows_parse_and_expire_as_temporary_events() {
+    let root = tmp_dir("temporary_retention_command_delivery");
+    let store = SessionStore::new(&root);
+    let path = store.history_path_for_session("session_a");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    // Historic writer bug: the trailing duplicated `kind` key won during
+    // deserialization, so those rows must decode into CommandDelivery.
+    let legacy_row = r#"{"type":"event","role":"system","turn_id":"t1","created_at_ms":1,"kind":"runtime_notice","content":"Core accepted command.","command_id":"c1","delivery_state":"core_accepted","kind":"command_delivery"}"#;
+    let structured = ChatHistoryRecord::Event {
+        role: ChatHistoryRole::System,
+        turn_id: "t2".to_string(),
+        created_at_ms: 2,
+        kind: ChatHistoryEventKind::CommandDelivery,
+        content: "Core accepted command.".to_string(),
+        extra: BTreeMap::new(),
+    };
+    let encoded = serde_json::to_string(&structured).unwrap();
+    assert!(
+        encoded.contains(r#""kind":"command_delivery""#),
+        "{encoded}"
+    );
+    assert_eq!(encoded.matches("\"kind\"").count(), 1, "no duplicated kind");
+
+    store
+        .append_history_record("session_a", &structured)
+        .unwrap();
+    store
+        .append_history_record(
+            "session_a",
+            &ChatHistoryRecord::Message {
+                role: ChatHistoryRole::User,
+                turn_id: "m1".to_string(),
+                created_at_ms: 1,
+                kind: None,
+                command_id: None,
+                delivery_state: None,
+                content: "durable user message".to_string(),
+            },
+        )
+        .unwrap();
+    {
+        use std::io::Write as _;
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap(),
+            "{legacy_row}"
+        )
+        .unwrap();
+    }
+
+    let loaded = read_all_history_records(&path).unwrap();
+    assert!(
+        loaded.iter().any(|record| matches!(
+            record,
+            ChatHistoryRecord::Event {
+                kind: ChatHistoryEventKind::CommandDelivery,
+                ..
+            }
+        )),
+        "the legacy duplicated-kind row decodes into CommandDelivery"
+    );
+
+    let removed = store
+        .prune_temporary_history_events_before("session_a", 100)
+        .unwrap();
+    assert_eq!(
+        removed, 2,
+        "legacy duplicated-kind row and structured row both expire"
+    );
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("durable user message"));
+    assert!(!text.contains("command_delivery"));
+}
+
+#[test]
 fn temporary_retention_serializes_with_concurrent_appends_without_losing_messages() {
     let root = tmp_dir("temporary_retention_concurrent_append");
     let store = SessionStore::new(&root);

@@ -723,6 +723,8 @@ export const en: Strings = {
     ariaLabel: "Open mailbox panel",
     empty: "No mailbox assigned yet",
     copyAddress: "Copy mailbox address",
+    copied: "Copied",
+    archiveTitle: "Archived",
     autoDeliver: "Auto-deliver new mail",
     inboxTitle: "Inbox",
     inboxEmpty: "Inbox is empty",
@@ -735,6 +737,8 @@ export const en: Strings = {
     statusSent: "sent",
     statusRead: "read",
     statusFailed: "failed",
+    statusTimeout: "read timeout",
+    statusDiscarded: "discarded",
     clear: "Clear mailbox",
   },
   timer: {
