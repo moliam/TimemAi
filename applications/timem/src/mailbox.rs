@@ -191,4 +191,31 @@ mod tests {
         }
         assert!(!duplicate);
     }
+
+    #[test]
+    fn receipt_kind_round_trips_and_legacy_envelopes_default_to_mail() {
+        let root = temp_root("receipt");
+        let mut receipt = sample("a1", "mb-target");
+        receipt.kind = "receipt".to_string();
+        receipt.receipt_for = Some("a0".to_string());
+        write_mail(&root, &receipt).unwrap();
+        let mails = scan_mails(&mailbox_spool_dir(&root, "mb-target"));
+        assert_eq!(mails.len(), 1);
+        assert_eq!(mails[0].1.kind, "receipt");
+        assert_eq!(mails[0].1.receipt_for.as_deref(), Some("a0"));
+
+        // Envelopes written before the kind field existed keep mail semantics.
+        let legacy_dir = mailbox_spool_dir(&root, "mb-legacy");
+        fs::create_dir_all(&legacy_dir).unwrap();
+        fs::write(
+            legacy_dir.join("mail_legacy.json"),
+            br#"{"id":"l1","from":"mb-s","to":"mb-legacy","msg":"hi","created_at_ms":1,"max_wait_secs":-1}"#,
+        )
+        .unwrap();
+        let mails = scan_mails(&legacy_dir);
+        assert_eq!(mails.len(), 1);
+        assert_eq!(mails[0].1.kind, "mail");
+        assert_eq!(mails[0].1.receipt_for, None);
+        fs::remove_dir_all(&root).ok();
+    }
 }

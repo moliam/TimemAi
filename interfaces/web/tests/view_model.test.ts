@@ -5185,4 +5185,42 @@ describe("sessionRuntimeUsage", () => {
     const usage = sessionRuntimeUsage({ ...session("session_1"), turns: [finished] });
     expect(usage?.llm_calls).toBe(1);
   });
+
+  it("aggregates authoritative finished stats together with live working usage", () => {
+    const finished: WebTurn = {
+      ...turn("t1", "finished"),
+      completion: {
+        stats: { llm_calls: 1, tool_calls: 3, prompt_tokens: 100, completion_tokens: 50 },
+      },
+    };
+    const working: WebTurn = {
+      ...turn("t2", "working"),
+      events: [modelResponseUsageEvent("u2", { llm_calls: 2, tool_calls: 0, prompt_tokens: 10, completion_tokens: 5 })],
+    };
+    const usage = sessionRuntimeUsage({ ...session("session_1"), turns: [finished, working] });
+    expect(usage).toEqual({ llm_calls: 3, tool_calls: 3, prompt_tokens: 110, completion_tokens: 55 });
+  });
+
+  it("skips turns created before telemetry_reset_at_ms but keeps the boundary turn", () => {
+    const before: WebTurn = {
+      ...turn("t-before", "finished"),
+      created_at_ms: 1,
+      completion: { stats: { llm_calls: 1, tool_calls: 1 } },
+    };
+    const boundary: WebTurn = {
+      ...turn("t-boundary", "finished"),
+      created_at_ms: 5,
+      completion: { stats: { llm_calls: 2, tool_calls: 0 } },
+    };
+    const usage = sessionRuntimeUsage({
+      ...session("session_1"),
+      telemetry_reset_at_ms: 5,
+      turns: [before, boundary],
+    });
+    expect(usage).toEqual({ llm_calls: 2, tool_calls: 0 });
+  });
+
+  it("returns undefined when no turn contributes usage", () => {
+    expect(sessionRuntimeUsage(session("session_1"))).toBeUndefined();
+  });
 });

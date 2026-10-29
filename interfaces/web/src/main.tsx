@@ -1,3 +1,4 @@
+import { useThrottledValue } from "./use_throttled_value";
 import { MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation, TimerInvocation, TimerToolIcon } from "./tool_invocation";
 import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
 import { initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, sessionReasoningOptions, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
@@ -7603,21 +7604,6 @@ function formatChatLibraryDate(value: number) {
     year:
       date.getFullYear() === new Date().getFullYear() ? undefined : "numeric",
   });
-}
-
-function useThrottledValue<T>(value: T, intervalMs: number): T {
-  const [shown, setShown] = useState(value);
-  const latestRef = useRef(value);
-  latestRef.current = value;
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      setShown((current) =>
-        Object.is(current, latestRef.current) ? current : latestRef.current,
-      );
-    }, intervalMs);
-    return () => window.clearInterval(timer);
-  }, [intervalMs]);
-  return shown;
 }
 
 const STREAM_MARKDOWN_INTERVAL_MS = 200;

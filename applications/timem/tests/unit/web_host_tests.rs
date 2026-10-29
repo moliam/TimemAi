@@ -20712,3 +20712,84 @@ fn mailbox_prune_drops_consumed_receipts_and_caps_lists() {
     // Idempotent: pruning again removes nothing.
     assert!(!prune_mailbox_lists(&mut mails, &mut sent));
 }
+
+#[test]
+fn mailbox_snapshot_counts_unread_and_keeps_full_lists() {
+    let mail = |id: &str, kind: &str, delivered: bool, read: bool| WebMailboxMail {
+        id: id.to_string(),
+        from: "mb-from".to_string(),
+        msg: "m".to_string(),
+        created_at_ms: 0,
+        max_wait_secs: 0,
+        kind: kind.to_string(),
+        receipt_for: None,
+        delivered,
+        read,
+    };
+    let state = MailboxState {
+        mailbox_name: "mb-abcd".to_string(),
+        auto_deliver: false,
+        mails: vec![
+            mail("m1", "mail", false, false),
+            mail("m2", "mail", true, true),
+            mail("r1", "receipt", false, false),
+        ],
+        sent: vec![SentMail {
+            id: "s1".to_string(),
+            to: "mb-peer".to_string(),
+            msg: "m".to_string(),
+            created_at_ms: 1,
+            status: "sent".to_string(),
+        }],
+    };
+    let snapshot = mailbox_snapshot(&state);
+    // Unread counts only unconsumed real mail: receipts acknowledge the
+    // sender's ledger instead of awaiting the recipient, and read mail is done.
+    assert_eq!(snapshot.unread, 1);
+    assert_eq!(snapshot.mailbox_name, "mb-abcd");
+    assert!(!snapshot.auto_deliver);
+    assert_eq!(
+        snapshot
+            .mails
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["m1", "m2", "r1"]
+    );
+    assert_eq!(snapshot.sent.len(), 1);
+    assert_eq!(snapshot.sent[0].id, "s1");
+}
+
+#[test]
+fn mailbox_commands_lane_to_their_session() {
+    let update: BrowserCommand = serde_json::from_value(json!({
+        "type": "mailbox_update",
+        "session_id": "session_a",
+        "auto_deliver": false
+    }))
+    .unwrap();
+    assert_eq!(
+        update.command.mutation_lane().as_deref(),
+        Some("session:session_a")
+    );
+
+    let clear: BrowserCommand = serde_json::from_value(json!({
+        "type": "mailbox_clear",
+        "session_id": "session_b"
+    }))
+    .unwrap();
+    assert_eq!(
+        clear.command.mutation_lane().as_deref(),
+        Some("session:session_b")
+    );
+
+    let get: BrowserCommand = serde_json::from_value(json!({
+        "type": "mailbox_get",
+        "session_id": "session_c"
+    }))
+    .unwrap();
+    assert_eq!(
+        get.command.mutation_lane().as_deref(),
+        Some("session:session_c")
+    );
+}
