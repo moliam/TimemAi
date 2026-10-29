@@ -1438,3 +1438,81 @@ fn action_events_split_consecutive_restart_notice_runs() {
         ["notice_1", "action_turn", "notice_3"]
     );
 }
+
+#[test]
+fn persisted_history_index_survives_store_restart_and_extends_incrementally() {
+    let root = tmp_dir("persisted_index");
+    let store = SessionStore::new(&root);
+    for index in 0..3 {
+        store
+            .append_history_record("session_a", &message(index))
+            .unwrap();
+    }
+    store.read_history_page("session_a", None, 10).unwrap();
+    let index_path = store
+        .history_path_for_session("session_a")
+        .with_file_name("raw_chat_history.index.json");
+    assert!(index_path.exists(), "reading a page must persist the index");
+
+    // Append behind the store's back, then reopen with a fresh store instance
+    // (simulates bytes written before a process restart): the rebuilt index
+    // must come from the persisted checkpoint plus only the appended tail.
+    let tail = ChatHistoryRecord::Message {
+        role: ChatHistoryRole::User,
+        turn_id: "turn_tail".to_string(),
+        created_at_ms: 99,
+        kind: None,
+        command_id: None,
+        delivery_state: None,
+        content: "appended after restart".to_string(),
+    };
+    let mut line = serde_json::to_vec(&tail).unwrap();
+    line.push(b'\n');
+    {
+        use std::io::Write as _;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(store.history_path_for_session("session_a"))
+            .unwrap();
+        file.write_all(&line).unwrap();
+    }
+
+    let reopened = SessionStore::new(&root);
+    let page = reopened.read_history_page("session_a", None, 10).unwrap();
+    let turn_ids: Vec<_> = page
+        .records
+        .iter()
+        .map(|record| record.turn_id().to_string())
+        .collect();
+    assert_eq!(turn_ids, vec!["turn_0", "turn_1", "turn_2", "turn_tail"]);
+    assert!(
+        index_path.exists(),
+        "the reopened store must re-persist the index"
+    );
+}
+
+#[test]
+fn corrupt_persisted_history_index_falls_back_to_full_rebuild() {
+    let root = tmp_dir("persisted_index_corrupt");
+    let store = SessionStore::new(&root);
+    for index in 0..2 {
+        store
+            .append_history_record("session_a", &message(index))
+            .unwrap();
+    }
+    store.read_history_page("session_a", None, 10).unwrap();
+    let index_path = store
+        .history_path_for_session("session_a")
+        .with_file_name("raw_chat_history.index.json");
+    assert!(index_path.exists());
+    fs::write(&index_path, b"{not json").unwrap();
+
+    let reopened = SessionStore::new(&root);
+    let page = reopened.read_history_page("session_a", None, 10).unwrap();
+    let turn_ids: Vec<_> = page
+        .records
+        .iter()
+        .map(|record| record.turn_id().to_string())
+        .collect();
+    assert_eq!(turn_ids, vec!["turn_0", "turn_1"]);
+}

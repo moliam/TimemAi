@@ -914,6 +914,7 @@ impl SessionStore {
             .lock()
             .map_err(|_| "chat_history_index_poisoned")?
             .remove(&path);
+        invalidate_persisted_history_index(&path);
         self.temporary_event_summaries
             .lock()
             .map_err(|_| "chat_history_summary_poisoned")?
@@ -1057,6 +1058,7 @@ impl SessionStore {
                     .lock()
                     .map_err(|_| "chat_history_index_poisoned".to_string())?
                     .remove(&path);
+                invalidate_persisted_history_index(&path);
             }
             Ok(removed)
         })
@@ -1153,6 +1155,7 @@ impl SessionStore {
             .lock()
             .map_err(|_| "chat_history_index_poisoned".to_string())?
             .remove(&path);
+        invalidate_persisted_history_index(&path);
         self.temporary_event_summaries
             .lock()
             .map_err(|_| "chat_history_summary_poisoned".to_string())?
@@ -1358,14 +1361,84 @@ fn restrict_session_path_permissions(_path: &Path, _directory: bool) -> Result<(
     Ok(())
 }
 
-fn build_history_index(
-    path: &Path,
+#[derive(Serialize, Deserialize)]
+struct PersistedHistoryIndex {
+    indexed_len: u64,
+    #[serde(default)]
+    entries: Vec<PersistedHistoryIndexEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedHistoryIndexEntry {
+    o: u64,
+    l: u64,
+    t: String,
+    #[serde(default)]
+    r: bool,
+}
+
+fn persisted_history_index_path(history_path: &Path) -> PathBuf {
+    history_path.with_file_name("raw_chat_history.index.json")
+}
+
+fn invalidate_persisted_history_index(history_path: &Path) {
+    let _ = fs::remove_file(persisted_history_index_path(history_path));
+}
+
+/// Loads a persisted index checkpoint and validates that the covered prefix
+/// really ends on a complete line boundary of the current history file.
+fn load_persisted_history_index(
+    history_path: &Path,
     file_len: u64,
-    modified_at_ms: Option<u128>,
-) -> Result<HistoryIndex, String> {
-    let file = fs::File::open(path).map_err(|_| "chat_history_open_failed")?;
+) -> Option<(u64, Vec<HistoryIndexEntry>)> {
+    let bytes = fs::read(persisted_history_index_path(history_path)).ok()?;
+    let persisted: PersistedHistoryIndex = serde_json::from_slice(&bytes).ok()?;
+    let indexed_len = persisted.indexed_len;
+    if indexed_len > file_len {
+        return None;
+    }
+    if indexed_len == 0 {
+        return Some((0, Vec::new()));
+    }
+    let mut file = fs::File::open(history_path).ok()?;
+    file.seek(SeekFrom::Start(indexed_len - 1)).ok()?;
+    let mut boundary = [0u8; 1];
+    file.read_exact(&mut boundary).ok()?;
+    if boundary[0] != b'\n' {
+        return None;
+    }
+    let entries = persisted
+        .entries
+        .into_iter()
+        .map(|entry| HistoryIndexEntry {
+            byte_offset: entry.o,
+            byte_len: entry.l,
+            turn_id: entry.t,
+            is_restart_notice: entry.r,
+        })
+        .collect::<Vec<_>>();
+    if let Some(last) = entries.last() {
+        if last.byte_offset.saturating_add(last.byte_len) > indexed_len {
+            return None;
+        }
+    }
+    Some((indexed_len, entries))
+}
+
+/// Scans history lines from `start_offset` to EOF, returning the index
+/// entries plus the byte offset reached (the new indexed length).
+fn scan_history_lines_from(
+    history_path: &Path,
+    start_offset: u64,
+) -> Result<(Vec<HistoryIndexEntry>, u64), String> {
+    let file = fs::File::open(history_path).map_err(|_| "chat_history_open_failed")?;
     let mut reader = BufReader::new(file);
-    let mut byte_offset = 0u64;
+    if start_offset > 0 {
+        reader
+            .seek(SeekFrom::Start(start_offset))
+            .map_err(|_| "chat_history_read_failed")?;
+    }
+    let mut byte_offset = start_offset;
     let mut entries = Vec::new();
     let mut line = String::new();
     loop {
@@ -1389,11 +1462,63 @@ fn build_history_index(
         }
         byte_offset = byte_offset.saturating_add(byte_len as u64);
     }
-    Ok(HistoryIndex {
+    Ok((entries, byte_offset))
+}
+
+fn persist_history_index(history_path: &Path, indexed_len: u64, entries: &[HistoryIndexEntry]) {
+    let persisted = PersistedHistoryIndex {
+        indexed_len,
+        entries: entries
+            .iter()
+            .map(|entry| PersistedHistoryIndexEntry {
+                o: entry.byte_offset,
+                l: entry.byte_len,
+                t: entry.turn_id.clone(),
+                r: entry.is_restart_notice,
+            })
+            .collect(),
+    };
+    let bytes = match serde_json::to_vec(&persisted) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!(
+                "[timem_web_warning] chat_history_index_serialize_failed path={:?} reason={error}",
+                history_path
+            );
+            return;
+        }
+    };
+    if let Err(error) = atomic_write_file(&persisted_history_index_path(history_path), &bytes) {
+        eprintln!(
+            "[timem_web_warning] chat_history_index_persist_failed path={:?} reason={error}",
+            history_path
+        );
+    }
+}
+
+fn build_history_index(
+    path: &Path,
+    file_len: u64,
+    modified_at_ms: Option<u128>,
+) -> Result<HistoryIndex, String> {
+    // Restarting the process drops the in-memory index cache; rescanning the
+    // whole file (hundreds of MB in long-lived memories) line by line is what
+    // makes the session area load slowly on the first connect. Reuse the
+    // persisted checkpoint and only scan the appended tail.
+    let (mut indexed_len, mut entries) =
+        load_persisted_history_index(path, file_len).unwrap_or((0, Vec::new()));
+    if indexed_len < file_len {
+        let (new_entries, scanned_len) = scan_history_lines_from(path, indexed_len)?;
+        entries.extend(new_entries);
+        indexed_len = scanned_len;
+    }
+    let index = HistoryIndex {
         file_len,
         modified_at_ms,
         entries,
-    })
+    };
+    persist_history_index(path, indexed_len, &index.entries);
+    Ok(index)
 }
 
 fn read_history_page_from_index(
