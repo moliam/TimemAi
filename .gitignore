@@ -14,3 +14,6 @@ __pycache__/
 /.benchmark-cache/
 /.test_mem/
 /.serena/
+
+# Local PCIe probe reports (never commit)
+/pcie_report_*
