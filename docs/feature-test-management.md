@@ -967,3 +967,16 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 背景：远端 ubuntu CI 暴露：不读 stdin 的快速命令工具脚本（`printf && exit 0`）在共享 runner 调度抖动下被间歇性误报 `command_input_failed: child exited before input delivery completed`。根因：executor 主循环先 `try_wait` 后 `try_write`，父线程被延迟调度时子进程已退出而 payload 尚未写完——此刻 payload 已无人可读，子进程自身退出状态与捕获输出才是权威结果。同根因第二表现面：子进程退出后写管道收 EPIPE 走写错误分支同样误报。
 - 改动：`core/agent/src/executor.rs`——退出早于投递完成时按子进程退出状态正常渲染（不读 payload 就干活的工具是合法行为）；写错误仅在子进程仍存活时判为 `command_input_failed`（`closed_stdin` 场景不变）；已退出则收敛到权威 wait 结果。
 - 测试看护：`executor_tests.rs` 新增 1MB payload + 不读 stdin 立即退出脚本，两种交错（退出先观察 / EPIPE 先到）都收敛 `status: 0` 且含 `still_alive`；`closed_stdin`/sigsegv/超时守护场景全部复核通过；agent_core lib 全量 883 过。
+
+## 2026-10 Mailbox 长邮件正文五行折叠
+
+- 背景：mailbox 侧栏此前把每封邮件正文全量铺开，一封长邮件即可占满整个面板，收件/发件条目难以浏览。
+- Web 呈现：新增 `src/mailbox_body.tsx`——正文默认 5 行 line-clamp（`-webkit-line-clamp: 5`，另以 `max-height: calc(5 * 1.5em)` 兜底不支持 line-clamp 的引擎）；`useLayoutEffect` 以 `scrollHeight > clientHeight` 判断真实溢出，只有溢出时才渲染「展开全文/收起」按钮，短邮件不出现无效按钮；展开后保留按钮可收起，折叠时重新测量；`ResizeObserver` 在面板宽度变化时重测（无该 API 时保留首测结果）；按钮带 `aria-expanded`/`aria-controls` 与 zh/en 文案（`mailbox.expandBody`/`mailbox.collapseBody`），明暗主题均有独立样式。收件、归档、发件三条渲染路径统一走该组件。
+- 测试看护：`mailbox_body_collapse.test.ts` 4 组——5 行 clamp 契约（含兜底高度）、仅溢出才显示按钮的测量与条件接线、可访问性与双语键、收件/发件均经组件渲染且不再直出正文；构建后 dist CSS 经 Chrome 142 真实几何验证：clamped 高 90px / 全文 126px（5×18px 行高），短邮件 18/18 不溢出、展开后 126/126、发件同。全量 `pnpm --dir interfaces/web test` 836 过。
+- 验证：`tsc --noEmit` 通过；vitest 全量绿；dist 重建且 index.html 引用完整；`git diff --check` 通过。`module_boundary_check.sh` 与 `test_contract_check.sh` 仍因本次未触及的既有问题失败（`core/agent/src/session_store.rs` 的 `[timem_web_warning]` 日志前缀触发 agent_core 引用 Interface 检查；`mailbox.yaml` 既有 example_json 为多键对象），两项在 HEAD 基线同样失败，与本改动无关。
+
+## 2026-10 Mailbox 例行维护日志默认静默
+
+- 背景：`[timem_web_mailbox_maintenance] ...` 在每次启动的第一次 tick 以及之后每 15 分钟无条件写 stderr；用户每次重启后仍会看到，长驻实例还会持续刷屏，容易被误判为报错。
+- 改动：`applications/timem/src/server.rs` 仅在本次维护实际回收了文件（`reclaimed_files > 0`）时输出摘要；例行无事发生时不打印。失败仍以 `[timem_web_warning] mailbox_maintenance_failed` 输出。需要完整逐次摘要时设置 `TIMEM_MAILBOX_MAINTENANCE_LOG=1`（也接受 true/yes/on）。
+- 测试看护：`web_host_tests.rs` 新增 `routine_mailbox_maintenance_stays_quiet_until_files_are_reclaimed`，覆盖例行静默、宽限期孤儿静默、实际回收输出与显式诊断开关四种情况。
