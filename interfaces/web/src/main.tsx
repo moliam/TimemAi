@@ -4009,8 +4009,11 @@ function TimemApp() {
     document.body.classList.toggle("workspace-modal-open", workspaceModalOpen);
     return () => document.body.classList.remove("workspace-modal-open");
   }, [workspaceModalOpen]);
-  return (
-    <TurnHistoryRequestContext.Provider value={(sessionId, turnId, priority = false) => {
+  // Stable context identity: SessionTimelinePane consumes this context, so a
+  // fresh closure on every render would re-render every mounted timeline even
+  // when its props are unchanged (memo cannot block context propagation).
+  const requestTurnHistory = useCallback(
+    (sessionId: string, turnId: string, priority = false) => {
       const queue = turnHydrationQueueRef.current;
       enqueueTurnHistoryHydration(
         queue,
@@ -4023,7 +4026,11 @@ function TimemApp() {
         priority,
       );
       pumpTurnHistoryHydration(queue, startTurnHistoryChain);
-    }}>
+    },
+    [startTurnHistoryChain],
+  );
+  return (
+    <TurnHistoryRequestContext.Provider value={requestTurnHistory}>
     <AssistantRuntimeProvider runtime={runtime}>
       <div
         inert={workspaceModalOpen}
