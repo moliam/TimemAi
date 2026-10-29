@@ -7616,6 +7616,17 @@ function useThrottledValue<T>(value: T, intervalMs: number): T {
   return shown;
 }
 
+const STREAM_MARKDOWN_INTERVAL_MS = 200;
+
+const StreamMarkdown = memo(function StreamMarkdown({ text }: { text: string }) {
+  // Streaming text changes at delta frequency; throttle the expensive
+  // markdown pipeline to ~5 renders/sec. The throttled value keeps
+  // converging to the latest text, so the final content still lands right
+  // after the stream settles.
+  const throttled = useThrottledValue(text, STREAM_MARKDOWN_INTERVAL_MS);
+  return <MarkdownContent text={throttled} />;
+});
+
 function timerRelativeTime(targetMs: number): string {
   const delta = targetMs - Date.now();
   const formatter = new Intl.RelativeTimeFormat(undefined, {
@@ -12333,7 +12344,7 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
       const isProcessChapter = activity?.kind === "free_talk" && !!(activity.detail ?? "").trim();
       const chapterIndex = isProcessChapter ? streamChapterIndex++ : -1;
       return activity?.kind === "free_talk"
-          ? <div key={key} className="stream-thought-text" {...(chapterIndex >= 0 ? { "data-stream-chapter": chapterIndex } : {})}><MarkdownContent text={activity.detail ?? ""} /></div>
+          ? <div key={key} className="stream-thought-text" {...(chapterIndex >= 0 ? { "data-stream-chapter": chapterIndex } : {})}><StreamMarkdown text={activity.detail ?? ""} /></div>
           : activity ? <ActivityView key={key} activity={activity} /> : null;
     })}
   </section>;
@@ -12601,6 +12612,10 @@ function TurnAnswerDelivery({
     (streamWorking && intermediate ? preview?.response?.text ?? "" : "");
   const hasPreview = !!previewText;
   const hasFinal = !!turn.final_answer;
+  // The live preview text changes at delta frequency; throttle the expensive
+  // markdown pipeline to ~5 renders/sec (the throttled value converges to
+  // the authoritative final answer within one tick).
+  const deliveredText = useThrottledValue(turn.final_answer || previewText, 200);
   // Reasoning deltas arrive far faster than reading speed; refresh the word
   // count once per second instead of on every delta.
   const thinkingWordsShown = useThrottledValue(
@@ -12647,7 +12662,7 @@ function TurnAnswerDelivery({
       {hasPreview && preview?.interruption && <div className="response-preview-interruption" role="status">{preview.interruption === "cancelled" ? t("interim.previewStopped") : preview.interruption === "network_error" ? t("interim.previewNetworkError") : t("interim.previewModelError")}</div>}
       {(hasFinal || !!previewText) && (
         <FinalAnswerDelivery
-          text={turn.final_answer || previewText}
+          text={deliveredText}
           layoutKey={`${streamRetained}:${workExpanded}`}
           processSections={processSections}
           processHostId={streamRetained ? processHostId : undefined}

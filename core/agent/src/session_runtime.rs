@@ -1200,6 +1200,10 @@ fn call_model_with_system_retries(
     let mut total_retry_wait = Duration::ZERO;
     let mut effective_request = request.clone();
     let mut parallel_tool_control_omitted = false;
+    // Streaming deltas arrive far faster than anyone reads; coalescing the
+    // preview publishes to ~10x/second cuts wire traffic and, more
+    // importantly, the client-side markdown re-render cost per arrival.
+    let mut last_preview_publish: Option<Instant> = None;
     for attempt in 0..=retry_policy.max_attempts {
         let model_wait_start = Instant::now();
         preview.begin(round);
@@ -1248,7 +1252,13 @@ fn call_model_with_system_retries(
                     changed = true;
                 }
                 if changed {
-                    preview.publish(&mut **shared_ui.borrow_mut(), session, turn_id);
+                    let due = last_preview_publish
+                        .map(|last| last.elapsed() >= Duration::from_millis(100))
+                        .unwrap_or(true);
+                    if due || preview.finish_pending() {
+                        last_preview_publish = Some(Instant::now());
+                        preview.publish(&mut **shared_ui.borrow_mut(), session, turn_id);
+                    }
                 }
             },
         );
