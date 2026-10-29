@@ -983,7 +983,8 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 
 ## 2026-10 Mailbox 系统提示呈现与本地投递回退
 
-- 背景：mailbox 已读/超时/丢弃/失败提示此前作为普通用户条目渲染，和手输消息混在一起；同一实例内直投失败（收件会话 turn 忙、worker 未就绪）会被写成终态 `failed`，正文虽已落盘却不再重试。
-- Host：新增结构化用户条目 kind `mailbox_status`（read/timeout/discarded/failed），`mailbox` 保留给收到的邮件正文，历史恢复白名单同步；同实例直投失败改为把信封写入收件人 spool，由 mailbox 调度器重试，不再终态失败；跨实例与本地路径共用 `write_mail_envelope`。
+- 背景：mailbox 已读/超时/丢弃/失败提示此前作为普通用户条目渲染，和手输消息混在一起；同一实例内直投失败会被写成终态 `failed`，正文虽已落盘却不再重试。
+- 根因订正：直投失败的触发条件不是“收件会话忙”。运行实例重启后，工作目录与 runtime cwd 不同的会话会挂起 `restart_cwd_decision`，`start_web_turn` 的第一道门 `ensure_restart_cwd_resolved` 直接返回 `session_restart_cwd_decision_required`；旧逻辑把这个可恢复状态写成终态失败且不落 spool。实测同一时刻 `rxtjar ↔ 6lal8v`（cwd 相同）成功，`ybv8uk`/`2otre4`（cwd 不同且未打开的会话）失败；`gozk0o` 被打开并确认目录后可以发信，而它发给仍未打开的 `2otre4` 依旧失败，和“忙”无关。
+- Host：新增结构化用户条目 kind `mailbox_status`（read/timeout/discarded/failed），`mailbox` 保留给收到的邮件正文，历史恢复白名单同步；同实例直投失败改为把信封写入收件人 spool，由 mailbox 调度器重试，不再终态失败；跨实例与本地路径共用 `write_mail_envelope`。本地投递被推迟时以 `[timem_web_warning] mailbox_local_delivery_deferred` 输出原因，并写入 lifecycle diagnostics 的 `mailbox_local_delivery_deferred` 检查点（`~/.timem/mem/diagnostics/timem-web/current-runs/*.json`）。
 - Web：timer/mailbox/mailbox_status 等系统触发条目统一加 `system-triggered`，使用 12px 小字号、系统提示中性底色和 mail 小图标；整帧只含系统条目时加 `system-only`，不再套用户气泡底色；旧历史仍以 `[mailbox]` 前缀兜底识别。
-- 测试看护：`local_mailbox_handoff_failure_falls_back_to_spool` 覆盖同实例忙时回退 spool；`mailbox_capacity_failure_is_terminal_without_body_or_spool` 断言 `mailbox_status` 结构化 kind；`mailbox_system_notice.test.ts` 冻结系统卡片样式与 mail 图标契约。
+- 测试看护：`local_mailbox_handoff_failure_falls_back_to_spool` 覆盖同实例直投失败回退 spool；新增 `local_mailbox_handoff_pending_restart_cwd_decision_is_spooled` 覆盖“重启后目录待确认”这一真实触发条件，断言发件状态保持 `sent` 且 spool 留有一封信；`mailbox_capacity_failure_is_terminal_without_body_or_spool` 断言 `mailbox_status` 结构化 kind；`mailbox_system_notice.test.ts` 冻结系统卡片样式与 mail 图标契约。
