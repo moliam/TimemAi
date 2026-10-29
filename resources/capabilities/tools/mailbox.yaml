@@ -2,21 +2,30 @@ kind: tool
 id: mailbox
 binding_type: builtin
 binding_name: mailbox
-summary: Mailbox is like email, for instant bi-directional communication: send mail to another session's mailbox across timem instances; delivery actively wakes the recipient (injected into its next model request, or a fresh turn when idle), so mail can also trigger or hand off work there, and you receive read/timeout receipts.
+summary: Mailbox is like email, for instant bi-directional communication: send mail to another session's mailbox across timem instances; delivery actively wakes the recipient (injected into its next model request, or a fresh turn when idle), so mail can also trigger or hand off work there, and you receive read/timeout receipts. `action` also lets you list, search, and read your own mailbox history.
 description: |
-  Mailbox is like email, for instant bi-directional communication. Use this
-  tool to send mail to another session's mailbox; your address will be
-  automatically signed on the mail, so the recipient can reply without
-  asking. Mailboxes work across timem instances on this machine. Each session owns exactly one
-  globally unique mailbox name (stated in the runtime prompt, e.g.
-  `mb-3ybe2`); the receiving runtime proactively surfaces a new mail in its
-  next model request, or starts a fresh turn when idle. Entering the
-  recipient's model context counts as read.
+  Mailbox is like email, for instant bi-directional communication. Send mail
+  to another session's mailbox across timem instances, and inspect your own
+  mailbox history. Your address is automatically signed on outgoing mail, so
+  the recipient can reply without asking. Mailboxes work across timem
+  instances on this machine. Each session owns exactly one globally unique
+  mailbox name (stated in the runtime prompt, e.g. `mb-3ybe2`).
 
-  Because delivery is proactive, mail is more than messaging: you can use it
-  to wake another session and trigger, assign or hand off work there. An idle
-  recipient starts working on your mail right away; a busy one receives it in
-  its running request. The recipient never needs to poll.
+  Actions (the `action` parameter):
+  - `send` (default): deliver mail into another mailbox. Delivery is
+    proactive: the mail is injected into the recipient's next model request,
+    or a fresh turn is started when it is idle. Because delivery is
+    proactive, mail can wake another session and trigger, assign or hand off
+    work there; the recipient never needs to poll. Requires `to` and `msg`.
+  - `list`: your most recent mails, received and sent merged, newest first.
+    Optional `count` (default 20, at most 100). Each entry shows
+    `[id] direction peer time state` plus a short body preview.
+  - `search`: case-insensitive full-text match over mail bodies. Requires
+    `query`; optional `count` (default 20, at most 100). Each entry shows the
+    same line as `list` plus a preview window of up to 128 words around the
+    first match, with `...` marking truncation.
+  - `read`: print one mail in full. Requires `mail_id` (the `[id]` shown by
+    `list`/`search`); reports `no mail with id ...` for unknown ids.
 
   Delivery is acknowledged in both directions:
   - When the mail is read, your runtime receives a read receipt and surfaces
@@ -27,9 +36,13 @@ description: |
     replayed after being surfaced.
 
   Parameters:
-  - `to`: recipient mailbox name. Required.
-  - `msg`: mail body. Required; at most 65536 bytes (64 KiB). Mail is a
-    short message, larger payloads belong in files.
+  - `action`: `send` (default), `list`, `search`, or `read`.
+  - `to`: recipient mailbox name (`send`).
+  - `msg`: mail body (`send`); at most 65536 bytes (64 KiB). Mail is a short
+    message, larger payloads belong in files.
+  - `query`: case-insensitive body text to match (`search`).
+  - `mail_id`: mail id to print in full (`read`).
+  - `count`: entry limit for `list`/`search`; default 20, at most 100.
   - `queue_timeout`: legacy compatibility parameter; mail is always
     delivered immediately, so it no longer changes behavior. `300` or `300s`
     syntax; `-1` waits indefinitely. Default 300. Legacy alias `max_wait` is
@@ -42,13 +55,16 @@ input_schema: |
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "to": {"type":"string","description":"Recipient mailbox name, e.g. mb-1a2b3c4d."},
-      "msg": {"type":"string","description":"Mail body delivered into the recipient's next model request. At most 65536 bytes (64 KiB)."},
+      "action": {"type":"string","enum":["send","list","search","read"],"description":"send (default) delivers mail to another mailbox; list shows recent received+sent mail; search matches bodies case-insensitively; read prints one mail in full."},
+      "to": {"type":"string","description":"Recipient mailbox name (action send), e.g. mb-1a2b3c4d."},
+      "msg": {"type":"string","description":"Mail body (action send) delivered into the recipient's next model request. At most 65536 bytes (64 KiB)."},
+      "query": {"type":"string","description":"Case-insensitive body text to match (action search)."},
+      "mail_id": {"type":"string","description":"Mail id to print in full (action read), as shown by list/search."},
+      "count": {"type":"integer","minimum":1,"maximum":100,"description":"Entry limit for list/search. Default 20."},
       "queue_timeout": {"type":"string","description":"Legacy compatibility parameter; mail is always delivered immediately. e.g. 300 or 300s; -1 waits indefinitely. Default 300."},
       "resp_timeout": {"type":"string","description":"Max seconds to wait for a read receipt before the sender is notified, e.g. 600 or 600s; -1 waits indefinitely. Default 600."},
       "max_wait": {"type":"string","description":"Deprecated alias of queue_timeout."}
-    },
-    "required": ["to", "msg"]
+    }
   }
 example_json: |
-  {"mailbox":{"to":"mb-3ybe2","msg":"please run the regression suite","queue_timeout":"300s","resp_timeout":"600s"}}
+  {"mailbox":{"action":"send","to":"mb-3ybe2","msg":"please run the regression suite","queue_timeout":"300s","resp_timeout":"600s"}}
