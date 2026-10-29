@@ -10,7 +10,9 @@
 //! later without changing the on-disk envelope format.
 
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -104,6 +106,36 @@ pub fn generate_mailbox_name() -> String {
     format!("mb-{}", std::str::from_utf8(&suffix).unwrap_or("00000"))
 }
 
+/// Short, content-addressed mail id: `mail_` + 6 base36 chars hashed from
+/// (body, created_at_ms, recipient mailbox). 36^6 ~= 2.17 billion
+/// combinations, and senders additionally retry on a spool or ledger
+/// collision, so ids stay practically unique across instances while remaining
+/// short and typeable.
+pub fn generate_mail_id(msg: &str, created_at_ms: u128, mailbox_id: &str) -> String {
+    const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut hasher = DefaultHasher::new();
+    msg.hash(&mut hasher);
+    created_at_ms.hash(&mut hasher);
+    mailbox_id.hash(&mut hasher);
+    let mut value = hasher.finish();
+    let mut suffix = [0u8; 6];
+    for slot in suffix.iter_mut() {
+        *slot = ALPHABET[(value % ALPHABET.len() as u64) as usize];
+        value /= ALPHABET.len() as u64;
+    }
+    format!("mail_{}", std::str::from_utf8(&suffix).unwrap_or("000000"))
+}
+
+/// Full spool envelope path for one mail id in one mailbox directory.
+pub fn mail_envelope_path(spool_root: &Path, mailbox_name: &str, id: &str) -> PathBuf {
+    mailbox_spool_dir(spool_root, mailbox_name).join(format!("mail_{id}.json"))
+}
+
+/// True when the recipient's spool already holds an envelope with this id.
+pub fn spool_contains_mail(spool_root: &Path, mailbox_name: &str, id: &str) -> bool {
+    mail_envelope_path(spool_root, mailbox_name, id).exists()
+}
+
 /// Picks a mailbox name whose spool directory is not taken yet, retrying a
 /// bounded number of times before falling back to one more draw.
 pub fn acquire_mailbox_name(spool_root: &Path) -> String {
@@ -132,7 +164,7 @@ pub fn write_mail(spool_root: &Path, mail: &MailboxMail) -> Result<(), String> {
     let bytes =
         serde_json::to_vec(mail).map_err(|_| "mailbox_mail_serialize_failed".to_string())?;
     let temporary = dir.join(format!(".mail_{}.tmp", mail.id));
-    let final_path = dir.join(format!("mail_{}.json", mail.id));
+    let final_path = mail_envelope_path(spool_root, &mail.to, &mail.id);
     {
         let mut file =
             fs::File::create(&temporary).map_err(|_| "mailbox_mail_write_failed".to_string())?;
@@ -199,6 +231,45 @@ mod tests {
             receipt_for: None,
             receipt_status: None,
         }
+    }
+
+    #[test]
+    fn mail_ids_are_short_base36_hashes_of_content_time_and_mailbox() {
+        let id = generate_mail_id("hello", 1_700_000_000_000, "mb-target");
+        assert!(id.starts_with("mail_"));
+        assert_eq!(id.len(), 11, "mail_ plus 6 base36 chars keeps it typeable");
+        assert!(
+            id[5..]
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+            "{id}"
+        );
+        // Deterministic per (content, time, mailbox); distinct across inputs.
+        assert_eq!(
+            generate_mail_id("hello", 1_700_000_000_000, "mb-target"),
+            id
+        );
+        assert_ne!(
+            generate_mail_id("hello", 1_700_000_000_001, "mb-target"),
+            id
+        );
+        assert_ne!(generate_mail_id("hello", 1_700_000_000_000, "mb-other"), id);
+        assert_ne!(
+            generate_mail_id("hellp", 1_700_000_000_000, "mb-target"),
+            id
+        );
+    }
+
+    #[test]
+    fn spool_collision_check_reports_existing_envelope_ids() {
+        let root = temp_root("idcollide");
+        write_mail(&root, &sample("a1", "mb-target")).unwrap();
+        assert!(spool_contains_mail(&root, "mb-target", "a1"));
+        assert!(!spool_contains_mail(&root, "mb-target", "a2"));
+        // Spool directories are per-recipient: the same id in another
+        // mailbox is a different envelope and never collides on disk.
+        assert!(!spool_contains_mail(&root, "mb-other", "a1"));
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

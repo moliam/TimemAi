@@ -7573,7 +7573,10 @@ fn web_message_from_history_record(record: ChatHistoryRecord) -> Option<WebChatM
 
 fn history_user_entry_kind(kind: Option<&str>) -> &str {
     match kind {
-        Some(kind @ ("task" | "supplement" | "approval" | "queued_interrupted" | "timer" | "mailbox")) => kind,
+        Some(
+            kind
+            @ ("task" | "supplement" | "approval" | "queued_interrupted" | "timer" | "mailbox"),
+        ) => kind,
         _ => "task",
     }
 }
@@ -8763,7 +8766,6 @@ fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde
         return;
     };
     let spool_root = crate::mailbox::mailbox_spool_root();
-    let mail_id = unique_web_id("mail");
     let mut msg = msg;
     let mut status = "sent";
     if msg.len() > MAILBOX_MAX_MSG_BYTES {
@@ -8775,6 +8777,21 @@ fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde
     if status == "sent" && !crate::mailbox::mailbox_exists(&spool_root, &to) {
         status = "failed";
     }
+    // Content-addressed id: `mail_` + 6 base36 chars hashing (body, time,
+    // recipient mailbox). A collision with an existing ledger entry or spool
+    // envelope must never overwrite evidence, so the timestamp is nudged by
+    // one millisecond and the id re-hashed, bounded times.
+    let mut created_at_ms = now_ms();
+    let mut mail_id = crate::mailbox::generate_mail_id(&msg, created_at_ms, &to);
+    for _ in 0..8 {
+        let taken = sender_mailbox.sent.iter().any(|sent| sent.id == mail_id)
+            || crate::mailbox::spool_contains_mail(&spool_root, &to, &mail_id);
+        if !taken {
+            break;
+        }
+        created_at_ms = created_at_ms.wrapping_add(1);
+        mail_id = crate::mailbox::generate_mail_id(&msg, created_at_ms, &to);
+    }
     if status == "sent" {
         if let Err(error) = crate::mailbox::write_mail(
             &spool_root,
@@ -8783,7 +8800,7 @@ fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde
                 from: sender_mailbox.mailbox_name.clone(),
                 to: to.clone(),
                 msg: msg.clone(),
-                created_at_ms: now_ms(),
+                created_at_ms,
                 queue_timeout_secs,
                 resp_timeout_secs,
                 kind: "mail".to_string(),
@@ -8802,7 +8819,7 @@ fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde
         id: mail_id,
         to,
         msg,
-        created_at_ms: now_ms(),
+        created_at_ms,
         status: status.to_string(),
         resp_timeout_secs,
         notified: false,
