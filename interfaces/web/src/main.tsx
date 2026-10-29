@@ -7805,7 +7805,6 @@ function MailboxPanel({
             <strong>{t("mailbox.empty")}</strong>
           </div>
         )}
-  const mailboxName = mailbox?.mailbox_name ?? "";
         <div className="mailbox-section-title">{t("mailbox.inboxTitle")}</div>
         {unreadMails.length === 0 ? (
           <div className="activity-empty">
