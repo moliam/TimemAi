@@ -4276,6 +4276,42 @@ describe("web topic view model", () => {
     expect(sessionTwo.state).toBe("ready");
   });
 
+  it("updates only the previewed turn and ignores stale revisions", () => {
+    const current = session("session_1");
+    const first = turn("turn_1", "finished");
+    const second = turn("turn_2", "working");
+    current.turns = [first, second];
+    current.active_turn_id = "turn_2";
+    const preview = (revision: number, text: string): CoreTopicEvent =>
+      topic("core.model.preview", {
+        turn_id: "turn_2",
+        revision,
+        response: { attempt: 1, revision, text, status: "streaming" },
+      });
+
+    const updated = applyCoreTopicToSession(
+      current,
+      preview(2, "hello"),
+      assistantMessage,
+    );
+    // Untouched turns keep their identity so memoized turn views can skip.
+    expect(updated.turns[0]).toBe(first);
+    expect(updated.turns[1]).not.toBe(second);
+    expect(updated.turns[1].preview?.revision).toBe(2);
+    expect(updated.turns[1].preview?.response?.text).toBe("hello");
+    expect(updated.turns[0].preview ?? null).toBeNull();
+    expect(
+      applyCoreTopicToSession(updated, preview(1, "stale"), assistantMessage),
+    ).toBe(updated);
+    expect(
+      applyCoreTopicToSession(
+        updated,
+        topic("core.model.preview", { turn_id: "turn_missing", revision: 3 }),
+        assistantMessage,
+      ),
+    ).toBe(updated);
+  });
+
   it("does not append a core topic event to another session with the same turn id", () => {
     const sharedTurnId = "turn_shared";
     const event: WebTurnEvent = {

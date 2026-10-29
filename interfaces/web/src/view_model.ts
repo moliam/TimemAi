@@ -1930,9 +1930,19 @@ export function applyCoreTopicToSession(
     const id = turnId ?? event.payload.turn_id;
     const preview = event.payload as unknown as NonNullable<WebTurn["preview"]>;
     if (!Number.isSafeInteger(preview.revision)) return session;
-    return { ...session, turns: session.turns.map((turn) =>
-      turn.turn_id === id && preview.revision > (turn.preview?.revision ?? 0)
-        ? { ...turn, preview } : turn) };
+    // Streaming previews almost always target the newest turn; avoid scanning
+    // the whole timeline on every revision.
+    const lastIndex = session.turns.length - 1;
+    const turnIndex =
+      lastIndex >= 0 && session.turns[lastIndex].turn_id === id
+        ? lastIndex
+        : session.turns.findIndex((turn) => turn.turn_id === id);
+    if (turnIndex < 0) return session;
+    const target = session.turns[turnIndex];
+    if (preview.revision <= (target.preview?.revision ?? 0)) return session;
+    const turns = [...session.turns];
+    turns[turnIndex] = { ...target, preview };
+    return { ...session, turns };
   }
   const contextState = event.payload.context_state;
   const reportedDir =

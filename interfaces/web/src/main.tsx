@@ -620,6 +620,12 @@ function TimemApp() {
   const [pendingFavoriteSourceKeys, setPendingFavoriteSourceKeys] = useState<
     Set<string>
   >(() => new Set());
+  // Stable identity matters: SessionTimelinePane is memoized, and a fresh Map
+  // on every streamed event would re-render every mounted session timeline.
+  const favoriteBySource = useMemo(
+    () => new Map(favorites.map((favorite) => [favorite.source_key, favorite])),
+    [favorites],
+  );
   const [favoriteCapacity, setFavoriteCapacity] = useState<ChatLibraryCapacity>(
     { used_bytes: 0, limit_bytes: 256 * 1024 * 1024, used_percent: 0 },
   );
