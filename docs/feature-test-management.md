@@ -980,3 +980,10 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 背景：`[timem_web_mailbox_maintenance] ...` 在每次启动的第一次 tick 以及之后每 15 分钟无条件写 stderr；用户每次重启后仍会看到，长驻实例还会持续刷屏，容易被误判为报错。
 - 改动：`applications/timem/src/server.rs` 仅在本次维护实际回收了文件（`reclaimed_files > 0`）时输出摘要；例行无事发生时不打印。失败仍以 `[timem_web_warning] mailbox_maintenance_failed` 输出。需要完整逐次摘要时设置 `TIMEM_MAILBOX_MAINTENANCE_LOG=1`（也接受 true/yes/on）。
 - 测试看护：`web_host_tests.rs` 新增 `routine_mailbox_maintenance_stays_quiet_until_files_are_reclaimed`，覆盖例行静默、宽限期孤儿静默、实际回收输出与显式诊断开关四种情况。
+
+## 2026-10 Mailbox 系统提示呈现与本地投递回退
+
+- 背景：mailbox 已读/超时/丢弃/失败提示此前作为普通用户条目渲染，和手输消息混在一起；同一实例内直投失败（收件会话 turn 忙、worker 未就绪）会被写成终态 `failed`，正文虽已落盘却不再重试。
+- Host：新增结构化用户条目 kind `mailbox_status`（read/timeout/discarded/failed），`mailbox` 保留给收到的邮件正文，历史恢复白名单同步；同实例直投失败改为把信封写入收件人 spool，由 mailbox 调度器重试，不再终态失败；跨实例与本地路径共用 `write_mail_envelope`。
+- Web：timer/mailbox/mailbox_status 等系统触发条目统一加 `system-triggered`，使用 12px 小字号、系统提示中性底色和 mail 小图标；整帧只含系统条目时加 `system-only`，不再套用户气泡底色；旧历史仍以 `[mailbox]` 前缀兜底识别。
+- 测试看护：`local_mailbox_handoff_failure_falls_back_to_spool` 覆盖同实例忙时回退 spool；`mailbox_capacity_failure_is_terminal_without_body_or_spool` 断言 `mailbox_status` 结构化 kind；`mailbox_system_notice.test.ts` 冻结系统卡片样式与 mail 图标契约。

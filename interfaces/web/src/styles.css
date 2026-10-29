@@ -1879,6 +1879,13 @@ body {
 .mailbox-entry-head > span { margin: 0; }
 .turn-user-entry .mailbox-entry-badge { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; border-radius: 5px; background: #2563eb; color: #fff; box-shadow: inset 0 -1px 0 #ffffff26; }
 .mailbox-entry-badge svg { display: block; }
+/* System-triggered entries on the user side (timer, mailbox delivery and
+   mailbox status) are machine-injected: smaller type and the same neutral
+   system-prompt card, never the hand-typed user bubble. */
+.turn-user-entry.system-triggered { font-size: 12px; line-height: 1.5; }
+.turn-user-entry.system-triggered .mailbox-entry-badge { width: 15px; height: 15px; }
+.turn-user-content.system-only { background: #cdd4da; color: #262f38; border-color: #b9c3cb; }
+:root[data-theme="light"] .turn-user-content.system-only { background: #e6eaee; color: #38424c; border-color: #cdd5dc; }
 :root[data-theme="light"] .turn-user-entry.timer,
 :root[data-theme="light"] .turn-user-entry.mailbox { background: #e6eaee; color: #38424c; }
 :root[data-theme="light"] .turn-user-content,

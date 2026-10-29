@@ -11930,6 +11930,20 @@ const TurnInteraction = memo(function TurnInteraction({
     setPendingUpdates(0);
   };
 
+  const visibleUserEntries = turn.user_entries.filter(
+    (entry) => entry.kind !== "approval" && entry.kind !== "resume_directly",
+  );
+  // Machine-injected entries share the system notice treatment: mailbox
+  // delivery/status (structured kind) and legacy [mailbox] history, plus timers.
+  const isSystemTriggeredEntry = (entry: (typeof turn.user_entries)[number]) =>
+    entry.kind === "mailbox" ||
+    entry.kind === "mailbox_status" ||
+    entry.kind === "timer" ||
+    entry.text.startsWith("[mailbox] ");
+  const systemOnlyFrame =
+    visibleUserEntries.length > 0 &&
+    visibleUserEntries.every(isSystemTriggeredEntry);
+
   return (
     <article
       className={`turn-interaction ${isWorking ? "active" : "completed"}`}
@@ -11939,7 +11953,7 @@ const TurnInteraction = memo(function TurnInteraction({
         (entry) => entry.kind !== "approval" && entry.kind !== "resume_directly",
       ).length && (
         <section className="turn-user-frame" data-user-message-anchor>
-          <div className="turn-user-content">
+          <div className={`turn-user-content${systemOnlyFrame ? " system-only" : ""}`}>
             {turn.user_entries
               .map((entry, roleIndex) => ({ entry, roleIndex }))
               .filter(
@@ -11949,17 +11963,20 @@ const TurnInteraction = memo(function TurnInteraction({
               .map(({ entry, roleIndex }) => {
                 const timerParts =
                   entry.kind === "timer" ? parseTimerEntryText(entry.text) : null;
-                // Mailbox notices arrive as kind "mailbox" turns (idle) or as
-                // supplements prefixed with [mailbox] (turn active); both are
-                // machine-injected, never hand-typed.
+                // "mailbox" carries delivered mail, "mailbox_status" carries
+                // read/timeout/discarded/failed notices; legacy history only
+                // has the [mailbox] prefix, so keep it as a fallback.
                 const isMailboxEntry =
-                  entry.kind === "mailbox" || entry.text.startsWith("[mailbox] ");
+                  entry.kind === "mailbox" ||
+                  entry.kind === "mailbox_status" ||
+                  entry.text.startsWith("[mailbox] ");
+                const isSystemTriggered = isSystemTriggeredEntry(entry);
                 const mailboxText = isMailboxEntry
                   ? entry.text.replace(/^\[mailbox\]\s*/, "")
                   : null;
                 return (
                 <div
-                  className={`turn-user-entry ${isMailboxEntry ? "mailbox" : entry.kind}`}
+                  className={`turn-user-entry ${isMailboxEntry ? "mailbox" : entry.kind}${isSystemTriggered ? " system-triggered" : ""}`}
                   key={`${entry.created_at_ms}-${roleIndex}`}
                 >
                   <button

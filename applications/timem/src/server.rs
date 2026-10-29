@@ -8027,8 +8027,8 @@ fn web_message_from_history_record(record: ChatHistoryRecord) -> Option<WebChatM
 fn history_user_entry_kind(kind: Option<&str>) -> &str {
     match kind {
         Some(
-            kind
-            @ ("task" | "supplement" | "approval" | "queued_interrupted" | "timer" | "mailbox"),
+            kind @ ("task" | "supplement" | "approval" | "queued_interrupted" | "timer" | "mailbox"
+            | "mailbox_status"),
         ) => kind,
         _ => "task",
     }
@@ -10164,7 +10164,7 @@ fn mailbox_tick(state: &AppState) {
                 "[mailbox] 收到来自 {} 的 mail:\n{}\n(可用 mailbox 工具回复对方。)",
                 mail.from, mail.msg
             );
-            if deliver_mailbox_prompt(state, &session_id, &prompt) {
+            if deliver_mailbox_prompt(state, &session_id, &prompt, "mailbox").is_ok() {
                 mailbox.entries[index].state = "read".to_string();
                 changed = true;
             }
@@ -10196,7 +10196,10 @@ fn mailbox_tick(state: &AppState) {
             .filter(|entry| entry.dir == "out" && entry.state != "sent")
             .filter_map(mailbox_terminal_notice)
             .collect();
-        if !notices.is_empty() && deliver_mailbox_prompt(state, &session_id, &notices.join("\n")) {
+        if !notices.is_empty()
+            && deliver_mailbox_prompt(state, &session_id, &notices.join("\n"), "mailbox_status")
+                .is_ok()
+        {
             for sent in mailbox
                 .entries
                 .iter_mut()
@@ -10229,7 +10232,12 @@ fn mailbox_tick(state: &AppState) {
 
 /// Mailbox delivery mirrors the timer immediate branch: an active turn
 /// receives the prompt as a supplement; an idle session starts a fresh turn.
-fn deliver_mailbox_prompt(state: &AppState, session_id: &str, text: &str) -> bool {
+fn deliver_mailbox_prompt(
+    state: &AppState,
+    session_id: &str,
+    text: &str,
+    entry_kind: &str,
+) -> Result<(), String> {
     let turn_active = state
         .sessions
         .lock()
@@ -10241,9 +10249,15 @@ fn deliver_mailbox_prompt(state: &AppState, session_id: &str, text: &str) -> boo
         })
         .unwrap_or(false);
     if turn_active {
-        if let Ok(Some(turn)) =
-            try_append_turn_supplement(state, session_id, text.to_string(), None, None, Vec::new())
-        {
+        if let Ok(Some(turn)) = try_append_turn_supplement_with_kind(
+            state,
+            session_id,
+            text.to_string(),
+            None,
+            None,
+            Vec::new(),
+            entry_kind,
+        ) {
             publish_semantic(
                 state,
                 WireEvent::TurnUpdated {
@@ -10251,7 +10265,7 @@ fn deliver_mailbox_prompt(state: &AppState, session_id: &str, text: &str) -> boo
                     turn,
                 },
             );
-            return true;
+            return Ok(());
         }
     }
     submit_turn_with_selected_attachments_and_kind(
@@ -10261,9 +10275,9 @@ fn deliver_mailbox_prompt(state: &AppState, session_id: &str, text: &str) -> boo
         None,
         None,
         Vec::new(),
-        "mailbox",
+        entry_kind,
     )
-    .is_ok()
+    .map(|_| ())
 }
 
 /// Reads a session's minted mailbox name without side effects: sessions that
@@ -10297,17 +10311,14 @@ fn deliver_local_mailbox_mail(
     state: &AppState,
     recipient_session_id: &str,
     mail: &MemMail,
-) -> bool {
+) -> Result<(), String> {
     let prompt = format!(
         "[mailbox] 收到来自 {} 的 mail:\n{}\n(可用 mailbox 工具回复对方。)",
         mail.from, mail.msg
     );
-    if !deliver_mailbox_prompt(state, recipient_session_id, &prompt) {
-        return false;
-    }
-    let Ok(mut mailbox) = load_mailbox_state(state, recipient_session_id) else {
-        return false;
-    };
+    deliver_mailbox_prompt(state, recipient_session_id, &prompt, "mailbox")?;
+    let mut mailbox = load_mailbox_state(state, recipient_session_id)
+        .map_err(|error| format!("recipient_mailbox_state_load_failed:{error}"))?;
     mailbox.entries.push(MailboxEntry {
         id: mail.id.clone(),
         dir: "in".to_string(),
@@ -10322,7 +10333,7 @@ fn deliver_local_mailbox_mail(
         eprintln!(
             "[timem_web_warning] mailbox_local_intake_save_failed session_id={recipient_session_id:?} reason={error}"
         );
-        return false;
+        return Err(format!("recipient_mailbox_state_save_failed:{error}"));
     }
     publish_semantic(
         state,
@@ -10331,7 +10342,30 @@ fn deliver_local_mailbox_mail(
             mailbox: mailbox_snapshot(state, &mailbox),
         },
     );
-    true
+    Ok(())
+}
+
+fn write_mail_envelope(
+    spool_root: &Path,
+    mail: &MemMail,
+    queue_timeout_secs: i64,
+    resp_timeout_secs: i64,
+) -> Result<(), String> {
+    crate::mailbox::write_mail(
+        spool_root,
+        &crate::mailbox::MailboxMail {
+            id: mail.id.clone(),
+            from: mail.from.clone(),
+            to: mail.to.clone(),
+            msg: mail.msg.clone(),
+            created_at_ms: mail.created_at_ms,
+            queue_timeout_secs,
+            resp_timeout_secs,
+            kind: "mail".to_string(),
+            receipt_for: None,
+            receipt_status: None,
+        },
+    )
 }
 
 fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde_json::Value) {
@@ -10401,29 +10435,37 @@ fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde
         // Keep a terminal metadata entry so the sending session receives a
         // failure notice; no body or spool envelope is fabricated at capacity.
     } else if let Some(recipient_session_id) = local_recipient.as_deref() {
-        status = if deliver_local_mailbox_mail(state, recipient_session_id, &mail) {
-            "read"
-        } else {
-            "failed"
-        };
+        match deliver_local_mailbox_mail(state, recipient_session_id, &mail) {
+            Ok(()) => status = "read",
+            Err(reason) => {
+                eprintln!(
+                    "[timem_web_warning] mailbox_local_delivery_deferred to={to:?} mail_id={mail_id:?} reason={reason}"
+                );
+                state.lifecycle_diagnostics.checkpoint(
+                    "mailbox_local_delivery_deferred",
+                    serde_json::json!({
+                        "to": &to,
+                        "mail_id": &mail_id,
+                        "reason": &reason,
+                    }),
+                );
+                if let Err(error) =
+                    write_mail_envelope(&spool_root, &mail, queue_timeout_secs, resp_timeout_secs)
+                {
+                    eprintln!("[timem_web_warning] mailbox_send_failed to={to:?} reason={error}");
+                    status = "failed";
+                }
+            }
+        }
+        // A deferred local hand-off (active turn ending, worker not ready,
+        // restart cwd decision pending) leaves the envelope spooled; the
+        // recipient's mailbox scheduler retries it instead of losing the mail.
     } else if status == "sent" {
         if !crate::mailbox::mailbox_exists(&spool_root, &to) {
             status = "failed";
-        } else if let Err(error) = crate::mailbox::write_mail(
-            &spool_root,
-            &crate::mailbox::MailboxMail {
-                id: mail.id.clone(),
-                from: mail.from.clone(),
-                to: mail.to.clone(),
-                msg: mail.msg.clone(),
-                created_at_ms: mail.created_at_ms,
-                queue_timeout_secs,
-                resp_timeout_secs,
-                kind: "mail".to_string(),
-                receipt_for: None,
-                receipt_status: None,
-            },
-        ) {
+        } else if let Err(error) =
+            write_mail_envelope(&spool_root, &mail, queue_timeout_secs, resp_timeout_secs)
+        {
             eprintln!("[timem_web_warning] mailbox_send_failed to={to:?} reason={error}");
             status = "failed";
         }
@@ -11305,6 +11347,26 @@ fn try_append_turn_supplement(
     command_id: Option<&str>,
     worker_roles: Vec<WorkerRole>,
 ) -> Result<Option<WebTurn>, String> {
+    try_append_turn_supplement_with_kind(
+        state,
+        session_id,
+        text,
+        attachment_ids,
+        command_id,
+        worker_roles,
+        "supplement",
+    )
+}
+
+fn try_append_turn_supplement_with_kind(
+    state: &AppState,
+    session_id: &str,
+    text: String,
+    attachment_ids: Option<&[String]>,
+    command_id: Option<&str>,
+    worker_roles: Vec<WorkerRole>,
+    entry_kind: &str,
+) -> Result<Option<WebTurn>, String> {
     if !session_has_active_turn(state, session_id)? {
         state.runtime_log.record(
             "supplement_no_active_turn",
@@ -11370,6 +11432,7 @@ fn try_append_turn_supplement(
                 attachment_ids,
                 command_id,
                 worker_roles.clone(),
+                entry_kind,
             )?);
             Ok(())
         },
@@ -14958,6 +15021,7 @@ fn append_turn_supplement_with_pending_attachments(
         None,
         command_id,
         Vec::new(),
+        "supplement",
     )
 }
 
@@ -14968,12 +15032,13 @@ fn append_turn_supplement_with_selected_attachments(
     attachment_ids: Option<&[String]>,
     command_id: Option<&str>,
     worker_roles: Vec<WorkerRole>,
+    kind: &str,
 ) -> Result<WebTurn, String> {
     append_turn_user_entry_with_attachments(
         state,
         session_id,
         TurnUserEntryInput {
-            kind: "supplement",
+            kind,
             text,
             attachments: Vec::new(),
             attachment_ids,

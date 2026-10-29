@@ -21781,12 +21781,17 @@ fn mailbox_capacity_failure_is_terminal_without_body_or_spool() {
     mailbox_tick(&state);
     let mailbox = load_mailbox_state(&state, &session_id).unwrap();
     assert!(mailbox.entries[0].notified);
-    assert!(state.sessions.lock().unwrap()[&session_id]
+    let notice_kind = state.sessions.lock().unwrap()[&session_id]
         .turns
         .iter()
-        .any(|turn| turn.user_entries.iter().any(|entry| {
-            entry.text.contains("[mailbox] 邮件") && entry.text.contains("失败")
-        })));
+        .flat_map(|turn| turn.user_entries.iter())
+        .find(|entry| entry.text.contains("[mailbox] 邮件") && entry.text.contains("失败"))
+        .map(|entry| entry.kind.clone());
+    assert_eq!(
+        notice_kind.as_deref(),
+        Some("mailbox_status"),
+        "machine-generated delivery notices must carry a structured kind"
+    );
 }
 
 #[test]
@@ -22483,6 +22488,91 @@ fn mailbox_local_delivery_is_bidirectional_between_two_sessions() {
     assert_eq!(b_out.peer, name_a);
     assert!(crate::mailbox::scan_mails(&e2e_inbox(&name_a)).is_empty());
     assert!(crate::mailbox::scan_mails(&e2e_inbox(&name_b)).is_empty());
+}
+
+#[test]
+fn local_mailbox_handoff_failure_falls_back_to_spool() {
+    let (_guard, state, sender) = mailbox_e2e_setup("mailbox_e2e_local_fallback");
+    let recipient = register_real_worker(&state, "mailbox_e2e_local_fallback_peer");
+    let to = load_mailbox_state(&state, &recipient).unwrap().mailbox_name;
+    // The recipient already has a turn but its worker is gone, so the
+    // in-process hand-off cannot accept a supplement or start another turn.
+    start_web_turn(&state, &recipient, "busy").unwrap();
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut(&recipient)
+        .unwrap()
+        .workers
+        .clear();
+
+    handle_mailbox_send_topic(
+        &state,
+        &sender,
+        &json!({"to": to, "msg": "retry through the spool"}),
+    );
+
+    let mailbox = load_mailbox_state(&state, &sender).unwrap();
+    let entry = mailbox
+        .entries
+        .iter()
+        .find(|entry| entry.peer == to)
+        .unwrap();
+    assert_eq!(
+        entry.state, "sent",
+        "a transient same-instance hand-off failure must stay retryable"
+    );
+    assert!(mem_mail_exists(&state, &entry.id));
+    assert_eq!(
+        crate::mailbox::scan_mails(&e2e_inbox(&to)).len(),
+        1,
+        "the envelope must wait in the recipient spool for the next tick"
+    );
+}
+
+#[test]
+fn local_mailbox_handoff_pending_restart_cwd_decision_is_spooled() {
+    let (_guard, state, sender) = mailbox_e2e_setup("mailbox_e2e_restart_cwd");
+    let recipient = register_real_worker(&state, "mailbox_e2e_restart_cwd_peer");
+    let to = load_mailbox_state(&state, &recipient).unwrap().mailbox_name;
+    // A session restored from a different working directory cannot start a
+    // host-initiated turn until the browser answers the cwd prompt.
+    let decision = RestartCwdDecision {
+        runtime_cwd: "/runtime/workspace".to_string(),
+        session_cwd: "/restored/workspace".to_string(),
+        session_cwd_available: true,
+        runtime_cwd_path: std::path::PathBuf::from("/runtime/workspace"),
+    };
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&recipient).unwrap();
+        session.restart_cwd_decision = Some(decision);
+        session.workers.clear();
+    }
+
+    handle_mailbox_send_topic(
+        &state,
+        &sender,
+        &json!({"to": to, "msg": "wait for the cwd decision"}),
+    );
+
+    let mailbox = load_mailbox_state(&state, &sender).unwrap();
+    let entry = mailbox
+        .entries
+        .iter()
+        .find(|entry| entry.peer == to)
+        .unwrap();
+    assert_eq!(
+        entry.state, "sent",
+        "a pending restart cwd decision must not become a terminal delivery failure"
+    );
+    assert!(mem_mail_exists(&state, &entry.id));
+    assert_eq!(
+        crate::mailbox::scan_mails(&e2e_inbox(&to)).len(),
+        1,
+        "the mail waits in the spool until the recipient opens and resolves its cwd"
+    );
 }
 
 #[test]
