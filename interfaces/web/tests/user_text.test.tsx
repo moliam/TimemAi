@@ -18,7 +18,9 @@ describe("user-authored text presentation", () => {
   });
 
   it("uses plain text for sent messages and live user supplements only", () => {
-    expect(mainSource).toContain("<UserText text={timerParts ? timerParts.prompt : entry.text} />");
+    expect(mainSource).toContain(
+      "text={timerParts ? timerParts.prompt : (mailboxText ?? entry.text)}",
+    );
     expect(mainSource).toContain("activity.detail && <UserText text={activity.detail} />");
     expect(mainSource).not.toContain("<MarkdownContent text={entry.text} />");
     expect(mainSource).not.toContain("activity.detail && <MarkdownContent text={activity.detail} />");

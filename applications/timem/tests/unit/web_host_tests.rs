@@ -5815,6 +5815,15 @@ fn restored_web_turns_preserve_user_entry_kinds() {
             delivery_state: Some(ChatCommandDeliveryState::Recorded),
             content: "queued input never dispatched".to_string(),
         },
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_1".to_string(),
+            created_at_ms: 15,
+            kind: Some("mailbox".to_string()),
+            command_id: None,
+            delivery_state: None,
+            content: "[mailbox] notice".to_string(),
+        },
     ];
 
     let turns = restored_turns_from_history_records(&records);
@@ -5830,6 +5839,7 @@ fn restored_web_turns_preserve_user_entry_kinds() {
             ("approval", "approved request"),
             ("task", "legacy text"),
             ("queued_interrupted", "queued input never dispatched"),
+            ("mailbox", "[mailbox] notice"),
         ]
     );
 }

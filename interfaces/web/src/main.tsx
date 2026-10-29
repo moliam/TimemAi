@@ -11884,9 +11884,17 @@ const TurnInteraction = memo(function TurnInteraction({
               .map(({ entry, roleIndex }) => {
                 const timerParts =
                   entry.kind === "timer" ? parseTimerEntryText(entry.text) : null;
+                // Mailbox notices arrive as kind "mailbox" turns (idle) or as
+                // supplements prefixed with [mailbox] (turn active); both are
+                // machine-injected, never hand-typed.
+                const isMailboxEntry =
+                  entry.kind === "mailbox" || entry.text.startsWith("[mailbox] ");
+                const mailboxText = isMailboxEntry
+                  ? entry.text.replace(/^\[mailbox\]\s*/, "")
+                  : null;
                 return (
                 <div
-                  className={`turn-user-entry ${entry.kind}`}
+                  className={`turn-user-entry ${isMailboxEntry ? "mailbox" : entry.kind}`}
                   key={`${entry.created_at_ms}-${roleIndex}`}
                 >
                   <button
@@ -11907,7 +11915,9 @@ const TurnInteraction = memo(function TurnInteraction({
                   >
                     <Trash2 size={13} />
                   </button>
-                  {entry.kind === "supplement" && <span>{t("composer.supplementTag")}</span>}
+                  {entry.kind === "supplement" && !isMailboxEntry && (
+                    <span>{t("composer.supplementTag")}</span>
+                  )}
                   {timerParts && (
                     <div className="timer-entry-head">
                       <span>{t("timer.timerTag")}</span>
@@ -11917,7 +11927,17 @@ const TurnInteraction = memo(function TurnInteraction({
                       {timerParts.name && <b className="timer-entry-name">{timerParts.name}</b>}
                     </div>
                   )}
-                  <UserText text={timerParts ? timerParts.prompt : entry.text} />
+                  {isMailboxEntry && (
+                    <div className="mailbox-entry-head">
+                      <span>{t("mailbox.entryTag")}</span>
+                      <span className="mailbox-entry-badge" aria-hidden="true">
+                        <Mail size={11} />
+                      </span>
+                    </div>
+                  )}
+                  <UserText
+                    text={timerParts ? timerParts.prompt : (mailboxText ?? entry.text)}
+                  />
                   {(
                     entry.worker_roles ??
                     (entry.worker_role ? [entry.worker_role] : [])

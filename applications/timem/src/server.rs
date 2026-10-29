@@ -7573,7 +7573,7 @@ fn web_message_from_history_record(record: ChatHistoryRecord) -> Option<WebChatM
 
 fn history_user_entry_kind(kind: Option<&str>) -> &str {
     match kind {
-        Some(kind @ ("task" | "supplement" | "approval" | "queued_interrupted" | "timer")) => kind,
+        Some(kind @ ("task" | "supplement" | "approval" | "queued_interrupted" | "timer" | "mailbox")) => kind,
         _ => "task",
     }
 }

@@ -1851,25 +1851,33 @@ body {
 .user-plain-text { display: block; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .turn-user-entry > .user-plain-text { padding-right: 26px; }
 
-/* User messages use a muted blue-gray in dark mode and a light blue in light mode. */
+/* Hand-typed user messages read as neutral gray; system-triggered
+   submissions (timer, mailbox) keep the accent blue tint so machine input
+   reads distinctly from hand-typed text. */
 .turn-user-content,
 .turn-stream-tools .turn-work-item.user-supplement {
-  background: #263746;
-  color: #e7f1f8;
+  background: #38414b;
+  color: #e9eef3;
 }
-.turn-user-entry { color: #e7f1f8; }
-.turn-user-entry + .turn-user-entry { border-color: #3b5366; }
-.turn-user-entry > span { color: #8fc3e8; }
+.turn-user-entry { color: #e9eef3; }
+.turn-user-entry + .turn-user-entry { border-color: #4a545e; }
+.turn-user-entry > span { color: #9aa6b0; }
 .turn-user-entry.approval { background: #22313d; color: #c3d1da; }
-/* Timer-fired turns reuse the existing accent blue as a tint so scheduled
-   submissions read distinctly from hand-typed input without a new hue. */
+/* Timer-fired and mailbox-injected turns reuse the existing accent blue as a
+   tint so machine submissions read distinctly from hand-typed input. */
 .turn-user-entry.timer { background: #3b82f62e; }
+.turn-user-entry.mailbox { background: #3b82f62e; }
+.mailbox-entry-head { display: flex; align-items: center; gap: 7px; margin: 0 0 5px; }
+.mailbox-entry-head > span { margin: 0; }
+.turn-user-entry .mailbox-entry-badge { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; border-radius: 5px; background: #2563eb; color: #fff; box-shadow: inset 0 -1px 0 #ffffff26; }
+.mailbox-entry-badge svg { display: block; }
 :root[data-theme="light"] .turn-user-entry.timer { background: #3b82f61a; }
+:root[data-theme="light"] .turn-user-entry.mailbox { background: #3b82f61a; }
 :root[data-theme="light"] .turn-user-content,
-:root[data-theme="light"] .turn-stream-tools .turn-work-item.user-supplement { background: #d9edff; color: #17324d; }
-:root[data-theme="light"] .turn-user-entry { color: #17324d; }
-:root[data-theme="light"] .turn-user-entry + .turn-user-entry { border-color: #b8d8f2; }
-:root[data-theme="light"] .turn-user-entry > span { color: #286792; }
+:root[data-theme="light"] .turn-stream-tools .turn-work-item.user-supplement { background: #edf0f3; color: #222c35; }
+:root[data-theme="light"] .turn-user-entry { color: #222c35; }
+:root[data-theme="light"] .turn-user-entry + .turn-user-entry { border-color: #cfd6dd; }
+:root[data-theme="light"] .turn-user-entry > span { color: #5d6974; }
 :root[data-theme="light"] .turn-user-entry.approval { background: #cfe4f5; color: #294d69; }
 .turn-entry-roles { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-top: 7px; color: #9fc9bb; font-size: 10px; }
 .turn-entry-roles > span { color: #87aa9f; font-weight: 700; }
