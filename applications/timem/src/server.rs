@@ -85,7 +85,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     io::{IsTerminal, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     path::{Path, PathBuf},
@@ -229,6 +229,27 @@ struct AppState {
     /// Public access token forwarded to the replacement process so browser
     /// URLs keep working across an upgrade restart.
     restart_public_token: Option<String>,
+    mem_mail_runtime: Arc<MemMailRuntime>,
+    mailbox_state_cache: Arc<Mutex<HashMap<PathBuf, CachedMailboxState>>>,
+}
+
+#[derive(Default)]
+struct MemMailRuntime {
+    io_lock: Mutex<()>,
+    usage_bytes: AtomicU64,
+    usage_files: AtomicU64,
+    usage_root: Mutex<Option<PathBuf>>,
+    usage_initialized: std::sync::atomic::AtomicBool,
+    next_maintenance_ms: AtomicU64,
+    next_capacity_maintenance_ms: AtomicU64,
+    maintenance_runs: AtomicU64,
+    reclaimed_files: AtomicU64,
+    reclaimed_bytes: AtomicU64,
+    capacity_rejections: AtomicU64,
+    index_loads: AtomicU64,
+    index_saves: AtomicU64,
+    body_reads: AtomicU64,
+    body_writes: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -1998,6 +2019,8 @@ pub async fn run(
         restart_notify: Arc::new(Notify::new()),
         restart_args: Arc::new(args.to_vec()),
         restart_public_token: token.clone(),
+        mem_mail_runtime: Arc::new(MemMailRuntime::default()),
+        mailbox_state_cache: Arc::new(Mutex::new(HashMap::new())),
     };
     // Best-effort removal of stale upgrade backups (older than one day)
     // left next to the executable by previous self upgrades.
@@ -4056,6 +4079,11 @@ fn handle_command_with_id(
                 .map_err(|_| "session_store_poisoned")?
                 .remove(&session_id)
                 .ok_or_else(|| "session_not_found".to_string())?;
+            if let Ok(path) = mailbox_state_path(state, &session_id) {
+                if let Ok(mut cache) = state.mailbox_state_cache.lock() {
+                    cache.remove(&path);
+                }
+            }
             let event = WireEvent::SessionDeleted { session_id };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -5653,6 +5681,7 @@ fn switch_mem_space(
         .lock()
         .map_err(|_| "command_dedup_poisoned".to_string())?
         .clear();
+    reset_mem_mail_runtime(state)?;
     {
         let mut lease = state
             .web_instance
@@ -6410,7 +6439,7 @@ fn store_migrated_mem_mail(state: &AppState, mail: &MemMail) -> Result<String, S
     for _ in 0..32 {
         let path = mem_mail_path(state, &candidate.id)?;
         if !path.exists() {
-            store_mem_mail(state, &candidate)?;
+            store_mem_mail_with_budget(state, &candidate, false)?;
             return Ok(candidate.id);
         }
         if let Ok(existing) = load_mem_mail(state, &candidate.id) {
@@ -8572,6 +8601,13 @@ struct MailboxState {
     entries: Vec<MailboxEntry>,
 }
 
+#[derive(Clone)]
+struct CachedMailboxState {
+    modified: SystemTime,
+    len: u64,
+    mailbox: MailboxState,
+}
+
 /// Snapshot projected to interfaces on mailbox changes.
 #[derive(Debug, Clone, Serialize)]
 struct MailboxSnapshot {
@@ -8579,6 +8615,77 @@ struct MailboxSnapshot {
     mails: Vec<WebMailboxMail>,
     sent: Vec<SentMail>,
     unread: usize,
+}
+
+const MEM_MAIL_DEFAULT_MAX_BYTES: u64 = 128 * 1024 * 1024;
+const MEM_MAIL_DEFAULT_MAX_FILES: u64 = 8192;
+const MEM_MAIL_DEFAULT_ORPHAN_GRACE_SECS: u64 = 24 * 60 * 60;
+const MEM_MAIL_MAINTENANCE_INTERVAL_MS: u64 = 15 * 60 * 1000;
+const MEM_MAIL_CAPACITY_MAINTENANCE_INTERVAL_MS: u64 = 60 * 1000;
+const MAILBOX_STATE_CACHE_LIMIT: usize = 256;
+
+fn mem_mail_max_bytes() -> u64 {
+    std::env::var("TIMEM_MAILBOX_MAX_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(MEM_MAIL_DEFAULT_MAX_BYTES)
+}
+
+fn mem_mail_max_files() -> u64 {
+    std::env::var("TIMEM_MAILBOX_MAX_FILES")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(MEM_MAIL_DEFAULT_MAX_FILES)
+}
+
+fn mem_mail_orphan_grace_ms() -> u128 {
+    std::env::var("TIMEM_MAILBOX_ORPHAN_GRACE_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|value| (value as u128).saturating_mul(1000))
+        .unwrap_or((MEM_MAIL_DEFAULT_ORPHAN_GRACE_SECS as u128) * 1000)
+}
+
+fn reset_mem_mail_runtime(state: &AppState) -> Result<(), String> {
+    let _io_guard = state
+        .mem_mail_runtime
+        .io_lock
+        .lock()
+        .map_err(|_| "mem_mail_runtime_poisoned")?;
+    state
+        .mailbox_state_cache
+        .lock()
+        .map_err(|_| "mailbox_state_cache_poisoned")?
+        .clear();
+    state
+        .mem_mail_runtime
+        .usage_root
+        .lock()
+        .map_err(|_| "mem_mail_runtime_poisoned")?
+        .take();
+    state
+        .mem_mail_runtime
+        .usage_initialized
+        .store(false, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .usage_bytes
+        .store(0, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .usage_files
+        .store(0, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .next_maintenance_ms
+        .store(0, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .next_capacity_maintenance_ms
+        .store(0, Ordering::Relaxed);
+    Ok(())
 }
 
 fn mem_mail_dir(state: &AppState) -> Result<PathBuf, String> {
@@ -8589,8 +8696,12 @@ fn mem_mail_dir(state: &AppState) -> Result<PathBuf, String> {
         .ok_or_else(|| "mem_mail_path_invalid".to_string())
 }
 
+fn mem_mail_path_in_dir(dir: &Path, id: &str) -> PathBuf {
+    dir.join(format!("mail_{id}.json"))
+}
+
 fn mem_mail_path(state: &AppState, id: &str) -> Result<PathBuf, String> {
-    Ok(mem_mail_dir(state)?.join(format!("{id}.json")))
+    Ok(mem_mail_path_in_dir(&mem_mail_dir(state)?, id))
 }
 
 fn mem_mail_exists(state: &AppState, id: &str) -> bool {
@@ -8599,53 +8710,473 @@ fn mem_mail_exists(state: &AppState, id: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn store_mem_mail(state: &AppState, mail: &MemMail) -> Result<(), String> {
-    let path = mem_mail_path(state, &mail.id)?;
+fn scan_mem_mail_usage(dir: &Path) -> Result<(u64, u64), String> {
+    let mut bytes = 0_u64;
+    let mut files = 0_u64;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(_) => return Err("mem_mail_usage_read_failed".to_string()),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|_| "mem_mail_usage_read_failed".to_string())?;
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if !name.starts_with("mail_") || !name.ends_with(".json") {
+            continue;
+        }
+        let file_type = entry
+            .file_type()
+            .map_err(|_| "mem_mail_usage_read_failed".to_string())?;
+        if !file_type.is_file() {
+            return Err("mem_mail_usage_read_failed".to_string());
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|_| "mem_mail_usage_read_failed".to_string())?;
+        bytes = bytes.saturating_add(metadata.len());
+        files = files.saturating_add(1);
+    }
+    Ok((bytes, files))
+}
+
+fn refresh_mem_mail_usage(state: &AppState, dir: &Path) -> Result<(u64, u64), String> {
+    let (bytes, files) = scan_mem_mail_usage(dir)?;
+    state
+        .mem_mail_runtime
+        .usage_bytes
+        .store(bytes, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .usage_files
+        .store(files, Ordering::Relaxed);
+    {
+        let mut root = state
+            .mem_mail_runtime
+            .usage_root
+            .lock()
+            .map_err(|_| "mem_mail_runtime_poisoned")?;
+        if root.as_deref() != Some(dir) {
+            *root = Some(dir.to_path_buf());
+        }
+    }
+    state
+        .mem_mail_runtime
+        .usage_initialized
+        .store(true, Ordering::Relaxed);
+    Ok((bytes, files))
+}
+
+fn ensure_mem_mail_usage(state: &AppState, dir: &Path) -> Result<(u64, u64), String> {
+    let root_matches = state
+        .mem_mail_runtime
+        .usage_root
+        .lock()
+        .map_err(|_| "mem_mail_runtime_poisoned")?
+        .as_deref()
+        == Some(dir);
+    if state
+        .mem_mail_runtime
+        .usage_initialized
+        .load(Ordering::Relaxed)
+        && root_matches
+    {
+        return Ok((
+            state.mem_mail_runtime.usage_bytes.load(Ordering::Relaxed),
+            state.mem_mail_runtime.usage_files.load(Ordering::Relaxed),
+        ));
+    }
+    refresh_mem_mail_usage(state, dir)
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MemMailMaintenanceReport {
+    referenced_files: usize,
+    orphan_files: usize,
+    reclaimed_files: u64,
+    reclaimed_bytes: u64,
+    usage_files: u64,
+    usage_bytes: u64,
+}
+
+fn file_modified_ms(metadata: &std::fs::Metadata) -> Result<u128, String> {
+    metadata
+        .modified()
+        .map_err(|_| "mem_mail_usage_read_failed".to_string())?
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .map_err(|_| "mem_mail_usage_read_failed".to_string())
+}
+
+fn mem_mail_references(state: &AppState) -> Result<HashSet<String>, String> {
+    let sessions_dir = current_session_store(state)?.sessions_dir();
+    let entries = match std::fs::read_dir(sessions_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(HashSet::new());
+        }
+        Err(_) => return Err("mem_mail_reference_scan_failed".to_string()),
+    };
+    let mut references = HashSet::new();
+    for entry in entries {
+        let entry = entry.map_err(|_| "mem_mail_reference_scan_failed".to_string())?;
+        if !entry
+            .file_type()
+            .map_err(|_| "mem_mail_reference_scan_failed".to_string())?
+            .is_dir()
+        {
+            continue;
+        }
+        let path = entry.path().join("mailbox.json");
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err("mem_mail_reference_scan_failed".to_string()),
+        };
+        // A malformed index fails closed: without its references, reclamation
+        // cannot prove that a body is unreachable.
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|_| "mem_mail_reference_parse_failed".to_string())?;
+        let Some(mailbox_name) = value.get("mailbox_name").and_then(Value::as_str) else {
+            return Err("mem_mail_reference_parse_failed".to_string());
+        };
+        if mailbox_name.is_empty() {
+            return Err("mem_mail_reference_parse_failed".to_string());
+        }
+        if let Some(entries) = value.get("entries") {
+            let entries = entries
+                .as_array()
+                .ok_or_else(|| "mem_mail_reference_parse_failed".to_string())?;
+            for entry in entries {
+                let Some(entry) = entry.as_object() else {
+                    return Err("mem_mail_reference_parse_failed".to_string());
+                };
+                let id = entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| "mem_mail_reference_parse_failed".to_string())?;
+                let direction = entry
+                    .get("dir")
+                    .and_then(Value::as_str)
+                    .filter(|dir| matches!(*dir, "in" | "out"))
+                    .ok_or_else(|| "mem_mail_reference_parse_failed".to_string())?;
+                for key in ["peer", "state"] {
+                    if entry.get(key).and_then(Value::as_str).is_none() {
+                        return Err("mem_mail_reference_parse_failed".to_string());
+                    }
+                }
+                if entry.get("created_at_ms").and_then(Value::as_u64).is_none()
+                    || entry.get("notified").and_then(Value::as_bool).is_none()
+                    || entry.get("receipt_sent").and_then(Value::as_bool).is_none()
+                    || entry
+                        .get("resp_timeout_secs")
+                        .and_then(Value::as_i64)
+                        .is_none()
+                {
+                    return Err("mem_mail_reference_parse_failed".to_string());
+                }
+                let _ = direction;
+                references.insert(id.to_string());
+            }
+        } else {
+            // Startup and lazy migration can overlap maintenance. Legacy
+            // indexes still provide authoritative liveness evidence.
+            if value.get("mails").is_none() && value.get("sent").is_none() {
+                return Err("mem_mail_reference_parse_failed".to_string());
+            }
+            for key in ["mails", "sent"] {
+                let Some(mails) = value.get(key) else {
+                    continue;
+                };
+                let mails = mails
+                    .as_array()
+                    .ok_or_else(|| "mem_mail_reference_parse_failed".to_string())?;
+                for mail in mails {
+                    let Some(mail) = mail.as_object() else {
+                        return Err("mem_mail_reference_parse_failed".to_string());
+                    };
+                    let id = mail
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        .ok_or_else(|| "mem_mail_reference_parse_failed".to_string())?;
+                    let peer_key = if key == "mails" { "from" } else { "to" };
+                    if mail.get(peer_key).and_then(Value::as_str).is_none()
+                        || mail.get("msg").and_then(Value::as_str).is_none()
+                        || mail.get("created_at_ms").and_then(Value::as_u64).is_none()
+                    {
+                        return Err("mem_mail_reference_parse_failed".to_string());
+                    }
+                    if key == "mails" && mail.get("kind").and_then(Value::as_str) == Some("receipt")
+                    {
+                        continue;
+                    }
+                    references.insert(id.to_string());
+                }
+            }
+        }
+    }
+    Ok(references)
+}
+
+/// Caller holds mem_mail_runtime.io_lock. Reconcile usage from disk on every
+/// run so out-of-band file changes cannot make the cached budget drift.
+fn maintain_mem_mail_locked(
+    state: &AppState,
+    dir: &Path,
+    now_ms: u128,
+) -> Result<MemMailMaintenanceReport, String> {
+    let references = mem_mail_references(state)?;
+    let mut report = MemMailMaintenanceReport::default();
+    let mut candidates = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            refresh_mem_mail_usage(state, dir)?;
+            return Ok(report);
+        }
+        Err(_) => return Err("mem_mail_usage_read_failed".to_string()),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|_| "mem_mail_usage_read_failed".to_string())?;
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if !name.starts_with("mail_") || !name.ends_with(".json") {
+            continue;
+        }
+        let file_type = entry
+            .file_type()
+            .map_err(|_| "mem_mail_usage_read_failed".to_string())?;
+        if !file_type.is_file() {
+            return Err("mem_mail_usage_read_failed".to_string());
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|_| "mem_mail_usage_read_failed".to_string())?;
+        report.usage_files = report.usage_files.saturating_add(1);
+        report.usage_bytes = report.usage_bytes.saturating_add(metadata.len());
+        let id = name
+            .strip_prefix("mail_")
+            .and_then(|name| name.strip_suffix(".json"))
+            .unwrap_or("");
+        if references.contains(id) {
+            report.referenced_files += 1;
+        } else {
+            report.orphan_files += 1;
+            candidates.push((file_modified_ms(&metadata)?, path, metadata.len()));
+        }
+    }
+    candidates.sort_by_key(|(modified_ms, _, _)| *modified_ms);
+    let grace_ms = mem_mail_orphan_grace_ms();
+    for (modified_ms, path, bytes) in candidates {
+        if now_ms.saturating_sub(modified_ms) < grace_ms {
+            continue;
+        }
+        std::fs::remove_file(path).map_err(|_| "mem_mail_reclaim_failed".to_string())?;
+        report.reclaimed_files = report.reclaimed_files.saturating_add(1);
+        report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(bytes);
+        report.usage_files = report.usage_files.saturating_sub(1);
+        report.usage_bytes = report.usage_bytes.saturating_sub(bytes);
+    }
+    refresh_mem_mail_usage(state, dir)?;
+    state
+        .mem_mail_runtime
+        .maintenance_runs
+        .fetch_add(1, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .reclaimed_files
+        .fetch_add(report.reclaimed_files, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .reclaimed_bytes
+        .fetch_add(report.reclaimed_bytes, Ordering::Relaxed);
+    Ok(report)
+}
+
+fn maybe_maintain_mem_mail(state: &AppState, now_ms: u128) {
+    let due = state
+        .mem_mail_runtime
+        .next_maintenance_ms
+        .load(Ordering::Relaxed);
+    if (now_ms as u64) < due {
+        return;
+    }
+    let Ok(_io_guard) = state.mem_mail_runtime.io_lock.try_lock() else {
+        return;
+    };
+    state.mem_mail_runtime.next_maintenance_ms.store(
+        (now_ms as u64).saturating_add(MEM_MAIL_MAINTENANCE_INTERVAL_MS),
+        Ordering::Relaxed,
+    );
+    let Ok(dir) = mem_mail_dir(state) else {
+        return;
+    };
+    match maintain_mem_mail_locked(state, &dir, now_ms) {
+        Ok(report) => eprintln!(
+            "[timem_web_mailbox_maintenance] maintenance_runs={} referenced_files={} orphan_files={} reclaimed_files={} reclaimed_bytes={} usage_files={} usage_bytes={} budget_files={} budget_bytes={} capacity_rejections={} index_loads={} index_saves={} body_reads={} body_writes={}",
+            state.mem_mail_runtime.maintenance_runs.load(Ordering::Relaxed),
+            report.referenced_files,
+            report.orphan_files,
+            report.reclaimed_files,
+            report.reclaimed_bytes,
+            report.usage_files,
+            report.usage_bytes,
+            mem_mail_max_files(),
+            mem_mail_max_bytes(),
+            state.mem_mail_runtime.capacity_rejections.load(Ordering::Relaxed),
+            state.mem_mail_runtime.index_loads.load(Ordering::Relaxed),
+            state.mem_mail_runtime.index_saves.load(Ordering::Relaxed),
+            state.mem_mail_runtime.body_reads.load(Ordering::Relaxed),
+            state.mem_mail_runtime.body_writes.load(Ordering::Relaxed)
+        ),
+        Err(error) => eprintln!("[timem_web_warning] mailbox_maintenance_failed reason={error}"),
+    }
+}
+
+fn store_mem_mail_with_budget(
+    state: &AppState,
+    mail: &MemMail,
+    enforce_budget: bool,
+) -> Result<(), String> {
+    let dir = mem_mail_dir(state)?;
+    let _io_guard = state
+        .mem_mail_runtime
+        .io_lock
+        .lock()
+        .map_err(|_| "mem_mail_runtime_poisoned")?;
+    ensure_mem_mail_usage(state, &dir)?;
+    let path = mem_mail_path_in_dir(&dir, &mail.id);
     if path.exists() {
         return match load_mem_mail(state, &mail.id) {
             Ok(existing) if existing == *mail => Ok(()),
             _ => Err("mem_mail_id_conflict".to_string()),
         };
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| "mem_mail_path_invalid".to_string())?;
-    std::fs::create_dir_all(parent).map_err(|_| "mem_mail_dir_create_failed".to_string())?;
     let bytes =
-        serde_json::to_vec_pretty(&mail).map_err(|_| "mem_mail_serialize_failed".to_string())?;
-    agent_core::atomic_write_file(&path, &bytes).map_err(|_| "mem_mail_write_failed".to_string())
+        serde_json::to_vec_pretty(mail).map_err(|_| "mem_mail_serialize_failed".to_string())?;
+    let budget = mem_mail_max_bytes();
+    let file_budget = mem_mail_max_files();
+    let mut usage = state.mem_mail_runtime.usage_bytes.load(Ordering::Relaxed);
+    let mut files = state.mem_mail_runtime.usage_files.load(Ordering::Relaxed);
+    if enforce_budget && (usage.saturating_add(bytes.len() as u64) > budget || files >= file_budget)
+    {
+        // Do not rescan every session for every rejected envelope while the
+        // budget remains full. Fresh bodies are grace-protected until their
+        // index is saved; a later pass can reclaim newly orphaned history.
+        let now = now_ms();
+        let due = state
+            .mem_mail_runtime
+            .next_capacity_maintenance_ms
+            .load(Ordering::Relaxed);
+        if (now as u64) >= due {
+            state.mem_mail_runtime.next_capacity_maintenance_ms.store(
+                (now as u64).saturating_add(MEM_MAIL_CAPACITY_MAINTENANCE_INTERVAL_MS),
+                Ordering::Relaxed,
+            );
+            maintain_mem_mail_locked(state, &dir, now)?;
+            usage = state.mem_mail_runtime.usage_bytes.load(Ordering::Relaxed);
+            files = state.mem_mail_runtime.usage_files.load(Ordering::Relaxed);
+        }
+    }
+    if enforce_budget && (usage.saturating_add(bytes.len() as u64) > budget || files >= file_budget)
+    {
+        state
+            .mem_mail_runtime
+            .capacity_rejections
+            .fetch_add(1, Ordering::Relaxed);
+        eprintln!(
+            "[timem_web_warning] mailbox_capacity_backpressure mail_id={:?} usage_files={} usage_bytes={} requested_bytes={} budget_files={} budget_bytes={}",
+            mail.id,
+            files,
+            usage,
+            bytes.len(),
+            file_budget,
+            budget
+        );
+        return Err("mem_mail_capacity_exceeded".to_string());
+    }
+    std::fs::create_dir_all(&dir).map_err(|_| "mem_mail_dir_create_failed".to_string())?;
+    agent_core::atomic_write_file(&path, &bytes)
+        .map_err(|_| "mem_mail_write_failed".to_string())?;
+    state
+        .mem_mail_runtime
+        .usage_bytes
+        .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .usage_files
+        .fetch_add(1, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .body_writes
+        .fetch_add(1, Ordering::Relaxed);
+    Ok(())
 }
 
-fn load_mem_mail(state: &AppState, id: &str) -> Result<MemMail, String> {
-    let bytes =
-        std::fs::read(mem_mail_path(state, id)?).map_err(|_| "mem_mail_read_failed".to_string())?;
+fn store_mem_mail(state: &AppState, mail: &MemMail) -> Result<(), String> {
+    store_mem_mail_with_budget(state, mail, true)
+}
+
+fn load_mem_mail_from_dir(dir: &Path, id: &str) -> Result<MemMail, String> {
+    let bytes = std::fs::read(mem_mail_path_in_dir(dir, id))
+        .map_err(|_| "mem_mail_read_failed".to_string())?;
     serde_json::from_slice(&bytes).map_err(|_| "mem_mail_parse_failed".to_string())
 }
 
-fn entry_mem_mail(state: &AppState, mailbox_name: &str, entry: &MailboxEntry) -> MemMail {
-    load_mem_mail(state, &entry.id).unwrap_or_else(|_| MemMail {
-        id: entry.id.clone(),
-        from: if entry.dir == "in" {
-            entry.peer.clone()
-        } else {
-            mailbox_name.to_string()
-        },
-        to: if entry.dir == "in" {
-            mailbox_name.to_string()
-        } else {
-            entry.peer.clone()
-        },
-        msg: format!("[mail body unavailable: {}]", entry.id),
-        created_at_ms: entry.created_at_ms,
-    })
+fn load_mem_mail(state: &AppState, id: &str) -> Result<MemMail, String> {
+    let mail = load_mem_mail_from_dir(&mem_mail_dir(state)?, id)?;
+    state
+        .mem_mail_runtime
+        .body_reads
+        .fetch_add(1, Ordering::Relaxed);
+    Ok(mail)
+}
+
+fn entry_mem_mail(
+    state: &AppState,
+    dir: &Path,
+    mailbox_name: &str,
+    entry: &MailboxEntry,
+) -> MemMail {
+    load_mem_mail_from_dir(dir, &entry.id)
+        .inspect(|_| {
+            state
+                .mem_mail_runtime
+                .body_reads
+                .fetch_add(1, Ordering::Relaxed);
+        })
+        .unwrap_or_else(|_| MemMail {
+            id: entry.id.clone(),
+            from: if entry.dir == "in" {
+                entry.peer.clone()
+            } else {
+                mailbox_name.to_string()
+            },
+            to: if entry.dir == "in" {
+                mailbox_name.to_string()
+            } else {
+                entry.peer.clone()
+            },
+            msg: format!("[mail body unavailable: {}]", entry.id),
+            created_at_ms: entry.created_at_ms,
+        })
 }
 
 fn mailbox_snapshot(state: &AppState, mailbox: &MailboxState) -> MailboxSnapshot {
     let mut mails = Vec::new();
     let mut sent = Vec::new();
     let mut unread = 0;
+    let dir = mem_mail_dir(state).unwrap_or_default();
     for entry in &mailbox.entries {
-        let mail = entry_mem_mail(state, &mailbox.mailbox_name, entry);
+        let mail = entry_mem_mail(state, &dir, &mailbox.mailbox_name, entry);
         if entry.dir == "in" {
             if entry.state != "read" {
                 unread += 1;
@@ -8690,32 +9221,33 @@ const MAILBOX_MAX_MSG_BYTES: usize = 64 * 1024;
 fn prune_mailbox_entries(entries: &mut Vec<MailboxEntry>) -> bool {
     let before = entries.len();
     for direction in ["in", "out"] {
-        let count = entries
+        let mut excess = entries
             .iter()
             .filter(|entry| entry.dir == direction)
-            .count();
-        if count <= MAILBOX_LIST_LIMIT {
+            .count()
+            .saturating_sub(MAILBOX_LIST_LIMIT);
+        if excess == 0 {
             continue;
         }
-        let mut excess = count - MAILBOX_LIST_LIMIT;
-        let mut index = 0;
-        while excess > 0 && index < entries.len() {
+        // Entries are append-ordered, so one retain pass removes the oldest
+        // settled history while preserving every pending delivery receipt or
+        // terminal notice. No Vec::remove loop and no quadratic shifting.
+        entries.retain(|entry| {
+            if excess == 0 || entry.dir != direction {
+                return true;
+            }
             let removable = if direction == "in" {
-                entries[index].dir == "in"
-                    && entries[index].state == "read"
-                    && entries[index].receipt_sent
+                entry.state == "read" && entry.receipt_sent
             } else {
-                entries[index].dir == "out"
-                    && entries[index].state != "sent"
-                    && entries[index].notified
+                entry.state != "sent" && entry.notified
             };
             if removable {
-                entries.remove(index);
                 excess -= 1;
+                false
             } else {
-                index += 1;
+                true
             }
-        }
+        });
     }
     before != entries.len()
 }
@@ -8839,7 +9371,28 @@ fn parse_mailbox_value(
 /// malformed file as corrupt. The spool remains derived, self-healing state.
 fn load_mailbox_state(state: &AppState, session_id: &str) -> Result<MailboxState, String> {
     let path = mailbox_state_path(state, session_id)?;
+    if let Ok(metadata) = std::fs::metadata(&path) {
+        if let Ok(modified) = metadata.modified() {
+            let cached = state
+                .mailbox_state_cache
+                .lock()
+                .ok()
+                .and_then(|cache| cache.get(&path).cloned())
+                .filter(|cached| cached.modified == modified && cached.len == metadata.len());
+            if let Some(cached) = cached {
+                let _ = std::fs::create_dir_all(crate::mailbox::mailbox_spool_dir(
+                    &crate::mailbox::mailbox_spool_root(),
+                    &cached.mailbox.mailbox_name,
+                ));
+                return Ok(cached.mailbox);
+            }
+        }
+    }
     if let Ok(bytes) = std::fs::read(&path) {
+        state
+            .mem_mail_runtime
+            .index_loads
+            .fetch_add(1, Ordering::Relaxed);
         let parsed = serde_json::from_slice::<serde_json::Value>(&bytes)
             .map_err(|_| "mailbox_state_parse_failed".to_string())
             .and_then(|value| parse_mailbox_value(state, &value));
@@ -8862,6 +9415,7 @@ fn load_mailbox_state(state: &AppState, session_id: &str) -> Result<MailboxState
                 {
                     return Err("mailbox_entry_direction_invalid".to_string());
                 }
+                cache_mailbox_state(state, &path, &mailbox);
                 return Ok(mailbox);
             }
             Err(error) => {
@@ -8892,7 +9446,32 @@ fn load_mailbox_state(state: &AppState, session_id: &str) -> Result<MailboxState
     ))
     .map_err(|_| "mailbox_spool_create_failed".to_string())?;
     save_mailbox_state_at(&path, &mailbox)?;
+    cache_mailbox_state(state, &path, &mailbox);
     Ok(mailbox)
+}
+
+fn cache_mailbox_state(state: &AppState, path: &Path, mailbox: &MailboxState) {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return;
+    };
+    if let Ok(mut cache) = state.mailbox_state_cache.lock() {
+        if cache.len() >= MAILBOX_STATE_CACHE_LIMIT && !cache.contains_key(path) {
+            if let Some(oldest) = cache.keys().next().cloned() {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(
+            path.to_path_buf(),
+            CachedMailboxState {
+                modified,
+                len: metadata.len(),
+                mailbox: mailbox.clone(),
+            },
+        );
+    }
 }
 
 fn save_mailbox_state_at(path: &Path, mailbox: &MailboxState) -> Result<(), String> {
@@ -8908,23 +9487,19 @@ fn save_mailbox_state(
     mailbox: &MailboxState,
 ) -> Result<(), String> {
     let path = mailbox_state_path(state, session_id)?;
-    save_mailbox_state_at(&path, mailbox)
+    save_mailbox_state_at(&path, mailbox)?;
+    state
+        .mem_mail_runtime
+        .index_saves
+        .fetch_add(1, Ordering::Relaxed);
+    cache_mailbox_state(state, &path, mailbox);
+    Ok(())
 }
 
-fn apply_mailbox_receipt(
-    mailbox: &mut MailboxState,
+fn apply_mailbox_receipt_to_entry(
+    sent: &mut MailboxEntry,
     receipt: &crate::mailbox::MailboxMail,
 ) -> bool {
-    let Some(receipt_for) = receipt.receipt_for.as_deref() else {
-        return false;
-    };
-    let Some(sent) = mailbox
-        .entries
-        .iter_mut()
-        .find(|entry| entry.dir == "out" && entry.id == receipt_for)
-    else {
-        return false;
-    };
     let status = receipt.receipt_status.as_deref().unwrap_or("read");
     if !matches!(status, "read" | "timeout" | "discarded" | "failed") {
         return false;
@@ -8940,6 +9515,24 @@ fn apply_mailbox_receipt(
     sent.state = status.to_string();
     sent.notified = false;
     true
+}
+
+#[cfg(test)]
+fn apply_mailbox_receipt(
+    mailbox: &mut MailboxState,
+    receipt: &crate::mailbox::MailboxMail,
+) -> bool {
+    let Some(receipt_for) = receipt.receipt_for.as_deref() else {
+        return false;
+    };
+    let Some(sent) = mailbox
+        .entries
+        .iter_mut()
+        .find(|entry| entry.dir == "out" && entry.id == receipt_for)
+    else {
+        return false;
+    };
+    apply_mailbox_receipt_to_entry(sent, receipt)
 }
 
 fn mailbox_terminal_notice(sent: &MailboxEntry) -> Option<String> {
@@ -9028,6 +9621,7 @@ fn mailbox_tick(state: &AppState) {
         return;
     }
     let now = now_ms();
+    maybe_maintain_mem_mail(state, now);
     let targets: Vec<String> = {
         let Ok(sessions) = state.sessions.lock() else {
             return;
@@ -9038,10 +9632,6 @@ fn mailbox_tick(state: &AppState) {
             .map(|session| session.session_id.clone())
             .collect()
     };
-    let mut events: Vec<WireEvent> = Vec::new();
-    let mut deliveries: Vec<(String, String, String, String, String)> = Vec::new();
-    let mut receipt_retries: Vec<(String, String, String, String)> = Vec::new();
-    let mut notice_batches: Vec<(String, String)> = Vec::new();
     for session_id in targets {
         let mut mailbox = match load_mailbox_state(state, &session_id) {
             Ok(mailbox) => mailbox,
@@ -9058,10 +9648,28 @@ fn mailbox_tick(state: &AppState) {
         );
         let mut changed = false;
         let mut intake_paths = Vec::new();
+        let mut known_ids: HashSet<String> = mailbox
+            .entries
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect();
+        let outgoing_ids: HashMap<String, usize> = mailbox
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.dir == "out")
+            .map(|(index, entry)| (entry.id.clone(), index))
+            .collect();
         for (path, mail) in crate::mailbox::scan_mails(&spool_dir) {
             if mail.kind == "receipt" {
-                changed |= apply_mailbox_receipt(&mut mailbox, &mail);
-            } else if !mailbox.entries.iter().any(|known| known.id == mail.id) {
+                if let Some(index) = mail
+                    .receipt_for
+                    .as_deref()
+                    .and_then(|id| outgoing_ids.get(id).copied())
+                {
+                    changed |= apply_mailbox_receipt_to_entry(&mut mailbox.entries[index], &mail);
+                }
+            } else if !known_ids.contains(&mail.id) {
                 let stored = store_mem_mail(
                     state,
                     &MemMail {
@@ -9077,9 +9685,11 @@ fn mailbox_tick(state: &AppState) {
                         "[timem_web_warning] mailbox_intake_body_save_failed session_id={session_id:?} mail_id={:?} reason={error}",
                         mail.id
                     );
-                    // Keep this envelope so the next tick retries the intake.
+                    // Keep the envelope: capacity pressure or an I/O failure
+                    // must retry later rather than silently dropping mail.
                     continue;
                 }
+                known_ids.insert(mail.id.clone());
                 mailbox.entries.push(MailboxEntry {
                     id: mail.id,
                     dir: "in".to_string(),
@@ -9107,9 +9717,7 @@ fn mailbox_tick(state: &AppState) {
                 changed = true;
             }
         }
-        if prune_mailbox_entries(&mut mailbox.entries) {
-            changed = true;
-        }
+        changed |= prune_mailbox_entries(&mut mailbox.entries);
         if changed {
             if let Err(error) = save_mailbox_state(state, &session_id, &mailbox) {
                 eprintln!(
@@ -9117,50 +9725,63 @@ fn mailbox_tick(state: &AppState) {
                 );
                 continue;
             }
-            events.push(WireEvent::MailboxUpdated {
-                session_id: session_id.clone(),
-                mailbox: mailbox_snapshot(state, &mailbox),
-            });
         }
+        let intake_changed = changed;
+        changed = false;
         for path in intake_paths {
-            // A crash between save and unlink replays intake; id dedup makes
-            // that replay idempotent and the global body write is idempotent.
+            // Save precedes unlink. A crash replays envelopes and the id set
+            // deduplicates intake without duplicate bodies or entries.
             let _ = std::fs::remove_file(path);
         }
+
+        // Deliver in-place, then persist all read transitions before writing
+        // any corresponding receipt. This preserves the crash guarantee while
+        // requiring only one read-state save for the entire burst.
         let self_name = mailbox.mailbox_name.clone();
-        for entry in mailbox
-            .entries
-            .iter()
-            .filter(|entry| entry.dir == "in" && entry.state == "queued")
-        {
-            match load_mem_mail(state, &entry.id) {
-                Ok(mail) => deliveries.push((
-                    session_id.clone(),
-                    format!(
-                        "[mailbox] 收到来自 {} 的 mail:\n{}\n(可用 mailbox 工具回复对方。)",
-                        mail.from, mail.msg
-                    ),
-                    entry.id.clone(),
-                    entry.peer.clone(),
-                    self_name.clone(),
-                )),
-                Err(error) => eprintln!(
-                    "[timem_web_warning] mailbox_delivery_body_load_failed session_id={session_id:?} mail_id={:?} reason={error}",
-                    entry.id
-                ),
+        for index in 0..mailbox.entries.len() {
+            if mailbox.entries[index].dir != "in" || mailbox.entries[index].state != "queued" {
+                continue;
+            }
+            let entry = &mailbox.entries[index];
+            let mail = match load_mem_mail(state, &entry.id) {
+                Ok(mail) => mail,
+                Err(error) => {
+                    eprintln!(
+                        "[timem_web_warning] mailbox_delivery_body_load_failed session_id={session_id:?} mail_id={:?} reason={error}",
+                        entry.id
+                    );
+                    continue;
+                }
+            };
+            let prompt = format!(
+                "[mailbox] 收到来自 {} 的 mail:\n{}\n(可用 mailbox 工具回复对方。)",
+                mail.from, mail.msg
+            );
+            if deliver_mailbox_prompt(state, &session_id, &prompt) {
+                mailbox.entries[index].state = "read".to_string();
+                changed = true;
             }
         }
-        for entry in mailbox
-            .entries
-            .iter()
-            .filter(|entry| entry.dir == "in" && entry.state == "read" && !entry.receipt_sent)
-        {
-            receipt_retries.push((
-                session_id.clone(),
-                entry.id.clone(),
-                entry.peer.clone(),
-                self_name.clone(),
-            ));
+        if changed {
+            if let Err(error) = save_mailbox_state(state, &session_id, &mailbox) {
+                eprintln!(
+                    "[timem_web_warning] mailbox_read_state_save_failed session_id={session_id:?} reason={error}"
+                );
+                // No receipts for these in-memory-only read transitions.
+                continue;
+            }
+        }
+        let delivery_changed = changed;
+        changed = false;
+        for index in 0..mailbox.entries.len() {
+            let entry = &mailbox.entries[index];
+            if entry.dir != "in" || entry.state != "read" || entry.receipt_sent {
+                continue;
+            }
+            if write_mailbox_receipt(&entry.id, &self_name, &entry.peer, "read").is_ok() {
+                mailbox.entries[index].receipt_sent = true;
+                changed = true;
+            }
         }
         let notices: Vec<String> = mailbox
             .entries
@@ -9168,101 +9789,34 @@ fn mailbox_tick(state: &AppState) {
             .filter(|entry| entry.dir == "out" && entry.state != "sent")
             .filter_map(mailbox_terminal_notice)
             .collect();
-        if !notices.is_empty() {
-            notice_batches.push((session_id.clone(), notices.join("\n")));
-        }
-    }
-    for event in events {
-        publish_semantic(state, event);
-    }
-    for (session_id, prompt, mail_id, mail_from, self_name) in deliveries {
-        if !deliver_mailbox_prompt(state, &session_id, &prompt) {
-            continue;
-        }
-        // Persist read before acknowledging. A crash may retry delivery or a
-        // receipt, never acknowledge a body absent from the global ledger.
-        let marked = if let Ok(mut mailbox) = load_mailbox_state(state, &session_id) {
-            let mut marked = false;
-            for entry in mailbox.entries.iter_mut() {
-                if entry.dir == "in" && entry.id == mail_id && entry.state != "read" {
-                    entry.state = "read".to_string();
-                    marked = true;
-                }
-            }
-            if marked && save_mailbox_state(state, &session_id, &mailbox).is_ok() {
-                publish_semantic(
-                    state,
-                    WireEvent::MailboxUpdated {
-                        session_id: session_id.clone(),
-                        mailbox: mailbox_snapshot(state, &mailbox),
-                    },
-                );
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        if marked && write_mailbox_receipt(&mail_id, &self_name, &mail_from, "read").is_ok() {
-            mark_mailbox_receipt_sent(state, &session_id, &mail_id);
-        }
-    }
-    for (session_id, mail_id, mail_from, self_name) in receipt_retries {
-        if write_mailbox_receipt(&mail_id, &self_name, &mail_from, "read").is_ok() {
-            mark_mailbox_receipt_sent(state, &session_id, &mail_id);
-        }
-    }
-    for (session_id, text) in notice_batches {
-        if !deliver_mailbox_prompt(state, &session_id, &text) {
-            continue;
-        }
-        if let Ok(mut mailbox) = load_mailbox_state(state, &session_id) {
-            let mut changed = false;
+        if !notices.is_empty() && deliver_mailbox_prompt(state, &session_id, &notices.join("\n")) {
             for sent in mailbox
                 .entries
                 .iter_mut()
-                .filter(|entry| entry.dir == "out" && entry.state != "sent")
+                .filter(|entry| entry.dir == "out" && entry.state != "sent" && !entry.notified)
             {
-                if !sent.notified {
-                    sent.notified = true;
-                    changed = true;
-                }
+                sent.notified = true;
+                changed = true;
             }
-            if changed && save_mailbox_state(state, &session_id, &mailbox).is_ok() {
-                publish_semantic(
-                    state,
-                    WireEvent::MailboxUpdated {
-                        session_id: session_id.clone(),
-                        mailbox: mailbox_snapshot(state, &mailbox),
-                    },
+        }
+        changed |= prune_mailbox_entries(&mut mailbox.entries);
+        if changed {
+            if let Err(error) = save_mailbox_state(state, &session_id, &mailbox) {
+                eprintln!(
+                    "[timem_web_warning] mailbox_state_save_failed session_id={session_id:?} reason={error}"
                 );
+                continue;
             }
         }
-    }
-}
-
-fn mark_mailbox_receipt_sent(state: &AppState, session_id: &str, mail_id: &str) {
-    let Ok(mut mailbox) = load_mailbox_state(state, session_id) else {
-        return;
-    };
-    let mut changed = false;
-    for entry in mailbox.entries.iter_mut() {
-        if entry.dir == "in" && entry.id == mail_id && entry.state == "read" && !entry.receipt_sent
-        {
-            entry.receipt_sent = true;
-            changed = true;
+        if intake_changed || delivery_changed || changed {
+            publish_semantic(
+                state,
+                WireEvent::MailboxUpdated {
+                    session_id,
+                    mailbox: mailbox_snapshot(state, &mailbox),
+                },
+            );
         }
-    }
-    let _ = save_mailbox_state(state, session_id, &mailbox);
-    if changed {
-        publish_semantic(
-            state,
-            WireEvent::MailboxUpdated {
-                session_id: session_id.to_string(),
-                mailbox: mailbox_snapshot(state, &mailbox),
-            },
-        );
     }
 }
 
@@ -9428,11 +9982,18 @@ fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde
         msg,
         created_at_ms,
     };
-    if let Err(error) = store_mem_mail(state, &mail) {
-        eprintln!("[timem_web_warning] mailbox_send_failed to={to:?} reason={error}");
-        return;
-    }
-    if let Some(recipient_session_id) = local_recipient.as_deref() {
+    let body_stored = match store_mem_mail(state, &mail) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("[timem_web_warning] mailbox_send_failed to={to:?} reason={error}");
+            status = "failed";
+            false
+        }
+    };
+    if !body_stored {
+        // Keep a terminal metadata entry so the sending session receives a
+        // failure notice; no body or spool envelope is fabricated at capacity.
+    } else if let Some(recipient_session_id) = local_recipient.as_deref() {
         status = if deliver_local_mailbox_mail(state, recipient_session_id, &mail) {
             "read"
         } else {

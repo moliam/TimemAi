@@ -73,12 +73,12 @@ fn execute_send(
 }
 
 fn execute_list(core: &AgentCore, action: &ParsedAction) -> ActionOutcome {
-    let rows = load_mail_rows(core);
+    let count = list_count(action);
+    let rows = load_mail_rows(core, None, Some(count));
     if rows.is_empty() {
         return ActionOutcome::completed("Action result: mailbox\nmailbox is empty: no mail yet");
     }
     let total = rows.len();
-    let count = list_count(action);
     let shown = total.min(count);
     let mut text = format!(
         "Action result: mailbox\nMost recent {shown} of {total} mails (in + out), newest first:"
@@ -100,7 +100,7 @@ fn execute_search(core: &AgentCore, action: &ParsedAction) -> ActionOutcome {
     if query.is_empty() {
         return ActionOutcome::failed("Action result: mailbox\nerror: query_required");
     }
-    let rows = load_mail_rows(core);
+    let rows = load_mail_rows(core, None, None);
     let query_lower = query.to_lowercase();
     let matches: Vec<&MailRow> = rows
         .iter()
@@ -134,7 +134,7 @@ fn execute_read(core: &AgentCore, action: &ParsedAction) -> ActionOutcome {
     if mail_id.is_empty() {
         return ActionOutcome::failed("Action result: mailbox\nerror: mail_id_required");
     }
-    let rows = load_mail_rows(core);
+    let rows = load_mail_rows(core, Some(&mail_id), Some(1));
     match rows.iter().find(|row| row.id == mail_id) {
         Some(row) => ActionOutcome::completed(format!(
             "Action result: mailbox\n{}\n{}",
@@ -171,7 +171,11 @@ fn mailbox_json_path(core: &AgentCore) -> Option<std::path::PathBuf> {
 
 /// Load the body-free session index and assemble bodies from the mem-wide
 /// mail ledger, newest first. Missing/malformed files behave as an empty box.
-fn load_mail_rows(core: &AgentCore) -> Vec<MailRow> {
+fn load_mail_rows(
+    core: &AgentCore,
+    only_id: Option<&str>,
+    body_limit: Option<usize>,
+) -> Vec<MailRow> {
     let mut rows: Vec<MailRow> = Vec::new();
     let memory_file = core.memory_file();
     let Some(memory_dir) = memory_file.parent() else {
@@ -194,15 +198,12 @@ fn load_mail_rows(core: &AgentCore) -> Vec<MailRow> {
     {
         let id = str_value(entry, "id");
         let direction = str_value(entry, "dir");
-        if id.is_empty() || !matches!(direction.as_str(), "in" | "out") {
+        if id.is_empty()
+            || !matches!(direction.as_str(), "in" | "out")
+            || only_id.is_some_and(|wanted| wanted != id)
+        {
             continue;
         }
-        let body_path = memory_dir.join("mail").join(format!("mail_{id}.json"));
-        let msg = std::fs::read(body_path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .map(|mail| str_value(&mail, "msg"))
-            .unwrap_or_default();
         let state = str_value(entry, "state");
         rows.push(MailRow {
             direction: if direction == "in" { "in" } else { "out" },
@@ -212,12 +213,23 @@ fn load_mail_rows(core: &AgentCore) -> Vec<MailRow> {
             } else {
                 state
             },
-            msg,
+            msg: String::new(),
             id,
             created_at_ms: u128_value(entry, "created_at_ms"),
         });
     }
     rows.sort_by_key(|row| std::cmp::Reverse(row.created_at_ms));
+    let body_count = body_limit.unwrap_or(rows.len()).min(rows.len());
+    for row in rows.iter_mut().take(body_count) {
+        let body_path = memory_dir
+            .join("mail")
+            .join(format!("mail_{}.json", row.id));
+        row.msg = std::fs::read(body_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .map(|mail| str_value(&mail, "msg"))
+            .unwrap_or_default();
+    }
     rows
 }
 

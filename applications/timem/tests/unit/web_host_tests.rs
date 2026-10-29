@@ -8239,6 +8239,8 @@ fn routing_test_state() -> AppState {
         restart_notify: Arc::new(tokio::sync::Notify::new()),
         restart_args: Arc::new(Vec::new()),
         restart_public_token: None,
+        mem_mail_runtime: Arc::new(MemMailRuntime::default()),
+        mailbox_state_cache: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
@@ -20875,6 +20877,9 @@ static MAILBOX_E2E_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 struct MailboxE2eGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     original_home: Option<PathBuf>,
+    original_max_bytes: Option<String>,
+    original_max_files: Option<String>,
+    original_orphan_grace: Option<String>,
 }
 
 impl Drop for MailboxE2eGuard {
@@ -20882,6 +20887,18 @@ impl Drop for MailboxE2eGuard {
         match self.original_home.take() {
             Some(home) => std::env::set_var("HOME", home),
             None => std::env::remove_var("HOME"),
+        }
+        match self.original_max_bytes.take() {
+            Some(value) => std::env::set_var("TIMEM_MAILBOX_MAX_BYTES", value),
+            None => std::env::remove_var("TIMEM_MAILBOX_MAX_BYTES"),
+        }
+        match self.original_max_files.take() {
+            Some(value) => std::env::set_var("TIMEM_MAILBOX_MAX_FILES", value),
+            None => std::env::remove_var("TIMEM_MAILBOX_MAX_FILES"),
+        }
+        match self.original_orphan_grace.take() {
+            Some(value) => std::env::set_var("TIMEM_MAILBOX_ORPHAN_GRACE_SECS", value),
+            None => std::env::remove_var("TIMEM_MAILBOX_ORPHAN_GRACE_SECS"),
         }
     }
 }
@@ -20897,6 +20914,9 @@ fn mailbox_e2e_setup(worker_label: &'static str) -> (MailboxE2eGuard, AppState, 
     let guard = MailboxE2eGuard {
         _lock: lock,
         original_home,
+        original_max_bytes: std::env::var("TIMEM_MAILBOX_MAX_BYTES").ok(),
+        original_max_files: std::env::var("TIMEM_MAILBOX_MAX_FILES").ok(),
+        original_orphan_grace: std::env::var("TIMEM_MAILBOX_ORPHAN_GRACE_SECS").ok(),
     };
     let state = routing_test_state();
     let session_id = register_real_worker(&state, worker_label);
@@ -21552,5 +21572,443 @@ fn legacy_mail_id_collision_redraws_without_overwriting_body() {
     assert_eq!(
         load_mem_mail(&state, &mailbox.entries[0].id).unwrap().msg,
         "legacy body"
+    );
+}
+
+#[test]
+fn mailbox_burst_index_io_is_bounded_and_idle_ticks_hit_cache() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_io_budget");
+    let self_name = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .mailbox_name;
+    for i in 0..200 {
+        crate::mailbox::write_mail(
+            &e2e_spool(),
+            &e2e_mail(&format!("io{i}"), "mb-io-peer", &self_name, 0, -1),
+        )
+        .unwrap();
+    }
+    state
+        .mem_mail_runtime
+        .index_loads
+        .store(0, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .index_saves
+        .store(0, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .body_writes
+        .store(0, Ordering::Relaxed);
+
+    mailbox_tick(&state);
+
+    assert_eq!(
+        state.mem_mail_runtime.index_loads.load(Ordering::Relaxed),
+        0,
+        "the pre-warmed cache serves the whole burst without a disk reload"
+    );
+    assert_eq!(
+        state.mem_mail_runtime.index_saves.load(Ordering::Relaxed),
+        3,
+        "intake, read evidence, and receipt/notice evidence are three batch commits"
+    );
+    assert_eq!(
+        state.mem_mail_runtime.body_writes.load(Ordering::Relaxed),
+        200
+    );
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.entries.len(), 200);
+    assert!(mailbox
+        .entries
+        .iter()
+        .all(|entry| { entry.dir == "in" && entry.state == "read" && entry.receipt_sent }));
+    assert_eq!(
+        state.mem_mail_runtime.index_loads.load(Ordering::Relaxed),
+        0,
+        "the post-tick read hits the metadata cache"
+    );
+
+    mailbox_tick(&state);
+    assert_eq!(
+        state.mem_mail_runtime.index_loads.load(Ordering::Relaxed),
+        0,
+        "an unchanged idle tick does not reload and parse mailbox.json"
+    );
+    assert_eq!(
+        state.mem_mail_runtime.index_saves.load(Ordering::Relaxed),
+        3,
+        "an unchanged idle tick performs no index write"
+    );
+}
+
+#[test]
+fn mem_mail_capacity_backpressure_keeps_spool_for_retry() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_capacity_retry");
+    std::env::set_var("TIMEM_MAILBOX_MAX_BYTES", "32");
+    let self_name = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .mailbox_name;
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("capacity", "mb-capacity-peer", &self_name, -1, -1),
+    )
+    .unwrap();
+
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert!(mailbox.entries.is_empty());
+    assert_eq!(
+        crate::mailbox::scan_mails(&e2e_inbox(&self_name)).len(),
+        1,
+        "capacity rejection must not unlink the transient envelope"
+    );
+    assert!(!mem_mail_exists(&state, "capacity"));
+    assert!(
+        state
+            .mem_mail_runtime
+            .capacity_rejections
+            .load(Ordering::Relaxed)
+            >= 1
+    );
+
+    std::env::set_var("TIMEM_MAILBOX_MAX_BYTES", "65536");
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.entries.len(), 1);
+    assert_eq!(mailbox.entries[0].state, "read");
+    assert!(mailbox.entries[0].receipt_sent);
+    assert_eq!(
+        load_mem_mail(&state, "capacity").unwrap().msg,
+        "msg-capacity"
+    );
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(&self_name)).is_empty());
+}
+
+#[test]
+fn mem_mail_maintenance_reclaims_only_expired_unreferenced_bodies() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_orphan_gc");
+    let mut mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    mailbox
+        .entries
+        .push(mailbox_test_entry("referenced", "in", "mb-peer", "queued"));
+    save_mailbox_state(&state, &session_id, &mailbox).unwrap();
+    for (id, msg) in [("referenced", "keep"), ("orphan", "collect later")] {
+        store_mem_mail(
+            &state,
+            &MemMail {
+                id: id.to_string(),
+                from: "mb-peer".to_string(),
+                to: mailbox.mailbox_name.clone(),
+                msg: msg.to_string(),
+                created_at_ms: 1,
+            },
+        )
+        .unwrap();
+    }
+    let dir = mem_mail_dir(&state).unwrap();
+    let now = now_ms();
+
+    let first = maintain_mem_mail_locked(&state, &dir, now).unwrap();
+    assert_eq!(first.referenced_files, 1);
+    assert_eq!(first.orphan_files, 1);
+    assert_eq!(first.reclaimed_files, 0);
+    assert!(mem_mail_exists(&state, "orphan"));
+    assert_eq!(first.usage_files, 2);
+
+    let later = now.saturating_add(mem_mail_orphan_grace_ms() + 1);
+    let second = maintain_mem_mail_locked(&state, &dir, later).unwrap();
+    assert_eq!(second.reclaimed_files, 1);
+    assert!(second.reclaimed_bytes > 0);
+    assert!(!mem_mail_exists(&state, "orphan"));
+    assert_eq!(load_mem_mail(&state, "referenced").unwrap().msg, "keep");
+    assert_eq!(second.usage_files, 1);
+    assert_eq!(
+        state
+            .mem_mail_runtime
+            .reclaimed_files
+            .load(Ordering::Relaxed),
+        1
+    );
+}
+
+#[test]
+fn mem_mail_maintenance_fails_closed_on_corrupt_index() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_gc_fail_closed");
+    store_mem_mail(
+        &state,
+        &MemMail {
+            id: "orphan".to_string(),
+            from: "mb-a".to_string(),
+            to: "mb-b".to_string(),
+            msg: "must survive uncertain references".to_string(),
+            created_at_ms: 1,
+        },
+    )
+    .unwrap();
+    let path = mailbox_state_path(&state, &session_id).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"{not-json").unwrap();
+    let error = maintain_mem_mail_locked(
+        &state,
+        &mem_mail_dir(&state).unwrap(),
+        now_ms().saturating_add(10 * 24 * 60 * 60 * 1000),
+    )
+    .unwrap_err();
+    assert_eq!(error, "mem_mail_reference_parse_failed");
+    assert!(mem_mail_exists(&state, "orphan"));
+}
+
+#[test]
+fn mailbox_capacity_failure_is_terminal_without_body_or_spool() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_send_capacity");
+    std::env::set_var("TIMEM_MAILBOX_MAX_BYTES", "32");
+    let peer = "mb-capacity-send";
+    std::fs::create_dir_all(e2e_inbox(peer)).unwrap();
+    handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &json!({"to": peer, "msg": "this body exceeds the tiny test budget"}),
+    );
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.entries.len(), 1);
+    assert_eq!(mailbox.entries[0].dir, "out");
+    assert_eq!(mailbox.entries[0].state, "failed");
+    assert!(!mailbox.entries[0].notified);
+    assert!(!mem_mail_exists(&state, &mailbox.entries[0].id));
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(peer)).is_empty());
+
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert!(mailbox.entries[0].notified);
+    assert!(state.sessions.lock().unwrap()[&session_id]
+        .turns
+        .iter()
+        .any(|turn| turn.user_entries.iter().any(|entry| {
+            entry.text.contains("[mailbox] 邮件") && entry.text.contains("失败")
+        })));
+}
+
+#[test]
+fn mem_mail_file_budget_keeps_spool_until_capacity_is_available() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_file_budget");
+    std::env::set_var("TIMEM_MAILBOX_MAX_FILES", "1");
+    let self_name = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .mailbox_name;
+    for id in ["file-budget-a", "file-budget-b"] {
+        crate::mailbox::write_mail(
+            &e2e_spool(),
+            &e2e_mail(id, "mb-file-budget-peer", &self_name, -1, -1),
+        )
+        .unwrap();
+    }
+
+    mailbox_tick(&state);
+    assert_eq!(
+        load_mailbox_state(&state, &session_id)
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+    assert_eq!(
+        crate::mailbox::scan_mails(&e2e_inbox(&self_name)).len(),
+        1,
+        "the body rejected by the file budget must remain retryable"
+    );
+    assert_eq!(
+        state.mem_mail_runtime.usage_files.load(Ordering::Relaxed),
+        1
+    );
+
+    std::env::set_var("TIMEM_MAILBOX_MAX_FILES", "2");
+    mailbox_tick(&state);
+    assert_eq!(
+        load_mailbox_state(&state, &session_id)
+            .unwrap()
+            .entries
+            .len(),
+        2
+    );
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(&self_name)).is_empty());
+    assert_eq!(
+        state.mem_mail_runtime.usage_files.load(Ordering::Relaxed),
+        2
+    );
+}
+
+#[test]
+fn mem_mail_maintenance_fails_closed_on_invalid_index_schema() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_schema_fail_closed");
+    store_mem_mail(
+        &state,
+        &MemMail {
+            id: "orphan".to_string(),
+            from: "mb-a".to_string(),
+            to: "mb-b".to_string(),
+            msg: "must survive incomplete references".to_string(),
+            created_at_ms: 1,
+        },
+    )
+    .unwrap();
+    let path = mailbox_state_path(&state, &session_id).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let invalid_indexes = [
+        json!({"mailbox_name": "mb-b", "entries": {}}),
+        json!({"mailbox_name": "mb-b", "entries": [{"dir": "in"}]}),
+        json!({"mailbox_name": "mb-b", "entries": [{
+            "id": "referenced", "dir": "sideways", "peer": "mb-a",
+            "created_at_ms": 1, "state": "queued", "notified": false,
+            "receipt_sent": false, "resp_timeout_secs": 120
+        }]}),
+        json!({"mailbox_name": "mb-b", "mails": {}, "sent": []}),
+        json!({"mailbox_name": "mb-b", "mails": [{"from": "mb-a"}], "sent": []}),
+    ];
+    for value in invalid_indexes {
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let error = maintain_mem_mail_locked(
+            &state,
+            &mem_mail_dir(&state).unwrap(),
+            now_ms().saturating_add(10 * 24 * 60 * 60 * 1000),
+        )
+        .unwrap_err();
+        assert_eq!(error, "mem_mail_reference_parse_failed", "{value}");
+        assert!(mem_mail_exists(&state, "orphan"), "{value}");
+    }
+}
+
+#[test]
+fn mem_mail_maintenance_fails_closed_on_nonregular_body_entry() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_body_scan_fail_closed");
+    load_mailbox_state(&state, &session_id).unwrap();
+    store_mem_mail(
+        &state,
+        &MemMail {
+            id: "orphan".to_string(),
+            from: "mb-a".to_string(),
+            to: "mb-b".to_string(),
+            msg: "must survive an incomplete body scan".to_string(),
+            created_at_ms: 1,
+        },
+    )
+    .unwrap();
+    std::fs::create_dir(mem_mail_path(&state, "not-a-file").unwrap()).unwrap();
+    let error = maintain_mem_mail_locked(
+        &state,
+        &mem_mail_dir(&state).unwrap(),
+        now_ms().saturating_add(10 * 24 * 60 * 60 * 1000),
+    )
+    .unwrap_err();
+    assert_eq!(error, "mem_mail_usage_read_failed");
+    assert!(mem_mail_exists(&state, "orphan"));
+}
+
+#[test]
+fn mailbox_state_cache_is_bounded_and_session_delete_evicts_entry() {
+    let (_guard, mut state, session_id) = mailbox_e2e_setup("mailbox_e2e_cache_lifecycle");
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    let root = std::env::temp_dir().join(unique_web_id("mailbox_cache_entries"));
+    std::fs::create_dir_all(&root).unwrap();
+    for index in 0..(MAILBOX_STATE_CACHE_LIMIT + 8) {
+        let path = root.join(format!("mailbox-{index}.json"));
+        save_mailbox_state_at(&path, &mailbox).unwrap();
+        cache_mailbox_state(&state, &path, &mailbox);
+    }
+    assert_eq!(
+        state.mailbox_state_cache.lock().unwrap().len(),
+        MAILBOX_STATE_CACHE_LIMIT
+    );
+
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    state.template = Arc::new(template);
+    let session_id = create_session(&state, None, None, BTreeMap::new()).unwrap();
+    load_mailbox_state(&state, &session_id).unwrap();
+    let path = mailbox_state_path(&state, &session_id).unwrap();
+    assert!(state
+        .mailbox_state_cache
+        .lock()
+        .unwrap()
+        .contains_key(&path));
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionDelete {
+            session_id: session_id.clone(),
+        },
+    )
+    .unwrap();
+    assert!(!state
+        .mailbox_state_cache
+        .lock()
+        .unwrap()
+        .contains_key(&path));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn mem_switch_reset_clears_mailbox_cache_usage_and_maintenance_schedule() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_mem_reset");
+    load_mailbox_state(&state, &session_id).unwrap();
+    store_mem_mail(
+        &state,
+        &MemMail {
+            id: "usage".to_string(),
+            from: "mb-a".to_string(),
+            to: "mb-b".to_string(),
+            msg: "body".to_string(),
+            created_at_ms: 1,
+        },
+    )
+    .unwrap();
+    state
+        .mem_mail_runtime
+        .next_maintenance_ms
+        .store(123, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .next_capacity_maintenance_ms
+        .store(456, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .index_loads
+        .store(7, Ordering::Relaxed);
+
+    reset_mem_mail_runtime(&state).unwrap();
+
+    assert!(state.mailbox_state_cache.lock().unwrap().is_empty());
+    assert!(!state
+        .mem_mail_runtime
+        .usage_initialized
+        .load(Ordering::Relaxed));
+    assert!(state.mem_mail_runtime.usage_root.lock().unwrap().is_none());
+    assert_eq!(
+        state.mem_mail_runtime.usage_bytes.load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        state.mem_mail_runtime.usage_files.load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        state
+            .mem_mail_runtime
+            .next_maintenance_ms
+            .load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        state
+            .mem_mail_runtime
+            .next_capacity_maintenance_ms
+            .load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        state.mem_mail_runtime.index_loads.load(Ordering::Relaxed),
+        7,
+        "cumulative operational counters remain useful across MEM switches"
     );
 }
