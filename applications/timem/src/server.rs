@@ -131,6 +131,10 @@ const TIMER_SCHEDULER_INTERVAL: Duration = Duration::from_millis(500);
 const TEMPORARY_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const TEMPORARY_MAINTENANCE_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const TEMPORARY_MAINTENANCE_BUSY_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+/// Rolling eviction cadence for conversation history. The idle-only pass
+/// cannot serve a long-running multi-agent workload, so history is also
+/// trimmed on this cadence while sessions keep working.
+const CONVERSATION_ROLLING_INTERVAL: Duration = Duration::from_secs(60);
 // Cap on concurrent session-restore worker threads.
 const SESSION_RESTORE_WORKERS: usize = 3;
 
@@ -252,6 +256,9 @@ struct MemMailRuntime {
     index_saves: AtomicU64,
     body_reads: AtomicU64,
     body_writes: AtomicU64,
+    /// Blocks evicted since the last mailbox tick. A tick drains this to drop
+    /// entries it had already loaded into memory before the eviction.
+    evicted_ids: Mutex<HashSet<String>>,
 }
 
 #[derive(Clone)]
@@ -2056,6 +2063,7 @@ pub async fn run(
     spawn_event_bridge(state.clone());
     spawn_timer_scheduler(state.clone());
     spawn_mailbox_scheduler(state.clone());
+    spawn_conversation_rolling_loop(state.clone());
 
     let listener = bind_web_listener(launch.port, launch.public_access, prefer_default_mem_port)
         .await
@@ -8751,21 +8759,6 @@ fn mem_mail_max_bytes() -> u64 {
         .unwrap_or(MEM_MAIL_DEFAULT_MAX_BYTES)
 }
 
-fn mem_mail_conversation_usage(
-    state: &AppState,
-    mailbox_bytes: u64,
-) -> Result<(u64, Option<u64>), String> {
-    let settings = current_mem_state(state)?.settings;
-    let history_bytes = conversation_history_usage(&current_session_store(state)?)?;
-    let index_bytes = mem_mail_index_usage(state)?;
-    Ok((
-        history_bytes
-            .saturating_add(mailbox_bytes)
-            .saturating_add(index_bytes),
-        settings.conversation_capacity_bytes,
-    ))
-}
-
 fn mem_mail_max_files() -> u64 {
     std::env::var("TIMEM_MAILBOX_MAX_FILES")
         .ok()
@@ -8981,6 +8974,8 @@ fn ensure_mem_mail_usage(state: &AppState, dir: &Path) -> Result<(u64, u64), Str
 struct MemMailMaintenanceReport {
     referenced_files: usize,
     orphan_files: usize,
+    evicted_files: u64,
+    evicted_bytes: u64,
     reclaimed_files: u64,
     reclaimed_bytes: u64,
     usage_files: u64,
@@ -9108,6 +9103,155 @@ fn mem_mail_references(state: &AppState) -> Result<HashSet<String>, String> {
     Ok(references)
 }
 
+/// Deletes the oldest archived mail blocks (ordered by archive time) until the
+/// requested byte and file targets are met, then drops the matching entries
+/// from every mailbox index. Unlike orphan reclamation this also evicts blocks
+/// that are still referenced: the mailbox budget is rolling, so an old block
+/// always yields to a newly arriving one instead of the new mail being refused.
+/// Caller holds mem_mail_runtime.io_lock.
+fn evict_oldest_mem_mail_locked(
+    state: &AppState,
+    dir: &Path,
+    bytes_to_free: u64,
+    files_to_free: u64,
+) -> Result<(u64, u64), String> {
+    if bytes_to_free == 0 && files_to_free == 0 {
+        return Ok((0, 0));
+    }
+    let references = mem_mail_references(state)?;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(_) => return Err("mem_mail_usage_read_failed".to_string()),
+    };
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|_| "mem_mail_usage_read_failed".to_string())?;
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if !name.starts_with("mail_") || !name.ends_with(".json") {
+            continue;
+        }
+        if !entry
+            .file_type()
+            .map_err(|_| "mem_mail_usage_read_failed".to_string())?
+            .is_file()
+        {
+            continue;
+        }
+        let id = name
+            .strip_prefix("mail_")
+            .and_then(|name| name.strip_suffix(".json"))
+            .unwrap_or("");
+        // Bodies that are not indexed yet are handled by the grace-protected
+        // orphan pass; eviction only removes established blocks.
+        if id.is_empty() || !references.contains(id) {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|_| "mem_mail_usage_read_failed".to_string())?;
+        candidates.push((
+            file_modified_ms(&metadata)?,
+            id.to_string(),
+            path,
+            metadata.len(),
+        ));
+    }
+    candidates.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    let mut evicted = HashSet::new();
+    let mut freed_bytes = 0_u64;
+    let mut freed_files = 0_u64;
+    for (_, id, path, bytes) in candidates {
+        if freed_bytes >= bytes_to_free && freed_files >= files_to_free {
+            break;
+        }
+        std::fs::remove_file(&path).map_err(|_| "mem_mail_reclaim_failed".to_string())?;
+        evicted.insert(id);
+        freed_bytes = freed_bytes.saturating_add(bytes);
+        freed_files = freed_files.saturating_add(1);
+    }
+    if evicted.is_empty() {
+        return Ok((0, 0));
+    }
+    drop_mem_mail_index_entries(state, &evicted)?;
+    if let Ok(mut pending) = state.mem_mail_runtime.evicted_ids.lock() {
+        pending.extend(evicted.iter().cloned());
+        // The notification set only bridges one tick; bound it defensively so a
+        // stopped scheduler cannot grow it without limit.
+        if pending.len() > 64 * 1024 {
+            pending.clear();
+        }
+    }
+    refresh_mem_mail_usage(state, dir)?;
+    state
+        .mem_mail_runtime
+        .reclaimed_files
+        .fetch_add(freed_files, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .reclaimed_bytes
+        .fetch_add(freed_bytes, Ordering::Relaxed);
+    Ok((freed_bytes, freed_files))
+}
+
+/// Drops index entries whose body block has been evicted. Every mailbox index
+/// in this MEM is reconciled in one pass so a deleted block cannot stay visible
+/// in a session that is not currently ticking.
+fn drop_mem_mail_index_entries(state: &AppState, ids: &HashSet<String>) -> Result<(), String> {
+    let sessions_dir = current_session_store(state)?.sessions_dir();
+    let entries = match std::fs::read_dir(sessions_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("mem_mail_reference_scan_failed".to_string()),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|_| "mem_mail_reference_scan_failed".to_string())?;
+        if !entry
+            .file_type()
+            .map_err(|_| "mem_mail_reference_scan_failed".to_string())?
+            .is_dir()
+        {
+            continue;
+        }
+        let path = entry.path().join("mailbox.json");
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err("mem_mail_reference_scan_failed".to_string()),
+        };
+        let mut value: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| "mem_mail_reference_parse_failed".to_string())?;
+        let mut changed = false;
+        for key in ["entries", "mails", "sent"] {
+            let Some(items) = value.get_mut(key).and_then(Value::as_array_mut) else {
+                continue;
+            };
+            let before = items.len();
+            items.retain(|item| {
+                item.get("id")
+                    .and_then(Value::as_str)
+                    .is_none_or(|id| !ids.contains(id))
+            });
+            changed |= items.len() != before;
+        }
+        if !changed {
+            continue;
+        }
+        let encoded = serde_json::to_vec_pretty(&value)
+            .map_err(|_| "mailbox_state_serialize_failed".to_string())?;
+        agent_core::atomic_write_file(&path, &encoded)
+            .map_err(|_| "mailbox_state_write_failed".to_string())?;
+        if let Ok(mut cache) = state.mailbox_state_cache.lock() {
+            cache.remove(&path);
+        }
+    }
+    Ok(())
+}
+
 /// Caller holds mem_mail_runtime.io_lock. Reconcile usage from disk on every
 /// run so out-of-band file changes cannot make the cached budget drift.
 fn maintain_mem_mail_locked(
@@ -9170,6 +9314,30 @@ fn maintain_mem_mail_locked(
         report.usage_files = report.usage_files.saturating_sub(1);
         report.usage_bytes = report.usage_bytes.saturating_sub(bytes);
     }
+    let index_bytes = mem_mail_index_usage(state)?;
+    let budget = mem_mail_max_bytes_for(state)?;
+    let file_budget = mem_mail_max_files();
+    // The index is not evictable, so byte pressure only triggers block
+    // eviction when the index alone can still fit under the budget.
+    let over_bytes = if index_bytes >= budget {
+        0
+    } else {
+        report
+            .usage_bytes
+            .saturating_add(index_bytes)
+            .saturating_sub(budget)
+    };
+    let over_files = report.usage_files.saturating_sub(file_budget);
+    if over_bytes > 0 || over_files > 0 {
+        let (freed_bytes, freed_files) =
+            evict_oldest_mem_mail_locked(state, dir, over_bytes, over_files)?;
+        report.evicted_files = freed_files;
+        report.evicted_bytes = freed_bytes;
+        report.reclaimed_files = report.reclaimed_files.saturating_add(freed_files);
+        report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(freed_bytes);
+        report.usage_files = report.usage_files.saturating_sub(freed_files);
+        report.usage_bytes = report.usage_bytes.saturating_sub(freed_bytes);
+    }
     refresh_mem_mail_usage(state, dir)?;
     state
         .mem_mail_runtime
@@ -9184,6 +9352,17 @@ fn maintain_mem_mail_locked(
         .reclaimed_bytes
         .fetch_add(report.reclaimed_bytes, Ordering::Relaxed);
     Ok(report)
+}
+
+/// Drains block ids evicted since the previous mailbox tick so an already
+/// loaded mailbox can drop entries whose body block is gone.
+fn take_evicted_mem_mail_ids(state: &AppState) -> HashSet<String> {
+    state
+        .mem_mail_runtime
+        .evicted_ids
+        .lock()
+        .map(|mut pending| std::mem::take(&mut *pending))
+        .unwrap_or_default()
 }
 
 fn maybe_maintain_mem_mail(state: &AppState, now_ms: u128) {
@@ -9273,40 +9452,55 @@ fn store_mem_mail_with_budget(
             files = state.mem_mail_runtime.usage_files.load(Ordering::Relaxed);
         }
     }
-    let mailbox_index_bytes = mem_mail_index_usage(state)?;
-    let mailbox_storage_full = usage
-        .saturating_add(mailbox_index_bytes)
-        .saturating_add(bytes.len() as u64)
-        > budget;
-    let (conversation_bytes, conversation_limit) = if enforce_budget {
-        mem_mail_conversation_usage(state, usage)?
-    } else {
-        (0, None)
+    // Mail storage is a transfer channel, not a second copy of conversation
+    // history. Judging it against the conversation-history budget let a long
+    // running session block every mailbox send while the history that caused
+    // the overflow kept growing untouched. The mailbox therefore answers only
+    // to its own budget, and exhausting that budget reclaims space instead of
+    // refusing the new mail.
+    let mailbox_full = |usage: u64, files: u64| -> Result<bool, String> {
+        Ok(files >= file_budget
+            || usage
+                .saturating_add(mem_mail_index_usage(state)?)
+                .saturating_add(bytes.len() as u64)
+                > budget)
     };
-    let conversation_full = conversation_limit.is_some_and(|total| {
-        RollingCapacity::from_total_bytes(total)
-            .map(|capacity| {
-                conversation_bytes.saturating_add(bytes.len() as u64) > capacity.stable_bytes
-            })
-            .unwrap_or(true)
-    });
-    if enforce_budget && (mailbox_storage_full || files >= file_budget || conversation_full) {
-        state
-            .mem_mail_runtime
-            .capacity_rejections
-            .fetch_add(1, Ordering::Relaxed);
-        eprintln!(
-            "[timem_web_warning] mailbox_capacity_backpressure mail_id={:?} usage_files={} usage_bytes={} requested_bytes={} budget_files={} budget_bytes={} conversation_bytes={} conversation_budget_bytes={:?}",
-            mail.id,
-            files,
-            usage,
-            bytes.len(),
-            file_budget,
-            budget,
-            conversation_bytes,
-            conversation_limit
-        );
-        return Err("mem_mail_capacity_exceeded".to_string());
+    if enforce_budget && mailbox_full(usage, files)? {
+        let _ = maintain_mem_mail_locked(state, &dir, now_ms());
+        usage = state.mem_mail_runtime.usage_bytes.load(Ordering::Relaxed);
+        files = state.mem_mail_runtime.usage_files.load(Ordering::Relaxed);
+        if mailbox_full(usage, files)? {
+            // Reclaim exactly the room this body needs from the oldest blocks.
+            let index_bytes = mem_mail_index_usage(state)?;
+            let need_bytes = usage
+                .saturating_add(index_bytes)
+                .saturating_add(bytes.len() as u64)
+                .saturating_sub(budget);
+            let need_files = if files >= file_budget {
+                files.saturating_sub(file_budget).saturating_add(1)
+            } else {
+                0
+            };
+            let _ = evict_oldest_mem_mail_locked(state, &dir, need_bytes, need_files);
+            usage = state.mem_mail_runtime.usage_bytes.load(Ordering::Relaxed);
+            files = state.mem_mail_runtime.usage_files.load(Ordering::Relaxed);
+        }
+        if mailbox_full(usage, files)? {
+            state
+                .mem_mail_runtime
+                .capacity_rejections
+                .fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "[timem_web_warning] mailbox_capacity_backpressure mail_id={:?} usage_files={} usage_bytes={} requested_bytes={} budget_files={} budget_bytes={}",
+                mail.id,
+                files,
+                usage,
+                bytes.len(),
+                file_budget,
+                budget
+            );
+            return Err("mem_mail_capacity_exceeded".to_string());
+        }
     }
     std::fs::create_dir_all(&dir).map_err(|_| "mem_mail_dir_create_failed".to_string())?;
     agent_core::atomic_write_file(&path, &bytes)
@@ -9923,6 +10117,14 @@ fn mailbox_tick(state: &AppState) {
             }
         }
         changed |= prune_mailbox_entries(&mut mailbox.entries);
+        let evicted_ids = take_evicted_mem_mail_ids(state);
+        if !evicted_ids.is_empty() {
+            let before = mailbox.entries.len();
+            mailbox
+                .entries
+                .retain(|entry| !evicted_ids.contains(&entry.id));
+            changed |= mailbox.entries.len() != before;
+        }
         if changed {
             if let Err(error) = save_mailbox_state(state, &session_id, &mailbox) {
                 eprintln!(

@@ -717,6 +717,84 @@ pub(super) async fn run_idle_temporary_maintenance(
         .map_err(|_| "temporary_maintenance_worker_stopped".to_string())?
 }
 
+/// Evicts whole oldest turns from the oldest sessions until the shared history
+/// budget is satisfied. Unlike the idle-only pass this tolerates active
+/// sessions: eviction always starts at the oldest end of a file, so the turn a
+/// session is currently appending stays in place. This is what keeps history
+/// storage rolling — new records are always admitted by removing old archives
+/// instead of refusing the newest write.
+pub(super) fn apply_conversation_rolling_eviction(
+    state: &AppState,
+    store: &SessionStore,
+    max_bytes: Option<u64>,
+) -> Result<u64, String> {
+    let Some(total_bytes) = max_bytes else {
+        return Ok(0);
+    };
+    let stable_bytes = conversation_stable_budget(state, total_bytes)?;
+    let mut used = conversation_history_usage(store)?;
+    if used <= stable_bytes {
+        return Ok(0);
+    }
+    // Block granularity is one complete Turn. Ordering is global across
+    // archives: the session that owns the globally oldest block is drained
+    // first, so old blocks always give way before new ones.
+    let mut blocks: Vec<(i64, String, u64)> = Vec::new();
+    for session in store.list_sessions_resilient()?.sessions {
+        if let Some(archive_ms) = store.oldest_history_turn_ms(&session.session_id)? {
+            let file_bytes = std::fs::metadata(store.history_path_for_session(&session.session_id))
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            blocks.push((archive_ms, session.session_id, file_bytes));
+        }
+    }
+    blocks.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    let mut removed = 0u64;
+    let mut guard = 0usize;
+    while used > stable_bytes && !blocks.is_empty() {
+        guard += 1;
+        if guard > 100_000 {
+            return Err("mem_conversation_rolling_eviction_stalled".to_string());
+        }
+        let (oldest_ms, session_id, file_bytes) = blocks[0].clone();
+        let excess = used.saturating_sub(stable_bytes);
+        // Blocks older than every block of the next archive are unambiguously
+        // the oldest, so one rewrite drops them all. A single archive, or
+        // equal archive times, falls back to a bounded byte step.
+        let reclaimed = match blocks.get(1).map(|(archive_ms, _, _)| *archive_ms) {
+            Some(cutoff) if cutoff > oldest_ms => {
+                let reclaimed = store.prune_history_turns_before(&session_id, cutoff)?;
+                if reclaimed == 0 {
+                    store.prune_oldest_history_turns(&session_id, 1)?
+                } else {
+                    reclaimed
+                }
+            }
+            _ => {
+                let step = excess.min((file_bytes / 2).max(1));
+                store.prune_oldest_history_turns(&session_id, step)?
+            }
+        };
+        if reclaimed == 0 {
+            // Only malformed or incomplete blocks remain in this archive.
+            blocks.remove(0);
+            continue;
+        }
+        used = used.saturating_sub(reclaimed);
+        removed = removed.saturating_add(reclaimed);
+        match store.oldest_history_turn_ms(&session_id)? {
+            Some(archive_ms) => {
+                blocks[0] = (archive_ms, session_id, file_bytes.saturating_sub(reclaimed));
+                blocks.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+            }
+            None => {
+                blocks.remove(0);
+            }
+        }
+    }
+    Ok(removed)
+}
+
 fn apply_conversation_stable_capacity_if_configured(
     state: &AppState,
     store: &SessionStore,
@@ -785,6 +863,44 @@ pub(super) fn record_idle_temporary_maintenance_failure(state: &AppState, error:
     state
         .lifecycle_diagnostics
         .checkpoint("idle_temporary_maintenance_failed", details);
+}
+
+/// Periodic rolling eviction for conversation history. The idle maintenance
+/// loop only runs while the whole instance is quiet, which a long-running
+/// multi-agent workload never is, so history grew without bound and the mailbox
+/// was the first writer to be refused. This loop is allowed to run while
+/// sessions work because it only removes whole oldest turns.
+pub(super) fn spawn_conversation_rolling_loop(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            sleep(CONVERSATION_ROLLING_INTERVAL).await;
+            let (store, max_bytes) = {
+                let Ok(mem) = state.mem.lock() else {
+                    continue;
+                };
+                (
+                    mem.session_store.clone(),
+                    mem.settings.conversation_capacity_bytes,
+                )
+            };
+            let Some(max_bytes) = max_bytes else {
+                continue;
+            };
+            let state_for_task = state.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                match apply_conversation_rolling_eviction(&state_for_task, &store, Some(max_bytes)) {
+                    Ok(0) => {}
+                    Ok(reclaimed) => eprintln!(
+                        "[timem_web_history_rolling] reclaimed_bytes={reclaimed} budget_bytes={max_bytes}"
+                    ),
+                    Err(error) => eprintln!(
+                        "[timem_web_warning] conversation_rolling_eviction_failed error={error}"
+                    ),
+                }
+            })
+            .await;
+        }
+    });
 }
 
 pub(super) fn spawn_idle_temporary_maintenance_loop(state: AppState) {

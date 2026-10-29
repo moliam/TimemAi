@@ -1273,6 +1273,57 @@ fn conversation_capacity_prunes_complete_oldest_turns() {
 }
 
 #[test]
+fn block_ordered_pruning_reports_oldest_block_and_prunes_before_cutoff() {
+    let root = tmp_dir("conversation_block_ordered_prune");
+    let store = SessionStore::new(&root);
+    for (turn_id, created_at_ms, content) in [
+        ("turn_old", 1_000_i64, "old"),
+        ("turn_mid", 2_000_i64, "mid"),
+        ("turn_new", 3_000_i64, "new"),
+    ] {
+        store
+            .append_history_record(
+                "session_a",
+                &ChatHistoryRecord::Message {
+                    role: ChatHistoryRole::User,
+                    turn_id: turn_id.to_string(),
+                    created_at_ms,
+                    kind: None,
+                    command_id: None,
+                    delivery_state: None,
+                    content: content.to_string(),
+                },
+            )
+            .unwrap();
+    }
+
+    assert_eq!(
+        store.oldest_history_turn_ms("session_a").unwrap(),
+        Some(1_000)
+    );
+    assert!(
+        store
+            .prune_history_turns_before("session_a", 3_000)
+            .unwrap()
+            > 0
+    );
+    let retained = read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].turn_id(), "turn_new");
+    assert_eq!(
+        store.oldest_history_turn_ms("session_a").unwrap(),
+        Some(3_000)
+    );
+    assert_eq!(
+        store
+            .prune_history_turns_before("session_a", 3_000)
+            .unwrap(),
+        0,
+        "blocks at the cutoff are retained"
+    );
+}
+
+#[test]
 fn temporary_retention_summary_survives_store_restart_and_tracks_appends() {
     let root = tmp_dir("temporary_retention_persisted_summary");
     let store = SessionStore::new(&root);

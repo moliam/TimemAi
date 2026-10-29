@@ -1082,6 +1082,67 @@ impl SessionStore {
         if bytes_to_remove == 0 {
             return Ok(0);
         }
+        self.prune_history_turns_with(session_id, Some(bytes_to_remove), None)
+    }
+
+    /// Removes every complete Turn block archived before `before_ms`
+    /// (exclusive). This is the ordered primitive used by rolling eviction:
+    /// callers derive the cutoff from the globally oldest block still present in
+    /// another archive, so old blocks are always deleted before new ones.
+    pub fn prune_history_turns_before(
+        &self,
+        session_id: &str,
+        before_ms: i64,
+    ) -> Result<u64, String> {
+        validate_session_id(session_id)?;
+        self.prune_history_turns_with(session_id, None, Some(before_ms))
+    }
+
+    /// Archive time of the oldest complete Turn block in this session. `None`
+    /// means the file has no complete block yet (or does not exist).
+    pub fn oldest_history_turn_ms(&self, session_id: &str) -> Result<Option<i64>, String> {
+        validate_session_id(session_id)?;
+        let path = self.history_path_for_session(session_id);
+        let file = match fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err("chat_history_read_failed".to_string()),
+        };
+        let mut reader = BufReader::new(file);
+        let mut first_turn: Option<String> = None;
+        let mut archive_ms: Option<i64> = None;
+        while let Some(record) =
+            read_bounded_jsonl_record(&mut reader, 2 * 1024 * 1024, "chat_history_read_failed")?
+        {
+            if record.oversized {
+                continue;
+            }
+            let Ok(text) = std::str::from_utf8(&record.bytes) else {
+                continue;
+            };
+            let Some(parsed) = parse_chat_history_record_line(text.trim_end()) else {
+                continue;
+            };
+            match first_turn.as_deref() {
+                None => {
+                    first_turn = Some(parsed.turn_id().to_string());
+                    archive_ms = Some(parsed.created_at_ms());
+                }
+                Some(turn) if turn == parsed.turn_id() => {
+                    archive_ms = Some(archive_ms.unwrap_or(i64::MIN).max(parsed.created_at_ms()));
+                }
+                Some(_) => break,
+            }
+        }
+        Ok(archive_ms)
+    }
+
+    fn prune_history_turns_with(
+        &self,
+        session_id: &str,
+        bytes_to_remove: Option<u64>,
+        before_ms: Option<i64>,
+    ) -> Result<u64, String> {
         let path = self.history_path_for_session(session_id);
         let removed = MemGuard::for_memory_domain(
             &self.root,
@@ -1095,50 +1156,62 @@ impl SessionStore {
                 return Ok::<u64, String>(0);
             }
             let bytes = fs::read(&path).map_err(|_| "chat_history_read_failed".to_string())?;
-            let mut records: Vec<(Vec<u8>, Option<String>)> = Vec::new();
+            let mut records: Vec<(Vec<u8>, Option<String>, Option<i64>)> = Vec::new();
             let mut start = 0usize;
             for (index, byte) in bytes.iter().enumerate() {
                 if *byte != b'\n' {
                     continue;
                 }
                 let raw = bytes[start..=index].to_vec();
-                let text = std::str::from_utf8(&raw).ok().map(str::trim_end);
-                let turn = text
+                let parsed = std::str::from_utf8(&raw)
+                    .ok()
+                    .map(str::trim_end)
                     .and_then(parse_chat_history_record_line)
-                    .map(|record| record.turn_id().to_string());
-                records.push((raw, turn));
+                    .map(|record| (record.turn_id().to_string(), record.created_at_ms()));
+                records.push(match parsed {
+                    Some((turn, created_at_ms)) => (raw, Some(turn), Some(created_at_ms)),
+                    None => (raw, None, None),
+                });
                 start = index + 1;
             }
             if start < bytes.len() {
                 let raw = bytes[start..].to_vec();
-                let turn = std::str::from_utf8(&raw)
+                let parsed = std::str::from_utf8(&raw)
                     .ok()
+                    .map(str::trim_end)
                     .and_then(parse_chat_history_record_line)
-                    .map(|record| record.turn_id().to_string());
-                records.push((raw, turn));
+                    .map(|record| (record.turn_id().to_string(), record.created_at_ms()));
+                records.push(match parsed {
+                    Some((turn, created_at_ms)) => (raw, Some(turn), Some(created_at_ms)),
+                    None => (raw, None, None),
+                });
             }
-            let mut groups: Vec<(usize, usize, u64, bool)> = Vec::new();
+            let mut groups: Vec<(usize, usize, u64, bool, Option<i64>)> = Vec::new();
             let mut index = 0usize;
             while index < records.len() {
                 let group_start = index;
                 let turn = records[index].1.clone();
+                let mut archive_ms = records[index].2;
                 index += 1;
                 while index < records.len() && turn.is_some() && records[index].1 == turn {
+                    archive_ms = archive_ms.max(records[index].2);
                     index += 1;
                 }
                 let size = records[group_start..index]
                     .iter()
-                    .map(|(raw, _)| raw.len() as u64)
+                    .map(|(raw, _, _)| raw.len() as u64)
                     .sum();
-                groups.push((group_start, index, size, turn.is_some()));
+                groups.push((group_start, index, size, turn.is_some(), archive_ms));
             }
             let mut reclaimed = 0u64;
             let mut remove = BTreeSet::new();
-            for (group_start, group_end, size, removable) in groups {
-                if reclaimed >= bytes_to_remove {
-                    break;
-                }
-                if !removable {
+            for (group_start, group_end, size, removable, archive_ms) in groups {
+                let selected = match (bytes_to_remove, before_ms) {
+                    (Some(limit), _) => reclaimed < limit,
+                    (None, Some(cutoff)) => archive_ms.is_some_and(|value| value < cutoff),
+                    (None, None) => false,
+                };
+                if !selected || !removable {
                     continue;
                 }
                 reclaimed = reclaimed.saturating_add(size);
@@ -1150,7 +1223,7 @@ impl SessionStore {
             let retained = records
                 .into_iter()
                 .enumerate()
-                .filter_map(|(index, (raw, _))| (!remove.contains(&index)).then_some(raw))
+                .filter_map(|(index, (raw, _, _))| (!remove.contains(&index)).then_some(raw))
                 .collect::<Vec<_>>();
             let retained_bytes = retained.into_iter().flatten().collect::<Vec<_>>();
             atomic_write_file(&path, &retained_bytes)

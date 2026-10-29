@@ -21790,51 +21790,44 @@ fn mailbox_capacity_failure_is_terminal_without_body_or_spool() {
 }
 
 #[test]
-fn mem_mail_file_budget_keeps_spool_until_capacity_is_available() {
+fn mem_mail_file_budget_rolls_oldest_block_into_new_mail() {
     let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_file_budget");
     std::env::set_var("TIMEM_MAILBOX_MAX_FILES", "1");
     let self_name = load_mailbox_state(&state, &session_id)
         .unwrap()
         .mailbox_name;
-    for id in ["file-budget-a", "file-budget-b"] {
-        crate::mailbox::write_mail(
-            &e2e_spool(),
-            &e2e_mail(id, "mb-file-budget-peer", &self_name, -1, -1),
-        )
-        .unwrap();
-    }
 
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("file-budget-old", "mb-file-budget-peer", &self_name, -1, -1),
+    )
+    .unwrap();
     mailbox_tick(&state);
-    assert_eq!(
-        load_mailbox_state(&state, &session_id)
-            .unwrap()
-            .entries
-            .len(),
-        1
-    );
-    assert_eq!(
-        crate::mailbox::scan_mails(&e2e_inbox(&self_name)).len(),
-        1,
-        "the body rejected by the file budget must remain retryable"
-    );
-    assert_eq!(
-        state.mem_mail_runtime.usage_files.load(Ordering::Relaxed),
-        1
-    );
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.entries.len(), 1);
+    assert_eq!(mailbox.entries[0].id, "file-budget-old");
 
-    std::env::set_var("TIMEM_MAILBOX_MAX_FILES", "2");
+    // The archive is at its block limit; the new mail must evict the oldest
+    // block instead of being left in the spool.
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("file-budget-new", "mb-file-budget-peer", &self_name, -1, -1),
+    )
+    .unwrap();
     mailbox_tick(&state);
-    assert_eq!(
-        load_mailbox_state(&state, &session_id)
-            .unwrap()
-            .entries
-            .len(),
-        2
+
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.entries.len(), 1);
+    assert_eq!(mailbox.entries[0].id, "file-budget-new");
+    assert!(
+        !mem_mail_exists(&state, "file-budget-old"),
+        "the oldest block must be deleted to admit the new one"
     );
+    assert!(mem_mail_exists(&state, "file-budget-new"));
     assert!(crate::mailbox::scan_mails(&e2e_inbox(&self_name)).is_empty());
     assert_eq!(
         state.mem_mail_runtime.usage_files.load(Ordering::Relaxed),
-        2
+        1
     );
 }
 
@@ -22311,7 +22304,7 @@ fn storage_usage_query_reports_temporary_conversation_mailbox_and_favorite() {
 }
 
 #[test]
-fn mailbox_shared_conversation_quota_blocks_body_and_preserves_spool() {
+fn mailbox_body_is_admitted_when_conversation_history_budget_is_exhausted() {
     let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_shared_quota");
     let store = current_session_store(&state).unwrap();
     let stored = agent_core::session_store::new_stored_session(
@@ -22345,8 +22338,8 @@ fn mailbox_shared_conversation_quota_blocks_body_and_preserves_spool() {
         .unwrap()
         .stable_bytes;
     assert_eq!(stable, 124 * 1024 * 1024);
-
-    // Fill the shared budget with sparse history: no real bytes are written.
+    // Sparse history over the stable budget: the conversation archive is full,
+    // but mail storage rolls on its own block budget.
     std::fs::OpenOptions::new()
         .write(true)
         .open(&history)
@@ -22368,41 +22361,90 @@ fn mailbox_shared_conversation_quota_blocks_body_and_preserves_spool() {
     .unwrap();
     mailbox_tick(&state);
 
-    assert!(
-        load_mailbox_state(&state, &session_id)
-            .unwrap()
-            .entries
-            .is_empty(),
-        "a body cannot be indexed when the shared budget is exhausted"
-    );
-    assert!(!mem_mail_exists(&state, "shared-quota"));
-    assert_eq!(
-        crate::mailbox::scan_mails(&e2e_inbox(&self_name)).len(),
-        1,
-        "the rejected envelope must remain retryable in the spool"
-    );
-    assert!(
-        state
-            .mem_mail_runtime
-            .capacity_rejections
-            .load(Ordering::Relaxed)
-            > before
-    );
-
-    // Freeing history restores the shared budget; the same spool entry lands.
-    std::fs::OpenOptions::new()
-        .write(true)
-        .open(&history)
-        .unwrap()
-        .set_len(0)
-        .unwrap();
-    mailbox_tick(&state);
     let mailbox = load_mailbox_state(&state, &session_id).unwrap();
-    assert_eq!(mailbox.entries.len(), 1);
+    assert_eq!(
+        mailbox.entries.len(),
+        1,
+        "conversation history pressure must not block a mailbox body"
+    );
     assert_eq!(mailbox.entries[0].id, "shared-quota");
     assert_eq!(mailbox.entries[0].state, "read");
     assert!(mem_mail_exists(&state, "shared-quota"));
     assert!(crate::mailbox::scan_mails(&e2e_inbox(&self_name)).is_empty());
+    assert_eq!(
+        state
+            .mem_mail_runtime
+            .capacity_rejections
+            .load(Ordering::Relaxed),
+        before
+    );
+}
+
+#[test]
+fn conversation_rolling_eviction_deletes_oldest_blocks_first() {
+    let (_guard, state, _session_id) = mailbox_e2e_setup("mailbox_e2e_rolling_history");
+    let store = current_session_store(&state).unwrap();
+    // The settings command only accepts preset capacities, so the rolling
+    // primitive is exercised directly with a small block budget.
+    let budget = 8 * 1024 * 1024;
+    let stable = RollingCapacity::from_total_bytes(budget)
+        .unwrap()
+        .stable_bytes;
+    assert_eq!(stable, 4 * 1024 * 1024);
+
+    for (session_id, turns) in [
+        ("roll_old", [("old-1", 1_000_i64), ("old-2", 1_100_i64)]),
+        ("roll_mid", [("mid-1", 2_000_i64), ("mid-2", 2_100_i64)]),
+        ("roll_new", [("new-1", 3_000_i64), ("new-2", 3_100_i64)]),
+    ] {
+        let stored = agent_core::session_store::new_stored_session(
+            session_id,
+            session_id,
+            "/work",
+            StoredSessionProfile::default(),
+            store.history_path_for_session(session_id),
+        );
+        store.upsert_session(&stored).unwrap();
+        for (turn_id, created_at_ms) in turns {
+            store
+                .append_history_record(
+                    session_id,
+                    &ChatHistoryRecord::Message {
+                        role: ChatHistoryRole::User,
+                        turn_id: turn_id.to_string(),
+                        created_at_ms,
+                        kind: None,
+                        command_id: None,
+                        delivery_state: None,
+                        content: "x".repeat(1024 * 1024),
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    assert!(mem_maintenance::conversation_history_usage(&store).unwrap() > stable);
+    let reclaimed =
+        mem_maintenance::apply_conversation_rolling_eviction(&state, &store, Some(budget)).unwrap();
+    assert!(reclaimed > 0);
+    assert!(
+        read_all_history_records(&store.history_path_for_session("roll_old"))
+            .unwrap()
+            .is_empty(),
+        "the archive holding the globally oldest block must be drained first"
+    );
+    assert!(
+        read_all_history_records(&store.history_path_for_session("roll_mid"))
+            .unwrap()
+            .is_empty(),
+        "the middle archive follows once the oldest one is exhausted"
+    );
+    let newest = read_all_history_records(&store.history_path_for_session("roll_new")).unwrap();
+    assert_eq!(newest.len(), 2, "the newest blocks must survive");
+    assert!(newest
+        .iter()
+        .all(|record| record.turn_id().starts_with("new-")));
+    assert!(mem_maintenance::conversation_history_usage(&store).unwrap() <= stable);
 }
 
 #[test]
