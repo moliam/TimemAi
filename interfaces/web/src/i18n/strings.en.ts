@@ -724,6 +724,7 @@ export const en: Strings = {
     addressLabel: "Mailbox ID for this conversation",
     addressHint: "This is the mailbox ID for this conversation. You can ask another conversation's AI to send mail to this mailbox to trigger work or chat.",
     entryTag: "Mailbox",
+    mailFrom: "Mail from {sender}:",
     empty: "No mailbox assigned yet",
     copyAddress: "Copy mailbox address",
     copied: "Copied",
@@ -788,6 +789,8 @@ export const en: Strings = {
     queueHint: "When checked, a due prompt joins the message queue and is delivered in order; deliveries are immediate by default (merged into the active turn or starting a new one)",
     queued: "Queued",
     timerTag: "Timer",
+    headPrefix: "Timer:",
+    triggerTag: "Trigger:",
     invalidInput: "Check the work assignment and trigger settings",
   },
   toolRepo: {

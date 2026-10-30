@@ -226,6 +226,7 @@ import {
   finishTurn,
   groupDecisionsBySessionTurn,
   manualToolGenCommand,
+  parseMailboxEntryText,
   parseTimerEntryText,
   prependHistoryRecords,
   pruneSessionDrafts,
@@ -11975,6 +11976,11 @@ const TurnInteraction = memo(function TurnInteraction({
                 const mailboxText = isMailboxEntry
                   ? entry.text.replace(/^\[mailbox\]\s*/, "")
                   : null;
+                // Delivered mail splits into "<sender> 发来 mail:" meta and the
+                // bare body; receipt/status notices keep the whole line as meta.
+                const mailboxParts = isMailboxEntry
+                  ? parseMailboxEntryText(entry.text)
+                  : null;
                 return (
                 <div
                   className={`turn-user-entry ${isMailboxEntry ? "mailbox" : entry.kind}${isSystemTriggered ? " system-triggered" : ""}`}
@@ -12003,25 +12009,36 @@ const TurnInteraction = memo(function TurnInteraction({
                   )}
                   {timerParts && (
                     <div className="timer-entry-head">
-                      <span>{t("timer.timerTag")}</span>
                       <span className="timer-entry-badge" aria-hidden="true">
                         <AlarmClock size={11} />
                       </span>
+                      <span>
+                        {timerParts.name ? t("timer.headPrefix") : t("timer.timerTag")}
+                      </span>
                       {timerParts.name && <b className="timer-entry-name">{timerParts.name}</b>}
+                      <span>{t("timer.triggerTag")}</span>
                     </div>
                   )}
                   {isMailboxEntry && (
                     <div className="mailbox-entry-head">
-                      <span>{t("mailbox.entryTag")}</span>
                       <span className="mailbox-entry-badge" aria-hidden="true">
                         <Mail size={11} />
                       </span>
+                      {mailboxParts ? (
+                        <span>{t("mailbox.mailFrom", { sender: mailboxParts.sender })}</span>
+                      ) : (
+                        <span>{mailboxText}</span>
+                      )}
                     </div>
                   )}
                   {isSystemTriggered ? (
-                    <CollapsibleSystemEntryText
-                      text={timerParts ? timerParts.prompt : (mailboxText ?? entry.text)}
-                    />
+                    mailboxParts ? (
+                      mailboxParts.body.length > 0 && (
+                        <CollapsibleSystemEntryText text={mailboxParts.body} />
+                      )
+                    ) : timerParts && timerParts.prompt.length > 0 ? (
+                      <CollapsibleSystemEntryText text={timerParts.prompt} />
+                    ) : null
                   ) : (
                     <UserText
                       text={timerParts ? timerParts.prompt : (mailboxText ?? entry.text)}

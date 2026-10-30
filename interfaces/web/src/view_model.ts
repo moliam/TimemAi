@@ -1299,6 +1299,23 @@ export function parseTimerEntryText(
   return { name: name.length > 0 ? name : null, prompt: text.slice(match[0].length) };
 }
 
+/**
+ * Mailbox deliveries carry a runtime header "<sender> 发来 mail:" before the
+ * actual body (legacy history keeps the "[mailbox] " prefix). Presentation
+ * splits header from body without rewriting stored text; receipt/status
+ * notices do not match this shape and yield null so they stay pure meta.
+ */
+export function parseMailboxEntryText(
+  text: string,
+): { sender: string; body: string } | null {
+  const stripped = text.replace(/^\[mailbox\]\s*/, "");
+  // "\u53d1\u6765" is the host protocol word anchoring the mail-delivery
+  // header; escaped so no raw CJK literal ships inside view-model code.
+  const match = /^(\S+) \u53d1\u6765 mail:\n?([\s\S]*)$/.exec(stripped);
+  if (!match) return null;
+  return { sender: match[1], body: match[2] };
+}
+
 type ChatMessageHistoryRecord = Extract<ChatHistoryRecord, { type: "message" }>;
 
 function isChatMessageHistoryRecord(

@@ -30,6 +30,7 @@ import {
   clearDecisionsForWorker,
   coalesceActionLifecycle,
   compareTurnTimelineItems,
+  parseMailboxEntryText,
   parseTimerEntryText,
   compareTurnStreamItems,
   composerPrimaryAction,
@@ -5002,6 +5003,35 @@ describe("parseTimerEntryText", () => {
   it("does not strip a prefix that is not at the start", () => {
     const text = "正文 [timer:late] 不是前缀";
     expect(parseTimerEntryText(text)).toEqual({ name: null, prompt: text });
+  });
+});
+
+
+describe("parseMailboxEntryText", () => {
+  it("splits the runtime header from the mail body", () => {
+    expect(parseMailboxEntryText("mb-keepo0 发来 mail:\n你好，请查看附件")).toEqual({
+      sender: "mb-keepo0",
+      body: "你好，请查看附件",
+    });
+  });
+
+  it("strips the legacy [mailbox] prefix and keeps multi-line bodies", () => {
+    expect(parseMailboxEntryText("[mailbox] mb-abc 发来 mail:\n第一行\n第二行")).toEqual({
+      sender: "mb-abc",
+      body: "第一行\n第二行",
+    });
+  });
+
+  it("returns null for receipt and status notices", () => {
+    expect(parseMailboxEntryText("邮件 m-1 已被 mb-x 读取")).toBeNull();
+    expect(parseMailboxEntryText("[mailbox] 邮件 m-1 被 mb-x 丢弃（未读取）")).toBeNull();
+  });
+
+  it("allows an empty body after the header", () => {
+    expect(parseMailboxEntryText("mb-x 发来 mail:\n")).toEqual({
+      sender: "mb-x",
+      body: "",
+    });
   });
 });
 

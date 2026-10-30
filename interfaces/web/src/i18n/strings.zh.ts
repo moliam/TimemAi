@@ -730,6 +730,7 @@ export const zh = {
     addressLabel: "当前对话 MailboxID",
     addressHint: "这是当前对话的 mailbox ID,可以请求其他对话的 AI 向这个邮箱发信息,来触发工作或交流。",
     entryTag: "邮箱",
+    mailFrom: "来自 {sender} 的邮件:",
     empty: "尚未分配 mailbox",
     copyAddress: "复制 mailbox 地址",
     copied: "已复制",
@@ -794,6 +795,8 @@ export const zh = {
     queueHint: "勾选后，到点的提示进入消息队列按序投递；默认立即投递（并入当前对话或立即开启新对话）",
     queued: "排队",
     timerTag: "定时",
+    headPrefix: "定时:",
+    triggerTag: "触发:",
     invalidInput: "请检查工作内容与触发设置",
   },
   usage: {
