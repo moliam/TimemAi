@@ -21146,6 +21146,57 @@ fn mailbox_send_dispatch_off_bridge_folds_local_reads_and_serializes() {
 }
 
 #[test]
+fn unconsumed_supplement_handoff_keeps_runtime_origin() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_handoff_system");
+    // An all-system batch (mailbox delivery supplements handed over by a
+    // finishing turn) must replay through the system turn channel and record
+    // the mailbox origin kind, not degrade into a user task entry (## USER
+    // plus a user timestamp).
+    let system_batch = vec![timem_session::UnconsumedSupplement {
+        manual_context_compress: false,
+        system_input: true,
+        text: "[mailbox] mb-x 发来 mail:\nhello".to_string(),
+        additional_context: None,
+        command_id: None,
+    }];
+    let turn = submit_unconsumed_supplement_handoff(&state, &session_id, &system_batch)
+        .expect("system handoff submits");
+    assert_eq!(turn.user_entries.len(), 1);
+    assert_eq!(
+        turn.user_entries[0].kind, "mailbox",
+        "runtime-originated handoff keeps the mailbox kind"
+    );
+}
+
+#[test]
+fn unconsumed_supplement_handoff_mixed_batch_keeps_user_origin() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_handoff_mixed");
+    // A batch mixed with real user input stays on the user channel: the
+    // entries keep the task/supplement origin kinds. One setup per test: the
+    // e2e lock is not re-entrant.
+    let mixed_batch = vec![
+        timem_session::UnconsumedSupplement {
+            manual_context_compress: false,
+            system_input: true,
+            text: "[mailbox] mb-x 发来 mail:\nhello".to_string(),
+            additional_context: None,
+            command_id: None,
+        },
+        timem_session::UnconsumedSupplement {
+            manual_context_compress: false,
+            system_input: false,
+            text: "用户手动补充".to_string(),
+            additional_context: None,
+            command_id: None,
+        },
+    ];
+    let turn = submit_unconsumed_supplement_handoff(&state, &session_id, &mixed_batch)
+        .expect("mixed handoff submits");
+    assert_eq!(turn.user_entries[0].kind, "task");
+    assert_eq!(turn.user_entries[1].kind, "supplement");
+}
+
+#[test]
 fn mailbox_tick_delivers_all_mail_immediately() {
     let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_queue");
     let self_name = load_mailbox_state(&state, &session_id)

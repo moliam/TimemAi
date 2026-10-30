@@ -17463,6 +17463,13 @@ fn submit_unconsumed_supplement_handoff(
         .cloned()
         .collect::<Vec<_>>();
     let supplements = text_supplements.as_slice();
+    // A handoff replay must keep the runtime origin: mailbox deliveries and
+    // timer fires queued as system supplements would otherwise downgrade into
+    // user questions (## USER plus a user timestamp) when the Host re-submits
+    // them after the finishing turn. A batch mixed with real user input stays
+    // on the user channel.
+    let system_handoff =
+        !supplements.is_empty() && supplements.iter().all(|supplement| supplement.system_input);
     validate_session_model_service_config(state, session_id)?;
     apply_pending_session_mcp(state, session_id)?;
     let previous_session;
@@ -17493,7 +17500,13 @@ fn submit_unconsumed_supplement_handoff(
                 })
             });
             user_entries.push(WebTurnUserEntry {
-                kind: if index == 0 { "task" } else { "supplement" }.to_string(),
+                kind: if system_handoff {
+                    "mailbox".to_string()
+                } else if index == 0 {
+                    "task".to_string()
+                } else {
+                    "supplement".to_string()
+                },
                 text: supplement.text.clone(),
                 attachments: original
                     .as_ref()
@@ -17533,7 +17546,11 @@ fn submit_unconsumed_supplement_handoff(
                 .collect::<Vec<_>>()
                 .join("\n\n"),
             created_at_ms,
-            kind: None,
+            kind: if system_handoff {
+                Some("mailbox".to_string())
+            } else {
+                None
+            },
             completion: None,
         });
     }
@@ -17595,13 +17612,21 @@ fn submit_unconsumed_supplement_handoff(
         .collect::<Vec<_>>()
         .join("\n\n");
     let enqueue = primary_worker_handle(state, session_id).and_then(|worker| {
-        turn_image_parts(&attachments).and_then(|images| {
-            // The original command IDs were already accepted by Core when the
-            // supplements entered the finishing turn. Preserve them on the Web
-            // entries, but use an internal handoff (no external command ID) for
-            // this new Core turn so deduplication cannot suppress it.
-            worker.run_turn_with_command_id_and_images(input, additional_context, None, images)
-        })
+        if system_handoff {
+            // Runtime-originated supplements replay through the system turn
+            // channel so they still render under ## RUNTIME, never as a user
+            // question. Mailbox/timer handoffs carry no images.
+            worker.run_system_turn_with_command_id(input, additional_context, None)
+        } else {
+            turn_image_parts(&attachments).and_then(|images| {
+                // The original command IDs were already accepted by Core when
+                // the supplements entered the finishing turn. Preserve them on
+                // the Web entries, but use an internal handoff (no external
+                // command ID) for this new Core turn so deduplication cannot
+                // suppress it.
+                worker.run_turn_with_command_id_and_images(input, additional_context, None, images)
+            })
+        }
     });
     if let Err(error) = enqueue {
         if let Ok(mut sessions) = state.sessions.lock() {
