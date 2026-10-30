@@ -4564,7 +4564,7 @@ fn session_create_command_returns_session_with_runtime_overrides_applied() {
 }
 
 #[test]
-fn missing_workspace_session_uses_locked_fallback_without_losing_metadata_or_history() {
+fn missing_workspace_session_restores_with_silent_fallback_without_losing_metadata_or_history() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("missing_workspace_restore"));
     let data_dir = root.join("data");
@@ -4653,28 +4653,13 @@ fn missing_workspace_session_uses_locked_fallback_without_losing_metadata_or_his
             std::fs::canonicalize(&restored.current_dir).unwrap(),
             std::fs::canonicalize(&runtime_workspace).unwrap()
         );
-        let pending = restored.restart_cwd_decision.as_ref().unwrap();
-        assert!(!pending.session_cwd_available);
-        assert_eq!(pending.session_cwd, missing_workspace.display().to_string());
+        // A missing stored workspace restores silently into the runtime
+        // directory: no pending cwd decision and no user-facing gate.
+        assert!(restored.restart_cwd_decision.is_none());
     }
-    assert_eq!(
-        start_web_turn(&state, session_id, "must remain locked").unwrap_err(),
-        "session_restart_cwd_decision_required"
-    );
-    assert_eq!(
-        resolve_restart_cwd_decision(&state, session_id, "keep_session").unwrap_err(),
-        "session_restart_cwd_unavailable"
-    );
 
-    resolve_restart_cwd_decision(&state, session_id, "use_runtime").unwrap();
-    let repaired = store.load_session(session_id).unwrap().unwrap();
-    assert_eq!(repaired.display_name, original_display_name);
-    assert_eq!(
-        std::fs::canonicalize(&repaired.current_dir).unwrap(),
-        std::fs::canonicalize(&runtime_workspace).unwrap()
-    );
-
-    // Confirmation persists the fallback, so a later restart restores normally.
+    // The silent fallback re-applies on every restart, so a later restart
+    // restores normally without any confirmation step.
     state.sessions.lock().unwrap().clear();
     assert_eq!(
         restore_stored_sessions_after_runtime_restart(&state).unwrap(),
@@ -4890,7 +4875,7 @@ fn restart_cwd_path_display_preserves_non_verbatim_and_special_namespace_paths()
 }
 
 #[test]
-fn runtime_restart_requires_each_restored_session_to_resolve_cwd_before_work() {
+fn runtime_restart_keeps_restored_sessions_on_their_stored_cwd_without_a_gate() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_restart_cwd"));
     let previous_cwd = root.join("previous");
@@ -4934,59 +4919,21 @@ fn runtime_restart_requires_each_restored_session_to_resolve_cwd_before_work() {
     );
 
     {
+        // Every restored session silently keeps its stored working directory:
+        // no pending decision, no gate, and no switch to the runtime cwd.
         let sessions = restarted.sessions.lock().unwrap();
         for session_id in [&keep_id, &switch_id] {
-            let pending = sessions
-                .get(session_id)
-                .unwrap()
-                .restart_cwd_decision
-                .as_ref()
-                .expect("every unvisited restored session must retain its decision");
-            assert_eq!(
-                std::fs::canonicalize(&pending.runtime_cwd).unwrap(),
-                std::fs::canonicalize(&runtime_cwd).unwrap()
+            let restored = sessions.get(session_id).unwrap();
+            assert!(
+                restored.restart_cwd_decision.is_none(),
+                "a real restart must keep the session on its stored cwd without a gate"
             );
             assert_eq!(
-                std::fs::canonicalize(&pending.session_cwd).unwrap(),
+                std::fs::canonicalize(&restored.current_dir).unwrap(),
                 std::fs::canonicalize(&previous_cwd).unwrap()
             );
-            assert!(pending.session_cwd_available);
         }
     }
-
-    assert_eq!(
-        start_web_turn(&restarted, &switch_id, "must not start").unwrap_err(),
-        "session_restart_cwd_decision_required"
-    );
-
-    resolve_restart_cwd_decision(&restarted, &keep_id, "keep_session").unwrap();
-    {
-        let sessions = restarted.sessions.lock().unwrap();
-        let kept = sessions.get(&keep_id).unwrap();
-        assert!(kept.restart_cwd_decision.is_none());
-        assert_eq!(
-            std::fs::canonicalize(&kept.current_dir).unwrap(),
-            std::fs::canonicalize(&previous_cwd).unwrap()
-        );
-        assert!(sessions
-            .get(&switch_id)
-            .unwrap()
-            .restart_cwd_decision
-            .is_some());
-    }
-
-    resolve_restart_cwd_decision(&restarted, &switch_id, "use_runtime").unwrap();
-    let sessions = restarted.sessions.lock().unwrap();
-    let switched = sessions.get(&switch_id).unwrap();
-    assert!(switched.restart_cwd_decision.is_none());
-    assert_eq!(
-        std::fs::canonicalize(&switched.current_dir).unwrap(),
-        std::fs::canonicalize(&runtime_cwd).unwrap()
-    );
-    assert!(switched.contexts.iter().all(|context| {
-        std::fs::canonicalize(&context.current_dir).unwrap()
-            == std::fs::canonicalize(&runtime_cwd).unwrap()
-    }));
 
     let _ = std::fs::remove_dir_all(root);
 }

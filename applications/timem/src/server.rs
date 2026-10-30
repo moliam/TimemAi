@@ -7019,41 +7019,6 @@ fn sync_state_parent_directory(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn restart_cwd_decision(
-    state: &AppState,
-    session_cwd: &Path,
-    record_runtime_restart: bool,
-) -> Option<RestartCwdDecision> {
-    if !record_runtime_restart {
-        return None;
-    }
-    let runtime_cwd = std::fs::canonicalize(&state.template.current_dir).ok()?;
-    let session_cwd = std::fs::canonicalize(session_cwd).ok()?;
-    (runtime_cwd != session_cwd).then(|| RestartCwdDecision {
-        runtime_cwd: path_for_user_display(&runtime_cwd),
-        session_cwd: path_for_user_display(&session_cwd),
-        session_cwd_available: true,
-        runtime_cwd_path: runtime_cwd,
-    })
-}
-
-fn missing_session_cwd_decision(
-    state: &AppState,
-    session_cwd: &Path,
-) -> Option<RestartCwdDecision> {
-    let runtime_cwd = std::fs::canonicalize(&state.template.current_dir).ok()?;
-    Some(RestartCwdDecision {
-        runtime_cwd: path_for_user_display(&runtime_cwd),
-        session_cwd: path_for_user_display(session_cwd),
-        session_cwd_available: false,
-        runtime_cwd_path: runtime_cwd,
-    })
-}
-
-fn path_for_user_display(path: &Path) -> String {
-    windows_verbatim_path_for_user_display(&path.to_string_lossy())
-}
-
 fn serialize_path_for_user_display<S>(path: &str, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
@@ -7415,11 +7380,13 @@ fn restore_stored_session(
                 }
                 .to_string(),
                 current_dir: current_dir.display().to_string(),
-                restart_cwd_decision: if stored_workspace_available {
-                    restart_cwd_decision(state, &current_dir, record_runtime_restart)
-                } else {
-                    missing_session_cwd_decision(state, &stored_current_dir)
-                },
+                // Restored sessions keep their stored working directory by
+                // default: no user-facing cwd gate, and no switch to the
+                // runtime directory. When the stored directory no longer
+                // exists, keeping it is impossible, so the restored session
+                // silently uses the runtime directory that `current_dir`
+                // already fell back to above.
+                restart_cwd_decision: None,
                 debug_dir,
                 max_llm_input_tokens,
                 tools,

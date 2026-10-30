@@ -989,6 +989,12 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - Web：timer/mailbox/mailbox_status 等系统触发条目统一加 `system-triggered`，使用 12px 小字号、系统提示中性底色和 mail 小图标；整帧只含系统条目时加 `system-only`，不再套用户气泡底色；旧历史仍以 `[mailbox]` 前缀兜底识别。
 - 测试看护：`local_mailbox_handoff_failure_falls_back_to_spool` 覆盖同实例直投失败回退 spool；新增 `local_mailbox_handoff_pending_restart_cwd_decision_is_spooled` 覆盖“重启后目录待确认”这一真实触发条件，断言发件状态保持 `sent` 且 spool 留有一封信；`mailbox_capacity_failure_is_terminal_without_body_or_spool` 断言 `mailbox_status` 结构化 kind；`mailbox_system_notice.test.ts` 冻结系统卡片样式与 mail 图标契约。
 
+## 2026-10-30 重启恢复静默保持工作目录
+
+- 行为变更：运行实例重启后，存量 session 恢复不再挂起 `restart_cwd_decision` 等待用户选择“切换/保持”，而是静默保持 stored 工作目录；stored 目录已消失时静默回退 runtime 启动目录（沿用 `session_restore_workspace_fallback` 诊断），不再有任何用户可见的 cwd gate、composer 替换或启动阻塞。
+- Host：恢复注入点固定为 `restart_cwd_decision: None`，删除 `restart_cwd_decision()` 与 `missing_session_cwd_decision()` 两个产生函数；`ensure_restart_cwd_resolved`/`resolve_restart_cwd_decision` 与 wire 字段、`SessionRestartCwdResolve` 命令、前端 `RestartCwdGate` 组件保留为协议兼容与防御门（恢复路径永不触发）。
+- 测试看护：`runtime_restart_requires_each_restored_session_to_resolve_cwd_before_work` 改名为 `runtime_restart_keeps_restored_sessions_on_their_stored_cwd_without_a_gate`（断言恢复后无 decision 且 current_dir 保持旧目录）；`missing_workspace_session_uses_locked_fallback_without_losing_metadata_or_history` 改名为 `missing_workspace_session_restores_with_silent_fallback_without_losing_metadata_or_history`（断言静默回退且无 decision）；`local_mailbox_handoff_pending_restart_cwd_decision_is_spooled` 以手动构造的 pending decision 继续看护 `ensure_restart_cwd_resolved` 防御门。
+
 ## 2026-10 Mailbox 动作结果补齐 mail id
 
 - 背景：mailbox 发送工具的 action result 只报告收件地址与超时设置，不返回 mail id；后续已读/超时/丢弃/失败通知以 `[mailbox] 邮件 mail_xxx ...` 形式出现，模型无法把回执与刚发出的邮件对应起来。
