@@ -2792,6 +2792,72 @@ fn user_supplement_still_renders_as_user_supplement() {
 }
 
 #[test]
+fn mailbox_address_is_restated_once_after_compaction_and_clear() {
+    let dir = tmp_dir("mailbox_address_reminder");
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
+    core.update_session_mailbox_name(Some("mb-test123".to_string()));
+    let reminder = "Current session's mailbox is: mb-test123";
+
+    let first = match core.begin_turn("first task", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(
+        !first.contains(reminder),
+        "a stable address must not be repeated on every request: {first}"
+    );
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"context_compress":{"summary":"mailbox reminder test","keywords":"checkpoint keywords"}}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    assert_eq!(
+        prompt.matches(reminder).count(),
+        1,
+        "the compaction confirmation restates the address once: {prompt}"
+    );
+
+    let next_turn = match core.begin_turn("second task", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        next_turn.matches(reminder).count(),
+        1,
+        "the address must not be restated again on later turns: {next_turn}"
+    );
+
+    core.clear_dynamic_context();
+    let after_clear = match core.begin_turn("after clear", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        after_clear.matches(reminder).count(),
+        1,
+        "a cleared context restates the address once: {after_clear}"
+    );
+    let later = match core.begin_turn("later turn", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        later.matches(reminder).count(),
+        1,
+        "the one-shot reminder must not repeat: {later}"
+    );
+}
+
+#[test]
 fn missing_durable_score_does_not_block_valid_actions() {
     let dir = tmp_dir("durable_ctx_score_not_required");
     fs::write(

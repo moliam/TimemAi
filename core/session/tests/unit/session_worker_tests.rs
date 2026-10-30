@@ -1370,6 +1370,88 @@ fn system_supplement_is_rendered_under_the_runtime_role() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn mailbox_address_is_restated_once_after_context_clear() {
+    let dir = tmp_dir("mailbox_address_reminder_clear");
+    let core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "mailbox_address_reminder_clear", 1),
+        ImmediateFinalPromptCaptureModel {
+            prompts: Arc::clone(&prompts),
+        },
+    );
+    let handle = worker.handle();
+    let _lifecycle = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker should emit lifecycle topic");
+
+    handle
+        .update_mailbox_name(Some("mb-test123".to_string()))
+        .expect("worker should accept the mailbox address");
+    handle
+        .clear_dynamic_context()
+        .expect("worker should clear the dynamic context");
+    handle
+        .run_turn("after clear", None)
+        .expect("worker should accept the first turn after clear");
+    loop {
+        match worker
+            .events()
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first turn after clear should finish")
+        {
+            CoreSessionWorkerEvent::TurnFinished { .. } => break,
+            _ => {}
+        }
+    }
+    handle
+        .run_turn("next turn", None)
+        .expect("worker should accept the following turn");
+    loop {
+        match worker
+            .events()
+            .recv_timeout(Duration::from_secs(5))
+            .expect("following turn should finish")
+        {
+            CoreSessionWorkerEvent::TurnFinished { .. } => break,
+            _ => {}
+        }
+    }
+
+    let captured = prompts.lock().unwrap();
+    assert!(captured.len() >= 2, "both turns must reach the model");
+    let reminder = "Current session's mailbox is: mb-test123";
+    assert_eq!(
+        captured[0].matches(reminder).count(),
+        1,
+        "the first turn after a clear restates the address once"
+    );
+    assert_eq!(
+        rendered_role_before(&captured[0], reminder),
+        "runtime",
+        "the mailbox reminder belongs to the runtime role"
+    );
+    assert_eq!(
+        captured[1].matches(reminder).count(),
+        1,
+        "the reminder must not be repeated on later turns"
+    );
+
+    drop(captured);
+    worker.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 struct PromptCutStressModel {
     call_tx: std::sync::mpsc::Sender<(usize, String)>,
     release_rx: std::sync::mpsc::Receiver<()>,

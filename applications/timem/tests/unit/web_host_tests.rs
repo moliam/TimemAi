@@ -21003,7 +21003,7 @@ fn mailbox_tick_intake_is_idempotent_and_acknowledges_read_mail() {
         .turns
         .iter()
         .any(|turn| turn.user_entries.iter().any(|entry| {
-            entry.text.contains("[mailbox] 收到来自 mb-peer1") && entry.text.contains("msg-mail_a")
+            entry.text.contains("[mailbox] mb-peer1 发来 mail") && entry.text.contains("msg-mail_a")
         })));
 
     crate::mailbox::write_mail(
@@ -21040,7 +21040,9 @@ fn mailbox_tick_delivers_all_mail_immediately() {
         .map(|turn| {
             turn.user_entries
                 .iter()
-                .filter(|entry| entry.text.contains("[mailbox] 收到来自"))
+                .filter(|entry| {
+                    entry.text.contains("[mailbox] ") && entry.text.contains("发来 mail")
+                })
                 .count()
         })
         .sum::<usize>();
@@ -21331,13 +21333,6 @@ fn session_upgraded_from_mailboxless_version_mints_short_address() {
     let mailbox = load_mailbox_state(&state, &session_id).unwrap();
     assert_eq!(mailbox.mailbox_name.len(), 9);
     assert!(mailbox.entries.is_empty());
-    assert_eq!(
-        session_mailbox_briefing(&state, &session_id),
-        Some(format!(
-            "Mailbox: {};[mailbox] 为跨实例邮件,用 mailbox 工具回复。",
-            mailbox.mailbox_name
-        ))
-    );
 }
 
 #[test]

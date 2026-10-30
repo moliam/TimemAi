@@ -409,6 +409,11 @@ enum CoreSessionWorkerCommand {
     TimerSync {
         timers: Vec<agent_core::TimerSpec>,
     },
+    /// Projects the Host-owned mailbox address into Core. Core restates it
+    /// only after a compaction or clear, so this is not prompt noise.
+    MailboxNameUpdated {
+        name: Option<String>,
+    },
     Shutdown,
 }
 
@@ -1037,6 +1042,12 @@ impl CoreSessionWorkerHandle {
     pub fn sync_timers(&self, timers: Vec<agent_core::TimerSpec>) -> Result<(), String> {
         self.command_tx
             .send(CoreSessionWorkerCommand::TimerSync { timers })
+            .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    pub fn update_mailbox_name(&self, name: Option<String>) -> Result<(), String> {
+        self.command_tx
+            .send(CoreSessionWorkerCommand::MailboxNameUpdated { name })
             .map_err(|_| "core_session_worker_stopped".to_string())
     }
 
@@ -1948,6 +1959,7 @@ impl CoreSessionWorker {
                     | CoreSessionWorkerCommand::ClearContext
                     | CoreSessionWorkerCommand::ImportContext { .. }
                     | CoreSessionWorkerCommand::TimerSync { .. }
+                    | CoreSessionWorkerCommand::MailboxNameUpdated { .. }
                         if shutdown_requested.load(Ordering::SeqCst) =>
                     {
                         break;
@@ -2302,6 +2314,9 @@ impl CoreSessionWorker {
                     }
                     CoreSessionWorkerCommand::TimerSync { timers } => {
                         core.replace_timers(timers);
+                    }
+                    CoreSessionWorkerCommand::MailboxNameUpdated { name } => {
+                        core.update_session_mailbox_name(name);
                     }
                     CoreSessionWorkerCommand::ExportContext { result_tx } => {
                         let _ = result_tx.send(Ok(core.export_dynamic_context()));

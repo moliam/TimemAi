@@ -9951,32 +9951,16 @@ fn mailbox_terminal_notice(sent: &MailboxEntry) -> Option<String> {
         return None;
     }
     let text = match sent.state.as_str() {
-        "read" => format!("[mailbox] 邮件 {} 已被 {} 读取。", sent.id, sent.peer),
+        "read" => format!("[mailbox] 邮件 {} 已被 {} 读取", sent.id, sent.peer),
         "timeout" => format!(
-            "[mailbox] 邮件 {} 等待 {} 已读超时;对方尚未确认读取,可按需重发。",
+            "[mailbox] 邮件 {} 未被 {} 读取（已读超时）",
             sent.id, sent.peer
         ),
-        "discarded" => format!(
-            "[mailbox] 邮件 {} 被 {} 丢弃,未读取;可按需重发。",
-            sent.id, sent.peer
-        ),
-        "failed" => format!(
-            "[mailbox] 邮件 {} 投递到 {} 失败,未读取。",
-            sent.id, sent.peer
-        ),
+        "discarded" => format!("[mailbox] 邮件 {} 被 {} 丢弃（未读取）", sent.id, sent.peer),
+        "failed" => format!("[mailbox] 邮件 {} 投递到 {} 失败", sent.id, sent.peer),
         _ => return None,
     };
     Some(text)
-}
-
-/// Injected into every model request's additional context so the session
-/// always knows its own mailbox address, even after context compression.
-fn session_mailbox_briefing(state: &AppState, session_id: &str) -> Option<String> {
-    let mailbox = load_mailbox_state(state, session_id).ok()?;
-    Some(format!(
-        "Mailbox: {};[mailbox] 为跨实例邮件,用 mailbox 工具回复。",
-        mailbox.mailbox_name
-    ))
 }
 
 const MAILBOX_SCHEDULER_INTERVAL: std::time::Duration = std::time::Duration::from_millis(600);
@@ -10172,10 +10156,7 @@ fn mailbox_tick(state: &AppState) {
                     continue;
                 }
             };
-            let prompt = format!(
-                "[mailbox] 收到来自 {} 的 mail:\n{}\n(可用 mailbox 工具回复对方。)",
-                mail.from, mail.msg
-            );
+            let prompt = format!("[mailbox] {} 发来 mail:\n{}", mail.from, mail.msg);
             if deliver_mailbox_prompt(state, &session_id, &prompt, "mailbox").is_ok() {
                 mailbox.entries[index].state = "read".to_string();
                 changed = true;
@@ -10303,6 +10284,18 @@ fn read_local_mailbox_name(state: &AppState, session_id: &str) -> Option<String>
         .map(std::string::ToString::to_string)
 }
 
+/// Mirrors the Host-owned mailbox address into the worker so Core can restate
+/// it once after a compaction or a context clear. Read-only: a session that
+/// never used its mailbox is not minted here.
+fn sync_worker_mailbox_name(
+    state: &AppState,
+    session_id: &str,
+    worker: &CoreSessionWorkerHandle,
+) -> Result<(), String> {
+    let name = read_local_mailbox_name(state, session_id);
+    worker.update_mailbox_name(name)
+}
+
 /// Resolves a mailbox name to a session of this very instance, if any.
 fn find_local_session_by_mailbox(state: &AppState, mailbox_name: &str) -> Option<String> {
     let session_ids: Vec<String> = {
@@ -10324,10 +10317,7 @@ fn deliver_local_mailbox_mail(
     recipient_session_id: &str,
     mail: &MemMail,
 ) -> Result<(), String> {
-    let prompt = format!(
-        "[mailbox] 收到来自 {} 的 mail:\n{}\n(可用 mailbox 工具回复对方。)",
-        mail.from, mail.msg
-    );
+    let prompt = format!("[mailbox] {} 发来 mail:\n{}", mail.from, mail.msg);
     deliver_mailbox_prompt(state, recipient_session_id, &prompt, "mailbox")?;
     let mut mailbox = load_mailbox_state(state, recipient_session_id)
         .map_err(|error| format!("recipient_mailbox_state_load_failed:{error}"))?;
@@ -10800,12 +10790,8 @@ fn send_queued_message_now(
     };
     let uploaded_context = uploaded_files_context(&item.payload.attachments, spec);
     let role_context = worker_roles_context(&item.payload.worker_roles);
-    let mailbox_briefing = session_mailbox_briefing(state, session_id);
-    let additional_context = combine_additional_contexts([
-        uploaded_context.as_deref(),
-        role_context.as_deref(),
-        mailbox_briefing.as_deref(),
-    ]);
+    let additional_context =
+        combine_additional_contexts([uploaded_context.as_deref(), role_context.as_deref()]);
     let mut appended = None;
     let accepted = worker.try_add_user_supplement_with_context_and_command_id_after(
         item.payload.text.clone(),
@@ -11434,6 +11420,7 @@ fn try_append_turn_supplement_with_kind(
         }),
     );
     let worker_handle = primary_worker_handle(state, session_id)?;
+    sync_worker_mailbox_name(state, session_id, &worker_handle)?;
     let selected_attachments = {
         let sessions = state
             .sessions
@@ -11462,12 +11449,8 @@ fn try_append_turn_supplement_with_kind(
     };
     let uploaded_context = uploaded_files_context(&selected_attachments, spec);
     let role_context = worker_roles_context(&worker_roles);
-    let mailbox_briefing = session_mailbox_briefing(state, session_id);
-    let additional_context = combine_additional_contexts([
-        uploaded_context.as_deref(),
-        role_context.as_deref(),
-        mailbox_briefing.as_deref(),
-    ]);
+    let additional_context =
+        combine_additional_contexts([uploaded_context.as_deref(), role_context.as_deref()]);
     let mut appended_turn = None;
     let system_input = entry_kind_is_system_input(entry_kind);
     let before_enqueue = || {
@@ -12180,6 +12163,7 @@ fn submit_turn_with_selected_attachments_and_kind(
     );
     let enqueue_started = std::time::Instant::now();
     let worker = primary_worker_handle(state, session_id)?;
+    sync_worker_mailbox_name(state, session_id, &worker)?;
     let additional_context =
         session_context_with_roles(state, session_id, &attachments, &worker_roles)?;
     let enqueue_result = if entry_kind == "resume_directly" {
@@ -12335,6 +12319,7 @@ fn resolve_work_instruction_decision(
         }
     }
     let worker = primary_worker_handle(state, session_id)?;
+    sync_worker_mailbox_name(state, session_id, &worker)?;
     let additional_context = session_context_with_roles(
         state,
         session_id,

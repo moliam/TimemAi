@@ -9,7 +9,8 @@ description: |
   mailbox history. Your address is automatically signed on outgoing mail, so
   the recipient can reply without asking. Mailboxes work across timem
   instances on this machine. Each session owns exactly one globally unique
-  mailbox name (stated in the runtime prompt, e.g. `mb-3ybe2`).
+  mailbox name (e.g. `mb-3ybe2`); it is signed automatically on outgoing mail,
+  and `list` reports it as `Your mailbox: ...` when you need it.
 
   Actions (the `action` parameter):
   - `send` (default): deliver mail into another mailbox. Delivery is

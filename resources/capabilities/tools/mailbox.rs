@@ -94,16 +94,31 @@ fn mailbox_send_request_id() -> String {
     format!("mailbox_send_{:016x}", u64::from_le_bytes(random))
 }
 
+/// The session's own address, read from the same host-owned file as the mail
+/// index. `list` surfaces it on demand, so the prompt no longer has to carry
+/// a mailbox note on every request.
+fn mailbox_own_name(core: &AgentCore) -> Option<String> {
+    let raw = std::fs::read_to_string(mailbox_json_path(core)?).ok()?;
+    let state = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    let name = str_value(&state, "mailbox_name");
+    (!name.is_empty()).then_some(name)
+}
+
 fn execute_list(core: &AgentCore, action: &ParsedAction) -> ActionOutcome {
     let count = list_count(action);
     let rows = load_mail_rows(core, None, Some(count));
+    let own = mailbox_own_name(core)
+        .map(|name| format!("Your mailbox: {name}\n"))
+        .unwrap_or_default();
     if rows.is_empty() {
-        return ActionOutcome::completed("Action result: mailbox\nmailbox is empty: no mail yet");
+        return ActionOutcome::completed(format!(
+            "Action result: mailbox\n{own}mailbox is empty: no mail yet"
+        ));
     }
     let total = rows.len();
     let shown = total.min(count);
     let mut text = format!(
-        "Action result: mailbox\nMost recent {shown} of {total} mails (in + out), newest first:"
+        "Action result: mailbox\n{own}Most recent {shown} of {total} mails (in + out), newest first:"
     );
     for row in rows.iter().take(shown) {
         text.push('\n');

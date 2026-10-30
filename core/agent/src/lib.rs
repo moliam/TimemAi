@@ -2030,6 +2030,13 @@ pub struct AgentCore {
     /// Memo forcibly closed by the runtime when the user stopped/interrupted
     /// the turn. The note is injected once at the start of the next turn.
     pending_interrupted_memo_note: Option<String>,
+    /// Host-provided mailbox address. It is deliberately absent from every
+    /// request: restating it once after a compaction or a context clear is
+    /// enough for the model to know where it can be reached.
+    session_mailbox_name: Option<String>,
+    /// Set by compaction or context clear so the next submission restates the
+    /// mailbox address exactly once.
+    pending_mailbox_reminder: bool,
     /// Memo text deleted during the current turn. Task finish in the same
     /// turn is challenged once (models may delete and immediately declare
     /// victory without genuinely re-checking the goal).
@@ -2152,6 +2159,8 @@ impl AgentCore {
             native_exchanges: Vec::new(),
             turn_finished_summary: None,
             active_memo: None,
+            session_mailbox_name: None,
+            pending_mailbox_reminder: false,
             timers: Vec::new(),
             memo_finish_guard_tokens: MEMO_FINISH_GUARD_TOKEN_CAP,
             pending_forcible_memo_note: None,
@@ -3450,6 +3459,8 @@ impl AgentCore {
     }
 
     pub fn clear_dynamic_context(&mut self) {
+        // A cleared context loses the address; the next submission restates it.
+        self.pending_mailbox_reminder = self.session_mailbox_name.is_some();
         self.deltas.clear();
         self.native_exchanges.clear();
         self.pending_native_exchange = None;
@@ -3718,6 +3729,25 @@ impl AgentCore {
     /// Confirmation line appended to the post-compression runtime slice so
     /// the compacted context still knows which timers will fire. Each entry
     /// carries created_by so user-created timers stay attributable.
+    /// Host updates the session's mailbox address. No prompt text is emitted
+    /// here: Core restates it only after a compaction or a context clear, so a
+    /// stable address is not repeated request after request.
+    pub fn update_session_mailbox_name(&mut self, name: Option<String>) {
+        let name = name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
+        if self.session_mailbox_name == name {
+            return;
+        }
+        self.session_mailbox_name = name;
+    }
+
+    fn mailbox_reminder_line(&self) -> Option<String> {
+        self.session_mailbox_name
+            .as_ref()
+            .map(|name| format!("Current session's mailbox is: {name}"))
+    }
+
     pub(crate) fn active_timers_confirmation_line(&self) -> String {
         if self.timers.is_empty() {
             return String::new();
@@ -3862,6 +3892,17 @@ impl AgentCore {
                 (PromptComponentRole::user(), "user_question", "user_input")
             };
             self.submit_prompt_component(role, kind, text, source);
+        }
+        if self.pending_mailbox_reminder {
+            if let Some(line) = self.mailbox_reminder_line() {
+                self.submit_prompt_component(
+                    PromptComponentRole::system(),
+                    "runtime_note",
+                    line,
+                    "runtime",
+                );
+            }
+            self.pending_mailbox_reminder = false;
         }
         if should_memory_precheck {
             let result = self.runtime_memory_precheck(user_input, 5);
@@ -4409,13 +4450,21 @@ impl AgentCore {
             // Timers survive compaction; restate them so the compacted
             // context still expects their prompts to arrive later.
             let timers_line = self.active_timers_confirmation_line();
+            // The compacted context no longer carries the mailbox address;
+            // restate it once in this runtime confirmation instead of on every
+            // request.
+            let mailbox_line = self
+                .mailbox_reminder_line()
+                .map(|line| format!("\n{line}"))
+                .unwrap_or_default();
             slices.push((
                 "context_compressed".to_string(),
                 format!(
-                    "context compressed successfully.\nCWD: {}{memo_line}{timers_line}",
+                    "context compressed successfully.\nCWD: {}{memo_line}{timers_line}{mailbox_line}",
                     self.current_prompt_cwd.display()
                 ),
             ));
+            self.pending_mailbox_reminder = false;
         }
         if !parsed.context_compresses.is_empty() && !compacted_successfully {
             // context_compress is a barrier: later actions were authored against the
