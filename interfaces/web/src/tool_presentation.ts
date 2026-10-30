@@ -200,3 +200,51 @@ export function selfToolPresentation(
   if (typeof input.new_path !== "string" || !input.new_path.trim()) return;
   return { kind: "change_cwd", path: input.new_path.trim() };
 }
+
+export type MailboxPresentation =
+  | { kind: "send"; to: string; msg: string }
+  | { kind: "read"; mailId: string }
+  | { kind: "search"; query: string }
+  | { kind: "list" };
+
+const MAILBOX_KNOWN = new Set([
+  "action", "to", "msg", "query", "mail_id", "count",
+  "queue_timeout", "resp_timeout", "max_wait",
+]);
+
+export function mailboxPresentation(
+  action: string,
+  input: unknown,
+): MailboxPresentation | undefined {
+  if (action !== "mailbox" || !record(input)) return;
+  if (Object.keys(input).some(key => !MAILBOX_KNOWN.has(key))) return;
+  if (input.count !== undefined
+    && (typeof input.count !== "number" || !Number.isSafeInteger(input.count)
+      || input.count < 1 || input.count > 100)) return;
+  const op = input.action === undefined ? "send" : input.action;
+  if (op === "send") {
+    if (typeof input.to !== "string" || !input.to.trim()) return;
+    if (typeof input.msg !== "string" || !input.msg.trim()) return;
+    if (input.query !== undefined || input.mail_id !== undefined
+      || input.count !== undefined) return;
+    return { kind: "send", to: input.to.trim(), msg: input.msg };
+  }
+  if (op === "read") {
+    if (typeof input.mail_id !== "string" || !input.mail_id.trim()) return;
+    if (input.to !== undefined || input.msg !== undefined
+      || input.query !== undefined || input.count !== undefined) return;
+    return { kind: "read", mailId: input.mail_id.trim() };
+  }
+  if (op === "search") {
+    if (typeof input.query !== "string" || !input.query.trim()) return;
+    if (input.to !== undefined || input.msg !== undefined
+      || input.mail_id !== undefined) return;
+    return { kind: "search", query: input.query };
+  }
+  if (op === "list") {
+    if (input.to !== undefined || input.msg !== undefined
+      || input.query !== undefined || input.mail_id !== undefined) return;
+    return { kind: "list" };
+  }
+  return;
+}

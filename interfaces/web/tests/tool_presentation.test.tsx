@@ -1,12 +1,69 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { isMemorySearch, memorySearchPresentation, readFilePresentation, runBashEditPresentation, selfToolPresentation, timerPresentation, timerDelayParts, formatTimerAt } from "../src/tool_presentation";
-import { MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, readFileRangeLabel, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation, TimerToolIcon, TimerInvocation } from "../src/tool_invocation";
+import { isMemorySearch, mailboxPresentation, memorySearchPresentation, readFilePresentation, runBashEditPresentation, selfToolPresentation, timerPresentation, timerDelayParts, formatTimerAt } from "../src/tool_presentation";
+import { MailboxIcon, MailboxInvocation, MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, readFileRangeLabel, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation, TimerToolIcon, TimerInvocation } from "../src/tool_invocation";
 import { activityFromTopic } from "../src/view_model";
 import type { CoreTopicEvent } from "../src/protocol";
 import { t } from "../src/i18n";
 
 const input = { ender: { line_nr: 15244 }, path: "applications/timem/tests/unit/web_host_tests.rs", starter: { line_nr: 15190 } };
+describe("mailbox tool presentation", () => {
+  it("renders a send invocation as action label plus separate body line", () => {
+    const mail = mailboxPresentation("mailbox", { to: "mb-rxtjar", msg: "你好，请查收" })!;
+    expect(mail).toEqual({ kind: "send", to: "mb-rxtjar", msg: "你好，请查收" });
+    const html = renderToStaticMarkup(<><MailboxIcon /><MailboxInvocation mailbox={mail} /></>);
+    expect(html).toContain("lucide-mail");
+    expect(html).toContain("mailbox-tool-action");
+    expect(html).toContain("mailbox-tool-body");
+    expect(html).toContain("mb-rxtjar");
+    expect(html).toContain("你好，请查收");
+    expect(html).not.toContain("msg=");
+    expect(html).not.toContain("&quot;to&quot;");
+  });
+
+  it("defaults a missing action to send", () => {
+    expect(mailboxPresentation("mailbox", { to: "mb-x", msg: "hi" })).toEqual({
+      kind: "send",
+      to: "mb-x",
+      msg: "hi",
+    });
+  });
+
+  it("describes read, search, and list actions without raw parameter dumps", () => {
+    const read = mailboxPresentation("mailbox", { action: "read", mail_id: "mail_7a3cvr" })!;
+    expect(read).toEqual({ kind: "read", mailId: "mail_7a3cvr" });
+    const readHtml = renderToStaticMarkup(<MailboxInvocation mailbox={read} />);
+    expect(readHtml).not.toContain("mail_id=");
+    const search = mailboxPresentation("mailbox", { action: "search", query: "部署" })!;
+    expect(search).toEqual({ kind: "search", query: "部署" });
+    expect(renderToStaticMarkup(<MailboxInvocation mailbox={search} />)).toContain("部署");
+    const list = mailboxPresentation("mailbox", { action: "list", count: 20 })!;
+    expect(list).toEqual({ kind: "list" });
+    expect(renderToStaticMarkup(<MailboxInvocation mailbox={list} />)).not.toContain("count");
+  });
+
+  it.each([
+    null, [], {},
+    { to: "mb-x" }, { msg: "hi" },
+    { to: "", msg: "hi" }, { to: "mb-x", msg: "" },
+    { to: "mb-x", msg: "hi", query: "x" },
+    { to: "mb-x", msg: "hi", mail_id: "m1" },
+    { to: "mb-x", msg: "hi", count: 5 },
+    { to: "mb-x", msg: "hi", unknown: 1 },
+    { action: "read" }, { action: "read", mail_id: "" },
+    { action: "read", mail_id: "m1", query: "x" },
+    { action: "search" }, { action: "search", query: "" },
+    { action: "search", query: "x", count: 0 },
+    { action: "search", query: "x", count: 101 },
+    { action: "list", count: 0 },
+    { action: "list", to: "mb-x" },
+    { action: "bogus", to: "mb-x" },
+  ])("falls back for invalid or unknown inputs: %j", value => {
+    expect(mailboxPresentation("mailbox", value)).toBeUndefined();
+  });
+});
+
+
 describe("structured built-in tool presentation", () => {
   it("uses structured selectors independently of parameter order", () => {
     const file = readFilePresentation("readfile", input)!;

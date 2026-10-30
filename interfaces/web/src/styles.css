@@ -6132,12 +6132,18 @@ body.workspace-modal-open .app-shell { user-select: none; }
 /* Structured readfile previews share one compact presentation in both modes. */
 .file-tool-icon, .bash-edit-icon, .memory-search-icon, .memory-tool-icon, .self-tool-icon, .tool-failure-icon, .timer-tool-icon { display: inline-flex; align-items: center; vertical-align: middle; }
 .timer-tool-icon { color: #8bc8ba; }
+/* Mailbox tool invocations keep the human-readable action on the head line
+   and the mail body on its own lighter line, mirroring system bubbles. */
+.mailbox-tool-preview { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.mailbox-tool-preview .mailbox-tool-action { max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.mailbox-tool-preview .mailbox-tool-body { max-width: 100%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 10.5px; font-weight: 300; opacity: 0.85; }
 .timer-tool-preview { color: #a8c9d7; overflow-wrap: anywhere; }
 .timer-tool-preview + .tool-activity-timing { margin-left: 6px; }
 .file-tool-preview { min-width: 0; display: flex; align-items: center; gap: 10px; color: var(--text-secondary, #a3a3a3); font-family: var(--agent-other-font), var(--agent-chinese-font), sans-serif; font-size: 11px; line-height: 1.5; }
 .tool-activity .file-tool-preview { grid-column: 3; width: 100%; }
 .stream-tool-head > .file-tool-preview,
 .stream-tool-head > .timer-tool-preview { flex: 1; }
+.stream-tool-head > .mailbox-tool-preview { flex: 1; }
 .file-tool-path { min-width: 0; display: flex; flex: 1 1 auto; overflow: hidden; white-space: nowrap; }
 .file-tool-directory { min-width: 0; overflow: hidden; text-overflow: ellipsis; opacity: .7; }
 .file-tool-name { flex-shrink: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }

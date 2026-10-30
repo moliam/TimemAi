@@ -1,4 +1,4 @@
-import { memorySearchPresentation, readFilePresentation, runBashEditPresentation, selfToolPresentation, timerPresentation } from "./tool_presentation";
+import { mailboxPresentation, memorySearchPresentation, readFilePresentation, runBashEditPresentation, selfToolPresentation, timerPresentation } from "./tool_presentation";
 import type { MarkdownOutlineItem } from "./markdown_outline";
 import {
   Activity,
@@ -2542,6 +2542,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         readfile: readFilePresentation(action, redactedInput),
         run_bash_edit: runBashEditPresentation(action, redactedInput),
         timer: timerPresentation(action, redactedInput),
+        mailbox: mailboxPresentation(action, redactedInput),
         tool_status: status,
         tool_mode: toolMode,
         elapsed_ms:

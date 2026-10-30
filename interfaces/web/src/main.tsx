@@ -1,5 +1,5 @@
 import { useThrottledValue } from "./use_throttled_value";
-import { MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation, TimerInvocation, TimerToolIcon } from "./tool_invocation";
+import { MailboxIcon, MailboxInvocation, MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation, TimerInvocation, TimerToolIcon } from "./tool_invocation";
 import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
 import { initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, sessionReasoningOptions, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
 import { persistComposerDraftTexts, readComposerDraftTexts } from "./composer_drafts";
@@ -12579,10 +12579,12 @@ function ToolActivityIcon({
     );
   if (activity.run_bash_edit) return <RunBashEditIcon />;
   if (activity.timer) return <TimerToolIcon />;
+  if (activity.mailbox) return <MailboxIcon />;
   if (activity.readfile) return <ReadFileIcon />;
   if (activity.memory_search) return <MemorySearchIcon />;
   if (activity.self_tool) return <SelfToolIcon />;
   if (activity.tool_name === "memmgr") return <MemoryIcon />;
+  if (activity.tool_name === "mailbox") return <MailboxIcon />;
   if ((activity.tool_name || activity.title) === "run_bash")
     return (
       <span className="bash-tool-icon" title={toolName}>
@@ -12601,7 +12603,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
     activity.tool_name || activity.title,
     activity.tool_mode,
   );
-  const structuredInvocation = !!activity.run_bash_edit || !!activity.readfile || !!activity.memory_search || !!activity.self_tool;
+  const structuredInvocation = !!activity.run_bash_edit || !!activity.readfile || !!activity.memory_search || !!activity.self_tool || !!activity.mailbox;
   const code = activity.code?.trim();
   const invocationPreview = !structuredInvocation ? toolInvocationPreview(activity) : undefined;
   const detail = activity.detail?.trim();
@@ -12655,7 +12657,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
         )}
         <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
         {status === "background_running" && <span className="stream-tool-background">(bg)</span>}
-        {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && <span className="stream-tool-command-preview tool-invocation-preview" title={invocationPreview}>{invocationPreview.replace(/\s+/g, " ")}</span>}
+        {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.mailbox ? <MailboxInvocation mailbox={activity.mailbox} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && <span className="stream-tool-command-preview tool-invocation-preview" title={invocationPreview}>{invocationPreview.replace(/\s+/g, " ")}</span>}
         {((running
           ? liveElapsedMs
           : activity.elapsed_ms) !== undefined ||
@@ -14040,7 +14042,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
     const timer = window.setInterval(updateElapsed, 1_000);
     return () => window.clearInterval(timer);
   }, [activity.createdAt, pollingActivity, running, waitBudgetMs]);
-  const structuredInvocation = !!activity.run_bash_edit || !!activity.readfile || !!activity.memory_search || !!activity.self_tool;
+  const structuredInvocation = !!activity.run_bash_edit || !!activity.readfile || !!activity.memory_search || !!activity.self_tool || !!activity.mailbox;
   const invocationPreview = activity.tool_name === "sub_answer" || structuredInvocation ? undefined : toolInvocationPreview(activity);
   const detail = activity.detail?.trim();
   const code = activity.code?.trim();
@@ -14066,7 +14068,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
         </span>
       )}
       <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
-      {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && (
+      {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.mailbox ? <MailboxInvocation mailbox={activity.mailbox} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && (
         <code className="tool-activity-command tool-invocation-preview" title={invocationPreview}>
           {invocationPreview}
         </code>
