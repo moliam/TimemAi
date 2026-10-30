@@ -344,6 +344,9 @@ enum CoreSessionWorkerCommand {
         command_id: Option<String>,
         initial_supplements: Vec<QueuedSupplement>,
         direct_resume: bool,
+        /// True when the Host produced this input itself (mailbox delivery,
+        /// timer fire, queued interruption) instead of the user typing it.
+        system_input: bool,
         cancel_generation: u64,
         turn_images: Vec<agent_core::ModelImagePart>,
     },
@@ -413,6 +416,10 @@ enum CoreSessionWorkerCommand {
 pub struct UnconsumedSupplement {
     #[serde(default)]
     pub manual_context_compress: bool,
+    /// Keeps the runtime origin across a Host handoff so a replayed
+    /// supplement still renders as a runtime observation.
+    #[serde(default)]
+    pub system_input: bool,
     pub text: String,
     pub additional_context: Option<String>,
     pub command_id: Option<String>,
@@ -425,6 +432,7 @@ impl From<QueuedSupplement> for UnconsumedSupplement {
             additional_context: supplement.additional_context,
             command_id: supplement.command_id,
             manual_context_compress: supplement.manual_context_compress,
+            system_input: supplement.system_input,
         }
     }
 }
@@ -443,6 +451,9 @@ struct QueuedSupplement {
     text: String,
     additional_context: Option<String>,
     command_id: Option<String>,
+    /// Runtime-triggered message (mailbox/timer/interruption) instead of a
+    /// user-typed supplement.
+    system_input: bool,
     queued_at: Instant,
     /// Manual context-compression request normalized onto the supplement
     /// shuttle: it rides the dispatch timeout to force the next model
@@ -562,6 +573,7 @@ impl CoreSessionWorkerHandle {
             command_id,
             Vec::new(),
             true,
+            false,
             Vec::new(),
         )
     }
@@ -599,6 +611,7 @@ impl CoreSessionWorkerHandle {
             command_id,
             Vec::new(),
             false,
+            false,
             images,
         )
     }
@@ -634,6 +647,27 @@ impl CoreSessionWorkerHandle {
             command_id,
             supplements,
             false,
+            false,
+            Vec::new(),
+        )
+    }
+
+    /// Starts a Turn whose input the Host generated itself (mailbox delivery,
+    /// timer fire, queued interruption): Core renders it as a runtime
+    /// observation instead of a user question.
+    pub fn run_system_turn_with_command_id(
+        &self,
+        input: impl Into<String>,
+        additional_context: Option<String>,
+        command_id: Option<String>,
+    ) -> Result<(), String> {
+        self.run_turn_batch_with_supplements_kind(
+            input,
+            additional_context,
+            command_id,
+            Vec::new(),
+            false,
+            true,
             Vec::new(),
         )
     }
@@ -645,6 +679,7 @@ impl CoreSessionWorkerHandle {
         command_id: Option<String>,
         supplements: Vec<(agent_core::UserSupplement, Option<String>)>,
         direct_resume: bool,
+        system_input: bool,
         turn_images: Vec<agent_core::ModelImagePart>,
     ) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
@@ -702,11 +737,13 @@ impl CoreSessionWorkerHandle {
                         text: supplement.text,
                         additional_context: supplement.additional_context,
                         command_id,
+                        system_input: supplement.system_input,
                         queued_at: Instant::now(),
                         manual_context_compress: false,
                     })
                     .collect(),
                 direct_resume,
+                system_input,
                 cancel_generation,
                 turn_images,
             })
@@ -775,6 +812,7 @@ impl CoreSessionWorkerHandle {
                     text: supplement.into(),
                     additional_context: None,
                     command_id: None,
+                    system_input: false,
                     queued_at: Instant::now(),
                     manual_context_compress: false,
                 });
@@ -806,6 +844,7 @@ impl CoreSessionWorkerHandle {
             text: supplement.into(),
             additional_context: None,
             command_id: None,
+            system_input: false,
             queued_at: Instant::now(),
             manual_context_compress: false,
         });
@@ -839,6 +878,48 @@ impl CoreSessionWorkerHandle {
     where
         F: FnOnce() -> Result<(), String>,
     {
+        self.enqueue_supplement_with_context_and_command_id_after(
+            supplement,
+            additional_context,
+            command_id,
+            false,
+            before_enqueue,
+        )
+    }
+
+    /// Runtime-triggered supplement (mailbox delivery, timer, interruption).
+    /// It rides the same shuttle as user input so ordering and command-id
+    /// dedup are unchanged, but Core renders it as a runtime observation.
+    pub fn try_add_system_supplement_with_context_and_command_id_after<F>(
+        &self,
+        supplement: impl Into<String>,
+        additional_context: Option<String>,
+        command_id: Option<String>,
+        before_enqueue: F,
+    ) -> Result<bool, String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        self.enqueue_supplement_with_context_and_command_id_after(
+            supplement,
+            additional_context,
+            command_id,
+            true,
+            before_enqueue,
+        )
+    }
+
+    fn enqueue_supplement_with_context_and_command_id_after<F>(
+        &self,
+        supplement: impl Into<String>,
+        additional_context: Option<String>,
+        command_id: Option<String>,
+        system_input: bool,
+        before_enqueue: F,
+    ) -> Result<bool, String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
         let mut mailbox = self
             .supplement_mailbox
             .lock()
@@ -867,6 +948,7 @@ impl CoreSessionWorkerHandle {
             text: supplement.into(),
             additional_context,
             command_id,
+            system_input,
             queued_at: Instant::now(),
             manual_context_compress: false,
         });
@@ -899,6 +981,7 @@ impl CoreSessionWorkerHandle {
             text: String::new(),
             additional_context: None,
             command_id: None,
+            system_input: false,
             queued_at: Instant::now(),
             manual_context_compress: true,
         });
@@ -1875,6 +1958,7 @@ impl CoreSessionWorker {
                         command_id,
                         initial_supplements,
                         direct_resume,
+                        mut system_input,
                         cancel_generation: command_generation,
                         turn_images,
                     } => {
@@ -1924,6 +2008,24 @@ impl CoreSessionWorker {
                                 let mut turn_failover = model_service_failover.clone();
                                 let main_outcome = if direct_resume {
                                     run_direct_resume_turn_with_model_client_and_failover(
+                                        &mut core,
+                                        &mut config,
+                                        &mut turn_failover,
+                                        TurnInput {
+                                            input: &input,
+                                            session: &identity.session_id,
+                                            audit_file: &workspace.audit_file,
+                                            runtime: &workspace.runtime,
+                                            run_bash_target: &workspace.run_bash_target,
+                                            additional_context: additional_context.as_deref(),
+                                            images: &turn_images,
+                                        },
+                                        &mut ui,
+                                        Some(&mut profiler),
+                                        &mut model_client,
+                                    )
+                                } else if system_input {
+                                    agent_core::run_system_turn_with_model_client_and_failover(
                                         &mut core,
                                         &mut config,
                                         &mut turn_failover,
@@ -1999,6 +2101,10 @@ impl CoreSessionWorker {
                                     std::iter::once(Some("These user messages arrived while the previous response was being finalized. Address them before finalizing again."))
                                         .chain(supplement_contexts.into_iter().map(Some)),
                                 );
+                                // A continuation keeps the runtime origin only when
+                                // every batched message came from the runtime.
+                                system_input =
+                                    supplements.iter().all(|supplement| supplement.system_input);
                             };
                             ui.current_turn_active = None;
                             drop(working);
@@ -2996,10 +3102,11 @@ impl WorkerTurnUi {
                 self.manual_compact_requested.store(true, Ordering::SeqCst);
                 continue;
             }
-            supplements.push(agent_core::UserSupplement::new(
-                queued.text,
-                queued.additional_context,
-            ));
+            supplements.push(if queued.system_input {
+                agent_core::UserSupplement::runtime(queued.text, queued.additional_context)
+            } else {
+                agent_core::UserSupplement::new(queued.text, queued.additional_context)
+            });
         }
         supplements
     }
@@ -3046,6 +3153,7 @@ impl WorkerTurnUi {
                 additional_context: None,
                 command_id: None,
                 manual_context_compress: true,
+                system_input: false,
             });
         }
         supplements

@@ -232,7 +232,7 @@ pub use session_runtime::{
     cancelled_turn_result, run_direct_resume_turn, run_direct_resume_turn_with_model_client,
     run_direct_resume_turn_with_model_client_and_failover, run_session_turn,
     run_session_turn_with_model_client, run_session_turn_with_model_client_and_failover,
-    ModelClient,
+    run_system_turn_with_model_client_and_failover, ModelClient,
 };
 use shell_exec::ShellJobManager;
 pub use shell_exec::{RunningShellJob, ShellJobExitUpdate};
@@ -3741,11 +3741,24 @@ impl AgentCore {
     }
 
     pub fn begin_direct_resume_turn(&mut self, supporting_context: Option<&str>) -> CoreStep {
-        self.begin_turn_with_input_kind("", supporting_context, true)
+        self.begin_turn_with_input_kind("", supporting_context, true, false)
     }
 
     pub fn begin_turn(&mut self, user_input: &str, supporting_context: Option<&str>) -> CoreStep {
-        self.begin_turn_with_input_kind(user_input, supporting_context, false)
+        self.begin_turn_with_input_kind(user_input, supporting_context, false, false)
+    }
+
+    /// Starts a Turn whose input was produced by the runtime itself (mailbox
+    /// delivery, timer fire, queued interruption). Such input must never be
+    /// presented as a `USER` question: it is a runtime observation the model
+    /// reacts to, so it renders under the runtime role and skips the
+    /// user-question admission work (memory precheck).
+    pub fn begin_runtime_turn(
+        &mut self,
+        runtime_input: &str,
+        supporting_context: Option<&str>,
+    ) -> CoreStep {
+        self.begin_turn_with_input_kind(runtime_input, supporting_context, false, true)
     }
 
     fn begin_turn_with_input_kind(
@@ -3753,6 +3766,7 @@ impl AgentCore {
         user_input: &str,
         supporting_context: Option<&str>,
         direct_resume: bool,
+        system_input: bool,
     ) -> CoreStep {
         self.current_round = 0;
         self.round_budget = self.configured_round_budget;
@@ -3804,7 +3818,8 @@ impl AgentCore {
                 "runtime",
             );
         }
-        let should_memory_precheck = !text.is_empty()
+        let should_memory_precheck = !system_input
+            && !text.is_empty()
             && supporting_context
                 .map(should_run_memory_precheck)
                 .unwrap_or(false);
@@ -3833,16 +3848,20 @@ impl AgentCore {
         // Supporting context describes state already present at turn admission
         // (notably restart/history notices), so it precedes the user input.
         if direct_resume || !text.is_empty() {
-            self.submit_prompt_component(
-                PromptComponentRole::user(),
-                if direct_resume {
-                    "user_resume_directly"
-                } else {
-                    "user_question"
-                },
-                text,
-                "user_input",
-            );
+            // Runtime-triggered input keeps its structured origin: it must not
+            // masquerade as a user question in the rendered prompt.
+            let (role, kind, source) = if system_input {
+                (PromptComponentRole::system(), "runtime_input", "runtime")
+            } else if direct_resume {
+                (
+                    PromptComponentRole::user(),
+                    "user_resume_directly",
+                    "user_input",
+                )
+            } else {
+                (PromptComponentRole::user(), "user_question", "user_input")
+            };
+            self.submit_prompt_component(role, kind, text, source);
         }
         if should_memory_precheck {
             let result = self.runtime_memory_precheck(user_input, 5);
@@ -3937,12 +3956,12 @@ impl AgentCore {
                     "host_context",
                 );
             }
-            self.submit_prompt_component(
-                PromptComponentRole::user(),
-                "user_supplement",
-                text,
-                "user_input",
-            );
+            let (role, kind, source) = if supplement.system_input {
+                (PromptComponentRole::system(), "runtime_input", "runtime")
+            } else {
+                (PromptComponentRole::user(), "user_supplement", "user_input")
+            };
+            self.submit_prompt_component(role, kind, text, source);
             added = true;
         }
         added.then(|| CoreStep::NeedModel {

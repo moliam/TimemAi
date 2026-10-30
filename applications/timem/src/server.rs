@@ -909,6 +909,8 @@ struct PendingWorkInstructionTurn {
     command_id: Option<String>,
     worker_roles: Vec<WorkerRole>,
     direct_resume: bool,
+    /// Preserves the runtime origin across the Host decision delay.
+    entry_kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -8024,6 +8026,16 @@ fn web_message_from_history_record(record: ChatHistoryRecord) -> Option<WebChatM
     }
 }
 
+/// Entry kinds the runtime itself produces (mailbox delivery, timer fire,
+/// queued interruption). Their text must render as a runtime observation, not
+/// as a user question.
+fn entry_kind_is_system_input(kind: &str) -> bool {
+    matches!(
+        kind,
+        "mailbox" | "mailbox_status" | "timer" | "queued_interrupted"
+    )
+}
+
 fn history_user_entry_kind(kind: Option<&str>) -> &str {
     match kind {
         Some(
@@ -11457,23 +11469,34 @@ fn try_append_turn_supplement_with_kind(
         mailbox_briefing.as_deref(),
     ]);
     let mut appended_turn = None;
-    let accepted = worker_handle.try_add_user_supplement_with_context_and_command_id_after(
-        text.clone(),
-        additional_context,
-        command_id.map(str::to_string),
-        || {
-            appended_turn = Some(append_turn_supplement_with_selected_attachments(
-                state,
-                session_id,
-                text.clone(),
-                attachment_ids,
-                command_id,
-                worker_roles.clone(),
-                entry_kind,
-            )?);
-            Ok(())
-        },
-    )?;
+    let system_input = entry_kind_is_system_input(entry_kind);
+    let before_enqueue = || {
+        appended_turn = Some(append_turn_supplement_with_selected_attachments(
+            state,
+            session_id,
+            text.clone(),
+            attachment_ids,
+            command_id,
+            worker_roles.clone(),
+            entry_kind,
+        )?);
+        Ok(())
+    };
+    let accepted = if system_input {
+        worker_handle.try_add_system_supplement_with_context_and_command_id_after(
+            text.clone(),
+            additional_context,
+            command_id.map(str::to_string),
+            before_enqueue,
+        )?
+    } else {
+        worker_handle.try_add_user_supplement_with_context_and_command_id_after(
+            text.clone(),
+            additional_context,
+            command_id.map(str::to_string),
+            before_enqueue,
+        )?
+    };
     if !accepted {
         state.runtime_log.record(
             "supplement_core_rejected_closed_turn",
@@ -12084,6 +12107,7 @@ fn submit_turn_with_selected_attachments_and_kind(
                 command_id: command_id.map(str::to_string),
                 worker_roles,
                 direct_resume: entry_kind == "resume_directly",
+                entry_kind: entry_kind.to_string(),
             });
         }
         let wire_payload = event.wire_payload();
@@ -12160,6 +12184,12 @@ fn submit_turn_with_selected_attachments_and_kind(
         session_context_with_roles(state, session_id, &attachments, &worker_roles)?;
     let enqueue_result = if entry_kind == "resume_directly" {
         worker.resume_turn_directly_with_command_id(
+            additional_context,
+            command_id.map(str::to_string),
+        )
+    } else if entry_kind_is_system_input(entry_kind) {
+        worker.run_system_turn_with_command_id(
+            text,
             additional_context,
             command_id.map(str::to_string),
         )
@@ -12313,6 +12343,12 @@ fn resolve_work_instruction_decision(
     )?;
     if pending.direct_resume {
         worker.resume_turn_directly_with_command_id(additional_context, pending.command_id)?;
+    } else if entry_kind_is_system_input(&pending.entry_kind) {
+        worker.run_system_turn_with_command_id(
+            pending.text,
+            additional_context,
+            pending.command_id,
+        )?;
     } else {
         let images = turn_image_parts(&pending.attachments)?;
         worker.run_turn_with_command_id_and_images(

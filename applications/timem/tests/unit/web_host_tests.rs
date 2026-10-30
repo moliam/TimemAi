@@ -9175,6 +9175,7 @@ fn failed_unconsumed_handoff_preserves_final_answer_and_pending_supplement() {
         CoreSessionWorkerEvent::UnconsumedSupplements {
             supplements: vec![timem_session::UnconsumedSupplement {
                 manual_context_compress: false,
+                system_input: false,
                 text: "Q2".to_string(),
                 additional_context: None,
                 command_id: None,
@@ -9265,6 +9266,7 @@ fn task_finished_handoff_failure_keeps_unconsumed_supplement_in_memory() {
         CoreSessionWorkerEvent::UnconsumedSupplements {
             supplements: vec![timem_session::UnconsumedSupplement {
                 manual_context_compress: false,
+                system_input: false,
                 text: "late follow-up".to_string(),
                 additional_context: None,
                 command_id: None,
@@ -9361,6 +9363,7 @@ fn normal_completion_hands_unconsumed_supplement_off_before_ordinary_queue() {
         CoreSessionWorkerEvent::UnconsumedSupplements {
             supplements: vec![timem_session::UnconsumedSupplement {
                 manual_context_compress: false,
+                system_input: false,
                 text: "S priority".to_string(),
                 additional_context: Some("RETURNED_CONTEXT_MARKER".to_string()),
                 command_id: Some("supplement-command".to_string()),
@@ -9443,12 +9446,14 @@ fn stopped_primary_turn_preserves_unconsumed_supplements_without_resubmitting() 
     let supplements = vec![
         timem_session::UnconsumedSupplement {
             manual_context_compress: false,
+            system_input: false,
             text: "follow-up one".to_string(),
             additional_context: None,
             command_id: None,
         },
         timem_session::UnconsumedSupplement {
             manual_context_compress: false,
+            system_input: false,
             text: "follow-up two".to_string(),
             additional_context: None,
             command_id: None,
@@ -17966,6 +17971,7 @@ fn task_finished_hands_manual_compact_off_to_direct_resume() {
         CoreSessionWorkerEvent::UnconsumedSupplements {
             supplements: vec![timem_session::UnconsumedSupplement {
                 manual_context_compress: true,
+                system_input: false,
                 text: String::new(),
                 additional_context: None,
                 command_id: None,

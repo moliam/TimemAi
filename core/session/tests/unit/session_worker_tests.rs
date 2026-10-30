@@ -99,6 +99,7 @@ fn manual_compact_marker_drains_into_flag_not_prompt_text() {
         text: "user follow-up".to_string(),
         additional_context: None,
         command_id: None,
+        system_input: false,
         queued_at: Instant::now(),
         manual_context_compress: false,
     });
@@ -106,6 +107,7 @@ fn manual_compact_marker_drains_into_flag_not_prompt_text() {
         text: String::new(),
         additional_context: None,
         command_id: None,
+        system_input: false,
         queued_at: Instant::now(),
         manual_context_compress: true,
     });
@@ -127,6 +129,7 @@ fn manual_compact_marker_uses_short_dispatch_timeout() {
         text: String::new(),
         additional_context: None,
         command_id: None,
+        system_input: false,
         queued_at: Instant::now() - Duration::from_secs(11),
         manual_context_compress: true,
     });
@@ -1181,6 +1184,190 @@ fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
         }
     }
     worker.shutdown().unwrap();
+}
+
+/// Captures every rendered prompt and keeps the first call busy long enough
+/// for a Host supplement to land inside the same turn.
+struct SystemSupplementCaptureModel {
+    prompts: Arc<Mutex<Vec<String>>>,
+    entered_first_call: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ModelClient for SystemSupplementCaptureModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        prompt: &str,
+        _audit_file: &std::path::Path,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        let call_no = {
+            let mut prompts = self.prompts.lock().unwrap();
+            prompts.push(prompt.to_string());
+            prompts.len()
+        };
+        if call_no == 1 {
+            self.entered_first_call
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_millis(200) {
+                if should_cancel() {
+                    return Err("cancelled_by_user".to_string());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        Ok(LlmResponse {
+            tool_calls: Vec::new(),
+            content: r#"{"status":"ALL_FINISHED","final_answer":"SYSTEM_INPUT_OK"}"#.to_string(),
+            model_name: "test-model".to_string(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        })
+    }
+}
+
+/// Closest rendered role heading before `needle`. The prompt itself describes
+/// both role words, so only the nearest preceding heading is evidence.
+fn rendered_role_before(prompt: &str, needle: &str) -> &'static str {
+    let at = prompt.find(needle).expect("needle missing from prompt");
+    let prefix = &prompt[..at];
+    match (prefix.rfind("## USER"), prefix.rfind("## RUNTIME")) {
+        (Some(user), Some(runtime)) if user > runtime => "user",
+        (Some(_), Some(_)) => "runtime",
+        (Some(_), None) => "user",
+        (None, Some(_)) => "runtime",
+        (None, None) => "none",
+    }
+}
+
+#[test]
+fn system_turn_input_is_rendered_under_the_runtime_role() {
+    let dir = tmp_dir("system_turn_runtime_role");
+    let core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "system_turn_runtime_role", 1),
+        ImmediateFinalPromptCaptureModel {
+            prompts: Arc::clone(&prompts),
+        },
+    );
+    let handle = worker.handle();
+    let _lifecycle = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker should emit lifecycle topic");
+
+    handle
+        .run_system_turn_with_command_id("[mailbox] SYSTEM_DELIVERY_SENTINEL", None, None)
+        .expect("worker should accept a runtime-triggered turn");
+
+    loop {
+        match worker
+            .events()
+            .recv_timeout(Duration::from_secs(5))
+            .expect("runtime-triggered turn should finish")
+        {
+            CoreSessionWorkerEvent::TurnFinished { .. } => break,
+            _ => {}
+        }
+    }
+
+    let prompt = prompts
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .expect("model prompt captured");
+    assert_eq!(
+        rendered_role_before(&prompt, "SYSTEM_DELIVERY_SENTINEL"),
+        "runtime",
+        "runtime-triggered input must never render as a user question"
+    );
+    assert!(!prompt.contains("[User input time"));
+
+    worker.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn system_supplement_is_rendered_under_the_runtime_role() {
+    let dir = tmp_dir("system_supplement_runtime_role");
+    let core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let entered_first_call = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "system_supplement_runtime_role", 1),
+        SystemSupplementCaptureModel {
+            prompts: Arc::clone(&prompts),
+            entered_first_call: Arc::clone(&entered_first_call),
+        },
+    );
+    let handle = worker.handle();
+    let _lifecycle = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker should emit lifecycle topic");
+
+    handle
+        .run_turn("USER_TURN_BASE_SENTINEL", None)
+        .expect("worker should accept the user turn");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !entered_first_call.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(Instant::now() < deadline, "first model call never started");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let accepted = handle
+        .try_add_system_supplement_with_context_and_command_id_after(
+            "[mailbox] MAILBOX_SUPPLEMENT_SENTINEL",
+            None,
+            None,
+            || Ok(()),
+        )
+        .expect("system supplement enqueue should not fail");
+    assert!(accepted, "system supplement should be accepted mid-turn");
+
+    loop {
+        match worker
+            .events()
+            .recv_timeout(Duration::from_secs(5))
+            .expect("supplemented turn should finish")
+        {
+            CoreSessionWorkerEvent::TurnFinished { .. } => break,
+            _ => {}
+        }
+    }
+
+    let captured = prompts.lock().unwrap();
+    assert!(
+        captured.len() >= 2,
+        "the system supplement must reach a model request"
+    );
+    assert_eq!(
+        rendered_role_before(&captured[1], "MAILBOX_SUPPLEMENT_SENTINEL"),
+        "runtime",
+        "runtime-triggered supplement must never render as a user question"
+    );
+
+    drop(captured);
+    worker.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 struct PromptCutStressModel {
@@ -6064,6 +6251,7 @@ fn manual_compact_at_finish_is_handed_off_without_waiting_for_user_input() {
                 text: String::new(),
                 additional_context: None,
                 command_id: None,
+                system_input: false,
                 queued_at: Instant::now(),
                 manual_context_compress: true,
             });

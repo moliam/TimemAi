@@ -49,7 +49,8 @@ impl PromptComponentRole {
                 | "user_supplement_context"
                 | "user_supplement_action_dispatch_timeout"
                 | "memo_interrupted_deleted"
-                | "memo_forcibly_deleted" => "runtime_note".to_string(),
+                | "memo_forcibly_deleted"
+                | "runtime_input" => "runtime_note".to_string(),
                 "mcp_capability_catalog" => "mcp_capability_catalog".to_string(),
                 "mcp_capability_update" => "mcp_capability_update".to_string(),
                 _ => "result_of_llm_action".to_string(),
@@ -63,7 +64,7 @@ impl PromptComponentRole {
 /// context, memo deletions), not results of model actions. They render as
 /// `runtime_note` so the action-result heading stays reserved for real
 /// model action results.
-pub(crate) const RUNTIME_SIDEBAND_KINDS: [&str; 8] = [
+pub(crate) const RUNTIME_SIDEBAND_KINDS: [&str; 9] = [
     "running_job_update",
     "job_killed",
     "disk_pressure",
@@ -72,6 +73,7 @@ pub(crate) const RUNTIME_SIDEBAND_KINDS: [&str; 8] = [
     "user_supplement_action_dispatch_timeout",
     "memo_interrupted_deleted",
     "memo_forcibly_deleted",
+    "runtime_input",
 ];
 
 /// True for sideband kinds that must keep the tool-result byte gate at

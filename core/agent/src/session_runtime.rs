@@ -247,6 +247,7 @@ pub fn run_direct_resume_turn_with_model_client(
         model_client,
         None,
         true,
+        false,
         &mut Vec::new(),
     )
 }
@@ -269,6 +270,7 @@ pub fn run_direct_resume_turn_with_model_client_and_failover(
         model_client,
         None,
         true,
+        false,
         failover,
     )
 }
@@ -289,6 +291,7 @@ pub fn run_session_turn_with_model_client(
         profiler,
         model_client,
         None,
+        false,
         false,
         &mut Vec::new(),
     )
@@ -312,6 +315,33 @@ pub fn run_session_turn_with_model_client_and_failover(
         model_client,
         None,
         false,
+        false,
+        failover,
+    )
+}
+
+/// Runs one Turn whose input was produced by the runtime itself (mailbox
+/// delivery, timer fire, queued interruption) instead of typed by the user.
+/// The input renders as a runtime observation, never as a `USER` question.
+pub fn run_system_turn_with_model_client_and_failover(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    failover: &mut Vec<ModelServiceConfig>,
+    request: TurnInput<'_>,
+    ui: &mut dyn TurnUi,
+    profiler: Option<&mut RuntimeProfiler>,
+    model_client: &mut dyn ModelClient,
+) -> TurnOutcome {
+    run_session_turn_with_model_client_and_reminder_override(
+        core,
+        config,
+        request,
+        ui,
+        profiler,
+        model_client,
+        None,
+        false,
+        true,
         failover,
     )
 }
@@ -334,6 +364,7 @@ fn run_session_turn_with_model_client_and_focus_interval(
         profiler,
         model_client,
         Some(focus_reminder_interval),
+        false,
         false,
         &mut Vec::new(),
     )
@@ -420,6 +451,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
     model_client: &mut dyn ModelClient,
     focus_reminder_interval: Option<Duration>,
     direct_resume: bool,
+    system_input: bool,
     failover: &mut Vec<ModelServiceConfig>,
 ) -> TurnOutcome {
     core.set_response_protocol(config.response_protocol);
@@ -467,6 +499,8 @@ fn run_session_turn_with_model_client_and_reminder_override(
         .filter(|context| !context.is_empty());
     let mut step = if direct_resume {
         core.begin_direct_resume_turn(additional_context)
+    } else if system_input {
+        core.begin_runtime_turn(request.input, additional_context)
     } else {
         core.begin_turn(request.input, additional_context)
     };

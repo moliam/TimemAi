@@ -2094,6 +2094,10 @@ pub trait TurnUi {
 pub struct UserSupplement {
     pub text: String,
     pub additional_context: Option<String>,
+    /// True when the runtime produced this message (mailbox delivery, timer,
+    /// queued interruption) instead of the user typing it. It then renders as
+    /// a runtime observation rather than a user supplement.
+    pub system_input: bool,
 }
 
 impl UserSupplement {
@@ -2101,7 +2105,23 @@ impl UserSupplement {
         Self {
             text: text.into(),
             additional_context,
+            system_input: false,
         }
+    }
+
+    /// Runtime-triggered supplement: same shuttle as a user supplement, but a
+    /// different rendered origin.
+    pub fn runtime(text: impl Into<String>, additional_context: Option<String>) -> Self {
+        Self {
+            text: text.into(),
+            additional_context,
+            system_input: true,
+        }
+    }
+
+    pub fn with_system_input(mut self, system_input: bool) -> Self {
+        self.system_input = system_input;
+        self
     }
 }
 

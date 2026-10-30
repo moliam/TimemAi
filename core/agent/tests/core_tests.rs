@@ -2695,6 +2695,102 @@ fn user_supplement_context_is_a_system_delta_before_the_user_text() {
     assert!(prompt[..user].contains("## RUNTIME"));
 }
 
+/// Which rendered role heading owns the text just before `needle`: the prompt
+/// carries both role words in its own structure description, so only the
+/// closest preceding heading is evidence.
+fn rendered_role_of(prompt: &str, needle: &str) -> &'static str {
+    let at = prompt.find(needle).expect("needle missing from prompt");
+    let prefix = &prompt[..at];
+    match (prefix.rfind("## USER"), prefix.rfind("## RUNTIME")) {
+        (Some(user), Some(runtime)) if user > runtime => "user",
+        (Some(_), Some(_)) => "runtime",
+        (Some(_), None) => "user",
+        (None, Some(_)) => "runtime",
+        (None, None) => "none",
+    }
+}
+
+#[test]
+fn runtime_triggered_turn_renders_as_runtime_observation() {
+    let dir = tmp_dir("runtime_triggered_turn_rendering");
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
+
+    let prompt = match core.begin_runtime_turn("MAILBOX_DELIVERY_SENTINEL", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    assert_eq!(
+        rendered_role_of(&prompt, "MAILBOX_DELIVERY_SENTINEL"),
+        "runtime"
+    );
+    assert!(!prompt.contains("[User input time"));
+}
+
+#[test]
+fn user_turn_still_renders_as_user_question() {
+    let dir = tmp_dir("user_turn_rendering");
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
+
+    let prompt = match core.begin_turn("USER_QUESTION_SENTINEL", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    assert_eq!(rendered_role_of(&prompt, "USER_QUESTION_SENTINEL"), "user");
+    assert!(prompt.contains("[User input time"));
+}
+
+#[test]
+fn runtime_supplement_renders_as_runtime_observation() {
+    let dir = tmp_dir("runtime_supplement_rendering");
+    let audit_file = dir.join("audit/action_audit.json");
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
+    let _ = core.begin_turn("initial task", None);
+
+    let prompt = match core
+        .append_user_supplements_with_context_and_audit(
+            vec![UserSupplement::runtime("TIMER_FIRE_SENTINEL", None)],
+            &audit_file,
+            "session_1",
+            "turn_1",
+        )
+        .expect("runtime supplement should produce prompt")
+    {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    assert_eq!(rendered_role_of(&prompt, "TIMER_FIRE_SENTINEL"), "runtime");
+}
+
+#[test]
+fn user_supplement_still_renders_as_user_supplement() {
+    let dir = tmp_dir("user_supplement_rendering");
+    let audit_file = dir.join("audit/action_audit.json");
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
+    let _ = core.begin_turn("initial task", None);
+
+    let prompt = match core
+        .append_user_supplements_with_context_and_audit(
+            vec![UserSupplement::new("USER_SUPPLEMENT_SENTINEL", None)],
+            &audit_file,
+            "session_1",
+            "turn_1",
+        )
+        .expect("supplement should produce prompt")
+    {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    assert_eq!(
+        rendered_role_of(&prompt, "USER_SUPPLEMENT_SENTINEL"),
+        "user"
+    );
+    assert!(prompt.contains("[User input time"));
+}
+
 #[test]
 fn missing_durable_score_does_not_block_valid_actions() {
     let dir = tmp_dir("durable_ctx_score_not_required");
