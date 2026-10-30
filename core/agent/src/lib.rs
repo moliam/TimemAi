@@ -148,15 +148,16 @@ pub use host::{
     CoreSessionState, CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopic,
     CoreTopicEvent, CoreTopicEventSink, CoreTopicStatusHint, CoreWorkInstructionLoadTopic,
     HostDecision, HostDecisionDefault, HostDecisionRequest, LongRunningCommandContinueRequest,
-    NoopTurnUi, OutputExpansionRequest, OutputExpansionResolution, RoundLimitDecisionRequest,
-    RoundLimitResolution, StoppedTurn, TopicReply, TopicReplyError, TurnInput, TurnOutcome,
-    TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi, UserSupplement, CORE_TOPIC_ACTION,
-    CORE_TOPIC_CONTEXT_COMPRESS, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST,
-    CORE_TOPIC_MAILBOX, CORE_TOPIC_MEMO, CORE_TOPIC_MODEL_CAPABILITY_NEGOTIATION,
-    CORE_TOPIC_MODEL_ENDPOINT_FAILOVER, CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE,
-    CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
-    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TIMER,
-    CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    MailSendReply, NoopTurnUi, OutputExpansionRequest, OutputExpansionResolution,
+    RoundLimitDecisionRequest, RoundLimitResolution, StoppedTurn, TopicReply, TopicReplyError,
+    TurnInput, TurnOutcome, TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi,
+    UserSupplement, CORE_TOPIC_ACTION, CORE_TOPIC_CONTEXT_COMPRESS, CORE_TOPIC_LIFECYCLE,
+    CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST, CORE_TOPIC_MAILBOX, CORE_TOPIC_MEMO,
+    CORE_TOPIC_MODEL_CAPABILITY_NEGOTIATION, CORE_TOPIC_MODEL_ENDPOINT_FAILOVER,
+    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST,
+    CORE_TOPIC_ROUND_LIMIT_REQUEST, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP,
+    CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TIMER, CORE_TOPIC_TOOLGEN,
+    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
     DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT, USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT,
 };
 pub use interaction::{
@@ -1340,7 +1341,7 @@ pub trait ActionRuntime {
     /// Sends a mailbox send request to the runtime-owned mailbox ledger and
     /// returns the mail id it assigned. Hosts without a mailbox return None;
     /// callers must not invent an id in that case.
-    fn request_mail_send(&mut self, _event: &host::CoreTopicEvent) -> Option<String> {
+    fn request_mail_send(&mut self, _event: &host::CoreTopicEvent) -> Option<host::MailSendReply> {
         None
     }
 
@@ -3454,10 +3455,18 @@ impl AgentCore {
         // lives in the Host scheduler, so Core state is a projection that
         // must follow the snapshot across restarts.
         self.timers = snapshot.active_timers;
-        // An import restores its own context; the clear-scheduled restatement
-        // does not apply to it.
-        self.pending_runtime_state_reminder = false;
+        // An import restores its own context. The invariant stays: if the
+        // address is known but the restored context lacks it (snapshot taken
+        // before the address was restated), the next request restates it
+        // once; a snapshot that already carries the line stays silent.
         self.restart_notice_restate = None;
+        self.pending_runtime_state_reminder = match self.session_mailbox_name.as_ref() {
+            Some(name) => {
+                let line = format!("Current session's mailbox is: {name}");
+                !self.visible_context_contains_line(&line)
+            }
+            None => false,
+        };
         if let Some(max_seq) = self
             .deltas
             .iter()
@@ -3758,8 +3767,10 @@ impl AgentCore {
     /// the compacted context still knows which timers will fire. Each entry
     /// carries created_by so user-created timers stay attributable.
     /// Host updates the session's mailbox address. No prompt text is emitted
-    /// here: Core restates it only after a compaction or a context clear, so a
-    /// stable address is not repeated request after request.
+    /// here on the steady path. The restating rule is: the address must
+    /// appear at least once in every context lifetime, however that context
+    /// came to be (fresh worker, restored snapshot, post-clear). The one-shot
+    /// reminder fires whenever the visible context does not already carry it.
     pub fn update_session_mailbox_name(&mut self, name: Option<String>) {
         let name = name
             .map(|name| name.trim().to_string())
@@ -3768,6 +3779,28 @@ impl AgentCore {
             return;
         }
         self.session_mailbox_name = name;
+        self.pending_runtime_state_reminder = match self.session_mailbox_name.as_ref() {
+            Some(name) => {
+                let line = format!("Current session's mailbox is: {name}");
+                !self.visible_context_contains_line(&line)
+            }
+            None => false,
+        };
+    }
+
+    fn visible_context_contains_line(&self, line: &str) -> bool {
+        if self
+            .pending_prompt_components
+            .iter()
+            .any(|component| component.content.contains(line))
+        {
+            return true;
+        }
+        self.deltas.iter().any(|delta| {
+            delta.slices.iter().any(|slice| {
+                !delta.hidden_slice_ids.contains(&slice.slice_id) && slice.text.contains(line)
+            })
+        })
     }
 
     fn mailbox_reminder_line(&self) -> Option<String> {

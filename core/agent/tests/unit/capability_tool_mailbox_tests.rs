@@ -10,13 +10,20 @@ impl ActionRuntime for NoopRuntime {
         false
     }
 
-    fn request_mail_send(&mut self, _event: &crate::host::CoreTopicEvent) -> Option<String> {
-        Some("mail_noop01".to_string())
+    fn request_mail_send(
+        &mut self,
+        _event: &crate::host::CoreTopicEvent,
+    ) -> Option<crate::host::MailSendReply> {
+        Some(crate::host::MailSendReply {
+            mail_id: "mail_noop01".to_string(),
+            initially_read: false,
+        })
     }
 }
 
 struct RecordingRuntime {
     topics: Vec<crate::host::CoreTopicEvent>,
+    initially_read: bool,
 }
 
 impl ActionRuntime for RecordingRuntime {
@@ -28,9 +35,15 @@ impl ActionRuntime for RecordingRuntime {
         self.topics.extend_from_slice(events);
     }
 
-    fn request_mail_send(&mut self, event: &crate::host::CoreTopicEvent) -> Option<String> {
+    fn request_mail_send(
+        &mut self,
+        event: &crate::host::CoreTopicEvent,
+    ) -> Option<crate::host::MailSendReply> {
         self.topics.push(event.clone());
-        Some("mail_abc123".to_string())
+        Some(crate::host::MailSendReply {
+            mail_id: "mail_abc123".to_string(),
+            initially_read: self.initially_read,
+        })
     }
 }
 
@@ -238,7 +251,10 @@ fn mailbox_unknown_action_fails_closed() {
 #[test]
 fn mailbox_send_reports_the_runtime_assigned_id() {
     let mut core = mailbox_test_core("send_id");
-    let mut runtime = RecordingRuntime { topics: Vec::new() };
+    let mut runtime = RecordingRuntime {
+        topics: Vec::new(),
+        initially_read: false,
+    };
     let action = ParsedAction {
         action: "mailbox".to_string(),
         name: None,
@@ -266,6 +282,35 @@ fn mailbox_send_reports_the_runtime_assigned_id() {
     assert!(
         request_id.starts_with("mailbox_send_"),
         "request id correlates the runtime reply: {request_id}"
+    );
+}
+
+#[test]
+fn mailbox_send_folds_a_fast_read_receipt_into_the_result() {
+    let mut core = mailbox_test_core("send_consumed");
+    let mut runtime = RecordingRuntime {
+        topics: Vec::new(),
+        initially_read: true,
+    };
+    let action = ParsedAction {
+        action: "mailbox".to_string(),
+        name: None,
+        call_id: "test_call".to_string(),
+        raw_input: json!({"to": "mb-999", "msg": "hello there"}),
+    };
+    let text = match execute_action(&mut core, &action, &mut runtime) {
+        ActionExecution::Completed(outcome) => outcome.text,
+        ActionExecution::NeedsApproval(_) => panic!("mailbox never needs approval"),
+    };
+    assert!(
+        text.contains(
+            "Mail sent to mailbox mb-999 (mail id mail_abc123) and already consumed by receiver."
+        ),
+        "a receipt observed during the send wait must fold into the result: {text}"
+    );
+    assert!(
+        !text.contains("will be notified"),
+        "no follow-up notice promise is needed once consumed: {text}"
     );
 }
 

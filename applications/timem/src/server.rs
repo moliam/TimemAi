@@ -237,6 +237,10 @@ struct AppState {
     restart_public_token: Option<String>,
     mem_mail_runtime: Arc<MemMailRuntime>,
     mailbox_state_cache: Arc<Mutex<HashMap<PathBuf, CachedMailboxState>>>,
+    /// Mail ids whose read receipt is being folded into the send action
+    /// result. mailbox_tick suppresses their terminal notice while watched,
+    /// so the receipt is not delivered twice.
+    mailbox_send_receipt_watch: Arc<Mutex<BTreeSet<(String, String)>>>,
 }
 
 #[derive(Default)]
@@ -2050,6 +2054,7 @@ pub async fn run(
         restart_public_token: token.clone(),
         mem_mail_runtime: Arc::new(MemMailRuntime::default()),
         mailbox_state_cache: Arc::new(Mutex::new(HashMap::new())),
+        mailbox_send_receipt_watch: Arc::new(Mutex::new(BTreeSet::new())),
     };
     // Best-effort removal of stale upgrade backups (older than one day)
     // left next to the executable by previous self upgrades.
@@ -10183,10 +10188,20 @@ fn mailbox_tick(state: &AppState) {
                 changed = true;
             }
         }
+        // Mail ids folded into a send action result must not also surface as
+        // a terminal notice (double delivery).
+        let send_receipt_watched = |mail_id: &str| {
+            state
+                .mailbox_send_receipt_watch
+                .lock()
+                .map(|watch| watch.contains(&(session_id.clone(), mail_id.to_string())))
+                .unwrap_or(false)
+        };
         let notices: Vec<String> = mailbox
             .entries
             .iter()
             .filter(|entry| entry.dir == "out" && entry.state != "sent")
+            .filter(|entry| !send_receipt_watched(&entry.id))
             .filter_map(mailbox_terminal_notice)
             .collect();
         if !notices.is_empty()
@@ -10197,6 +10212,7 @@ fn mailbox_tick(state: &AppState) {
                 .entries
                 .iter_mut()
                 .filter(|entry| entry.dir == "out" && entry.state != "sent" && !entry.notified)
+                .filter(|entry| !send_receipt_watched(&entry.id))
             {
                 sent.notified = true;
                 changed = true;
@@ -10379,11 +10395,20 @@ fn valid_mail_id(value: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
 }
 
+/// Post-send wait for a fast read receipt. Configurable so tests can skip
+/// the window (`TIMEM_MAILBOX_RECEIPT_WAIT_MS=0`) or shorten it.
+fn mailbox_receipt_wait_ms() -> u64 {
+    std::env::var("TIMEM_MAILBOX_RECEIPT_WAIT_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(2000)
+}
+
 fn handle_mailbox_send_topic(
     state: &AppState,
     session_id: &str,
     payload: &serde_json::Value,
-) -> Option<String> {
+) -> Option<(String, bool)> {
     let to = payload["to"].as_str().unwrap_or("").to_string();
     let msg = payload["msg"].as_str().unwrap_or("").to_string();
     let queue_timeout_secs = payload["queue_timeout_secs"]
@@ -10444,12 +10469,24 @@ fn handle_mailbox_send_topic(
     if !unique {
         if provided_mail_id.is_none() {
             eprintln!("[timem_web_warning] mailbox_send_failed to={to:?} reason=mail_id_collision");
-            return Some(mail_id);
+            return Some((mail_id, false));
         }
         // Keep the caller's id so the failure notice matches the action result;
         // never fabricate a body or spool envelope under a duplicate id.
         status = "failed";
     }
+    // Watch the mail id before any delivery attempt: mailbox_tick must
+    // suppress the terminal notice while this handler folds the receipt into
+    // the action result.
+    let watch_registered = if status == "sent" {
+        if let Ok(mut watch) = state.mailbox_send_receipt_watch.lock() {
+            watch.insert((session_id.to_string(), mail_id.clone()))
+        } else {
+            false
+        }
+    } else {
+        false
+    };
     let mail = MemMail {
         id: mail_id.clone(),
         from: sender_mailbox.mailbox_name.clone(),
@@ -10531,7 +10568,51 @@ fn handle_mailbox_send_topic(
             mailbox: mailbox_snapshot(state, &sender_mailbox),
         },
     );
-    Some(mail_id)
+    // Give a fast receiver a moment to consume the mail: fold the read
+    // receipt into the action result instead of a separate [mailbox] notice.
+    let mut initially_read = false;
+    if watch_registered {
+        let deadline = std::time::Instant::now() + Duration::from_millis(mailbox_receipt_wait_ms());
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+            let Ok(mailbox) = load_mailbox_state(state, session_id) else {
+                break;
+            };
+            match mailbox
+                .entries
+                .iter()
+                .find(|entry| entry.dir == "out" && entry.id == mail_id)
+                .map(|entry| entry.state.as_str())
+            {
+                Some("read") => {
+                    initially_read = true;
+                    break;
+                }
+                Some("timeout" | "discarded" | "failed") => break,
+                _ => {}
+            }
+        }
+        // Ordering matters at this boundary: the entry must be marked as
+        // notified (and saved) BEFORE the watch is released. Releasing first
+        // would let mailbox_tick deliver the notice in the gap and duplicate
+        // the receipt that already rides the action result.
+        if initially_read {
+            if let Ok(mut mailbox) = load_mailbox_state(state, session_id) {
+                if let Some(entry) = mailbox
+                    .entries
+                    .iter_mut()
+                    .find(|entry| entry.dir == "out" && entry.id == mail_id)
+                {
+                    entry.notified = true;
+                }
+                let _ = save_mailbox_state(state, session_id, &mailbox);
+            }
+        }
+        if let Ok(mut watch) = state.mailbox_send_receipt_watch.lock() {
+            watch.remove(&(session_id.to_string(), mail_id.clone()));
+        }
+    }
+    Some((mail_id, initially_read))
 }
 
 fn deliver_timer_fire(
@@ -16718,13 +16799,15 @@ fn handle_scoped_worker_event(
                     }
                 }
                 if event.topic.name == CORE_TOPIC_MAILBOX {
-                    let mail_id = handle_mailbox_send_topic(state, session_id, &event.payload);
-                    if let (Some(request_id), Some(mail_id)) = (event.request_id(), mail_id) {
+                    let sent = handle_mailbox_send_topic(state, session_id, &event.payload);
+                    if let (Some(request_id), Some((mail_id, initially_read))) =
+                        (event.request_id(), sent)
+                    {
                         let reply = TopicReply::new(
                             session_id.to_string(),
                             event.topic.name.clone(),
                             HostDecision::Accept,
-                            json!({ "mail_id": mail_id }),
+                            json!({ "mail_id": mail_id, "initially_read": initially_read }),
                         )
                         .with_request_id(request_id);
                         let _ = relay_topic_reply_to_requesting_worker(

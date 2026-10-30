@@ -8241,6 +8241,7 @@ fn routing_test_state() -> AppState {
         restart_public_token: None,
         mem_mail_runtime: Arc::new(MemMailRuntime::default()),
         mailbox_state_cache: Arc::new(Mutex::new(HashMap::new())),
+        mailbox_send_receipt_watch: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
     }
 }
 
@@ -21018,6 +21019,75 @@ fn mailbox_tick_intake_is_idempotent_and_acknowledges_read_mail() {
 }
 
 #[test]
+fn mailbox_send_receipt_wait_folds_fast_reads_and_falls_back() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_send_receipt_wait");
+    let self_name = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .mailbox_name;
+
+    // Case 1: a synchronous local receiver folds the read receipt into the
+    // send action result; the tick must never re-deliver it as a notice.
+    std::env::set_var("TIMEM_MAILBOX_RECEIPT_WAIT_MS", "2000");
+    let (mail_id, initially_read) = handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &json!({"to": self_name, "msg": "consume me"}),
+    )
+    .expect("send should succeed");
+    assert!(initially_read, "local delivery is synchronous: {mail_id}");
+    {
+        let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+        let entry = mailbox
+            .entries
+            .iter()
+            .find(|entry| entry.dir == "out" && entry.id == mail_id)
+            .expect("out entry recorded");
+        assert_eq!(entry.state, "read");
+        assert!(
+            entry.notified,
+            "notice folded into the action result, tick must not re-deliver"
+        );
+    }
+    mailbox_tick(&state);
+    let status_notices = state.sessions.lock().unwrap()[&session_id]
+        .turns
+        .iter()
+        .flat_map(|turn| turn.user_entries.iter())
+        .filter(|entry| entry.kind == "mailbox_status")
+        .count();
+    assert_eq!(
+        status_notices, 0,
+        "the consumed receipt must not re-appear as a notice"
+    );
+
+    // Case 2: no receipt inside the window keeps the fallback path intact.
+    std::env::set_var("TIMEM_MAILBOX_RECEIPT_WAIT_MS", "0");
+    // The peer inbox must exist or the send fails outright.
+    std::fs::create_dir_all(e2e_inbox("mb-faraway")).unwrap();
+    let (mail_id2, initially_read2) = handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &json!({"to": "mb-faraway", "msg": "slow receiver"}),
+    )
+    .expect("send should succeed");
+    assert!(!initially_read2);
+    {
+        let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+        let entry = mailbox
+            .entries
+            .iter()
+            .find(|entry| entry.dir == "out" && entry.id == mail_id2)
+            .expect("out entry recorded");
+        assert_eq!(entry.state, "sent");
+        assert!(
+            !entry.notified,
+            "the notice stays deliverable after the window"
+        );
+    }
+    std::env::remove_var("TIMEM_MAILBOX_RECEIPT_WAIT_MS");
+}
+
+#[test]
 fn mailbox_tick_delivers_all_mail_immediately() {
     let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_queue");
     let self_name = load_mailbox_state(&state, &session_id)
@@ -21151,7 +21221,7 @@ fn mailbox_send_topic_returns_the_runtime_generated_mail_id() {
     let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_send_runtime_id");
     let peer = "mb-e2e-peer-runtime-id";
     std::fs::create_dir_all(e2e_inbox(peer)).unwrap();
-    let mail_id = handle_mailbox_send_topic(
+    let (mail_id, _initially_read) = handle_mailbox_send_topic(
         &state,
         &session_id,
         &json!({

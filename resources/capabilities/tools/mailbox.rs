@@ -58,7 +58,7 @@ fn execute_send(
     // The runtime owns mail-id assignment: the Host persists the envelope and
     // answers with the id it assigned, so the action result and every later
     // receipt name the same id. The tool only correlates the request.
-    let mail_id = match runtime.request_mail_send(&crate::host::mailbox_send_topic_event(
+    let reply = match runtime.request_mail_send(&crate::host::mailbox_send_topic_event(
         session_id,
         &to,
         &msg,
@@ -66,9 +66,18 @@ fn execute_send(
         resp_timeout,
         &mailbox_send_request_id(),
     )) {
-        Some(mail_id) => mail_id,
+        Some(reply) => reply,
         None => return failed("mailbox_runtime_unavailable"),
     };
+    let mail_id = reply.mail_id;
+    // The Host waits briefly after sending; when the receiver consumed the
+    // mail within that window the read receipt folds into this result and
+    // no separate [mailbox] notice follows.
+    if reply.initially_read {
+        return ActionExecution::Completed(ActionOutcome::completed(format!(
+            "Mail sent to mailbox {to} (mail id {mail_id}) and already consumed by receiver."
+        )));
+    }
     let resp_text = if resp_timeout < 0 {
         "no read-receipt deadline".to_string()
     } else {

@@ -19,6 +19,16 @@ pub use timem_ui_contract::projections::{
 };
 
 pub const DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Reply to one mailbox send request. `initially_read` is set when the Host's
+/// short post-send wait already observed the receiver consuming the mail, so
+/// the tool can fold the read receipt into its action result instead of
+/// delivering a separate `[mailbox]` notice.
+#[derive(Debug, Clone)]
+pub struct MailSendReply {
+    pub mail_id: String,
+    pub initially_read: bool,
+}
 pub const USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct TurnInput<'a> {
@@ -2014,7 +2024,7 @@ pub trait TurnUi {
 
     /// Sends a mailbox send request and returns the mail id the Host assigned
     /// after persisting the envelope. Hosts without a mailbox return None.
-    fn request_mail_send(&mut self, _event: &CoreTopicEvent) -> Option<String> {
+    fn request_mail_send(&mut self, _event: &CoreTopicEvent) -> Option<MailSendReply> {
         None
     }
 

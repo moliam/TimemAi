@@ -3038,7 +3038,7 @@ impl TurnUi for WorkerTurnUi {
     /// Sends a mailbox send topic and waits for the Host-owned mailbox ledger
     /// to answer with the mail id it assigned. Topic delivery is asynchronous,
     /// so the action result can only name the runtime id after this handshake.
-    fn request_mail_send(&mut self, event: &CoreTopicEvent) -> Option<String> {
+    fn request_mail_send(&mut self, event: &CoreTopicEvent) -> Option<agent_core::MailSendReply> {
         let mut event = event.clone();
         event.session_id = self.session_id.clone();
         if let Some(phase) = self.phase.as_deref() {
@@ -3071,7 +3071,14 @@ impl TurnUi for WorkerTurnUi {
                             .payload
                             .get("mail_id")
                             .and_then(|value| value.as_str())
-                            .map(str::to_string);
+                            .map(|mail_id| agent_core::MailSendReply {
+                                mail_id: mail_id.to_string(),
+                                initially_read: reply
+                                    .payload
+                                    .get("initially_read")
+                                    .and_then(|value| value.as_bool())
+                                    .unwrap_or(false),
+                            });
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => continue,

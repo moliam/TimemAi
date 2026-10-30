@@ -2792,21 +2792,33 @@ fn user_supplement_still_renders_as_user_supplement() {
 }
 
 #[test]
-fn mailbox_address_is_restated_once_after_compaction_and_clear() {
+fn mailbox_address_appears_once_per_context_lifetime() {
     let dir = tmp_dir("mailbox_address_reminder");
     let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     core.update_session_mailbox_name(Some("mb-test123".to_string()));
     let reminder = "Current session's mailbox is: mb-test123";
 
+    // The invariant: the address appears at least once in every context
+    // lifetime. A fresh context does not carry it, so the first request
+    // states it exactly once.
     let first = match core.begin_turn("first task", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(
-        !first.contains(reminder),
-        "a stable address must not be repeated on every request: {first}"
+    assert_eq!(first.matches(reminder).count(), 1, "{first}");
+
+    let second = match core.begin_turn("second task", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        second.matches(reminder).count(),
+        1,
+        "the address must not be restated on later turns: {second}"
     );
 
+    // Compaction drops the old deltas; the confirmation restates the
+    // address so the compacted context still knows it.
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(
@@ -2824,16 +2836,6 @@ fn mailbox_address_is_restated_once_after_compaction_and_clear() {
         prompt.matches(reminder).count(),
         1,
         "the compaction confirmation restates the address once: {prompt}"
-    );
-
-    let next_turn = match core.begin_turn("second task", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert_eq!(
-        next_turn.matches(reminder).count(),
-        1,
-        "the address must not be restated again on later turns: {next_turn}"
     );
 
     core.clear_dynamic_context();
@@ -2854,6 +2856,62 @@ fn mailbox_address_is_restated_once_after_compaction_and_clear() {
         later.matches(reminder).count(),
         1,
         "the one-shot reminder must not repeat: {later}"
+    );
+}
+
+#[test]
+fn restored_context_gets_the_mailbox_address_once() {
+    let dir = tmp_dir("mailbox_address_restore");
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
+    let _ = core.begin_turn("old work", None);
+
+    // Restart: a fresh worker imports the persisted snapshot, then the Host
+    // syncs the mailbox address at the first turn submission. The restored
+    // deltas do not carry the address, so it must be restated once.
+    let snapshot = core.export_dynamic_context();
+    let mut restored = test_core("STATIC", profile("qwen-plus"), &dir);
+    restored.import_dynamic_context(snapshot);
+    restored.update_session_mailbox_name(Some("mb-restore1".to_string()));
+    let reminder = "Current session's mailbox is: mb-restore1";
+
+    let first = match restored.begin_turn("continue work", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(first.matches(reminder).count(), 1, "{first}");
+
+    let second = match restored.begin_turn("more work", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        second.matches(reminder).count(),
+        1,
+        "the address must not be restated again: {second}"
+    );
+
+    // A snapshot that already carries the address must stay silent: the
+    // invariant is already satisfied inside the restored context.
+    let mut carrying = test_core("STATIC", profile("qwen-plus"), &dir);
+    let _ = carrying.begin_turn("seed", None);
+    carrying.submit_prompt_component(
+        agent_core::PromptComponentRole::system(),
+        "runtime_note",
+        reminder,
+        "runtime",
+    );
+    let snapshot_with_line = carrying.export_dynamic_context();
+    let mut restored2 = test_core("STATIC", profile("qwen-plus"), &dir);
+    restored2.import_dynamic_context(snapshot_with_line);
+    restored2.update_session_mailbox_name(Some("mb-restore1".to_string()));
+    let quiet = match restored2.begin_turn("continue", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        quiet.matches(reminder).count(),
+        1,
+        "restored context already carries the address; no second injection: {quiet}"
     );
 }
 

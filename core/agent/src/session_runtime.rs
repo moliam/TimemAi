@@ -1196,7 +1196,7 @@ impl ActionRuntime for TurnActionRuntime<'_> {
         self.ui.on_core_topic_events(events);
     }
 
-    fn request_mail_send(&mut self, event: &CoreTopicEvent) -> Option<String> {
+    fn request_mail_send(&mut self, event: &CoreTopicEvent) -> Option<crate::MailSendReply> {
         self.ui.request_mail_send(event)
     }
 
