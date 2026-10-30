@@ -10595,17 +10595,31 @@ fn handle_mailbox_send_topic(
         // Ordering matters at this boundary: the entry must be marked as
         // notified (and saved) BEFORE the watch is released. Releasing first
         // would let mailbox_tick deliver the notice in the gap and duplicate
-        // the receipt that already rides the action result.
+        // the receipt that already rides the action result. The scheduler
+        // runs on its own task: a stale snapshot it loaded before our mark
+        // and saved after (carrying unrelated entry changes) can roll
+        // `notified` back, so release only after a verified mark — re-marking
+        // once if the flag was lost. The residual exposure shrinks to the
+        // microseconds between the verified save and the watch removal.
         if initially_read {
-            if let Ok(mut mailbox) = load_mailbox_state(state, session_id) {
-                if let Some(entry) = mailbox
-                    .entries
-                    .iter_mut()
-                    .find(|entry| entry.dir == "out" && entry.id == mail_id)
-                {
-                    entry.notified = true;
+            for _ in 0..2 {
+                let marked = load_mailbox_state(state, session_id)
+                    .ok()
+                    .and_then(|mut mailbox| {
+                        let entry = mailbox
+                            .entries
+                            .iter_mut()
+                            .find(|entry| entry.dir == "out" && entry.id == mail_id)?;
+                        if entry.notified {
+                            return Some(());
+                        }
+                        entry.notified = true;
+                        save_mailbox_state(state, session_id, &mailbox).ok()?;
+                        Some(())
+                    });
+                if marked == Some(()) {
+                    break;
                 }
-                let _ = save_mailbox_state(state, session_id, &mailbox);
             }
         }
         if let Ok(mut watch) = state.mailbox_send_receipt_watch.lock() {
