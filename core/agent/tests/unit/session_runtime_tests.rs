@@ -175,6 +175,37 @@ fn higher_than_h0_trailer_preserves_context_compression_protocol() {
     }
 }
 
+#[test]
+fn every_context_compression_trailer_carries_the_data_loss_caution() {
+    let caution = crate::prompt_render::CONTEXT_COMPRESS_CAUTION;
+    assert!(caution.contains("prone to data loss and directional drift"));
+    assert!(caution.contains("strictly avoid deviating from the primary objective"));
+    assert!(caution.contains("Synthesize historical memos—especially the ##USER inputs history"));
+    assert!(caution.contains("when executing context compression"));
+
+    for trailer in [
+        crate::prompt_render::CONTEXT_COMPRESS_REQUIRED_TRAILER,
+        crate::prompt_render::MANUAL_CONTEXT_COMPRESS_TRAILER,
+        crate::prompt_render::REASONING_UPGRADED_CONTEXT_COMPRESS_TRAILER,
+        crate::prompt_render::REASONING_UPGRADED_MANUAL_CONTEXT_COMPRESS_TRAILER,
+    ] {
+        assert!(trailer.contains(caution), "{trailer}");
+        assert!(
+            trailer.ends_with("Your tool calls must start with context_compress:"),
+            "{trailer}"
+        );
+    }
+    // The upgraded variants keep the reasoning lead-in ahead of the caution.
+    assert!(
+        crate::prompt_render::REASONING_UPGRADED_CONTEXT_COMPRESS_TRAILER
+            .starts_with("This request is using stronger reasoning")
+    );
+    assert!(
+        crate::prompt_render::REASONING_UPGRADED_MANUAL_CONTEXT_COMPRESS_TRAILER
+            .starts_with("This request is using stronger reasoning")
+    );
+}
+
 fn usage(prompt_tokens: u32, completion_tokens: u32) -> UsageStats {
     UsageStats {
         llm_calls: 1,

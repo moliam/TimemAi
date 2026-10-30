@@ -4624,6 +4624,7 @@ fn compression_prompts_use_h1_only_for_threshold_triggered_requests() {
             prompt.contains("Please compress it now (see the `context_compress` tool description)")
         );
         assert!(prompt.contains("Your tool calls must start with context_compress:"));
+        assert!(prompt.contains(crate::prompt_render::CONTEXT_COMPRESS_CAUTION));
         assert!(!prompt.contains("User manually requests context compression"));
     }
 
@@ -4642,6 +4643,7 @@ fn compression_prompts_use_h1_only_for_threshold_triggered_requests() {
             prompt.contains("Please compress it now (see the `context_compress` tool description)")
         );
         assert!(prompt.contains("Your tool calls must start with context_compress:"));
+        assert!(prompt.contains(crate::prompt_render::CONTEXT_COMPRESS_CAUTION));
     }
 }
 
