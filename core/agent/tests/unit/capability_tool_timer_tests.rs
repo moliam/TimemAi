@@ -260,7 +260,8 @@ fn timer_snapshot_roundtrip_restores_timers() {
     assert!(!snapshot.is_empty());
 
     core.clear_dynamic_context();
-    // Timers survive a plain clear, unlike the memo.
+    // Timers and the memo survive a plain clear; the runtime restates
+    // them once on the next request.
     assert_eq!(core.timers().len(), 1);
 
     // Import wholesale-replaces: empty snapshot removes them.

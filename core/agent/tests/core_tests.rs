@@ -2857,6 +2857,217 @@ fn mailbox_address_is_restated_once_after_compaction_and_clear() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn clear_context_restates_runtime_known_state_once() {
+    let dir = tmp_dir("clear_runtime_state_snapshot");
+    let mut core = test_core("STATIC", profile("qwen-plus"), dir.clone());
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let audit = dir.join("audit/action_audit.json");
+    core.update_session_mailbox_name(Some("mb-snap123".to_string()));
+    core.replace_timers(vec![agent_core::TimerSpec {
+        timer_id: "t1".to_string(),
+        name: "timer0".to_string(),
+        prompt: "SNAP_TIMER_PROMPT".to_string(),
+        mode: "once".to_string(),
+        after_ms: Some(3_600_000),
+        at: None,
+        interval_ms: None,
+        deliver_immediately: false,
+        created_by: "user".to_string(),
+    }]);
+    core.record_turn_start_audit(&audit, "session_snap", "turn_0", "seed");
+    let _ = core.begin_turn("seed task", None);
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"free_talk":"set memo","working_still_action":[{"memo":{"op":"create","text":"SNAP_MEMO_TEXT"}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(
+        matches!(step, CoreStep::NeedModel { .. }),
+        "memo create should continue the turn"
+    );
+    assert_eq!(core.active_memo().as_deref(), Some("SNAP_MEMO_TEXT"));
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"working_still_action":[{"run_bash":{"cmd":"sleep 5; printf done","background":true}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+    assert!(
+        !core
+            .query_running_shell_jobs_for_session("session_snap")
+            .is_empty(),
+        "the background job should be alive at clear time"
+    );
+
+    core.clear_dynamic_context();
+    core.record_turn_start_audit(&audit, "session_snap", "turn_1", "after clear");
+    let prompt = match core.begin_turn("after clear", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        prompt
+            .matches("Current session's mailbox is: mb-snap123")
+            .count(),
+        1,
+        "{prompt}"
+    );
+    assert!(prompt.contains("SNAP_TIMER_PROMPT"), "{prompt}");
+    assert_eq!(
+        prompt.matches("memo active: SNAP_MEMO_TEXT").count(),
+        1,
+        "{prompt}"
+    );
+    assert!(prompt.contains("running shell jobs"), "{prompt}");
+    assert!(prompt.contains("[!!!NOTE] cwd now set to:"), "{prompt}");
+
+    core.record_turn_start_audit(&audit, "session_snap", "turn_2", "next");
+    let next = match core.begin_turn("next turn", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        next.matches("Current session's mailbox is: mb-snap123")
+            .count(),
+        1,
+        "the snapshot must not be restated on later turns: {next}"
+    );
+    assert_eq!(
+        next.matches("memo active: SNAP_MEMO_TEXT").count(),
+        1,
+        "{next}"
+    );
+    assert_eq!(next.matches("running shell jobs").count(), 1, "{next}");
+}
+
+#[cfg(unix)]
+#[test]
+fn compaction_confirmation_restates_running_jobs() {
+    let dir = tmp_dir("compact_running_jobs");
+    let mut core = test_core("STATIC", profile("qwen-plus"), dir.clone());
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let audit = dir.join("audit/action_audit.json");
+    core.record_turn_start_audit(&audit, "session_jobs", "turn_1", "work");
+    let _ = core.begin_turn("long task", None);
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"working_still_action":[{"run_bash":{"cmd":"sleep 5; printf done","background":true}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"context_compress":{"summary":"retain running job awareness","keywords":"checkpoint keywords"}}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    assert!(
+        prompt.contains("context compressed successfully."),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("running shell jobs"),
+        "the compaction confirmation must restate live jobs: {prompt}"
+    );
+}
+
+#[test]
+fn compaction_reopens_the_work_instruction_block() {
+    let block = "work_directory_instructions:\n[BEGIN WORK_DIRECTORY_INSTRUCTION v1]\nSNAP_WORK_RULE keep tests deterministic\n[END WORK_DIRECTORY_INSTRUCTION v1]";
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("compact_work_instructions"),
+    );
+
+    let prompt = match core.begin_turn("first", Some(block)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("SNAP_WORK_RULE"), "{prompt}");
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"context_compress":{"summary":"drop the stale deltas","keywords":"checkpoint keywords"}}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+
+    let next = match core.begin_turn("second", Some(block)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(
+        next.contains("SNAP_WORK_RULE"),
+        "after compaction the same work instruction must be re-injected, not filtered as a duplicate: {next}"
+    );
+}
+
+#[test]
+fn compaction_restates_the_restart_notice() {
+    let notice = "Runtime restarted at 2026-10-30 09:00:00 (local time). Previous runtime/job state may be stale. Inspect recent history when recovering prior work.";
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("compact_restart_notice"),
+    );
+    let _ = core.begin_turn("first", Some(notice));
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"context_compress":{"summary":"retain task state","keywords":"checkpoint keywords"}}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    assert!(
+        prompt.contains("Runtime restarted at 2026-10-30 09:00:00 (local time)."),
+        "the restart fact must survive compaction: {prompt}"
+    );
+    assert_eq!(
+        prompt
+            .matches("may have been dropped by a later compaction")
+            .count(),
+        1,
+        "{prompt}"
+    );
+}
+
 #[test]
 fn missing_durable_score_does_not_block_valid_actions() {
     let dir = tmp_dir("durable_ctx_score_not_required");

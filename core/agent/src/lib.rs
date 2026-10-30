@@ -2034,9 +2034,15 @@ pub struct AgentCore {
     /// request: restating it once after a compaction or a context clear is
     /// enough for the model to know where it can be reached.
     session_mailbox_name: Option<String>,
-    /// Set by compaction or context clear so the next submission restates the
-    /// mailbox address exactly once.
-    pending_mailbox_reminder: bool,
+    /// Set by a context clear so the next submission restates the runtime
+    /// known state (mailbox address, timers, memo, running shell jobs)
+    /// exactly once: compaction summaries may drop those facts, and a
+    /// cleared context definitely does.
+    pending_runtime_state_reminder: bool,
+    /// Compact restatement of the runtime restart notice observed at turn
+    /// admission. The notice rides only the first post-restart supporting
+    /// context; a later compaction may drop it, so Core keeps the fact.
+    restart_notice_restate: Option<String>,
     /// Memo text deleted during the current turn. Task finish in the same
     /// turn is challenged once (models may delete and immediately declare
     /// victory without genuinely re-checking the goal).
@@ -2160,7 +2166,8 @@ impl AgentCore {
             turn_finished_summary: None,
             active_memo: None,
             session_mailbox_name: None,
-            pending_mailbox_reminder: false,
+            pending_runtime_state_reminder: false,
+            restart_notice_restate: None,
             timers: Vec::new(),
             memo_finish_guard_tokens: MEMO_FINISH_GUARD_TOKEN_CAP,
             pending_forcible_memo_note: None,
@@ -3447,6 +3454,10 @@ impl AgentCore {
         // lives in the Host scheduler, so Core state is a projection that
         // must follow the snapshot across restarts.
         self.timers = snapshot.active_timers;
+        // An import restores its own context; the clear-scheduled restatement
+        // does not apply to it.
+        self.pending_runtime_state_reminder = false;
+        self.restart_notice_restate = None;
         if let Some(max_seq) = self
             .deltas
             .iter()
@@ -3459,8 +3470,25 @@ impl AgentCore {
     }
 
     pub fn clear_dynamic_context(&mut self) {
-        // A cleared context loses the address; the next submission restates it.
-        self.pending_mailbox_reminder = self.session_mailbox_name.is_some();
+        // A cleared context loses runtime-known state the model cannot
+        // recover on its own (mailbox address, timers, memo, live jobs);
+        // schedule the one-shot restatement. The cwd note re-emits through
+        // its own pending flag.
+        self.pending_runtime_state_reminder = self.session_mailbox_name.is_some()
+            || !self.timers.is_empty()
+            || self.active_memo.is_some()
+            || self
+                .current_session_id
+                .as_deref()
+                .map(|session| {
+                    !self
+                        .shell_jobs
+                        .query_running_for_session(session)
+                        .is_empty()
+                })
+                .unwrap_or(false);
+        self.restart_notice_restate = None;
+        self.cwd_note_pending = true;
         self.deltas.clear();
         self.native_exchanges.clear();
         self.pending_native_exchange = None;
@@ -3492,9 +3520,9 @@ impl AgentCore {
         self.last_notifications.clear();
         self.turn_finished_summary = None;
         self.loaded_work_instruction_fingerprints.clear();
-        // The memo is persisted beside the dynamic context as one consistency
-        // unit; clearing the context clears the reminder with it.
-        self.active_memo = None;
+        // The memo intentionally survives a plain clear: it is the long-task
+        // anchor, the Host projection keeps it active, and the one-shot
+        // runtime state restatement re-injects it on the next request.
     }
     pub fn resolve_stale_context_with_audit(
         &mut self,
@@ -3748,6 +3776,60 @@ impl AgentCore {
             .map(|name| format!("Current session's mailbox is: {name}"))
     }
 
+    /// Detached shell jobs that are still alive. A compaction summary may
+    /// drop them and the model cannot re-derive them, so runtime restates
+    /// them after compaction or a context clear.
+    fn running_jobs_reminder_line(&self) -> Option<String> {
+        let session_id = self.current_session_id.as_deref()?;
+        let jobs = self.shell_jobs.query_running_for_session(session_id);
+        if jobs.is_empty() {
+            return None;
+        }
+        let now = now_ms();
+        let shown = jobs
+            .iter()
+            .take(8)
+            .map(|job| {
+                let elapsed_ms = (now - job.created_at_ms).max(0);
+                format!(
+                    "pid={} cmd={:?} elapsed_ms={}",
+                    job.pid, job.command, elapsed_ms
+                )
+            })
+            .collect::<Vec<_>>();
+        let more = jobs.len() - shown.len();
+        let more_note = if more > 0 {
+            format!(" ...and {more} more")
+        } else {
+            String::new()
+        };
+        Some(format!(
+            "running shell jobs (still alive; do not assume they finished): {}{more_note}",
+            shown.join("; ")
+        ))
+    }
+
+    /// One-shot restatement of runtime-known state after a context clear:
+    /// mailbox address, timers, memo, and still-running shell jobs. A cleared
+    /// context has none of them, and the model cannot recover them alone.
+    fn runtime_state_reminder_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(line) = self.mailbox_reminder_line() {
+            lines.push(line);
+        }
+        let timers = self.active_timers_confirmation_line();
+        if !timers.is_empty() {
+            lines.push(timers.trim_start().to_string());
+        }
+        if let Some(memo) = self.active_memo.as_ref() {
+            lines.push(format!("memo active: {memo}"));
+        }
+        if let Some(line) = self.running_jobs_reminder_line() {
+            lines.push(line);
+        }
+        lines
+    }
+
     pub(crate) fn active_timers_confirmation_line(&self) -> String {
         if self.timers.is_empty() {
             return String::new();
@@ -3856,6 +3938,21 @@ impl AgentCore {
         let filtered_supporting_context = supporting_context
             .map(|ctx| self.filter_supporting_context(ctx))
             .filter(|ctx| !ctx.trim().is_empty());
+        // A restart notice rides only the first post-restart supporting
+        // context. Keep a compact restatement so a later compaction cannot
+        // silently drop the restart fact.
+        if let Some(ctx) = filtered_supporting_context.as_deref() {
+            let trimmed = ctx.trim_start();
+            if trimmed.starts_with("Runtime restarted at ") {
+                let first_sentence = match trimmed.find("(local time).") {
+                    Some(idx) => trimmed[..idx + "(local time).".len()].trim(),
+                    None => trimmed.lines().next().unwrap_or(trimmed).trim(),
+                };
+                self.restart_notice_restate = Some(format!(
+                    "{first_sentence} This context continues across that restart; the original recovery guidance may have been dropped by a later compaction. Re-verify the current cwd, files, and processes before continuing prior work."
+                ));
+            }
+        }
         let mut system_texts = Vec::new();
         if let Some(ctx) = filtered_supporting_context.as_deref() {
             system_texts.push(ctx.trim().to_string());
@@ -3893,16 +3990,17 @@ impl AgentCore {
             };
             self.submit_prompt_component(role, kind, text, source);
         }
-        if self.pending_mailbox_reminder {
-            if let Some(line) = self.mailbox_reminder_line() {
+        if self.pending_runtime_state_reminder {
+            let lines = self.runtime_state_reminder_lines();
+            if !lines.is_empty() {
                 self.submit_prompt_component(
                     PromptComponentRole::system(),
                     "runtime_note",
-                    line,
+                    lines.join("\n"),
                     "runtime",
                 );
             }
-            self.pending_mailbox_reminder = false;
+            self.pending_runtime_state_reminder = false;
         }
         if should_memory_precheck {
             let result = self.runtime_memory_precheck(user_input, 5);
@@ -4390,8 +4488,17 @@ impl AgentCore {
             self.threshold_compaction_reasoning_required = threshold_followup_required;
             self.manual_compact_trailer_pending = false;
             self.process_scope_prompted_session = None;
+            // The compacted context may have dropped the work-instruction
+            // block; stop filtering it as a duplicate so the next supporting
+            // context re-injects it.
+            self.loaded_work_instruction_fingerprints.clear();
             if let Some(note) = self.take_process_aggregate_scopes_if_needed() {
                 slices.push(("runtime_note".to_string(), note));
+            }
+            // The restart fact must survive compaction summaries that dropped
+            // the original notice.
+            if let Some(restate) = self.restart_notice_restate.clone() {
+                slices.push(("runtime_note".to_string(), restate));
             }
         }
         if compacted_successfully {
@@ -4457,14 +4564,20 @@ impl AgentCore {
                 .mailbox_reminder_line()
                 .map(|line| format!("\n{line}"))
                 .unwrap_or_default();
+            // Detached jobs are invisible to the summary; restate them so the
+            // model does not assume everything finished.
+            let jobs_line = self
+                .running_jobs_reminder_line()
+                .map(|line| format!("\n{line}"))
+                .unwrap_or_default();
             slices.push((
                 "context_compressed".to_string(),
                 format!(
-                    "context compressed successfully.\nCWD: {}{memo_line}{timers_line}{mailbox_line}",
+                    "context compressed successfully.\nCWD: {}{memo_line}{timers_line}{mailbox_line}{jobs_line}",
                     self.current_prompt_cwd.display()
                 ),
             ));
-            self.pending_mailbox_reminder = false;
+            self.pending_runtime_state_reminder = false;
         }
         if !parsed.context_compresses.is_empty() && !compacted_successfully {
             // context_compress is a barrier: later actions were authored against the
