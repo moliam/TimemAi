@@ -2007,7 +2007,7 @@ fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
     assert_eq!(model.prompts.len(), 3);
     assert!(model.prompts[1].contains("Your action's output is too large:"));
     assert!(model.prompts[1]
-        .ends_with("[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"));
+        .ends_with("[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve work blueprint, directions, decisions, unfinished work, etc. Your tool calls must start with context_compress:"));
     assert!(model.prompts[2].contains("context compressed successfully."));
     assert!(model.prompts[1].contains("optimize your action or compress context"));
     assert!(!model.prompts[1].contains(&"0".repeat(1_000)));
