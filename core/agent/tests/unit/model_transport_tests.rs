@@ -63,11 +63,14 @@ fn cancellation_interrupts_waiting_for_response_headers() {
 
     assert_eq!(error, "cancelled_by_user");
     // The stub server sleeps 5s before any response and the request timeout
-    // is 10s, so a genuine cancellation must return well before the server
-    // would ever answer. The 4s bound keeps that proof while staying stable
-    // under parallel test load (thread starvation delays the cancel check).
+    // is 10s, so a genuine cancellation must return before the server could
+    // ever answer. The bound only has to stay under that 5s sleep: with the
+    // full suite running in parallel, thread starvation can delay the cancel
+    // checks well past 4s (observed repeatedly on a loaded machine), so 5s
+    // keeps the proof (still before the server's first possible response and
+    // far under the 10s request timeout) while tolerating the starvation.
     assert!(
-        started.elapsed() < Duration::from_secs(4),
+        started.elapsed() < Duration::from_secs(5),
         "native HTTP cancellation took {:?}",
         started.elapsed()
     );
