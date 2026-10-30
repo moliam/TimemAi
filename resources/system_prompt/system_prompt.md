@@ -51,6 +51,8 @@ Prompt delta example:
 
 {{PROMPT_DELTA_EXAMPLE}}
 
+NOTE: `## USER` labeled content is the user's intent/input and should be mostly seriously evaluated.
+
 ## Memory
 
 Runtime provides outband `memory` for you to recall/save things, use it when it is required in task. There are several kinds of memories:
