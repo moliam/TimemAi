@@ -986,6 +986,7 @@ pub fn mailbox_send_topic_event(
     msg: &str,
     queue_timeout_secs: i64,
     resp_timeout_secs: i64,
+    mail_id: &str,
 ) -> CoreTopicEvent {
     CoreTopicEvent::new(
         session_id,
@@ -998,6 +999,7 @@ pub fn mailbox_send_topic_event(
         CoreSessionState::Running,
         json!({
             "op": "send",
+            "mail_id": mail_id,
             "to": to,
             "msg": msg,
             "queue_timeout_secs": queue_timeout_secs,

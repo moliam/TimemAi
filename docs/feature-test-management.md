@@ -988,3 +988,10 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - Host：新增结构化用户条目 kind `mailbox_status`（read/timeout/discarded/failed），`mailbox` 保留给收到的邮件正文，历史恢复白名单同步；同实例直投失败改为把信封写入收件人 spool，由 mailbox 调度器重试，不再终态失败；跨实例与本地路径共用 `write_mail_envelope`。本地投递被推迟时以 `[timem_web_warning] mailbox_local_delivery_deferred` 输出原因，并写入 lifecycle diagnostics 的 `mailbox_local_delivery_deferred` 检查点（`~/.timem/mem/diagnostics/timem-web/current-runs/*.json`）。
 - Web：timer/mailbox/mailbox_status 等系统触发条目统一加 `system-triggered`，使用 12px 小字号、系统提示中性底色和 mail 小图标；整帧只含系统条目时加 `system-only`，不再套用户气泡底色；旧历史仍以 `[mailbox]` 前缀兜底识别。
 - 测试看护：`local_mailbox_handoff_failure_falls_back_to_spool` 覆盖同实例直投失败回退 spool；新增 `local_mailbox_handoff_pending_restart_cwd_decision_is_spooled` 覆盖“重启后目录待确认”这一真实触发条件，断言发件状态保持 `sent` 且 spool 留有一封信；`mailbox_capacity_failure_is_terminal_without_body_or_spool` 断言 `mailbox_status` 结构化 kind；`mailbox_system_notice.test.ts` 冻结系统卡片样式与 mail 图标契约。
+
+## 2026-10 Mailbox 动作结果补齐 mail id
+
+- 背景：mailbox 发送工具的 action result 只报告收件地址与超时设置，不返回 mail id；后续已读/超时/丢弃/失败通知以 `[mailbox] 邮件 mail_xxx ...` 形式出现，模型无法把回执与刚发出的邮件对应起来。
+- 根因：Web Host 通过 worker channel 异步处理 core topic，mail id 由 Host 在落盘时才生成；工具返回时拿不到该 id，两端各自命名，天然对不上。
+- 修复：mail id 改由 mailbox 工具生成（`mail_` + 48-bit 随机十六进制）并随 `mailbox.send` topic 下发；Host 校验格式后直接采用该 id 落账与写 spool，冲突时保留调用方 id 并记为 `failed`（不伪造正文/信封）；工具结果直接返回 `mail id <id>`，后续回执引用同一 id。缺失或非法 id 的旧调用方仍走 Host 生成路径。
+- 测试看护：`mailbox_send_reports_the_same_id_it_hands_to_the_host` 断言 action result 与 topic payload 的 id 一致；`mailbox_send_topic_adopts_the_tool_supplied_mail_id` 断言 Host 采用工具 id 且正文落盘。

@@ -10368,6 +10368,15 @@ fn write_mail_envelope(
     )
 }
 
+fn valid_mail_id(value: &str) -> bool {
+    value.len() >= 6
+        && value.len() <= 64
+        && value.starts_with("mail_")
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
 fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde_json::Value) {
     let to = payload["to"].as_str().unwrap_or("").to_string();
     let msg = payload["msg"].as_str().unwrap_or("").to_string();
@@ -10397,7 +10406,18 @@ fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde
         None
     };
     let created_at_ms = now_ms();
-    let mut mail_id = crate::mailbox::generate_mail_id(&msg, created_at_ms, &to);
+    // The mailbox tool generates the id and reports it in its action result.
+    // Topic delivery is asynchronous, so the Host must adopt that id instead of
+    // minting a second one; otherwise later receipts name an id the model has
+    // never seen. Older callers without an id keep the host-generated path.
+    let provided_mail_id = payload["mail_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| valid_mail_id(value))
+        .map(str::to_string);
+    let mut mail_id = provided_mail_id
+        .clone()
+        .unwrap_or_else(|| crate::mailbox::generate_mail_id(&msg, created_at_ms, &to));
     let mut unique = false;
     for _ in 0..8 {
         let taken = mem_mail_exists(state, &mail_id)
@@ -10410,11 +10430,19 @@ fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde
             unique = true;
             break;
         }
+        if provided_mail_id.is_some() {
+            break;
+        }
         mail_id = crate::mailbox::generate_mail_id(&msg, created_at_ms, &to);
     }
     if !unique {
-        eprintln!("[timem_web_warning] mailbox_send_failed to={to:?} reason=mail_id_collision");
-        return;
+        if provided_mail_id.is_none() {
+            eprintln!("[timem_web_warning] mailbox_send_failed to={to:?} reason=mail_id_collision");
+            return;
+        }
+        // Keep the caller's id so the failure notice matches the action result;
+        // never fabricate a body or spool envelope under a duplicate id.
+        status = "failed";
     }
     let mail = MemMail {
         id: mail_id.clone(),
@@ -10423,13 +10451,17 @@ fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde
         msg,
         created_at_ms,
     };
-    let body_stored = match store_mem_mail(state, &mail) {
-        Ok(()) => true,
-        Err(error) => {
-            eprintln!("[timem_web_warning] mailbox_send_failed to={to:?} reason={error}");
-            status = "failed";
-            false
+    let body_stored = if unique {
+        match store_mem_mail(state, &mail) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("[timem_web_warning] mailbox_send_failed to={to:?} reason={error}");
+                status = "failed";
+                false
+            }
         }
+    } else {
+        false
     };
     if !body_stored {
         // Keep a terminal metadata entry so the sending session receives a

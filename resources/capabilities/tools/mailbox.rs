@@ -55,12 +55,18 @@ fn execute_send(
     let resp_timeout = parse_secs(&str_field(action, "resp_timeout"))
         .unwrap_or(crate::host::MAILBOX_DEFAULT_RESP_TIMEOUT_SECS);
     let session_id = core.current_session_id();
+    // The action result and every later receipt/timeout notice must name the
+    // same mail id. The host consumes this id when it persists the ledger and
+    // spool envelope, so the model can correlate the follow-up [mailbox] notice
+    // with the mail it just sent.
+    let mail_id = generate_mail_id();
     runtime.on_core_topic_events(&[crate::host::mailbox_send_topic_event(
         session_id,
         &to,
         &msg,
         queue_timeout,
         resp_timeout,
+        &mail_id,
     )]);
     let resp_text = if resp_timeout < 0 {
         "no read-receipt deadline".to_string()
@@ -68,8 +74,31 @@ fn execute_send(
         format!("you will be notified if it is not read within {resp_timeout}s")
     };
     ActionExecution::Completed(ActionOutcome::completed(format!(
-        "Mail delivered to mailbox {to}: {resp_text}. A read receipt or a timeout notice will arrive as a [mailbox] message."
+        "Mail sent to mailbox {to} (mail id {mail_id}): {resp_text}. A read receipt, timeout, or failure notice will arrive as a [mailbox] message naming this id."
     )))
+}
+
+/// 48-bit random id in the host-compatible `mail_` namespace. The tool owns id
+/// generation because topic delivery is asynchronous: the Host persists the
+/// envelope after this action returns, so only an id chosen here can be named
+/// in the action result and matched by later receipts.
+fn generate_mail_id() -> String {
+    let mut random = [0u8; 6];
+    if crate::os::fill_secure_random(&mut random).is_err() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos() as u64)
+            .unwrap_or_default();
+        let mixed =
+            (nanos ^ (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)).to_le_bytes();
+        random.copy_from_slice(&mixed[..6]);
+    }
+    let mut id = String::from("mail_");
+    for byte in random {
+        use std::fmt::Write;
+        let _ = write!(id, "{byte:02x}");
+    }
+    id
 }
 
 fn execute_list(core: &AgentCore, action: &ParsedAction) -> ActionOutcome {

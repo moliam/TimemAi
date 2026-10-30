@@ -21116,6 +21116,29 @@ fn mailbox_resp_timeout_notifies_once_and_clear_preserves_pending_evidence() {
 }
 
 #[test]
+fn mailbox_send_topic_adopts_the_tool_supplied_mail_id() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_send_id");
+    let peer = "mb-e2e-peer-id";
+    std::fs::create_dir_all(e2e_inbox(peer)).unwrap();
+    handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &json!({
+            "to": peer,
+            "msg": "same id please",
+            "mail_id": "mail_00ff00ff00ff",
+        }),
+    );
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(
+        mailbox.entries.last().unwrap().id,
+        "mail_00ff00ff00ff",
+        "the Host must persist the id the tool already returned to the model"
+    );
+    assert!(mem_mail_exists(&state, "mail_00ff00ff00ff"));
+}
+
+#[test]
 fn mailbox_send_topic_resolves_timeout_args_and_failed_peers() {
     let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_send");
     let peer = "mb-e2e-peer4";

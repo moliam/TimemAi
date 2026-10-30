@@ -11,6 +11,20 @@ impl ActionRuntime for NoopRuntime {
     }
 }
 
+struct RecordingRuntime {
+    topics: Vec<crate::host::CoreTopicEvent>,
+}
+
+impl ActionRuntime for RecordingRuntime {
+    fn should_cancel(&mut self) -> bool {
+        false
+    }
+
+    fn on_core_topic_events(&mut self, events: &[crate::host::CoreTopicEvent]) {
+        self.topics.extend_from_slice(events);
+    }
+}
+
 fn mailbox_test_core(tag: &str) -> AgentCore {
     let root = std::env::temp_dir().join(format!(
         "timem_mailbox_tool_{tag}_{}_{}",
@@ -213,11 +227,37 @@ fn mailbox_unknown_action_fails_closed() {
 }
 
 #[test]
+fn mailbox_send_reports_the_same_id_it_hands_to_the_host() {
+    let mut core = mailbox_test_core("send_id");
+    let mut runtime = RecordingRuntime { topics: Vec::new() };
+    let action = ParsedAction {
+        action: "mailbox".to_string(),
+        name: None,
+        call_id: "test_call".to_string(),
+        raw_input: json!({"to": "mb-999", "msg": "hello there"}),
+    };
+    let text = match execute_action(&mut core, &action, &mut runtime) {
+        ActionExecution::Completed(outcome) => outcome.text,
+        ActionExecution::NeedsApproval(_) => panic!("mailbox never needs approval"),
+    };
+    assert!(text.contains("Mail sent to mailbox mb-999"), "{text}");
+    let sent = runtime.topics.first().expect("send topic");
+    let mail_id = sent.payload["mail_id"]
+        .as_str()
+        .expect("topic payload carries the mail id");
+    assert!(mail_id.starts_with("mail_"), "{mail_id}");
+    assert!(
+        text.contains(mail_id),
+        "action result must name the same id later notices use: {text}"
+    );
+}
+
+#[test]
 fn mailbox_send_keeps_legacy_behavior_with_and_without_action() {
     let mut core = mailbox_test_core("send");
     let implicit = run(&mut core, json!({"to": "mb-999", "msg": "hello there"}));
     assert!(
-        implicit.contains("Mail delivered to mailbox mb-999"),
+        implicit.contains("Mail sent to mailbox mb-999"),
         "{implicit}"
     );
     let explicit = run(
@@ -225,7 +265,7 @@ fn mailbox_send_keeps_legacy_behavior_with_and_without_action() {
         json!({"action": "send", "to": "mb-999", "msg": "hello again"}),
     );
     assert!(
-        explicit.contains("Mail delivered to mailbox mb-999"),
+        explicit.contains("Mail sent to mailbox mb-999"),
         "{explicit}"
     );
     let missing_to = run(&mut core, json!({"action": "send", "msg": "hi"}));
