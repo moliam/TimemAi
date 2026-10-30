@@ -11,6 +11,7 @@ import { SelfUpgradeSetting } from "./self_upgrade";
 import { StreamText } from "./stream_reveal";
 import { FlippingTime } from "./flipping_time";
 import { UserText } from "./user_text";
+import { CollapsibleSystemEntryText } from "./collapsible_system_entry";
 import { formatUserEntryTime } from "./user_entry_time";
 import {
   AssistantRuntimeProvider,
@@ -12017,9 +12018,15 @@ const TurnInteraction = memo(function TurnInteraction({
                       </span>
                     </div>
                   )}
-                  <UserText
-                    text={timerParts ? timerParts.prompt : (mailboxText ?? entry.text)}
-                  />
+                  {isSystemTriggered ? (
+                    <CollapsibleSystemEntryText
+                      text={timerParts ? timerParts.prompt : (mailboxText ?? entry.text)}
+                    />
+                  ) : (
+                    <UserText
+                      text={timerParts ? timerParts.prompt : (mailboxText ?? entry.text)}
+                    />
+                  )}
                   {(
                     entry.worker_roles ??
                     (entry.worker_role ? [entry.worker_role] : [])

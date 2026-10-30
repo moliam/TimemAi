@@ -745,6 +745,10 @@ export const en: Strings = {
     expandBody: "Show full message",
     collapseBody: "Collapse",
   },
+  systemEntry: {
+    expand: "Expand",
+    collapse: "Collapse",
+  },
   timer: {
     title: "Timers",
     ariaLabel: "Open timers panel",

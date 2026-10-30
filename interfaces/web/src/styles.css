@@ -1884,6 +1884,15 @@ body {
    system-prompt card, never the hand-typed user bubble. */
 .turn-user-entry.system-triggered { font-size: 12px; line-height: 1.5; }
 .turn-user-entry.system-triggered .mailbox-entry-badge { width: 15px; height: 15px; }
+/* System-triggered entry bodies stay one truncated line by default; the
+   inline toggle reveals the full text without stealing attention. */
+.system-entry-text { display: flex; align-items: flex-start; gap: 6px; padding-right: 26px; }
+.system-entry-text-body { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.system-entry-text.expanded .system-entry-text-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+.system-entry-toggle { flex: none; display: inline-flex; align-items: center; gap: 2px; margin: 0; padding: 1px 6px; border: none; border-radius: 999px; background: transparent; color: inherit; font: inherit; font-size: 10px; line-height: 1.5; opacity: 0.55; cursor: pointer; }
+.system-entry-toggle > span { margin: 0; color: inherit; }
+.system-entry-toggle:hover { opacity: 1; }
+.system-entry-toggle:focus-visible { outline: 1px solid currentColor; }
 .turn-user-content.system-only { background: #cdd4da; color: #262f38; border-color: #b9c3cb; }
 :root[data-theme="light"] .turn-user-content.system-only { background: #e6eaee; color: #38424c; border-color: #cdd5dc; }
 :root[data-theme="light"] .turn-user-entry.timer,

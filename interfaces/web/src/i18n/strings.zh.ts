@@ -751,6 +751,10 @@ export const zh = {
     expandBody: "展开全文",
     collapseBody: "收起",
   },
+  systemEntry: {
+    expand: "展开",
+    collapse: "收起",
+  },
   timer: {
     title: "定时任务",
     ariaLabel: "打开定时任务面板",
