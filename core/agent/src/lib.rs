@@ -1337,6 +1337,13 @@ pub trait ActionRuntime {
 
     fn on_core_topic_events(&mut self, _events: &[host::CoreTopicEvent]) {}
 
+    /// Sends a mailbox send request to the runtime-owned mailbox ledger and
+    /// returns the mail id it assigned. Hosts without a mailbox return None;
+    /// callers must not invent an id in that case.
+    fn request_mail_send(&mut self, _event: &host::CoreTopicEvent) -> Option<String> {
+        None
+    }
+
     /// Complete protocol validation result, before any response actions execute.
     /// Provisional display is never permission to execute an action.
     fn on_model_response_validated(&mut self, _accepted: bool, _final_response: bool) {}

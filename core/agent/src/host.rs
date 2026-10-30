@@ -986,7 +986,7 @@ pub fn mailbox_send_topic_event(
     msg: &str,
     queue_timeout_secs: i64,
     resp_timeout_secs: i64,
-    mail_id: &str,
+    request_id: &str,
 ) -> CoreTopicEvent {
     CoreTopicEvent::new(
         session_id,
@@ -999,7 +999,7 @@ pub fn mailbox_send_topic_event(
         CoreSessionState::Running,
         json!({
             "op": "send",
-            "mail_id": mail_id,
+            "request_id": request_id,
             "to": to,
             "msg": msg,
             "queue_timeout_secs": queue_timeout_secs,
@@ -2011,6 +2011,12 @@ pub trait TurnUi {
     }
 
     fn on_core_topic_events(&mut self, _events: &[CoreTopicEvent]) {}
+
+    /// Sends a mailbox send request and returns the mail id the Host assigned
+    /// after persisting the envelope. Hosts without a mailbox return None.
+    fn request_mail_send(&mut self, _event: &CoreTopicEvent) -> Option<String> {
+        None
+    }
 
     fn on_model_error(&mut self, _error: &str) {}
 

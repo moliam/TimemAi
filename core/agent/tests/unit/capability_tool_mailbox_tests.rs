@@ -9,6 +9,10 @@ impl ActionRuntime for NoopRuntime {
     fn should_cancel(&mut self) -> bool {
         false
     }
+
+    fn request_mail_send(&mut self, _event: &crate::host::CoreTopicEvent) -> Option<String> {
+        Some("mail_noop01".to_string())
+    }
 }
 
 struct RecordingRuntime {
@@ -22,6 +26,11 @@ impl ActionRuntime for RecordingRuntime {
 
     fn on_core_topic_events(&mut self, events: &[crate::host::CoreTopicEvent]) {
         self.topics.extend_from_slice(events);
+    }
+
+    fn request_mail_send(&mut self, event: &crate::host::CoreTopicEvent) -> Option<String> {
+        self.topics.push(event.clone());
+        Some("mail_abc123".to_string())
     }
 }
 
@@ -227,7 +236,7 @@ fn mailbox_unknown_action_fails_closed() {
 }
 
 #[test]
-fn mailbox_send_reports_the_same_id_it_hands_to_the_host() {
+fn mailbox_send_reports_the_runtime_assigned_id() {
     let mut core = mailbox_test_core("send_id");
     let mut runtime = RecordingRuntime { topics: Vec::new() };
     let action = ParsedAction {
@@ -241,14 +250,22 @@ fn mailbox_send_reports_the_same_id_it_hands_to_the_host() {
         ActionExecution::NeedsApproval(_) => panic!("mailbox never needs approval"),
     };
     assert!(text.contains("Mail sent to mailbox mb-999"), "{text}");
-    let sent = runtime.topics.first().expect("send topic");
-    let mail_id = sent.payload["mail_id"]
-        .as_str()
-        .expect("topic payload carries the mail id");
-    assert!(mail_id.starts_with("mail_"), "{mail_id}");
     assert!(
-        text.contains(mail_id),
-        "action result must name the same id later notices use: {text}"
+        text.contains("mail_abc123"),
+        "action result must name the runtime-assigned id: {text}"
+    );
+    let sent = runtime.topics.first().expect("send topic");
+    assert_eq!(sent.payload["op"], "send");
+    assert!(
+        sent.payload.get("mail_id").is_none(),
+        "the tool must not invent a mail id: {sent:?}"
+    );
+    let request_id = sent.payload["request_id"]
+        .as_str()
+        .expect("topic payload carries the request id");
+    assert!(
+        request_id.starts_with("mailbox_send_"),
+        "request id correlates the runtime reply: {request_id}"
     );
 }
 

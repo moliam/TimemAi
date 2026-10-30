@@ -85,8 +85,8 @@ fn sanitize_mailbox_component(name: &str) -> String {
         .collect()
 }
 
-/// Machine-locally unique, short and typeable: `mb-xxxxx` (5 lowercase
-/// base36 characters, 36^5 = 60,466,176 combinations). The scheduler
+/// Machine-locally unique, short and typeable: `mb-xxxxxx` (6 lowercase
+/// base36 characters, 36^6 = 2,176,782,336 combinations). The scheduler
 /// additionally retries when a generated name is already taken on this
 /// machine, so collisions are practically impossible while the address stays
 /// easy to read, say out loud and type.
@@ -97,13 +97,13 @@ pub fn generate_mailbox_name() -> String {
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
     let mix = nanos ^ (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    let mut value = (mix ^ (mix >> 32)) as u32;
-    let mut suffix = [0u8; 5];
+    let mut value = mix ^ (mix >> 32);
+    let mut suffix = [0u8; 6];
     for slot in suffix.iter_mut() {
-        *slot = ALPHABET[(value % ALPHABET.len() as u32) as usize];
-        value /= ALPHABET.len() as u32;
+        *slot = ALPHABET[(value % ALPHABET.len() as u64) as usize];
+        value /= ALPHABET.len() as u64;
     }
-    format!("mb-{}", std::str::from_utf8(&suffix).unwrap_or("00000"))
+    format!("mb-{}", std::str::from_utf8(&suffix).unwrap_or("000000"))
 }
 
 /// Short mail id: `mail_` + 6 base36 chars hashed from (body, created_at_ms,
@@ -314,7 +314,7 @@ mod tests {
     fn generated_names_are_short_prefixed_and_unique() {
         let first = generate_mailbox_name();
         assert!(first.starts_with("mb-"));
-        assert_eq!(first.len(), 8, "mb- plus 5 base36 chars keeps it typeable");
+        assert_eq!(first.len(), 9, "mb- plus 6 base36 chars keeps it typeable");
         assert!(
             first[3..]
                 .chars()

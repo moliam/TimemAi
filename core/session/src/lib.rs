@@ -2914,6 +2914,51 @@ impl TurnUi for WorkerTurnUi {
         }
     }
 
+    /// Sends a mailbox send topic and waits for the Host-owned mailbox ledger
+    /// to answer with the mail id it assigned. Topic delivery is asynchronous,
+    /// so the action result can only name the runtime id after this handshake.
+    fn request_mail_send(&mut self, event: &CoreTopicEvent) -> Option<String> {
+        let mut event = event.clone();
+        event.session_id = self.session_id.clone();
+        if let Some(phase) = self.phase.as_deref() {
+            event.topic.attributes["runtime_phase"] = serde_json::json!(phase);
+            event.payload["runtime_phase"] = serde_json::json!(phase);
+        }
+        let event = event.with_worker_scope(&self.context_id, &self.worker_id);
+        if self
+            .event_tx
+            .send(CoreSessionWorkerEvent::Topics(vec![event.clone()]))
+            .is_err()
+        {
+            return None;
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if self.cancel_requested.load(Ordering::SeqCst) {
+                return None;
+            }
+            let remaining = deadline.checked_duration_since(Instant::now())?;
+            match self
+                .reply_rx
+                .recv_timeout(remaining.min(Duration::from_millis(50)))
+            {
+                Ok(reply) => {
+                    if reply.topic_name == event.topic.name
+                        && reply.request_id.as_deref() == event.request_id()
+                    {
+                        return reply
+                            .payload
+                            .get("mail_id")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string);
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => return None,
+            }
+        }
+    }
+
     fn take_bash_always_allow(&mut self) -> bool {
         let flag = self.pending_bash_always_allow;
         self.pending_bash_always_allow = false;

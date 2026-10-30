@@ -10377,7 +10377,11 @@ fn valid_mail_id(value: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
 }
 
-fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde_json::Value) {
+fn handle_mailbox_send_topic(
+    state: &AppState,
+    session_id: &str,
+    payload: &serde_json::Value,
+) -> Option<String> {
     let to = payload["to"].as_str().unwrap_or("").to_string();
     let msg = payload["msg"].as_str().unwrap_or("").to_string();
     let queue_timeout_secs = payload["queue_timeout_secs"]
@@ -10388,10 +10392,10 @@ fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde
         .as_i64()
         .unwrap_or(agent_core::host::MAILBOX_DEFAULT_RESP_TIMEOUT_SECS);
     if to.is_empty() || msg.is_empty() {
-        return;
+        return None;
     }
     let Ok(mut sender_mailbox) = load_mailbox_state(state, session_id) else {
-        return;
+        return None;
     };
     let spool_root = crate::mailbox::mailbox_spool_root();
     let mut msg = msg;
@@ -10438,7 +10442,7 @@ fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde
     if !unique {
         if provided_mail_id.is_none() {
             eprintln!("[timem_web_warning] mailbox_send_failed to={to:?} reason=mail_id_collision");
-            return;
+            return Some(mail_id);
         }
         // Keep the caller's id so the failure notice matches the action result;
         // never fabricate a body or spool envelope under a duplicate id.
@@ -10503,7 +10507,7 @@ fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde
         }
     }
     sender_mailbox.entries.push(MailboxEntry {
-        id: mail_id,
+        id: mail_id.clone(),
         dir: "out".to_string(),
         peer: to,
         created_at_ms,
@@ -10525,6 +10529,7 @@ fn handle_mailbox_send_topic(state: &AppState, session_id: &str, payload: &serde
             mailbox: mailbox_snapshot(state, &sender_mailbox),
         },
     );
+    Some(mail_id)
 }
 
 fn deliver_timer_fire(
@@ -16692,7 +16697,22 @@ fn handle_scoped_worker_event(
                     }
                 }
                 if event.topic.name == CORE_TOPIC_MAILBOX {
-                    handle_mailbox_send_topic(state, session_id, &event.payload);
+                    let mail_id = handle_mailbox_send_topic(state, session_id, &event.payload);
+                    if let (Some(request_id), Some(mail_id)) = (event.request_id(), mail_id) {
+                        let reply = TopicReply::new(
+                            session_id.to_string(),
+                            event.topic.name.clone(),
+                            HostDecision::Accept,
+                            json!({ "mail_id": mail_id }),
+                        )
+                        .with_request_id(request_id);
+                        let _ = relay_topic_reply_to_requesting_worker(
+                            state,
+                            session_id,
+                            Some(worker_id),
+                            reply,
+                        );
+                    }
                 }
                 if event.topic.name == CORE_TOPIC_TOOLGEN {
                     if let Ok(repo) = session_tool_repo(state, session_id) {

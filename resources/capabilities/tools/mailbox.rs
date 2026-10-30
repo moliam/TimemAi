@@ -55,19 +55,20 @@ fn execute_send(
     let resp_timeout = parse_secs(&str_field(action, "resp_timeout"))
         .unwrap_or(crate::host::MAILBOX_DEFAULT_RESP_TIMEOUT_SECS);
     let session_id = core.current_session_id();
-    // The action result and every later receipt/timeout notice must name the
-    // same mail id. The host consumes this id when it persists the ledger and
-    // spool envelope, so the model can correlate the follow-up [mailbox] notice
-    // with the mail it just sent.
-    let mail_id = generate_mail_id();
-    runtime.on_core_topic_events(&[crate::host::mailbox_send_topic_event(
+    // The runtime owns mail-id assignment: the Host persists the envelope and
+    // answers with the id it assigned, so the action result and every later
+    // receipt name the same id. The tool only correlates the request.
+    let mail_id = match runtime.request_mail_send(&crate::host::mailbox_send_topic_event(
         session_id,
         &to,
         &msg,
         queue_timeout,
         resp_timeout,
-        &mail_id,
-    )]);
+        &mailbox_send_request_id(),
+    )) {
+        Some(mail_id) => mail_id,
+        None => return failed("mailbox_runtime_unavailable"),
+    };
     let resp_text = if resp_timeout < 0 {
         "no read-receipt deadline".to_string()
     } else {
@@ -78,27 +79,19 @@ fn execute_send(
     )))
 }
 
-/// 48-bit random id in the host-compatible `mail_` namespace. The tool owns id
-/// generation because topic delivery is asynchronous: the Host persists the
-/// envelope after this action returns, so only an id chosen here can be named
-/// in the action result and matched by later receipts.
-fn generate_mail_id() -> String {
-    let mut random = [0u8; 6];
+/// Correlation id for one mailbox send round-trip. This is not a mail id: the
+/// Host assigns that when it persists the envelope and answers this request.
+fn mailbox_send_request_id() -> String {
+    let mut random = [0u8; 8];
     if crate::os::fill_secure_random(&mut random).is_err() {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos() as u64)
             .unwrap_or_default();
-        let mixed =
+        random =
             (nanos ^ (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)).to_le_bytes();
-        random.copy_from_slice(&mixed[..6]);
     }
-    let mut id = String::from("mail_");
-    for byte in random {
-        use std::fmt::Write;
-        let _ = write!(id, "{byte:02x}");
-    }
-    id
+    format!("mailbox_send_{:016x}", u64::from_le_bytes(random))
 }
 
 fn execute_list(core: &AgentCore, action: &ParsedAction) -> ActionOutcome {

@@ -21139,6 +21139,37 @@ fn mailbox_send_topic_adopts_the_tool_supplied_mail_id() {
 }
 
 #[test]
+fn mailbox_send_topic_returns_the_runtime_generated_mail_id() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_send_runtime_id");
+    let peer = "mb-e2e-peer-runtime-id";
+    std::fs::create_dir_all(e2e_inbox(peer)).unwrap();
+    let mail_id = handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &json!({
+            "to": peer,
+            "msg": "runtime id please",
+            "request_id": "mailbox_send_test",
+        }),
+    )
+    .expect("the Host must answer the send with the id it assigned");
+    assert_eq!(mail_id.len(), 11, "mail_ plus 6 base36 chars");
+    assert!(mail_id.starts_with("mail_"), "{mail_id}");
+    assert!(
+        mail_id[5..]
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+        "{mail_id}"
+    );
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(
+        mailbox.entries.last().unwrap().id,
+        mail_id,
+        "the Host must persist the id it returned to the tool"
+    );
+}
+
+#[test]
 fn mailbox_send_topic_resolves_timeout_args_and_failed_peers() {
     let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_send");
     let peer = "mb-e2e-peer4";
@@ -21292,7 +21323,7 @@ fn mailbox_stress_burst_receipts_timeouts_and_delivery() {
 fn session_upgraded_from_mailboxless_version_mints_short_address() {
     let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_upgrade");
     let mailbox = load_mailbox_state(&state, &session_id).unwrap();
-    assert_eq!(mailbox.mailbox_name.len(), 8);
+    assert_eq!(mailbox.mailbox_name.len(), 9);
     assert!(mailbox.entries.is_empty());
     assert_eq!(
         session_mailbox_briefing(&state, &session_id),

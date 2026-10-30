@@ -1162,6 +1162,10 @@ impl ActionRuntime for TurnActionRuntime<'_> {
         self.ui.on_core_topic_events(events);
     }
 
+    fn request_mail_send(&mut self, event: &CoreTopicEvent) -> Option<String> {
+        self.ui.request_mail_send(event)
+    }
+
     fn on_model_response_parsed(
         &mut self,
         tool_count: usize,

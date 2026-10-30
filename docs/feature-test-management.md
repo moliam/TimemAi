@@ -993,5 +993,5 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 
 - 背景：mailbox 发送工具的 action result 只报告收件地址与超时设置，不返回 mail id；后续已读/超时/丢弃/失败通知以 `[mailbox] 邮件 mail_xxx ...` 形式出现，模型无法把回执与刚发出的邮件对应起来。
 - 根因：Web Host 通过 worker channel 异步处理 core topic，mail id 由 Host 在落盘时才生成；工具返回时拿不到该 id，两端各自命名，天然对不上。
-- 修复：mail id 改由 mailbox 工具生成（`mail_` + 48-bit 随机十六进制）并随 `mailbox.send` topic 下发；Host 校验格式后直接采用该 id 落账与写 spool，冲突时保留调用方 id 并记为 `failed`（不伪造正文/信封）；工具结果直接返回 `mail id <id>`，后续回执引用同一 id。缺失或非法 id 的旧调用方仍走 Host 生成路径。
+- 修复：mail id 由 Host 在 `mailbox.send` 处理后生成（`mail_` + 6 位 base36），通过 topic 的 `request_id` 同步回执返回给工具，action result 直接返回该 id；Host 落账/写 spool 与后续回执引用同一 id。工具不再生成 mail id，缺失回执时失败关闭，不伪造 id。
 - 测试看护：`mailbox_send_reports_the_same_id_it_hands_to_the_host` 断言 action result 与 topic payload 的 id 一致；`mailbox_send_topic_adopts_the_tool_supplied_mail_id` 断言 Host 采用工具 id 且正文落盘。
