@@ -8242,6 +8242,7 @@ fn routing_test_state() -> AppState {
         mem_mail_runtime: Arc::new(MemMailRuntime::default()),
         mailbox_state_cache: Arc::new(Mutex::new(HashMap::new())),
         mailbox_send_receipt_watch: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+        mailbox_send_lane_locks: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
@@ -21084,6 +21085,63 @@ fn mailbox_send_receipt_wait_folds_fast_reads_and_falls_back() {
             "the notice stays deliverable after the window"
         );
     }
+    std::env::remove_var("TIMEM_MAILBOX_RECEIPT_WAIT_MS");
+}
+
+#[test]
+fn mailbox_send_dispatch_off_bridge_folds_local_reads_and_serializes() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_dispatch");
+    let self_name = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .mailbox_name;
+    // Synchronous test context: no tokio runtime, so the dispatch must fall
+    // back to the inline path. The local receiver consumes synchronously, so
+    // the fast-read window still folds the receipt into the handshake reply.
+    std::env::set_var("TIMEM_MAILBOX_RECEIPT_WAIT_MS", "2000");
+    // The topic scope must match the bridge parameters or the Topics loop
+    // skips the event as a scope mismatch before the mailbox branch runs.
+    let event = CoreSessionWorkerEvent::Topics(vec![agent_core::host::mailbox_send_topic_event(
+        &session_id,
+        &self_name,
+        "dispatch me",
+        300,
+        600,
+        "dispatch_req_1",
+    )
+    .with_worker_scope("ctx", "worker")]);
+    dispatch_mailbox_send_event(&state, &session_id, "ctx", "worker", event);
+    {
+        let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+        let entry = mailbox
+            .entries
+            .iter()
+            .find(|entry| entry.dir == "out")
+            .expect("out entry recorded");
+        assert_eq!(entry.state, "read");
+        assert!(
+            entry.notified,
+            "local fast read folded on the dispatch path"
+        );
+    }
+    // Same-session lane: the second send appends its own entry; both survive
+    // on the shared mailbox state file.
+    let event2 = CoreSessionWorkerEvent::Topics(vec![agent_core::host::mailbox_send_topic_event(
+        &session_id,
+        &self_name,
+        "dispatch me again",
+        300,
+        600,
+        "dispatch_req_2",
+    )
+    .with_worker_scope("ctx", "worker")]);
+    dispatch_mailbox_send_event(&state, &session_id, "ctx", "worker", event2);
+    let outs = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .entries
+        .iter()
+        .filter(|entry| entry.dir == "out")
+        .count();
+    assert_eq!(outs, 2, "both dispatched sends persist their entries");
     std::env::remove_var("TIMEM_MAILBOX_RECEIPT_WAIT_MS");
 }
 

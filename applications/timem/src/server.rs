@@ -241,6 +241,11 @@ struct AppState {
     /// result. mailbox_tick suppresses their terminal notice while watched,
     /// so the receipt is not delivered twice.
     mailbox_send_receipt_watch: Arc<Mutex<BTreeSet<(String, String)>>>,
+    /// Per-session send lanes: mailbox send handling waits synchronously for
+    /// the fast-read receipt window off the bridge loop. Cross-session sends
+    /// run in parallel (mailbox state files are per-session), while
+    /// same-session sends stay serialized because they share one state file.
+    mailbox_send_lane_locks: Arc<Mutex<HashMap<String, Arc<std::sync::Mutex<()>>>>>,
 }
 
 #[derive(Default)]
@@ -2055,6 +2060,7 @@ pub async fn run(
         mem_mail_runtime: Arc::new(MemMailRuntime::default()),
         mailbox_state_cache: Arc::new(Mutex::new(HashMap::new())),
         mailbox_send_receipt_watch: Arc::new(Mutex::new(BTreeSet::new())),
+        mailbox_send_lane_locks: Arc::new(Mutex::new(HashMap::new())),
     };
     // Best-effort removal of stale upgrade backups (older than one day)
     // left next to the executable by previous self upgrades.
@@ -11610,7 +11616,7 @@ fn settle_closed_primary_turn(state: &AppState, session_id: &str) -> Result<(), 
         let events = drain_worker_events(state);
         drained_events += events.len();
         for (event_session_id, context_id, worker_id, event) in events {
-            handle_scoped_worker_event(state, &event_session_id, &context_id, &worker_id, event);
+            dispatch_mailbox_send_event(state, &event_session_id, &context_id, &worker_id, event);
         }
         if !session_has_active_turn(state, session_id)? {
             break;
@@ -16047,12 +16053,74 @@ fn work_instruction_notice_event(state: &AppState, session_id: &str) -> Option<W
     })
 }
 
+/// True when every topic carried by the event is a mailbox send handshake.
+/// Workers emit one topic per event, so this covers every send; mixed events
+/// keep the synchronous bridge path.
+fn event_is_mailbox_send(event: &CoreSessionWorkerEvent) -> bool {
+    match event {
+        CoreSessionWorkerEvent::Topics(topics) => {
+            !topics.is_empty()
+                && topics
+                    .iter()
+                    .all(|topic| topic.topic.name == CORE_TOPIC_MAILBOX)
+        }
+        _ => false,
+    }
+}
+
+/// Mailbox send waits synchronously for the fast-read receipt window (up to
+/// TIMEM_MAILBOX_RECEIPT_WAIT_MS). Running that wait inside the event bridge
+/// would let one session's wait delay every other session's bridging, so
+/// mailbox-send events are dispatched off the loop: cross-session waits run
+/// in parallel, same-session waits stay serialized on a per-session lane
+/// (they share one mailbox state file). The reply is relayed inside the
+/// dispatched task; without a tokio runtime (tests) the call falls back to
+/// the synchronous path.
+fn dispatch_mailbox_send_event(
+    state: &AppState,
+    session_id: &str,
+    context_id: &str,
+    worker_id: &str,
+    event: CoreSessionWorkerEvent,
+) {
+    if !event_is_mailbox_send(&event) {
+        handle_scoped_worker_event(state, session_id, context_id, worker_id, event);
+        return;
+    }
+    let lane = {
+        let Ok(mut lanes) = state.mailbox_send_lane_locks.lock() else {
+            handle_scoped_worker_event(state, session_id, context_id, worker_id, event);
+            return;
+        };
+        lanes
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+            .clone()
+    };
+    let state = state.clone();
+    let session_id = session_id.to_string();
+    let context_id = context_id.to_string();
+    let worker_id = worker_id.to_string();
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn_blocking(move || {
+                let _lane = lane.lock();
+                handle_scoped_worker_event(&state, &session_id, &context_id, &worker_id, event);
+            });
+        }
+        Err(_) => {
+            let _lane = lane.lock();
+            handle_scoped_worker_event(&state, &session_id, &context_id, &worker_id, event);
+        }
+    }
+}
+
 fn spawn_event_bridge(state: AppState) {
     tokio::spawn(async move {
         loop {
             let pending = drain_worker_events(&state);
             for (session_id, context_id, worker_id, event) in pending {
-                handle_scoped_worker_event(&state, &session_id, &context_id, &worker_id, event);
+                dispatch_mailbox_send_event(&state, &session_id, &context_id, &worker_id, event);
             }
             sleep(EVENT_POLL_INTERVAL).await;
         }
