@@ -1886,7 +1886,9 @@ body {
 .turn-user-entry.system-triggered .mailbox-entry-badge { width: 15px; height: 15px; }
 /* System-triggered entry bodies stay one truncated line by default; the
    inline toggle reveals the full text without stealing attention. */
-.system-entry-text { display: flex; align-items: flex-start; gap: 6px; padding-right: 26px; }
+/* Content lines render in a lighter, slightly smaller face so the system
+   meta line (head) and the machine-delivered body read as distinct areas. */
+.system-entry-text { display: flex; align-items: flex-start; gap: 6px; padding-right: 26px; font-size: 11px; font-weight: 300; line-height: 1.55; }
 .system-entry-text-body { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .system-entry-text.expanded .system-entry-text-body { white-space: pre-wrap; overflow-wrap: anywhere; }
 .system-entry-toggle { flex: none; display: inline-flex; align-items: center; gap: 2px; margin: 0; padding: 1px 6px; border: none; border-radius: 999px; background: transparent; color: inherit; font: inherit; font-size: 10px; line-height: 1.5; opacity: 0.55; cursor: pointer; }
