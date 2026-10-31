@@ -6244,6 +6244,13 @@ function ExpandedTextEditor({
       if (liveCommitTimerRef.current !== null) {
         window.clearTimeout(liveCommitTimerRef.current);
         liveCommitTimerRef.current = null;
+        // Teardown with unsaved typing (e.g. a transient session-projection
+        // swap unmounted the panel): commit synchronously instead of
+        // dropping the expanded-editor text.
+        const current = liveStateRef.current;
+        if (current.onLiveCommit && current.draft !== current.value) {
+          current.onLiveCommit(current.draft);
+        }
       }
     },
     [],
@@ -9624,12 +9631,17 @@ function TimemThread({
     composerWriteThroughRef.current?.onInput(text);
   }, []);
   useEffect(() => {
+    // While the expanded editor is open it owns the composer text (its
+    // commits are authoritative); adopting external draft updates here would
+    // overwrite the very text the panel was seeded from, so a stale draft
+    // racing the expand click can no longer blank it.
+    if (composerExpanded) return;
     // Adopt authoritative draft changes (restore, rejection refill, submit
     // clear) into the live-text ref, but skip our own write-through echo: the
     // local field may already hold newer keystrokes than the committed copy.
     if (draft !== composerWriteThroughTextRef.current)
       composerLiveTextRef.current = draft;
-  }, [draft]);
+  }, [draft, composerExpanded]);
   useEffect(() => {
     // A pending write-through belongs to the session it was typed in; it must
     // never leak into the next session's draft after a switch.
@@ -11247,6 +11259,10 @@ function TimemThread({
                 onEnter={submitDraft}
                 onCtrlEnter={submitDraftAsSupplement}
                 onExpand={() => {
+                  // Expand is authoritative: land pending throttled typing
+                  // first so the expanded editor and the session draft start
+                  // from the exact same text.
+                  composerWriteThroughRef.current?.flush();
                   composerExpandedBaseRef.current = composerLiveTextRef.current;
                   setComposerExpanded(true);
                 }}
