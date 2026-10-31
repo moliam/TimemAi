@@ -235,12 +235,17 @@ fn failover_failure_thresholds_match_tight_rate_limit_contract() {
 }
 
 #[test]
-fn missing_key_and_rejected_credential_mark_endpoint_unavailable() {
+fn missing_key_rejected_credential_and_exhausted_balance_mark_endpoint_unavailable() {
     assert!(is_endpoint_unavailable_error(
         "missing_api_key: set TIMEM_API_KEY or configure the Session API key"
     ));
     assert!(is_endpoint_unavailable_error(
         "model_http_401: invalid credentials"
+    ));
+    // An exhausted prepaid balance (HTTP 402 Payment Required) cannot recover
+    // by waiting either: the failover chain must take over immediately.
+    assert!(is_endpoint_unavailable_error(
+        "model_http_402: Insufficient Balance (request_id: c48827d7)"
     ));
     assert!(!is_endpoint_unavailable_error(
         "model_http_403: forbidden for this account"
