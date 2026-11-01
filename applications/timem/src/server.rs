@@ -75,7 +75,7 @@ use agent_core::{
 use axum::{
     extract::{
         ws::{WebSocket, WebSocketUpgrade},
-        Multipart, Query, State,
+        ConnectInfo, Multipart, Query, State,
     },
     http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Response},
@@ -2122,7 +2122,7 @@ pub async fn run(
             );
         }
         println!(
-            "Public mode is enabled. Browser, API, upload, and WebSocket access require the token in the URL."
+            "Public mode is enabled. Remote browser, API, upload, and WebSocket access require the token in the URL; loopback access on this machine needs no token."
         );
         println!("Local access: {local_url}");
     }
@@ -2152,15 +2152,18 @@ pub async fn run(
     spawn_idle_temporary_maintenance_loop(state.clone());
     spawn_model_endpoint_health_scanner(state.clone());
     let shutdown_reason = Arc::new(Mutex::new(None));
-    let serve_result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(
-            shutdown_monitor,
-            Arc::clone(&shutdown_reason),
-            state.restart_notify.clone(),
-            diagnostics.clone(),
-        ))
-        .await
-        .map_err(|error| error.to_string());
+    let serve_result = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(
+        shutdown_monitor,
+        Arc::clone(&shutdown_reason),
+        state.restart_notify.clone(),
+        diagnostics.clone(),
+    ))
+    .await
+    .map_err(|error| error.to_string());
     serve_result?;
     diagnostics.event("graceful_shutdown_cleanup_started", serde_json::Value::Null);
     cleanup_guard.cleanup()?;
@@ -2477,9 +2480,10 @@ async fn performance_trace(
     State((state, _)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
     Json(trace): Json<ClientPerformanceTrace>,
 ) -> Response {
-    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     if !state.runtime_log.enabled() {
@@ -2622,8 +2626,9 @@ async fn debug_browse(
     State((state, _)): State<(AppState, u16)>,
     Query(query): Query<DebugBrowseQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !authorized_api_request(&state, query.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, query.token.as_deref(), &headers, *connect_info) {
         // A bare 401 reads as "broken page" in the browser. Explain what
         // happened and how to recover (reopen the authenticated WebUI URL).
         return (
@@ -2770,8 +2775,9 @@ async fn debug_reset_statistics(
     State((state, _)): State<(AppState, u16)>,
     Query(query): Query<UploadQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> StatusCode {
-    if !authorized_api_request(&state, query.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, query.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED;
     }
     let Some(debug) = state.debug.as_ref() else {
@@ -2787,8 +2793,9 @@ async fn upgrade_status(
     State((state, _)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     Json(json!({
@@ -2802,8 +2809,9 @@ async fn upgrade_check(
     State((state, _)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let runtime = state.upgrade.clone();
@@ -2817,8 +2825,9 @@ async fn upgrade_apply(
     State((state, _)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let runtime = state.upgrade.clone();
@@ -2832,8 +2841,9 @@ async fn upgrade_restart(
     State((state, _)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     match self_upgrade::snapshot_phase(&state.upgrade) {
@@ -2931,8 +2941,9 @@ async fn attach_sessions(
     State((state, _)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     Json(json!({ "sessions": attach_sessions_snapshot(&state) })).into_response()
@@ -2942,9 +2953,10 @@ async fn upload_file(
     State((state, _)): State<(AppState, u16)>,
     Query(query): Query<UploadQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
     mut multipart: Multipart,
 ) -> Response {
-    if !authorized_api_request(&state, query.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, query.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     if let Err(error) = ensure_restart_cwd_resolved(&state, &query.session_id) {
@@ -2988,11 +3000,12 @@ async fn static_asset(
     State((state, _)): State<(AppState, u16)>,
     Query(query): Query<AuthQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
     uri: Uri,
 ) -> Response {
     let token_from_query =
         state.public_access && query.token.as_deref() == Some(state.token.as_str());
-    if !authorized_token_or_cookie(&state, query.token.as_deref(), &headers) {
+    if !authorized_token_or_cookie(&state, query.token.as_deref(), &headers, *connect_info) {
         return (
             StatusCode::UNAUTHORIZED,
             [(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"))],
@@ -3105,8 +3118,9 @@ async fn health(
     State((state, port)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     Json(json!({ "ok": true, "port": port })).into_response()
@@ -3116,8 +3130,9 @@ async fn snapshot(
     State((state, port)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     Json(snapshot_for(&state, port)).into_response()
@@ -3128,8 +3143,9 @@ async fn websocket(
     State((state, port)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     ws.on_upgrade(move |socket| websocket_delivery::websocket_session(socket, state, port))
@@ -3137,11 +3153,27 @@ async fn websocket(
 
 #[cfg(test)]
 fn authorized(state: &AppState, auth: &AuthQuery, headers: &HeaderMap) -> bool {
-    authorized_token_or_cookie(state, auth.token.as_deref(), headers)
+    // Remote perspective: loopback exemption must not weaken token checks.
+    authorized_token_or_cookie(
+        state,
+        auth.token.as_deref(),
+        headers,
+        SocketAddr::from(([192, 168, 0, 10], 41000)),
+    )
 }
 
-fn authorized_token_or_cookie(state: &AppState, token: Option<&str>, headers: &HeaderMap) -> bool {
-    if !state.public_access {
+fn authorized_token_or_cookie(
+    state: &AppState,
+    token: Option<&str>,
+    headers: &HeaderMap,
+    client: SocketAddr,
+) -> bool {
+    // Public mode trusts same-machine loopback callers exactly like the
+    // default loopback-only bind: local access needs no token, so a stale
+    // token left in local browser storage must not lock the loopback UI out
+    // after the runtime rotates credentials. Remote clients must present the
+    // current rotating token (query or cookie).
+    if !state.public_access || (client.ip().is_loopback() && host_is_loopback(headers)) {
         return true;
     }
     match token {
@@ -3150,8 +3182,44 @@ fn authorized_token_or_cookie(state: &AppState, token: Option<&str>, headers: &H
     }
 }
 
-fn authorized_api_request(state: &AppState, token: Option<&str>, headers: &HeaderMap) -> bool {
-    authorized_token_or_cookie(state, token, headers) && request_origin_allowed(headers)
+/// Guards the tokenless loopback exemption against DNS rebinding: a browser
+/// page whose domain resolves to 127.0.0.1 would otherwise reach the loopback
+/// UI without a token while passing the Origin==Host check. The exemption
+/// only applies when the request itself names a loopback host.
+fn host_is_loopback(headers: &HeaderMap) -> bool {
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        // Fail closed when the Host header cannot be inspected.
+        return false;
+    };
+    let host = host.trim();
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        // IPv6 literal: [::1]:port -> ::1
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        // IPv4/name literal: strip a trailing numeric port when present.
+        match host.rsplit_once(':') {
+            Some((name, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => {
+                name
+            }
+            _ => host,
+        }
+    };
+    if name.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    name.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+fn authorized_api_request(
+    state: &AppState,
+    token: Option<&str>,
+    headers: &HeaderMap,
+    client: SocketAddr,
+) -> bool {
+    authorized_token_or_cookie(state, token, headers, client) && request_origin_allowed(headers)
 }
 
 fn current_mem_state(state: &AppState) -> Result<WebMemState, String> {
@@ -18948,7 +19016,7 @@ fn highlighted_browser_url(browser_url: &str, use_color: bool) -> String {
 }
 
 fn print_help() {
-    println!("Timem Web\n\nUsage: timem [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; browser/API/WebSocket/upload require the access token\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default under the user home\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --timeout <seconds>          model connect/inactivity timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
+    println!("Timem Web\n\nUsage: timem [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; remote access requires the token, loopback access needs none\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default under the user home\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --timeout <seconds>          model connect/inactivity timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
 }
 
 fn public_access_url(configured_host: Option<&str>, port: u16, token: &str) -> Option<String> {

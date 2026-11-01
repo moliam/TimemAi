@@ -128,14 +128,40 @@ esac
 grep -q 'Public mode is enabled.' "$first_log"
 grep -q 'The server is bound to 0.0.0.0.' "$first_log"
 
-unauthorized_status="$(curl --silent --show-error --connect-timeout 1 --max-time 10 \
+# Loopback callers are trusted exactly like the default local bind: the
+# public entry must serve them without any token.
+loopback_status="$(curl --silent --show-error --connect-timeout 1 --max-time 10 \
   --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:$first_port/")"
-wrong_token_status="$(curl --silent --show-error --connect-timeout 1 --max-time 10 \
-  --output /dev/null --write-out '%{http_code}' \
-  "http://127.0.0.1:$first_port/?token=invalid")"
-if [ "$unauthorized_status" != "401" ] || [ "$wrong_token_status" != "401" ]; then
-  echo "public Web entry did not reject missing/invalid credentials" >&2
+if [ "$loopback_status" != "200" ]; then
+  echo "public Web entry did not serve a tokenless loopback request: HTTP $loopback_status" >&2
   exit 1
+fi
+
+# Remote clients must still present the token. Reach the bound 0.0.0.0
+# listener through a non-loopback address of this machine when one exists.
+remote_host=""
+if command -v ipconfig >/dev/null 2>&1; then
+  remote_host="$(ipconfig getifaddr en0 2>/dev/null || true)"
+elif command -v hostname >/dev/null 2>&1; then
+  remote_host="$(hostname -I 2>/dev/null | awk '{print $1}')"
+fi
+if [ -n "$remote_host" ] && [ "$remote_host" != "127.0.0.1" ]; then
+  remote_unauthorized="$(curl --silent --show-error --connect-timeout 1 --max-time 10 \
+    --output /dev/null --write-out '%{http_code}' "http://$remote_host:$first_port/")"
+  remote_wrong_token="$(curl --silent --show-error --connect-timeout 1 --max-time 10 \
+    --output /dev/null --write-out '%{http_code}' \
+    "http://$remote_host:$first_port/?token=invalid")"
+  remote_authorized="$(curl --silent --show-error --connect-timeout 1 --max-time 10 \
+    --output /dev/null --write-out '%{http_code}' \
+    "http://$remote_host:$first_port/?token=$first_token")"
+  if [ "$remote_unauthorized" != "401" ] || [ "$remote_wrong_token" != "401" ] \
+    || [ "$remote_authorized" != "200" ]; then
+    echo "public Web entry did not enforce the token for remote clients: \
+$remote_unauthorized/$remote_wrong_token/$remote_authorized" >&2
+    exit 1
+  fi
+else
+  echo "no non-loopback address detected; remote token enforcement covered by unit tests"
 fi
 
 curl "${curl_common[@]}" --dump-header "$test_root/headers" \
@@ -177,12 +203,16 @@ if [ "$first_token" = "$second_token" ]; then
   exit 1
 fi
 
-old_status="$(curl --silent --show-error --connect-timeout 1 --max-time 10 \
-  --output /dev/null --write-out '%{http_code}' \
-  "http://127.0.0.1:$first_port/?token=$first_token")"
-if [ "$old_status" != "401" ]; then
-  echo "the previous public runtime token remained authorized: HTTP $old_status" >&2
-  exit 1
+# The rotated-away token stays usable from loopback only because loopback is
+# trusted like local mode; it must stay rejected for remote clients.
+if [ -n "$remote_host" ] && [ "$remote_host" != "127.0.0.1" ]; then
+  old_status="$(curl --silent --show-error --connect-timeout 1 --max-time 10 \
+    --output /dev/null --write-out '%{http_code}' \
+    "http://$remote_host:$first_port/?token=$first_token")"
+  if [ "$old_status" != "401" ]; then
+    echo "the previous public runtime token remained authorized remotely: HTTP $old_status" >&2
+    exit 1
+  fi
 fi
 curl "${curl_common[@]}" "$second_url" >"$test_root/restarted.html"
 grep -q '<div id="root">' "$test_root/restarted.html"
