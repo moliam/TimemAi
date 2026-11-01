@@ -22344,23 +22344,14 @@ fn mem_switch_reset_clears_mailbox_cache_usage_and_maintenance_schedule() {
 }
 
 #[test]
-fn routine_mailbox_maintenance_stays_quiet_until_files_are_reclaimed() {
-    let mut report = MemMailMaintenanceReport::default();
-    assert!(!mailbox_maintenance_should_log(&report, false));
-    report.orphan_files = 2;
-    assert!(
-        !mailbox_maintenance_should_log(&report, false),
-        "orphans within the grace window are routine"
-    );
-    report.reclaimed_files = 1;
-    assert!(
-        mailbox_maintenance_should_log(&report, false),
-        "reclaiming files is actionable and must be reported"
-    );
-    assert!(
-        mailbox_maintenance_should_log(&MemMailMaintenanceReport::default(), true),
-        "the explicit diagnostic switch keeps the full per-run summary"
-    );
+fn routine_mailbox_maintenance_stays_quiet_without_expert_verbose_flag() {
+    // Orphan reclamation is routine at every 15-minute maintenance tick, so
+    // the default must stay silent regardless of the reclaim counts: the
+    // debug UI must not flood with per-run statistics. Genuine anomalies keep
+    // dedicated warning logs, and operators can still request the full
+    // per-run summary via TIMEM_MAILBOX_MAINTENANCE_LOG=1.
+    assert!(!mailbox_maintenance_should_log(false));
+    assert!(mailbox_maintenance_should_log(true));
 }
 
 // ===== Mailbox capacity settings, usage accounting and shared quota =====

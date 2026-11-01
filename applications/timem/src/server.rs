@@ -8847,8 +8847,14 @@ fn env_flag(name: &str) -> bool {
 /// Its summary is only actionable when files were actually reclaimed; the rest
 /// of the time it must stay out of the terminal. Set
 /// `TIMEM_MAILBOX_MAINTENANCE_LOG=1` to restore the full per-run summary.
-fn mailbox_maintenance_should_log(report: &MemMailMaintenanceReport, verbose: bool) -> bool {
-    verbose || report.reclaimed_files > 0
+fn mailbox_maintenance_should_log(verbose: bool) -> bool {
+    // Orphan reclamation is the routine outcome of the mailbox write/cleanup
+    // cadence, not an actionable anomaly: printing a per-run summary every
+    // maintenance tick floods the debug UI. Real anomalies keep their own
+    // dedicated logs (`mailbox_capacity_backpressure`,
+    // `mailbox_maintenance_failed`); operators opt into the full per-run
+    // summary via TIMEM_MAILBOX_MAINTENANCE_LOG=1.
+    verbose
 }
 
 fn reset_mem_mail_runtime(state: &AppState) -> Result<(), String> {
@@ -9443,7 +9449,7 @@ fn maybe_maintain_mem_mail(state: &AppState, now_ms: u128) {
     };
     let verbose = env_flag("TIMEM_MAILBOX_MAINTENANCE_LOG");
     match maintain_mem_mail_locked(state, &dir, now_ms) {
-        Ok(report) if mailbox_maintenance_should_log(&report, verbose) => eprintln!(
+        Ok(report) if mailbox_maintenance_should_log(verbose) => eprintln!(
             "[timem_web_mailbox_maintenance] maintenance_runs={} referenced_files={} orphan_files={} reclaimed_files={} reclaimed_bytes={} usage_files={} usage_bytes={} budget_files={} budget_bytes={} capacity_rejections={} index_loads={} index_saves={} body_reads={} body_writes={}",
             state.mem_mail_runtime.maintenance_runs.load(Ordering::Relaxed),
             report.referenced_files,
