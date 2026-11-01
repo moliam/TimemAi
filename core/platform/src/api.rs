@@ -331,6 +331,31 @@ impl Drop for ProcessSafetyNetGuard {
     }
 }
 
+const REAPER_FAST_CADENCE: std::time::Duration = std::time::Duration::from_millis(250);
+const REAPER_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Idle backoff for the orphan-reaper loop: any reaping or managed-child
+/// spawn activity restores the fast 250 ms cadence; otherwise the poll
+/// interval doubles up to a 4 s ceiling.
+pub(crate) fn next_reaper_backoff(
+    reaped: usize,
+    churn: u64,
+    current: std::time::Duration,
+) -> std::time::Duration {
+    if reaped > 0 || churn > 0 {
+        REAPER_FAST_CADENCE
+    } else {
+        current.saturating_mul(2).min(REAPER_MAX_BACKOFF)
+    }
+}
+
+fn take_spawn_churn() -> u64 {
+    #[cfg(unix)]
+    return crate::shared::take_spawn_churn();
+    #[cfg(not(unix))]
+    0
+}
+
 pub fn ensure_process_safety_net() -> ProcessSafetyNetGuard {
     static STATUS: OnceLock<ProcessSafetyNetStatus> = OnceLock::new();
     let status = *STATUS.get_or_init(|| {
@@ -345,9 +370,17 @@ pub fn ensure_process_safety_net() -> ProcessSafetyNetGuard {
             .name("orphan-reaper".to_string())
             .spawn(|| {
                 let mut reaper = FallbackProcessReaper::for_runtime();
+                // Fixed 250 ms full-/proc polling costs a constant CPU share
+                // on busy hosts. Reaping or managed-child spawns keep the fast
+                // cadence; quiet periods double the interval up to 4 s. A
+                // newly dead orphan is then at most ~4 s from reaping, which
+                // stays invisible to the runtime lifecycle.
+                let mut backoff = std::time::Duration::from_millis(250);
                 loop {
-                    reaper.reap_adopted_zombies();
-                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    let reaped = reaper.reap_adopted_zombies();
+                    let churn = take_spawn_churn();
+                    backoff = next_reaper_backoff(reaped, churn, backoff);
+                    std::thread::sleep(backoff);
                 }
             }) {
             Ok(_) => ProcessSafetyNetStatus::Active,

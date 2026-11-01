@@ -8436,6 +8436,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         current_dir: "/work".to_string(),
         restart_cwd_decision: None,
         debug_dir: None,
+        preview_throttle: Default::default(),
         max_llm_input_tokens: 10_000,
         tools: Vec::new(),
         mcp_server_ids: Vec::new(),
@@ -22944,4 +22945,125 @@ fn mailbox_cross_instance_receipt_updates_out_and_notifies_once() {
     assert_eq!(notices(&state), 1);
     mailbox_tick(&state);
     assert_eq!(notices(&state), 1, "the read notice surfaces exactly once");
+}
+
+#[test]
+fn streaming_preview_broadcasts_are_throttled_and_terminal_answer_drops_pending() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let web_turn = start_web_turn(&state, session_id, "throttle the preview stream").unwrap();
+    let worker_id = test_worker_id(session_id);
+    let core_turn_id = "core_turn_throttle";
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Active(
+            agent_core::ActiveTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.to_string(),
+                    turn_id: core_turn_id.to_string(),
+                    epoch: 1,
+                },
+                stop_requested: false,
+                input_admission: agent_core::TurnInputAdmission::Open,
+                activity: agent_core::TurnActivity::Running,
+            },
+        )),
+    );
+    let mut receiver = state.events.subscribe();
+    let preview = |attempt: u64, revision: u64, text: &str| {
+        CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new("core.model.preview", json!({})),
+            CoreSessionState::WaitingModel,
+            json!({
+                "turn_id": core_turn_id,
+                "attempt": attempt,
+                "revision": revision,
+                "interruption": null,
+                "response": {
+                    "attempt": attempt,
+                    "revision": revision,
+                    "text": text,
+                    "status": "intermediate"
+                }
+            }),
+        )
+        .with_worker_scope(test_context_id(session_id), worker_id.clone())
+    };
+
+    // The first frame of a turn is outside any window and broadcasts at once.
+    response_preview::publish(&state, session_id, &worker_id, &preview(1, 1, "first"));
+    assert_eq!(drain_wire_events(&mut receiver).len(), 1);
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_none());
+
+    // Frames inside the window are withheld from the wire while the
+    // server-side projection keeps tracking the newest revision.
+    response_preview::publish(&state, session_id, &worker_id, &preview(1, 2, "second"));
+    response_preview::publish(&state, session_id, &worker_id, &preview(1, 3, "third"));
+    assert_eq!(drain_wire_events(&mut receiver).len(), 0);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[session_id];
+        let turn = session
+            .turns
+            .iter()
+            .find(|turn| turn.turn_id == web_turn.turn_id)
+            .unwrap();
+        assert_eq!(turn.preview.as_ref().unwrap()["revision"], 3);
+        assert!(session.preview_throttle.pending.is_some());
+    }
+
+    // Once the window elapses the drain releases the newest withheld frame
+    // exactly once.
+    std::thread::sleep(std::time::Duration::from_millis(160));
+    response_preview::flush_pending(&state, session_id);
+    let drained = drain_wire_events(&mut receiver);
+    assert_eq!(drained.len(), 1);
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_none());
+
+    // A withheld frame of a finished turn is dropped, never broadcast late on
+    // top of the terminal answer.
+    response_preview::publish(&state, session_id, &worker_id, &preview(1, 4, "stale"));
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_some());
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Finished(
+            agent_core::FinishedTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.to_string(),
+                    turn_id: core_turn_id.to_string(),
+                    epoch: 1,
+                },
+                outcome: agent_core::TurnProjectionOutcome::Completed,
+            },
+        )),
+    );
+    response_preview::flush_pending(&state, session_id);
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_none());
+    // The Finished projection itself is broadcast, but the withheld stale
+    // preview frame must never leak on top of the terminal answer.
+    let drained = drain_wire_events(&mut receiver);
+    assert!(
+        drained.iter().all(|event| match event {
+            WireEvent::CoreTopic { event, .. } => {
+                event["topic"]["name"] != json!("core.model.preview")
+            }
+            _ => true,
+        }),
+        "a finished turn must not leak its withheld preview frame"
+    );
 }

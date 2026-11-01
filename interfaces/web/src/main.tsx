@@ -360,7 +360,7 @@ import { requestTimelineNavigationWork } from "./timeline_navigation_work";
 import { selectedUserMessageText, useTimedClipboardCopy } from "./clipboard_copy";
 import "./styles.css";
 
-const STORED_HISTORY_PAGE_SIZE = 200;
+const STORED_HISTORY_PAGE_SIZE = 50;
 const MAX_MOUNTED_SESSION_TIMELINES = 2;
 const TOKEN_STORAGE_KEY = "timem-web-access-token";
 const EMPTY_CHAT_MESSAGES: ChatMessage[] = [];

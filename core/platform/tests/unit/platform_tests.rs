@@ -1061,3 +1061,19 @@ fn macos_process_identity_and_unsupported_ownership_are_not_conflated() {
     assert!(!install_process_subreaper());
     assert!(reparented_detached_child_pids().is_empty());
 }
+
+#[test]
+fn reaper_backoff_restores_fast_cadence_on_activity_and_caps_idle_growth() {
+    let fast = std::time::Duration::from_millis(250);
+    assert_eq!(crate::next_reaper_backoff(1, 0, fast), fast);
+    assert_eq!(crate::next_reaper_backoff(0, 3, fast), fast);
+    assert_eq!(
+        crate::next_reaper_backoff(0, 0, fast),
+        std::time::Duration::from_millis(500)
+    );
+    let mut backoff = fast;
+    for _ in 0..10 {
+        backoff = crate::next_reaper_backoff(0, 0, backoff);
+    }
+    assert_eq!(backoff, std::time::Duration::from_secs(4));
+}

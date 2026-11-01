@@ -24,6 +24,18 @@ struct ManagedChildRegistry {
 }
 
 static MANAGED_CHILDREN: OnceLock<Mutex<ManagedChildRegistry>> = OnceLock::new();
+/// Counts successful managed-child registrations since the reaper last
+/// drained it. The orphan-reaper loop uses this to keep its fast polling
+/// cadence while the runtime is actively spawning and to back off when idle.
+static SPAWN_CHURN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(super) fn note_spawn_churn() {
+    SPAWN_CHURN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(super) fn take_spawn_churn() -> u64 {
+    SPAWN_CHURN.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
 static ORPHAN_PROCESS_EVENTS: OnceLock<Mutex<VecDeque<OrphanProcessEvent>>> = OnceLock::new();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -94,6 +106,7 @@ pub(super) fn register_managed_child(pid: u32) -> ManagedChildRegistration {
     };
     if let Some(refs) = registry.pids.get_mut(&pid) {
         *refs = refs.saturating_add(1);
+        note_spawn_churn();
         return ManagedChildRegistration { pid, tracked: true };
     }
     if registry.pids.len() >= MAX_MANAGED_CHILD_PIDS {
@@ -104,6 +117,7 @@ pub(super) fn register_managed_child(pid: u32) -> ManagedChildRegistration {
         };
     }
     registry.pids.insert(pid, 1);
+    note_spawn_churn();
     ManagedChildRegistration { pid, tracked: true }
 }
 

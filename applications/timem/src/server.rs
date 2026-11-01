@@ -693,6 +693,8 @@ struct WebSession {
     mcp_config_revision: u64,
     #[serde(skip)]
     applied_mcp_config_revision: u64,
+    #[serde(skip)]
+    preview_throttle: response_preview::PreviewThrottleState,
     runtime_profile: WebSessionRuntimeProfile,
     contexts: Vec<WebContext>,
     workers: Vec<WebWorker>,
@@ -6493,6 +6495,7 @@ fn create_session_in_group(
         sessions.insert(
             session_id.clone(),
             WebSession {
+                preview_throttle: response_preview::PreviewThrottleState::default(),
                 session_id: session_id.clone(),
                 group_id,
                 display_name: session_display_name,
@@ -7437,6 +7440,7 @@ fn restore_stored_session(
         sessions.insert(
             stored.session_id.clone(),
             WebSession {
+                preview_throttle: response_preview::PreviewThrottleState::default(),
                 session_id: stored.session_id.clone(),
                 group_id: stored.group_id.clone(),
                 display_name: stored.display_name.clone(),
@@ -16791,6 +16795,7 @@ fn handle_scoped_worker_event(
                     );
                     continue;
                 }
+                response_preview::flush_pending(state, session_id);
                 if event.topic.name == "core.model.preview" {
                     if !toolgen_scoped {
                         response_preview::publish(state, session_id, worker_id, &event);
