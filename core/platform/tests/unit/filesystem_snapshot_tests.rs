@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::process_lifecycle_test_lock;
 
 #[test]
 fn aliases_sample_once_and_preserve_device_identity() {
@@ -71,6 +72,7 @@ fn native_snapshot_deduplicates_working_paths_and_mount_aliases() {
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_snapshot_tracks_real_disk_image_mount_and_unmount() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     use std::process::Command;
     struct Image {
         image: PathBuf,

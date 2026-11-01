@@ -4,6 +4,8 @@ use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use crate::test_support::process_lifecycle_test_lock;
+
 #[test]
 fn host_environment_contains_os_and_bash_without_template_syntax() {
     let environment = host_environment();
@@ -217,11 +219,13 @@ fn linux_process_identity_comes_from_proc_start_ticks() {
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_child_running_distinguishes_running_and_reaped_children() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     let mut running = std::process::Command::new("/bin/sleep")
         .arg("30")
         .spawn()
         .expect("spawn running Linux child");
     let running_pid = running.id();
+    let _running_registration = crate::register_managed_child(running_pid);
     assert!(child_process_running(running_pid));
     terminate_process(running_pid);
     let status = running.wait().expect("reap terminated Linux child");
@@ -245,6 +249,7 @@ fn linux_child_running_distinguishes_running_and_reaped_children() {
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_runtime_process_group_termination_reaches_descendants() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     let root = std::env::temp_dir().join(format!(
         "timem-linux-os-group-{}-{}",
         std::process::id(),
@@ -264,6 +269,7 @@ fn linux_runtime_process_group_termination_reaches_descendants() {
     configure_child_process_group(&mut command);
     let mut leader = command.spawn().expect("spawn Linux process group");
     let leader_pid = leader.id();
+    let _leader_registration = crate::register_managed_child(leader_pid);
     let descendant_pid = wait_for_file(&pid_file, std::time::Duration::from_secs(2))
         .trim()
         .parse::<u32>()
@@ -349,6 +355,7 @@ fn windows_process_identity_and_parent_are_available() {
 #[cfg(target_os = "linux")]
 #[test]
 fn subreaper_safety_net_adopts_and_sweeps_detached_orphans() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     use crate::install_process_subreaper;
     use crate::reparented_detached_child_pids;
     assert!(
@@ -406,6 +413,7 @@ fn subreaper_safety_net_adopts_and_sweeps_detached_orphans() {
 #[cfg(target_os = "linux")]
 #[test]
 fn subreaper_reaps_self_exited_adopted_orphans() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     use crate::install_process_subreaper;
     use crate::reparented_detached_child_pids;
     use crate::try_reap_child_process;
@@ -457,6 +465,7 @@ fn subreaper_reaps_self_exited_adopted_orphans() {
 #[cfg(unix)]
 #[test]
 fn list_live_process_group_members_reports_spawned_child() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     use crate::configure_child_process_group;
     use std::process::Command;
     let marker = std::env::temp_dir().join("timem_pgid_member_test");
@@ -502,6 +511,7 @@ fn list_live_process_group_members_reports_spawned_child() {
 #[cfg(unix)]
 #[test]
 fn list_live_process_group_members_empty_after_group_exit() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     use crate::configure_child_process_group;
     use std::process::Command;
     let mut child = Command::new("bash");
@@ -558,6 +568,7 @@ fn local_filesystem_mount_points_reports_root_and_skips_pseudo() {
 
 #[test]
 fn managed_command_status_preserves_owner_exit_status() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     let status = crate::command_status(
         std::process::Command::new(crate::POSIX_SHELL_EXECUTABLE).args(["-c", "exit 27"]),
     )
@@ -567,6 +578,7 @@ fn managed_command_status_preserves_owner_exit_status() {
 
 #[test]
 fn managed_command_output_preserves_captured_streams_and_status() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     let output = crate::command_output(
         std::process::Command::new(crate::POSIX_SHELL_EXECUTABLE)
             .args(["-c", "printf stdout-text; printf stderr-text >&2; exit 9"]),
@@ -595,6 +607,7 @@ fn fallback_contains(pid: u32) -> bool {
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_fallback_reaper_does_not_consume_registered_child_exit_status() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     assert!(crate::install_process_subreaper());
     let _ = crate::take_orphan_process_events();
     let mut child = std::process::Command::new("sh")
@@ -622,6 +635,7 @@ fn linux_fallback_reaper_does_not_consume_registered_child_exit_status() {
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_fallback_registration_race_requires_stable_unowned_observations() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     assert!(crate::install_process_subreaper());
     let _ = crate::take_orphan_process_events();
     let mut child = std::process::Command::new("sh")
@@ -656,6 +670,7 @@ fn linux_fallback_registration_race_requires_stable_unowned_observations() {
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_fallback_lifecycle_is_adopted_active_then_exactly_reaped() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     assert!(crate::install_process_subreaper());
     let _ = crate::take_orphan_process_events();
     let marker = std::env::temp_dir().join(format!(
@@ -735,6 +750,7 @@ fn linux_fallback_lifecycle_is_adopted_active_then_exactly_reaped() {
 
 #[test]
 fn process_safety_net_initialization_is_idempotent_and_non_blocking() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     let first = ensure_process_safety_net();
     let first_status = first.status();
     let second = ensure_process_safety_net();
@@ -856,6 +872,7 @@ fn linux_process_aggregate_scope_snapshot_exposes_runtime_and_opaque_session_dir
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_managed_process_job_contains_and_kills_setsid_descendants() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     let raw_session_id = "private-session-id-must-not-appear";
     let job = match ManagedProcessJob::create_for_session(raw_session_id) {
         Ok(job) => job,
@@ -950,6 +967,7 @@ impl Drop for MacosTestChild {
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_older_group_remains_visible_and_term_resistant_child_is_killed() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
     let mut command = Command::new("/bin/sh");
@@ -991,6 +1009,7 @@ fn macos_older_group_remains_visible_and_term_resistant_child_is_killed() {
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_zombie_only_group_is_not_running_before_reap() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     use std::io::{BufRead, BufReader};
     let mut command = std::process::Command::new("/bin/sh");
     command.args(["-c", "echo ready; exit 0"]);
