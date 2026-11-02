@@ -546,8 +546,24 @@ pub const MAX_TIMERS: usize = 32;
 /// the trigger description); the Host owns the wall clock: it computes the
 /// concrete fire time, persists timers across restarts, and delivers the
 /// prompt as a turn when due.
-fn default_deliver_immediately() -> bool {
-    true
+/// Legacy timer files stored a boolean `deliver_immediately`; map it onto
+/// the minute-based queue timeout (true -> 0, false -> u64::MAX, i.e. queue
+/// indefinitely) so old persisted timers keep their delivery semantics.
+fn deserialize_queue_timeout_minutes<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: serde_json::Value = serde::Deserialize::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Number(number) => number
+            .as_u64()
+            .ok_or_else(|| serde::de::Error::custom("queue_timeout_minutes_must_be_unsigned")),
+        serde_json::Value::Bool(true) => Ok(0),
+        serde_json::Value::Bool(false) => Ok(u64::MAX),
+        other => Err(serde::de::Error::custom(format!(
+            "queue_timeout_minutes_invalid_value:{other}"
+        ))),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -571,14 +587,15 @@ pub struct TimerSpec {
     /// Refire period in milliseconds; present only for mode "repeat".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval_ms: Option<u64>,
-    /// Default (true, also the serde default for legacy files without the
-    /// field): deliver at once — an active turn receives the fired prompt as
-    /// an immediate supplement and an idle session starts a new turn
-    /// directly, even ahead of queued messages. Explicit false opts into
-    /// queue delivery: the prompt waits behind pending messages and is
-    /// dispatched automatically in order.
-    #[serde(default = "default_deliver_immediately")]
-    pub deliver_immediately: bool,
+    /// Maximum minutes a fired prompt may wait in the session message queue
+    /// before being dispatched immediately out of queue order. 0 (also the
+    /// serde default): never queue — deliver at once; an active turn
+    /// receives the fired prompt as an immediate supplement and an idle
+    /// session starts a new turn directly, even ahead of queued messages.
+    /// Legacy files storing the removed boolean field map true to 0 and
+    /// false to u64::MAX (queue indefinitely, the old false semantics).
+    #[serde(default, deserialize_with = "deserialize_queue_timeout_minutes")]
+    pub queue_timeout_minutes: u64,
     /// Who created the timer: "model" (timer tool) or "user" (interface).
     pub created_by: String,
 }

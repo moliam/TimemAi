@@ -869,6 +869,11 @@ struct WebNextTurnPayload {
     text: String,
     attachments: Vec<WebAttachment>,
     worker_roles: Vec<WorkerRole>,
+    /// Timer queue entry with queue_timeout_minutes > 0: once the wall clock
+    /// passes this deadline the entry is dispatched immediately out of queue
+    /// order instead of waiting behind pending messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dispatch_deadline_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1443,8 +1448,8 @@ enum ClientCommand {
         at: Option<String>,
         #[serde(default)]
         interval_ms: Option<u64>,
-        #[serde(default = "default_timer_deliver_immediately")]
-        deliver_immediately: bool,
+        #[serde(default)]
+        queue_timeout_minutes: u64,
     },
     TimerDelete {
         session_id: String,
@@ -1470,7 +1475,7 @@ enum ClientCommand {
         #[serde(default)]
         interval_ms: Option<u64>,
         #[serde(default)]
-        deliver_immediately: Option<bool>,
+        queue_timeout_minutes: Option<u64>,
     },
     SessionDelete {
         session_id: String,
@@ -4076,7 +4081,7 @@ fn handle_command_with_id(
             after_ms,
             at,
             interval_ms,
-            deliver_immediately,
+            queue_timeout_minutes,
         } => {
             create_session_timer(
                 state,
@@ -4087,7 +4092,7 @@ fn handle_command_with_id(
                 after_ms,
                 at,
                 interval_ms,
-                deliver_immediately,
+                queue_timeout_minutes,
             )?;
         }
         ClientCommand::TimerDelete {
@@ -4156,7 +4161,7 @@ fn handle_command_with_id(
             after_ms,
             at,
             interval_ms,
-            deliver_immediately,
+            queue_timeout_minutes,
         } => {
             update_session_timer(
                 state,
@@ -4168,7 +4173,7 @@ fn handle_command_with_id(
                 after_ms,
                 at,
                 interval_ms,
-                deliver_immediately,
+                queue_timeout_minutes,
             )?;
         }
         ClientCommand::SessionDelete { session_id } => {
@@ -4505,6 +4510,7 @@ fn handle_command_with_id(
                         text,
                         attachment_ids.as_deref(),
                         worker_roles,
+                        None,
                     )?;
                     return Ok(Some(WireEvent::MessageQueueUpdated {
                         session_id,
@@ -8370,7 +8376,7 @@ fn create_session_timer(
     after_ms: Option<u64>,
     at: Option<String>,
     interval_ms: Option<u64>,
-    deliver_immediately: bool,
+    queue_timeout_minutes: u64,
 ) -> Result<(), String> {
     let prompt = prompt.trim().to_string();
     if prompt.is_empty() {
@@ -8393,7 +8399,7 @@ fn create_session_timer(
         after_ms,
         at,
         interval_ms,
-        deliver_immediately,
+        queue_timeout_minutes,
         created_by: "user".to_string(),
     };
     let next_fire_ms = compute_next_fire_ms(&spec, now)?;
@@ -8510,7 +8516,7 @@ fn update_session_timer(
     after_ms: Option<u64>,
     at: Option<String>,
     interval_ms: Option<u64>,
-    deliver_immediately: Option<bool>,
+    queue_timeout_minutes: Option<u64>,
 ) -> Result<(), String> {
     let prompt = prompt.trim().to_string();
     if prompt.is_empty() {
@@ -8567,9 +8573,9 @@ fn update_session_timer(
                 changed = true;
             }
         }
-        if let Some(deliver_immediately) = deliver_immediately {
-            if timer.spec.deliver_immediately != deliver_immediately {
-                timer.spec.deliver_immediately = deliver_immediately;
+        if let Some(queue_timeout_minutes) = queue_timeout_minutes {
+            if timer.spec.queue_timeout_minutes != queue_timeout_minutes {
+                timer.spec.queue_timeout_minutes = queue_timeout_minutes;
                 changed = true;
             }
         }
@@ -8618,8 +8624,8 @@ fn fire_due_timers(state: &AppState) {
         return;
     }
     let now = now_ms();
-    // (session_id, timer_id, fire_text, deliver_immediately)
-    let due: Vec<(String, String, String, bool)> = {
+    // (session_id, timer_id, fire_text, queue_timeout_minutes)
+    let due: Vec<(String, String, String, u64)> = {
         let Ok(sessions) = state.sessions.lock() else {
             return;
         };
@@ -8636,19 +8642,19 @@ fn fire_due_timers(state: &AppState) {
                             session.session_id.clone(),
                             timer.spec.timer_id.clone(),
                             format!("[timer:{}] {}", timer.spec.name, timer.spec.prompt),
-                            timer.spec.deliver_immediately,
+                            timer.spec.queue_timeout_minutes,
                         )
                     })
             })
             .collect()
     };
-    for (session_id, timer_id, fire_text, deliver_immediately) in due {
+    for (session_id, timer_id, fire_text, queue_timeout_minutes) in due {
         let delivered = deliver_timer_fire(
             state,
             &session_id,
             &timer_id,
             &fire_text,
-            deliver_immediately,
+            queue_timeout_minutes,
         );
         let fired_at = now_ms();
         {
@@ -10685,7 +10691,7 @@ fn deliver_timer_fire(
     session_id: &str,
     timer_id: &str,
     fire_text: &str,
-    deliver_immediately: bool,
+    queue_timeout_minutes: u64,
 ) -> bool {
     let turn_active = state
         .sessions
@@ -10697,7 +10703,7 @@ fn deliver_timer_fire(
                 .map(|session| current_turn_id(session).is_some())
         })
         .unwrap_or(false);
-    if deliver_immediately {
+    if queue_timeout_minutes == 0 {
         // Immediate mode mirrors the user typing right now: an active turn
         // receives the prompt as a supplement; an idle session starts a new
         // turn even when queued messages are still waiting.
@@ -10725,7 +10731,13 @@ fn deliver_timer_fire(
                 Ok(None) => {}
                 Err(error) => {
                     log_timer_fire_failure(state, session_id, timer_id, &error);
-                    return enqueue_timer_fire(state, session_id, timer_id, fire_text.to_string());
+                    return enqueue_timer_fire(
+                        state,
+                        session_id,
+                        timer_id,
+                        fire_text.to_string(),
+                        queue_timeout_minutes,
+                    );
                 }
             }
         }
@@ -10743,7 +10755,13 @@ fn deliver_timer_fire(
                 log_timer_fire_failure(state, session_id, timer_id, &error);
                 // Never drop or park the fired prompt behind a delivery
                 // hiccup; queue delivery is the lossless fallback.
-                enqueue_timer_fire(state, session_id, timer_id, fire_text.to_string())
+                enqueue_timer_fire(
+                    state,
+                    session_id,
+                    timer_id,
+                    fire_text.to_string(),
+                    queue_timeout_minutes,
+                )
             }
         };
     }
@@ -10783,7 +10801,13 @@ fn deliver_timer_fire(
                     })
                     .unwrap_or(false);
                 if turn_active {
-                    enqueue_timer_fire(state, session_id, timer_id, fire_text.to_string())
+                    enqueue_timer_fire(
+                        state,
+                        session_id,
+                        timer_id,
+                        fire_text.to_string(),
+                        queue_timeout_minutes,
+                    )
                 } else {
                     log_timer_fire_failure(state, session_id, timer_id, &error);
                     false
@@ -10791,7 +10815,13 @@ fn deliver_timer_fire(
             }
         };
     }
-    enqueue_timer_fire(state, session_id, timer_id, fire_text.to_string())
+    enqueue_timer_fire(
+        state,
+        session_id,
+        timer_id,
+        fire_text.to_string(),
+        queue_timeout_minutes,
+    )
 }
 
 fn enqueue_timer_fire(
@@ -10799,9 +10829,27 @@ fn enqueue_timer_fire(
     session_id: &str,
     timer_id: &str,
     fire_text: String,
+    queue_timeout_minutes: u64,
 ) -> bool {
     let command_id = unique_web_id("timer_fire");
-    match enqueue_next_turn_intent(state, session_id, &command_id, fire_text, None, Vec::new()) {
+    // The wait cap is anchored at fire time: once the wall clock passes the
+    // deadline the queued entry is dispatched immediately out of order.
+    let dispatch_deadline_ms = if queue_timeout_minutes == 0 {
+        None
+    } else {
+        let deadline =
+            now_ms().saturating_add(u128::from(queue_timeout_minutes).saturating_mul(60_000));
+        u64::try_from(deadline).ok()
+    };
+    match enqueue_next_turn_intent(
+        state,
+        session_id,
+        &command_id,
+        fire_text,
+        None,
+        Vec::new(),
+        dispatch_deadline_ms,
+    ) {
         Ok(_) => true,
         Err(error) => {
             log_timer_fire_failure(state, session_id, timer_id, &error);
@@ -10815,11 +10863,6 @@ fn log_timer_fire_failure(state: &AppState, session_id: &str, timer_id: &str, er
         "timer_fire_failed",
         json!({"session_id": session_id, "timer_id": timer_id, "error": error}),
     );
-}
-
-fn default_timer_deliver_immediately() -> bool {
-    // Timers deliver immediately by default; queueing is the explicit opt-in.
-    true
 }
 
 fn message_queue_error(error: SessionMessageQueueError) -> String {
@@ -11162,6 +11205,7 @@ fn enqueue_next_turn_intent(
     text: String,
     attachment_ids: Option<&[String]>,
     worker_roles: Vec<WorkerRole>,
+    dispatch_deadline_ms: Option<u64>,
 ) -> Result<MessageQueueProjection<WebNextTurnPayload>, String> {
     if queued_payload_for_command_id(state, session_id, command_id)?.is_some() {
         dispatch_next_turn_intent_if_ready(state, session_id);
@@ -11196,6 +11240,7 @@ fn enqueue_next_turn_intent(
             text,
             attachments,
             worker_roles,
+            dispatch_deadline_ms,
         };
         session
             .message_queue
@@ -11237,7 +11282,26 @@ fn dispatch_next_turn_intent_if_ready(state: &AppState, session_id: &str) {
             .first()
             .filter(|item| item.payload.send_after_cancel)
             .map(|item| item.command_id.clone());
+        // A queued timer entry whose queue timeout has expired is delivered
+        // immediately, out of queue order: the wait cap beats the order.
+        let timed_out = session
+            .message_queue
+            .projection()
+            .items
+            .iter()
+            .find(|item| {
+                item.payload
+                    .dispatch_deadline_ms
+                    .is_some_and(|deadline| u128::from(now_ms()) >= u128::from(deadline))
+            })
+            .map(|item| item.command_id.clone());
         let item = if let Some(command_id) = explicit_after_stop {
+            session
+                .message_queue
+                .begin_immediate_dispatch(&command_id)
+                .ok()?
+                .clone()
+        } else if let Some(command_id) = timed_out {
             session
                 .message_queue
                 .begin_immediate_dispatch(&command_id)

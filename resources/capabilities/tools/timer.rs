@@ -35,7 +35,7 @@ fn execute_new(
     let after_ms = u64_field(action, "after_ms");
     let at = str_field(action, "at");
     let interval_ms = u64_field(action, "interval_ms");
-    let deliver_immediately = action.input_bool_or("deliver_immediately", true);
+    let queue_timeout_minutes = action.input_u64("queue_timeout").unwrap_or(0);
 
     // The tool validates shape only; the host parses `at` with its clock.
     match mode.as_str() {
@@ -75,7 +75,7 @@ fn execute_new(
         after_ms,
         at: if at.is_empty() { None } else { Some(at) },
         interval_ms,
-        deliver_immediately,
+        queue_timeout_minutes,
         created_by: "model".to_string(),
     };
     match core.add_timer(spec) {
@@ -94,10 +94,13 @@ fn execute_new(
                 added.name,
                 added.mode,
                 added.prompt,
-                if added.deliver_immediately {
-                    ""
+                if added.queue_timeout_minutes > 0 {
+                    format!(
+                        " Queue delivery: when the session is busy at fire time the prompt waits in the session queue for up to {} minute(s), then is delivered directly",
+                        added.queue_timeout_minutes
+                    )
                 } else {
-                    " Queued delivery: the fired prompt waits behind pending messages and is dispatched automatically in order"
+                    String::new()
                 },
                 core.timers().len()
             )))

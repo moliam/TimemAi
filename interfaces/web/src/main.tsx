@@ -7718,7 +7718,7 @@ type TimerEditForm = {
   delayMinutes: string;
   atValue: string;
   intervalMinutes: string;
-  queueOnFire: boolean;
+  queueTimeoutMinutes: string;
 };
 
 function timerAtToLocalInput(at: string | null | undefined): string {
@@ -7746,8 +7746,15 @@ function timerToEditForm(timer: TimerInfo): TimerEditForm {
       timer.interval_ms != null
         ? String(Math.max(1, Math.round(timer.interval_ms / 60_000)))
         : "",
-    queueOnFire: !(timer.deliver_immediately ?? true),
+    queueTimeoutMinutes: timer.queue_timeout_minutes
+      ? String(timer.queue_timeout_minutes)
+      : "",
   };
+}
+
+function queueTimeoutMinutesFromInput(text: string): number {
+  const parsed = Number.parseInt(text.trim(), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
 function fallbackCopyText(text: string, done: () => void) {
@@ -7983,7 +7990,7 @@ function TimerPanel({
   const [delayMinutes, setDelayMinutes] = useState("");
   const [atValue, setAtValue] = useState("");
   const [intervalMinutes, setIntervalMinutes] = useState("");
-  const [queueOnFire, setQueueOnFire] = useState(false);
+  const [queueTimeoutMinutes, setQueueTimeoutMinutes] = useState("");
   useEffect(() => {
     setCreateOpen(false);
     setPrompt("");
@@ -7993,7 +8000,7 @@ function TimerPanel({
     setDelayMinutes("");
     setAtValue("");
     setIntervalMinutes("");
-    setQueueOnFire(false);
+    setQueueTimeoutMinutes("");
     setEditingTimerId(null);
     setEditForm(null);
     setExpandedPrompts(new Set());
@@ -8052,7 +8059,7 @@ function TimerPanel({
       ...(editForm.mode === "repeat"
         ? { interval_ms: Math.round(Number(editForm.intervalMinutes) * 60_000) }
         : { interval_ms: null }),
-      deliver_immediately: !editForm.queueOnFire,
+      queue_timeout_minutes: queueTimeoutMinutesFromInput(editForm.queueTimeoutMinutes),
     };
     if (!sendCommand.current(command)) return;
     setEditingTimerId(null);
@@ -8070,7 +8077,7 @@ function TimerPanel({
     setDelayMinutes("");
     setAtValue("");
     setIntervalMinutes("");
-    setQueueOnFire(false);
+    setQueueTimeoutMinutes("");
   };
   const submitCreate = (event: React.FormEvent) => {
     event.preventDefault();
@@ -8087,7 +8094,7 @@ function TimerPanel({
       ...(mode === "repeat"
         ? { interval_ms: Math.round(Number(intervalMinutes) * 60_000) }
         : {}),
-      deliver_immediately: !queueOnFire,
+      queue_timeout_minutes: queueTimeoutMinutesFromInput(queueTimeoutMinutes),
     };
     if (!sendCommand.current(command)) return;
     setCreateOpen(false);
@@ -8145,7 +8152,7 @@ function TimerPanel({
                     ? t("timer.modeRepeat")
                     : t("timer.modeOnce")}
                 </span>
-                {!(timer.deliver_immediately ?? true) && (
+                {(timer.queue_timeout_minutes ?? 0) > 0 && (
                   <span className="timer-item-origin queued" title={t("timer.queueHint")}>
                     {t("timer.queued")}
                   </span>
@@ -8259,13 +8266,15 @@ function TimerPanel({
                   </div>
                   <label className="timer-create-checkbox">
                     <input
-                      type="checkbox"
-                      checked={editForm.queueOnFire}
+                      type="number"
+                      min={0}
+                      step={1}
+                      value={editForm.queueTimeoutMinutes}
                       title={t("timer.queueHint")}
                       onChange={(event) =>
                         setEditForm({
                           ...editForm,
-                          queueOnFire: event.target.checked,
+                          queueTimeoutMinutes: event.target.value,
                         })
                       }
                     />
@@ -8515,10 +8524,12 @@ function TimerPanel({
         </div>
         <label className="timer-create-checkbox">
           <input
-            type="checkbox"
-            checked={queueOnFire}
+            type="number"
+            min={0}
+            step={1}
+            value={queueTimeoutMinutes}
             title={t("timer.queueHint")}
-            onChange={(event) => setQueueOnFire(event.target.checked)}
+            onChange={(event) => setQueueTimeoutMinutes(event.target.value)}
           />
           {t("timer.queueLabel")}
         </label>

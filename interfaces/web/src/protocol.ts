@@ -221,8 +221,8 @@ export type TimerInfo = {
   after_ms?: number | null;
   at?: string | null;
   interval_ms?: number | null;
-  /** When true the fired prompt bypasses the message queue. */
-  deliver_immediately?: boolean;
+  /** Minutes a fired prompt may wait in the session queue when busy; 0 delivers immediately. */
+  queue_timeout_minutes?: number;
   created_by: "user" | "model" | string;
   created_at_ms: number;
   enabled: boolean;
@@ -1034,7 +1034,7 @@ export type ClientCommand =
       after_ms?: number;
       at?: string;
       interval_ms?: number;
-      deliver_immediately?: boolean;
+      queue_timeout_minutes?: number;
     }
   | { type: "timer_delete"; session_id: string; timer_id: string }
   | {
@@ -1055,7 +1055,7 @@ export type ClientCommand =
       after_ms?: number | null;
       at?: string | null;
       interval_ms?: number | null;
-      deliver_immediately?: boolean;
+      queue_timeout_minutes?: number;
     }
   | { type: "mcp_server_upsert"; session_id: string; config: McpServerConfig }
   | { type: "mcp_server_delete"; server_id: string }

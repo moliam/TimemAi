@@ -11,11 +11,12 @@ description: |
 
   ops:
   - new: create a timer. `prompt` is required. `mode` is "once" (default) or "repeat".
-    `deliver_immediately` (boolean, default true) controls delivery timing. Default true:
-    the fired prompt is delivered immediately. An active turn receives it as an immediate
+    `queue_timeout` (integer, minutes, default 0) controls delivery timing. 0 never queues:
+    the fired prompt is delivered immediately; an active turn receives it as an immediate
     supplement and an otherwise idle session starts a new turn directly, even ahead of
-    queued messages. Set false to queue it behind pending messages instead; queued fires
-    are dispatched automatically in order.
+    queued messages. With a positive value, a busy session queues the fired prompt behind
+    pending messages and waits at most that many minutes; on timeout it is delivered
+    directly, out of queue order.
     For "once", exactly one of `after_ms` (relative delay from creation) or `at` (absolute
     ISO-RFC3339 UTC instant) is required. For "repeat", one of `after_ms`/`at` plus `interval_ms`
     is required; the prompt refires every interval_ms. `name` is optional and auto-generated as
@@ -42,7 +43,7 @@ input_schema: |
       "after_ms": {"type":"integer","description":"Relative delay from creation in milliseconds for the first fire."},
       "at": {"type":"string","description":"Absolute first-fire instant as ISO-RFC3339 UTC, e.g. 2026-01-01T09:00:00Z."},
       "interval_ms": {"type":"integer","description":"Refire period in milliseconds. Required for repeat; invalid for once."},
-      "deliver_immediately": {"type":"boolean","description":"Optional, default true. The fired prompt is delivered immediately: an active turn receives it as an immediate supplement and an idle session starts a new turn directly, even ahead of queued messages. Set false to queue it behind pending messages; queued fires dispatch automatically in order."}
+      "queue_timeout": {"type":"integer","description":"Optional, minutes, default 0. 0 never queues: the fired prompt is delivered immediately (an active turn receives it as an immediate supplement, an idle session starts a new turn directly). With a positive value a busy session queues the fired prompt and waits at most this many minutes; on timeout it is delivered directly."}
     },
     "required": ["op"]
   }

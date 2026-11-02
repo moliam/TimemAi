@@ -9445,6 +9445,7 @@ fn normal_completion_hands_unconsumed_supplement_off_before_ordinary_queue() {
                     text: "Q ordinary".to_string(),
                     attachments: Vec::new(),
                     worker_roles: Vec::new(),
+                    dispatch_deadline_ms: None,
                 },
             )
             .unwrap();
@@ -9570,6 +9571,7 @@ fn stopped_primary_turn_preserves_unconsumed_supplements_without_resubmitting() 
                     text: "ordinary queued question".to_string(),
                     attachments: Vec::new(),
                     worker_roles: Vec::new(),
+                    dispatch_deadline_ms: None,
                 },
             )
             .unwrap();
@@ -12670,6 +12672,7 @@ fn legacy_queue_file_with_smaller_capacity_still_loads_after_capacity_raise() {
             text: "legacy intent survives".to_string(),
             attachments: Vec::new(),
             worker_roles: Vec::new(),
+            dispatch_deadline_ms: None,
         },
     );
     let path = next_turn_intents_path(&state, &session_id).unwrap();
@@ -13870,6 +13873,7 @@ fn direct_resume_bypasses_a_failed_continuation_without_dropping_the_queue() {
                     attachments: Vec::new(),
                     worker_roles: Vec::new(),
                     send_after_cancel: false,
+                    dispatch_deadline_ms: None,
                 },
             )
             .unwrap();
@@ -17864,6 +17868,7 @@ fn queued_message_turn_uses_consume_time_not_enqueue_time_for_chat_order() {
                     text: "typed early, consumed later".to_string(),
                     attachments: Vec::new(),
                     worker_roles: Vec::new(),
+                    dispatch_deadline_ms: None,
                 },
             )
             .unwrap();
@@ -19750,6 +19755,7 @@ fn interrupted_queued_message_id_follows_the_shared_history_formula() {
             text: "queued text".to_string(),
             attachments: Vec::new(),
             worker_roles: Vec::new(),
+            dispatch_deadline_ms: None,
         },
     };
     let (message, turn) = interrupted_turn_from_queued_message(&item, 5000);
@@ -19778,7 +19784,7 @@ fn web_timer_fixture(name: &str, mode: &str, next_fire_ms: u64) -> WebTimer {
             after_ms: Some(1000),
             at: None,
             interval_ms: if mode == "repeat" { Some(60_000) } else { None },
-            deliver_immediately: false,
+            queue_timeout_minutes: u64::MAX,
             created_by: "user".to_string(),
         },
         created_at_ms: now_ms(),
@@ -19799,7 +19805,7 @@ fn web_timer_compute_next_fire_ms_parses_at_and_rejects_invalid() {
         after_ms: Some(1500),
         at: None,
         interval_ms: None,
-        deliver_immediately: false,
+        queue_timeout_minutes: 0,
         created_by: "user".into(),
     };
     assert_eq!(compute_next_fire_ms(&spec, 10_000).unwrap(), 11_500);
@@ -19866,7 +19872,7 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
         Some(1000),
         None,
         None,
-        false
+        0
     )
     .unwrap_err()
     .contains("prompt_required"));
@@ -19880,7 +19886,7 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
         Some(1000),
         None,
         None,
-        false,
+        u64::MAX,
     )
     .unwrap();
     create_session_timer(
@@ -19892,7 +19898,7 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
         None,
         Some("2030-01-01T00:00:00Z".to_string()),
         None,
-        false,
+        u64::MAX,
     )
     .unwrap();
     {
@@ -19914,7 +19920,7 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
         Some(1000),
         None,
         None,
-        false
+        0
     )
     .unwrap_err()
     .contains("name_exists"));
@@ -19937,7 +19943,7 @@ fn web_timer_update_edits_prompt_schedule_name_and_delivery() {
         Some(60_000),
         None,
         None,
-        false,
+        u64::MAX,
     )
     .unwrap();
     create_session_timer(
@@ -19949,7 +19955,7 @@ fn web_timer_update_edits_prompt_schedule_name_and_delivery() {
         Some(1000),
         None,
         None,
-        false,
+        u64::MAX,
     )
     .unwrap();
     let timer_id = state.sessions.lock().unwrap()["session_a"].timers[0]
@@ -19977,7 +19983,7 @@ fn web_timer_update_edits_prompt_schedule_name_and_delivery() {
         let timer = &sessions["session_a"].timers[0];
         assert_eq!(timer.spec.prompt, "work2");
         assert_eq!(timer.next_fire_ms, next_fire_before);
-        assert!(!timer.spec.deliver_immediately);
+        assert_eq!(timer.spec.queue_timeout_minutes, u64::MAX);
     }
 
     // Renaming onto a sibling is rejected.
@@ -20009,7 +20015,7 @@ fn web_timer_update_edits_prompt_schedule_name_and_delivery() {
         Some(30_000),
         None,
         Some(120_000),
-        Some(true),
+        Some(5),
     )
     .unwrap();
     let update_finished = now_ms() as u64;
@@ -20021,7 +20027,7 @@ fn web_timer_update_edits_prompt_schedule_name_and_delivery() {
         assert_eq!(timer.spec.after_ms, Some(30_000));
         assert_eq!(timer.spec.at, None);
         assert_eq!(timer.spec.interval_ms, Some(120_000));
-        assert!(timer.spec.deliver_immediately);
+        assert_eq!(timer.spec.queue_timeout_minutes, 5);
         assert!(timer.next_fire_ms >= update_started + 30_000);
         assert!(timer.next_fire_ms <= update_finished + 30_000);
     }
@@ -20063,7 +20069,7 @@ fn web_timer_toggle_and_delete() {
         Some(1000),
         None,
         None,
-        false,
+        u64::MAX,
     )
     .unwrap();
     let timer_id = state.sessions.lock().unwrap()["session_a"].timers[0]
@@ -20116,7 +20122,7 @@ fn web_timer_merge_from_core_preserves_host_metadata() {
         after_ms: Some(2000),
         at: None,
         interval_ms: None,
-        deliver_immediately: false,
+        queue_timeout_minutes: u64::MAX,
         created_by: "model".into(),
     };
     merge_session_timers_from_core(&state, "session_a", &[updated, model_timer]).unwrap();
@@ -20153,7 +20159,7 @@ fn web_timer_fire_due_enqueues_into_active_turn() {
         Some(1000),
         None,
         None,
-        false,
+        u64::MAX,
     )
     .unwrap();
     // Simulate a turn in flight: pending_turn_id alone satisfies the
@@ -20186,7 +20192,7 @@ fn web_timer_fire_due_enqueues_into_active_turn() {
         Some(1000),
         None,
         Some(60_000),
-        false,
+        u64::MAX,
     )
     .unwrap();
     {
@@ -20217,7 +20223,7 @@ fn web_timer_fire_due_idle_session_starts_new_timer_turn() {
         Some(1000),
         None,
         None,
-        false,
+        u64::MAX,
     )
     .unwrap();
     {
@@ -20426,7 +20432,7 @@ fn real_worker_timer_fire_delivers_prompt_and_completes_turn() {
         Some(1000),
         None,
         None,
-        false,
+        u64::MAX,
     )
     .unwrap();
     // Force the timer due on the next scheduler tick.
@@ -20592,7 +20598,7 @@ fn web_timer_update_prompt_preserves_schedule_and_persists() {
         Some(1000),
         None,
         None,
-        false,
+        u64::MAX,
     )
     .unwrap();
     let (timer_id, next_fire, enabled) = {
@@ -20711,7 +20717,7 @@ fn web_timer_fire_immediate_contrasts_with_queue_delivery() {
         Some(1000),
         None,
         None,
-        true,
+        0,
     )
     .unwrap();
     {
@@ -20728,6 +20734,7 @@ fn web_timer_fire_immediate_contrasts_with_queue_delivery() {
                     text: "queued work".into(),
                     attachments: Vec::new(),
                     worker_roles: Vec::new(),
+                    dispatch_deadline_ms: None,
                 },
             )
             .unwrap();
@@ -20756,7 +20763,7 @@ fn web_timer_fire_immediate_contrasts_with_queue_delivery() {
         Some(1000),
         None,
         None,
-        false,
+        u64::MAX,
     )
     .unwrap();
     {

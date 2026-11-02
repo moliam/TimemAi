@@ -301,7 +301,7 @@ fn timer_confirmation_line_marks_created_by() {
         after_ms: Some(5000),
         at: None,
         interval_ms: Some(900000),
-        deliver_immediately: false,
+        queue_timeout_minutes: u64::MAX,
         created_by: "user".into(),
     };
     let mut timers = core.timers().to_vec();
@@ -318,27 +318,21 @@ fn timer_confirmation_line_marks_created_by() {
 }
 
 #[test]
-fn timer_new_accepts_deliver_immediately_flag() {
+fn timer_new_accepts_queue_timeout_minutes() {
     let (mut core, dir) = setup("immediate_flag");
     let out = run(
         &mut core,
-        json!({"op": "new", "prompt": "urgent check", "name": "now1", "after_ms": 1000, "deliver_immediately": true}),
+        json!({"op": "new", "prompt": "urgent check", "name": "now1", "after_ms": 1000}),
     );
-    assert!(!out.contains("Queued delivery"), "{out}");
-    assert!(core.timers()[0].deliver_immediately);
-    run(
-        &mut core,
-        json!({"op": "new", "prompt": "patient check", "name": "later1", "after_ms": 1000}),
-    );
-    // Default delivers immediately (no queueing).
-    assert!(core.timers()[1].deliver_immediately);
-    // Explicit false opts into queue delivery and says so in the outcome.
+    assert!(!out.contains("Queue delivery"), "{out}");
+    assert_eq!(core.timers()[0].queue_timeout_minutes, 0);
     let out = run(
         &mut core,
-        json!({"op": "new", "prompt": "patient check 2", "name": "later2", "after_ms": 1000, "deliver_immediately": false}),
+        json!({"op": "new", "prompt": "patient check", "name": "later1", "after_ms": 1000, "queue_timeout": 3}),
     );
-    assert!(out.contains("Queued delivery"), "{out}");
-    assert!(!core.timers()[2].deliver_immediately);
+    assert!(out.contains("Queue delivery"), "{out}");
+    assert!(out.contains("up to 3 minute(s)"), "{out}");
+    assert_eq!(core.timers()[1].queue_timeout_minutes, 3);
     drop(core);
     std::fs::remove_dir_all(dir).unwrap();
 }
