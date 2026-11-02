@@ -33,6 +33,7 @@ fn retryable_model_system_errors_cover_network_and_transient_http() {
         "model_http_503",
         "model_responses_stream_failed: event_type=error code=server_is_overloaded type=error message=Our servers are currently overloaded. Please try again later.",
         "model_responses_stream_failed: event_type=response.failed code=rate_limit_exceeded type=server_error message=retry later",
+        "model_response_too_large: response exceeds 16777216 bytes",
     ] {
         assert!(is_retryable_model_system_error(error), "{error}");
     }

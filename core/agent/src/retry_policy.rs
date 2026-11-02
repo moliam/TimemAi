@@ -115,6 +115,12 @@ pub fn is_retryable_model_system_error(error: &str) -> bool {
         || lower.contains("operation timed out")
         || lower.contains("connection reset")
         || lower.contains("could not resolve host")
+        // A response past the transport's 16 MB guard is almost always an
+        // abnormal sampling run (a generation loop or a malformed stream from
+        // the provider), so a fresh sample usually arrives within bounds. The
+        // byte guard itself stays: the retry loop bounds the attempts, and a
+        // request that deterministically overflows still terminates.
+        || lower.starts_with("model_response_too_large")
     {
         return true;
     }
