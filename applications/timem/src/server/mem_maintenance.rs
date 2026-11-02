@@ -890,9 +890,18 @@ pub(super) fn spawn_conversation_rolling_loop(state: AppState) {
             let _ = tokio::task::spawn_blocking(move || {
                 match apply_conversation_rolling_eviction(&state_for_task, &store, Some(max_bytes)) {
                     Ok(0) => {}
-                    Ok(reclaimed) => eprintln!(
-                        "[timem_web_history_rolling] reclaimed_bytes={reclaimed} budget_bytes={max_bytes}"
-                    ),
+                    // Routine rolling is hygiene, not an actionable anomaly: a
+                    // busy multi-agent workload reclaims bytes every tick, so a
+                    // per-tick summary line floods the terminal. Operators opt
+                    // back in via TIMEM_WEB_HISTORY_ROLLING_LOG=1; real
+                    // failures keep the dedicated warning below.
+                    Ok(reclaimed) => {
+                        if super::env_flag("TIMEM_WEB_HISTORY_ROLLING_LOG") {
+                            eprintln!(
+                                "[timem_web_history_rolling] reclaimed_bytes={reclaimed} budget_bytes={max_bytes}"
+                            );
+                        }
+                    }
                     Err(error) => eprintln!(
                         "[timem_web_warning] conversation_rolling_eviction_failed error={error}"
                     ),

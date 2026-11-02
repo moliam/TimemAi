@@ -1001,3 +1001,9 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 根因：Web Host 通过 worker channel 异步处理 core topic，mail id 由 Host 在落盘时才生成；工具返回时拿不到该 id，两端各自命名，天然对不上。
 - 修复：mail id 由 Host 在 `mailbox.send` 处理后生成（`mail_` + 6 位 base36），通过 topic 的 `request_id` 同步回执返回给工具，action result 直接返回该 id；Host 落账/写 spool 与后续回执引用同一 id。工具不再生成 mail id，缺失回执时失败关闭，不伪造 id。
 - 测试看护：`mailbox_send_reports_the_same_id_it_hands_to_the_host` 断言 action result 与 topic payload 的 id 一致；`mailbox_send_topic_adopts_the_tool_supplied_mail_id` 断言 Host 采用工具 id 且正文落盘。
+
+## 2026-11 会话历史滚动回收日志默认静默
+
+- 背景：`[timem_web_history_rolling] reclaimed_bytes=... budget_bytes=...` 在每个滚动 tick（60 秒间隔）实际回收非零字节时写 stderr；繁忙的多 agent 工作负载每个 tick 都有回收，长驻实例持续刷屏，与已静默的 mailbox 例行维护日志同性质。
+- 改动：`applications/timem/src/server/mem_maintenance.rs` 的 `spawn_conversation_rolling_loop` 默认不再输出例行回收摘要；需要观察时设置 `TIMEM_WEB_HISTORY_ROLLING_LOG=1`（也接受 true/yes/on）。真实失败仍以 `[timem_web_warning] conversation_rolling_eviction_failed` 输出。
+- 测试看护：`conversation_rolling_eviction_deletes_oldest_blocks_first` 复核回收行为不变；timem lib 全量 467 过（1 ignored）。
