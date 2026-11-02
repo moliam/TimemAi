@@ -34,6 +34,10 @@ fn retryable_model_system_errors_cover_network_and_transient_http() {
         "model_responses_stream_failed: event_type=error code=server_is_overloaded type=error message=Our servers are currently overloaded. Please try again later.",
         "model_responses_stream_failed: event_type=response.failed code=rate_limit_exceeded type=server_error message=retry later",
         "model_response_too_large: response exceeds 16777216 bytes",
+        "model_tls_error: stage=response_headers handshake failed",
+        "model_responses_stream_missing_terminal",
+        "model_responses_stream_failed: event_type=error code=overloaded_error type=error message=Overloaded",
+        "model_responses_stream_failed: event_type=error code=api_error type=error message=Internal server error",
     ] {
         assert!(is_retryable_model_system_error(error), "{error}");
     }
@@ -57,7 +61,9 @@ fn non_retryable_model_errors_do_not_waste_rounds() {
         "model_request_too_large: request body exceeds limit",
         "model_redirect_blocked: cross-origin redirect",
         "model_responses_stream_failed: event_type=response.failed code=invalid_request_error type=invalid_request_error message=bad tools",
-        "model_responses_stream_failed",
+        // "model_responses_stream_failed" (bare) moved to the retryable set:
+        // a provider stream failure without extractable details is server-side
+        // and transient, exactly like connection resets.
         "invalid_json",
         "status_required",
         "next_actions[0].args_required",
@@ -140,6 +146,7 @@ fn input_too_large_errors_are_detected_without_matching_unrelated_failures() {
         "model_http_400: too many input tokens",
         "model_http_400: prompt is too long: 200001 tokens > 200000 maximum",
         "model_http_400: input token length exceeds the model limit",
+        "model_request_too_large: request body exceeds 16777216 bytes",
     ] {
         assert!(is_model_input_too_large_error(error), "{error}");
     }

@@ -121,6 +121,12 @@ pub fn is_retryable_model_system_error(error: &str) -> bool {
         // byte guard itself stays: the retry loop bounds the attempts, and a
         // request that deterministically overflows still terminates.
         || lower.starts_with("model_response_too_large")
+        // Runtime TLS failures (handshake, certificate verification through a
+        // filtering proxy) are network-path problems and recover when the
+        // path heals. The `stage=` marker separates them from the local
+        // `model_tls_error: invalid private CA PEM` configuration errors,
+        // which are deterministic and must not burn retry rounds.
+        || lower.starts_with("model_tls_error: stage=")
     {
         return true;
     }
@@ -134,9 +140,19 @@ pub fn is_retryable_model_system_error(error: &str) -> bool {
             "rate_limit_exceeded",
             "rate_limited",
             "timeout",
+            "overloaded_error",
+            "api_error",
         ]
         .iter()
         .any(|signal| details.contains(signal));
+    }
+    // A stream failure without extractable details, or a stream that ended
+    // without its terminal message, means the provider broke the stream:
+    // server-side, transient, and exactly what a fresh attempt is for.
+    if lower == "model_responses_stream_failed"
+        || lower == "model_responses_stream_missing_terminal"
+    {
+        return true;
     }
     if let Some(status_text) = lower.strip_prefix("model_http_") {
         let status: u16 = status_text
@@ -264,7 +280,8 @@ pub fn is_model_input_too_large_error(error: &str) -> bool {
         || lower.contains("too large")
         || lower.contains("too many")
         || lower.contains("exceed");
-    lower.contains("argument list too long")
+    lower.starts_with("model_request_too_large")
+        || lower.contains("argument list too long")
         || lower.contains("os error 7")
         || lower.contains("e2big")
         || lower.starts_with("model_http_413")
