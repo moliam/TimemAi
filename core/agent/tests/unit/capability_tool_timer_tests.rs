@@ -324,14 +324,21 @@ fn timer_new_accepts_deliver_immediately_flag() {
         &mut core,
         json!({"op": "new", "prompt": "urgent check", "name": "now1", "after_ms": 1000, "deliver_immediately": true}),
     );
-    assert!(out.contains("Immediate delivery is enabled"), "{out}");
+    assert!(!out.contains("Queued delivery"), "{out}");
     assert!(core.timers()[0].deliver_immediately);
-    // Default stays false (queue delivery) for compatibility.
     run(
         &mut core,
         json!({"op": "new", "prompt": "patient check", "name": "later1", "after_ms": 1000}),
     );
-    assert!(!core.timers()[1].deliver_immediately);
+    // Default delivers immediately (no queueing).
+    assert!(core.timers()[1].deliver_immediately);
+    // Explicit false opts into queue delivery and says so in the outcome.
+    let out = run(
+        &mut core,
+        json!({"op": "new", "prompt": "patient check 2", "name": "later2", "after_ms": 1000, "deliver_immediately": false}),
+    );
+    assert!(out.contains("Queued delivery"), "{out}");
+    assert!(!core.timers()[2].deliver_immediately);
     drop(core);
     std::fs::remove_dir_all(dir).unwrap();
 }

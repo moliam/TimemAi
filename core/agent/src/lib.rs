@@ -546,6 +546,10 @@ pub const MAX_TIMERS: usize = 32;
 /// the trigger description); the Host owns the wall clock: it computes the
 /// concrete fire time, persists timers across restarts, and delivers the
 /// prompt as a turn when due.
+fn default_deliver_immediately() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TimerSpec {
     pub timer_id: String,
@@ -567,13 +571,13 @@ pub struct TimerSpec {
     /// Refire period in milliseconds; present only for mode "repeat".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval_ms: Option<u64>,
-    /// When true the fired prompt is delivered at once: an active turn
-    /// receives it as an immediate supplement and an idle session starts a
-    /// new turn directly, even ahead of queued messages. When false the
-    /// prompt is delivered at once only when the session is fully idle
-    /// (no active turn and empty queue); otherwise it waits in the session
-    /// message queue and is dispatched automatically.
-    #[serde(default)]
+    /// Default (true, also the serde default for legacy files without the
+    /// field): deliver at once — an active turn receives the fired prompt as
+    /// an immediate supplement and an idle session starts a new turn
+    /// directly, even ahead of queued messages. Explicit false opts into
+    /// queue delivery: the prompt waits behind pending messages and is
+    /// dispatched automatically in order.
+    #[serde(default = "default_deliver_immediately")]
     pub deliver_immediately: bool,
     /// Who created the timer: "model" (timer tool) or "user" (interface).
     pub created_by: String,

@@ -7746,7 +7746,7 @@ function timerToEditForm(timer: TimerInfo): TimerEditForm {
       timer.interval_ms != null
         ? String(Math.max(1, Math.round(timer.interval_ms / 60_000)))
         : "",
-    queueOnFire: !(timer.deliver_immediately ?? false),
+    queueOnFire: !(timer.deliver_immediately ?? true),
   };
 }
 
@@ -8145,7 +8145,7 @@ function TimerPanel({
                     ? t("timer.modeRepeat")
                     : t("timer.modeOnce")}
                 </span>
-                {!(timer.deliver_immediately ?? false) && (
+                {!(timer.deliver_immediately ?? true) && (
                   <span className="timer-item-origin queued" title={t("timer.queueHint")}>
                     {t("timer.queued")}
                   </span>

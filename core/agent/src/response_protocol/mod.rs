@@ -252,6 +252,13 @@ impl ParsedAction {
             .unwrap_or(false)
     }
 
+    pub fn input_bool_or(&self, key: &str, default: bool) -> bool {
+        self.raw_input
+            .get(key)
+            .and_then(Value::as_bool)
+            .unwrap_or(default)
+    }
+
     pub fn input_list(&self, key: &str) -> Vec<String> {
         self.raw_input
             .get(key)

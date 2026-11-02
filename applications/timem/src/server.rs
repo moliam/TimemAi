@@ -1443,7 +1443,7 @@ enum ClientCommand {
         at: Option<String>,
         #[serde(default)]
         interval_ms: Option<u64>,
-        #[serde(default)]
+        #[serde(default = "default_timer_deliver_immediately")]
         deliver_immediately: bool,
     },
     TimerDelete {
@@ -10815,6 +10815,11 @@ fn log_timer_fire_failure(state: &AppState, session_id: &str, timer_id: &str, er
         "timer_fire_failed",
         json!({"session_id": session_id, "timer_id": timer_id, "error": error}),
     );
+}
+
+fn default_timer_deliver_immediately() -> bool {
+    // Timers deliver immediately by default; queueing is the explicit opt-in.
+    true
 }
 
 fn message_queue_error(error: SessionMessageQueueError) -> String {
