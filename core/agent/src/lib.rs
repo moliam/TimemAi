@@ -567,9 +567,12 @@ pub struct TimerSpec {
     /// Refire period in milliseconds; present only for mode "repeat".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval_ms: Option<u64>,
-    /// When true the fired prompt bypasses the message queue: an active turn
+    /// When true the fired prompt is delivered at once: an active turn
     /// receives it as an immediate supplement and an idle session starts a
-    /// new turn directly, instead of waiting behind queued messages.
+    /// new turn directly, even ahead of queued messages. When false the
+    /// prompt is delivered at once only when the session is fully idle
+    /// (no active turn and empty queue); otherwise it waits in the session
+    /// message queue and is dispatched automatically.
     #[serde(default)]
     pub deliver_immediately: bool,
     /// Who created the timer: "model" (timer tool) or "user" (interface).

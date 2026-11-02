@@ -95,7 +95,7 @@ fn execute_new(
                 added.mode,
                 added.prompt,
                 if added.deliver_immediately {
-                    " Immediate delivery is enabled: the fired prompt bypasses queued messages (active turn gets an immediate supplement, idle session starts a new turn)"
+                    " Immediate delivery is enabled: an active turn gets the prompt as an immediate supplement and an idle session starts a new turn directly, even when queued messages are waiting"
                 } else {
                     ""
                 },

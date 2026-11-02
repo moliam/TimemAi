@@ -8145,7 +8145,7 @@ function TimerPanel({
                     ? t("timer.modeRepeat")
                     : t("timer.modeOnce")}
                 </span>
-                {!(timer.deliver_immediately ?? true) && (
+                {!(timer.deliver_immediately ?? false) && (
                   <span className="timer-item-origin queued" title={t("timer.queueHint")}>
                     {t("timer.queued")}
                   </span>
