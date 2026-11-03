@@ -71,6 +71,9 @@ fn active_memo_records_summary_but_returns_failed_tool_result() {
     assert!(outcome.text.contains("an active memo still exists"));
     assert!(outcome.text.contains("Active memo: 继续完成回归测试"));
     assert!(outcome.text.contains("this tool call's thought"));
+    assert!(outcome.text.contains(
+        "All task/final goal really achieved? If yes, delete the memo (memo op=delete) before giving the final answer; if no, update memo and continue."
+    ));
     assert_eq!(
         core.take_turn_finished_summary().as_deref(),
         Some("阶段性总结仍需显示")
