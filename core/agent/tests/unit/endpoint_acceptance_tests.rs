@@ -343,8 +343,8 @@ fn every_catalog_profile_accepts_chat_compression_and_tool_scenarios() {
                 let tuned_body = body_for(&tuned, &plain);
                 assert_admissible(&tuned, &tuned_body, &format!("{label} 档位 {effort}"));
                 // kimi-k2.7-code 恒思考，官方要求省略 thinking 字段。
-                let expects_wire = !(profile.reasoning_adapter == ReasoningAdapter::KimiK2Thinking
-                    && !model.efforts.iter().any(|value| value == "none"));
+                let expects_wire = profile.reasoning_adapter != ReasoningAdapter::KimiK2Thinking
+                    || model.efforts.iter().any(|value| value == "none");
                 if expects_wire {
                     assert!(
                         wrote_reasoning_wire(profile.reasoning_adapter, &tuned_body),

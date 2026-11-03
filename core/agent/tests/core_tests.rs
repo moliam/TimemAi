@@ -2950,7 +2950,7 @@ fn clear_context_restates_runtime_known_state_once() {
         matches!(step, CoreStep::NeedModel { .. }),
         "memo create should continue the turn"
     );
-    assert_eq!(core.active_memo().as_deref(), Some("SNAP_MEMO_TEXT"));
+    assert_eq!(core.active_memo(), Some("SNAP_MEMO_TEXT"));
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),

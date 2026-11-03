@@ -1271,13 +1271,12 @@ fn system_turn_input_is_rendered_under_the_runtime_role() {
         .expect("worker should accept a runtime-triggered turn");
 
     loop {
-        match worker
+        if let CoreSessionWorkerEvent::TurnFinished { .. } = worker
             .events()
             .recv_timeout(Duration::from_secs(5))
             .expect("runtime-triggered turn should finish")
         {
-            CoreSessionWorkerEvent::TurnFinished { .. } => break,
-            _ => {}
+            break;
         }
     }
 
@@ -1344,13 +1343,12 @@ fn system_supplement_is_rendered_under_the_runtime_role() {
     assert!(accepted, "system supplement should be accepted mid-turn");
 
     loop {
-        match worker
+        if let CoreSessionWorkerEvent::TurnFinished { .. } = worker
             .events()
             .recv_timeout(Duration::from_secs(5))
             .expect("supplemented turn should finish")
         {
-            CoreSessionWorkerEvent::TurnFinished { .. } => break,
-            _ => {}
+            break;
         }
     }
 
@@ -1405,26 +1403,24 @@ fn mailbox_address_is_restated_once_after_context_clear() {
         .run_turn("after clear", None)
         .expect("worker should accept the first turn after clear");
     loop {
-        match worker
+        if let CoreSessionWorkerEvent::TurnFinished { .. } = worker
             .events()
             .recv_timeout(Duration::from_secs(5))
             .expect("first turn after clear should finish")
         {
-            CoreSessionWorkerEvent::TurnFinished { .. } => break,
-            _ => {}
+            break;
         }
     }
     handle
         .run_turn("next turn", None)
         .expect("worker should accept the following turn");
     loop {
-        match worker
+        if let CoreSessionWorkerEvent::TurnFinished { .. } = worker
             .events()
             .recv_timeout(Duration::from_secs(5))
             .expect("following turn should finish")
         {
-            CoreSessionWorkerEvent::TurnFinished { .. } => break,
-            _ => {}
+            break;
         }
     }
 
