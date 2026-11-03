@@ -103,6 +103,7 @@ import {
   Wrench,
   X,
   AlarmClock,
+  Cog,
   Mail,
   Pause,
   Play,
@@ -5204,7 +5205,7 @@ function TimemApp() {
                   else setShowMailbox(true);
                 }}
               >
-                <Mail size={17} />
+                <Cog size={17} />
                 {mailboxUnread > 0 && (
                   <span className="mailbox-header-count" aria-hidden="true">
                     {mailboxCountLabel}
@@ -7839,7 +7840,7 @@ function MailboxPanel({
       />
       <header className="side-panel-header">
         <div className="side-panel-title">
-          <Mail size={15} />
+          <Cog size={15} />
           <strong>{t("mailbox.title")}</strong>
         </div>
         <button
@@ -7853,6 +7854,20 @@ function MailboxPanel({
         </button>
       </header>
       <div className="mailbox-list">
+        {sessionId && (
+          <div className="mailbox-address-block mailbox-session-id">
+            <div className="mailbox-address-label">
+              {t("mailbox.sessionIdLabel")}
+            </div>
+            <div className="mailbox-address">
+              <code>
+                {/^[a-z0-9]{6}$/.test(sessionId)
+                  ? `id_${sessionId}`
+                  : sessionId}
+              </code>
+            </div>
+          </div>
+        )}
         {mailboxName ? (
           <div
             className="mailbox-address-block"

@@ -729,8 +729,9 @@ export const zh = {
     loadingDetails: "正在读取详情…",
   },
   mailbox: {
-    title: "Mailbox",
-    ariaLabel: "打开 Mailbox 面板",
+    title: "会话配置",
+    ariaLabel: "打开会话配置面板",
+    sessionIdLabel: "会话 ID",
     addressLabel: "当前对话 MailboxID",
     addressHint: "这是当前对话的 mailbox ID,可以请求其他对话的 AI 向这个邮箱发信息,来触发工作或交流。",
     entryTag: "邮箱",

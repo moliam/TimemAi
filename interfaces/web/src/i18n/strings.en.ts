@@ -723,8 +723,9 @@ export const en: Strings = {
     interrupted: "Interrupted",
   },
   mailbox: {
-    title: "Mailbox",
-    ariaLabel: "Open mailbox panel",
+    title: "Session settings",
+    ariaLabel: "Open the session settings panel",
+    sessionIdLabel: "Session ID",
     addressLabel: "Mailbox ID for this conversation",
     addressHint: "This is the mailbox ID for this conversation. You can ask another conversation's AI to send mail to this mailbox to trigger work or chat.",
     entryTag: "Mailbox",
