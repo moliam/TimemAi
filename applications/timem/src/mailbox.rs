@@ -95,14 +95,13 @@ pub fn is_compact_mailbox_id(id: &str) -> bool {
             .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
 }
 
-/// Strips a known mailbox address prefix (`id_` canonical, `mb-` legacy) and
-/// returns the bare id. Anything else passes through unchanged so acquired
-/// random names are never corrupted.
+/// Strips the canonical address prefix (`id_`) and returns the bare id.
+/// Anything else passes through unchanged so acquired names are never
+/// corrupted. Legacy `mb-` addresses are not an accepted input form: they
+/// exist only until the one-time startup migration renames them, so a
+/// literal `mb-...` input resolves to nothing instead of an old address.
 pub fn normalize_mailbox_id(name: &str) -> String {
-    name.strip_prefix("id_")
-        .or_else(|| name.strip_prefix("mb-"))
-        .unwrap_or(name)
-        .to_string()
+    name.strip_prefix("id_").unwrap_or(name).to_string()
 }
 
 /// Canonical user-facing mailbox address: `id_{bare}` for compact ids. Other
@@ -416,17 +415,19 @@ mod tests {
 
     #[test]
     fn mailbox_ids_normalize_and_canonicalize_compatibly() {
-        // Canonical, legacy and bare forms collapse onto the same bare id.
+        // The canonical prefix is the only normalized one.
         assert_eq!(normalize_mailbox_id("id_6lal8v"), "6lal8v");
-        assert_eq!(normalize_mailbox_id("mb-6lal8v"), "6lal8v");
         assert_eq!(normalize_mailbox_id("6lal8v"), "6lal8v");
+        // Legacy mb- addresses are not an input form: they pass through
+        // verbatim and resolve to nothing after the one-time migration.
+        assert_eq!(normalize_mailbox_id("mb-6lal8v"), "mb-6lal8v");
         // Unknown shapes pass through so acquired names stay intact.
-        assert_eq!(normalize_mailbox_id("mb-team-inbox"), "team-inbox");
+        assert_eq!(normalize_mailbox_id("team-inbox"), "team-inbox");
         assert_eq!(normalize_mailbox_id("weird name"), "weird name");
         // Only compact ids mint a canonical address; others are preserved.
-        assert_eq!(canonical_mailbox_id("mb-6lal8v"), "id_6lal8v");
         assert_eq!(canonical_mailbox_id("6lal8v"), "id_6lal8v");
         assert_eq!(canonical_mailbox_id("id_6lal8v"), "id_6lal8v");
+        assert_eq!(canonical_mailbox_id("mb-6lal8v"), "mb-6lal8v");
         assert_eq!(canonical_mailbox_id("team-inbox"), "team-inbox");
         assert_eq!(canonical_mailbox_id(""), "");
         assert!(is_compact_mailbox_id("6lal8v"));

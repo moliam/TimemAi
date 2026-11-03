@@ -21880,6 +21880,131 @@ fn first_start_migrates_sessions_mailboxes_peers_history_and_spool() {
 }
 
 #[test]
+fn restore_migrates_legacy_identities_before_the_global_prefix_sweep() {
+    let (_guard, state, _session_id) = mailbox_e2e_setup("mailbox_e2e_sweep_order");
+    let store = current_session_store(&state).unwrap();
+
+    // 1) A pre-id legacy session (long machine-minted id) whose mailbox
+    //    address is an acquired random name: mb- plus 6 base36 chars, exactly
+    //    the shape the global prefix sweep matches. The sweep must not claim
+    //    this directory before the identity migration renames it itself.
+    let old_legacy = "session_1700000000002_2";
+    let acquired = "mb-x7k2p9";
+    let legacy_session = agent_core::session_store::new_stored_session(
+        old_legacy,
+        "L",
+        "/work",
+        StoredSessionProfile::default(),
+        store.history_path_for_session(old_legacy),
+    );
+    store.upsert_session(&legacy_session).unwrap();
+    std::fs::write(store.history_path_for_session(old_legacy), b"").unwrap();
+    let legacy_mailbox_path = store
+        .metadata_path_for_session(old_legacy)
+        .with_file_name("mailbox.json");
+    std::fs::write(
+        &legacy_mailbox_path,
+        serde_json::to_vec(&json!({
+            "mailbox_name": acquired,
+            "entries": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("legacy_pending", "mb-sender", acquired, -1, -1),
+    )
+    .unwrap();
+
+    // 2) The previous generation's compact session: canonical session id,
+    //    mailbox address still mb-{sid}.
+    let compact_old = "c0ffee";
+    let compact_session = agent_core::session_store::new_stored_session(
+        compact_old,
+        "C",
+        "/work",
+        StoredSessionProfile::default(),
+        store.history_path_for_session(compact_old),
+    );
+    store.upsert_session(&compact_session).unwrap();
+    std::fs::write(store.history_path_for_session(compact_old), b"").unwrap();
+    let compact_mailbox_path = store
+        .metadata_path_for_session(compact_old)
+        .with_file_name("mailbox.json");
+    std::fs::create_dir_all(compact_mailbox_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &compact_mailbox_path,
+        serde_json::to_vec(&json!({
+            "mailbox_name": "mb-c0ffee",
+            "entries": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("compact_pending", "mb-sender", "mb-c0ffee", -1, -1),
+    )
+    .unwrap();
+
+    // 3) An unclaimed agent mailbox: no session will ever rename it, so only
+    //    the final sweep moves it.
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("agent_pending", "mb-sender", "mb-d4e5f6", -1, -1),
+    )
+    .unwrap();
+
+    restore_stored_sessions(&state).unwrap();
+
+    // The legacy session redraws onto a compact id with the canonical
+    // address, and its acquired directory was moved by the identity pass.
+    let migrated = current_session_store(&state)
+        .unwrap()
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.display_name == "L")
+        .unwrap();
+    assert!(is_compact_session_id(&migrated.session_id));
+    assert_ne!(migrated.session_id, old_legacy);
+    let legacy_mailbox = load_mailbox_state(&state, &migrated.session_id).unwrap();
+    assert_eq!(
+        legacy_mailbox.mailbox_name,
+        format!("id_{}", migrated.session_id)
+    );
+    assert!(!e2e_inbox(acquired).exists());
+    // Regression probe for the sweep order: a premature prefix sweep would
+    // strand the envelopes under this renamed orphan directory.
+    assert!(!e2e_inbox("id-x7k2p9").exists());
+    let legacy_pending = crate::mailbox::scan_mails(&e2e_inbox(&legacy_mailbox.mailbox_name));
+    assert_eq!(legacy_pending.len(), 1);
+    assert_eq!(legacy_pending[0].1.id, "legacy_pending");
+    assert_eq!(legacy_pending[0].1.to, legacy_mailbox.mailbox_name);
+
+    // The compact session upgrades in place onto the canonical address.
+    let compact_mailbox = load_mailbox_state(&state, compact_old).unwrap();
+    assert_eq!(compact_mailbox.mailbox_name, "id_c0ffee");
+    assert_eq!(crate::mailbox::scan_mails(&e2e_inbox("id_c0ffee")).len(), 1);
+    assert!(!e2e_inbox("mb-c0ffee").exists());
+
+    // The unclaimed agent mailbox is moved by the sweep with its mail intact.
+    assert!(e2e_inbox("id_d4e5f6").is_dir());
+    assert_eq!(crate::mailbox::scan_mails(&e2e_inbox("id_d4e5f6")).len(), 1);
+    assert!(!e2e_inbox("mb-d4e5f6").exists());
+
+    // After the one-time migration no mb- directory remains in the spool.
+    let leftovers: Vec<String> = std::fs::read_dir(e2e_spool())
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with("mb-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
 fn legacy_mail_id_collision_redraws_without_overwriting_body() {
     let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_id_collision");
     store_mem_mail(

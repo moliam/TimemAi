@@ -2156,9 +2156,6 @@ pub async fn run(
     // Full MEM scans never run on startup or ordinary history writes. Settings
     // commands may run them explicitly. The fallback checkpoints a tiny cumulative
     // runtime counter every 15 minutes and scans only when due and fully idle.
-    // One-time spool hygiene: legacy mb-{compact} directories move to their
-    // canonical id_{compact} location before anything reads or writes mail.
-    crate::mailbox::migrate_prefixed_mailbox_dirs(&crate::mailbox::mailbox_spool_root());
     spawn_idle_temporary_maintenance_loop(state.clone());
     spawn_model_endpoint_health_scanner(state.clone());
     let shutdown_reason = Arc::new(Mutex::new(None));
@@ -6424,6 +6421,9 @@ fn generate_compact_session_id(
             && !reserved.contains(&session_id)
             && !store.sessions_dir().join(&session_id).exists()
             && !crate::mailbox::mailbox_exists(&spool_root, &format!("id_{session_id}"))
+            // Not an input-compat path: until the one-time migration runs,
+            // pre-migration spool dirs can still be named mb-{compact}; a
+            // freshly minted id must collide with neither form on disk.
             && !crate::mailbox::mailbox_exists(&spool_root, &format!("mb-{session_id}"))
         {
             return Ok(session_id);
@@ -6901,6 +6901,12 @@ fn restore_stored_sessions_with_runtime_restart_marker(
     let store = current_session_store(state)?;
     let mut stored_sessions = list_stored_sessions_resilient(&store)?;
     migrate_legacy_session_ids(state, &store, &mut stored_sessions)?;
+    // One-time spool sweep, strictly after identity migration: a legacy
+    // session's acquired address (mb-{compact}) looks identical to a compact
+    // session's pre-migration directory, and only the identity pass knows
+    // which session claims it. Running the sweep first would strand that
+    // session's envelopes in a renamed orphan directory.
+    crate::mailbox::migrate_prefixed_mailbox_dirs(&crate::mailbox::mailbox_spool_root());
     // Restore newest sessions first: the user's most relevant page comes back
     // fastest while older sessions continue restoring in the background.
     // The worker queue pops from the end, so sort ascending to pop newest.
