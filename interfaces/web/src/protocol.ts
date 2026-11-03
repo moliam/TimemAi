@@ -425,8 +425,6 @@ export type Activity = {
   elapsed_ms?: number;
   /** Bytes of the tool's own result output injected into the next prompt (runtime metadata excluded). */
   tool_output_bytes?: number;
-  /** Assistant thought shown before a task_finished attempt blocked by an active memo. */
-  finish_summary?: string;
   timeout_ms?: number;
   loop_timeout_ms?: number;
   interval_ms?: number;

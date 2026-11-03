@@ -14,6 +14,7 @@ import {
 } from "../src/protocol";
 import {
   activeModelRetryStatus,
+  activitiesFromTopic,
   activityFromTopic,
   completionStopReasonText,
   repairIssueText,
@@ -519,22 +520,49 @@ describe("web topic view model", () => {
       title: "memo stops finish",
       detail: "目标 B",
     });
-    expect(stopsFinish?.finish_summary).toBeUndefined();
-    const stopsFinishWithSummary = activityFromTopic(
-      topic("core.memo", {
-        op: "stops_finish",
-        active: true,
-        text: "目标 B",
-        summary: "被拦截也要显示的普通 thought",
-      }),
-    );
-    expect(stopsFinishWithSummary).toMatchObject({
+    const blockedFinish = topic("core.memo", {
+      op: "stops_finish",
+      active: true,
+      text: "目标 B",
+      summary: "被拦截也要显示的普通 thought",
+    });
+    expect(activityFromTopic(blockedFinish)).toMatchObject({
       tone: "notice",
       kind: "memo_notice",
       title: "memo stops finish",
       detail: "目标 B",
-      finish_summary: "被拦截也要显示的普通 thought",
     });
+    expect(activitiesFromTopic(blockedFinish)).toMatchObject([
+      {
+        tone: "thinking",
+        kind: "free_talk",
+        title: "",
+        detail: "被拦截也要显示的普通 thought",
+      },
+      {
+        tone: "notice",
+        kind: "memo_notice",
+        title: "memo stops finish",
+        detail: "目标 B",
+      },
+    ]);
+    expect(
+      activitiesFromTopic(
+        topic("core.memo", {
+          op: "stops_finish",
+          active: true,
+          text: "目标 B",
+          summary: "   ",
+        }),
+      ),
+    ).toMatchObject([
+      {
+        tone: "notice",
+        kind: "memo_notice",
+        title: "memo stops finish",
+        detail: "目标 B",
+      },
+    ]);
     const forceDeleted = activityFromTopic(
       topic("core.memo", { op: "force_deleted", active: false, text: null }),
     );

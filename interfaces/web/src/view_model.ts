@@ -2682,7 +2682,6 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
           kind: "memo_notice",
           title: "memo stops finish",
           detail: label(payload.text),
-          finish_summary: label(payload.summary).trim() || undefined,
           createdAt: Date.now(),
         };
       }
@@ -2699,6 +2698,34 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
     default:
       return null;
   }
+}
+
+/**
+ * Expand one authoritative topic into its ordered presentation activities.
+ * A memo-blocked finish contains both model-authored assistant text and a memo
+ * notice. Keep them as two ordinary activity objects instead of a hybrid row
+ * with hand-copied typography.
+ */
+export function activitiesFromTopic(event: CoreTopicEvent): Activity[] {
+  const activity = activityFromTopic(event);
+  if (event.topic.name !== "core.memo" || event.payload.op !== "stops_finish")
+    return activity ? [activity] : [];
+  const summary =
+    typeof event.payload.summary === "string" ? event.payload.summary.trim() : "";
+  return [
+    ...(summary
+      ? [{
+          id: clientId(),
+          sessionId: event.session_id,
+          tone: "thinking" as const,
+          kind: "free_talk" as const,
+          title: "",
+          detail: summary,
+          createdAt: Date.now(),
+        }]
+      : []),
+    ...(activity ? [activity] : []),
+  ];
 }
 
 export function hasOnlyFreeTalkActivity(

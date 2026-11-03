@@ -251,22 +251,18 @@ it("uses one typography contract for system-level notices", () => {
   expect(styles).not.toContain('.compact-notice .compact-notice-line');
 });
 
-it("renders a blocked task_finished summary with ordinary assistant body typography before Continue memo", () => {
+it("renders a blocked task_finished summary as the same free-talk activity class before Continue memo", () => {
   const activityView = source.slice(source.indexOf("function ActivityView("), source.indexOf("function ToolGenNotice("));
-  expect(activityView).toContain('{activity.finish_summary && (');
-  expect(activityView).toContain('className="memo-finish-summary"');
-  expect(activityView).toContain('<MarkdownContent text={activity.finish_summary} />');
-  expect(activityView.indexOf("activity.finish_summary")).toBeLessThan(activityView.indexOf("<MemoNotice activity={activity} />"));
-  const memoSummaryBranch = activityView.slice(
-    activityView.indexOf("{activity.finish_summary && ("),
-    activityView.indexOf("<MemoNotice activity={activity} />"),
-  );
-  expect(memoSummaryBranch).not.toContain('className="turn-work-item thinking free-talk"');
-  expect(memoSummaryBranch).not.toContain("activity-thinking-dot");
-  expect(memoSummaryBranch).not.toContain("turn-work-detail");
-  expect(styles).toContain(".response-preview,\n.turn-interim-item,\n.memo-finish-summary {");
-  expect(styles).toContain(".turn-interim-item .message-content,\n.memo-finish-summary > .message-content {");
-  expect(styles).toContain(':root[data-theme="light"] .memo-finish-summary > .message-content { color: #24333a; }');
+  const eventAdapter = source.slice(source.indexOf("function activitiesFromTurnEvent("), source.indexOf("function activityFromTurnEvent("));
+  const lifecycleItems = source.slice(source.indexOf("const lifecycleItems = useMemo("), source.indexOf("const supplementItems = useMemo("));
+  expect(activityView).toContain('activity.kind === "free_talk" ? " free-talk" : ""');
+  expect(eventAdapter).toContain("const activities = activitiesFromTopic(");
+  expect(eventAdapter).toContain("return activities.map((activity, index) => ({");
+  expect(lifecycleItems).toContain("lifecycleEvents.flatMap((event) =>");
+  expect(lifecycleItems).toContain("activitiesFromTurnEvent(");
+  expect(source).not.toContain("finish_summary");
+  expect(source).not.toContain("memo-finish-summary");
+  expect(styles).not.toContain("memo-finish-summary");
 });
 
 it("narrows tool rendering from the right edge while preserving mobile width", () => {

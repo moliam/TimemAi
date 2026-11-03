@@ -201,6 +201,7 @@ import {
   type ActiveModelRetryStatus,
   applyTurnProjection,
   activeModelRetryStatus,
+  activitiesFromTopic,
   activityFromTopic,
   applySessionRuntimeProfile,
   appendActivityToCurrentTurn,
@@ -11719,17 +11720,19 @@ const TurnInteraction = memo(function TurnInteraction({
   );
   const lifecycleItems = useMemo(
     () =>
-      lifecycleEvents.map((event) => ({
-        type: "event" as const,
-        key: event.presentation_id ?? event.event_id,
-        createdAt: event.presentation_created_at_ms ?? event.created_at_ms,
-        timelineSeq: event.timeline_seq,
-        event,
-        activity: (() => {
-          const activity = activityFromTurnEvent({ ...event, event_id: event.presentation_id ?? event.event_id }, sessionId);
-          return activity ? { ...activity, timelineSeq: event.timeline_seq, execution_order: event.execution_order, settled_order: event.settled_order } : activity;
-        })(),
-      })),
+      lifecycleEvents.flatMap((event) =>
+        activitiesFromTurnEvent(
+          { ...event, event_id: event.presentation_id ?? event.event_id },
+          sessionId,
+        ).map((activity) => ({
+          type: "event" as const,
+          key: activity?.id ?? (event.presentation_id ?? event.event_id),
+          createdAt: event.presentation_created_at_ms ?? event.created_at_ms,
+          timelineSeq: event.timeline_seq,
+          event,
+          activity: activity ? { ...activity, timelineSeq: event.timeline_seq, execution_order: event.execution_order, settled_order: event.settled_order } : activity,
+        })),
+      ),
     [lifecycleEvents, sessionId],
   );
   const supplementItems = useMemo(
@@ -13850,17 +13853,7 @@ function ActivityView({ activity, enterPulse = false }: { activity: Activity; en
   if (activity.kind === "context_compress")
     return <ContextCompressNotice activity={activity} />;
   if (activity.kind === "toolgen") return <ToolGenNotice activity={activity} />;
-  if (activity.kind === "memo_notice")
-    return (
-      <>
-        {activity.finish_summary && (
-          <div className="memo-finish-summary">
-            <MarkdownContent text={activity.finish_summary} />
-          </div>
-        )}
-        <MemoNotice activity={activity} />
-      </>
-    );
+  if (activity.kind === "memo_notice") return <MemoNotice activity={activity} />;
   if (activity.kind === "model_service_issue")
     return <ModelServiceIssueNotice activity={activity} />;
   if (activity.kind === "user_supplement")
@@ -14266,6 +14259,27 @@ function toolInvocationPreview(activity: Activity) {
   const code = activity.code?.split("\n", 1)[0]?.trim();
   if (code) return code;
   return activity.detail?.split("\n", 1)[0]?.trim();
+}
+
+function activitiesFromTurnEvent(
+  event: WebTurnEvent,
+  sessionId: string,
+): (Activity | null)[] {
+  if (event.source !== "core_topic")
+    return [activityFromTurnEvent(event, sessionId)];
+  const activities = activitiesFromTopic(
+    event.payload as unknown as import("./protocol").CoreTopicEvent,
+  );
+  if (activities.length === 0) return [null];
+  return activities.map((activity, index) => ({
+    ...activity,
+    id:
+      index === activities.length - 1
+        ? event.event_id
+        : `${event.event_id}:activity:${index}`,
+    sessionId,
+    createdAt: event.created_at_ms,
+  }));
 }
 
 function activityFromTurnEvent(

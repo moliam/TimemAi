@@ -5358,25 +5358,18 @@ body.workspace-modal-open .app-shell { user-select: none; }
 /* Stream UI Mode: preview text must match final-answer typography exactly,
    so confirmation never resizes anything. */
 .response-preview,
-.turn-interim-item,
-.memo-finish-summary {
+.turn-interim-item {
   font-family: var(--agent-other-font), var(--agent-chinese-font), sans-serif;
   font-weight: var(--agent-font-weight);
 }
 .response-preview > .message-content,
-.turn-interim-item .message-content,
-.memo-finish-summary > .message-content {
+.turn-interim-item .message-content {
   color: #e6edf4;
   font-size: var(--content-size);
   line-height: 1.68;
 }
 :root[data-theme="light"] .response-preview > .message-content,
-:root[data-theme="light"] .turn-interim-item .message-content,
-:root[data-theme="light"] .memo-finish-summary > .message-content { color: #24333a; }
-.memo-finish-summary { min-width: 0; padding: 2px 6px 6px; }
-.memo-finish-summary > .message-content { overflow-wrap: anywhere; }
-.memo-finish-summary > .message-content p:first-child { margin-top: 0; }
-.memo-finish-summary > .message-content p:last-child { margin-bottom: 0; }
+:root[data-theme="light"] .turn-interim-item .message-content { color: #24333a; }
 
 /* Running tools render expanded in the stream delivery area while the
    Thought/Action frame waits for their terminal status. */
