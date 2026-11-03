@@ -3997,7 +3997,10 @@ impl AgentCore {
             .filter(|ctx| !ctx.trim().is_empty());
         // A restart notice rides only the first post-restart supporting
         // context. Keep a compact restatement so a later compaction cannot
-        // silently drop the restart fact.
+        // silently drop the restart fact. The restatement carries the time
+        // and one positioning sentence only: a post-compaction context
+        // already holds the working state through its summary, so the full
+        // recovery guidance stays exclusive to the cold-start notice.
         if let Some(ctx) = filtered_supporting_context.as_deref() {
             let trimmed = ctx.trim_start();
             if trimmed.starts_with("Runtime restarted at ") {
@@ -4006,7 +4009,7 @@ impl AgentCore {
                     None => trimmed.lines().next().unwrap_or(trimmed).trim(),
                 };
                 self.restart_notice_restate = Some(format!(
-                    "{first_sentence} This context continues across that restart; the original recovery guidance may have been dropped by a later compaction. Re-verify the current cwd, files, and processes before continuing prior work."
+                    "{first_sentence} This context continues across that restart."
                 ));
             }
         }

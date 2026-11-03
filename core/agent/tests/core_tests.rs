@@ -3117,11 +3117,18 @@ fn compaction_restates_the_restart_notice() {
         prompt.contains("Runtime restarted at 2026-10-30 09:00:00 (local time)."),
         "the restart fact must survive compaction: {prompt}"
     );
+    // Post-compaction restatement stays a bare fact: the summary already
+    // carries the working state, so no cold-start recovery guidance returns.
     assert_eq!(
         prompt
-            .matches("may have been dropped by a later compaction")
+            .matches("This context continues across that restart.")
             .count(),
         1,
+        "{prompt}"
+    );
+    assert!(!prompt.contains("Re-verify the current cwd"), "{prompt}");
+    assert!(
+        !prompt.contains("Previous runtime/job state may be stale"),
         "{prompt}"
     );
 }
