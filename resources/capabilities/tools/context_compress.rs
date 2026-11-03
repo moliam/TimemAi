@@ -1,6 +1,10 @@
 use crate::response_protocol::{ParsedAction, ParsedContextCompress};
 use serde_json::Value;
 
+/// The prompt promises a hard cap of 1200 comma-separated keyword entries;
+/// enforce it here so the documented limit is real.
+pub(crate) const KEYWORDS_HARD_CAP_WORDS: usize = 1200;
+
 pub(crate) fn from_action(action: &ParsedAction) -> Result<ParsedContextCompress, String> {
     let input = action
         .raw_input
@@ -22,6 +26,16 @@ pub(crate) fn from_action(action: &ParsedAction) -> Result<ParsedContextCompress
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "context_compress.keywords_required".to_string())?
         .to_string();
+    let keyword_words = keywords
+        .split(',')
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+        .count();
+    if keyword_words > KEYWORDS_HARD_CAP_WORDS {
+        return Err(format!(
+            "context_compress.keywords_too_long:{keyword_words}>{KEYWORDS_HARD_CAP_WORDS}"
+        ));
+    }
     reject_overlap(&keep_delta_ids, &offload_delta_ids)?;
     let mut delta_ids = keep_delta_ids.clone();
     for id in &offload_delta_ids {
@@ -81,3 +95,7 @@ fn reject_overlap(keep: &[String], offload: &[String]) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../../../core/agent/tests/unit/capability_tool_context_compress_tests.rs"]
+mod tests;
