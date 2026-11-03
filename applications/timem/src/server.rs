@@ -15828,7 +15828,7 @@ fn session_work_file_context(state: &AppState, session_id: &str) -> Result<Optio
                 content.push_str("\n... [truncated]");
             }
             format!(
-                "\n\n[BEGIN SESSION_WORK_FILE file=\"{}\"]\n{}\n[END SESSION_WORK_FILE]",
+                "\n\n[BEGIN SESSION INSTRUCTION file=\"{}\"]\n{}\n[END SESSION INSTRUCTION]",
                 path.display(),
                 content
             )

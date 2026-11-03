@@ -425,7 +425,7 @@ export type Activity = {
   elapsed_ms?: number;
   /** Bytes of the tool's own result output injected into the next prompt (runtime metadata excluded). */
   tool_output_bytes?: number;
-  /** Summary of a task_finished attempt intercepted by the memo finish guard. */
+  /** Assistant thought shown before a task_finished attempt blocked by an active memo. */
   finish_summary?: string;
   timeout_ms?: number;
   loop_timeout_ms?: number;

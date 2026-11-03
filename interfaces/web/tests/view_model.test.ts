@@ -442,7 +442,7 @@ describe("web topic view model", () => {
     expect(hasOnlyFreeTalkActivity(freeTalk ? [freeTalk] : [], 1)).toBe(false);
   });
 
-  it("omits completion control actions from live and restored activity", () => {
+  it("omits task_finished and legacy turn_finished tool rows from live and restored activity", () => {
     for (const action of ["task_finished", "turn_finished"]) {
       for (const event of ["start", "execution_start", "finish"]) {
         expect(
@@ -450,7 +450,7 @@ describe("web topic view model", () => {
             topic("core.action", {
               action,
               event,
-              status: event === "finish" ? "completed" : "running",
+              status: event === "finish" ? "failed" : "running",
               input: { summary: "Final answer" },
             }),
           ),
@@ -468,7 +468,7 @@ describe("web topic view model", () => {
     const finish = actionEvent(
       "2000",
       "finish",
-      "completed",
+      "failed",
       { summary: "Final answer" },
       "finish-control",
     );
@@ -525,7 +525,7 @@ describe("web topic view model", () => {
         op: "stops_finish",
         active: true,
         text: "目标 B",
-        summary: "被拦截也要可见的最终总结",
+        summary: "被拦截也要显示的普通 thought",
       }),
     );
     expect(stopsFinishWithSummary).toMatchObject({
@@ -533,7 +533,7 @@ describe("web topic view model", () => {
       kind: "memo_notice",
       title: "memo stops finish",
       detail: "目标 B",
-      finish_summary: "被拦截也要可见的最终总结",
+      finish_summary: "被拦截也要显示的普通 thought",
     });
     const forceDeleted = activityFromTopic(
       topic("core.memo", { op: "force_deleted", active: false, text: null }),

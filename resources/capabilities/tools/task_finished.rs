@@ -16,6 +16,11 @@ pub(crate) fn execute_action(
         return failed("summary_required");
     }
     core.record_turn_finished(summary.to_string());
+    if let Some(memo) = core.active_memo() {
+        return ActionExecution::Completed(ActionOutcome::failed(format!(
+            "task_finished failed: an active memo still exists, so this finish did not take effect. The summary remains available as this tool call's thought. Active memo: {memo}. Delete or update the memo, complete its goal, then call task_finished again."
+        )));
+    }
     ActionExecution::Completed(ActionOutcome::completed("Current task finished."))
 }
 

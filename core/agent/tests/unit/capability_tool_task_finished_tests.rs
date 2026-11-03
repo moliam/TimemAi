@@ -1,4 +1,5 @@
 use super::*;
+use crate::ActionStatus;
 use serde_json::json;
 
 fn setup(name: &str) -> (AgentCore, std::path::PathBuf) {
@@ -54,6 +55,26 @@ fn records_summary_and_succeeds() {
         Some("All done.")
     );
     assert_eq!(core.take_turn_finished_summary(), None);
+}
+
+#[test]
+fn active_memo_records_summary_but_returns_failed_tool_result() {
+    let (mut core, _dir) = setup("active_memo");
+    core.set_active_memo("继续完成回归测试".to_string());
+    let mut runtime = NoopRuntime;
+    let result = execute_action(&mut core, &action("阶段性总结仍需显示"), &mut runtime);
+    let outcome = match result {
+        ActionExecution::Completed(outcome) => outcome,
+        ActionExecution::NeedsApproval(_) => panic!("unexpected approval"),
+    };
+    assert_eq!(outcome.status, ActionStatus::Failed);
+    assert!(outcome.text.contains("an active memo still exists"));
+    assert!(outcome.text.contains("Active memo: 继续完成回归测试"));
+    assert!(outcome.text.contains("this tool call's thought"));
+    assert_eq!(
+        core.take_turn_finished_summary().as_deref(),
+        Some("阶段性总结仍需显示")
+    );
 }
 
 #[test]

@@ -3056,7 +3056,7 @@ fn compaction_confirmation_restates_running_jobs() {
 
 #[test]
 fn compaction_reopens_the_work_instruction_block() {
-    let block = "work_directory_instructions:\n[BEGIN WORK_DIRECTORY_INSTRUCTION v1]\nSNAP_WORK_RULE keep tests deterministic\n[END WORK_DIRECTORY_INSTRUCTION v1]";
+    let block = "work_directory_instructions:\n[BEGIN PROJECT INSTRUCTION v1]\nSNAP_WORK_RULE keep tests deterministic\n[END PROJECT INSTRUCTION v1]";
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -3135,7 +3135,7 @@ fn compaction_restates_the_restart_notice() {
 
 #[test]
 fn compaction_reinjects_the_work_instruction_block() {
-    let notice = "work_directory_instructions:\nThese instructions were loaded from files in the current working directory.\n\n[BEGIN WORK_DIRECTORY_INSTRUCTION file=\"AGENTS.md\" directory=\"/work\"]\nKeep changes scoped.\n[END WORK_DIRECTORY_INSTRUCTION file=\"AGENTS.md\"]";
+    let notice = "work_directory_instructions:\nThese instructions were loaded from files in the current working directory.\n\n[BEGIN PROJECT INSTRUCTION file=\"AGENTS.md\" directory=\"/work\"]\nKeep changes scoped.\n[END PROJECT INSTRUCTION file=\"AGENTS.md\"]";
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -3159,7 +3159,7 @@ fn compaction_reinjects_the_work_instruction_block() {
     // The block returns right after compaction, within the same turn: a new
     // supporting context only arrives with the next turn.
     assert!(
-        prompt.contains("[BEGIN WORK_DIRECTORY_INSTRUCTION file=\"AGENTS.md\""),
+        prompt.contains("[BEGIN PROJECT INSTRUCTION file=\"AGENTS.md\""),
         "the work-instruction block must return immediately after compaction: {prompt}"
     );
 
@@ -8866,9 +8866,9 @@ fn work_directory_instructions_are_loaded_once_even_if_host_repeats_context() {
     let supporting_context = r#"work_directory_instructions:
 These instructions were loaded from files in the current working directory. Follow them while working in that directory.
 
-[BEGIN WORK_DIRECTORY_INSTRUCTION file="AGENTS.md" directory="/tmp/project"]
+[BEGIN PROJECT INSTRUCTION file="AGENTS.md" directory="/tmp/project"]
 unique_agents_rule_do_not_repeat_7f9a
-[END WORK_DIRECTORY_INSTRUCTION file="AGENTS.md"]
+[END PROJECT INSTRUCTION file="AGENTS.md"]
 
 workspace_reference:
 unique_workspace_reference_should_remain_visible

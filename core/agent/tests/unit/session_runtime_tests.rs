@@ -6898,7 +6898,7 @@ struct MemoGuardNativeInterceptModel {
     intercepted_prompt_has_no_result_heading: bool,
     intercepted_prompt_keeps_guard_note: bool,
     intercepted_exchange_carries_narrative: bool,
-    intercepted_exchange_rewrites_result: bool,
+    intercepted_exchange_has_failed_result: bool,
 }
 
 #[cfg(unix)]
@@ -6964,11 +6964,12 @@ impl ModelClient for MemoGuardNativeInterceptModel {
                     .assistant_text
                     .contains(NARRATIVE)
                 && request.native_exchanges[1].calls[0].name == "task_finished";
-            self.intercepted_exchange_rewrites_result = request.native_exchanges.len() == 2
-                && request.native_exchanges[1]
-                    .results
-                    .iter()
-                    .any(|result| result.content.contains("this finish did not take effect"));
+            self.intercepted_exchange_has_failed_result = request.native_exchanges.len() == 2
+                && request.native_exchanges[1].results.iter().any(|result| {
+                    result.is_error
+                        && result.content.contains("an active memo still exists")
+                        && result.content.contains("this finish did not take effect")
+                });
         }
         let (content, calls): (String, Vec<crate::NativeToolCall>) = match self.business_calls {
             1 => (
@@ -7042,7 +7043,7 @@ fn memo_finish_guard_native_keeps_narrative_in_exchange_only() {
         intercepted_prompt_has_no_result_heading: false,
         intercepted_prompt_keeps_guard_note: false,
         intercepted_exchange_carries_narrative: false,
-        intercepted_exchange_rewrites_result: false,
+        intercepted_exchange_has_failed_result: false,
     };
 
     let outcome = run_session_turn_with_model_client(
@@ -7079,8 +7080,8 @@ fn memo_finish_guard_native_keeps_narrative_in_exchange_only() {
         "the structured exchange must carry the narrative verbatim"
     );
     assert!(
-        model.intercepted_exchange_rewrites_result,
-        "the intercepted task_finished result must be rewritten to the block wording"
+        model.intercepted_exchange_has_failed_result,
+        "the intercepted task_finished exchange must carry a genuine failed tool result"
     );
     assert_eq!(
         outcome.text,
@@ -7109,7 +7110,7 @@ fn memo_finish_guard_stops_finish_event_carries_blocked_summary_native() {
         intercepted_prompt_has_no_result_heading: false,
         intercepted_prompt_keeps_guard_note: false,
         intercepted_exchange_carries_narrative: false,
-        intercepted_exchange_rewrites_result: false,
+        intercepted_exchange_has_failed_result: false,
     };
     let mut ui = RetryRecordingUi::default();
 
@@ -7150,6 +7151,20 @@ fn memo_finish_guard_stops_finish_event_carries_blocked_summary_native() {
         "\u{6301}\u{7eed}\u{4efb}\u{52a1}\u{63d0}\u{9192}"
     );
     assert_eq!(stops_finish.payload["active"], true);
+    let failed_finish = ui
+        .events
+        .iter()
+        .find(|event| {
+            event.topic.name == crate::host::CORE_TOPIC_ACTION
+                && event.payload["action"] == "task_finished"
+                && event.payload["event"] == "finish"
+        })
+        .expect("the intercepted task_finished must emit a terminal core.action event");
+    assert_eq!(failed_finish.payload["status"], "failed");
+    assert_eq!(
+        failed_finish.payload["input"]["summary"],
+        "\u{88ab}\u{62e6}\u{622a}\u{4e5f}\u{8981}\u{53ef}\u{89c1}\u{7684}\u{6f14}\u{793a}\u{603b}\u{7ed3}"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -7399,7 +7414,7 @@ fn session_work_file_content_block_is_injected_once_then_filtered() {
     config.response_protocol = crate::ResponseProtocolKind::Json;
     let pointer = "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.";
     let block = format!(
-        "{pointer}\n\n[BEGIN SESSION_WORK_FILE file=\"/mem/sessions/6lal8v/Timem.md\"]\n## Active work\n- keep the goal anchored\n[END SESSION_WORK_FILE]"
+        "{pointer}\n\n[BEGIN SESSION INSTRUCTION file=\"/mem/sessions/6lal8v/Timem.md\"]\n## Active work\n- keep the goal anchored\n[END SESSION INSTRUCTION]"
     );
     struct TwoTurnModel {
         prompts: Vec<String>,
@@ -7453,7 +7468,7 @@ fn session_work_file_content_block_is_injected_once_then_filtered() {
     );
     assert_eq!(first.text, "first");
     assert!(
-        model.prompts[0].contains("[BEGIN SESSION_WORK_FILE"),
+        model.prompts[0].contains("[BEGIN SESSION INSTRUCTION"),
         "the first turn must carry the work file content block: {}",
         model.prompts[0]
     );
@@ -7481,7 +7496,7 @@ fn session_work_file_content_block_is_injected_once_then_filtered() {
         "the pointer line must still ride the supporting context: {second_prompt}"
     );
     assert_eq!(
-        second_prompt.matches("[BEGIN SESSION_WORK_FILE").count(),
+        second_prompt.matches("[BEGIN SESSION INSTRUCTION").count(),
         1,
         "an identical repeat must stay filtered; only the turn-one historical copy may remain: {second_prompt}"
     );
@@ -7497,7 +7512,7 @@ fn session_work_file_content_block_survives_compaction() {
     config.response_protocol = crate::ResponseProtocolKind::Json;
     let pointer = "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.";
     let block = format!(
-        "{pointer}\n\n[BEGIN SESSION_WORK_FILE file=\"/mem/sessions/6lal8v/Timem.md\"]\n## Active work\n- keep the goal anchored\n[END SESSION_WORK_FILE]"
+        "{pointer}\n\n[BEGIN SESSION INSTRUCTION file=\"/mem/sessions/6lal8v/Timem.md\"]\n## Active work\n- keep the goal anchored\n[END SESSION INSTRUCTION]"
     );
     struct CompactModel {
         prompts: Vec<String>,
@@ -7556,7 +7571,7 @@ fn session_work_file_content_block_survives_compaction() {
     );
     assert_eq!(setup.text, "setup");
     assert!(
-        model.prompts[0].contains("[BEGIN SESSION_WORK_FILE"),
+        model.prompts[0].contains("[BEGIN SESSION INSTRUCTION"),
         "the first turn must register the content block: {}",
         model.prompts[0]
     );
@@ -7579,13 +7594,15 @@ fn session_work_file_content_block_survives_compaction() {
     );
     assert_eq!(outcome.text, "compacted");
     assert_eq!(
-        model.prompts[1].matches("[BEGIN SESSION_WORK_FILE").count(),
+        model.prompts[1]
+            .matches("[BEGIN SESSION INSTRUCTION")
+            .count(),
         1,
         "only the turn-one historical copy may remain before compaction: {}",
         model.prompts[1]
     );
     assert!(
-        model.prompts[2].contains("[BEGIN SESSION_WORK_FILE"),
+        model.prompts[2].contains("[BEGIN SESSION INSTRUCTION"),
         "the work file content must ride the post-compaction prompt: {}",
         model.prompts[2]
     );

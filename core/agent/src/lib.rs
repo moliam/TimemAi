@@ -4877,20 +4877,6 @@ impl AgentCore {
                                 Some(&stop_summary),
                             ));
                         }
-                        // The canned success line would contradict the block:
-                        // rewrite the task_finished result so both the model
-                        // and the UI read the interception as such.
-                        let rewrite_intercepted = |text: &str| -> String {
-                            text.replace(
-                                "Current task finished.",
-                                "blocked: an active memo remains, so this finish did not take effect. The summary above was still delivered to the user; delete or update the memo, then finish again.",
-                            )
-                        };
-                        for slice in slices.iter_mut() {
-                            if slice.0 == "result_of_llm_action" {
-                                slice.1 = rewrite_intercepted(&slice.1);
-                            }
-                        }
                         slices.push((
                             "memo_finish_guard".to_string(),
                             memo_finish_guard_reminder(&memo),
@@ -4902,7 +4888,7 @@ impl AgentCore {
                                 .map(|(call, result)| NativeToolResult {
                                     call_id: call.id.clone(),
                                     name: call.name.clone(),
-                                    content: rewrite_intercepted(result),
+                                    content: result.clone(),
                                     is_error: Self::action_result_is_error(result),
                                 })
                                 .collect();
@@ -9272,8 +9258,7 @@ fn split_text_for_prompt_slices(text: &str, limit: usize) -> Vec<String> {
 
 fn work_instruction_context_block(supporting_context: &str) -> Option<(usize, usize, &str)> {
     let start = supporting_context.find("work_directory_instructions:")?;
-    let relative_end_marker =
-        supporting_context[start..].rfind("[END WORK_DIRECTORY_INSTRUCTION")?;
+    let relative_end_marker = supporting_context[start..].rfind("[END PROJECT INSTRUCTION")?;
     let marker_start = start + relative_end_marker;
     let after_marker = supporting_context[marker_start..]
         .find(']')
@@ -9283,7 +9268,7 @@ fn work_instruction_context_block(supporting_context: &str) -> Option<(usize, us
         .map(|idx| after_marker + idx + 1)
         .unwrap_or(supporting_context.len());
     let block = supporting_context[start..end].trim();
-    if block.contains("[BEGIN WORK_DIRECTORY_INSTRUCTION") {
+    if block.contains("[BEGIN PROJECT INSTRUCTION") {
         Some((start, end, block))
     } else {
         None
@@ -9291,8 +9276,8 @@ fn work_instruction_context_block(supporting_context: &str) -> Option<(usize, us
 }
 
 fn session_work_file_context_block(supporting_context: &str) -> Option<(usize, usize, &str)> {
-    let start = supporting_context.find("[BEGIN SESSION_WORK_FILE ")?;
-    let relative_end_marker = supporting_context[start..].find("[END SESSION_WORK_FILE")?;
+    let start = supporting_context.find("[BEGIN SESSION INSTRUCTION ")?;
+    let relative_end_marker = supporting_context[start..].find("[END SESSION INSTRUCTION")?;
     let marker_start = start + relative_end_marker;
     let after_marker = supporting_context[marker_start..]
         .find(']')
@@ -9302,7 +9287,7 @@ fn session_work_file_context_block(supporting_context: &str) -> Option<(usize, u
         .map(|idx| after_marker + idx + 1)
         .unwrap_or(supporting_context.len());
     let block = supporting_context[start..end].trim();
-    if block.contains("[BEGIN SESSION_WORK_FILE") {
+    if block.contains("[BEGIN SESSION INSTRUCTION") {
         Some((start, end, block))
     } else {
         None

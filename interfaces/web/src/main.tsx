@@ -13850,14 +13850,19 @@ function ActivityView({ activity, enterPulse = false }: { activity: Activity; en
   if (activity.kind === "context_compress")
     return <ContextCompressNotice activity={activity} />;
   if (activity.kind === "toolgen") return <ToolGenNotice activity={activity} />;
-  // A blocked-finish summary renders first, as normal answer typography with
-  // no special label, then the memo notice itself.
   if (activity.kind === "memo_notice")
     return (
       <>
         {activity.finish_summary && (
-          <div className="turn-work-item finish-summary-block">
-            <MarkdownContent text={activity.finish_summary} />
+          <div className="turn-work-item thinking free-talk">
+            <span className="activity-mark">
+              <span className="activity-thinking-dot" aria-hidden="true" />
+            </span>
+            <div>
+              <div className="turn-work-detail">
+                <MarkdownContent text={activity.finish_summary} />
+              </div>
+            </div>
           </div>
         )}
         <MemoNotice activity={activity} />
