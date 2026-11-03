@@ -6809,6 +6809,12 @@ fn memo_finish_guard_keeps_the_task_finished_summary_visible() {
         model.prompts[2].contains("still memo active"),
         "guard reminder missing in prompt[2]"
     );
+    // The canned success line must not contradict the block: the result is
+    // rewritten to say the finish did not take effect.
+    assert!(
+        model.prompts[2].contains("this finish did not take effect"),
+        "intercepted result wording missing in prompt[2]"
+    );
     assert_eq!(outcome.text, "被拦截也要可见的最终总结");
     let _ = std::fs::remove_dir_all(dir);
 }

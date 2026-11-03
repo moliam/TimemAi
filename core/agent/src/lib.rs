@@ -4821,6 +4821,20 @@ impl AgentCore {
                             Some(&parsed),
                             Some(&stop_summary),
                         ));
+                        // The canned success line would contradict the block:
+                        // rewrite the task_finished result so both the model
+                        // and the UI read the interception as such.
+                        let rewrite_intercepted = |text: &str| -> String {
+                            text.replace(
+                                "Current task finished.",
+                                "blocked: an active memo remains, so this finish did not take effect. The summary above was still delivered to the user; delete or update the memo, then finish again.",
+                            )
+                        };
+                        for slice in slices.iter_mut() {
+                            if slice.0 == "result_of_llm_action" {
+                                slice.1 = rewrite_intercepted(&slice.1);
+                            }
+                        }
                         slices.push((
                             "memo_finish_guard".to_string(),
                             memo_finish_guard_reminder(&memo),
@@ -4832,7 +4846,7 @@ impl AgentCore {
                                 .map(|(call, result)| NativeToolResult {
                                     call_id: call.id.clone(),
                                     name: call.name.clone(),
-                                    content: result.clone(),
+                                    content: rewrite_intercepted(result),
                                     is_error: Self::action_result_is_error(result),
                                 })
                                 .collect();
