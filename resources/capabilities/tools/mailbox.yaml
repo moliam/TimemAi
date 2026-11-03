@@ -9,8 +9,11 @@ description: |
   mailbox history. Your address is automatically signed on outgoing mail, so
   the recipient can reply without asking. Mailboxes work across timem
   instances on this machine. Each session owns exactly one globally unique
-  mailbox name (e.g. `mb-3ybe2`); it is signed automatically on outgoing mail,
-  and `list` reports it as `Your mailbox: ...` when you need it.
+  mailbox id (e.g. `id_6lal8v`): one id addresses that session/agent and all
+  of its mailbox resources. It is signed automatically on outgoing mail, and
+  `list` reports it as `Your mailbox: ...` when you need it. Legacy `mb-...`
+  and bare ids are still accepted as recipient input and answered with the
+  canonical form.
 
   Actions (the `action` parameter):
   - `send` (default): deliver mail into another mailbox. Delivery is
@@ -38,7 +41,8 @@ description: |
 
   Parameters:
   - `action`: `send` (default), `list`, `search`, or `read`.
-  - `to`: recipient mailbox name (`send`).
+  - `to`: recipient mailbox id (`send`); canonical form `id_1a2b3c4d`.
+    Legacy `mb-...` names and bare ids are accepted too.
   - `msg`: mail body (`send`); at most 65536 bytes (64 KiB). Mail is a short
     message, larger payloads belong in files.
   - `query`: case-insensitive body text to match (`search`).
@@ -57,7 +61,7 @@ input_schema: |
     "additionalProperties": false,
     "properties": {
       "action": {"type":"string","enum":["send","list","search","read"],"description":"send (default) delivers mail to another mailbox; list shows recent received+sent mail; search matches bodies case-insensitively; read prints one mail in full."},
-      "to": {"type":"string","description":"Recipient mailbox name (action send), e.g. mb-1a2b3c4d."},
+      "to": {"type":"string","description":"Recipient mailbox id (action send), e.g. id_1a2b3c4d. Legacy mb-... names and bare ids are accepted too."},
       "msg": {"type":"string","description":"Mail body (action send) delivered into the recipient's next model request. At most 65536 bytes (64 KiB)."},
       "query": {"type":"string","description":"Case-insensitive body text to match (action search)."},
       "mail_id": {"type":"string","description":"Mail id to print in full (action read), as shown by list/search."},
@@ -68,4 +72,4 @@ input_schema: |
     }
   }
 example_json: |
-  {"mailbox":{"action":"send","to":"mb-3ybe2","msg":"please run the regression suite","queue_timeout":"300s","resp_timeout":"600s"}}
+  {"mailbox":{"action":"send","to":"id_3ybe2","msg":"please run the regression suite","queue_timeout":"300s","resp_timeout":"600s"}}

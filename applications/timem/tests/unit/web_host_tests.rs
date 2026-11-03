@@ -21169,7 +21169,8 @@ fn mailbox_send_receipt_wait_folds_fast_reads_and_falls_back() {
 
     // Case 2: no receipt inside the window keeps the fallback path intact.
     std::env::set_var("TIMEM_MAILBOX_RECEIPT_WAIT_MS", "0");
-    // The peer inbox must exist or the send fails outright.
+    // The peer inbox must exist or the send fails outright. A non-compact
+    // legacy address is kept verbatim, so the spool location is unchanged.
     std::fs::create_dir_all(e2e_inbox("mb-faraway")).unwrap();
     let (mail_id2, initially_read2) = handle_mailbox_send_topic(
         &state,
@@ -21628,7 +21629,7 @@ fn compact_session_id_derives_mailbox_name() {
     let path = mailbox_state_path(&state, &compact).unwrap();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mailbox = load_mailbox_state(&state, &compact).unwrap();
-    assert_eq!(mailbox.mailbox_name, format!("mb-{compact}"));
+    assert_eq!(mailbox.mailbox_name, format!("id_{compact}"));
 }
 
 #[test]
@@ -21840,8 +21841,8 @@ fn first_start_migrates_sessions_mailboxes_peers_history_and_spool() {
 
     let mailbox_a = load_mailbox_state(&state, &new_a.session_id).unwrap();
     let mailbox_b = load_mailbox_state(&state, &new_b.session_id).unwrap();
-    assert_eq!(mailbox_a.mailbox_name, format!("mb-{}", new_a.session_id));
-    assert_eq!(mailbox_b.mailbox_name, format!("mb-{}", new_b.session_id));
+    assert_eq!(mailbox_a.mailbox_name, format!("id_{}", new_a.session_id));
+    assert_eq!(mailbox_b.mailbox_name, format!("id_{}", new_b.session_id));
     assert_eq!(mailbox_a.entries[0].peer, mailbox_b.mailbox_name);
     assert_eq!(mailbox_b.entries[0].peer, mailbox_a.mailbox_name);
     assert_eq!(mailbox_a.entries[0].id, mailbox_b.entries[0].id);

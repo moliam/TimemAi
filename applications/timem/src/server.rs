@@ -2156,6 +2156,9 @@ pub async fn run(
     // Full MEM scans never run on startup or ordinary history writes. Settings
     // commands may run them explicitly. The fallback checkpoints a tiny cumulative
     // runtime counter every 15 minutes and scans only when due and fully idle.
+    // One-time spool hygiene: legacy mb-{compact} directories move to their
+    // canonical id_{compact} location before anything reads or writes mail.
+    crate::mailbox::migrate_prefixed_mailbox_dirs(&crate::mailbox::mailbox_spool_root());
     spawn_idle_temporary_maintenance_loop(state.clone());
     spawn_model_endpoint_health_scanner(state.clone());
     let shutdown_reason = Arc::new(Mutex::new(None));
@@ -6420,6 +6423,7 @@ fn generate_compact_session_id(
         if !live_collision
             && !reserved.contains(&session_id)
             && !store.sessions_dir().join(&session_id).exists()
+            && !crate::mailbox::mailbox_exists(&spool_root, &format!("id_{session_id}"))
             && !crate::mailbox::mailbox_exists(&spool_root, &format!("mb-{session_id}"))
         {
             return Ok(session_id);
@@ -6748,11 +6752,11 @@ fn migrate_legacy_session_ids(
             let new_id = generate_compact_session_id(state, &reserved)?;
             reserved.insert(new_id.clone());
             if let Some(old_mailbox) = old_mailbox {
-                peer_names.insert(old_mailbox, format!("mb-{new_id}"));
+                peer_names.insert(old_mailbox, format!("id_{new_id}"));
             }
             id_map.insert(stored.session_id.clone(), new_id);
         } else if is_compact_session_id(&stored.session_id) {
-            let new_name = format!("mb-{}", stored.session_id);
+            let new_name = format!("id_{}", stored.session_id);
             if let Some(old_mailbox) = old_mailbox {
                 if old_mailbox != new_name {
                     peer_names.insert(old_mailbox, new_name);
@@ -6775,7 +6779,7 @@ fn migrate_legacy_session_ids(
                 && value
                     .get("mailbox_name")
                     .and_then(serde_json::Value::as_str)
-                    != Some(format!("mb-{}", stored.session_id).as_str()))
+                    != Some(format!("id_{}", stored.session_id).as_str()))
     };
     if id_map.is_empty()
         && peer_names.is_empty()
@@ -6849,7 +6853,7 @@ fn migrate_legacy_session_ids(
             continue;
         }
         let new_name = if compact {
-            format!("mb-{}", stored.session_id)
+            format!("id_{}", stored.session_id)
         } else {
             read_mailbox_name(&path).ok_or_else(|| "mailbox_name_missing".to_string())?
         };
@@ -9735,15 +9739,12 @@ fn mailbox_state_path(state: &AppState, session_id: &str) -> Result<PathBuf, Str
 }
 
 fn is_compact_session_id(session_id: &str) -> bool {
-    session_id.len() == 6
-        && session_id
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+    crate::mailbox::is_compact_mailbox_id(session_id)
 }
 
 fn mint_mailbox_name(session_id: &str) -> String {
     if is_compact_session_id(session_id) {
-        format!("mb-{session_id}")
+        format!("id_{session_id}")
     } else {
         crate::mailbox::acquire_mailbox_name(&crate::mailbox::mailbox_spool_root())
     }
@@ -10378,8 +10379,12 @@ fn find_local_session_by_mailbox(state: &AppState, mailbox_name: &str) -> Option
             .map(|session| session.session_id.clone())
             .collect()
     };
+    let bare_recipient = crate::mailbox::normalize_mailbox_id(mailbox_name);
     session_ids.into_iter().find(|session_id| {
-        read_local_mailbox_name(state, session_id).as_deref() == Some(mailbox_name)
+        read_local_mailbox_name(state, session_id)
+            .map(|name| crate::mailbox::normalize_mailbox_id(&name))
+            .as_deref()
+            == Some(bare_recipient.as_str())
     })
 }
 
@@ -10466,7 +10471,9 @@ fn handle_mailbox_send_topic(
     session_id: &str,
     payload: &serde_json::Value,
 ) -> Option<(String, bool)> {
-    let to = payload["to"].as_str().unwrap_or("").to_string();
+    // Accept canonical id_ addresses plus legacy mb- and bare ids: normalize
+    // first so one id keeps addressing the same session and spool resources.
+    let to = crate::mailbox::canonical_mailbox_id(payload["to"].as_str().unwrap_or(""));
     let msg = payload["msg"].as_str().unwrap_or("").to_string();
     let queue_timeout_secs = payload["queue_timeout_secs"]
         .as_i64()

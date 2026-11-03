@@ -85,7 +85,70 @@ fn sanitize_mailbox_component(name: &str) -> String {
         .collect()
 }
 
-/// Machine-locally unique, short and typeable: `mb-xxxxxx` (6 lowercase
+/// The bare id of a mailbox address: 6 lowercase base36 characters. For
+/// sessions it equals the compact session id, so one id addresses the
+/// session/agent and all of its mailbox resources.
+pub fn is_compact_mailbox_id(id: &str) -> bool {
+    id.len() == 6
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+}
+
+/// Strips a known mailbox address prefix (`id_` canonical, `mb-` legacy) and
+/// returns the bare id. Anything else passes through unchanged so acquired
+/// random names are never corrupted.
+pub fn normalize_mailbox_id(name: &str) -> String {
+    name.strip_prefix("id_")
+        .or_else(|| name.strip_prefix("mb-"))
+        .unwrap_or(name)
+        .to_string()
+}
+
+/// Canonical user-facing mailbox address: `id_{bare}` for compact ids. Other
+/// inputs are returned unchanged; callers keep working with whatever shape
+/// they already own instead of minting a second address.
+pub fn canonical_mailbox_id(name: &str) -> String {
+    let bare = normalize_mailbox_id(name);
+    if is_compact_mailbox_id(&bare) {
+        format!("id_{bare}")
+    } else {
+        name.to_string()
+    }
+}
+
+/// Startup migration: legacy `mb-{compact}` spool directories are renamed to
+/// their canonical `id_{compact}` location. A target that already exists is
+/// kept untouched so both directories survive instead of overwriting mail.
+/// Returns the number of directories migrated.
+pub fn migrate_prefixed_mailbox_dirs(spool_root: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(spool_root) else {
+        return 0;
+    };
+    let mut migrated = 0;
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(bare) = name.strip_prefix("mb-") else {
+            continue;
+        };
+        if !is_compact_mailbox_id(bare) {
+            continue;
+        }
+        let target = mailbox_spool_dir(spool_root, &format!("id_{bare}"));
+        if target.exists() {
+            continue;
+        }
+        if std::fs::rename(entry.path(), &target).is_ok() {
+            migrated += 1;
+        }
+    }
+    migrated
+}
+
+/// Machine-locally unique, short and typeable: `id_xxxxxx` (6 lowercase
 /// base36 characters, 36^6 = 2,176,782,336 combinations). The scheduler
 /// additionally retries when a generated name is already taken on this
 /// machine, so collisions are practically impossible while the address stays
@@ -103,7 +166,7 @@ pub fn generate_mailbox_name() -> String {
         *slot = ALPHABET[(value % ALPHABET.len() as u64) as usize];
         value /= ALPHABET.len() as u64;
     }
-    format!("mb-{}", std::str::from_utf8(&suffix).unwrap_or("000000"))
+    format!("id_{}", std::str::from_utf8(&suffix).unwrap_or("000000"))
 }
 
 /// Short mail id: `mail_` + 6 base36 chars hashed from (body, created_at_ms,
@@ -313,8 +376,9 @@ mod tests {
     #[test]
     fn generated_names_are_short_prefixed_and_unique() {
         let first = generate_mailbox_name();
-        assert!(first.starts_with("mb-"));
-        assert_eq!(first.len(), 9, "mb- plus 6 base36 chars keeps it typeable");
+        assert!(first.starts_with("id_"));
+        assert_eq!(first.len(), 9, "id_ plus 6 base36 chars keeps it typeable");
+        assert_eq!(first, canonical_mailbox_id(&first));
         assert!(
             first[3..]
                 .chars()
@@ -347,6 +411,54 @@ mod tests {
         // Every draw taken: the last resort still returns a usable name.
         let picked = acquire_mailbox_name_with(&root, || "mb-taken".to_string());
         assert_eq!(picked, "mb-taken");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn mailbox_ids_normalize_and_canonicalize_compatibly() {
+        // Canonical, legacy and bare forms collapse onto the same bare id.
+        assert_eq!(normalize_mailbox_id("id_6lal8v"), "6lal8v");
+        assert_eq!(normalize_mailbox_id("mb-6lal8v"), "6lal8v");
+        assert_eq!(normalize_mailbox_id("6lal8v"), "6lal8v");
+        // Unknown shapes pass through so acquired names stay intact.
+        assert_eq!(normalize_mailbox_id("mb-team-inbox"), "team-inbox");
+        assert_eq!(normalize_mailbox_id("weird name"), "weird name");
+        // Only compact ids mint a canonical address; others are preserved.
+        assert_eq!(canonical_mailbox_id("mb-6lal8v"), "id_6lal8v");
+        assert_eq!(canonical_mailbox_id("6lal8v"), "id_6lal8v");
+        assert_eq!(canonical_mailbox_id("id_6lal8v"), "id_6lal8v");
+        assert_eq!(canonical_mailbox_id("team-inbox"), "team-inbox");
+        assert_eq!(canonical_mailbox_id(""), "");
+        assert!(is_compact_mailbox_id("6lal8v"));
+        assert!(!is_compact_mailbox_id("6lal8V"));
+        assert!(!is_compact_mailbox_id("6lal8"));
+    }
+
+    #[test]
+    fn startup_migration_renames_legacy_spool_dirs_without_overwrites() {
+        let root = temp_root("migratedirs");
+        // Legacy compact dirs migrate to their canonical location.
+        let legacy = mailbox_spool_dir(&root, "mb-abc123");
+        fs::create_dir_all(&legacy).unwrap();
+        // A foreign mb- name that is not a compact id stays untouched.
+        let foreign = mailbox_spool_dir(&root, "mb-team-inbox");
+        fs::create_dir_all(&foreign).unwrap();
+        // A canonical dir already in place blocks the rename: both survive.
+        let claimed = mailbox_spool_dir(&root, "id_dead00");
+        fs::create_dir_all(&claimed).unwrap();
+        let legacy_claimed = mailbox_spool_dir(&root, "mb-dead00");
+        fs::create_dir_all(&legacy_claimed).unwrap();
+
+        let migrated = migrate_prefixed_mailbox_dirs(&root);
+        assert_eq!(migrated, 1, "only the unclaimed compact dir moves");
+        assert!(mailbox_spool_dir(&root, "id_abc123").is_dir());
+        assert!(!legacy.is_dir());
+        assert!(foreign.is_dir(), "non-compact mb- names stay");
+        assert!(mailbox_spool_dir(&root, "id_dead00").is_dir());
+        assert!(legacy_claimed.is_dir(), "claimed target keeps both dirs");
+
+        // Idempotent: nothing left to migrate.
+        assert_eq!(migrate_prefixed_mailbox_dirs(&root), 0);
         fs::remove_dir_all(&root).ok();
     }
 
