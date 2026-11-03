@@ -4,9 +4,10 @@ binding_type: builtin
 binding_name: task_finished
 summary: Explicitly declare that all work for the current user turn is complete and deliver the final answer.
 description: |
-  Call this tool when all user's valid asked task is finished. Do not call it
-  while any work, verification, or pending question remains; keep using other tools
-  instead. The `summary` must be a final answer containing complete, polished, summarized knowledge,
+  Call this tool when all user's valid asked task is finished, the goal is reached(refer to active `memo` if any). Do not call it
+  while any work, verification, or pending question remains.
+  IMPORTANT: no `memo` should should be active, otherwise this toolcall will fail!
+  The `summary` must be a final answer containing complete, polished, summarized knowledge,
   not a placeholder or progress note. Neatly organize the answer with lists/table, etc.
   Provide the summary in the user's language.
 input_schema: |
