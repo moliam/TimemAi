@@ -7685,6 +7685,25 @@ function formatChatLibraryDate(value: number) {
   });
 }
 
+/// Mailbox stamps: today shows the clock time only, earlier mail adds the
+/// date, and mail from previous years keeps the year.
+function formatMailboxStamp(value: number) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const now = new Date();
+  if (date.toDateString() === now.toDateString()) {
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  const sameYear = date.getFullYear() === now.getFullYear();
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    ...(sameYear ? {} : { year: "numeric" }),
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 const STREAM_MARKDOWN_INTERVAL_MS = 200;
 
 const StreamMarkdown = memo(function StreamMarkdown({ text }: { text: string }) {
@@ -7811,6 +7830,9 @@ function MailboxPanel({
     >
       <div className="mailbox-item-top">
         <b>{mail.from}</b>
+        <span className="mailbox-item-time">
+          {formatMailboxStamp(mail.created_at_ms)}
+        </span>
         {mail.kind === "receipt" && (
           <span className="mailbox-item-badge">
             {t("mailbox.receiptBadge")}
@@ -7922,6 +7944,9 @@ function MailboxPanel({
             >
               <div className="mailbox-item-top">
                 <b>{entry.to}</b>
+                <span className="mailbox-item-time">
+                  {formatMailboxStamp(entry.created_at_ms)}
+                </span>
                 <span
                   className={`mailbox-item-state${entry.status === "read" ? " status-read" : entry.status === "failed" || entry.status === "timeout" || entry.status === "discarded" ? " status-failed" : ""}`}
                 >
