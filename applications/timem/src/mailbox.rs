@@ -11,6 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::BTreeSet;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
@@ -137,6 +138,40 @@ pub fn migrate_prefixed_mailbox_dirs(spool_root: &Path) -> usize {
             continue;
         }
         let target = mailbox_spool_dir(spool_root, &format!("id_{bare}"));
+        if target.exists() {
+            continue;
+        }
+        if std::fs::rename(entry.path(), &target).is_ok() {
+            migrated += 1;
+        }
+    }
+    migrated
+}
+
+/// One-time startup sweep: every legacy `mb-...` spool directory that no
+/// stored session claims moves to its `id_...` canonical location without
+/// waiting for the first UI connect. Directories whose name appears in
+/// `claimed` (the stored mailbox.json addresses) are left for the identity
+/// migration, which must keep its own rewrite order. A target that already
+/// exists is kept untouched so both directories survive. Returns the number
+/// of directories migrated.
+pub fn migrate_unclaimed_mailbox_dirs(spool_root: &Path, claimed: &BTreeSet<String>) -> usize {
+    let Ok(entries) = std::fs::read_dir(spool_root) else {
+        return 0;
+    };
+    let mut migrated = 0;
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(legacy) = name.strip_prefix("mb-") else {
+            continue;
+        };
+        if legacy.is_empty() || claimed.contains(name) {
+            continue;
+        }
+        let target = mailbox_spool_dir(spool_root, &format!("id_{legacy}"));
         if target.exists() {
             continue;
         }
@@ -460,6 +495,33 @@ mod tests {
 
         // Idempotent: nothing left to migrate.
         assert_eq!(migrate_prefixed_mailbox_dirs(&root), 0);
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn startup_sweep_moves_only_unclaimed_legacy_dirs() {
+        let root = temp_root("sweepunclaimed");
+        let mut claimed = BTreeSet::new();
+        claimed.insert("mb-lived".to_string());
+        // A claimed directory stays for the identity migration to rename.
+        fs::create_dir_all(mailbox_spool_dir(&root, "mb-lived")).unwrap();
+        // Unclaimed compact and non-compact legacy dirs both move to id_.
+        fs::create_dir_all(mailbox_spool_dir(&root, "mb-orphan1")).unwrap();
+        fs::create_dir_all(mailbox_spool_dir(&root, "mb-3ec13409ab245091")).unwrap();
+        // A canonical target already in place blocks the rename: both survive.
+        fs::create_dir_all(mailbox_spool_dir(&root, "id_orphan2")).unwrap();
+        fs::create_dir_all(mailbox_spool_dir(&root, "mb-orphan2")).unwrap();
+
+        let migrated = migrate_unclaimed_mailbox_dirs(&root, &claimed);
+        assert_eq!(migrated, 2, "claimed and blocked targets stay");
+        assert!(mailbox_spool_dir(&root, "mb-lived").is_dir());
+        assert!(mailbox_spool_dir(&root, "id_orphan1").is_dir());
+        assert!(mailbox_spool_dir(&root, "id_3ec13409ab245091").is_dir());
+        assert!(mailbox_spool_dir(&root, "id_orphan2").is_dir());
+        assert!(mailbox_spool_dir(&root, "mb-orphan2").is_dir());
+
+        // Idempotent: nothing left to migrate.
+        assert_eq!(migrate_unclaimed_mailbox_dirs(&root, &claimed), 0);
         fs::remove_dir_all(&root).ok();
     }
 

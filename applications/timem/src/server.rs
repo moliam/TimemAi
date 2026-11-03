@@ -2156,6 +2156,17 @@ pub async fn run(
     // Full MEM scans never run on startup or ordinary history writes. Settings
     // commands may run them explicitly. The fallback checkpoints a tiny cumulative
     // runtime counter every 15 minutes and scans only when due and fully idle.
+    // One-time startup sweep: legacy mb-... spool directories that no stored
+    // session claims move to their id_... location without waiting for the
+    // first UI connect. Claimed names come straight from the stored
+    // mailbox.json files, so the identity migration keeps its rename order.
+    if let Ok(store) = current_session_store(&state) {
+        let claimed = collect_stored_mailbox_names(&store);
+        crate::mailbox::migrate_unclaimed_mailbox_dirs(
+            &crate::mailbox::mailbox_spool_root(),
+            &claimed,
+        );
+    }
     spawn_idle_temporary_maintenance_loop(state.clone());
     spawn_model_endpoint_health_scanner(state.clone());
     let shutdown_reason = Arc::new(Mutex::new(None));
@@ -6737,6 +6748,23 @@ fn migrate_spool_envelopes(
 /// One-time, pre-restore conversion of ids minted by older Web Hosts. The
 /// complete old->new address map is built before any mailbox is rewritten so
 /// both sides of local conversations converge on the same new names.
+/// Mailbox names claimed by stored sessions, read straight from their
+/// mailbox.json files: cheap reads that let the startup sweep distinguish
+/// orphaned legacy directories from directories the identity migration will
+/// rename itself.
+fn collect_stored_mailbox_names(store: &SessionStore) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let Ok(entries) = std::fs::read_dir(store.sessions_dir()) else {
+        return names;
+    };
+    for entry in entries.flatten() {
+        if let Some(name) = read_mailbox_name(&entry.path().join("mailbox.json")) {
+            names.insert(name);
+        }
+    }
+    names
+}
+
 fn migrate_legacy_session_ids(
     state: &AppState,
     store: &SessionStore,
