@@ -3134,6 +3134,82 @@ fn compaction_restates_the_restart_notice() {
 }
 
 #[test]
+fn compaction_reinjects_the_work_instruction_block() {
+    let notice = "work_directory_instructions:\nThese instructions were loaded from files in the current working directory.\n\n[BEGIN WORK_DIRECTORY_INSTRUCTION file=\"AGENTS.md\" directory=\"/work\"]\nKeep changes scoped.\n[END WORK_DIRECTORY_INSTRUCTION file=\"AGENTS.md\"]";
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("compact_work_instruction"),
+    );
+    let _ = core.begin_turn("first", Some(notice));
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"context_compress":{"summary":"retain task state","keywords":"checkpoint keywords"}}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    // The block returns right after compaction, within the same turn: a new
+    // supporting context only arrives with the next turn.
+    assert!(
+        prompt.contains("[BEGIN WORK_DIRECTORY_INSTRUCTION file=\"AGENTS.md\""),
+        "the work-instruction block must return immediately after compaction: {prompt}"
+    );
+
+    // The next supporting context carries the same block; the re-registered
+    // fingerprint keeps it filtered so the guidance never duplicates.
+    let _ = core.begin_turn("second", Some(notice));
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: "acknowledged".to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    assert_eq!(
+        prompt.matches("work_directory_instructions").count(),
+        1,
+        "the re-injected block must not duplicate: {prompt}"
+    );
+}
+
+#[test]
+fn compaction_confirmation_carries_the_session_work_file() {
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("compact_work_file"));
+    core.update_session_work_file(Some("/mem/sessions/6lal8v/Timem.md".to_string()));
+    let _ = core.begin_turn("first", None);
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"context_compress":{"summary":"retain task state","keywords":"checkpoint keywords"}}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    assert!(
+        prompt.contains("session work file: /mem/sessions/6lal8v/Timem.md"),
+        "the compaction confirmation must carry the session work file: {prompt}"
+    );
+}
+
+#[test]
 fn missing_durable_score_does_not_block_valid_actions() {
     let dir = tmp_dir("durable_ctx_score_not_required");
     fs::write(

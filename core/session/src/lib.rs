@@ -414,6 +414,11 @@ enum CoreSessionWorkerCommand {
     MailboxNameUpdated {
         name: Option<String>,
     },
+    /// Projects the Host-owned session work file path (Timem.md) into Core.
+    /// Core restates it after a compaction or clear for the same reason.
+    SessionWorkFileUpdated {
+        path: Option<String>,
+    },
     Shutdown,
 }
 
@@ -1048,6 +1053,12 @@ impl CoreSessionWorkerHandle {
     pub fn update_mailbox_name(&self, name: Option<String>) -> Result<(), String> {
         self.command_tx
             .send(CoreSessionWorkerCommand::MailboxNameUpdated { name })
+            .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    pub fn update_session_work_file(&self, path: Option<String>) -> Result<(), String> {
+        self.command_tx
+            .send(CoreSessionWorkerCommand::SessionWorkFileUpdated { path })
             .map_err(|_| "core_session_worker_stopped".to_string())
     }
 
@@ -1960,6 +1971,7 @@ impl CoreSessionWorker {
                     | CoreSessionWorkerCommand::ImportContext { .. }
                     | CoreSessionWorkerCommand::TimerSync { .. }
                     | CoreSessionWorkerCommand::MailboxNameUpdated { .. }
+                    | CoreSessionWorkerCommand::SessionWorkFileUpdated { .. }
                         if shutdown_requested.load(Ordering::SeqCst) =>
                     {
                         break;
@@ -2317,6 +2329,9 @@ impl CoreSessionWorker {
                     }
                     CoreSessionWorkerCommand::MailboxNameUpdated { name } => {
                         core.update_session_mailbox_name(name);
+                    }
+                    CoreSessionWorkerCommand::SessionWorkFileUpdated { path } => {
+                        core.update_session_work_file(path);
                     }
                     CoreSessionWorkerCommand::ExportContext { result_tx } => {
                         let _ = result_tx.send(Ok(core.export_dynamic_context()));

@@ -9772,6 +9772,18 @@ fn mailbox_state_path(state: &AppState, session_id: &str) -> Result<PathBuf, Str
         .ok_or_else(|| "mailbox_path_invalid".to_string())
 }
 
+/// Persistent work file of a session: lives next to the session metadata
+/// in its mem storage and holds the guidance, plans, and progress of
+/// durable, complex work assigned to this session.
+fn session_work_file_path(state: &AppState, session_id: &str) -> Result<PathBuf, String> {
+    let store = current_session_store(state)?;
+    let metadata = store.metadata_path_for_session(session_id);
+    metadata
+        .parent()
+        .map(|parent| parent.join("Timem.md"))
+        .ok_or_else(|| "session_work_file_path_invalid".to_string())
+}
+
 fn is_compact_session_id(session_id: &str) -> bool {
     crate::mailbox::is_compact_mailbox_id(session_id)
 }
@@ -10402,6 +10414,19 @@ fn sync_worker_mailbox_name(
 ) -> Result<(), String> {
     let name = read_local_mailbox_name(state, session_id);
     worker.update_mailbox_name(name)
+}
+
+/// Mirrors this session's persistent work file path into the worker so the
+/// Core can restate it after a compaction or a context clear.
+fn sync_worker_session_work_file(
+    state: &AppState,
+    session_id: &str,
+    worker: &CoreSessionWorkerHandle,
+) -> Result<(), String> {
+    let path = session_work_file_path(state, session_id)
+        .map(|path| path.display().to_string())
+        .ok();
+    worker.update_session_work_file(path)
 }
 
 /// Resolves a mailbox name to a session of this very instance, if any.
@@ -11677,6 +11702,7 @@ fn try_append_turn_supplement_with_kind(
     );
     let worker_handle = primary_worker_handle(state, session_id)?;
     sync_worker_mailbox_name(state, session_id, &worker_handle)?;
+    sync_worker_session_work_file(state, session_id, &worker_handle)?;
     let selected_attachments = {
         let sessions = state
             .sessions
@@ -12420,6 +12446,7 @@ fn submit_turn_with_selected_attachments_and_kind(
     let enqueue_started = std::time::Instant::now();
     let worker = primary_worker_handle(state, session_id)?;
     sync_worker_mailbox_name(state, session_id, &worker)?;
+    sync_worker_session_work_file(state, session_id, &worker)?;
     let additional_context =
         session_context_with_roles(state, session_id, &attachments, &worker_roles)?;
     let enqueue_result = if entry_kind == "resume_directly" {
@@ -12576,6 +12603,7 @@ fn resolve_work_instruction_decision(
     }
     let worker = primary_worker_handle(state, session_id)?;
     sync_worker_mailbox_name(state, session_id, &worker)?;
+    sync_worker_session_work_file(state, session_id, &worker)?;
     let additional_context = session_context_with_roles(
         state,
         session_id,
@@ -15773,6 +15801,18 @@ fn session_context(
     session_context_with_roles(state, session_id, attachments, &[])
 }
 
+/// One-line pointer to this session's persistent work file: durable,
+/// complex work assigned to this session records its guidance, plans, and
+/// progress there, so a compaction or a context clear can re-anchor the
+/// work from it.
+fn session_work_file_context(state: &AppState, session_id: &str) -> Result<Option<String>, String> {
+    let path = session_work_file_path(state, session_id)?;
+    Ok(Some(format!(
+        "Session work file: {} — record the guidance, plans, designs, and progress of durable, complex work assigned to this session in this file and keep it current; it re-anchors the work after a compaction or a context clear.",
+        path.display()
+    )))
+}
+
 fn session_context_with_roles(
     state: &AppState,
     session_id: &str,
@@ -15858,9 +15898,11 @@ fn session_context_with_roles(
         ))
     };
     let worker_roles = worker_roles_context(worker_roles);
+    let session_work_file = session_work_file_context(state, session_id)?;
     Ok(combine_additional_contexts([
         resume_notice.as_deref(),
         instructions.as_deref(),
+        session_work_file.as_deref(),
         uploaded_files.as_deref(),
         image_note.as_deref(),
         worker_roles.as_deref(),

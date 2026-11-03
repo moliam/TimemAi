@@ -2024,6 +2024,15 @@ pub struct AgentCore {
     current_action_user_question: String,
     last_notifications: Vec<CoreNotification>,
     loaded_work_instruction_fingerprints: HashSet<String>,
+    /// Last accepted work-instruction block: re-injected right after a
+    /// compaction so the remainder of the turn keeps the project-level
+    /// guidance before the next supporting context arrives.
+    last_work_instruction_context: Option<String>,
+    /// Absolute path of this session's persistent work file (Timem.md in
+    /// the session's mem storage), synced from the Host. Durable, complex
+    /// work assigned to the session records its guidance, plans, and
+    /// progress there.
+    session_work_file: Option<String>,
     pending_prompt_components: Vec<PromptComponent>,
     pending_user_interruption_note: bool,
     prompt_component_sequence: u64,
@@ -2174,6 +2183,8 @@ impl AgentCore {
             current_action_user_question: String::new(),
             last_notifications: Vec::new(),
             loaded_work_instruction_fingerprints: HashSet::new(),
+            last_work_instruction_context: None,
+            session_work_file: None,
             pending_prompt_components: Vec::new(),
             pending_user_interruption_note: false,
             prompt_component_sequence: 0,
@@ -3521,6 +3532,7 @@ impl AgentCore {
                 })
                 .unwrap_or(false);
         self.restart_notice_restate = None;
+        self.last_work_instruction_context = None;
         self.cwd_note_pending = true;
         self.deltas.clear();
         self.native_exchanges.clear();
@@ -3681,6 +3693,7 @@ impl AgentCore {
             .loaded_work_instruction_fingerprints
             .insert(fingerprint)
         {
+            self.last_work_instruction_context = Some(block.to_string());
             return supporting_context.trim().to_string();
         }
 
@@ -3795,6 +3808,13 @@ impl AgentCore {
     /// appear at least once in every context lifetime, however that context
     /// came to be (fresh worker, restored snapshot, post-clear). The one-shot
     /// reminder fires whenever the visible context does not already carry it.
+    /// Projects the Host-owned session work file path (Timem.md) into
+    /// Core: the compaction confirmation and the post-clear restatement
+    /// carry it so durable work stays re-anchorable.
+    pub fn update_session_work_file(&mut self, path: Option<String>) {
+        self.session_work_file = path;
+    }
+
     pub fn update_session_mailbox_name(&mut self, name: Option<String>) {
         let name = name
             .map(|name| name.trim().to_string())
@@ -3883,6 +3903,9 @@ impl AgentCore {
         }
         if let Some(line) = self.running_jobs_reminder_line() {
             lines.push(line);
+        }
+        if let Some(path) = self.session_work_file.as_ref() {
+            lines.push(format!("session work file: {path}"));
         }
         lines
     }
@@ -4549,9 +4572,17 @@ impl AgentCore {
             self.manual_compact_trailer_pending = false;
             self.process_scope_prompted_session = None;
             // The compacted context may have dropped the work-instruction
-            // block; stop filtering it as a duplicate so the next supporting
-            // context re-injects it.
+            // block. Re-inject the last accepted block right away so the
+            // remainder of this turn keeps the project-level guidance (a
+            // new supporting context only arrives with the next turn), and
+            // re-register its fingerprint so that next supporting context
+            // stays filtered as a duplicate.
             self.loaded_work_instruction_fingerprints.clear();
+            if let Some(block) = self.last_work_instruction_context.clone() {
+                self.loaded_work_instruction_fingerprints
+                    .insert(stable_text_fingerprint(&block));
+                slices.push(("runtime_note".to_string(), block));
+            }
             if let Some(note) = self.take_process_aggregate_scopes_if_needed() {
                 slices.push(("runtime_note".to_string(), note));
             }
@@ -4630,10 +4661,15 @@ impl AgentCore {
                 .running_jobs_reminder_line()
                 .map(|line| format!("\n{line}"))
                 .unwrap_or_default();
+            let work_file_line = self
+                .session_work_file
+                .as_ref()
+                .map(|path| format!("\nsession work file: {path}"))
+                .unwrap_or_default();
             slices.push((
                 "context_compressed".to_string(),
                 format!(
-                    "context compressed successfully.\nCWD: {}{memo_line}{timers_line}{mailbox_line}{jobs_line}",
+                    "context compressed successfully.\nCWD: {}{memo_line}{timers_line}{mailbox_line}{jobs_line}{work_file_line}",
                     self.current_prompt_cwd.display()
                 ),
             ));
