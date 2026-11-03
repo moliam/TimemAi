@@ -6753,6 +6753,67 @@ fn restart_leaves_memo_inactive_and_finish_unguarded() {
 }
 
 #[test]
+fn memo_finish_guard_keeps_the_task_finished_summary_visible() {
+    let dir = tmp_dir("memo_guard_summary_kept");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    let mut model = ReplayModel::new(vec![
+        Ok(llm(
+            r#"{"free_talk":"记下。","working_still_action":[{"memo":{"op":"create","text":"持续任务提醒"}}]}"#,
+            1_000,
+            false,
+        )),
+        Ok(llm(
+            r#"{"free_talk":"任务完成了。","working_still_action":[{"task_finished":{"summary":"被拦截也要可见的最终总结"}}]}"#,
+            1_100,
+            false,
+        )),
+        Ok(llm(
+            r#"{"working_still_action":[{"memo":{"op":"delete"}}]}"#,
+            1_200,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"被拦截也要可见的最终总结"}"#,
+            1_300,
+            false,
+        )),
+    ]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "长任务请求",
+            session: "memo_guard_summary_kept_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    // Interception blocks only the finish action: the model's summary
+    // expression stays visible in the follow-up prompt.
+    assert!(
+        model.prompts[2].contains("被拦截也要可见的最终总结"),
+        "the intercepted summary must stay visible in prompt[2]"
+    );
+    assert!(
+        model.prompts[2].contains("still memo active"),
+        "guard reminder missing in prompt[2]"
+    );
+    assert_eq!(outcome.text, "被拦截也要可见的最终总结");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn memo_finish_guard_recharges_after_working_round() {
     let dir = tmp_dir("memo_guard_recharge");
     let audit = dir.join("audit.json");

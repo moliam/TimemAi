@@ -4813,6 +4813,14 @@ impl AgentCore {
                                 &memo,
                             ),
                         ]);
+                        // The summary is the model's expression to the user:
+                        // interception blocks only the finish action, never
+                        // the summary itself.
+                        slices.extend(self.assistant_replay_slices(
+                            &raw_model_output,
+                            Some(&parsed),
+                            Some(&stop_summary),
+                        ));
                         slices.push((
                             "memo_finish_guard".to_string(),
                             memo_finish_guard_reminder(&memo),
