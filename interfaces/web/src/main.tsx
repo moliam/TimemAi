@@ -103,7 +103,7 @@ import {
   Wrench,
   X,
   AlarmClock,
-  Cog,
+  Info,
   Mail,
   Pause,
   Play,
@@ -5205,7 +5205,7 @@ function TimemApp() {
                   else setShowMailbox(true);
                 }}
               >
-                <Cog size={17} />
+                <Info size={17} />
                 {mailboxUnread > 0 && (
                   <span className="mailbox-header-count" aria-hidden="true">
                     {mailboxCountLabel}
@@ -7799,7 +7799,11 @@ function MailboxPanel({
   const sent = mailbox?.sent ?? [];
   const unreadMails = mails.filter((mail) => !mail.read);
   const archivedMails = [...mails.filter((mail) => mail.read)].reverse();
-  const mailboxName = mailbox?.mailbox_name ?? "";
+  const sessionIdLabel = sessionId
+    ? /^[a-z0-9]{6}$/.test(sessionId)
+      ? `id_${sessionId}`
+      : sessionId
+    : "";
   const renderMail = (mail: (typeof mails)[number]) => (
     <div
       key={mail.id}
@@ -7840,7 +7844,7 @@ function MailboxPanel({
       />
       <header className="side-panel-header">
         <div className="side-panel-title">
-          <Cog size={15} />
+          <Info size={15} />
           <strong>{t("mailbox.title")}</strong>
         </div>
         <button
@@ -7860,51 +7864,32 @@ function MailboxPanel({
               {t("mailbox.sessionIdLabel")}
             </div>
             <div className="mailbox-address">
-              <code>
-                {/^[a-z0-9]{6}$/.test(sessionId)
-                  ? `id_${sessionId}`
-                  : sessionId}
-              </code>
-            </div>
-          </div>
-        )}
-        {mailboxName ? (
-          <div
-            className="mailbox-address-block"
-            title={t("mailbox.addressHint")}
-          >
-            <div className="mailbox-address-label">{t("mailbox.addressLabel")}</div>
-            <div className="mailbox-address">
-              <code>{mailboxName}</code>
-            <button
-              type="button"
-              className="icon-button"
-              title={copied ? t("mailbox.copied") : t("mailbox.copyAddress")}
-              aria-label={copied ? t("mailbox.copied") : t("mailbox.copyAddress")}
-              onClick={() => {
-                const done = () => {
-                  setCopied(true);
-                  window.setTimeout(() => setCopied(false), 1500);
-                };
-                if (navigator.clipboard?.writeText) {
-                  navigator.clipboard
-                    .writeText(mailboxName)
-                    .then(done)
-                    .catch(() => fallbackCopyText(mailboxName, done));
-                } else {
-                  // Plain-http LAN contexts expose no navigator.clipboard;
-                  // the deprecated execCommand path is the only fallback.
-                  fallbackCopyText(mailboxName, done);
-                }
-              }}
-            >
+              <code>{sessionIdLabel}</code>
+              <button
+                type="button"
+                className="icon-button"
+                title={copied ? t("mailbox.copied") : t("mailbox.copyAddress")}
+                aria-label={copied ? t("mailbox.copied") : t("mailbox.copyAddress")}
+                onClick={() => {
+                  const done = () => {
+                    setCopied(true);
+                    window.setTimeout(() => setCopied(false), 1500);
+                  };
+                  if (navigator.clipboard?.writeText) {
+                    navigator.clipboard
+                      .writeText(sessionIdLabel)
+                      .then(done)
+                      .catch(() => fallbackCopyText(sessionIdLabel, done));
+                  } else {
+                    // Plain-http LAN contexts expose no navigator.clipboard;
+                    // the deprecated execCommand path is the only fallback.
+                    fallbackCopyText(sessionIdLabel, done);
+                  }
+                }}
+              >
                 {copied ? <Check size={14} /> : <Copy size={14} />}
               </button>
             </div>
-          </div>
-        ) : (
-          <div className="activity-empty">
-            <strong>{t("mailbox.empty")}</strong>
           </div>
         )}
         <div className="mailbox-section-title">{t("mailbox.inboxTitle")}</div>
