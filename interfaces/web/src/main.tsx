@@ -13854,15 +13854,8 @@ function ActivityView({ activity, enterPulse = false }: { activity: Activity; en
     return (
       <>
         {activity.finish_summary && (
-          <div className="turn-work-item thinking free-talk">
-            <span className="activity-mark">
-              <span className="activity-thinking-dot" aria-hidden="true" />
-            </span>
-            <div>
-              <div className="turn-work-detail">
-                <MarkdownContent text={activity.finish_summary} />
-              </div>
-            </div>
+          <div className="memo-finish-summary">
+            <MarkdownContent text={activity.finish_summary} />
           </div>
         )}
         <MemoNotice activity={activity} />

@@ -251,14 +251,22 @@ it("uses one typography contract for system-level notices", () => {
   expect(styles).not.toContain('.compact-notice .compact-notice-line');
 });
 
-it("renders a blocked task_finished summary as ordinary assistant thought before Continue memo", () => {
+it("renders a blocked task_finished summary with ordinary assistant body typography before Continue memo", () => {
   const activityView = source.slice(source.indexOf("function ActivityView("), source.indexOf("function ToolGenNotice("));
   expect(activityView).toContain('{activity.finish_summary && (');
-  expect(activityView).toContain('className="turn-work-item thinking free-talk"');
+  expect(activityView).toContain('className="memo-finish-summary"');
   expect(activityView).toContain('<MarkdownContent text={activity.finish_summary} />');
   expect(activityView.indexOf("activity.finish_summary")).toBeLessThan(activityView.indexOf("<MemoNotice activity={activity} />"));
-  expect(activityView).not.toContain("finish-summary-block");
-  expect(styles).not.toContain("finish-summary-block");
+  const memoSummaryBranch = activityView.slice(
+    activityView.indexOf("{activity.finish_summary && ("),
+    activityView.indexOf("<MemoNotice activity={activity} />"),
+  );
+  expect(memoSummaryBranch).not.toContain('className="turn-work-item thinking free-talk"');
+  expect(memoSummaryBranch).not.toContain("activity-thinking-dot");
+  expect(memoSummaryBranch).not.toContain("turn-work-detail");
+  expect(styles).toContain(".response-preview,\n.turn-interim-item,\n.memo-finish-summary {");
+  expect(styles).toContain(".turn-interim-item .message-content,\n.memo-finish-summary > .message-content {");
+  expect(styles).toContain(':root[data-theme="light"] .memo-finish-summary > .message-content { color: #24333a; }');
 });
 
 it("narrows tool rendering from the right edge while preserving mobile width", () => {
