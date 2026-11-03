@@ -11358,7 +11358,7 @@ fn dispatch_next_turn_intent_if_ready(state: &AppState, session_id: &str) {
             .find(|item| {
                 item.payload
                     .dispatch_deadline_ms
-                    .is_some_and(|deadline| u128::from(now_ms()) >= u128::from(deadline))
+                    .is_some_and(|deadline| now_ms() >= u128::from(deadline))
             })
             .map(|item| item.command_id.clone());
         let item = if let Some(command_id) = explicit_after_stop {
@@ -15801,16 +15801,41 @@ fn session_context(
     session_context_with_roles(state, session_id, attachments, &[])
 }
 
-/// One-line pointer to this session's persistent work file: durable,
-/// complex work assigned to this session records its guidance, plans, and
-/// progress there, so a compaction or a context clear can re-anchor the
-/// work from it.
+/// Pointer to this session's persistent work file plus its bounded current
+/// content: durable, complex work assigned to this session records its
+/// guidance, plans, and progress there, so a compaction or a context clear
+/// can re-anchor the work from it. The injected content is capped so a
+/// runaway work file cannot inflate every prompt.
 fn session_work_file_context(state: &AppState, session_id: &str) -> Result<Option<String>, String> {
+    const SESSION_WORK_FILE_CONTEXT_CONTENT_LIMIT: usize = 16 * 1024;
     let path = session_work_file_path(state, session_id)?;
-    Ok(Some(format!(
-        "Session work file: {} — record the guidance, plans, designs, and progress of durable, complex work assigned to this session in this file and keep it current; it re-anchors the work after a compaction or a context clear.",
+    let pointer = format!(
+        "Session work file: {}. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.",
         path.display()
-    )))
+    );
+    // Content injection is best-effort: a missing or unreadable work file
+    // still leaves the pointer line, and the block markers let Core dedupe
+    // repeats and re-inject the last accepted block after a compaction.
+    let body = match std::fs::read_to_string(&path) {
+        Ok(content) if !content.trim().is_empty() => {
+            let mut content = content.trim().to_string();
+            if content.len() > SESSION_WORK_FILE_CONTEXT_CONTENT_LIMIT {
+                let mut end = SESSION_WORK_FILE_CONTEXT_CONTENT_LIMIT;
+                while end > 0 && !content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                content.truncate(end);
+                content.push_str("\n... [truncated]");
+            }
+            format!(
+                "\n\n[BEGIN SESSION_WORK_FILE file=\"{}\"]\n{}\n[END SESSION_WORK_FILE]",
+                path.display(),
+                content
+            )
+        }
+        _ => String::new(),
+    };
+    Ok(Some(format!("{pointer}{body}")))
 }
 
 fn session_context_with_roles(
