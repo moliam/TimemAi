@@ -137,7 +137,7 @@ export const zh = {
     memoUpdated: "备忘已更新",
     memoDeleted: "备忘已删除",
     memoForceDeleted: "备忘已被运行时强制删除",
-    memoStopsFinish: "备忘仍在：已阻止结束回合",
+    memoStopsFinish: "继续：",
   },
   roles: {
     panel: "Role",

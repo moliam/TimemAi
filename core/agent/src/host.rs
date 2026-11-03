@@ -967,7 +967,14 @@ pub fn memo_topic_event_with_op(
 
 /// Emitted when the memo-finish-guard intercepts a finish attempt because a
 /// memo is still active. Purely informational: the memo state is unchanged.
-pub fn memo_stops_finish_topic_event(session_id: impl Into<String>, memo: &str) -> CoreTopicEvent {
+/// `blocked_summary` carries the intercepted task_finished summary verbatim:
+/// the finish action is blocked, but the model's user-facing expression must
+/// stay deliverable through every interface projection.
+pub fn memo_stops_finish_topic_event(
+    session_id: impl Into<String>,
+    memo: &str,
+    blocked_summary: &str,
+) -> CoreTopicEvent {
     CoreTopicEvent::new(
         session_id,
         CoreTopic::new(
@@ -981,6 +988,7 @@ pub fn memo_stops_finish_topic_event(session_id: impl Into<String>, memo: &str) 
             "active": true,
             "text": memo,
             "op": "stops_finish",
+            "summary": blocked_summary,
         }),
     )
 }

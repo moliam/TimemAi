@@ -2024,10 +2024,12 @@ pub struct AgentCore {
     current_action_user_question: String,
     last_notifications: Vec<CoreNotification>,
     loaded_work_instruction_fingerprints: HashSet<String>,
+    loaded_session_work_file_fingerprints: HashSet<String>,
     /// Last accepted work-instruction block: re-injected right after a
     /// compaction so the remainder of the turn keeps the project-level
     /// guidance before the next supporting context arrives.
     last_work_instruction_context: Option<String>,
+    last_session_work_file_context: Option<String>,
     /// Absolute path of this session's persistent work file (Timem.md in
     /// the session's mem storage), synced from the Host. Durable, complex
     /// work assigned to the session records its guidance, plans, and
@@ -2183,7 +2185,9 @@ impl AgentCore {
             current_action_user_question: String::new(),
             last_notifications: Vec::new(),
             loaded_work_instruction_fingerprints: HashSet::new(),
+            loaded_session_work_file_fingerprints: HashSet::new(),
             last_work_instruction_context: None,
+            last_session_work_file_context: None,
             session_work_file: None,
             pending_prompt_components: Vec::new(),
             pending_user_interruption_note: false,
@@ -3533,6 +3537,7 @@ impl AgentCore {
                 .unwrap_or(false);
         self.restart_notice_restate = None;
         self.last_work_instruction_context = None;
+        self.last_session_work_file_context = None;
         self.cwd_note_pending = true;
         self.deltas.clear();
         self.native_exchanges.clear();
@@ -3564,6 +3569,7 @@ impl AgentCore {
         self.current_action_user_question.clear();
         self.last_notifications.clear();
         self.turn_finished_summary = None;
+        self.loaded_session_work_file_fingerprints.clear();
         self.loaded_work_instruction_fingerprints.clear();
         // The memo intentionally survives a plain clear: it is the long-task
         // anchor, the Host projection keeps it active, and the one-shot
@@ -3681,6 +3687,7 @@ impl AgentCore {
 
     fn filter_supporting_context(&mut self, supporting_context: &str) -> String {
         let context = self.filter_repeated_work_instructions(supporting_context);
+        let context = self.filter_repeated_session_work_file(&context);
         self.filter_repeated_worker_roles(&context)
     }
 
@@ -3695,6 +3702,29 @@ impl AgentCore {
         {
             self.last_work_instruction_context = Some(block.to_string());
             return supporting_context.trim().to_string();
+        }
+
+        let mut filtered = String::new();
+        filtered.push_str(supporting_context[..start].trim_end());
+        let tail = supporting_context[end..].trim_start();
+        if !filtered.trim().is_empty() && !tail.is_empty() {
+            filtered.push_str("\n\n");
+        }
+        filtered.push_str(tail);
+        filtered.trim().to_string()
+    }
+
+    fn filter_repeated_session_work_file(&mut self, supporting_context: &str) -> String {
+        let Some((start, end, block)) = session_work_file_context_block(supporting_context) else {
+            return supporting_context.to_string();
+        };
+        let fingerprint = stable_text_fingerprint(block);
+        if self
+            .loaded_session_work_file_fingerprints
+            .insert(fingerprint)
+        {
+            self.last_session_work_file_context = Some(block.to_string());
+            return supporting_context.to_string();
         }
 
         let mut filtered = String::new();
@@ -3905,7 +3935,15 @@ impl AgentCore {
             lines.push(line);
         }
         if let Some(path) = self.session_work_file.as_ref() {
-            lines.push(format!("session work file: {path}"));
+            // The Host session context restates a one-line work-file pointer
+            // every turn, and the compaction confirmation carries the raw
+            // path too; only restate it here when the visible context does
+            // not already carry it (mirrors the mailbox restatement rule).
+            let carried = self.visible_context_contains_line(&format!("Session work file: {path}"))
+                || self.visible_context_contains_line(&format!("session work file: {path}"));
+            if !carried {
+                lines.push(format!("session work file: {path}"));
+            }
         }
         lines
     }
@@ -4583,6 +4621,16 @@ impl AgentCore {
                     .insert(stable_text_fingerprint(&block));
                 slices.push(("runtime_note".to_string(), block));
             }
+            // The session work file follows the same survival rule: the
+            // compacted context may have dropped its content block, so
+            // re-inject the last accepted block right away and re-register
+            // its fingerprint so the next supporting context stays filtered.
+            self.loaded_session_work_file_fingerprints.clear();
+            if let Some(block) = self.last_session_work_file_context.clone() {
+                self.loaded_session_work_file_fingerprints
+                    .insert(stable_text_fingerprint(&block));
+                slices.push(("runtime_note".to_string(), block));
+            }
             if let Some(note) = self.take_process_aggregate_scopes_if_needed() {
                 slices.push(("runtime_note".to_string(), note));
             }
@@ -4713,6 +4761,7 @@ impl AgentCore {
                     runtime.on_core_topic_events(&[crate::host::memo_stops_finish_topic_event(
                         self.current_session_id().to_string(),
                         &memo,
+                        &final_text,
                     )]);
                     slices.extend(self.assistant_replay_slices(
                         &raw_model_output,
@@ -4811,16 +4860,23 @@ impl AgentCore {
                             crate::host::memo_stops_finish_topic_event(
                                 self.current_session_id().to_string(),
                                 &memo,
+                                &stop_summary,
                             ),
                         ]);
                         // The summary is the model's expression to the user:
                         // interception blocks only the finish action, never
-                        // the summary itself.
-                        slices.extend(self.assistant_replay_slices(
-                            &raw_model_output,
-                            Some(&parsed),
-                            Some(&stop_summary),
-                        ));
+                        // the summary itself. Inline protocol replays the
+                        // narrative as delta text; in native mode the
+                        // structured assistant message of the exchange below
+                        // already carries it verbatim, so the delta text must
+                        // not duplicate the model's own words.
+                        if native_calls.is_empty() {
+                            slices.extend(self.assistant_replay_slices(
+                                &raw_model_output,
+                                Some(&parsed),
+                                Some(&stop_summary),
+                            ));
+                        }
                         // The canned success line would contradict the block:
                         // rewrite the task_finished result so both the model
                         // and the UI read the interception as such.
@@ -4874,12 +4930,16 @@ impl AgentCore {
                 }
                 // task_finished was executed among the actions above. Its native
                 // tool exchange is still recorded below so the provider message
-                // sequence stays valid; the turn ends here regardless.
-                slices.extend(self.assistant_replay_slices(
-                    &raw_model_output,
-                    Some(&parsed),
-                    Some(&stop_summary),
-                ));
+                // sequence stays valid; the turn ends here regardless. Inline
+                // protocol replays the narrative as delta text; native mode
+                // carries it verbatim inside the structured exchange only.
+                if native_calls.is_empty() {
+                    slices.extend(self.assistant_replay_slices(
+                        &raw_model_output,
+                        Some(&parsed),
+                        Some(&stop_summary),
+                    ));
+                }
                 if !native_calls.is_empty() {
                     let exchange_results = native_calls
                         .iter()
@@ -9224,6 +9284,25 @@ fn work_instruction_context_block(supporting_context: &str) -> Option<(usize, us
         .unwrap_or(supporting_context.len());
     let block = supporting_context[start..end].trim();
     if block.contains("[BEGIN WORK_DIRECTORY_INSTRUCTION") {
+        Some((start, end, block))
+    } else {
+        None
+    }
+}
+
+fn session_work_file_context_block(supporting_context: &str) -> Option<(usize, usize, &str)> {
+    let start = supporting_context.find("[BEGIN SESSION_WORK_FILE ")?;
+    let relative_end_marker = supporting_context[start..].find("[END SESSION_WORK_FILE")?;
+    let marker_start = start + relative_end_marker;
+    let after_marker = supporting_context[marker_start..]
+        .find(']')
+        .map(|idx| marker_start + idx + 1)?;
+    let end = supporting_context[after_marker..]
+        .find('\n')
+        .map(|idx| after_marker + idx + 1)
+        .unwrap_or(supporting_context.len());
+    let block = supporting_context[start..end].trim();
+    if block.contains("[BEGIN SESSION_WORK_FILE") {
         Some((start, end, block))
     } else {
         None

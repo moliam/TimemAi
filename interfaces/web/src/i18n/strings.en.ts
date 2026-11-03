@@ -140,7 +140,7 @@ export const en: Strings = {
     memoUpdated: "Memo updated",
     memoDeleted: "Memo deleted",
     memoForceDeleted: "Memo forcibly deleted by runtime",
-    memoStopsFinish: "Memo still active: finish stopped",
+    memoStopsFinish: "Continue:",
   },
   roles: {
     panel: "Role",

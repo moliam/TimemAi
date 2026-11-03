@@ -50,6 +50,8 @@ impl PromptComponentRole {
                 | "user_supplement_action_dispatch_timeout"
                 | "memo_interrupted_deleted"
                 | "memo_forcibly_deleted"
+                | "memo_finish_guard"
+                | "forced_compaction_abandoned"
                 | "runtime_input" => "runtime_note".to_string(),
                 "mcp_capability_catalog" => "mcp_capability_catalog".to_string(),
                 "mcp_capability_update" => "mcp_capability_update".to_string(),
@@ -64,7 +66,7 @@ impl PromptComponentRole {
 /// context, memo deletions), not results of model actions. They render as
 /// `runtime_note` so the action-result heading stays reserved for real
 /// model action results.
-pub(crate) const RUNTIME_SIDEBAND_KINDS: [&str; 9] = [
+pub(crate) const RUNTIME_SIDEBAND_KINDS: [&str; 11] = [
     "running_job_update",
     "job_killed",
     "disk_pressure",
@@ -73,6 +75,8 @@ pub(crate) const RUNTIME_SIDEBAND_KINDS: [&str; 9] = [
     "user_supplement_action_dispatch_timeout",
     "memo_interrupted_deleted",
     "memo_forcibly_deleted",
+    "memo_finish_guard",
+    "forced_compaction_abandoned",
     "runtime_input",
 ];
 

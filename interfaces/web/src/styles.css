@@ -5927,6 +5927,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .system-notice .system-notice-detail { color: var(--system-notice-text); font: inherit; font-weight: 500; font-variant-numeric: tabular-nums; }
 .system-notice .system-notice-metric { color: var(--system-notice-accent); font: inherit; font-weight: 650; font-variant-numeric: tabular-nums; }
 .system-notice .system-notice-long-detail { max-width: 60%; overflow: hidden; color: var(--system-notice-muted); text-overflow: ellipsis; white-space: nowrap; }
+.turn-work-item.finish-summary-block { display: block; margin: 2px 0 0; padding: 2px 8px; color: inherit; font-size: var(--content-size); line-height: 1.62; font-family: var(--agent-other-font), var(--agent-chinese-font), sans-serif; font-weight: var(--agent-font-weight); }
 .turn-work-item.system-notice .activity-mark,
 .system-notice .system-notice-icon { width: 16px; height: 20px; align-self: center; display: inline-flex; align-items: center; justify-content: center; padding: 0; background: transparent; color: var(--system-notice-accent); font-size: 13px; line-height: 1; }
 .turn-work-item.system-notice .activity-mark svg,

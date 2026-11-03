@@ -519,6 +519,22 @@ describe("web topic view model", () => {
       title: "memo stops finish",
       detail: "目标 B",
     });
+    expect(stopsFinish?.finish_summary).toBeUndefined();
+    const stopsFinishWithSummary = activityFromTopic(
+      topic("core.memo", {
+        op: "stops_finish",
+        active: true,
+        text: "目标 B",
+        summary: "被拦截也要可见的最终总结",
+      }),
+    );
+    expect(stopsFinishWithSummary).toMatchObject({
+      tone: "notice",
+      kind: "memo_notice",
+      title: "memo stops finish",
+      detail: "目标 B",
+      finish_summary: "被拦截也要可见的最终总结",
+    });
     const forceDeleted = activityFromTopic(
       topic("core.memo", { op: "force_deleted", active: false, text: null }),
     );

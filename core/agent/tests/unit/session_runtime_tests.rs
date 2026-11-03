@@ -6891,6 +6891,421 @@ fn memo_finish_guard_recharges_after_working_round() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
+struct MemoGuardNativeInterceptModel {
+    business_calls: usize,
+    intercepted_prompt_has_no_narrative: bool,
+    intercepted_prompt_has_no_result_heading: bool,
+    intercepted_prompt_keeps_guard_note: bool,
+    intercepted_exchange_carries_narrative: bool,
+    intercepted_exchange_rewrites_result: bool,
+}
+
+#[cfg(unix)]
+impl ModelClient for MemoGuardNativeInterceptModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        Err("unexpected_inline_model_call".to_string())
+    }
+
+    fn call_model_interaction(
+        &mut self,
+        config: &ModelServiceConfig,
+        request: &ModelInteractionRequest,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        if request
+            .tools
+            .iter()
+            .any(|tool| tool.name == "timem_capability_probe")
+        {
+            let count = usize::from(request.parallel_tool_calls) + 1;
+            return Ok(LlmResponse {
+                tool_calls: (0..count)
+                    .map(|index| crate::NativeToolCall {
+                        assistant_continuation: None,
+                        id: format!("probe_{index}"),
+                        name: "timem_capability_probe".to_string(),
+                        arguments: serde_json::json!({"slot": index + 1}),
+                        raw_arguments: format!("{{\"slot\":{}}}", index + 1),
+                    })
+                    .collect(),
+                content: String::new(),
+                model_name: config.model.clone(),
+                usage: usage(10, 2),
+                truncated: false,
+            });
+        }
+        self.business_calls += 1;
+        const NARRATIVE: &str = "\u{6b63}\u{5728}\u{6536}\u{5c3e}\u{ff1a}\u{6240}\u{6709}\u{5de5}\u{4f5c}\u{5df2}\u{5b8c}\u{6210}\u{ff0c}\u{76f4}\u{63a5}\u{7ed3}\u{675f}\u{4efb}\u{52a1}\u{3002}";
+        if self.business_calls == 3 {
+            // The intercepted finish round. The narrative must ride the
+            // structured assistant message only; the delta text keeps just
+            // the guard note as a runtime note without the action-result
+            // heading.
+            self.intercepted_prompt_has_no_narrative = !request.rendered_prompt.contains(NARRATIVE);
+            self.intercepted_prompt_has_no_result_heading = !request
+                .rendered_prompt
+                .contains("The following are results of the actions generated in response:");
+            self.intercepted_prompt_keeps_guard_note =
+                request.rendered_prompt.contains("still memo active")
+                    && request
+                        .rendered_prompt
+                        .contains("\u{6301}\u{7eed}\u{4efb}\u{52a1}\u{63d0}\u{9192}");
+            self.intercepted_exchange_carries_narrative = request.native_exchanges.len() == 2
+                && request.native_exchanges[1].delta_id == "pd_3"
+                && request.native_exchanges[1]
+                    .assistant_text
+                    .contains(NARRATIVE)
+                && request.native_exchanges[1].calls[0].name == "task_finished";
+            self.intercepted_exchange_rewrites_result = request.native_exchanges.len() == 2
+                && request.native_exchanges[1]
+                    .results
+                    .iter()
+                    .any(|result| result.content.contains("this finish did not take effect"));
+        }
+        let (content, calls): (String, Vec<crate::NativeToolCall>) = match self.business_calls {
+            1 => (
+                "\u{597d}\u{7684}\u{ff0c}\u{5148}\u{521b}\u{5efa}\u{6f14}\u{793a} memo\u{3002}".to_string(),
+                vec![crate::NativeToolCall {
+                    assistant_continuation: None,
+                    id: "call_memo_create".to_string(),
+                    name: "memo".to_string(),
+                    arguments: serde_json::json!({"op": "create", "text": "\u{6301}\u{7eed}\u{4efb}\u{52a1}\u{63d0}\u{9192}"}),
+                    raw_arguments: "{\"op\":\"create\",\"text\":\"\u{6301}\u{7eed}\u{4efb}\u{52a1}\u{63d0}\u{9192}\"}".to_string(),
+                }],
+            ),
+            2 => (
+                NARRATIVE.to_string(),
+                vec![crate::NativeToolCall {
+                    assistant_continuation: None,
+                    id: "call_finish_intercepted".to_string(),
+                    name: "task_finished".to_string(),
+                    arguments: serde_json::json!({"summary": "\u{88ab}\u{62e6}\u{622a}\u{4e5f}\u{8981}\u{53ef}\u{89c1}\u{7684}\u{6f14}\u{793a}\u{603b}\u{7ed3}"}),
+                    raw_arguments: "{\"summary\":\"\u{88ab}\u{62e6}\u{622a}\u{4e5f}\u{8981}\u{53ef}\u{89c1}\u{7684}\u{6f14}\u{793a}\u{603b}\u{7ed3}\"}".to_string(),
+                }],
+            ),
+            3 => (
+                "\u{6f14}\u{793a}\u{786e}\u{8ba4}\u{ff0c}\u{5220}\u{9664} memo\u{3002}".to_string(),
+                vec![crate::NativeToolCall {
+                    assistant_continuation: None,
+                    id: "call_memo_delete".to_string(),
+                    name: "memo".to_string(),
+                    arguments: serde_json::json!({"op": "delete"}),
+                    raw_arguments: "{\"op\":\"delete\"}".to_string(),
+                }],
+            ),
+            _ => (
+                String::new(),
+                vec![crate::NativeToolCall {
+                    assistant_continuation: None,
+                    id: "call_finish_final".to_string(),
+                    name: "task_finished".to_string(),
+                    arguments: serde_json::json!({"summary": "\u{6700}\u{7ec8}\u{603b}\u{7ed3}\u{ff1a}\u{5168}\u{90e8}\u{5b8c}\u{6210}\u{3002}"}),
+                    raw_arguments: "{\"summary\":\"\u{6700}\u{7ec8}\u{603b}\u{7ed3}\u{ff1a}\u{5168}\u{90e8}\u{5b8c}\u{6210}\u{3002}\"}".to_string(),
+                }],
+            ),
+        };
+        Ok(LlmResponse {
+            tool_calls: calls,
+            content,
+            model_name: config.model.clone(),
+            usage: usage(120, 10),
+            truncated: false,
+        })
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn memo_finish_guard_native_keeps_narrative_in_exchange_only() {
+    let dir = tmp_dir("memo_guard_native_exchange_only");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(
+        include_str!("../../../../resources/system_prompt/system_prompt.md"),
+        test_profile(),
+        &dir,
+    );
+    let mut config = test_config();
+    config.model = "native-memo-guard-exchange-only".to_string();
+    config.interaction.tool_call_mode = crate::ToolCallMode::Auto;
+    config.interaction.parallel_tool_calls = crate::ParallelToolCalls::Auto;
+    let mut model = MemoGuardNativeInterceptModel {
+        business_calls: 0,
+        intercepted_prompt_has_no_narrative: false,
+        intercepted_prompt_has_no_result_heading: false,
+        intercepted_prompt_keeps_guard_note: false,
+        intercepted_exchange_carries_narrative: false,
+        intercepted_exchange_rewrites_result: false,
+    };
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "\u{957f}\u{4efb}\u{52a1}\u{8bf7}\u{6c42}",
+            session: "memo_guard_native_session",
+            audit_file: &audit,
+            runtime: "test",
+            run_bash_target: "test_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    assert!(
+        model.intercepted_prompt_has_no_narrative,
+        "the intercepted narrative must not be replayed into delta text in native mode"
+    );
+    assert!(
+        model.intercepted_prompt_has_no_result_heading,
+        "the guard note is runtime narration and must not carry the action-result heading"
+    );
+    assert!(
+        model.intercepted_prompt_keeps_guard_note,
+        "the guard note itself must stay visible in the follow-up prompt"
+    );
+    assert!(
+        model.intercepted_exchange_carries_narrative,
+        "the structured exchange must carry the narrative verbatim"
+    );
+    assert!(
+        model.intercepted_exchange_rewrites_result,
+        "the intercepted task_finished result must be rewritten to the block wording"
+    );
+    assert_eq!(
+        outcome.text,
+        "\u{6700}\u{7ec8}\u{603b}\u{7ed3}\u{ff1a}\u{5168}\u{90e8}\u{5b8c}\u{6210}\u{3002}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn memo_finish_guard_stops_finish_event_carries_blocked_summary_native() {
+    let dir = tmp_dir("memo_guard_stops_finish_event_native");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(
+        include_str!("../../../../resources/system_prompt/system_prompt.md"),
+        test_profile(),
+        &dir,
+    );
+    let mut config = test_config();
+    config.model = "native-memo-guard-stops-finish-event".to_string();
+    config.interaction.tool_call_mode = crate::ToolCallMode::Auto;
+    config.interaction.parallel_tool_calls = crate::ParallelToolCalls::Auto;
+    let mut model = MemoGuardNativeInterceptModel {
+        business_calls: 0,
+        intercepted_prompt_has_no_narrative: false,
+        intercepted_prompt_has_no_result_heading: false,
+        intercepted_prompt_keeps_guard_note: false,
+        intercepted_exchange_carries_narrative: false,
+        intercepted_exchange_rewrites_result: false,
+    };
+    let mut ui = RetryRecordingUi::default();
+
+    let _outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "\u{957f}\u{4efb}\u{52a1}\u{8bf7}\u{6c42}",
+            session: "memo_guard_stops_finish_event_native_session",
+            audit_file: &audit,
+            runtime: "test",
+            run_bash_target: "test_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    // The interception blocks only the finish action; the blocked summary
+    // must ride the stops_finish projection so interfaces can surface it.
+    let stops_finish = ui
+        .events
+        .iter()
+        .find(|event| {
+            event.topic.name == crate::host::CORE_TOPIC_MEMO
+                && event.payload["op"] == "stops_finish"
+        })
+        .expect("the native finish interception must emit a core.memo stops_finish event");
+    assert_eq!(
+        stops_finish.payload["summary"],
+        "\u{88ab}\u{62e6}\u{622a}\u{4e5f}\u{8981}\u{53ef}\u{89c1}\u{7684}\u{6f14}\u{793a}\u{603b}\u{7ed3}",
+        "the blocked summary must ride the stops_finish projection"
+    );
+    assert_eq!(
+        stops_finish.payload["text"],
+        "\u{6301}\u{7eed}\u{4efb}\u{52a1}\u{63d0}\u{9192}"
+    );
+    assert_eq!(stops_finish.payload["active"], true);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn memo_finish_guard_stops_finish_event_carries_blocked_summary_inline() {
+    let dir = tmp_dir("memo_guard_stops_finish_event_inline");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    let mut model = ReplayModel::new(vec![
+        Ok(llm(
+            r#"{"free_talk":"记下。","working_still_action":[{"memo":{"op":"create","text":"持续任务提醒"}}]}"#,
+            1_000,
+            false,
+        )),
+        // The inline-protocol final answer without an explicit task_finished
+        // tool must pass the same guard and carry its final answer as the
+        // blocked summary in the stops_finish projection.
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"被拦截也要可见的最终总结"}"#,
+            1_100,
+            false,
+        )),
+        Ok(llm(
+            r#"{"working_still_action":[{"memo":{"op":"delete"}}]}"#,
+            1_200,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"被拦截也要可见的最终总结"}"#,
+            1_300,
+            false,
+        )),
+    ]);
+    let mut ui = RetryRecordingUi::default();
+
+    let _outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "长任务请求",
+            session: "memo_guard_stops_finish_event_inline_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    let stops_finish = ui
+        .events
+        .iter()
+        .find(|event| {
+            event.topic.name == crate::host::CORE_TOPIC_MEMO
+                && event.payload["op"] == "stops_finish"
+        })
+        .expect("the inline finish interception must emit a core.memo stops_finish event");
+    assert_eq!(
+        stops_finish.payload["summary"], "被拦截也要可见的最终总结",
+        "the blocked final answer must ride the stops_finish projection"
+    );
+    assert_eq!(stops_finish.payload["text"], "持续任务提醒");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn runtime_state_reminder_skips_work_file_already_visible() {
+    let dir = tmp_dir("runtime_state_reminder_work_file");
+    let mut core = test_core(r#"{\"role\":\"test static prompt\"}"#, test_profile(), &dir);
+    core.update_session_work_file(Some("/mem/sessions/6lal8v/Timem.md".to_string()));
+    core.update_session_mailbox_name(Some("id_testbox".to_string()));
+
+    // Cleared context: nothing visible yet, so the restatement carries the
+    // raw work-file line.
+    let lines = core.runtime_state_reminder_lines();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("session work file: /mem/sessions/6lal8v/Timem.md")),
+        "cleared context must restate the work file: {lines:?}"
+    );
+
+    // Visible context already carries the Host one-line pointer: the
+    // restatement must not duplicate it (mirrors the mailbox rule).
+    core.submit_prompt_component(
+        crate::prompt_components::PromptComponentRole::system(),
+        "runtime_note",
+        "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.",
+        "test_host_context",
+    );
+    let lines = core.runtime_state_reminder_lines();
+    assert!(
+        !lines.iter().any(|line| line.contains("session work file:")),
+        "visible work-file pointer must suppress the duplicate restatement: {lines:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn system_runtime_narration_kinds_render_as_runtime_notes_not_action_results() {
+    // Identity registry audit: every system narration kind must map to
+    // `runtime_note` so it renders under the RUNTIME heading without the
+    // action-result heading, and must keep the sideband byte gate. A kind
+    // falling through the `result_of_llm_action` fallback would impersonate
+    // a tool result in the prompt identity system.
+    let narration_kinds = [
+        "memo_finish_guard",
+        "forced_compaction_abandoned",
+        "user_interrupted_work",
+        "memo_interrupted_deleted",
+        "memo_forcibly_deleted",
+        "turn_progress_reminder",
+        "turn_time_reminder",
+        "turn_round_reminder",
+        "running_job_update",
+        "job_killed",
+        "disk_pressure",
+        "runtime_config_changed",
+        "user_supplement_context",
+        "user_supplement_action_dispatch_timeout",
+        "runtime_input",
+    ];
+    for kind in narration_kinds {
+        let hint = crate::prompt_components::PromptComponentRole::system().prompt_type_hint(kind);
+        assert_eq!(
+            hint, "runtime_note",
+            "kind {kind} must render as a runtime note, not an action result"
+        );
+    }
+    // Sideband members keep the bounded-ingress byte gate, and every
+    // sideband kind must itself map to the runtime-note identity so the
+    // registry stays consistent.
+    for kind in crate::prompt_components::RUNTIME_SIDEBAND_KINDS {
+        assert!(
+            crate::prompt_components::is_runtime_sideband_kind(kind),
+            "sideband kind {kind} must keep the byte gate"
+        );
+        let hint = crate::prompt_components::PromptComponentRole::system().prompt_type_hint(kind);
+        assert_eq!(
+            hint, "runtime_note",
+            "sideband kind {kind} must render as a runtime note, not an action result"
+        );
+    }
+    // Real action results keep their identity.
+    assert_eq!(
+        crate::prompt_components::PromptComponentRole::system()
+            .prompt_type_hint("result_of_llm_action"),
+        "result_of_llm_action"
+    );
+}
+
 #[test]
 fn memo_survives_context_compression_and_rides_next_prompt() {
     let dir = tmp_dir("memo_compact");
@@ -6973,6 +7388,208 @@ fn memo_survives_context_compression_and_rides_next_prompt() {
         "memo must ride the post-compaction prompt"
     );
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn session_work_file_content_block_is_injected_once_then_filtered() {
+    let dir = tmp_dir("work_file_block_filter");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    let pointer = "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.";
+    let block = format!(
+        "{pointer}\n\n[BEGIN SESSION_WORK_FILE file=\"/mem/sessions/6lal8v/Timem.md\"]\n## Active work\n- keep the goal anchored\n[END SESSION_WORK_FILE]"
+    );
+    struct TwoTurnModel {
+        prompts: Vec<String>,
+        calls: usize,
+    }
+    impl ModelClient for TwoTurnModel {
+        fn call_model(
+            &mut self,
+            _config: &ModelServiceConfig,
+            prompt: &str,
+            _audit_file: &Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.prompts.push(prompt.to_string());
+            self.calls += 1;
+            match self.calls {
+                1 => Ok(llm(
+                    r#"{"status":"ALL_FINISHED","final_answer":"first"}"#,
+                    1_000,
+                    false,
+                )),
+                2 => Ok(llm(
+                    r#"{"status":"ALL_FINISHED","final_answer":"second"}"#,
+                    1_100,
+                    false,
+                )),
+                _ => Err("unexpected_extra_model_call".to_string()),
+            }
+        }
+    }
+    let mut model = TwoTurnModel {
+        prompts: Vec::new(),
+        calls: 0,
+    };
+
+    let first = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "turn one",
+            session: "work_file_filter_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(block.as_str()),
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+    assert_eq!(first.text, "first");
+    assert!(
+        model.prompts[0].contains("[BEGIN SESSION_WORK_FILE"),
+        "the first turn must carry the work file content block: {}",
+        model.prompts[0]
+    );
+
+    let second = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "turn two",
+            session: "work_file_filter_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(block.as_str()),
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+    assert_eq!(second.text, "second");
+    let second_prompt = &model.prompts[1];
+    assert!(
+        second_prompt.contains("Session work file: /mem/sessions/6lal8v/Timem.md"),
+        "the pointer line must still ride the supporting context: {second_prompt}"
+    );
+    assert_eq!(
+        second_prompt.matches("[BEGIN SESSION_WORK_FILE").count(),
+        1,
+        "an identical repeat must stay filtered; only the turn-one historical copy may remain: {second_prompt}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn session_work_file_content_block_survives_compaction() {
+    let dir = tmp_dir("work_file_compact");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    let pointer = "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.";
+    let block = format!(
+        "{pointer}\n\n[BEGIN SESSION_WORK_FILE file=\"/mem/sessions/6lal8v/Timem.md\"]\n## Active work\n- keep the goal anchored\n[END SESSION_WORK_FILE]"
+    );
+    struct CompactModel {
+        prompts: Vec<String>,
+        calls: usize,
+    }
+    impl ModelClient for CompactModel {
+        fn call_model(
+            &mut self,
+            _config: &ModelServiceConfig,
+            prompt: &str,
+            _audit_file: &Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.prompts.push(prompt.to_string());
+            self.calls += 1;
+            match self.calls {
+                1 => Ok(llm(
+                    r#"{"status":"ALL_FINISHED","final_answer":"setup"}"#,
+                    1_000,
+                    false,
+                )),
+                2 => Ok(llm(
+                    r#"{"free_talk":"整理上下文。","context_compress":{"summary":"保留工作文件要点。","keywords":"checkpoint keywords"}}"#,
+                    3_000,
+                    false,
+                )),
+                3 => Ok(llm(
+                    r#"{"status":"ALL_FINISHED","final_answer":"compacted"}"#,
+                    1_300,
+                    false,
+                )),
+                _ => Err("unexpected_extra_model_call".to_string()),
+            }
+        }
+    }
+    let mut model = CompactModel {
+        prompts: Vec::new(),
+        calls: 0,
+    };
+
+    let setup = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "setup turn",
+            session: "work_file_compact_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(block.as_str()),
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+    assert_eq!(setup.text, "setup");
+    assert!(
+        model.prompts[0].contains("[BEGIN SESSION_WORK_FILE"),
+        "the first turn must register the content block: {}",
+        model.prompts[0]
+    );
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "compact turn",
+            session: "work_file_compact_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(block.as_str()),
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+    assert_eq!(outcome.text, "compacted");
+    assert_eq!(
+        model.prompts[1].matches("[BEGIN SESSION_WORK_FILE").count(),
+        1,
+        "only the turn-one historical copy may remain before compaction: {}",
+        model.prompts[1]
+    );
+    assert!(
+        model.prompts[2].contains("[BEGIN SESSION_WORK_FILE"),
+        "the work file content must ride the post-compaction prompt: {}",
+        model.prompts[2]
+    );
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]

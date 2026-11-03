@@ -251,6 +251,19 @@ it("uses one typography contract for system-level notices", () => {
   expect(styles).not.toContain('.compact-notice .compact-notice-line');
 });
 
+it("renders the memo finish guard's blocked summary as normal answer text before the notice", () => {
+  const activityView = source.slice(source.indexOf("function ActivityView("), source.indexOf("function ToolGenNotice("));
+  const memo = source.slice(source.indexOf("function MemoNotice("), source.indexOf("function toolInvocationPreview("));
+  // Summary first, in plain answer typography (no special label block); then the notice.
+  expect(activityView).toContain('className="turn-work-item finish-summary-block"');
+  expect(activityView).toContain('<MarkdownContent text={activity.finish_summary} />');
+  expect(activityView.indexOf("finish-summary-block")).toBeLessThan(activityView.indexOf("<MemoNotice activity={activity} />"));
+  expect(memo).not.toContain("finish_summary");
+  expect(styles).toContain(".turn-work-item.finish-summary-block");
+  expect(styles).not.toContain("memo-notice-summary");
+  expect(styles).not.toContain("memoStopsFinishSummary");
+});
+
 it("narrows tool rendering from the right edge while preserving mobile width", () => {
   expect(styles).toContain("width: 90%;\n  max-width: 90%;\n  margin-right: auto;");
   expect(styles).toMatch(/@media \(max-width: 720px\) \{[\s\S]*\.stream-tool-run,[\s\S]*width: 100%; max-width: 100%;/);

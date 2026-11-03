@@ -2682,6 +2682,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
           kind: "memo_notice",
           title: "memo stops finish",
           detail: label(payload.text),
+          finish_summary: label(payload.summary).trim() || undefined,
           createdAt: Date.now(),
         };
       }
