@@ -83,3 +83,41 @@ export function reconcileRuntimeDrafts(
   }
   return changed ? next : drafts;
 }
+
+export const RESOURCE_CAP_PERCENT_MIN = 1;
+export const RESOURCE_CAP_PERCENT_MAX = 100;
+
+export function parseResourceCapPercent(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^\d{1,3}(\.\d{1,2})?$/.test(trimmed)) return null;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed)) return null;
+  if (parsed < RESOURCE_CAP_PERCENT_MIN || parsed > RESOURCE_CAP_PERCENT_MAX) {
+    return null;
+  }
+  return parsed;
+}
+
+export const RESOURCE_CAP_PERCENT_OPTIONS = [10, 25, 50, 70, 85, 100] as const;
+
+export type ResourceCapability =
+  | "manageable"
+  | "needs-permission"
+  | "unsupported";
+
+/// Classifies one resource-cap dimension for the settings UI:
+/// - "unsupported": the host reports no usable management facility, so the
+///   switch must stay off/greyed and no operation may be offered.
+/// - "needs-permission": the facility exists but root is required, so the
+///   switch stays interactive and a toggle prompts for a one-shot password.
+/// - "manageable": the kernel facility is present and usable now.
+export function resourceCapability(
+  dimension: { kernel: string; escalation_required: boolean } | undefined,
+): ResourceCapability {
+  if (!dimension) return "manageable";
+  if (dimension.kernel === "unsupported") return "unsupported";
+  if (dimension.kernel === "unavailable") {
+    return dimension.escalation_required ? "needs-permission" : "unsupported";
+  }
+  return "manageable";
+}

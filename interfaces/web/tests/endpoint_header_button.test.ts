@@ -4,6 +4,10 @@ import { zh as zhCatalog } from "../src/i18n/strings.zh";
 import { en as enCatalog } from "../src/i18n/strings.en";
 
 const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
+const insightsSource = readFileSync(
+  new URL("../src/session_insights.tsx", import.meta.url),
+  "utf8",
+);
 const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 
 describe("header endpoint selector", () => {
@@ -12,11 +16,13 @@ describe("header endpoint selector", () => {
     expect(source).not.toMatch(/activeSession\?\.state === "working"\s+\? activeSession\.runtime_profile\?\.active_model_endpoint_id/);
   });
 
-  it("replaces the context meter with model-only telemetry and puts MCP beside Timer", () => {
+  it("replaces the context meter with Session Insights and puts MCP beside Timer", () => {
     expect(source).not.toContain('className="header-context-meter"');
-    expect(source).toContain('className="header-model-speed"');
-    expect(source).toContain('className="header-ttft"');
-    expect(source).toContain('<Gauge size={12} strokeWidth={1.8}');
+    expect(source).toContain("<SessionInsights");
+    expect(source).toContain("session_resource_usage_query");
+    expect(insightsSource).toContain('className={`session-insights-chip${open ? " open" : ""}`}');
+    expect(insightsSource).toContain('className="session-insights-panel"');
+    expect(insightsSource).toContain('className="session-insights-head"');
     const actions = source.slice(source.indexOf('<div className="header-actions">'), source.indexOf('</header>'));
     expect(actions.indexOf('ref={mcpButtonRef}')).toBeGreaterThan(0);
     expect(actions.indexOf('ref={mcpButtonRef}')).toBeLessThan(actions.indexOf('ref={timersButtonRef}'));
@@ -34,12 +40,11 @@ describe("header endpoint selector", () => {
     expect(source).toContain("aria-expanded={showRuntime}");
   });
 
-  it("uses Lucide direction icons instead of in/out text in the cache readout", () => {
-    expect(source).toContain('<ArrowBigUp size={12} strokeWidth={1.8} />');
-    expect(source).toContain('<ArrowBigDown size={12} strokeWidth={1.8} />');
-    expect(source).toContain('className="header-cache-token header-cache-input"');
-    expect(source).toContain('className="header-cache-token header-cache-output"');
-    expect(source).not.toContain('`cache: ${cacheHitPercent.toFixed(1)}%, in:');
+  it("shows numbers beside every token-flow bar in Session Insights", () => {
+    expect(insightsSource).toContain('className="session-insight-flow-number"');
+    expect(insightsSource).toContain("formatTokensCoarse(value)");
+    expect(insightsSource).toContain("session-insight-flow-bar ${tone}");
+    expect(insightsSource).not.toContain('`cache: ${cacheHitPercent.toFixed(1)}%, in:');
     expect(source).toContain('`${cachePercentLabel}, input: ${cacheInputLabel}, output: ${cacheOutputLabel}`');
     expect(styles).not.toContain(".header-cache-rate {");
     expect(styles).toContain('.header-cache-token { display: inline-flex; align-items: center; gap: 1px; }');

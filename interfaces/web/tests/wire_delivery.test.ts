@@ -62,6 +62,7 @@ describe("production wire delivery contract", () => {
     { type: "model_endpoint_import_scanned", candidates: [], issues: [] },
     { type: "tool_repo_search_result", session_id: "session-a", query: "q", tools: [] },
     { type: "tool_repo_detail", session_id: "session-a", detail: {} },
+    { type: "session_resource_usage", session_id: "session-a", sampled_at_ms: 1, usage: null },
   ] as WireEvent[])("continues reducing direct $type responses in semantic mode", (event) => {
     expect(isDirectWireEvent(event)).toBe(true);
     expect(shouldReduceTopLevelWireEvent(event, true)).toBe(true);

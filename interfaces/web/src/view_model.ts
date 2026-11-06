@@ -1116,8 +1116,15 @@ export function upsertTurn(session: Session, incoming: WebTurn): Session {
   );
   // Turn state is monotonic. A delayed started/updated event from a cancelled
   // execution must not overwrite the terminal projection already shown by UI.
+  // A terminal projection may still be replaced by another terminal projection:
+  // restored turns (state "completed") gain late work-stream notices such as
+  // Timem.md updates, and the Host snapshot stays authoritative.
+  const incomingIsTerminal =
+    incoming.state === "finished" ||
+    incoming.state === "completed" ||
+    !!incoming.completion;
   const boundedIncoming =
-    previousIsTerminal && incoming.state !== "finished" ? previous : incoming;
+    previousIsTerminal && !incomingIsTerminal ? previous : incoming;
   const turns = trimTurns(
     previous
       ? session.turns.map((turn) =>
@@ -2318,6 +2325,92 @@ export function sessionModelTelemetry(session: Session): SessionModelTelemetry {
     ttftMeanSeconds: samples > 0 ? ttftMean : undefined,
     ttftStdDevSeconds: samples > 0 ? Math.sqrt(ttftM2 / samples) : undefined,
     samples,
+  };
+}
+
+/** Chronological per-request samples used by the Session Insights sparklines.
+ * Only the newest `MODEL_PULSE_LIMIT` requests are retained, so rendering a
+ * long session keeps a fixed-size working set instead of materializing every
+ * historical request just to draw a short curve. */
+export type SessionModelPulse = {
+  /** Tokens/sec for the last `MODEL_PULSE_LIMIT` completed requests. */
+  tokensPerSecond: number[];
+  /** TTFT seconds for the last `MODEL_PULSE_LIMIT` completed requests. */
+  ttftSeconds: number[];
+};
+
+const MODEL_PULSE_LIMIT = 15;
+
+type ModelPulseSample = {
+  createdAtMs: number;
+  eventId: string;
+  tokensPerSecond?: number;
+  ttftSeconds?: number;
+};
+
+function compareModelPulseSamples(
+  left: ModelPulseSample,
+  right: ModelPulseSample,
+): number {
+  return left.createdAtMs - right.createdAtMs || left.eventId.localeCompare(right.eventId);
+}
+
+/** Inserts in chronological order and drops the oldest sample beyond the
+ * fixed window. The working set is always at most MODEL_PULSE_LIMIT entries. */
+function retainRecentModelPulseSample(
+  samples: ModelPulseSample[],
+  sample: ModelPulseSample,
+): void {
+  let insertAt = samples.length;
+  while (
+    insertAt > 0 &&
+    compareModelPulseSamples(samples[insertAt - 1], sample) > 0
+  ) {
+    insertAt -= 1;
+  }
+  samples.splice(insertAt, 0, sample);
+  if (samples.length > MODEL_PULSE_LIMIT) samples.shift();
+}
+
+export function sessionModelPulse(session: Session): SessionModelPulse {
+  const resetAtMs = session.telemetry_reset_at_ms ?? undefined;
+  const recent: ModelPulseSample[] = [];
+  for (const turn of session.turns) {
+    for (const response of turn.events) {
+      if (resetAtMs !== undefined && response.created_at_ms < resetAtMs) continue;
+      if (response.source !== "worker_activity" || response.payload.kind !== "model_response") continue;
+      const round = finitePayloadNumber(response.payload, "round");
+      if (round === undefined) continue;
+      const usage = response.payload.usage;
+      if (!usage || typeof usage !== "object") continue;
+      const completed = turn.events.find(
+        (event) =>
+          event.source === "worker_activity" &&
+          event.payload.kind === "model_request_completed" &&
+          finitePayloadNumber(event.payload, "round") === round,
+      );
+      if (!completed) continue;
+      const latencyMs = finitePayloadNumber(completed.payload, "latency_ms");
+      const outputTokens = finitePayloadNumber(usage as UsageStats, "completion_tokens");
+      const ttftMs = finitePayloadNumber(completed.payload, "ttft_ms");
+      retainRecentModelPulseSample(recent, {
+        createdAtMs: response.created_at_ms,
+        eventId: response.event_id,
+        tokensPerSecond:
+          latencyMs !== undefined && latencyMs > 0 && outputTokens !== undefined
+            ? outputTokens * 1000 / latencyMs
+            : undefined,
+        ttftSeconds: ttftMs === undefined ? undefined : ttftMs / 1000,
+      });
+    }
+  }
+  return {
+    tokensPerSecond: recent
+      .map((sample) => sample.tokensPerSecond)
+      .filter((value): value is number => value !== undefined),
+    ttftSeconds: recent
+      .map((sample) => sample.ttftSeconds)
+      .filter((value): value is number => value !== undefined),
   };
 }
 

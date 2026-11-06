@@ -68,6 +68,7 @@ import {
   runtimeConnectionLabel,
   sessionCacheHitPercent,
   sessionCacheTokenTotals,
+  sessionModelPulse,
   sessionModelTelemetry,
   turnLatestModelTelemetry,
   sessionContextUsage,
@@ -4669,6 +4670,29 @@ describe("web topic view model", () => {
     expect(replayed).toBe(once);
   });
 
+  it("lets a restored terminal turn gain a late work-stream notice", () => {
+    const restored: WebTurn = {
+      ...turn("turn_restored", "completed"),
+      completion: { stop_reason: "Completed" },
+      final_answer: "done",
+    };
+    const started = upsertTurn(session("session_1"), restored);
+    const notice: WebTurnEvent = {
+      event_id: "work_file_notice_1",
+      source: "ui_activity",
+      payload: { kind: "work_file_notice", tone: "notice", title: "" },
+      created_at_ms: 3,
+    };
+
+    const updated = upsertTurn(started, { ...restored, events: [notice] });
+
+    // Terminal state is kept, but the Host projection still lands: restored
+    // "completed" turns must be able to show Timem.md update notices.
+    expect(updated.turns[0]?.events).toEqual([notice]);
+    expect(updated.turns[0]?.state).toBe("completed");
+    expect(updated.turns[0]?.final_answer).toBe("done");
+  });
+
   it("builds a source-turn-bound manual ToolGen command without inventing user text", () => {
     expect(manualToolGenCommand("session_1", "turn_7", "   ")).toEqual({
       type: "turn_submit",
@@ -5233,6 +5257,68 @@ describe("model response telemetry", () => {
     // Include an incomplete third response: it cannot contaminate the aggregates.
     value.turns[0].events.push({ event_id: "response-3", source: "worker_activity", created_at_ms: 30, payload: { kind: "model_response", round: 3, usage: { completion_tokens: 999 } } });
     expect(sessionModelTelemetry(value)).toEqual({ tokensPerSecond: 50, ttftMeanSeconds: 0.5, ttftStdDevSeconds: 0.5, samples: 2 });
+  });
+
+  it("exposes a bounded chronological speed and TTFT series", () => {
+    const value = session("telemetry-pulse");
+    value.turns = [modelTurn()];
+    value.turns[0].events.push({ event_id: "response-3", source: "worker_activity", created_at_ms: 30, payload: { kind: "model_response", round: 3, usage: { completion_tokens: 999 } } });
+    const pulse = sessionModelPulse(value);
+    expect(pulse.tokensPerSecond).toEqual([50, 50]);
+    expect(pulse.ttftSeconds).toEqual([0, 1]);
+    // Exact percentiles over the whole history would require an O(n) sample
+    // buffer; the dashboard uses the O(1) Welford mean/spread instead.
+    expect("ttftP50Seconds" in pulse).toBe(false);
+    expect("ttftP95Seconds" in pulse).toBe(false);
+
+    value.telemetry_reset_at_ms = 15;
+    const reset = sessionModelPulse(value);
+    expect(reset.tokensPerSecond).toEqual([50]);
+    expect(reset.ttftSeconds).toEqual([1]);
+  });
+
+  it("keeps only the newest fifteen pulse samples", () => {
+    const value = session("telemetry-pulse-window");
+    const events: WebTurnEvent[] = [];
+    for (let round = 1; round <= 20; round += 1) {
+      events.push({
+        event_id: `response-${round}`,
+        source: "worker_activity",
+        created_at_ms: round * 10,
+        payload: {
+          kind: "model_response",
+          round,
+          usage: { completion_tokens: round * 10 },
+        },
+      });
+      events.push({
+        event_id: `complete-${round}`,
+        source: "worker_activity",
+        created_at_ms: round * 10 + 1,
+        payload: {
+          kind: "model_request_completed",
+          round,
+          latency_ms: 1_000,
+          ttft_ms: round,
+        },
+      });
+    }
+    value.turns = [{ ...turn("turn-pulse-window"), events }];
+    const pulse = sessionModelPulse(value);
+    expect(pulse.tokensPerSecond).toHaveLength(15);
+    expect(pulse.ttftSeconds).toHaveLength(15);
+    // Rounds 6..20 survive; the first five have been evicted.
+    expect(pulse.ttftSeconds[0]).toBeCloseTo(0.006, 8);
+    expect(pulse.ttftSeconds[14]).toBeCloseTo(0.02, 8);
+
+    // Averages/spread stay whole-history: the window alone would be 0.011
+    // mean and a different deviation. Welford keeps O(1) state while covering
+    // all 20 requests, and the 15-sample curve is a separate bounded buffer.
+    const telemetry = sessionModelTelemetry(value);
+    expect(telemetry.samples).toBe(20);
+    expect(telemetry.ttftMeanSeconds).toBeCloseTo(0.0105, 8);
+    expect(telemetry.ttftStdDevSeconds).toBeCloseTo(0.0057662813, 8);
+    expect(telemetry.tokensPerSecond).toBeCloseTo(105, 8);
   });
 
   it("degrades safely when provider usage or timing is absent", () => {

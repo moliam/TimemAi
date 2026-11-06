@@ -52,6 +52,14 @@ It may contain:
   display frames stop. Known work-collapse and stream-archive commits directly
   remeasure outline position; correctness must not wait for a ResizeObserver
   notification. Ordinary scroll navigation remains frame-only.
+- Session Insights (`src/session_insights.tsx`): the header chip and draggable
+  floating dashboard are presentation only. Item order, panel position, and pin
+  are bounded browser-local preferences (localStorage) and never affect Session
+  or Turn semantics. Token speed and TTFT series derive from existing
+  `worker_activity` events; CPU/memory arrive as read-only, connection-local
+  `session_resource_usage` replies to a bounded 2-second query. Unavailable
+  dimensions render as unavailable instead of zero, so non-Linux platforms and
+  Hosts without cgroup accounting degrade without inventing facts.
 - Live one-shot browser command delivery. The UI may assign a correlation
   `command_id`, but sends only while the WebSocket is open and the initial Host
   snapshot is ready. It does not persist an outbox, replay commands after

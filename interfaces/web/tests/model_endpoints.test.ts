@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { capabilityModelForDraft, effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointLabelForProfile, endpointDraftValid, endpointMatchesProfile, endpointNameForProfile, endpointSaveErrorMessage, formatContextWindowTokens, isValidMaxLlmInputTokens, MODEL_CONTEXT_WINDOW_OPTIONS, MAX_ENDPOINT_CHAIN_LENGTH, moveEndpointInChain, REASONING_EFFORT_OPTIONS, sessionReasoningOptions, toggleAllowedReasoning, toggleEndpointInChain } from "../src/model_endpoints";
+import { applyContextWindowChoice, capabilityModelForDraft, effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointContextWindowWarning, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointLabelForProfile, endpointDraftValid, endpointMatchesProfile, endpointNameForProfile, endpointSaveErrorMessage, formatContextWindowTokens, isValidMaxLlmInputTokens, MODEL_CONTEXT_WINDOW_OPTIONS, MAX_ENDPOINT_CHAIN_LENGTH, moveEndpointInChain, REASONING_EFFORT_OPTIONS, sessionReasoningOptions, toggleAllowedReasoning, toggleEndpointInChain } from "../src/model_endpoints";
 import { setLocale } from "../src/i18n";
 
 const endpoint = { id: "one", name: "Production", model: "gpt-4.1", api_protocol: "openai-compatible", response_protocol: "xml", base_url: "https://api.example/v1", max_llm_input_tokens: 100_000, max_llm_output_tokens: 10_000, stream: false, function_calling: true, api_key_configured: true };
@@ -814,5 +814,36 @@ describe("Session reasoning selector", () => {
 
   it("shows no selectable levels when model capability is unknown", () => {
     expect(sessionReasoningOptions(endpoint, [])).toEqual([]);
+  });
+});
+
+describe("unified context window", () => {
+  const windowModel: CatalogModel = {
+    ...template,
+    id: "fixture/window-cap",
+    context_window: 128_000,
+  };
+  const windowDraft = applyEndpointTemplate(blank(), windowModel);
+
+  it("flags configured windows beyond the documented model window", () => {
+    expect(endpointContextWindowWarning(windowDraft, windowModel)).toBeNull();
+    const oversized = editEndpoint(windowDraft, { max_llm_input_tokens: 120_000 });
+    expect(oversized.max_llm_input_tokens + oversized.max_llm_output_tokens).toBe(140_000);
+    expect(endpointContextWindowWarning(oversized, windowModel)).toEqual({ total: 140_000, known: 128_000 });
+    expect(endpointContextWindowWarning(windowDraft, undefined)).toBeNull();
+  });
+
+  it("maps a unified window choice onto the input budget", () => {
+    const applied = applyContextWindowChoice(windowDraft, 200_000);
+    expect(applied.max_llm_input_tokens).toBe(180_000);
+    expect(applied.max_llm_output_tokens).toBe(windowDraft.max_llm_output_tokens);
+    const clamped = applyContextWindowChoice({ ...windowDraft, max_llm_output_tokens: 199_999 }, 200_000);
+    expect(clamped.max_llm_input_tokens).toBe(1);
+  });
+
+  it("treats an oversized window as a warning instead of a capability failure", () => {
+    const oversized = editEndpoint(windowDraft, { max_llm_input_tokens: 120_000 });
+    expect(oversized.max_llm_input_tokens + oversized.max_llm_output_tokens).toBeGreaterThan(windowModel.context_window);
+    expect(endpointCapabilityIssue(oversized, windowModel, providerSpecs)).toBeNull();
   });
 });

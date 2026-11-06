@@ -1,7 +1,7 @@
 import { useThrottledValue } from "./use_throttled_value";
 import { MailboxIcon, MailboxInvocation, MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation, TimerInvocation, TimerToolIcon } from "./tool_invocation";
 import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
-import { initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, sessionReasoningOptions, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
+import { applyContextWindowChoice, initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, sessionReasoningOptions, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointContextWindowWarning, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
 import { persistComposerDraftTexts, readComposerDraftTexts } from "./composer_drafts";
 import { createComposerWriteThrough, type ComposerWriteThrough } from "./composer_input";
 import type { CatalogModel } from "./model_endpoints";
@@ -104,6 +104,7 @@ import {
   X,
   AlarmClock,
   Info,
+  NotebookPen,
   Mail,
   Pause,
   Play,
@@ -291,12 +292,16 @@ import {
   mergeMcpSecrets,
 } from "./mcp";
 import {
+  RESOURCE_CAP_PERCENT_OPTIONS,
+  parseResourceCapPercent,
   reconcileRuntimeDrafts,
+  resourceCapability,
   runtimeOptionLabel,
   sessionRuntimeOptions,
   shouldAutoRevealSessionApiKey,
   updateRevealedSessionApiKeys,
 } from "./runtime_settings";
+import { SessionInsights, type SessionResourcePulseSample } from "./session_insights";
 import {
   commandSessionId,
   isModelSubmissionCommand,
@@ -339,7 +344,11 @@ import {
 } from "./queued_messages";
 
 import { commandNeedsReliableDelivery } from "./command_outbox";
-import type { MailboxSnapshotInfo, TimerInfo } from "./protocol";
+import type {
+  MailboxSnapshotInfo,
+  ResourceCapsProjection,
+  TimerInfo,
+} from "./protocol";
 import { classifyEventSequence, snapshotEventBaseline } from "./event_cursor";
 import {
   enablesSemanticDelivery,
@@ -699,6 +708,9 @@ function TimemApp() {
   const [memTemporaryItemsError, setMemTemporaryItemsError] = useState("");
   const [memStorageUsage, setMemStorageUsage] =
     useState<MemStorageUsage | null>(null);
+  const [resourcePulseBySession, setResourcePulseBySession] = useState<
+    Record<string, SessionResourcePulseSample[]>
+  >({});
   const memorySettingsOpenRef = useRef(false);
   memorySettingsOpenRef.current =
     showAppearance && settingsSection === "memory";
@@ -790,6 +802,7 @@ function TimemApp() {
     useState(false);
   const [pendingContextCompressThreshold, setPendingContextCompressThreshold] =
     useState(false);
+  const [pendingResourceCaps, setPendingResourceCaps] = useState(false);
   const [pendingRestorePromptContext, setPendingRestorePromptContext] =
     useState(false);
   const [rejectedSubmitCommandIds, setRejectedSubmitCommandIds] = useState<
@@ -1431,6 +1444,62 @@ function TimemApp() {
     },
     [reportUiError, sendCommand],
   );
+  const saveResourceCaps = useCallback(
+    (
+      cpu_enabled: boolean,
+      cpu_percent: number,
+      mem_enabled: boolean,
+      mem_percent: number,
+    ) => {
+      setPendingResourceCaps(true);
+      if (
+        !sendCommand({
+          type: "system_resource_caps_update",
+          cpu_enabled,
+          cpu_percent,
+          mem_enabled,
+          mem_percent,
+        })
+      ) {
+        setPendingResourceCaps(false);
+        reportUiError(
+          "System resource caps failed",
+          "Reconnect to Timem Web before changing the system resource caps.",
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand],
+  );
+  const escalateResourceCaps = useCallback(
+    (
+      cpu_enabled: boolean,
+      cpu_percent: number,
+      mem_enabled: boolean,
+      mem_percent: number,
+      password: string,
+    ) => {
+      setPendingResourceCaps(true);
+      if (
+        !sendCommand({
+          type: "system_resource_caps_escalate",
+          cpu_enabled,
+          cpu_percent,
+          mem_enabled,
+          mem_percent,
+          password,
+        })
+      ) {
+        setPendingResourceCaps(false);
+        reportUiError(
+          "System resource caps failed",
+          "Reconnect to Timem Web before authorizing the system resource caps repair.",
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand],
+  );
   const saveRestorePromptContextOnStartup = useCallback(
     (enabled: boolean) => {
       setPendingRestorePromptContext(true);
@@ -1982,6 +2051,8 @@ function TimemApp() {
             setPendingContextCompressThreshold(false);
           if (completed?.type === "system_restore_prompt_context_on_startup_update")
             setPendingRestorePromptContext(false);
+          if (completed?.type === "system_resource_caps_update")
+            setPendingResourceCaps(false);
           const memSwitchNeedsConfirmation =
             completed?.type === "mem_switch" &&
             !completed.stop_running &&
@@ -2096,6 +2167,7 @@ function TimemApp() {
         setPendingModelToolResultBytes(false);
         setPendingContextCompressThreshold(false);
         setPendingRestorePromptContext(false);
+        setPendingResourceCaps(false);
         setServer((current) =>
           current
             ? {
@@ -2114,6 +2186,11 @@ function TimemApp() {
                     event.context_compress_threshold_percent,
                   restore_prompt_context_on_startup:
                     event.restore_prompt_context_on_startup,
+                  system_cpu_cap_percent: event.system_cpu_cap_percent,
+                  system_mem_cap_percent: event.system_mem_cap_percent,
+                  system_cpu_cap_enabled: event.system_cpu_cap_enabled,
+                  system_mem_cap_enabled: event.system_mem_cap_enabled,
+                  resource_caps: event.resource_caps,
                 },
               }
             : current,
@@ -2232,6 +2309,27 @@ function TimemApp() {
               : session,
           ),
         );
+        return;
+      }
+      if (event.type === "session_resource_usage") {
+        setResourcePulseBySession((current) => {
+          const previous = current[event.session_id] ?? [];
+          const sample: SessionResourcePulseSample = {
+            at: event.sampled_at_ms,
+            cpuUsageUsec: event.usage?.cpu_usage_usec,
+            quotaCores: event.usage?.cpu_quota_cores,
+            memBytes: event.usage?.memory_current_bytes,
+            swapBytes: event.usage?.swap_current_bytes,
+            memHighBytes: event.usage?.memory_high_bytes,
+            memMaxBytes: event.usage?.memory_max_bytes,
+          };
+          // 2s cadence: a bounded 12-slot ring keeps the visible 20s window
+          // even when a sample arrives late or early.
+          return {
+            ...current,
+            [event.session_id]: [...previous, sample].slice(-12),
+          };
+        });
         return;
       }
       if (event.type === "session_memo_updated") {
@@ -4942,13 +5040,27 @@ function TimemApp() {
         <main className="chat-shell">
           <header className="chat-header">
             <div className="header-context-actions">
-              <HeaderTelemetryBoard
+              <SessionInsights
                 session={activeSession}
+                resourceSamples={
+                  activeSession
+                    ? resourcePulseBySession[activeSession.session_id]
+                    : undefined
+                }
                 onReset={
                   activeSession
                     ? () =>
                         sendCommand({
                           type: "session_usage_reset",
+                          session_id: activeSession.session_id,
+                        })
+                    : null
+                }
+                onSample={
+                  activeSession
+                    ? () =>
+                        sendCommand({
+                          type: "session_resource_usage_query",
                           session_id: activeSession.session_id,
                         })
                     : null
@@ -5235,6 +5347,22 @@ function TimemApp() {
               }
               contextCompressThresholdPending={pendingContextCompressThreshold}
               onContextCompressThresholdChange={saveContextCompressThreshold}
+              systemCpuCapPercent={
+                server?.mem?.system_cpu_cap_percent ?? 85
+              }
+              systemMemCapPercent={
+                server?.mem?.system_mem_cap_percent ?? 85
+              }
+              systemCpuCapEnabled={
+                server?.mem?.system_cpu_cap_enabled ?? true
+              }
+              systemMemCapEnabled={
+                server?.mem?.system_mem_cap_enabled ?? true
+              }
+              resourceCaps={server?.mem?.resource_caps}
+              resourceCapsPending={pendingResourceCaps}
+              onResourceCapsChange={saveResourceCaps}
+              onResourceCapsEscalate={escalateResourceCaps}
               restorePromptContextOnStartup={
                 server?.mem?.restore_prompt_context_on_startup ?? false
               }
@@ -9117,6 +9245,28 @@ function captureViewportTurnAnchor(viewport: HTMLElement): ViewportTurnAnchor | 
   );
 }
 
+const MemoCopyButton = memo(function MemoCopyButton({ text }: { text: string }) {
+  const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(text, {
+    idle: t("messageNav.memoCopy"),
+    copied: t("messageNav.memoCopied"),
+    failed: t("messageNav.memoCopyFailed"),
+  });
+  return (
+    <button
+      type="button"
+      className={`thread-memo-copy ${copyClass}`}
+      title={copyLabel}
+      aria-label={copyLabel}
+      onClick={(event) => {
+        event.stopPropagation();
+        void copy();
+      }}
+    >
+      {copyState === "copied" ? <CheckCheck size={12} /> : <Copy size={12} />}
+    </button>
+  );
+});
+
 /**
  * Working-indicator memo tooltip rendered through a portal with
  * `position: fixed`. Portalling escapes every ancestor overflow clip and
@@ -9129,10 +9279,16 @@ const WorkingMemoTooltip = memo(function WorkingMemoTooltip({
   anchor,
   caption,
   text,
+  visible,
+  onPointerEnter,
+  onPointerLeave,
 }: {
   anchor: HTMLElement;
   caption: string;
   text: string;
+  visible: boolean;
+  onPointerEnter: () => void;
+  onPointerLeave: () => void;
 }) {
   const [placement, setPlacement] = useState<{ left: number; top: number } | null>(
     null,
@@ -9172,13 +9328,18 @@ const WorkingMemoTooltip = memo(function WorkingMemoTooltip({
     <span
       className="thread-working-memo-tooltip is-portal"
       role="tooltip"
+      onPointerEnter={onPointerEnter}
+      onPointerLeave={onPointerLeave}
       style={
-        placement
+        placement && visible
           ? { left: `${placement.left}px`, top: `${placement.top}px`, visibility: "visible" }
           : { visibility: "hidden" }
       }
     >
-      <span className="thread-memo-caption">{caption}</span>
+      <span className="thread-memo-caption-row">
+        <span className="thread-memo-caption">{caption}</span>
+        <MemoCopyButton text={text} />
+      </span>
       <span className="thread-memo-text">{text}</span>
     </span>,
     document.body,
@@ -9595,9 +9756,43 @@ function TimemThread({
   const followThreadLatest = useRef(true);
   const [threadAwayFromBottom, setThreadAwayFromBottom] = useState(false);
   const workingAwayButtonRef = useRef<HTMLButtonElement | null>(null);
+  const workingMemoHideTimerRef = useRef<number | null>(null);
+  const workingMemoPointerInsideRef = useRef(false);
+  const [workingMemoPinned, setWorkingMemoPinned] = useState(false);
   const [workingMemoVisible, setWorkingMemoVisible] = useState(false);
-  const showWorkingMemoTooltip = () => setWorkingMemoVisible(true);
-  const hideWorkingMemoTooltip = () => setWorkingMemoVisible(false);
+  const showWorkingMemoTooltip = () => {
+    if (workingMemoHideTimerRef.current !== null) {
+      window.clearTimeout(workingMemoHideTimerRef.current);
+      workingMemoHideTimerRef.current = null;
+    }
+    setWorkingMemoPinned(true);
+    setWorkingMemoVisible(true);
+  };
+  // Grace period instead of an instant hide, and the tooltip stays mounted
+  // while pinned: unmounting it would kill its own pointerenter, so the
+  // pointer could never re-enter across the gap. The timer dismisses only
+  // when the pointer never entered (or has already left) the tooltip.
+  const hideWorkingMemoTooltip = () => {
+    if (workingMemoHideTimerRef.current !== null) window.clearTimeout(workingMemoHideTimerRef.current);
+    workingMemoHideTimerRef.current = window.setTimeout(() => {
+      workingMemoHideTimerRef.current = null;
+      if (!workingMemoPointerInsideRef.current) {
+        setWorkingMemoVisible(false);
+        setWorkingMemoPinned(false);
+      }
+    }, 200);
+  };
+  const handleWorkingMemoTooltipEnter = () => {
+    workingMemoPointerInsideRef.current = true;
+    showWorkingMemoTooltip();
+  };
+  const handleWorkingMemoTooltipLeave = () => {
+    workingMemoPointerInsideRef.current = false;
+    hideWorkingMemoTooltip();
+  };
+  useEffect(() => () => {
+    if (workingMemoHideTimerRef.current !== null) window.clearTimeout(workingMemoHideTimerRef.current);
+  }, []);
   const [draftsBySession, setDraftsBySession] = useState<
     Record<string, string>
   >(() => readComposerDraftTexts());
@@ -11570,8 +11765,11 @@ function TimemThread({
               <MemoIcon size={13} />
             </span>
             <span className="thread-memo-tooltip" role="tooltip">
-              <span className="thread-memo-caption">
-                {t("messageNav.memoIndicator")}
+              <span className="thread-memo-caption-row">
+                <span className="thread-memo-caption">
+                  {t("messageNav.memoIndicator")}
+                </span>
+                <MemoCopyButton text={activeSession.active_memo} />
               </span>
               <span className="thread-memo-text">{activeSession.active_memo}</span>
             </span>
@@ -11579,12 +11777,15 @@ function TimemThread({
         )}
         {activeSession?.state === "working" &&
           activeSession.active_memo &&
-          workingMemoVisible &&
+          workingMemoPinned &&
           workingAwayButtonRef.current && (
             <WorkingMemoTooltip
               anchor={workingAwayButtonRef.current}
               caption={t("messageNav.memoIndicator")}
               text={activeSession.active_memo}
+              visible={workingMemoVisible}
+              onPointerEnter={handleWorkingMemoTooltipEnter}
+              onPointerLeave={handleWorkingMemoTooltipLeave}
             />
           )}
       </nav>
@@ -11996,6 +12197,7 @@ const TurnInteraction = memo(function TurnInteraction({
     entry.kind === "mailbox" ||
     entry.kind === "mailbox_status" ||
     entry.kind === "timer" ||
+    entry.kind === "resource_observation" ||
     entry.text.startsWith("[mailbox] ");
   const systemOnlyFrame =
     visibleUserEntries.length > 0 &&
@@ -13632,88 +13834,6 @@ function FinalAnswerContent({ text, provisional = false, layoutKey, processSecti
   );
 }
 
-function HeaderTelemetryBoard({
-  session,
-  onReset,
-}: {
-  session: Session | undefined;
-  onReset: (() => void) | null;
-}) {
-  useT();
-  const runtimeTotals = session ? sessionRuntimeUsage(session) : undefined;
-  const cacheHitPercent = session ? sessionCacheHitPercent(session) : undefined;
-  const telemetry = session ? sessionModelTelemetry(session) : undefined;
-  const cacheInputLabel = formatTokensCoarse(runtimeTotals?.prompt_tokens ?? 0) ?? "0";
-  const cacheOutputLabel = formatTokensCoarse(runtimeTotals?.completion_tokens ?? 0) ?? "0";
-  const cacheCachedLabel = formatTokensCoarse(runtimeTotals?.cached_tokens ?? 0) ?? "0";
-  const thinkLabel = formatTokensCoarse(runtimeTotals?.reasoning_tokens ?? 0) ?? "0";
-  const hitLabel = cacheHitPercent === undefined ? undefined : `${cacheHitPercent.toFixed(1)}%`;
-  const speedLabel = telemetry?.tokensPerSecond === undefined
-    ? "\u2014"
-    : telemetry.tokensPerSecond < 10
-      ? telemetry.tokensPerSecond.toFixed(1)
-      : Math.round(telemetry.tokensPerSecond).toLocaleString();
-  const ttftLabel = telemetry?.ttftMeanSeconds === undefined
-    ? "\u2014"
-    : `${telemetry.ttftMeanSeconds.toFixed(2)} (\u03c3 ${(telemetry.ttftStdDevSeconds ?? 0).toFixed(2)}) sec`;
-  return (
-    <span
-      className="header-telemetry-board"
-      title={t("usage.boardTitle")}
-      aria-label={t("usage.boardTitle")}
-    >
-      <span className="header-telemetry-main">
-        <span className="header-model-speed" title={t("usage.speedTitle")}>
-          <Gauge size={12} strokeWidth={1.8} aria-hidden="true" />
-          <span>{speedLabel}</span>
-          <span className="header-telemetry-unit">Tokens/sec</span>
-        </span>
-        <span className="header-ttft" title={t("usage.ttftTitle", { count: telemetry?.samples ?? 0 })}>
-          <span>TTFT</span>
-          <span>{ttftLabel}</span>
-        </span>
-      </span>
-      <span className="header-context-secondary">
-        <span className="header-cache-token header-usage-llm" title={t("completion.llmCallsTitle")}>
-          <Sparkles size={12} strokeWidth={1.8} aria-hidden="true" />
-          {formatTokensCoarse(runtimeTotals?.llm_calls) ?? "0"}
-        </span>
-        <span className="header-cache-token header-cache-input" title={t("completion.inputTokensTitle")}>
-          <ArrowBigUp size={12} strokeWidth={1.8} />
-          {cacheInputLabel}
-          {!!runtimeTotals?.cached_tokens && (
-            <span className="header-usage-detail">
-              (cache {cacheCachedLabel}{hitLabel ? `, ${hitLabel}` : ""})
-            </span>
-          )}
-        </span>
-        <span className="header-cache-token header-cache-output" title={t("completion.outputTokensTitle")}>
-          <ArrowBigDown size={12} strokeWidth={1.8} />
-          {cacheOutputLabel}
-          {!!runtimeTotals?.reasoning_tokens && (
-            <span className="header-usage-detail">(think {thinkLabel})</span>
-          )}
-        </span>
-        <span className="header-cache-token header-usage-tools" title={t("completion.toolCallsTitle")}>
-          <Wrench size={12} strokeWidth={1.8} aria-hidden="true" />
-          {formatTokensCoarse(runtimeTotals?.tool_calls) ?? "0"}
-        </span>
-      </span>
-      {onReset && (
-        <button
-          type="button"
-          className="header-telemetry-reset"
-          title={t("usage.resetTitle")}
-          aria-label={t("usage.resetTitle")}
-          onClick={onReset}
-        >
-          <RotateCcw size={11} aria-hidden="true" />
-        </button>
-      )}
-    </span>
-  );
-}
-
 function HeaderContextControl({
   session,
   onClear,
@@ -13854,6 +13974,8 @@ function ActivityView({ activity, enterPulse = false }: { activity: Activity; en
     return <ContextCompressNotice activity={activity} />;
   if (activity.kind === "toolgen") return <ToolGenNotice activity={activity} />;
   if (activity.kind === "memo_notice") return <MemoNotice activity={activity} />;
+  if (activity.kind === "work_file_notice")
+    return <WorkFileNotice activity={activity} />;
   if (activity.kind === "model_service_issue")
     return <ModelServiceIssueNotice activity={activity} />;
   if (activity.kind === "user_supplement")
@@ -14250,6 +14372,21 @@ function MemoNotice({ activity }: { activity: Activity }) {
       <div className="system-notice-line">
         <strong className="system-notice-title">{t(op)}</strong>
         {activity.detail && <span className="system-notice-detail system-notice-long-detail">{activity.detail}</span>}
+      </div>
+    </div>
+  );
+}
+
+function WorkFileNotice(_: { activity: Activity }) {
+  // Same notice shell as memo and context compression: a small Lucide mark in
+  // the system-notice lane, never a user bubble.
+  return (
+    <div className="turn-work-item notice system-notice work-file-notice">
+      <span className="activity-mark" aria-hidden="true">
+        <NotebookPen size={13} />
+      </span>
+      <div className="system-notice-line">
+        <strong className="system-notice-title">{t("turn.workNotesUpdated")}</strong>
       </div>
     </div>
   );
@@ -15260,6 +15397,25 @@ type SettingsCenterProps = {
   onContextCompressThresholdChange: (
     percent: ContextCompressThresholdPercent,
   ) => void;
+  systemCpuCapPercent: number;
+  systemMemCapPercent: number;
+  systemCpuCapEnabled: boolean;
+  systemMemCapEnabled: boolean;
+  resourceCaps: ResourceCapsProjection | undefined;
+  resourceCapsPending: boolean;
+  onResourceCapsChange: (
+    cpuEnabled: boolean,
+    cpuPercent: number,
+    memEnabled: boolean,
+    memPercent: number,
+  ) => void;
+  onResourceCapsEscalate: (
+    cpuEnabled: boolean,
+    cpuPercent: number,
+    memEnabled: boolean,
+    memPercent: number,
+    password: string,
+  ) => void;
   restorePromptContextOnStartup: boolean;
   restorePromptContextPending: boolean;
   onRestorePromptContextChange: (enabled: boolean) => void;
@@ -15334,6 +15490,14 @@ const SettingsCenter = memo(function SettingsCenter(
     contextCompressThresholdPercent,
     contextCompressThresholdPending,
     onContextCompressThresholdChange,
+    systemCpuCapPercent,
+    systemMemCapPercent,
+    systemCpuCapEnabled,
+    systemMemCapEnabled,
+    resourceCaps,
+    resourceCapsPending,
+    onResourceCapsEscalate,
+    onResourceCapsChange,
     restorePromptContextOnStartup,
     restorePromptContextPending,
     onRestorePromptContextChange,
@@ -15398,6 +15562,98 @@ const SettingsCenter = memo(function SettingsCenter(
   const [favoriteCapacityLimit, setFavoriteCapacityLimit] = useState<
     number | null
   >(favoriteCapacity.limit_bytes ?? null);
+  const [resourceCpuDraft, setResourceCpuDraft] = useState(() =>
+    String(systemCpuCapPercent),
+  );
+  const [resourceMemDraft, setResourceMemDraft] = useState(() =>
+    String(systemMemCapPercent),
+  );
+  const resourceCpuCapability = resourceCapability(resourceCaps?.cpu);
+  const resourceMemCapability = resourceCapability(resourceCaps?.mem);
+  // The switch reflects enforcement, not the saved desire: a dimension the
+  // kernel cannot manage right now renders OFF even when the stored flag says
+  // on. "needs-permission" stays interactive and asks for a one-shot password
+  // when switched on; "unsupported" offers no operation at all.
+  const effectiveSystemCpuCapEnabled =
+    resourceCpuCapability === "manageable" ? systemCpuCapEnabled : false;
+  const effectiveSystemMemCapEnabled =
+    resourceMemCapability === "manageable" ? systemMemCapEnabled : false;
+  const [resourceCpuEnabledDraft, setResourceCpuEnabledDraft] = useState(
+    () => effectiveSystemCpuCapEnabled,
+  );
+  const [resourceMemEnabledDraft, setResourceMemEnabledDraft] = useState(
+    () => effectiveSystemMemCapEnabled,
+  );
+  const [resourceCapsEscalateOpen, setResourceCapsEscalateOpen] =
+    useState(false);
+  const [resourceCapsEscalateTarget, setResourceCapsEscalateTarget] =
+    useState<"cpu" | "mem" | null>(null);
+  const [resourceCapsPassword, setResourceCapsPassword] = useState("");
+  useEffect(() => {
+    setResourceCpuDraft(String(systemCpuCapPercent));
+  }, [systemCpuCapPercent]);
+  useEffect(() => {
+    setResourceMemDraft(String(systemMemCapPercent));
+  }, [systemMemCapPercent]);
+  useEffect(() => {
+    setResourceCpuEnabledDraft(effectiveSystemCpuCapEnabled);
+  }, [effectiveSystemCpuCapEnabled]);
+  useEffect(() => {
+    setResourceMemEnabledDraft(effectiveSystemMemCapEnabled);
+  }, [effectiveSystemMemCapEnabled]);
+  const resourceCpuValid = parseResourceCapPercent(resourceCpuDraft) !== null;
+  const resourceMemValid = parseResourceCapPercent(resourceMemDraft) !== null;
+  const resourceCapsDirty =
+    resourceCpuEnabledDraft !== effectiveSystemCpuCapEnabled ||
+    parseResourceCapPercent(resourceCpuDraft) !== systemCpuCapPercent ||
+    resourceMemEnabledDraft !== effectiveSystemMemCapEnabled ||
+    parseResourceCapPercent(resourceMemDraft) !== systemMemCapPercent;
+  const toggleResourceCap = (dimension: "cpu" | "mem", enabled: boolean) => {
+    const capability =
+      dimension === "cpu" ? resourceCpuCapability : resourceMemCapability;
+    if (capability === "unsupported") return;
+    if (enabled && capability === "needs-permission") {
+      setResourceCapsEscalateTarget(dimension);
+      setResourceCapsPassword("");
+      setResourceCapsEscalateOpen(true);
+      return;
+    }
+    if (dimension === "cpu") setResourceCpuEnabledDraft(enabled);
+    else setResourceMemEnabledDraft(enabled);
+  };
+  const closeResourceCapsEscalation = () => {
+    setResourceCapsEscalateOpen(false);
+    setResourceCapsEscalateTarget(null);
+    setResourceCapsPassword("");
+  };
+  const submitResourceCaps = () => {
+    const cpuPercent = parseResourceCapPercent(resourceCpuDraft);
+    const memPercent = parseResourceCapPercent(resourceMemDraft);
+    if (cpuPercent === null || memPercent === null) return;
+    onResourceCapsChange(
+      resourceCpuEnabledDraft,
+      cpuPercent,
+      resourceMemEnabledDraft,
+      memPercent,
+    );
+  };
+  const submitResourceCapsEscalation = () => {
+    const cpuPercent = parseResourceCapPercent(resourceCpuDraft);
+    const memPercent = parseResourceCapPercent(resourceMemDraft);
+    if (cpuPercent === null || memPercent === null) return;
+    if (!resourceCapsPassword || resourceCapsEscalateTarget === null) return;
+    const target = resourceCapsEscalateTarget;
+    setResourceCapsEscalateOpen(false);
+    setResourceCapsEscalateTarget(null);
+    onResourceCapsEscalate(
+      target === "cpu" ? true : resourceCpuEnabledDraft,
+      cpuPercent,
+      target === "mem" ? true : resourceMemEnabledDraft,
+      memPercent,
+      resourceCapsPassword,
+    );
+    setResourceCapsPassword("");
+  };
   const [path, setPath] = useState(memPath);
   const [memoryPage, setMemoryPage] = useState<"overview" | "switch">(
     "overview",
@@ -15412,6 +15668,7 @@ const SettingsCenter = memo(function SettingsCenter(
     mailboxCapacityPending ||
     modelToolResultBytesPending ||
     contextCompressThresholdPending ||
+    resourceCapsPending ||
     restorePromptContextPending ||
     claudeCodexToolDiscoveryPending ||
     favoriteCapacityPending ||
@@ -15860,6 +16117,195 @@ const SettingsCenter = memo(function SettingsCenter(
                       )}
                     </label>
                   </div>
+                </section>
+                <section className="settings-group system-resource-caps">
+                  <div className="settings-group-heading">
+                    <div>
+                      <strong>{t("system.resourceCapsTitle")}</strong>
+                      <p>{t("system.resourceCapsDesc")}</p>
+                    </div>
+                  </div>
+                  <div className="resource-cap-rows">
+                    {[
+                      {
+                        key: "cpu" as const,
+                        title: t("system.resourceCpuCapTitle"),
+                        aria: t("system.resourceCpuCapAria"),
+                        desc: t("system.resourceCpuCapDesc"),
+                        hint: t("system.resourceCpuUnsupportedHint"),
+                        capability: resourceCpuCapability,
+                        enabled: resourceCpuEnabledDraft,
+                        setEnabled: (enabled: boolean) =>
+                          toggleResourceCap("cpu", enabled),
+                        draft: resourceCpuDraft,
+                        setDraft: setResourceCpuDraft,
+                      },
+                      {
+                        key: "mem" as const,
+                        title: t("system.resourceMemCapTitle"),
+                        aria: t("system.resourceMemCapAria"),
+                        desc: t("system.resourceMemCapDesc"),
+                        hint: t("system.resourceMemUnsupportedHint"),
+                        capability: resourceMemCapability,
+                        enabled: resourceMemEnabledDraft,
+                        setEnabled: (enabled: boolean) =>
+                          toggleResourceCap("mem", enabled),
+                        draft: resourceMemDraft,
+                        setDraft: setResourceMemDraft,
+                      },
+                    ].map((row) => (
+                      <div
+                        className={`resource-cap-row${
+                          row.capability === "unsupported"
+                            ? " is-unsupported"
+                            : ""
+                        }`}
+                        data-capability={row.capability}
+                        data-dimension={row.key}
+                        key={row.key}
+                      >
+                        <label className="resource-cap-switch">
+                          <input
+                            type="checkbox"
+                            role="switch"
+                            checked={row.enabled}
+                            aria-label={row.aria}
+                            disabled={
+                              resourceCapsPending ||
+                              !connected ||
+                              row.capability === "unsupported"
+                            }
+                            onChange={(event) =>
+                              row.setEnabled(event.target.checked)
+                            }
+                          />
+                          <span
+                            className="resource-cap-slider"
+                            aria-hidden="true"
+                          />
+                          <span className="resource-cap-name">{row.title}</span>
+                        </label>
+                        <select
+                          className="resource-cap-select"
+                          value={row.draft}
+                          aria-label={row.aria}
+                          disabled={
+                            resourceCapsPending || !connected || !row.enabled
+                          }
+                          onChange={(event) => row.setDraft(event.target.value)}
+                        >
+                          {RESOURCE_CAP_PERCENT_OPTIONS.map((option) => (
+                            <option key={option} value={String(option)}>
+                              {option}%
+                            </option>
+                          ))}
+                        </select>
+                        {row.capability === "unsupported" && (
+                          <span
+                            className="resource-cap-warning"
+                            role="img"
+                            tabIndex={0}
+                            aria-label={row.hint}
+                            title={row.hint}
+                            data-tooltip={row.hint}
+                          >
+                            <TriangleAlert size={13} aria-hidden="true" />
+                          </span>
+                        )}
+                        <span className="system-select-desc resource-cap-desc">
+                          {row.desc}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="resource-caps-actions">
+                    <div className="resource-caps-action-status">
+                      {resourceCapsPending && (
+                        <small
+                          className="system-setting-status"
+                          role="status"
+                          aria-live="polite"
+                        >
+                          {t("system.saving")}
+                        </small>
+                      )}
+                      {(!resourceCpuValid || !resourceMemValid) && (
+                        <small
+                          className="system-setting-status resource-caps-error"
+                          role="alert"
+                        >
+                          {t("system.resourceCapsInvalid")}
+                        </small>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      className={`primary compact ${resourceCapsPending ? "sending" : ""}`}
+                      disabled={
+                        resourceCapsPending ||
+                        !connected ||
+                        !resourceCpuValid ||
+                        !resourceMemValid ||
+                        !resourceCapsDirty
+                      }
+                      onClick={submitResourceCaps}
+                    >
+                      {resourceCapsPending && <LoaderCircle size={14} />}
+                      <span>{t("system.resourceCapsSave")}</span>
+                    </button>
+                  </div>
+                  {resourceCapsEscalateOpen && (
+                    <div
+                      className="resource-caps-modal"
+                      role="dialog"
+                      aria-modal="true"
+                      aria-label={t("system.resourceCapsEscalateTitle")}
+                      onClick={closeResourceCapsEscalation}
+                    >
+                      <div
+                        className="resource-caps-modal-card"
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        <strong>{t("system.resourceCapsEscalateTitle")}</strong>
+                        <p>{t("system.resourceCapsEscalateDesc")}</p>
+                        <input
+                          type="password"
+                          autoComplete="off"
+                          autoFocus
+                          placeholder={t("system.resourceCapsEscalatePassword")}
+                          aria-label={t("system.resourceCapsEscalatePassword")}
+                          value={resourceCapsPassword}
+                          onChange={(event) =>
+                            setResourceCapsPassword(event.target.value)
+                          }
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              submitResourceCapsEscalation();
+                            }
+                            if (event.key === "Escape") {
+                              closeResourceCapsEscalation();
+                            }
+                          }}
+                        />
+                        <div className="resource-caps-modal-actions">
+                          <button
+                            type="button"
+                            onClick={closeResourceCapsEscalation}
+                          >
+                            {t("system.resourceCapsEscalateCancel")}
+                          </button>
+                          <button
+                            type="button"
+                            className="primary"
+                            disabled={!resourceCapsPassword}
+                            onClick={submitResourceCapsEscalation}
+                          >
+                            {t("system.resourceCapsEscalateConfirm")}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </section>
                 <section className="settings-group system-restore-prompt-context">
                   <div className="settings-group-heading">
@@ -16942,12 +17388,21 @@ function EndpointSettingsPane({
         ) : (
           endpoints.map((endpoint) => {
             const selectedForDelete = selectedEndpointIds.has(endpoint.id);
+            const windowWarning = endpointContextWindowWarning(endpoint, endpointCatalogModel(endpoint, catalog));
             const endpointDetails = (
               <>
                 <span>
                   <strong>
                     {endpoint.name}
                     <EndpointChainRateFlag endpoint={endpoint} />
+                    {windowWarning && (
+                      <span
+                        className="endpoint-window-badge"
+                        title={t("endpoints.contextWindowOverLimit", { known: windowWarning.known.toLocaleString() })}
+                      >
+                        <TriangleAlert size={11} strokeWidth={2.2} aria-hidden="true" />
+                      </span>
+                    )}
                   </strong>
                 </span>
                 <small>
@@ -17766,9 +18221,16 @@ function ModelEndpointEditor({
   const providerLabels: Record<string, string> = { openai: "OpenAI", zhipu: t("endpoints.zhipu"), kimi: t("endpoints.kimi"), kimi_code: t("endpoints.kimiCode") };
   const capabilityIssue = endpointCapabilityIssue(draft, selectedModel, providers);
   const templateBudget = templateBudgetSuggestion(selectedModel);
-  const inputBudgetInvalid = !!selectedModel && (capabilityIssue?.code === "input_budget" || capabilityIssue?.code === "context_budget");
-  const outputBudgetInvalid = !!selectedModel && (capabilityIssue?.code === "output_budget" || capabilityIssue?.code === "context_budget");
+  const inputBudgetInvalid = !!selectedModel && (capabilityIssue?.code === "input_budget");
+  const outputBudgetInvalid = !!selectedModel && (capabilityIssue?.code === "output_budget");
   const catalogInvalid = capabilityIssue !== null;
+  const contextWindowTotal = draft.max_llm_input_tokens + draft.max_llm_output_tokens;
+  const contextWindowWarning = endpointContextWindowWarning(draft, selectedModel);
+  const contextWindowMode = (() => {
+    if (selectedModel && contextWindowTotal === selectedModel.context_window) return "model";
+    const preset = MODEL_CONTEXT_WINDOW_OPTIONS.find((option) => option === contextWindowTotal);
+    return preset != null ? String(preset) : "custom";
+  })();
   const dailyReasoningOptions = allowed != null
     ? displayedAllowed
     : selectedModel?.efforts ?? REASONING_EFFORT_OPTIONS;
@@ -17968,6 +18430,70 @@ function ModelEndpointEditor({
             <option value="json">json</option>
           </select>
         </label>
+
+        <div className="wide endpoint-context-window">
+          <div className="endpoint-context-window-head">
+            <span>{t("endpoints.contextWindow")}</span>
+            {contextWindowWarning && (
+              <span
+                className="endpoint-context-window-warning"
+                tabIndex={0}
+                title={t("endpoints.contextWindowOverLimit", { known: contextWindowWarning.known.toLocaleString() })}
+              >
+                <TriangleAlert size={13} strokeWidth={2} aria-hidden="true" />
+                <small>{t("endpoints.contextWindowOverLimitHint")}</small>
+              </span>
+            )}
+          </div>
+          <div className="endpoint-context-window-control">
+            <select
+              aria-label={t("endpoints.contextWindow")}
+              value={contextWindowMode}
+              onChange={(event) => {
+                const choice = event.target.value;
+                if (choice === "custom") return;
+                const tokens = choice === "model" && selectedModel
+                  ? selectedModel.context_window
+                  : Number(choice);
+                if (Number.isFinite(tokens) && tokens >= 1)
+                  setDraft((current) => applyContextWindowChoice(current, tokens));
+              }}
+            >
+              {selectedModel && (
+                <option value="model">
+                  {t("endpoints.contextWindowModel", { value: formatContextWindowTokens(selectedModel.context_window) })}
+                </option>
+              )}
+              {MODEL_CONTEXT_WINDOW_OPTIONS.map((option) => (
+                <option key={option} value={String(option)}>{formatContextWindowTokens(option)}</option>
+              ))}
+              <option value="custom">{t("endpoints.contextWindowCustom")}</option>
+            </select>
+            {contextWindowMode === "custom" && (
+              <input
+                className="endpoint-token-budget"
+                type="number"
+                inputMode="numeric"
+                min={1}
+                step={1}
+                value={contextWindowTotal}
+                onKeyDown={(event) => { if (event.key === "ArrowUp" || event.key === "ArrowDown") event.preventDefault(); }}
+                onChange={(event) => {
+                  const tokens = Number(event.target.value);
+                  if (Number.isFinite(tokens) && tokens >= 1)
+                    setDraft((current) => applyContextWindowChoice(current, tokens));
+                }}
+              />
+            )}
+            <small className="endpoint-context-window-sum">
+              {t("endpoints.contextWindowSum", {
+                input: draft.max_llm_input_tokens.toLocaleString(),
+                output: draft.max_llm_output_tokens.toLocaleString(),
+              })}
+            </small>
+          </div>
+          <small>{t("endpoints.contextWindowHint")}</small>
+        </div>
 
         <label>
           {t("endpoints.inputBudget")}

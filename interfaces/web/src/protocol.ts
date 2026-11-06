@@ -438,6 +438,7 @@ export type Activity = {
     | "free_talk"
     | "user_supplement"
     | "memo_notice"
+    | "work_file_notice"
     | "reasoning_notice"
     | "model_service_issue";
   toolgen_phase?: string;
@@ -540,6 +541,41 @@ export type ChatFavorite = {
   deleted?: boolean;
 };
 
+export type ResourceCapKernelStatus =
+  | "applied"
+  | "disabled"
+  | "unavailable"
+  | "unsupported";
+
+export type ResourceCapDimension = {
+  enabled: boolean;
+  percent: number;
+  kernel: ResourceCapKernelStatus;
+  limit: string | null;
+  reason: string | null;
+  escalation_required: boolean;
+};
+
+export type ResourceCapsProjection = {
+  cpu: ResourceCapDimension;
+  mem: ResourceCapDimension;
+  scope: string;
+};
+
+/// Read-only resource sample for the Session Insights dashboard. Absent
+/// dimensions mean the current platform cannot account for them; the UI must
+/// render an unavailable state instead of zero.
+export type SessionResourceUsage = {
+  cpu_usage_usec?: number;
+  cpu_quota_cores?: number;
+  memory_current_bytes?: number;
+  memory_peak_bytes?: number;
+  swap_current_bytes?: number;
+  memory_high_bytes?: number;
+  memory_max_bytes?: number;
+  oom_kill_count: number;
+};
+
 export type MemStorageUsage = {
   temporary_bytes: number;
   conversation_bytes: number;
@@ -574,6 +610,11 @@ export type Snapshot = {
       model_tool_result_bytes: ModelToolResultBytes;
       context_compress_threshold_percent: ContextCompressThresholdPercent;
       restore_prompt_context_on_startup: boolean;
+      system_cpu_cap_percent: number;
+      system_mem_cap_percent: number;
+      system_cpu_cap_enabled: boolean;
+      system_mem_cap_enabled: boolean;
+      resource_caps: ResourceCapsProjection;
     };
     runtime_options: Array<{
       key: string;
@@ -763,8 +804,19 @@ export type WireEvent =
       model_tool_result_bytes: ModelToolResultBytes;
       context_compress_threshold_percent: ContextCompressThresholdPercent;
       restore_prompt_context_on_startup: boolean;
+      system_cpu_cap_percent: number;
+      system_mem_cap_percent: number;
+      system_cpu_cap_enabled: boolean;
+      system_mem_cap_enabled: boolean;
+      resource_caps: ResourceCapsProjection;
     }
   | ({ type: "mem_storage_usage" } & MemStorageUsage)
+  | {
+      type: "session_resource_usage";
+      session_id: string;
+      sampled_at_ms: number;
+      usage: SessionResourceUsage | null;
+    }
   | { type: "mem_temporary_items"; items: MemTemporaryItem[]; error?: string }
   | { type: "file_uploaded"; session_id: string; file: Attachment }
   | { type: "attachment_removed"; session_id: string; attachment_id: string }
@@ -985,6 +1037,7 @@ export type ClientCommand =
       max_input_tokens: number | null;
     }
   | { type: "session_usage_reset"; session_id: string }
+  | { type: "session_resource_usage_query"; session_id: string }
   | {
       type: "model_endpoint_upsert";
       endpoint: {
@@ -1081,6 +1134,21 @@ export type ClientCommand =
   | {
       type: "system_context_compress_threshold_update";
       percent: ContextCompressThresholdPercent;
+    }
+  | {
+      type: "system_resource_caps_update";
+      cpu_enabled: boolean;
+      cpu_percent: number;
+      mem_enabled: boolean;
+      mem_percent: number;
+    }
+  | {
+      type: "system_resource_caps_escalate";
+      cpu_enabled: boolean;
+      cpu_percent: number;
+      mem_enabled: boolean;
+      mem_percent: number;
+      password: string;
     }
   | { type: "system_restore_prompt_context_on_startup_update"; enabled: boolean }
   | { type: "mem_temporary_items_list" }

@@ -383,8 +383,7 @@ export type EndpointCapabilityIssue =
   | { code: "daily_reasoning_unsupported" }
   | { code: "allowed_reasoning_unsupported" }
   | { code: "input_budget" }
-  | { code: "output_budget" }
-  | { code: "context_budget" };
+  | { code: "output_budget" };
 
 export type ProviderSpec = {
   id: string;
@@ -422,8 +421,6 @@ export function endpointCapabilityIssue(
     return { code: "input_budget" };
   if (draft.max_llm_output_tokens < model.min_output || draft.max_llm_output_tokens > model.max_output)
     return { code: "output_budget" };
-  if (draft.max_llm_input_tokens + draft.max_llm_output_tokens > model.context_window)
-    return { code: "context_budget" };
   return null;
 }
 
@@ -438,8 +435,32 @@ export function endpointCapabilityIssueMessage(issue: EndpointCapabilityIssue): 
     case "allowed_reasoning_unsupported": return t("endpoints.validationAllowedUnsupported");
     case "input_budget": return t("endpoints.validationInputBudget");
     case "output_budget": return t("endpoints.validationOutputBudget");
-    case "context_budget": return t("endpoints.validationContextBudget");
   }
+}
+
+/** Applies a unified context-window choice: the output budget stays and the
+ * input budget takes the remainder (clamped to a positive integer). */
+export function applyContextWindowChoice(
+  draft: ModelEndpointDraft,
+  windowTokens: number,
+): ModelEndpointDraft {
+  const output = Math.max(0, Math.floor(draft.max_llm_output_tokens));
+  const input = Math.max(1, Math.floor(windowTokens) - output);
+  return { ...draft, max_llm_input_tokens: input };
+}
+
+export type EndpointContextWindowWarning = { total: number; known: number };
+
+/** Warning-only mismatch between the configured window (input + output) and
+ * the model's documented context window. An oversized choice never blocks
+ * saving: the host compresses at the model's real window. */
+export function endpointContextWindowWarning(
+  budget: Pick<ModelEndpointDraft, "max_llm_input_tokens" | "max_llm_output_tokens">,
+  model: CatalogModel | undefined,
+): EndpointContextWindowWarning | null {
+  if (!model) return null;
+  const total = budget.max_llm_input_tokens + budget.max_llm_output_tokens;
+  return total > model.context_window ? { total, known: model.context_window } : null;
 }
 
 export function endpointImportIssueMessage(issue: string): string {
