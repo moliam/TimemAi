@@ -17858,8 +17858,13 @@ function SortableEndpointChainRow({
         </span>
       </span>
       {working && current && (
-        <span className="endpoint-chain-active-badge">
-          {t("endpoints.chainCurrent")}
+        <span
+          className="endpoint-chain-active-badge"
+          role="img"
+          aria-label={t("endpoints.chainCurrent")}
+          title={t("endpoints.chainCurrent")}
+        >
+          <Check size={11} aria-hidden="true" />
         </span>
       )}
       <button
