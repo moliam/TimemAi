@@ -241,7 +241,7 @@ assert(await evaluate(`document.querySelector('.endpoint-catalog-picker select')
 assert(await evaluate(`document.querySelector(${JSON.stringify(protocol)}).value==='openai-responses'`),'Kimi Code suggests Responses');
 assert(await evaluate(`document.querySelector('.endpoint-editor-grid input:nth-of-type(2)').value==='k3.1-pro'`),'Kimi Code model id populated');
 await setField('.endpoint-editor-grid input', 'Kimi Code E2E '+runId);
-await setField('.endpoint-api-key input', 'sk-kimi-e2e-placeholder');
+await setField('.endpoint-api-key input', 'kimi-e2e-placeholder');
 assert(await evaluate(`!document.querySelector('.endpoint-editor button.primary').disabled`),'Kimi Code template is saveable after API key entry');
 await evaluate(`document.querySelector('.endpoint-editor-topbar').scrollIntoView({block:'start'})`);
 const kimiSave = await hitTest("document.querySelector('.endpoint-editor-buttons button.primary')",'Kimi Code save');
