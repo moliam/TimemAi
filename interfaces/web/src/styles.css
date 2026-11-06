@@ -6244,44 +6244,23 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .resource-cap-select { height: 34px; border: 1px solid #303936; border-radius: 6px; padding: 0 9px; background: #141917; color: #dce7e2; font: inherit; font-size: 12px; }
 .resource-cap-select:focus { outline: none; border-color: #4d6a5f; }
 .resource-cap-select:disabled { opacity: 0.5; }
-.resource-cap-row.is-unsupported .resource-cap-switch { cursor: not-allowed; }
-.resource-cap-row.is-unsupported .resource-cap-name { color: #77847e; opacity: 0.55; }
-.resource-cap-row.is-unsupported .resource-cap-select { opacity: 0.4; }
-.resource-cap-row.is-unsupported .resource-cap-slider { opacity: 0.35; }
-.resource-cap-row.is-unsupported .resource-cap-desc { opacity: 0.55; }
-.resource-cap-warning { position: relative; display: inline-flex; align-items: center; color: #b08a5a; cursor: help; flex: none; border-radius: 3px; }
+.resource-cap-row.is-inert .resource-cap-switch { cursor: not-allowed; }
+.resource-cap-row.is-inert .resource-cap-name { color: #77847e; opacity: 0.55; }
+.resource-cap-row.is-inert .resource-cap-select { opacity: 0.4; }
+.resource-cap-row.is-inert .resource-cap-slider { opacity: 0.35; }
+.resource-cap-row.is-inert .resource-cap-desc { opacity: 0.55; }
+/* Native title only: the settings pane scrolls (and .settings-center clips),
+   so an absolutely positioned custom tooltip would be cut off at the pane
+   edge. Keep the icon focusable for keyboard/AT users. */
+.resource-cap-warning { display: inline-flex; align-items: center; color: #b08a5a; cursor: help; flex: none; border-radius: 3px; }
 .resource-cap-warning:focus-visible { outline: 2px solid #4d6a5f; outline-offset: 2px; }
-.resource-cap-warning::after {
-  content: attr(data-tooltip);
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 0;
-  width: max-content;
-  max-width: 240px;
-  padding: 6px 9px;
-  border: 1px solid #303936;
-  border-radius: 6px;
-  background: #141917;
-  color: #dce7e2;
-  font-size: 11px;
-  line-height: 1.45;
-  text-align: left;
-  white-space: normal;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.12s ease;
-  z-index: 5;
-}
-.resource-cap-warning:hover::after,
-.resource-cap-warning:focus-visible::after { opacity: 1; }
 :root[data-theme="light"] .resource-cap-name { color: #24352f; }
 :root[data-theme="light"] .resource-cap-slider { background: #c9d6d0; }
 :root[data-theme="light"] .resource-cap-slider::after { background: #f7faf8; }
 :root[data-theme="light"] .resource-cap-switch input:checked + .resource-cap-slider { background: #3d7d64; }
 :root[data-theme="light"] .resource-cap-select { border-color: #c9d6d0; background: #f7faf8; color: #24352f; }
-:root[data-theme="light"] .resource-cap-row.is-unsupported .resource-cap-name { color: #65766f; }
+:root[data-theme="light"] .resource-cap-row.is-inert .resource-cap-name { color: #65766f; }
 :root[data-theme="light"] .resource-cap-warning { color: #8a6d2f; }
-:root[data-theme="light"] .resource-cap-warning::after { background: #ffffff; color: #24352f; border-color: #d3ded9; }
 .resource-caps-modal { position: fixed; inset: 0; background: rgba(8, 12, 10, 0.62); display: flex; align-items: center; justify-content: center; z-index: 90; }
 .resource-caps-modal-card { width: min(420px, calc(100vw - 32px)); background: #141917; border: 1px solid #303936; border-radius: 10px; padding: 18px; display: flex; flex-direction: column; gap: 12px; color: #dce7e2; }
 .resource-caps-modal-card p { margin: 0; font-size: 12px; color: #9aa8a1; line-height: 1.6; }

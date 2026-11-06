@@ -94,13 +94,16 @@ pub(super) fn spawn_session_work_file_monitor(state: AppState) {
     tokio::spawn(async move {
         let mut watch = WorkFileWatchState::default();
         loop {
-            sample_work_files(&state, &mut watch);
+            sample_work_files(&state, &mut watch).await;
             tokio::time::sleep(POLL_INTERVAL).await;
         }
     });
 }
 
-fn sample_work_files(state: &AppState, watch: &mut WorkFileWatchState) {
+/// Async metadata reads keep the 1s sweep from pinning a runtime worker on
+/// slow or network-backed stores; the per-session reads stay sequential so the
+/// burst of `stat` calls is still bounded by the poll interval.
+async fn sample_work_files(state: &AppState, watch: &mut WorkFileWatchState) {
     if state
         .session_restore_in_progress
         .load(std::sync::atomic::Ordering::SeqCst)
@@ -123,7 +126,7 @@ fn sample_work_files(state: &AppState, watch: &mut WorkFileWatchState) {
         let Ok(path) = session_work_file_path(state, &session_id) else {
             continue;
         };
-        let stamp = match std::fs::metadata(&path) {
+        let stamp = match tokio::fs::metadata(&path).await {
             Ok(metadata) => WorkFileStamp {
                 modified: metadata.modified().ok(),
                 len: metadata.len(),

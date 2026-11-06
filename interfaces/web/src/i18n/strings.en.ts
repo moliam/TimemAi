@@ -683,6 +683,8 @@ export const en: Strings = {
     resourceCapsErrorTitle: "Saving system resource caps failed",
     resourceCapsErrorBody: "Reconnect to Timem Web before changing the system resource caps.",
     resourceCpuUnsupportedHint: "CPU cap management is not supported on this system",
+    resourceCpuUnavailableHint: "CPU cap management is temporarily unavailable on this system",
+    resourceMemUnavailableHint: "Memory cap management is temporarily unavailable on this system",
     resourceMemUnsupportedHint: "Memory cap management is not supported on this system",
     resourceCapsEscalateTitle: "Administrator authorization required",
     resourceCapsEscalateDesc: "Enabling the selected resource cap requires administrator permission. Enter the administrator password for a one-time authorization; it is used only for this action and is never stored or logged.",

@@ -680,6 +680,8 @@ export const zh = {
     resourceCapsErrorTitle: "系统资源上限保存失败",
     resourceCapsErrorBody: "重新连接 Timem Web 后再修改系统资源上限。",
     resourceCpuUnsupportedHint: "当前系统不支持 CPU 管控",
+    resourceCpuUnavailableHint: "当前系统暂时无法使用 CPU 管控",
+    resourceMemUnavailableHint: "当前系统暂时无法使用内存管控",
     resourceMemUnsupportedHint: "当前系统不支持内存管控",
     resourceCapsEscalateTitle: "需要管理员授权",
     resourceCapsEscalateDesc: "开启所选资源管控需要管理员权限。输入系统管理员密码完成一次性授权；密码仅用于本次操作，不会被保存或记录。",

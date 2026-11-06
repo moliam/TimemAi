@@ -103,11 +103,15 @@ export const RESOURCE_CAP_PERCENT_OPTIONS = [10, 25, 50, 70, 85, 100] as const;
 export type ResourceCapability =
   | "manageable"
   | "needs-permission"
+  | "unavailable"
   | "unsupported";
 
 /// Classifies one resource-cap dimension for the settings UI:
-/// - "unsupported": the host reports no usable management facility, so the
-///   switch must stay off/greyed and no operation may be offered.
+/// - "unsupported": the host reports no usable management facility at all, so
+///   the switch stays off/greyed and no operation may be offered.
+/// - "unavailable": the facility exists but cannot be applied right now (for
+///   example a cgroup root shared with other processes). The controls stay
+///   inert, but the explanation differs from a permanent platform limitation.
 /// - "needs-permission": the facility exists but root is required, so the
 ///   switch stays interactive and a toggle prompts for a one-shot password.
 /// - "manageable": the kernel facility is present and usable now.
@@ -117,7 +121,16 @@ export function resourceCapability(
   if (!dimension) return "manageable";
   if (dimension.kernel === "unsupported") return "unsupported";
   if (dimension.kernel === "unavailable") {
-    return dimension.escalation_required ? "needs-permission" : "unsupported";
+    return dimension.escalation_required ? "needs-permission" : "unavailable";
   }
   return "manageable";
+}
+
+/// Both non-actionable states render the same inert controls. They differ only
+/// in the host-supplied explanation, so callers can share the disabled/opacity
+/// handling instead of duplicating the two capability names.
+export function resourceCapabilityIsInert(
+  capability: ResourceCapability,
+): boolean {
+  return capability === "unsupported" || capability === "unavailable";
 }

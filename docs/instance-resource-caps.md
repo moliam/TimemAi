@@ -176,7 +176,7 @@ root 修复，动作只有两类白名单操作：
   保存值继续生效；环境变量仅作为首次种子。
 - **可观测性联动**：RUNTIME_INFO 的 `resource` 段在 caps 值变化后会再次呈现一次新状态。
 - **UI 细节**：每个维度一行 = 开关（`role="switch"`，on=内核管控）+ 档位下拉
-  （10/25/50/70/85/100），不再渲染内核状态徽标或技术文案，只按能力三态呈现
+  （10/25/50/70/85/100），不再渲染内核状态徽标或技术文案，只按能力四态呈现
   （`resourceCapability`，`interfaces/web/src/runtime_settings.ts`）：
   - **可管控**（`applied`/`disabled`）：普通 on/off 开关，保存走
     `system_resource_caps_update`。
@@ -185,9 +185,17 @@ root 修复，动作只有两类白名单操作：
     对话框走 `system_resource_caps_escalate`（目标维度强制 enabled=true 提交，内核先
     热应用、成功才保存），取消或点击遮罩则保持 OFF。面向非技术用户，密码框文案不使用
     root / 内核 / 提权等术语，只说明"需要管理员授权、密码仅用于本次操作"。
-  - **不支持**（`unsupported`，或 `unavailable` 且无提权路径）：开关禁用、强制 OFF，
-    行灰化并仅附一个 ⚠️ 图标，hover 提示「当前系统不支持 CPU/内存 管控」，不提供任何
-    操作入口。
+  - **暂时不可用**（`unavailable` 且 `escalation_required=false`）：能力存在但当前无法
+    应用（例如实例根与其它进程共享 cgroup 根），开关禁用、强制 OFF，行灰化并附 ⚠️ 图标，
+    原生 title 提示「当前系统暂时无法使用 CPU/内存 管控」。这与平台不支持是两种不同
+    事实，不能混为一谈。
+  - **不支持**（`unsupported`）：平台不存在该能力，开关禁用、强制 OFF，行灰化并附 ⚠️
+    图标，原生 title 提示「当前系统不支持 CPU/内存 管控」，不提供任何操作入口。
+  两种不可操作状态共用 `is-inert` 样式与 `resourceCapabilityIsInert` 判定，仅提示文案
+  不同。提示只使用原生 `title`：设置面板内容区会滚动/裁剪，绝对定位的自定义 tooltip
+  会在面板边缘被截断；⚠️ 图标保留 `tabIndex=0` 与 `aria-label`，键盘/读屏用户仍可获取
+  提示。密码对话框打开后焦点落在密码框，Tab 由应用级对话框焦点陷阱限制在卡片内，
+  文档级 Escape 可从任意控件关闭对话框（不再依赖密码框自身的键盘处理）。
   未修改/非法时禁用保存，保存中与失败状态均有 aria-live 反馈；密码输入不持久化、
   提交后即清空；中英文文案齐全（`system.resourceCaps*`）。
 

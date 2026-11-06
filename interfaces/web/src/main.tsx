@@ -296,6 +296,7 @@ import {
   parseResourceCapPercent,
   reconcileRuntimeDrafts,
   resourceCapability,
+  resourceCapabilityIsInert,
   runtimeOptionLabel,
   sessionRuntimeOptions,
   shouldAutoRevealSessionApiKey,
@@ -15589,6 +15590,29 @@ const SettingsCenter = memo(function SettingsCenter(
   const [resourceCapsEscalateTarget, setResourceCapsEscalateTarget] =
     useState<"cpu" | "mem" | null>(null);
   const [resourceCapsPassword, setResourceCapsPassword] = useState("");
+  const resourceCapsPasswordInputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (!resourceCapsEscalateOpen) return;
+    // Tab containment already comes from the app-level dialog focus trap
+    // (role="dialog" aria-modal="true" below). This effect owns two things the
+    // password field alone cannot: focus lands in the dialog on open, and
+    // Escape dismisses it from any control, not only while the input is
+    // focused.
+    resourceCapsPasswordInputRef.current?.focus({ preventScroll: true });
+    const dismissOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      // The Settings center also listens for Escape on the document (bubble
+      // phase) and would close the whole panel behind this modal. Consume the
+      // key in the capture phase so the modal is the only thing that closes.
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setResourceCapsEscalateOpen(false);
+      setResourceCapsEscalateTarget(null);
+      setResourceCapsPassword("");
+    };
+    document.addEventListener("keydown", dismissOnEscape, true);
+    return () => document.removeEventListener("keydown", dismissOnEscape, true);
+  }, [resourceCapsEscalateOpen]);
   useEffect(() => {
     setResourceCpuDraft(String(systemCpuCapPercent));
   }, [systemCpuCapPercent]);
@@ -15611,7 +15635,7 @@ const SettingsCenter = memo(function SettingsCenter(
   const toggleResourceCap = (dimension: "cpu" | "mem", enabled: boolean) => {
     const capability =
       dimension === "cpu" ? resourceCpuCapability : resourceMemCapability;
-    if (capability === "unsupported") return;
+    if (resourceCapabilityIsInert(capability)) return;
     if (enabled && capability === "needs-permission") {
       setResourceCapsEscalateTarget(dimension);
       setResourceCapsPassword("");
@@ -16132,7 +16156,10 @@ const SettingsCenter = memo(function SettingsCenter(
                         title: t("system.resourceCpuCapTitle"),
                         aria: t("system.resourceCpuCapAria"),
                         desc: t("system.resourceCpuCapDesc"),
-                        hint: t("system.resourceCpuUnsupportedHint"),
+                        hint:
+                          resourceCpuCapability === "unavailable"
+                            ? t("system.resourceCpuUnavailableHint")
+                            : t("system.resourceCpuUnsupportedHint"),
                         capability: resourceCpuCapability,
                         enabled: resourceCpuEnabledDraft,
                         setEnabled: (enabled: boolean) =>
@@ -16145,7 +16172,10 @@ const SettingsCenter = memo(function SettingsCenter(
                         title: t("system.resourceMemCapTitle"),
                         aria: t("system.resourceMemCapAria"),
                         desc: t("system.resourceMemCapDesc"),
-                        hint: t("system.resourceMemUnsupportedHint"),
+                        hint:
+                          resourceMemCapability === "unavailable"
+                            ? t("system.resourceMemUnavailableHint")
+                            : t("system.resourceMemUnsupportedHint"),
                         capability: resourceMemCapability,
                         enabled: resourceMemEnabledDraft,
                         setEnabled: (enabled: boolean) =>
@@ -16156,8 +16186,8 @@ const SettingsCenter = memo(function SettingsCenter(
                     ].map((row) => (
                       <div
                         className={`resource-cap-row${
-                          row.capability === "unsupported"
-                            ? " is-unsupported"
+                          resourceCapabilityIsInert(row.capability)
+                            ? " is-inert"
                             : ""
                         }`}
                         data-capability={row.capability}
@@ -16173,7 +16203,7 @@ const SettingsCenter = memo(function SettingsCenter(
                             disabled={
                               resourceCapsPending ||
                               !connected ||
-                              row.capability === "unsupported"
+                              resourceCapabilityIsInert(row.capability)
                             }
                             onChange={(event) =>
                               row.setEnabled(event.target.checked)
@@ -16190,7 +16220,10 @@ const SettingsCenter = memo(function SettingsCenter(
                           value={row.draft}
                           aria-label={row.aria}
                           disabled={
-                            resourceCapsPending || !connected || !row.enabled
+                            resourceCapsPending ||
+                            !connected ||
+                            resourceCapabilityIsInert(row.capability) ||
+                            !row.enabled
                           }
                           onChange={(event) => row.setDraft(event.target.value)}
                         >
@@ -16200,14 +16233,13 @@ const SettingsCenter = memo(function SettingsCenter(
                             </option>
                           ))}
                         </select>
-                        {row.capability === "unsupported" && (
+                        {resourceCapabilityIsInert(row.capability) && (
                           <span
                             className="resource-cap-warning"
                             role="img"
                             tabIndex={0}
                             aria-label={row.hint}
                             title={row.hint}
-                            data-tooltip={row.hint}
                           >
                             <TriangleAlert size={13} aria-hidden="true" />
                           </span>
@@ -16269,9 +16301,9 @@ const SettingsCenter = memo(function SettingsCenter(
                         <strong>{t("system.resourceCapsEscalateTitle")}</strong>
                         <p>{t("system.resourceCapsEscalateDesc")}</p>
                         <input
+                          ref={resourceCapsPasswordInputRef}
                           type="password"
                           autoComplete="off"
-                          autoFocus
                           placeholder={t("system.resourceCapsEscalatePassword")}
                           aria-label={t("system.resourceCapsEscalatePassword")}
                           value={resourceCapsPassword}
@@ -16281,9 +16313,6 @@ const SettingsCenter = memo(function SettingsCenter(
                           onKeyDown={(event) => {
                             if (event.key === "Enter") {
                               submitResourceCapsEscalation();
-                            }
-                            if (event.key === "Escape") {
-                              closeResourceCapsEscalation();
                             }
                           }}
                         />

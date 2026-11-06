@@ -2282,6 +2282,27 @@ export function turnLatestModelTelemetry(
   return undefined;
 }
 
+/** Indexes `model_request_completed` events by round in one pass.
+ *
+ * Both telemetry helpers used to scan `turn.events` with `find` for every
+ * model response, which is O(responses × events) per turn. Keeping the first
+ * match per round preserves the previous `find` semantics for duplicated or
+ * out-of-order rounds.
+ */
+export function completedModelEventsByRound(
+  turn: WebTurn,
+): Map<number, WebTurnEvent> {
+  const completedByRound = new Map<number, WebTurnEvent>();
+  for (const event of turn.events) {
+    if (event.source !== "worker_activity") continue;
+    if (event.payload.kind !== "model_request_completed") continue;
+    const round = finitePayloadNumber(event.payload, "round");
+    if (round === undefined || completedByRound.has(round)) continue;
+    completedByRound.set(round, event);
+  }
+  return completedByRound;
+}
+
 /** Streaming Welford aggregation over completed model requests only. */
 export function sessionModelTelemetry(session: Session): SessionModelTelemetry {
   let completionTokens = 0;
@@ -2291,6 +2312,7 @@ export function sessionModelTelemetry(session: Session): SessionModelTelemetry {
   let ttftM2 = 0;
   const resetAtMs = session.telemetry_reset_at_ms ?? undefined;
   for (const turn of session.turns) {
+    const completedByRound = completedModelEventsByRound(turn);
     for (const response of turn.events) {
       if (resetAtMs !== undefined && response.created_at_ms < resetAtMs) continue;
       if (response.source !== "worker_activity" || response.payload.kind !== "model_response") continue;
@@ -2298,11 +2320,7 @@ export function sessionModelTelemetry(session: Session): SessionModelTelemetry {
       if (round === undefined) continue;
       const usage = response.payload.usage;
       if (!usage || typeof usage !== "object") continue;
-      const completed = turn.events.find((event) =>
-        event.source === "worker_activity" &&
-        event.payload.kind === "model_request_completed" &&
-        finitePayloadNumber(event.payload, "round") === round
-      );
+      const completed = completedByRound.get(round);
       if (!completed) continue;
       const latencyMs = finitePayloadNumber(completed.payload, "latency_ms");
       const outputTokens = finitePayloadNumber(usage as UsageStats, "completion_tokens");
@@ -2376,6 +2394,7 @@ export function sessionModelPulse(session: Session): SessionModelPulse {
   const resetAtMs = session.telemetry_reset_at_ms ?? undefined;
   const recent: ModelPulseSample[] = [];
   for (const turn of session.turns) {
+    const completedByRound = completedModelEventsByRound(turn);
     for (const response of turn.events) {
       if (resetAtMs !== undefined && response.created_at_ms < resetAtMs) continue;
       if (response.source !== "worker_activity" || response.payload.kind !== "model_response") continue;
@@ -2383,12 +2402,7 @@ export function sessionModelPulse(session: Session): SessionModelPulse {
       if (round === undefined) continue;
       const usage = response.payload.usage;
       if (!usage || typeof usage !== "object") continue;
-      const completed = turn.events.find(
-        (event) =>
-          event.source === "worker_activity" &&
-          event.payload.kind === "model_request_completed" &&
-          finitePayloadNumber(event.payload, "round") === round,
-      );
+      const completed = completedByRound.get(round);
       if (!completed) continue;
       const latencyMs = finitePayloadNumber(completed.payload, "latency_ms");
       const outputTokens = finitePayloadNumber(usage as UsageStats, "completion_tokens");

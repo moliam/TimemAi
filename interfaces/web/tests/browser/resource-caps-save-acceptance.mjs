@@ -472,7 +472,7 @@ async function unsupportedFlow() {
     assert(mem.selectDisabled, "unsupported preset select is disabled");
     assert(mem.warnTitle === "当前系统不支持内存管控", `warning hover title, got ${JSON.stringify(mem.warnTitle)}`);
     assert(mem.warnAria === mem.warnTitle, "warning icon is announced to assistive tech");
-    assert(mem.warnTooltip === mem.warnTitle, "warning icon carries the immediate CSS tooltip text");
+    assert(mem.warnTooltip === null, "custom data-tooltip is gone; the native title is the only tooltip");
     assert(mem.warnTabIndex === 0, "warning icon is keyboard-focusable so the hint is not mouse-only");
     assert(!mem.badge, "no kernel status badge");
     assert(!mem.rowText.includes("不可用") && !mem.rowText.includes("平台不支持") && !mem.rowText.includes("需要 root"), `no technical copy in the row: ${JSON.stringify(mem.rowText)}`);
@@ -525,6 +525,71 @@ async function unsupportedFlow() {
   }
 }
 
+// A facility that exists but cannot be applied right now (for example a
+// cgroup root shared with other processes) must not be misreported as a
+// permanent platform limitation: same inert controls, different explanation.
+async function unavailableFlow() {
+  const caps = {
+    cpu: DEFAULT_CAPS.cpu,
+    mem: { enabled: true, percent: 85, kernel: "unavailable", limit: null, reason: "instance root shared with other processes", escalation_required: false },
+    scope: DEFAULT_CAPS.scope,
+  };
+  const host = await startHost(makeSession(), caps);
+  const browser = await startBrowser(host.url);
+  try {
+    await browser.call("Page.bringToFront");
+    await waitFor(() => browser.evaluate(`document.body.textContent.includes('Resource caps acceptance turn')`), "initial snapshot");
+    await browser.evaluate(`localStorage.setItem('timem-web-locale-v1','zh'); localStorage.setItem('timem-web-appearance-v1', JSON.stringify({theme:'dark'}))`);
+    await browser.call("Page.reload");
+    await waitFor(() => browser.evaluate(`document.body.textContent.includes('Resource caps acceptance turn')`), "snapshot after locale/theme");
+
+    await openSystemPane(browser);
+    const mem = await browser.evaluate(`(() => {
+      const row = document.querySelector('.resource-cap-row[data-dimension="mem"]');
+      const sw = row.querySelector('input[type="checkbox"]');
+      const warn = row.querySelector('.resource-cap-warning');
+      return {
+        capability: row.dataset.capability,
+        checked: sw.checked,
+        disabled: sw.disabled,
+        selectDisabled: row.querySelector('select').disabled,
+        inertClass: row.classList.contains('is-inert'),
+        warnTitle: warn ? warn.title : null,
+        warnAria: warn ? warn.getAttribute('aria-label') : null,
+        warnTooltip: warn ? warn.getAttribute('data-tooltip') : null,
+        rowText: row.textContent,
+      };
+    })()`);
+    assert(mem, "mem row renders");
+    assert(mem.capability === "unavailable", `mem row marked temporarily unavailable, got ${mem.capability}`);
+    assert(!mem.checked && mem.disabled && mem.selectDisabled, "temporarily unavailable dimension is OFF and inoperable");
+    assert(mem.inertClass, "inert styling applies to a temporarily unavailable dimension");
+    assert(mem.warnTitle === "当前系统暂时无法使用内存管控", `temporarily-unavailable title, got ${JSON.stringify(mem.warnTitle)}`);
+    assert(mem.warnAria === mem.warnTitle, "warning icon is announced to assistive tech");
+    assert(mem.warnTooltip === null, "custom data-tooltip is gone; the native title is the only tooltip");
+    assert(!mem.rowText.includes("不支持"), `temporarily unavailable is not described as unsupported: ${JSON.stringify(mem.rowText)}`);
+
+    // Saving submits the inert dimension as OFF, never the stale stored ON.
+    await browser.evaluate(`(() => {
+      const select = document.querySelector('.resource-cap-row[data-dimension="cpu"] select');
+      const setValue = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+      setValue.call(select, '70');
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await waitFor(() => browser.evaluate(`!document.querySelector('.system-resource-caps .resource-caps-actions button').disabled`), "dirty caps enable save");
+    await browser.evaluate(`document.querySelector('.system-resource-caps .resource-caps-actions button').click()`);
+    await waitFor(() => host.commands.some((c) => c.type === "system_resource_caps_update"), "caps save command");
+    const saved = host.commands.find((c) => c.type === "system_resource_caps_update");
+    assert(saved.mem_enabled === false, `temporarily unavailable dimension must submit OFF, got ${saved.mem_enabled}`);
+    assert(saved.cpu_enabled === true && saved.cpu_percent === 70, "manageable dimension keeps its draft");
+
+    console.log("PASS Temporarily unavailable dimension: distinct hint, inert controls, native title only, submits OFF.");
+  } finally {
+    await browser.close();
+    await host.close();
+  }
+}
+
 // A dimension with a facility but no permission keeps an interactive switch
 // that renders OFF, and toggling it on opens the root password dialog at once.
 async function escalationFlow() {
@@ -566,8 +631,34 @@ async function escalationFlow() {
     await click(browser, switchPoint);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.resource-caps-modal')`), "password dialog opens on toggle");
     assert(await browser.evaluate(`document.querySelector('.resource-cap-row[data-dimension="mem"] input[type="checkbox"]').checked`) === false, "draft stays OFF while the dialog is open");
+    assert(await browser.evaluate(`document.activeElement === document.querySelector('.resource-caps-modal input[type="password"]')`), "password field receives focus when the dialog opens");
 
-    // Cancelling keeps the dimension OFF.
+    // Tab must stay inside the modal instead of escaping to the settings page.
+    for (let index = 0; index < 4; index += 1) {
+      await browser.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+      await browser.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 });
+    }
+    assert(await browser.evaluate(`document.querySelector('.resource-caps-modal').contains(document.activeElement)`), "Tab keeps focus inside the password dialog");
+
+    // Escape works from the focused action button too, not only the input.
+    await browser.evaluate(`document.querySelector('.resource-caps-modal-actions button').focus()`);
+    await browser.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+    await browser.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+    await waitFor(() => browser.evaluate(`!document.querySelector('.resource-caps-modal')`), "Escape closes the dialog from a button");
+    const afterEscape = await browser.evaluate(`({
+      modal: !!document.querySelector('.resource-caps-modal'),
+      settings: !!document.querySelector('.settings-center'),
+      checked: document.querySelector('.resource-cap-row[data-dimension="mem"] input[type="checkbox"]')?.checked,
+    })`);
+    assert(!afterEscape.modal, "Escape closes only the password dialog");
+    assert(afterEscape.settings, `Escape keeps the Settings center open: ${JSON.stringify(afterEscape)}`);
+    assert(afterEscape.checked === false, `Escape leaves the switch OFF: ${JSON.stringify(afterEscape)}`);
+
+    // Cancelling keeps the dimension OFF. Escape above closed the dialog, so
+    // reopen it first.
+    const cancelPoint = await center(browser, '.resource-cap-row[data-dimension="mem"] .resource-cap-switch');
+    await click(browser, cancelPoint);
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.resource-caps-modal')`), "dialog reopens for cancel test");
     await browser.evaluate(`[...document.querySelectorAll('.resource-caps-modal-actions button')].find(b => b.textContent.trim() === '取消').click()`);
     await waitFor(() => browser.evaluate(`!document.querySelector('.resource-caps-modal')`), "dialog closes on cancel");
     assert(await browser.evaluate(`document.querySelector('.resource-cap-row[data-dimension="mem"] input[type="checkbox"]').checked`) === false, "cancel leaves the switch OFF");
@@ -609,6 +700,7 @@ async function escalationFlow() {
 async function main() {
   await saveActionFlow();
   await unsupportedFlow();
+  await unavailableFlow();
   await escalationFlow();
 }
 

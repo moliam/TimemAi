@@ -4,6 +4,7 @@ import {
   parseResourceCapPercent,
   RESOURCE_CAP_PERCENT_OPTIONS,
   resourceCapability,
+  resourceCapabilityIsInert,
 } from "../src/runtime_settings";
 import { zh } from "../src/i18n/strings.zh";
 import { en } from "../src/i18n/strings.en";
@@ -35,14 +36,21 @@ describe("resource caps ui", () => {
     expect([...RESOURCE_CAP_PERCENT_OPTIONS]).toEqual([10, 25, 50, 70, 85, 100]);
   });
 
-  it("classifies dimensions into actionable, password-gated, and unsupported", () => {
+  it("classifies dimensions into actionable, password-gated, temporarily unavailable, and unsupported", () => {
     expect(resourceCapability(undefined)).toBe("manageable");
     expect(resourceCapability({ kernel: "applied", escalation_required: false })).toBe("manageable");
     expect(resourceCapability({ kernel: "applied", escalation_required: true })).toBe("manageable");
     expect(resourceCapability({ kernel: "disabled", escalation_required: false })).toBe("manageable");
     expect(resourceCapability({ kernel: "unavailable", escalation_required: true })).toBe("needs-permission");
-    expect(resourceCapability({ kernel: "unavailable", escalation_required: false })).toBe("unsupported");
+    // A real facility that is temporarily unusable (for example a shared
+    // cgroup root) is not the same as a platform without the facility.
+    expect(resourceCapability({ kernel: "unavailable", escalation_required: false })).toBe("unavailable");
     expect(resourceCapability({ kernel: "unsupported", escalation_required: true })).toBe("unsupported");
+    expect(resourceCapability({ kernel: "unsupported", escalation_required: false })).toBe("unsupported");
+    expect(resourceCapabilityIsInert("unavailable")).toBe(true);
+    expect(resourceCapabilityIsInert("unsupported")).toBe(true);
+    expect(resourceCapabilityIsInert("manageable")).toBe(false);
+    expect(resourceCapabilityIsInert("needs-permission")).toBe(false);
   });
 
   it("wires switches, preset selects, and the initial capability state end to end", () => {
@@ -86,20 +94,36 @@ describe("resource caps ui", () => {
     expect(mainSource).not.toContain("resourceCapsEscalationRequired");
   });
 
-  it("greys unsupported dimensions and leaves only a hoverable warning icon", () => {
+  it("greys inert dimensions and explains them with a native hover title", () => {
     expect(mainSource).toContain("data-capability={row.capability}");
-    expect(mainSource).toContain("is-unsupported");
+    expect(mainSource).toContain("is-inert");
     expect(mainSource).toContain("resource-cap-warning");
+    expect(mainSource).toContain("resourceCapabilityIsInert(row.capability)");
     expect(mainSource).toContain("resourceCpuUnsupportedHint");
     expect(mainSource).toContain("resourceMemUnsupportedHint");
-    expect(mainSource).toContain('row.capability === "unsupported"');
-    expect(mainSource).toContain('title={t(');
-    expect(stylesSource).toContain(".resource-cap-row.is-unsupported .resource-cap-switch");
-    expect(stylesSource).toContain(".resource-cap-row.is-unsupported .resource-cap-name");
-    expect(stylesSource).toContain(".resource-cap-row.is-unsupported .resource-cap-select");
-    expect(stylesSource).toContain(".resource-cap-row.is-unsupported .resource-cap-slider");
+    expect(mainSource).toContain("resourceCpuUnavailableHint");
+    expect(mainSource).toContain("resourceMemUnavailableHint");
+    expect(mainSource).toContain("title={row.hint}");
+    // The settings pane scrolls and clips, so the old absolutely positioned
+    // CSS tooltip was cut off; only the native title remains.
+    expect(mainSource).not.toContain("data-tooltip");
+    expect(stylesSource).not.toContain("resource-cap-warning::after");
+    expect(stylesSource).toContain(".resource-cap-row.is-inert .resource-cap-switch");
+    expect(stylesSource).toContain(".resource-cap-row.is-inert .resource-cap-name");
+    expect(stylesSource).toContain(".resource-cap-row.is-inert .resource-cap-select");
+    expect(stylesSource).toContain(".resource-cap-row.is-inert .resource-cap-slider");
     expect(stylesSource).toContain(".resource-cap-warning");
     expect(stylesSource).not.toContain(".resource-caps-status");
+  });
+
+  it("dismisses the password dialog with a document-level Escape and focuses it on open", () => {
+    expect(mainSource).toContain("resourceCapsPasswordInputRef");
+    expect(mainSource).toContain("resourceCapsPasswordInputRef.current?.focus");
+    expect(mainSource).toContain('document.addEventListener("keydown", dismissOnEscape)');
+    expect(mainSource).toContain('if (event.key !== "Escape") return');
+    // The dialog opts into the app-level Tab containment hook.
+    expect(mainSource).toContain('role="dialog"');
+    expect(mainSource).toContain('aria-modal="true"');
   });
 
   it("prompts for a one-shot password when a permission-gated switch is turned on", () => {
@@ -117,9 +141,10 @@ describe("resource caps ui", () => {
     expect(serverSource).toContain("apply_resource_cap_escalation_plan");
   });
 
-  it("keeps unsupported dimensions inoperable instead of saving a stale ON flag", () => {
-    expect(mainSource).toContain('row.capability === "unsupported"');
-    // Save uses the effective drafts, so unsupported dimensions submit OFF.
+  it("keeps inert dimensions inoperable instead of saving a stale ON flag", () => {
+    expect(mainSource).toContain("resourceCapabilityIsInert(row.capability)");
+    // Save uses the effective drafts, so unsupported/unavailable dimensions
+    // submit OFF.
     const submit = mainSource.slice(
       mainSource.indexOf("const submitResourceCaps = () =>"),
       mainSource.indexOf("const submitResourceCapsEscalation = () =>"),
@@ -150,7 +175,9 @@ describe("resource caps ui", () => {
       "resourceMemCapAria",
       "resourceMemCapDesc",
       "resourceCpuUnsupportedHint",
+      "resourceCpuUnavailableHint",
       "resourceMemUnsupportedHint",
+      "resourceMemUnavailableHint",
       "resourceCapsSave",
       "resourceCapsInvalid",
       "resourceCapsErrorTitle",

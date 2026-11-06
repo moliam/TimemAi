@@ -30,6 +30,7 @@ import {
   clearDecisionsForSession,
   clearDecisionsForWorker,
   coalesceActionLifecycle,
+  completedModelEventsByRound,
   compareTurnTimelineItems,
   parseMailboxEntryText,
   parseTimerEntryText,
@@ -5319,6 +5320,38 @@ describe("model response telemetry", () => {
     expect(telemetry.ttftMeanSeconds).toBeCloseTo(0.0105, 8);
     expect(telemetry.ttftStdDevSeconds).toBeCloseTo(0.0057662813, 8);
     expect(telemetry.tokensPerSecond).toBeCloseTo(105, 8);
+  });
+
+  it("indexes completed requests once per round and keeps first-match semantics", () => {
+    const value = modelTurn();
+    // Duplicated and out-of-order completions must not change the pairing:
+    // the old `find` picked the first matching event in the array.
+    value.events.push({
+      event_id: "complete-2-duplicate",
+      source: "worker_activity",
+      created_at_ms: 25,
+      payload: { kind: "model_request_completed", round: 2, latency_ms: 9_000, ttft_ms: 9_000 },
+    });
+    value.events.push({
+      event_id: "complete-1-late",
+      source: "worker_activity",
+      created_at_ms: 30,
+      payload: { kind: "model_request_completed", round: 1, latency_ms: 9_000, ttft_ms: 9_000 },
+    });
+    const byRound = completedModelEventsByRound(value);
+    expect(byRound.get(1)?.event_id).toBe("complete-1");
+    expect(byRound.get(2)?.event_id).toBe("complete-2");
+    expect(byRound.has(3)).toBe(false);
+
+    const sessionValue = session("telemetry-duplicate-round");
+    sessionValue.turns = [value];
+    expect(sessionModelTelemetry(sessionValue)).toEqual({
+      tokensPerSecond: 50,
+      ttftMeanSeconds: 0.5,
+      ttftStdDevSeconds: 0.5,
+      samples: 2,
+    });
+    expect(sessionModelPulse(sessionValue).ttftSeconds).toEqual([0, 1]);
   });
 
   it("degrades safely when provider usage or timing is absent", () => {
