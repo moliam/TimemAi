@@ -2972,10 +2972,82 @@ fn apply_instance_resource_caps_from_mem(mem: &WebMemState) {
     );
 }
 
+/// Trim trailing zeros from a fixed-point number ("23.80" -> "23.8").
+fn trim_float(value: String) -> String {
+    if value.contains('.') {
+        value
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    } else {
+        value
+    }
+}
+
+/// Render the cgroup v2 CPU "quota period" pair (microseconds) in cores.
+fn format_cpu_cores(limit: &str) -> Option<String> {
+    let mut parts = limit.split_whitespace();
+    let quota: f64 = parts.next()?.parse().ok()?;
+    let period: f64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || quota < 0.0 || period <= 0.0 {
+        return None;
+    }
+    let cores = quota / period;
+    Some(format!(
+        "{} {}",
+        trim_float(format!("{:.2}", cores)),
+        if (cores - 1.0).abs() < f64::EPSILON {
+            "core"
+        } else {
+            "cores"
+        }
+    ))
+}
+
+/// Render a byte count in MB or GB (1024-based, matching the WebUI).
+fn format_memory_bytes(bytes: u64) -> String {
+    const MB: f64 = 1024.0 * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let value = bytes as f64;
+    if value >= GB {
+        format!("{} GB", trim_float(format!("{:.2}", value / GB)))
+    } else if value >= MB {
+        format!("{} MB", trim_float(format!("{:.2}", value / MB)))
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Memory limits arrive as `high=<bytes>; max=<bytes>` (or a bare byte count
+/// in older projections). Keep the labels and humanize each value.
+fn format_memory_limit(limit: &str) -> String {
+    limit
+        .split(';')
+        .map(|segment| {
+            let segment = segment.trim();
+            match segment.split_once('=') {
+                Some((key, value)) => match value.trim().parse::<u64>() {
+                    Ok(bytes) => format!("{} {}", key.trim(), format_memory_bytes(bytes)),
+                    Err(_) => segment.to_string(),
+                },
+                None => match segment.parse::<u64>() {
+                    Ok(bytes) => format_memory_bytes(bytes),
+                    Err(_) => segment.to_string(),
+                },
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// One startup-log line for one cap dimension. The line always states the
 /// configured intent and the kernel outcome, including disabled/unavailable
 /// dimensions, so the startup log is a complete picture.
-fn cap_summary_line(label: &str, unit: &str, dimension: &WireResourceCapDimension) -> String {
+fn cap_summary_line(
+    label: &str,
+    dimension: &WireResourceCapDimension,
+    render_limit: fn(&str) -> String,
+) -> String {
     let intent = if dimension.enabled {
         format!("{}%", dimension.percent)
     } else {
@@ -2986,7 +3058,7 @@ fn cap_summary_line(label: &str, unit: &str, dimension: &WireResourceCapDimensio
         dimension.limit.as_deref(),
         dimension.reason.as_deref(),
     ) {
-        ("applied", Some(limit), _) => format!("applied ({unit}: {limit})"),
+        ("applied", Some(limit), _) => format!("applied ({})", render_limit(limit)),
         ("applied", None, _) => "applied".to_string(),
         (kernel, _, Some(reason)) => format!("{kernel} ({reason})"),
         (kernel, _, None) => kernel.to_string(),
@@ -2996,8 +3068,10 @@ fn cap_summary_line(label: &str, unit: &str, dimension: &WireResourceCapDimensio
 
 fn resource_caps_summary_lines(caps: &WireResourceCaps) -> Vec<String> {
     vec![
-        cap_summary_line("CPU", "quota period", &caps.cpu),
-        cap_summary_line("MEM", "bytes", &caps.mem),
+        cap_summary_line("CPU", &caps.cpu, |limit| {
+            format_cpu_cores(limit).unwrap_or_else(|| format!("quota period: {limit}"))
+        }),
+        cap_summary_line("MEM", &caps.mem, format_memory_limit),
     ]
 }
 

@@ -23917,7 +23917,7 @@ fn resource_caps_startup_summary_reports_both_dimensions() {
     assert_eq!(lines.len(), 2);
     assert_eq!(
         lines[0],
-        "[resource_caps] CPU limit: 85% applied (quota period: 2380000 100000)"
+        "[resource_caps] CPU limit: 85% applied (23.8 cores)"
     );
     assert_eq!(
         lines[1],
@@ -23950,6 +23950,41 @@ fn resource_caps_startup_summary_marks_disabled_dimensions() {
     assert_eq!(lines[0], "[resource_caps] CPU limit: off disabled");
     assert_eq!(
         lines[1],
-        "[resource_caps] MEM limit: 50% applied (bytes: 123456)"
+        "[resource_caps] MEM limit: 50% applied (123456 B)"
     );
+}
+
+#[test]
+fn resource_caps_startup_summary_humanizes_applied_limits() {
+    let caps = WireResourceCaps {
+        cpu: WireResourceCapDimension {
+            enabled: true,
+            percent: 85.0,
+            kernel: "applied".to_string(),
+            limit: Some("2380000 100000".to_string()),
+            reason: None,
+            escalation_required: false,
+        },
+        mem: WireResourceCapDimension {
+            enabled: true,
+            percent: 85.0,
+            kernel: "applied".to_string(),
+            limit: Some("high=24063819806; max=28310376243".to_string()),
+            reason: None,
+            escalation_required: false,
+        },
+        scope: String::new(),
+    };
+    let lines = resource_caps_summary_lines(&caps);
+    assert_eq!(
+        lines[0],
+        "[resource_caps] CPU limit: 85% applied (23.8 cores)"
+    );
+    assert_eq!(
+        lines[1],
+        "[resource_caps] MEM limit: 85% applied (high 22.41 GB, max 26.37 GB)"
+    );
+    assert_eq!(format_memory_limit("524288000"), "500 MB");
+    assert_eq!(format_memory_limit("28310351872"), "26.37 GB");
+    assert_eq!(format_cpu_cores("100000 100000").as_deref(), Some("1 core"));
 }
