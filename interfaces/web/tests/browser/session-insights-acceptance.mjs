@@ -525,6 +525,10 @@ async function main() {
     })()`), "collapsed order is model name, reasoning, donut");
     assert(await browser.evaluate(`!document.querySelector('.header-model-control .lucide-sparkles')`), "collapsed control has no decorative sparkles");
     assert(await browser.evaluate(`document.querySelector('.header-model-control').title.includes('Context usage 7%')`), "collapsed control exposes context usage on hover");
+    assert(await browser.evaluate(`(() => {
+      const title = document.querySelector('.header-model-control').title;
+      return !title.includes(' / ') && !title.includes('/ ') && !title.includes(' /');
+    })()`), "collapsed header context readout has no padded slash");
     assert(await browser.evaluate(`!document.querySelector('.header-actions .header-context-control')`), "the old standalone context chip is gone");
     const modelControl = await center(browser, ".header-model-control");
     await click(browser, modelControl);
@@ -552,7 +556,7 @@ async function main() {
     assert(headerPopoverLayout.reasoningSelectWidth <= 120, `reasoning select hugs its content: ${JSON.stringify(headerPopoverLayout)}`);
     assert(await browser.evaluate(`document.querySelector('#header-model-popover').textContent.includes('Context management')`), "popover carries the context management row");
     assert(await browser.evaluate(`document.querySelector('#header-model-popover .header-model-popover-length input').value === '16000'`), "popover shows the current context length");
-    assert(await browser.evaluate(`document.querySelector('#header-model-popover .header-model-popover-context').textContent.includes('1.0K / 16K')`), "context row shows used and limit tokens");
+    assert(await browser.evaluate(`document.querySelector('#header-model-popover .header-model-popover-context').textContent.includes('1.0K/16K')`), "context row shows used and limit tokens");
     assert(await browser.evaluate(`!!document.querySelector('#header-model-popover .header-model-popover-context .context-donut')`), "context row renders the donut");
     assert(await browser.evaluate(`(() => {
       const buttons = [...document.querySelectorAll('#header-model-popover .header-model-popover-length-actions button')];
@@ -606,13 +610,13 @@ async function main() {
     await click(browser, applyPoint);
     await waitFor(() => host.commands.some((command) => command.type === 'session_endpoint_max_input_tokens_update' && command.endpoint_id === 'ep-header' && command.max_input_tokens === 32000), "context length update command");
     await waitFor(() => browser.evaluate(`document.querySelector('#header-model-popover .header-model-popover-length input').value === '32000'
-      && document.querySelector('#header-model-popover .header-model-popover-context').textContent.includes('1.0K / 32K')`), "applied context window comes back from the host");
+      && document.querySelector('#header-model-popover .header-model-popover-context').textContent.includes('1.0K/32K')`), "applied context window comes back from the host");
     await waitFor(() => browser.evaluate(`!document.querySelectorAll('#header-model-popover .header-model-popover-length-actions button')[1].disabled`), "default enables once an override exists");
     const resetPoint = await browser.evaluate(`(() => { const b = document.querySelectorAll('#header-model-popover .header-model-popover-length-actions button')[1]; const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
     await click(browser, resetPoint);
     await waitFor(() => host.commands.some((command) => command.type === 'session_endpoint_max_input_tokens_update' && command.max_input_tokens === null), "context length reset command");
     await waitFor(() => browser.evaluate(`document.querySelector('#header-model-popover .header-model-popover-length input').value === '16000'
-      && document.querySelector('#header-model-popover .header-model-popover-context').textContent.includes('1.0K / 16K')
+      && document.querySelector('#header-model-popover .header-model-popover-context').textContent.includes('1.0K/16K')
       && document.querySelectorAll('#header-model-popover .header-model-popover-length-actions button')[1].disabled`), "reset restores the endpoint default");
     // An unsaved draft is discarded when the popover closes.
     await browser.evaluate(`(() => {
@@ -992,7 +996,11 @@ async function main() {
         && !!ttft && ttft.title.includes('time to first token') && !ttft.title.includes('Drag');
     })()`), "row hover text describes each metric instead of reordering");
     assert(await browser.evaluate(`document.querySelector('.session-insight-grip').title.includes('Drag a row to reorder')`), "drag hint remains on the grip");
-    assert(await browser.evaluate(`document.querySelector('.session-insights-chip-value').textContent.includes('/')`), "collapsed chip shows average/latest for the top item");
+    assert(await browser.evaluate(`(() => {
+      const text = document.querySelector('.session-insights-chip-value').textContent;
+      const parts = text.split('/');
+      return parts.length === 2 && parts.every((part) => part.length > 0 && part === part.trim());
+    })()`), "collapsed chip shows average/latest with a compact, unpadded slash");
 
     // Sparklines: speed/TTFT have 15 samples, CPU/MEM have a 20s window.
     await waitFor(() => browser.evaluate(`document.querySelectorAll('.session-insight-sparkline').length === 7`), "sparklines render for speed/TTFT/cache/CPU/systemCPU/MEM/systemMEM");

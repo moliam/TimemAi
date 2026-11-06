@@ -14151,7 +14151,7 @@ function HeaderModelControl({
         ? defaultEffort
         : (reasoningOptions[0] ?? "");
   const contextTitle = contextLimit
-    ? `Context usage ${ratio}% · ${formatTokens(contextUsed) ?? "0"} / ${formatTokens(contextLimit) ?? "0"} input tokens`
+    ? `Context usage ${ratio}% · ${formatTokens(contextUsed) ?? "0"}/${formatTokens(contextLimit) ?? "0"} input tokens`
     : "Context usage waiting for runtime usage";
   const modelName = endpoint?.model ?? session?.runtime_profile?.model ?? "";
   const collapsedName = modelName || endpointLabel;
@@ -14278,7 +14278,7 @@ function HeaderModelControl({
             <span className="header-model-popover-label">{t("headerModel.contextManagement")}</span>
             <span className="header-model-popover-context" title={contextTitle}>
               <ContextDonut ratio={ratio} size={22} />
-              <span>{contextLimit ? `${formatTokens(contextUsed) ?? "0"} / ${formatTokens(contextLimit) ?? "0"}` : t("insights.unavailable")}</span>
+              <span>{contextLimit ? `${formatTokens(contextUsed) ?? "0"}/${formatTokens(contextLimit) ?? "0"}` : t("insights.unavailable")}</span>
             </span>
             <span className="header-model-popover-context-actions" aria-busy={compressing}>
               {onCompact && (

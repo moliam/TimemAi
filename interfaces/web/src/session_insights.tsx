@@ -812,7 +812,7 @@ export function SessionInsights({
           value:
             speedAverage === undefined && speedLatest === undefined
               ? "\u2014"
-              : `${formatSpeed(speedAverage)} / ${formatSpeed(speedLatest)}`,
+              : `${formatSpeed(speedAverage)}/${formatSpeed(speedLatest)}`,
         };
       case "ttft":
         return {
@@ -820,7 +820,7 @@ export function SessionInsights({
           value:
             ttftAverage === undefined && ttftLatest === undefined
               ? "\u2014"
-              : `${formatSeconds(ttftAverage)} / ${formatSeconds(ttftLatest)}`,
+              : `${formatSeconds(ttftAverage)}/${formatSeconds(ttftLatest)}`,
         };
       case "cache":
         return {
@@ -828,7 +828,7 @@ export function SessionInsights({
           value:
             cacheAverage === undefined && cacheLatest === undefined
               ? "\u2014"
-              : `${formatPercent(cacheAverage)} / ${formatPercent(cacheLatest)}`,
+              : `${formatPercent(cacheAverage)}/${formatPercent(cacheLatest)}`,
         };
       case "context":
         return { label: t("insights.context"), value: contextPercent === undefined ? "\u2014" : `${contextPercent}%` };
