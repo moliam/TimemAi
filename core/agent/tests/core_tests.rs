@@ -8952,6 +8952,37 @@ fn rendered_static_prompt_preserves_source_rule_order() {
 }
 
 #[test]
+fn admission_runtime_notes_precede_the_user_entry_that_closes_the_delta() {
+    let dir = tmp_dir("user_entry_closes_delta");
+    let mut core = test_core("STATIC", profile("qwen-plus"), dir.clone());
+    core.change_prompt_cwd(dir.to_str().unwrap()).unwrap();
+    core.notify_runtime_config_changed();
+    let prompt = match core.begin_turn("USER_SENTINEL_QUESTION", Some("SUPPORT_SENTINEL_CONTEXT")) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let user_heading = prompt
+        .rfind("\n## USER\n")
+        .expect("the user entry should render as a role block");
+    let support = prompt.find("SUPPORT_SENTINEL_CONTEXT").unwrap();
+    let cwd = prompt.find("[!!!NOTE] cwd now set to:").unwrap();
+    let config = prompt.find("User changes some runtime config").unwrap();
+    assert!(support < cwd, "{prompt}");
+    assert!(
+        cwd < user_heading,
+        "the cwd note is admission-time state, so it must precede the user entry: {prompt}"
+    );
+    assert!(
+        config < user_heading,
+        "the config-change notice is admission-time state, so it must precede the user entry: {prompt}"
+    );
+    assert!(
+        !prompt[user_heading..].contains("\n## RUNTIME\n"),
+        "the user entry must close its delta: {prompt}"
+    );
+}
+
+#[test]
 fn runtime_system_context_is_part_of_the_api_system_block_and_survives_fork() {
     let mut core = test_core(
         "STATIC",

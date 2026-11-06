@@ -4094,24 +4094,12 @@ impl AgentCore {
                 "runtime",
             );
         }
-        // Supporting context describes state already present at turn admission
-        // (notably restart/history notices), so it precedes the user input.
-        if direct_resume || !text.is_empty() {
-            // Runtime-triggered input keeps its structured origin: it must not
-            // masquerade as a user question in the rendered prompt.
-            let (role, kind, source) = if system_input {
-                (PromptComponentRole::system(), "runtime_input", "runtime")
-            } else if direct_resume {
-                (
-                    PromptComponentRole::user(),
-                    "user_resume_directly",
-                    "user_input",
-                )
-            } else {
-                (PromptComponentRole::user(), "user_question", "user_input")
-            };
-            self.submit_prompt_component(role, kind, text, source);
-        }
+        // Every admission-time runtime note (cwd change, config change, state
+        // reminder, memory precheck) describes state that already existed when
+        // the user entry arrived. Submit them before the entry so the user
+        // entry closes its delta instead of being buried between notes.
+        self.submit_process_aggregate_scopes_if_needed();
+        self.submit_runtime_config_changed_notice_if_pending();
         if self.pending_runtime_state_reminder {
             let lines = self.runtime_state_reminder_lines();
             if !lines.is_empty() {
@@ -4134,6 +4122,25 @@ impl AgentCore {
             );
         }
         self.submit_cwd_note_if_pending();
+        // Supporting context describes state already present at turn admission
+        // (notably restart/history notices); the user entry is the newest
+        // event, so it closes the delta after every admission-time note.
+        if direct_resume || !text.is_empty() {
+            // Runtime-triggered input keeps its structured origin: it must not
+            // masquerade as a user question in the rendered prompt.
+            let (role, kind, source) = if system_input {
+                (PromptComponentRole::system(), "runtime_input", "runtime")
+            } else if direct_resume {
+                (
+                    PromptComponentRole::user(),
+                    "user_resume_directly",
+                    "user_input",
+                )
+            } else {
+                (PromptComponentRole::user(), "user_question", "user_input")
+            };
+            self.submit_prompt_component(role, kind, text, source);
+        }
         CoreStep::NeedModel {
             prompt: self.build_next_prompt(),
             rounds_remaining: self.round_budget,
@@ -5984,17 +5991,22 @@ impl AgentCore {
         );
     }
 
+    fn submit_runtime_config_changed_notice_if_pending(&mut self) {
+        if !self.runtime_config_changed_notice_pending {
+            return;
+        }
+        self.runtime_config_changed_notice_pending = false;
+        self.submit_prompt_component(
+            PromptComponentRole::system(),
+            "runtime_config_changed",
+            RUNTIME_CONFIG_CHANGED_NOTICE,
+            "runtime_config",
+        );
+    }
+
     pub fn build_next_prompt(&mut self) -> String {
         self.submit_process_aggregate_scopes_if_needed();
-        if self.runtime_config_changed_notice_pending {
-            self.runtime_config_changed_notice_pending = false;
-            self.submit_prompt_component(
-                PromptComponentRole::system(),
-                "runtime_config_changed",
-                RUNTIME_CONFIG_CHANGED_NOTICE,
-                "runtime_config",
-            );
-        }
+        self.submit_runtime_config_changed_notice_if_pending();
         self.guard_pending_action_output_budget();
         self.flush_pending_prompt_components();
         let rendered = self.render_prompt();

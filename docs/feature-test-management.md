@@ -620,11 +620,13 @@ USER (supplement) header. Approval, round-budget, output expansion and stale-con
 decisions remain runtime decision/evidence paths, not fabricated user messages.
 
 Turn-start supporting context (restart/history, cwd instructions and attachment
-context) precedes the initial user entry. Later runtime observations retain their
-chronological position; no role-wide sorting is introduced. Prior pending assistant
-output stays before the new user input. Internal turn IDs and turn-boundary markers
-are not injected into model prompts or prompt examples; runtime turn ownership and
-audit identities remain unchanged. Empty ordinary user inputs and supplements remain omitted.
+context) and admission-time runtime notes (cwd change, runtime-config change, state
+reminder, memory precheck) precede the initial user entry, which closes its delta;
+later runtime observations follow in subsequent deltas and retain their chronological
+position. No role-wide sorting is introduced. Prior pending assistant output stays
+before the new user input. Internal turn IDs and turn-boundary markers are not
+injected into model prompts or prompt examples; runtime turn ownership and audit
+identities remain unchanged. Empty ordinary user inputs and supplements remain omitted.
 
 Regression coverage: `core/agent/tests/unit/lib_tests.rs` exercises direct resume
 in JSON/XML and inline/native modes, empty component preservation, interruption
