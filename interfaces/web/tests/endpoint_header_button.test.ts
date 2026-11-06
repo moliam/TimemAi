@@ -28,16 +28,25 @@ describe("header endpoint selector", () => {
     expect(actions.indexOf('ref={mcpButtonRef}')).toBeLessThan(actions.indexOf('ref={timersButtonRef}'));
   });
 
-  it("renders the endpoint name and folding control inside one button", () => {
-    expect(source).toMatch(
-      /className={`header-model[\s\S]*<span title={headerModelLabel}>{headerModelLabel}<\/span>[\s\S]*<ChevronDown/,
+  it("renders model, context donut, and reasoning in one collapsible control", () => {
+    expect(source).toContain(
+      'className={`header-model header-model-control${open ? " selected" : ""}`}',
     );
-    expect(source).toContain('className="header-reasoning-select"');
+    expect(source).toContain('className="header-model-control-name"');
+    expect(source).toContain("<ContextDonut ratio={ratio} size={15} />");
+    expect(source).toContain('className="header-model-control-reasoning"');
+    expect(source).toContain('className="header-model-popover"');
+    expect(source).toContain('className="header-model-popover-context"');
     expect(source).toContain('type: "session_reasoning_effort_update"');
+    expect(source).toContain('type: "session_endpoint_max_input_tokens_update"');
     expect(source).toContain('t("modelService.reasoningUnavailable")');
-    expect(source).not.toMatch(/headerModelEndpoint[\s\S]{0,300}apiProtocolShort\(headerModelEndpoint\.api_protocol\)/);
-    expect(source).toMatch(/className="header-model-meta"/);
-    expect(source).toContain("aria-expanded={showRuntime}");
+    expect(source).toContain("aria-expanded={open}");
+  });
+
+  it("moves the ctx readout into the model control instead of header actions", () => {
+    expect(source).not.toContain("<HeaderContextControl");
+    expect(source).toContain("header-model-popover-context");
+    expect(source).toContain("ContextDonut");
   });
 
   it("shows numbers beside every token-flow bar in Session Insights", () => {
@@ -45,7 +54,7 @@ describe("header endpoint selector", () => {
     expect(insightsSource).toContain("formatTokensCoarse(value)");
     expect(insightsSource).toContain("session-insight-flow-bar ${tone}");
     expect(insightsSource).not.toContain('`cache: ${cacheHitPercent.toFixed(1)}%, in:');
-    expect(source).toContain('`${cachePercentLabel}, input: ${cacheInputLabel}, output: ${cacheOutputLabel}`');
+    expect(source).toContain("Context usage ${ratio}%");
     expect(styles).not.toContain(".header-cache-rate {");
     expect(styles).toContain('.header-cache-token { display: inline-flex; align-items: center; gap: 1px; }');
   });

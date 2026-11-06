@@ -843,6 +843,15 @@ export const en: Strings = {
     boardTitle: "Model data board: generation speed, TTFT, token usage and call stats; hover an item for details",
     ttftTitle: "TTFT mean ~population standard deviation across {count} samples",
   },
+  headerModel: {
+    title: "Model and context",
+    model: "Model",
+    switchModel: "Switch",
+    contextLength: "Context length",
+    apply: "Apply",
+    reset: "Default",
+    contextManagement: "Context management",
+  },
   insights: {
     title: "Session Insights",
     open: "Open the Session Insights dashboard",

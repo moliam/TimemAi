@@ -91,7 +91,6 @@ import {
   Search,
   Send,
   Share2,
-  Hand,
   Settings,
   Sparkles,
   Star,
@@ -3798,6 +3797,14 @@ function TimemApp() {
   const headerDefaultEffort =
     endpointCatalogModel(headerModelEndpoint, server?.model_catalog ?? [])
       ?.default_effort ?? "";
+  const headerContextUsage = activeSession
+    ? sessionContextUsage(activeSession)
+    : undefined;
+  const headerContextUsed = headerContextUsage?.prompt_tokens ?? 0;
+  const headerContextLimit = activeSession?.max_llm_input_tokens || undefined;
+  const headerContextCompressPending = activeSession
+    ? sessionContextCompressPending(activeSession)
+    : false;
   // Documented catalog facts decide the image warning; custom endpoints
   // (unknown modalities) stay permissive to avoid false alarms.
   const activeImageUnsupportedEndpoint =
@@ -5083,131 +5090,89 @@ function TimemApp() {
             </div>
             <div className="header-session-cluster">
               <div className="header-session-model-row">
-              <div className="header-model-guide-anchor">
-                <button
-                  type="button"
-                  ref={runtimeButtonRef}
-                  className={`header-model ${showRuntime ? "selected" : ""}`}
-                  title={runtimeLabel}
-                  aria-label={`${runtimeLabel}: ${headerModelLabel}`}
-                  aria-expanded={showRuntime}
-                  aria-controls="runtime-panel"
-                  onClick={() => {
-                    setShowAppearance(false);
-                    setShowMcp(false);
-                    setShowToolRepo(false);
-                    if (showRuntime) closeRuntimePanel();
-                    else setShowRuntime(true);
-                  }}
-                >
-                  <Sparkles size={10} aria-hidden="true" />
-                  <span title={headerModelLabel}>{headerModelLabel}</span>
-                  <ChevronDown size={11} aria-hidden="true" />
-                </button>
-                {modelEndpointsUnavailable && !showRuntime && (
-                  <div className="endpoint-guide-bubble" role="status">
-                    <span className="endpoint-guide-icon" aria-hidden="true">
-                      <Sparkles size={14} />
-                    </span>
-                    <div className="endpoint-guide-copy">
-                      <strong>{t("modelService.unconfiguredTitle")}</strong>
-                      <span>{t("modelService.unconfiguredDetail")}</span>
-                    </div>
-                    <button type="button" onClick={openEndpointCreator}>
-                      <Plus size={13} />
-                      <span>{t("modelService.configureNow")}</span>
-                    </button>
-                  </div>
-                )}
-              </div>
-              {headerModelEndpoint && (
-                <div className="header-model-meta">
-                  <span
-                    className="header-model-meta-model"
-                    title={headerModelEndpoint.model}
-                  >
-                    {headerModelEndpoint.model}
-                  </span>
-                  <div className="header-model-meta-row">
-                    {headerReasoningOptions.length > 0 ? (
-                      <select
-                        className="header-reasoning-select"
-                        aria-label={t("modelService.reasoningLabel")}
-                        title={
-                          headerDefaultEffort
-                            ? `${t("modelService.reasoningLabel")} · ${t("endpoints.defaultOptionTitle")}: ${headerDefaultEffort}`
-                            : t("modelService.reasoningLabel")
-                        }
-                        value={
-                          headerReasoningValue &&
-                          headerReasoningOptions.includes(headerReasoningValue)
-                            ? headerReasoningValue
-                            : headerReasoningOptions.includes(headerDefaultEffort)
-                              ? headerDefaultEffort
-                              : headerReasoningOptions[0]
-                        }
-                        disabled={runtimeLocked || !activeSession}
-                        onChange={(event) => {
-                          if (!activeSession) return;
-                          if (!sendCommand({
-                            type: "session_reasoning_effort_update",
-                            session_id: activeSession.session_id,
-                            reasoning_effort: event.target.value,
-                          })) {
-                            reportUiError(
-                              "Reasoning update failed",
-                              t("errors.checkConnection"),
-                              activeSession.session_id,
-                            );
+                <div className="header-model-guide-anchor">
+                  <HeaderModelControl
+                    session={activeSession}
+                    endpoint={headerModelEndpoint}
+                    endpointLabel={headerModelLabel}
+                    reasoningOptions={headerReasoningOptions}
+                    reasoningValue={headerReasoningValue}
+                    defaultEffort={headerDefaultEffort}
+                    reasoningLocked={runtimeLocked}
+                    contextUsed={headerContextUsed}
+                    contextLimit={headerContextLimit}
+                    compressPending={headerContextCompressPending}
+                    buttonRef={runtimeButtonRef}
+                    onReasoningChange={(effort) => {
+                      if (!activeSession) return;
+                      if (!sendCommand({
+                        type: "session_reasoning_effort_update",
+                        session_id: activeSession.session_id,
+                        reasoning_effort: effort,
+                      })) {
+                        reportUiError(
+                          "Reasoning update failed",
+                          t("errors.checkConnection"),
+                          activeSession.session_id,
+                        );
+                      }
+                    }}
+                    onContextLimitChange={(tokens) => {
+                      if (!activeSession || !headerModelEndpoint) return;
+                      sendCommand({
+                        type: "session_endpoint_max_input_tokens_update",
+                        session_id: activeSession.session_id,
+                        endpoint_id: headerModelEndpoint.id,
+                        max_input_tokens: tokens,
+                      });
+                    }}
+                    onCompact={
+                      activeSession
+                        ? () => {
+                            sendCommand({
+                              type: "session_request_context_compress",
+                              session_id: activeSession.session_id,
+                            });
                           }
-                        }}
-                      >
-                        {headerReasoningOptions.map((effort) => (
-                          <option
-                            key={effort}
-                            value={effort}
-                            title={effort === headerDefaultEffort ? t("endpoints.defaultOptionTitle") : undefined}
-                          >
-                            {effort}
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <span className="header-reasoning-none">{t("modelService.reasoningUnavailable")}</span>
-                    )}
-                  </div>
+                        : null
+                    }
+                    onClear={
+                      activeSession && !sessionBusy
+                        ? () => {
+                            if (window.confirm(t("context.clearConfirm")))
+                              sendCommand({
+                                type: "session_clear_context",
+                                session_id: activeSession.session_id,
+                              });
+                          }
+                        : null
+                    }
+                    onOpenModelPanel={() => {
+                      setShowAppearance(false);
+                      setShowMcp(false);
+                      setShowToolRepo(false);
+                      setShowRuntime(true);
+                    }}
+                  />
+                  {modelEndpointsUnavailable && !showRuntime && (
+                    <div className="endpoint-guide-bubble" role="status">
+                      <span className="endpoint-guide-icon" aria-hidden="true">
+                        <Sparkles size={14} />
+                      </span>
+                      <div className="endpoint-guide-copy">
+                        <strong>{t("modelService.unconfiguredTitle")}</strong>
+                        <span>{t("modelService.unconfiguredDetail")}</span>
+                      </div>
+                      <button type="button" onClick={openEndpointCreator}>
+                        <Plus size={13} />
+                        <span>{t("modelService.configureNow")}</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
-              )}
               </div>
             </div>
             <div className="header-actions">
-              <HeaderContextControl
-                session={activeSession}
-                onClear={
-                  activeSession && !sessionBusy
-                    ? () => {
-                        if (
-                          window.confirm(
-                            t("context.clearConfirm"),
-                          )
-                        )
-                          sendCommand({
-                            type: "session_clear_context",
-                            session_id: activeSession.session_id,
-                          });
-                      }
-                    : null
-                }
-                onCompact={
-                  activeSession
-                    ? () =>
-                        sendCommand({
-                          type: "session_request_context_compress",
-                          session_id: activeSession.session_id,
-                        })
-                    : null
-                }
-              />
               <button
                 type="button"
                 ref={mobileSessionButtonRef}
@@ -13849,25 +13814,100 @@ function FinalAnswerContent({ text, provisional = false, layoutKey, processSecti
   );
 }
 
-function HeaderContextControl({
+function ContextDonut({
+  ratio,
+  size = 16,
+}: {
+  ratio: number;
+  size?: number;
+}) {
+  const clamped = Math.max(0, Math.min(100, ratio));
+  const stroke = size >= 20 ? 3 : 2.4;
+  const radius = (size - stroke) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const level = clamped >= 90 ? "critical" : clamped >= 75 ? "warning" : "normal";
+  return (
+    <svg
+      className={`context-donut ${level}`}
+      width={size}
+      height={size}
+      viewBox={`0 0 ${size} ${size}`}
+      aria-hidden="true"
+    >
+      <circle
+        className="context-donut-track"
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        fill="none"
+        strokeWidth={stroke}
+      />
+      <circle
+        className="context-donut-value"
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        fill="none"
+        strokeWidth={stroke}
+        strokeDasharray={`${(clamped / 100) * circumference} ${circumference}`}
+        strokeLinecap="round"
+        transform={`rotate(-90 ${size / 2} ${size / 2})`}
+      />
+    </svg>
+  );
+}
+
+function HeaderModelControl({
   session,
-  onClear,
+  endpoint,
+  endpointLabel,
+  reasoningOptions,
+  reasoningValue,
+  defaultEffort,
+  reasoningLocked,
+  contextUsed,
+  contextLimit,
+  compressPending,
+  buttonRef,
+  onReasoningChange,
+  onContextLimitChange,
   onCompact,
+  onClear,
+  onOpenModelPanel,
 }: {
   session: Session | undefined;
-  onClear: (() => void) | null;
+  endpoint: ModelEndpoint | undefined;
+  endpointLabel: string;
+  reasoningOptions: string[];
+  reasoningValue: string;
+  defaultEffort: string;
+  reasoningLocked: boolean;
+  contextUsed: number;
+  contextLimit: number | undefined;
+  compressPending: boolean;
+  buttonRef: MutableRefObject<HTMLButtonElement | null>;
+  onReasoningChange: (effort: string) => void;
+  onContextLimitChange: (tokens: number | null) => void;
   onCompact: (() => void) | null;
+  onClear: (() => void) | null;
+  onOpenModelPanel: () => void;
 }) {
   useT();
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuRef = useRef<HTMLSpanElement | null>(null);
+  const [open, setOpen] = useState(false);
+  const [lengthDraft, setLengthDraft] = useState(
+    contextLimit ? String(contextLimit) : "",
+  );
+  const rootRef = useRef<HTMLSpanElement | null>(null);
   useEffect(() => {
-    if (!menuOpen) return;
+    setLengthDraft(contextLimit ? String(contextLimit) : "");
+  }, [contextLimit]);
+  useEffect(() => {
+    if (!open) return;
     const onDocDown = (event: MouseEvent) => {
-      if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false);
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
     };
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMenuOpen(false);
+      if (event.key === "Escape") setOpen(false);
     };
     document.addEventListener("mousedown", onDocDown);
     document.addEventListener("keydown", onKey);
@@ -13875,87 +13915,149 @@ function HeaderContextControl({
       document.removeEventListener("mousedown", onDocDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [menuOpen]);
-  const usage = session ? sessionContextUsage(session) : undefined;
-  const cacheHitPercent = session ? sessionCacheHitPercent(session) : undefined;
-  const runtimeTotals = session ? sessionRuntimeUsage(session) : undefined;
-  const limit = session?.max_llm_input_tokens || undefined;
-  const ratio = limit
-    ? Math.min(100, Math.ceil(((usage?.prompt_tokens ?? 0) * 100) / limit))
+  }, [open]);
+  const ratio = contextLimit
+    ? Math.min(100, Math.ceil((contextUsed * 100) / contextLimit))
     : 0;
-  const level = ratio >= 90 ? "critical" : ratio >= 75 ? "warning" : "normal";
-  const cachePercentLabel =
-    cacheHitPercent === undefined ? "cache: \u2014" : `cache: ${cacheHitPercent.toFixed(1)}%`;
-  const cacheInputLabel = formatTokensCoarse(runtimeTotals?.prompt_tokens ?? 0) ?? "0";
-  const cacheOutputLabel = formatTokensCoarse(runtimeTotals?.completion_tokens ?? 0) ?? "0";
-  const cacheLabel = cacheHitPercent === undefined
-    ? cachePercentLabel
-    : `${cachePercentLabel}, input: ${cacheInputLabel}, output: ${cacheOutputLabel}`;
-  const cacheRateBasis =
-    "Cache rate excludes the first model request after a detected runtime restart; input/output totals still include it.";
-  const contextUsageLabel = limit
-    ? `Context usage ${ratio}% \u00b7 ${formatTokens(usage?.prompt_tokens ?? 0)} / ${formatTokens(limit)} input tokens \u00b7 ${cacheLabel}. ${cacheRateBasis}`
-    : `Context usage waiting for runtime usage \u00b7 ${cacheLabel}. ${cacheRateBasis}`;
+  const selectedReasoning =
+    reasoningValue && reasoningOptions.includes(reasoningValue)
+      ? reasoningValue
+      : reasoningOptions.includes(defaultEffort)
+        ? defaultEffort
+        : (reasoningOptions[0] ?? "");
+  const contextTitle = contextLimit
+    ? `Context usage ${ratio}% · ${formatTokens(contextUsed) ?? "0"} / ${formatTokens(contextLimit) ?? "0"} input tokens`
+    : "Context usage waiting for runtime usage";
+  const modelName = endpoint?.model ?? session?.runtime_profile?.model ?? "";
+  const applyContextLength = () => {
+    const parsed = Number(lengthDraft.trim());
+    if (!Number.isFinite(parsed) || parsed <= 0 || !Number.isInteger(parsed)) {
+      setLengthDraft(contextLimit ? String(contextLimit) : "");
+      return;
+    }
+    onContextLimitChange(parsed);
+  };
   return (
-    <span
-      className={`header-context-control ${level}`}
-      title={contextUsageLabel}
-      aria-label={contextUsageLabel}
-    >
-      <span className="header-context-main">
-        <span aria-hidden="true">· ctx</span>
-        <span>{limit ? `${ratio}%/${formatTokens(limit)}` : "\u2014"}</span>
-        {(onClear || onCompact) && (
-          <span className="context-actions-menu" ref={menuRef}>
+    <span className="header-model-control-anchor" ref={rootRef}>
+      <button
+        ref={buttonRef}
+        type="button"
+        className={`header-model header-model-control${open ? " selected" : ""}`}
+        title={contextTitle}
+        aria-expanded={open}
+        aria-controls="header-model-popover"
+        aria-label={`${endpointLabel} · ${contextTitle}`}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <Sparkles size={10} aria-hidden="true" />
+        <span className="header-model-control-name" title={endpointLabel}>
+          {endpointLabel}
+        </span>
+        <ContextDonut ratio={ratio} size={15} />
+        {selectedReasoning && (
+          <span className="header-model-control-reasoning">{selectedReasoning}</span>
+        )}
+        <ChevronDown size={11} aria-hidden="true" />
+      </button>
+      {open && (
+        <div
+          id="header-model-popover"
+          className="header-model-popover"
+          role="dialog"
+          aria-label={t("headerModel.title")}
+        >
+          <div className="header-model-popover-row">
+            <span className="header-model-popover-label">{t("headerModel.model")}</span>
+            <span className="header-model-popover-model">
+              <strong title={endpointLabel}>{endpointLabel}</strong>
+              {modelName && <small title={modelName}>{modelName}</small>}
+            </span>
             <button
               type="button"
-              className="context-clear-inline"
-              title={t("context.actionsTitle")}
-              aria-label={t("context.actionsTitle")}
-              aria-expanded={menuOpen}
-              aria-haspopup="menu"
-              onClick={() => setMenuOpen(value => !value)}
+              className="header-model-popover-action"
+              onClick={() => {
+                setOpen(false);
+                onOpenModelPanel();
+              }}
             >
-              <Hand size={12} aria-hidden="true" />
+              {t("headerModel.switchModel")}
             </button>
-            {menuOpen && (
-              <span className="context-actions-dropdown" role="menu">
-                {onCompact && (
-                  <button
-                    type="button"
-                    role="menuitem"
-                    disabled={session ? sessionContextCompressPending(session) : false}
-                    onClick={() => {
-                      setMenuOpen(false);
-                      onCompact();
-                    }}
-                  >
-                    {session && sessionContextCompressPending(session)
-                      ? t("context.compressingAction")
-                      : t("context.compressAction")}
-                  </button>
-                )}
-                {onClear && (
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      setMenuOpen(false);
-                      if (window.confirm(t("context.clearConfirm"))) onClear();
-                    }}
-                  >
-                    {t("context.clearAction")}
-                  </button>
-                )}
-              </span>
+          </div>
+          <div className="header-model-popover-row">
+            <span className="header-model-popover-label">{t("modelService.reasoningLabel")}</span>
+            {reasoningOptions.length > 0 ? (
+              <select
+                className="header-model-popover-select"
+                aria-label={t("modelService.reasoningLabel")}
+                value={selectedReasoning}
+                disabled={reasoningLocked || !session}
+                onChange={(event) => onReasoningChange(event.target.value)}
+              >
+                {reasoningOptions.map((effort) => (
+                  <option key={effort} value={effort}>
+                    {effort}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span className="header-model-popover-muted">{t("modelService.reasoningUnavailable")}</span>
             )}
-          </span>
-        )}
-      </span>
+            <span />
+          </div>
+          <div className="header-model-popover-row">
+            <span className="header-model-popover-label">{t("headerModel.contextLength")}</span>
+            <span className="header-model-popover-length">
+              <input
+                type="number"
+                inputMode="numeric"
+                min={1}
+                step={1}
+                value={lengthDraft}
+                disabled={!endpoint}
+                aria-label={t("headerModel.contextLength")}
+                onChange={(event) => setLengthDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    applyContextLength();
+                  }
+                }}
+              />
+              <span>tokens</span>
+            </span>
+            <span className="header-model-popover-length-actions">
+              <button type="button" className="header-model-popover-action" disabled={!endpoint} onClick={applyContextLength}>
+                {t("headerModel.apply")}
+              </button>
+              <button type="button" className="header-model-popover-action" disabled={!endpoint} onClick={() => onContextLimitChange(null)}>
+                {t("headerModel.reset")}
+              </button>
+            </span>
+          </div>
+          <div className="header-model-popover-row header-model-popover-context-row">
+            <span className="header-model-popover-label">{t("headerModel.contextManagement")}</span>
+            <span className="header-model-popover-context" title={contextTitle}>
+              <ContextDonut ratio={ratio} size={22} />
+              <span>{contextLimit ? `${formatTokens(contextUsed) ?? "0"} / ${formatTokens(contextLimit) ?? "0"}` : t("insights.unavailable")}</span>
+            </span>
+            <span className="header-model-popover-context-actions">
+              {onCompact && (
+                <button type="button" className="header-model-popover-action" disabled={compressPending} onClick={onCompact}>
+                  {compressPending ? t("context.compressingAction") : t("context.compressAction")}
+                </button>
+              )}
+              {onClear && (
+                <button type="button" className="header-model-popover-action" onClick={onClear}>
+                  {t("context.clearAction")}
+                </button>
+              )}
+            </span>
+          </div>
+        </div>
+      )}
     </span>
   );
 }
-
 
 function LiveTurnUsage({ turn }: { turn: WebTurn }) {
   const usage = turnLiveUsage(turn);

@@ -840,6 +840,15 @@ export const zh = {
     boardTitle: "模型数据看板：生成速度、TTFT、token 用量与调用统计；悬停单项查看详情",
     ttftTitle: "TTFT 平均值 ~总体标准差，{count} 个有效样本",
   },
+  headerModel: {
+    title: "模型与上下文",
+    model: "模型",
+    switchModel: "切换",
+    contextLength: "上下文长度",
+    apply: "应用",
+    reset: "默认",
+    contextManagement: "上下文管理",
+  },
   insights: {
     title: "Session Insights",
     open: "展开 Session Insights 看板",
