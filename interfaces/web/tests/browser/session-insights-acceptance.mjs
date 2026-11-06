@@ -1099,8 +1099,9 @@ async function main() {
     await waitFor(() => browser.evaluate(`!!document.querySelector('.session-insights-shield.partial')`), "partial-protection shield");
     assert(await browser.evaluate(`document.querySelector('.session-insights-shield').title.includes('Partial protection: CPU capped at 85% only')`), "partial shield hover text");
     host.setResourceCaps(resourceCaps("disabled", "unavailable"));
-    await waitFor(() => browser.evaluate(`!!document.querySelector('.session-insights-shield.none')`), "no-protection shield");
-    assert(await browser.evaluate(`document.querySelector('.session-insights-shield').title.includes('No resource protection')`), "no-protection shield hover text");
+    // Nothing enforced means nothing to guard: the shield disappears from
+    // the header instead of showing a shield-x badge.
+    await waitFor(() => browser.evaluate(`!document.querySelector('.session-insights-shield')`), "no-protection state hides the shield entirely");
     host.setResourceCaps(fullResourceCaps);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.session-insights-shield.full')`), "full-protection shield restored");
     const shield = await center(browser, ".session-insights-shield");

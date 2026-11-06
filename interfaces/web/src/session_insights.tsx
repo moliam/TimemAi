@@ -30,7 +30,6 @@ import {
   RotateCcw,
   ShieldAlert,
   ShieldCheck,
-  ShieldX,
   Sparkles,
   Wrench,
 } from "lucide-react";
@@ -246,7 +245,7 @@ export function resourceProtectionLevel(
 
 function protectionTitleFor(
   caps: ResourceCapsProjection,
-  level: ResourceProtectionLevel,
+  level: Exclude<ResourceProtectionLevel, "none">,
 ): string {
   const cpu = caps.cpu.kernel === "applied";
   const mem = caps.mem.kernel === "applied";
@@ -259,10 +258,7 @@ function protectionTitleFor(
   if (cpu) {
     return t("insights.protectionPartialCpu", { percent: caps.cpu.percent });
   }
-  if (mem) {
-    return t("insights.protectionPartialMem", { percent: caps.mem.percent });
-  }
-  return t("insights.protectionNone");
+  return t("insights.protectionPartialMem", { percent: caps.mem.percent });
 }
 
 /** CPU quota attached to the latest sample; undefined when the platform
@@ -475,7 +471,7 @@ export function SessionInsights({
   const latestResource = recentResourceSamples?.[recentResourceSamples.length - 1];
   const protectionLevel = resourceProtectionLevel(resourceCaps);
   const protectionTitle =
-    resourceCaps && protectionLevel
+    resourceCaps && protectionLevel && protectionLevel !== "none"
       ? protectionTitleFor(resourceCaps, protectionLevel)
       : undefined;
   const systemCpuSeries = systemCpuPercentSeries(recentResourceSamples);
@@ -888,7 +884,10 @@ export function SessionInsights({
           </span>
           <ChevronDown size={11} aria-hidden="true" />
         </button>
-        {!open && protectionLevel && protectionTitle && (
+        {!open &&
+          protectionLevel &&
+          protectionLevel !== "none" &&
+          protectionTitle && (
           <button
             type="button"
             className={`session-insights-shield ${protectionLevel}`}
@@ -898,10 +897,8 @@ export function SessionInsights({
           >
             {protectionLevel === "full" ? (
               <ShieldCheck size={17} aria-hidden="true" />
-            ) : protectionLevel === "partial" ? (
-              <ShieldAlert size={17} aria-hidden="true" />
             ) : (
-              <ShieldX size={17} aria-hidden="true" />
+              <ShieldAlert size={17} aria-hidden="true" />
             )}
           </button>
         )}
