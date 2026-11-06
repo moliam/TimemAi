@@ -546,6 +546,19 @@ async function main() {
       };
     })()`);
     assert(Math.abs(headerPillSpacing.leftGap - headerPillSpacing.rightGap) <= 1, `header model pill optical padding is symmetric: ${JSON.stringify(headerPillSpacing)}`);
+    const headerClusterSpacing = await browser.evaluate(`(() => {
+      const sidebar = document.querySelector('.sidebar');
+      const pill = document.querySelector('.header-model-control');
+      const divider = document.querySelector('.header-context-actions');
+      const sr = sidebar.getBoundingClientRect();
+      const pr = pill.getBoundingClientRect();
+      const dr = divider.getBoundingClientRect();
+      return {
+        gapSidebarToPill: pr.left - sr.right,
+        gapPillToDivider: dr.left - pr.right,
+      };
+    })()`);
+    assert(Math.abs(headerClusterSpacing.gapSidebarToPill - headerClusterSpacing.gapPillToDivider) <= 1.5, `model pill sits symmetrically between the sidebar edge and the insights divider: ${JSON.stringify(headerClusterSpacing)}`);
     assert(await browser.evaluate(`!document.querySelector('.header-actions .header-context-control')`), "the old standalone context chip is gone");
     const modelControl = await center(browser, ".header-model-control");
     await click(browser, modelControl);
