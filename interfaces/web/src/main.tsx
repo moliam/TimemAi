@@ -125,6 +125,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   useId,
 } from "react";
 import { createPortal } from "react-dom";
@@ -514,6 +515,51 @@ function makeMessage(
 }
 
 const SIDEBAR_LAYOUT_STORAGE_KEY = "timem.sidebar-layout.v1";
+const THINKING_CHAIN_STORAGE_KEY = "timem.thinking-chain.v1";
+const THINKING_CHAIN_CHANGE_EVENT = "timem:thinking-chain-change";
+
+// Instance-wide display preference: whether the inline thinking window is
+// rendered while a model round streams. Pure UI preference persisted in the
+// browser like the sidebar layout; every session in this web UI follows it.
+function thinkingChainVisible(): boolean {
+  try {
+    return window.localStorage.getItem(THINKING_CHAIN_STORAGE_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+function setThinkingChainVisible(visible: boolean): void {
+  try {
+    window.localStorage.setItem(THINKING_CHAIN_STORAGE_KEY, visible ? "1" : "0");
+  } catch {
+    // Storage may be unavailable (private mode); the change event below still
+    // updates this page instance.
+  }
+  window.dispatchEvent(new Event(THINKING_CHAIN_CHANGE_EVENT));
+}
+
+const thinkingChainStore = {
+  subscribe(listener: () => void): () => void {
+    window.addEventListener(THINKING_CHAIN_CHANGE_EVENT, listener);
+    window.addEventListener("storage", listener);
+    return () => {
+      window.removeEventListener(THINKING_CHAIN_CHANGE_EVENT, listener);
+      window.removeEventListener("storage", listener);
+    };
+  },
+  getSnapshot(): boolean {
+    return thinkingChainVisible();
+  },
+};
+
+function useShowThinkingChain(): boolean {
+  return useSyncExternalStore(
+    thinkingChainStore.subscribe,
+    thinkingChainStore.getSnapshot,
+  );
+}
+
 const LEFT_SIDEBAR_MIN_WIDTH = 180;
 const LEFT_SIDEBAR_MAX_WIDTH = 380;
 const RIGHT_SIDEBAR_MIN_WIDTH = 180;
@@ -8055,6 +8101,8 @@ function fallbackCopyText(text: string, done: () => void) {
   }
 }
 
+const MAILBOX_PREVIEW_COUNT = 8;
+
 function MailboxPanel({
   panelRef,
   anchorRight,
@@ -8077,20 +8125,28 @@ function MailboxPanel({
   const [copied, setCopied] = useState(false);
   const mails = mailbox?.mails ?? [];
   const sent = mailbox?.sent ?? [];
-  const unreadMails = mails.filter((mail) => !mail.read);
-  const archivedMails = [...mails.filter((mail) => mail.read)].reverse();
+  // The host snapshot lists mailbox entries in arrival order; display the
+  // newest first so the panel reads like a mail client instead of hiding
+  // every read mail inside the archive fold.
+  const inboxMails = [...mails].reverse();
+  const recentMails = inboxMails.slice(0, MAILBOX_PREVIEW_COUNT);
+  const olderMails = inboxMails.slice(MAILBOX_PREVIEW_COUNT);
+  const sentMails = [...sent].reverse();
+  const recentSent = sentMails.slice(0, MAILBOX_PREVIEW_COUNT);
+  const olderSent = sentMails.slice(MAILBOX_PREVIEW_COUNT);
   const sessionIdLabel = sessionId
     ? /^[a-z0-9]{6}$/.test(sessionId)
       ? `id_${sessionId}`
       : sessionId
     : "";
-  const renderMail = (mail: (typeof mails)[number]) => (
-    <div
+  const renderMailLine = (mail: (typeof mails)[number]) => (
+    <details
       key={mail.id}
-      className={`mailbox-item${mail.read ? " read" : ""}${mail.kind === "receipt" ? " receipt" : ""}`}
+      className={`mailbox-item-line${mail.read ? " read" : ""}${mail.kind === "receipt" ? " receipt" : ""}`}
     >
-      <div className="mailbox-item-top">
+      <summary>
         <b>{mail.from}</b>
+        <span className="mailbox-item-preview">{mail.msg}</span>
         <span className="mailbox-item-time">
           {formatMailboxStamp(mail.created_at_ms)}
         </span>
@@ -8106,9 +8162,37 @@ function MailboxPanel({
               ? t("mailbox.delivered")
               : t("mailbox.queued")}
         </span>
-      </div>
+      </summary>
       <MailboxBody text={mail.msg} />
-    </div>
+    </details>
+  );
+  const renderSentLine = (entry: (typeof sent)[number]) => (
+    <details
+      key={entry.id}
+      className={`mailbox-item-line sent ${entry.status === "read" ? "status-read" : entry.status === "failed" || entry.status === "timeout" || entry.status === "discarded" ? "status-failed" : ""}`}
+    >
+      <summary>
+        <b>{entry.to}</b>
+        <span className="mailbox-item-preview">{entry.msg}</span>
+        <span className="mailbox-item-time">
+          {formatMailboxStamp(entry.created_at_ms)}
+        </span>
+        <span
+          className={`mailbox-item-state${entry.status === "read" ? " status-read" : entry.status === "failed" || entry.status === "timeout" || entry.status === "discarded" ? " status-failed" : ""}`}
+        >
+          {entry.status === "read"
+            ? t("mailbox.statusRead")
+            : entry.status === "timeout"
+              ? t("mailbox.statusTimeout")
+              : entry.status === "discarded"
+                ? t("mailbox.statusDiscarded")
+                : entry.status === "failed"
+                  ? t("mailbox.statusFailed")
+                  : t("mailbox.statusSent")}
+        </span>
+      </summary>
+      <MailboxBody text={entry.msg} />
+    </details>
   );
   return (
     <aside
@@ -8176,21 +8260,25 @@ function MailboxPanel({
           </div>
         )}
         <div className="mailbox-section-title">{t("mailbox.inboxTitle")}</div>
-        {unreadMails.length === 0 ? (
+        {mails.length === 0 ? (
           <div className="activity-empty">
             <strong>{t("mailbox.inboxEmpty")}</strong>
           </div>
         ) : (
-          unreadMails.map(renderMail)
-        )}
-        {archivedMails.length > 0 && (
-          <details className="mailbox-archive">
-            <summary>
-              <span>{t("mailbox.archiveTitle")}</span>
-              <span className="mailbox-archive-count">{archivedMails.length}</span>
-            </summary>
-            {archivedMails.map(renderMail)}
-          </details>
+          <>
+            {recentMails.map(renderMailLine)}
+            {olderMails.length > 0 && (
+              <details className="mailbox-more">
+                <summary>
+                  <span>{t("mailbox.more")}</span>
+                  <span className="mailbox-archive-count">
+                    {olderMails.length}
+                  </span>
+                </summary>
+                {olderMails.map(renderMailLine)}
+              </details>
+            )}
+          </>
         )}
         <div className="mailbox-section-title">{t("mailbox.sentTitle")}</div>
         {sent.length === 0 ? (
@@ -8198,33 +8286,20 @@ function MailboxPanel({
             <strong>{t("mailbox.sentEmpty")}</strong>
           </div>
         ) : (
-          sent.map((entry) => (
-            <div
-              key={entry.id}
-              className={`mailbox-item sent ${entry.status === "read" ? "status-read" : entry.status === "failed" || entry.status === "timeout" || entry.status === "discarded" ? "status-failed" : ""}`}
-            >
-              <div className="mailbox-item-top">
-                <b>{entry.to}</b>
-                <span className="mailbox-item-time">
-                  {formatMailboxStamp(entry.created_at_ms)}
-                </span>
-                <span
-                  className={`mailbox-item-state${entry.status === "read" ? " status-read" : entry.status === "failed" || entry.status === "timeout" || entry.status === "discarded" ? " status-failed" : ""}`}
-                >
-                  {entry.status === "read"
-                    ? t("mailbox.statusRead")
-                    : entry.status === "timeout"
-                      ? t("mailbox.statusTimeout")
-                      : entry.status === "discarded"
-                        ? t("mailbox.statusDiscarded")
-                        : entry.status === "failed"
-                          ? t("mailbox.statusFailed")
-                          : t("mailbox.statusSent")}
-                </span>
-              </div>
-              <MailboxBody text={entry.msg} />
-            </div>
-          ))
+          <>
+            {recentSent.map(renderSentLine)}
+            {olderSent.length > 0 && (
+              <details className="mailbox-more">
+                <summary>
+                  <span>{t("mailbox.more")}</span>
+                  <span className="mailbox-archive-count">
+                    {olderSent.length}
+                  </span>
+                </summary>
+                {olderSent.map(renderSentLine)}
+              </details>
+            )}
+          </>
         )}
         {sessionId && (mails.length > 0 || sent.length > 0) && (
           <button
@@ -13192,6 +13267,7 @@ function TurnAnswerDelivery({
     1000,
   );
   const thinkingTailShown = preview?.thinking_tail ?? "";
+  const showThinkingChain = useShowThinkingChain();
   const isThinking = modelPhaseForStream(waitingModel, preview?.response?.status) &&
     preview?.stream_phase === "thinking";
   const isWaiting = !!modelRetryStatus && waitingModel && !preview?.stream_phase;
@@ -13278,7 +13354,8 @@ function TurnAnswerDelivery({
             ) : isThinking ? (
               <span className="stream-working-detail">
                 <span>thinking</span>
-                {thinkingTailShown && (
+                {showThinkingChain &&
+                  thinkingTailShown && (
                   <ThinkingPreviewWindow text={thinkingTailShown} />
                 )}
                 <strong>{t("tools.thinkingWords", { count: thinkingWordsShown })}</strong>
@@ -15890,6 +15967,7 @@ const SettingsCenter = memo(function SettingsCenter(
   props: SettingsCenterProps,
 ) {
   useT();
+  const showThinkingChain = useShowThinkingChain();
   const {
     panelRef,
     section,
@@ -16591,6 +16669,29 @@ const SettingsCenter = memo(function SettingsCenter(
                       )}
                     </label>
                   </div>
+                </section>
+                <section className="settings-group system-thinking-chain">
+                  <div className="settings-group-heading">
+                    <div>
+                      <strong>{t("system.thinkingChainTitle")}</strong>
+                      <p>{t("system.thinkingChainDesc")}</p>
+                    </div>
+                  </div>
+                  <label className="resource-cap-switch thinking-chain-switch">
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      checked={showThinkingChain}
+                      aria-label={t("system.thinkingChainAria")}
+                      onChange={(event) =>
+                        setThinkingChainVisible(event.target.checked)
+                      }
+                    />
+                    <span className="resource-cap-slider" aria-hidden="true" />
+                    <span className="resource-cap-name">
+                      {t("system.thinkingChainToggle")}
+                    </span>
+                  </label>
                 </section>
                 <section className="settings-group system-resource-caps">
                   <div className="settings-group-heading">

@@ -698,17 +698,23 @@ async function main() {
       const ps = getComputedStyle(pop);
       const heading = document.querySelector('.header-model-popover-heading');
       const hs = heading ? getComputedStyle(heading) : null;
+      const contextValue = document.querySelector('.header-model-popover-context > span:last-child');
+      const lengthUnit = document.querySelector('.header-model-popover-length span');
       const result = {
         background: ps.backgroundColor,
         borderColor: ps.borderTopColor,
         headingBackground: hs?.backgroundColor ?? null,
+        contextColor: contextValue ? getComputedStyle(contextValue).color : null,
+        lengthUnitColor: lengthUnit ? getComputedStyle(lengthUnit).color : null,
       };
       document.documentElement.dataset.theme = original;
       return result;
     })()`);
     assert(lightPopoverChrome.background === 'rgb(255, 255, 255)' &&
       lightPopoverChrome.borderColor === 'rgb(201, 214, 218)' &&
-      lightPopoverChrome.headingBackground === 'rgb(243, 248, 249)',
+      lightPopoverChrome.headingBackground === 'rgb(243, 248, 249)' &&
+      lightPopoverChrome.contextColor === 'rgb(51, 72, 79)' &&
+      lightPopoverChrome.lengthUnitColor === 'rgb(109, 129, 137)',
       `model popover mirrors the endpoint card in light theme: ${JSON.stringify(lightPopoverChrome)}`);
     const headerPopoverLayout = await browser.evaluate(`(() => {
       const labels = [...document.querySelectorAll('.header-model-popover-label')];

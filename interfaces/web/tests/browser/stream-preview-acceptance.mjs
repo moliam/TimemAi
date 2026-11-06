@@ -390,6 +390,11 @@ async function startBrowser(url) {
   }
 }
 
+async function click(browser, point) {
+  await browser.call("Input.dispatchMouseEvent", { type: "mousePressed", x: point.x, y: point.y, button: "left", buttons: 1, clickCount: 1 });
+  await browser.call("Input.dispatchMouseEvent", { type: "mouseReleased", x: point.x, y: point.y, button: "left", buttons: 0, clickCount: 1 });
+}
+
 async function main() {
   const host = await startHost();
   const browser = await startBrowser(host.url);
@@ -750,7 +755,46 @@ async function main() {
       await browser.evaluate(`!document.querySelector('.stream-thinking-window')`),
       "whitespace-only reasoning must not render an empty strip",
     );
-    publish(34, null, []);
+    // The thinking chain display is an instance-wide preference in
+    // Settings -> System; toggling it must hide and restore the inline
+    // window without touching the thinking row itself.
+    publishThinking(35, thinkingTail);
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-thinking-window')`), "thinking window returns for the toggle flow");
+    const openSettings = async () => {
+      await click(browser, await browser.evaluate(`(() => { const b = document.querySelector('[aria-controls="settings-center"]'); const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`));
+      await waitFor(() => browser.evaluate(`!!document.querySelector('#settings-center')`), "settings center opens");
+    };
+    const closeSettings = async () => {
+      await click(browser, await browser.evaluate(`(() => { const b = document.querySelector('.settings-center-header .icon-button'); const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`));
+      await waitFor(() => browser.evaluate(`!document.querySelector('#settings-center')`), "settings center closes");
+    };
+    const openSystemPane = async () => {
+      const nav = await browser.evaluate(`(() => { const b = [...document.querySelectorAll('.settings-center-nav button')].find(n => n.textContent.includes('系统') || n.textContent.includes('System')); if (!b) return null; const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+      assert(nav, "system settings nav found");
+      await click(browser, nav);
+      await waitFor(() => browser.evaluate(`!!document.querySelector('.system-thinking-chain .resource-cap-switch')`), "thinking chain toggle renders");
+    };
+    const toggleThinkingChain = async () => {
+      await click(browser, await browser.evaluate(`(() => { const b = document.querySelector('.system-thinking-chain .resource-cap-switch'); const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`));
+    };
+    await openSettings();
+    await openSystemPane();
+    assert(await browser.evaluate(`document.querySelector('.system-thinking-chain input[type="checkbox"]').checked`), "thinking chain toggle defaults on");
+    await toggleThinkingChain();
+    await waitFor(() => browser.evaluate(`!document.querySelector('.system-thinking-chain input[type="checkbox"]').checked`), "thinking chain toggle switches off");
+    await closeSettings();
+    publishThinking(36, thinkingTail);
+    await sleep(160);
+    assert(await browser.evaluate(`!document.querySelector('.stream-thinking-window')`), "disabled thinking chain hides the inline window");
+    assert(await browser.evaluate(`!!document.querySelector('.stream-working-detail')`), "disabled thinking chain keeps the thinking row");
+    await openSettings();
+    await openSystemPane();
+    await toggleThinkingChain();
+    await waitFor(() => browser.evaluate(`document.querySelector('.system-thinking-chain input[type="checkbox"]').checked`), "thinking chain toggle switches back on");
+    await closeSettings();
+    publishThinking(37, thinkingTail);
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-thinking-window')`), "re-enabled thinking chain shows the window again");
+    publish(38, null, []);
     await waitFor(() => browser.evaluate(`!document.querySelector('.stream-thinking-window')`), "thinking window must clear when reasoning ends");
     assert(await browser.evaluate(`!document.querySelector('.stream-thought-card, .stream-reading-hold')`), "extra thought frame exists");
     for (const theme of ["dark", "light"]) {
