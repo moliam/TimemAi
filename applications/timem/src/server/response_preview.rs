@@ -95,6 +95,15 @@ pub(super) fn publish(state: &AppState, session_id: &str, worker_id: &str, event
     let mut preview = event.payload.clone();
     preview["timeline_seq"] = json!(timeline_seq);
     let web_turn_id = turn.turn_id.clone();
+    // A settled Final frame is the answer itself, not a streaming tick. It must
+    // reach the wire before the terminal turn event, whose flush drops withheld
+    // previews as stale. Track that before the payload is moved into the wire
+    // event.
+    let final_preview = preview
+        .get("response")
+        .and_then(|response| response.get("status"))
+        .and_then(Value::as_str)
+        == Some("final");
     // The server-side projection always tracks the newest frame; only the
     // broadcast is throttled.
     turn.preview = Some(preview.clone());
@@ -105,17 +114,14 @@ pub(super) fn publish(state: &AppState, session_id: &str, worker_id: &str, event
         let now = now_ms();
         let throttle = &mut session.preview_throttle;
         let mut due: Vec<PendingPreview> = Vec::new();
-        // An elapsed window first releases the withheld frame so the wire
-        // order (timeline_seq) stays monotonic before any newer frame.
-        if let Some(pending) = throttle.pending.take() {
-            if now.saturating_sub(throttle.window_started_ms) >= PREVIEW_THROTTLE_WINDOW_MS {
-                throttle.last_flush_ms = now;
+        if final_preview {
+            // Terminal frames never wait: flush any withheld streaming frame
+            // first so wire order stays monotonic, then publish the Final
+            // frame immediately. Otherwise the following terminal turn event
+            // would discard it as a stale pending preview.
+            if let Some(pending) = throttle.pending.take() {
                 due.push(pending);
-            } else {
-                throttle.pending = Some(pending);
             }
-        }
-        if now.saturating_sub(throttle.last_flush_ms) >= PREVIEW_THROTTLE_WINDOW_MS {
             throttle.last_flush_ms = now;
             due.push(PendingPreview {
                 turn_id: web_turn_id,
@@ -123,14 +129,33 @@ pub(super) fn publish(state: &AppState, session_id: &str, worker_id: &str, event
                 wire_event,
             });
         } else {
-            if throttle.pending.is_none() {
-                throttle.window_started_ms = now;
+            // An elapsed window first releases the withheld frame so the wire
+            // order (timeline_seq) stays monotonic before any newer frame.
+            if let Some(pending) = throttle.pending.take() {
+                if now.saturating_sub(throttle.window_started_ms) >= PREVIEW_THROTTLE_WINDOW_MS {
+                    throttle.last_flush_ms = now;
+                    due.push(pending);
+                } else {
+                    throttle.pending = Some(pending);
+                }
             }
-            throttle.pending = Some(PendingPreview {
-                turn_id: web_turn_id,
-                timeline_seq,
-                wire_event,
-            });
+            if now.saturating_sub(throttle.last_flush_ms) >= PREVIEW_THROTTLE_WINDOW_MS {
+                throttle.last_flush_ms = now;
+                due.push(PendingPreview {
+                    turn_id: web_turn_id,
+                    timeline_seq,
+                    wire_event,
+                });
+            } else {
+                if throttle.pending.is_none() {
+                    throttle.window_started_ms = now;
+                }
+                throttle.pending = Some(PendingPreview {
+                    turn_id: web_turn_id,
+                    timeline_seq,
+                    wire_event,
+                });
+            }
         }
         due
     };

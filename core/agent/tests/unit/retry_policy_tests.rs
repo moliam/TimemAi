@@ -265,3 +265,29 @@ fn missing_key_rejected_credential_and_exhausted_balance_mark_endpoint_unavailab
         "model_network_error: connection reset"
     ));
 }
+
+#[test]
+fn invalid_native_tool_call_payloads_are_protocol_violations() {
+    for error in [
+        "invalid_tool_call[1].arguments_json:expected `,` or `]` at line 1 column 68",
+        "invalid_tool_call[0].arguments_must_be_object",
+        "invalid_tool_call[2].input_must_be_object",
+        "invalid_tool_call[0].id_required",
+        "invalid_tool_call[0].arguments_must_be_json",
+    ] {
+        assert!(is_invalid_native_tool_call_error(error), "{error}");
+        // A malformed native payload must not be retried against the same
+        // endpoint as a transport failure; the turn loop handles it as a
+        // bounded protocol repair instead.
+        assert!(!is_retryable_model_system_error(error), "{error}");
+    }
+    for error in [
+        "invalid_json",
+        "model_http_400: invalid_tool_call[1].arguments_json",
+        "invalid_tool_call[]...",
+        "invalid_tool_call[x].arguments_json",
+        "too_many_tool_calls: received 5, limit 4",
+    ] {
+        assert!(!is_invalid_native_tool_call_error(error), "{error}");
+    }
+}

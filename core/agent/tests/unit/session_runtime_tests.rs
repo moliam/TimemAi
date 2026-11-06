@@ -8497,3 +8497,68 @@ fn missing_api_key_endpoint_switches_to_failover_immediately() {
         ui.retries
     );
 }
+
+#[test]
+fn invalid_native_tool_call_arguments_get_a_bounded_repair_round() {
+    let dir = tmp_dir("native_invalid_tool_arguments_repair");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Xml;
+    config.interaction.tool_call_mode = crate::ToolCallMode::Native;
+    let mut model = ReplayModel::new([
+        Err(
+            "invalid_tool_call[1].arguments_json:expected `,` or `]` at line 1 column 68"
+                .to_string(),
+        ),
+        Ok(LlmResponse {
+            tool_calls: vec![crate::NativeToolCall {
+                assistant_continuation: None,
+                id: "call_finish_after_repair".to_string(),
+                name: "task_finished".to_string(),
+                arguments: serde_json::json!({"summary": "repaired answer"}),
+                raw_arguments: String::new(),
+            }],
+            content: String::new(),
+            model_name: config.model.clone(),
+            usage: usage(100, 10),
+            truncated: false,
+        }),
+    ]);
+    let mut ui = NoopTurnUi;
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "finish after a malformed native tool call",
+            session: "native_invalid_tool_arguments_repair",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "repaired answer");
+    assert_eq!(
+        model.prompts.len(),
+        2,
+        "the malformed payload must receive exactly one repair request"
+    );
+    let repair_prompt = &model.prompts[1];
+    assert!(
+        repair_prompt.contains("native tool call"),
+        "{repair_prompt}"
+    );
+    assert!(repair_prompt.contains("line_nr"), "{repair_prompt}");
+    assert!(
+        repair_prompt.contains("invalid_tool_call[1].arguments_json"),
+        "{repair_prompt}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}

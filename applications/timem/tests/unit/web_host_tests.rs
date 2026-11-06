@@ -23400,6 +23400,101 @@ fn streaming_preview_broadcasts_are_throttled_and_terminal_answer_drops_pending(
     );
 }
 
+#[test]
+fn settled_final_preview_bypasses_broadcast_throttle_and_keeps_wire_order() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let _web_turn = start_web_turn(&state, session_id, "publish the final preview").unwrap();
+    let worker_id = test_worker_id(session_id);
+    let core_turn_id = "core_turn_final_preview";
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Active(
+            agent_core::ActiveTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.to_string(),
+                    turn_id: core_turn_id.to_string(),
+                    epoch: 1,
+                },
+                stop_requested: false,
+                input_admission: agent_core::TurnInputAdmission::Open,
+                activity: agent_core::TurnActivity::Running,
+            },
+        )),
+    );
+    let mut receiver = state.events.subscribe();
+    let preview = |attempt: u64, revision: u64, text: &str, status: &str| {
+        CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new("core.model.preview", json!({})),
+            CoreSessionState::WaitingModel,
+            json!({
+                "turn_id": core_turn_id,
+                "attempt": attempt,
+                "revision": revision,
+                "interruption": null,
+                "response": {
+                    "attempt": attempt,
+                    "revision": revision,
+                    "text": text,
+                    "status": status
+                }
+            }),
+        )
+        .with_worker_scope(test_context_id(session_id), worker_id.clone())
+    };
+
+    // First frame broadcasts at once; the next streaming frame falls inside
+    // the throttle window and is withheld.
+    response_preview::publish(
+        &state,
+        session_id,
+        &worker_id,
+        &preview(1, 1, "partial answer", "streaming"),
+    );
+    response_preview::publish(
+        &state,
+        session_id,
+        &worker_id,
+        &preview(1, 2, "final answer", "streaming"),
+    );
+    assert_eq!(drain_wire_events(&mut receiver).len(), 1);
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_some());
+
+    // The settled Final frame is the answer itself. It must flush the withheld
+    // streaming frame and broadcast immediately; otherwise the following
+    // terminal turn event drops it as a stale pending preview and the UI never
+    // receives a Final model preview.
+    response_preview::publish(
+        &state,
+        session_id,
+        &worker_id,
+        &preview(1, 3, "final answer", "final"),
+    );
+    let drained = drain_wire_events(&mut receiver);
+    assert_eq!(
+        drained.len(),
+        2,
+        "final frame must flush pending and broadcast: {drained:?}"
+    );
+    let statuses = drained
+        .iter()
+        .map(|event| match event {
+            WireEvent::CoreTopic { event, .. } => event["payload"]["response"]["status"].clone(),
+            _ => json!(null),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(statuses, vec![json!("streaming"), json!("final")]);
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_none());
+}
+
 mod session_resource_observation_tests {
     use crate::server::session_resource_monitor::{
         dominant_memory_session, dominant_share_suffix, render_observation, ResourceObservation,

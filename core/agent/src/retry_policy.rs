@@ -271,6 +271,21 @@ pub fn is_explicit_parallel_tool_control_unsupported(error: &str) -> bool {
     names_parallel_field && explicitly_rejects_field
 }
 
+/// True when a native model response carried a tool call that cannot be
+/// accepted as protocol-compliant input (missing id/name, non-JSON
+/// `arguments`, or non-object arguments). The rejected response never reached
+/// action execution, so the runtime can safely request a protocol repair
+/// round instead of terminating the turn as a model failure.
+pub fn is_invalid_native_tool_call_error(error: &str) -> bool {
+    let Some(rest) = error.trim_start().strip_prefix("invalid_tool_call[") else {
+        return false;
+    };
+    let Some((index, tail)) = rest.split_once(']') else {
+        return false;
+    };
+    !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit()) && tail.starts_with('.')
+}
+
 pub fn is_model_input_too_large_error(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     let input_subject =

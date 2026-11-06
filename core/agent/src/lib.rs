@@ -218,9 +218,9 @@ use response_protocol::{
 };
 pub use retry_policy::{
     is_endpoint_unavailable_error, is_explicit_native_tools_unsupported,
-    is_model_input_too_large_error, is_model_rate_limited_error, is_retryable_model_system_error,
-    model_failover_failure_threshold, model_failover_strike_delay, model_retry_decision,
-    ModelCallOutcome, ModelRetryDecision, ModelSystemRetryPolicy,
+    is_invalid_native_tool_call_error, is_model_input_too_large_error, is_model_rate_limited_error,
+    is_retryable_model_system_error, model_failover_failure_threshold, model_failover_strike_delay,
+    model_retry_decision, ModelCallOutcome, ModelRetryDecision, ModelSystemRetryPolicy,
     DEFAULT_MODEL_SYSTEM_ERROR_RETRIES, DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY,
     MODEL_ENDPOINT_FAILOVER_RATE_LIMIT_FAILURES, MODEL_ENDPOINT_FAILOVER_RATE_LIMIT_STRIKE_DELAY,
     MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_FAILURES,
@@ -6093,6 +6093,45 @@ impl AgentCore {
         } else {
             self.round_budget.saturating_sub(self.current_round)
         }
+    }
+
+    /// A native tool-call payload was rejected by the transport parser before
+    /// any action executed (for example malformed JSON in `arguments`). That
+    /// is a model protocol violation, not a dead endpoint: ask the model for a
+    /// corrected tool-call response in a bounded repair round so a long turn
+    /// is not discarded. Returns `None` when repair is exhausted or when the
+    /// active interaction does not use native tool calls.
+    pub fn request_native_tool_call_repair(
+        &mut self,
+        error: &str,
+        runtime: &mut dyn ActionRuntime,
+    ) -> Option<CoreStep> {
+        if self.resolved_tool_call_mode != ToolCallMode::Native
+            || self.repair_attempts >= MAX_PROTOCOL_REPAIR_ATTEMPTS
+        {
+            return None;
+        }
+        self.repair_attempted = true;
+        self.repair_attempts = self.repair_attempts.saturating_add(1);
+        self.last_repair_issue = Some("invalid_native_tool_call_arguments".to_string());
+        self.current_stats.repair_calls = self.current_stats.repair_calls.saturating_add(1);
+        runtime.on_core_topic_events(&[host::model_repair_topic_event(
+            self.current_session_id(),
+            "invalid_native_tool_call_arguments",
+            "The previous native tool call carried invalid arguments JSON. No action was executed; the runtime is asking the model to reissue the tool calls.",
+            self.repair_attempts,
+            MAX_PROTOCOL_REPAIR_ATTEMPTS,
+        )]);
+        let repair_note = format!(
+            "{}'s previous response contained a native tool call whose `arguments` was not valid JSON, so none of the tool calls in that response were executed.\nerror: {error}\n\nReissue the intended tool calls now with syntactically valid JSON arguments. Parameters declared as JSON objects (for example `starter` and `ender` in `readfile`) must be objects such as {{\"line_nr\": 950}}, never arrays such as [\"line_nr\": 950]. Emit the corrected tool calls directly without restating the error.",
+            self.assistant_speaker_name
+        );
+        let prompt = self
+            .render_prompt_with_temporary_delta(vec![("response_repair".to_string(), repair_note)]);
+        Some(CoreStep::NeedModel {
+            prompt,
+            rounds_remaining: self.remaining_rounds(),
+        })
     }
 
     fn request_protocol_repair(

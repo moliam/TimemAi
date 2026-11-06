@@ -305,7 +305,7 @@ fn raw_chat_session_scope_survives_a_busier_sibling_session() {
     for index in 0..55 {
         busy.push(user_message(
             &format!("turn_{}_{}", 1791948100000i64 + index, index),
-            1791948100000 + index as i64,
+            1791948100000 + index,
             &format!("search marker SCOPE-NOISE-{index}"),
         ));
     }

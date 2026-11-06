@@ -4,8 +4,9 @@ use crate::model_stream::{
 };
 use crate::turn_state::{allocate_turn_token, TurnProjectionState};
 use crate::{
-    append_audit_event, is_endpoint_unavailable_error, is_model_input_too_large_error,
-    is_retryable_model_system_error, model_failover_failure_threshold, model_failover_strike_delay,
+    append_audit_event, is_endpoint_unavailable_error, is_invalid_native_tool_call_error,
+    is_model_input_too_large_error, is_retryable_model_system_error,
+    model_failover_failure_threshold, model_failover_strike_delay,
     model_input_overflow_recovery_audit_event, model_retry_audit_event, model_retry_decision,
     normalize_user_supplements_with_context, ActionRuntime, AgentCore, CoreStep, CoreTopicEvent,
     HostDecisionRequest, HttpModelClient, LlmResponse, LongRunningCommandDecision,
@@ -798,6 +799,19 @@ fn run_session_turn_with_model_client_and_reminder_override(
                         );
                         if take_cancel_request(ui, &mut turn_projection) {
                             break cancelled_turn_parts();
+                        }
+                        // A rejected native tool-call payload is a protocol
+                        // violation, not a dead endpoint: the response never
+                        // reached action execution, so ask for corrected tool
+                        // calls instead of failing the whole turn.
+                        if is_invalid_native_tool_call_error(&err) {
+                            let mut repair_runtime = TurnActionRuntime::new(ui);
+                            if let Some(next_step) =
+                                core.request_native_tool_call_repair(&err, &mut repair_runtime)
+                            {
+                                step = next_step;
+                                continue;
+                            }
                         }
                         // A failing endpoint must not burn unbounded backoff
                         // when an ordered failover chain is available: once the
