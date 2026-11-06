@@ -324,9 +324,10 @@ async function main() {
       ),
       "header button must highlight with active timers",
     );
+    // Badge shows working/total so a paused timer remains visible in the count.
     assert(
-      await browser.evaluate(`document.querySelector('.timer-header-count')?.textContent === '1'`),
-      "header count must show 1",
+      await browser.evaluate(`document.querySelector('.timer-header-count')?.textContent === '1/1'`),
+      "header count must show working/total timers as 1/1",
     );
 
     // Open the panel.
@@ -498,8 +499,8 @@ async function main() {
     assert(created.mode === "once", "mode default must be once");
     // Panel shows the new timer (count badge updates).
     await waitFor(() => browser.evaluate(
-      `document.querySelector('.timer-header-count')?.textContent === '2'`,
-    ), "header count must show 2 after create");
+      `document.querySelector('.timer-header-count')?.textContent === '2/2'`,
+    ), "header count must show 2/2 after create");
 
     // Successful create collapses the form back to the toggle.
     await waitFor(() => exists(".timer-create-toggle"), "toggle must return after create");
@@ -529,18 +530,20 @@ async function main() {
       `document.querySelector('.timer-create-form select').value = 'repeat';
        document.querySelector('.timer-create-form select').dispatchEvent(new Event('change', { bubbles: true }));`,
     );
+    // delay + interval + queue-timeout are all number inputs; identify the
+    // interval by its label instead of by DOM order.
     await waitFor(() => browser.evaluate(
-      `document.querySelectorAll('.timer-create-form input[type=number]').length === 2`,
+      `[...document.querySelectorAll('.timer-create-form label')].some((node) => node.textContent?.includes('重复间隔'))`,
     ), "repeat mode must reveal interval field");
     await setNativeValue(".timer-create-form textarea", "循环巡检");
     const numberInputs = () => browser.evaluate(
       `[...document.querySelectorAll('.timer-create-form input[type=number]')].map((el) => el.value)`,
     );
     await setNativeValue(".timer-create-form input[type=number]", "2");
-    // Second number input is the interval: fill through DOM order.
+    // Fill the interval by its label (queue-timeout is also a number input).
     await browser.evaluate(
-      `(() => { const inputs = [...document.querySelectorAll('.timer-create-form input[type=number]')];
-        const el = inputs[inputs.length - 1]; el.focus();
+      `(() => { const label = [...document.querySelectorAll('.timer-create-form label')].find((node) => node.textContent?.includes('重复间隔'));
+        const el = label?.querySelector('input[type=number]'); el.focus();
         Object.getOwnPropertyDescriptor(el.constructor.prototype, 'value').set.call(el, '15');
         el.dispatchEvent(new Event('input', { bubbles: true })); })()`,
     );
@@ -612,14 +615,17 @@ async function main() {
       );
       assert(timerBg && timerBg !== "rgba(0, 0, 0, 0)" && timerBg !== plainBg,
         `timer entry must tint: theme=${theme} timer=${timerBg} plain=${plainBg}`);
-      assert(timerBg.startsWith("rgba(59, 130, 246,"),
-        `timer tint must use the existing accent blue: theme=${theme} got=${timerBg}`);
+      // Machine-injected entries use the neutral system card, not the
+      // hand-typed accent bubble; assert the exact designed fill per theme.
+      const expectedTimerBg = theme === "light" ? "rgb(230, 234, 238)" : "rgb(205, 212, 218)";
+      assert(timerBg === expectedTimerBg,
+        `timer entry must use the neutral system card: theme=${theme} expected=${expectedTimerBg} got=${timerBg}`);
       assert(bubbleBg !== timerBg, "bubble and timer tint must differ");
     }
 
     // Layout acceptance across themes and widths (panel + create form).
     for (const theme of ["dark", "light"]) {
-      for (const width of [1440, 390]) {
+      for (const width of [1440, 900, 390]) {
         await browser.call("Emulation.setDeviceMetricsOverride", { width, height: 1000, deviceScaleFactor: 1, mobile: false });
         await browser.evaluate(`document.documentElement.dataset.theme = ${JSON.stringify(theme)}`);
         await browser.evaluate(`new Promise((resolveFrame) => requestAnimationFrame(() => requestAnimationFrame(resolveFrame)))`);

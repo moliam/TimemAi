@@ -664,6 +664,37 @@ async function main() {
     const closeMcpPanelPoint = await center(browser, ".mcp-panel-header-actions .icon-button");
     await click(browser, closeMcpPanelPoint);
     await waitFor(() => browser.evaluate(`!document.querySelector('.mcp-panel')`), "MCP panel closes");
+    // Timers and session info are anchored cards too. They must not replace
+    // the worker-role sidebar or open inside the grid as a third column.
+    for (const [buttonSelector, panelSelector] of [
+      [".timer-header-button", "#timer-panel"],
+      [".mailbox-header-button", "#mailbox-panel"],
+    ]) {
+      await click(browser, await center(browser, buttonSelector));
+      await waitFor(() => browser.evaluate(`!!document.querySelector(${JSON.stringify(panelSelector)})`), `${panelSelector} opens`);
+      const cardLayout = await browser.evaluate(`(() => {
+        const button = document.querySelector(${JSON.stringify(buttonSelector)}).getBoundingClientRect();
+        const panel = document.querySelector(${JSON.stringify(panelSelector)});
+        const rect = panel.getBoundingClientRect();
+        return {
+          button: button.toJSON(),
+          panel: rect.toJSON(),
+          position: getComputedStyle(panel).position,
+          radius: getComputedStyle(panel).borderTopLeftRadius,
+          sidebar: !!document.querySelector('.worker-role-panel'),
+          viewport: innerWidth,
+        };
+      })()`);
+      assert(cardLayout.position === 'absolute', `session card floats: ${JSON.stringify(cardLayout)}`);
+      assert(cardLayout.radius === '12px', `session card uses the shared card radius: ${JSON.stringify(cardLayout)}`);
+      assert(Math.abs(cardLayout.panel.right - cardLayout.button.right) <= 1, `session card anchors to its trigger: ${JSON.stringify(cardLayout)}`);
+      assert(cardLayout.panel.top > cardLayout.button.bottom && cardLayout.panel.top - cardLayout.button.bottom <= 32, `session card drops just below its trigger: ${JSON.stringify(cardLayout)}`);
+      assert(cardLayout.panel.left > cardLayout.viewport / 2, `session card opens on the right half: ${JSON.stringify(cardLayout)}`);
+      assert(cardLayout.sidebar, `worker-role sidebar stays mounted: ${JSON.stringify(cardLayout)}`);
+      await click(browser, await center(browser, `${panelSelector} .side-panel-header .icon-button`));
+      await waitFor(() => browser.evaluate(`!document.querySelector(${JSON.stringify(panelSelector)})`), `${panelSelector} closes`);
+    }
+    assert(await browser.evaluate(`!!document.querySelector('.mailbox-header-button svg.lucide-messages-square')`), "session info uses the direct-conversation icon");
     // A session without an endpoint chain falls back to the session-level
     // runtime setting; the Host projection still drives the next request.
     const unbound = makeSession();

@@ -78,6 +78,7 @@ import {
   Maximize2,
   Menu,
   MessageSquareText,
+  MessagesSquare,
   Minimize2,
   Palette,
   FolderInput,
@@ -102,7 +103,6 @@ import {
   Wrench,
   X,
   AlarmClock,
-  Info,
   NotebookPen,
   Mail,
   Pause,
@@ -616,6 +616,12 @@ function TimemApp() {
   const [showToolRepo, setShowToolRepo] = useState(false);
   const [showTimers, setShowTimers] = useState(false);
   const [showMailbox, setShowMailbox] = useState(false);
+  const [timersPanelAnchorRight, setTimersPanelAnchorRight] = useState<
+    number | null
+  >(null);
+  const [mailboxPanelAnchorRight, setMailboxPanelAnchorRight] = useState<
+    number | null
+  >(null);
   const [mailboxBySession, setMailboxBySession] = useState<
     Record<string, MailboxSnapshotInfo>
   >({});
@@ -919,13 +925,13 @@ function TimemApp() {
     setShowToolRepo(false);
     toolRepoButtonRef.current?.focus({ preventScroll: true });
   }, []);
-  const closeTimersPanel = useCallback(() => {
+  const closeTimersPanel = useCallback((restoreFocus = true) => {
     setShowTimers(false);
-    timersButtonRef.current?.focus({ preventScroll: true });
+    if (restoreFocus) timersButtonRef.current?.focus({ preventScroll: true });
   }, []);
-  const closeMailboxPanel = useCallback(() => {
+  const closeMailboxPanel = useCallback((restoreFocus = true) => {
     setShowMailbox(false);
-    mailboxButtonRef.current?.focus({ preventScroll: true });
+    if (restoreFocus) mailboxButtonRef.current?.focus({ preventScroll: true });
   }, []);
   const closeRuntimePanel = useCallback((restoreFocus = true) => {
     setShowRuntime(false);
@@ -966,6 +972,49 @@ function TimemApp() {
     window.addEventListener("resize", anchor);
     return () => window.removeEventListener("resize", anchor);
   }, [showMcp]);
+  useLayoutEffect(() => {
+    if (!showTimers) return;
+    const anchor = () => {
+      const button = timersButtonRef.current;
+      if (!button) return;
+      // The timer card lives under the app shell, not inside the chat shell;
+      // measure against the card's own containing block when it is mounted.
+      const boundary =
+        (timersPanelRef.current?.offsetParent as HTMLElement | null)?.getBoundingClientRect()
+          .right ??
+        (button.offsetParent as HTMLElement | null)?.getBoundingClientRect()
+          .right ??
+        window.innerWidth;
+      const rect = button.getBoundingClientRect();
+      setTimersPanelAnchorRight(
+        Math.max(12, Math.min(Math.round(boundary - rect.right), window.innerWidth - 48)),
+      );
+    };
+    anchor();
+    window.addEventListener("resize", anchor);
+    return () => window.removeEventListener("resize", anchor);
+  }, [showTimers]);
+  useLayoutEffect(() => {
+    if (!showMailbox) return;
+    const anchor = () => {
+      const button = mailboxButtonRef.current;
+      if (!button) return;
+      // See the timer card: anchor against the card's own containing block.
+      const boundary =
+        (mailboxPanelRef.current?.offsetParent as HTMLElement | null)?.getBoundingClientRect()
+          .right ??
+        (button.offsetParent as HTMLElement | null)?.getBoundingClientRect()
+          .right ??
+        window.innerWidth;
+      const rect = button.getBoundingClientRect();
+      setMailboxPanelAnchorRight(
+        Math.max(12, Math.min(Math.round(boundary - rect.right), window.innerWidth - 48)),
+      );
+    };
+    anchor();
+    window.addEventListener("resize", anchor);
+    return () => window.removeEventListener("resize", anchor);
+  }, [showMailbox]);
   const closeMobileSidebar = useCallback((restoreFocus = true) => {
     setShowMobileSessions(false);
     if (restoreFocus)
@@ -1082,20 +1131,48 @@ function TimemApp() {
   useEffect(() => {
     if (!showTimers) return;
     timersPanelRef.current?.focus({ preventScroll: true });
+    const dismissOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (
+        timersButtonRef.current?.contains(target) ||
+        timersPanelRef.current?.contains(target)
+      )
+        return;
+      closeTimersPanel(false);
+    };
     const dismissOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") closeTimersPanel();
     };
+    document.addEventListener("pointerdown", dismissOnOutsidePointer);
     document.addEventListener("keydown", dismissOnEscape);
-    return () => document.removeEventListener("keydown", dismissOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", dismissOnOutsidePointer);
+      document.removeEventListener("keydown", dismissOnEscape);
+    };
   }, [closeTimersPanel, showTimers]);
   useEffect(() => {
     if (!showMailbox) return;
     mailboxPanelRef.current?.focus({ preventScroll: true });
+    const dismissOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (
+        mailboxButtonRef.current?.contains(target) ||
+        mailboxPanelRef.current?.contains(target)
+      )
+        return;
+      closeMailboxPanel(false);
+    };
     const dismissOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") closeMailboxPanel();
     };
+    document.addEventListener("pointerdown", dismissOnOutsidePointer);
     document.addEventListener("keydown", dismissOnEscape);
-    return () => document.removeEventListener("keydown", dismissOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", dismissOnOutsidePointer);
+      document.removeEventListener("keydown", dismissOnEscape);
+    };
   }, [closeMailboxPanel, showMailbox]);
 
   useEffect(() => {
@@ -4209,7 +4286,7 @@ function TimemApp() {
       <div
         inert={workspaceModalOpen}
         aria-hidden={workspaceModalOpen || undefined}
-        className={`app-shell ${leftSidebarCollapsed ? "left-sidebar-collapsed" : ""} ${!showToolRepo && !showTimers && !showMailbox && rightSidebarCollapsed ? "right-sidebar-collapsed" : ""}`}
+        className={`app-shell ${leftSidebarCollapsed ? "left-sidebar-collapsed" : ""} ${!showToolRepo && rightSidebarCollapsed ? "right-sidebar-collapsed" : ""}`}
         style={
           {
             "--left-sidebar-width": `${sidebarLayout.leftWidth}px`,
@@ -5383,7 +5460,7 @@ function TimemApp() {
                   else setShowMailbox(true);
                 }}
               >
-                <Info size={17} />
+                <MessagesSquare size={17} />
                 {mailboxUnread > 0 && (
                   <span className="mailbox-header-count" aria-hidden="true">
                     {mailboxCountLabel}
@@ -5667,7 +5744,7 @@ function TimemApp() {
             onDecisionReply={replyToDecision}
           />
         </main>
-        {!showToolRepo && !showTimers && !showMailbox && showRoles && (
+        {!showToolRepo && showRoles && (
           <button
             type="button"
             className="role-panel-backdrop"
@@ -5675,7 +5752,7 @@ function TimemApp() {
             onClick={() => setShowRoles(false)}
           />
         )}
-        {!showToolRepo && !showTimers && !showMailbox && (
+        {!showToolRepo && (
           <WorkerRolePanel
             key={activeSession?.session_id ?? "no-session"}
             session={activeSession}
@@ -5828,36 +5905,20 @@ function TimemApp() {
           />
         )}
         {showTimers && (
-          <button
-            type="button"
-            className="side-panel-backdrop"
-            aria-label={t("common.close")}
-            onClick={closeTimersPanel}
-          />
-        )}
-        {showTimers && (
           <TimerPanel
             key={activeSession?.session_id ?? "no-session"}
             panelRef={timersPanelRef}
-            onResizeStart={(event) => startSidebarResize("right", event)}
+            anchorRight={timersPanelAnchorRight}
             onClose={closeTimersPanel}
             session={activeSession}
             sendCommand={sendCommandRef}
           />
         )}
         {showMailbox && (
-          <button
-            type="button"
-            className="side-panel-backdrop"
-            aria-label={t("common.close")}
-            onClick={closeMailboxPanel}
-          />
-        )}
-        {showMailbox && (
           <MailboxPanel
             key={activeSession?.session_id ?? "no-session"}
             panelRef={mailboxPanelRef}
-            onResizeStart={(event) => startSidebarResize("right", event)}
+            anchorRight={mailboxPanelAnchorRight}
             onClose={closeMailboxPanel}
             session={activeSession}
             mailbox={activeMailbox}
@@ -7993,14 +8054,14 @@ function fallbackCopyText(text: string, done: () => void) {
 
 function MailboxPanel({
   panelRef,
-  onResizeStart,
+  anchorRight,
   onClose,
   session,
   mailbox,
   sendCommand,
 }: {
   panelRef: MutableRefObject<HTMLElement | null>;
-  onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  anchorRight: number | null;
   onClose: () => void;
   session: Session | undefined;
   mailbox: MailboxSnapshotInfo | undefined;
@@ -8050,20 +8111,20 @@ function MailboxPanel({
     <aside
       id="mailbox-panel"
       ref={panelRef}
-      className="mailbox-panel toolrepo-side-panel session-side-panel"
+      className="mailbox-panel session-popover"
+      style={
+        anchorRight === null
+          ? undefined
+          : ({ "--session-popover-right": `${anchorRight}px` } as CSSProperties)
+      }
+      role="dialog"
+      aria-modal="false"
       aria-label={t("mailbox.title")}
       tabIndex={-1}
     >
-      <button
-        type="button"
-        className="sidebar-resize-handle right"
-        title="Resize mailbox"
-        aria-label="Resize mailbox"
-        onPointerDown={onResizeStart}
-      />
       <header className="side-panel-header">
         <div className="side-panel-title">
-          <Info size={15} />
+          <MessagesSquare size={15} />
           <strong>{t("mailbox.title")}</strong>
         </div>
         <button
@@ -8181,13 +8242,13 @@ function MailboxPanel({
 
 function TimerPanel({
   panelRef,
-  onResizeStart,
+  anchorRight,
   onClose,
   session,
   sendCommand,
 }: {
   panelRef: MutableRefObject<HTMLElement | null>;
-  onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  anchorRight: number | null;
   onClose: () => void;
   session: Session | undefined;
   sendCommand: MutableRefObject<
@@ -8326,17 +8387,17 @@ function TimerPanel({
     <aside
       id="timer-panel"
       ref={panelRef}
-      className="timer-panel toolrepo-side-panel session-side-panel"
+      className="timer-panel session-popover"
+      style={
+        anchorRight === null
+          ? undefined
+          : ({ "--session-popover-right": `${anchorRight}px` } as CSSProperties)
+      }
+      role="dialog"
+      aria-modal="false"
       aria-label={t("timer.title")}
       tabIndex={-1}
     >
-      <button
-        type="button"
-        className="sidebar-resize-handle right"
-        title="Resize timers"
-        aria-label="Resize timers"
-        onPointerDown={onResizeStart}
-      />
       <header className="side-panel-header">
         <div className="side-panel-title">
           <AlarmClock size={15} />

@@ -6782,3 +6782,70 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 :root[data-theme="light"] .endpoint-chain-token-cap { color: #4a7066; }
 :root[data-theme="light"] .endpoint-chain-active-badge { border-color: #2f9077; background: #2f9077; color: #fff; box-shadow: 0 0 0 2px #ffffff, 0 0 6px #2f907733; }
 :root[data-theme="light"] .endpoint-chain-empty { border-color: #c5d7d2; background: #f4faf7; color: #526a75; }
+
+
+/* Timers and session info open as anchored cards, not grid sidebars. */
+.timer-panel,
+.mailbox-panel {
+  position: absolute;
+  z-index: 10;
+  top: 62px;
+  right: var(--session-popover-right, 24px);
+  left: auto;
+  width: min(420px, calc(100vw - 32px));
+  max-height: min(560px, calc(100vh - 84px));
+  display: flex;
+  flex-direction: column;
+  border: 0;
+  border-radius: 12px;
+  background: #171e1c;
+  box-shadow: 0 24px 68px #000c, 0 8px 24px #0007;
+  overflow: hidden;
+}
+.mailbox-panel { width: min(440px, calc(100vw - 32px)); }
+.timer-panel > header,
+.mailbox-panel > header {
+  flex: none;
+  border: 0;
+  padding: 13px 15px 11px !important;
+  box-shadow: 0 1px #2d3a377a;
+}
+.timer-panel > header .icon-button,
+.mailbox-panel > header .icon-button { width: 30px; height: 30px; margin-right: -4px; }
+.timer-panel .side-panel-title,
+.mailbox-panel .side-panel-title { gap: 8px; }
+.timer-panel .side-panel-title svg,
+.mailbox-panel .side-panel-title svg { color: #78cfba; }
+.timer-panel .side-panel-title strong,
+.mailbox-panel .side-panel-title strong { color: #e2efea; font-size: 14px; font-weight: 650; }
+.timer-panel .timer-list,
+.mailbox-panel .mailbox-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 12px;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+.timer-panel .timer-item,
+.mailbox-panel .mailbox-item {
+  border: 0;
+  border-radius: 9px;
+  background: #202825;
+  box-shadow: 0 4px 13px #0003;
+}
+.timer-panel .timer-item:hover,
+.mailbox-panel .mailbox-item:hover { background: #242d29; }
+:root[data-theme="light"] .timer-panel,
+:root[data-theme="light"] .mailbox-panel { border: 0; background: #f7faf9; box-shadow: 0 24px 64px #29443b38, 0 8px 22px #29443b20; }
+:root[data-theme="light"] .timer-panel > header,
+:root[data-theme="light"] .mailbox-panel > header { box-shadow: 0 1px #dbe8e4; }
+:root[data-theme="light"] .timer-panel .side-panel-title svg,
+:root[data-theme="light"] .mailbox-panel .side-panel-title svg { color: #2f8f7d; }
+:root[data-theme="light"] .timer-panel .side-panel-title strong,
+:root[data-theme="light"] .mailbox-panel .side-panel-title strong { color: #233a34; }
+:root[data-theme="light"] .timer-panel .timer-item,
+:root[data-theme="light"] .mailbox-panel .mailbox-item { background: #fff; box-shadow: 0 4px 13px #29443b18; }
+@media (max-width: 720px) {
+  .timer-panel,
+  .mailbox-panel { position: fixed; inset: 62px 12px auto; width: auto; max-height: min(560px, calc(100vh - 76px)); }
+}
