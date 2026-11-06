@@ -4694,6 +4694,27 @@ describe("web topic view model", () => {
     expect(updated.turns[0]?.final_answer).toBe("done");
   });
 
+  it("does not let a late working projection reopen a restored completed turn", () => {
+    const restored: WebTurn = {
+      ...turn("turn_restored_working", "completed"),
+      completion: { stop_reason: "Completed" },
+      final_answer: "done",
+    };
+    const completed = upsertTurn(session("session_1"), restored);
+    const lateWorking = {
+      ...turn("turn_restored_working", "working"),
+      completion: null,
+      final_answer: null,
+    };
+
+    const updated = upsertTurn(completed, lateWorking);
+
+    expect(updated.turns[0]?.state).toBe("completed");
+    expect(updated.turns[0]?.final_answer).toBe("done");
+    expect(updated.state).not.toBe("working");
+    expect(updated.active_turn_id).not.toBe("turn_restored_working");
+  });
+
   it("builds a source-turn-bound manual ToolGen command without inventing user text", () => {
     expect(manualToolGenCommand("session_1", "turn_7", "   ")).toEqual({
       type: "turn_submit",

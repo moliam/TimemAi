@@ -93,6 +93,24 @@ export function moveEndpointInChain(
 export const MODEL_CONTEXT_WINDOW_OPTIONS = [
   100_000, 200_000, 300_000, 1_000_000,
 ] as const;
+/** Maps the current total window to the unified select value.
+ *
+ * A user who explicitly chose "custom" keeps that mode even when the value
+ * happens to equal a preset or the model's documented window; otherwise the
+ * semantic option wins. This is what makes the custom number field reachable
+ * from a preset value instead of silently snapping back to the preset. */
+export function contextWindowSelectionMode(
+  total: number,
+  modelWindow: number | undefined,
+  customRequested: boolean,
+): string {
+  if (customRequested) return "custom";
+  if (modelWindow !== undefined && total === modelWindow) return "model";
+  return MODEL_CONTEXT_WINDOW_OPTIONS.some((option) => option === total)
+    ? String(total)
+    : "custom";
+}
+
 export const MODEL_OUTPUT_TOKEN_OPTIONS = [10_000, 20_000, 50_000] as const;
 
 export const REASONING_EFFORT_OPTIONS = [

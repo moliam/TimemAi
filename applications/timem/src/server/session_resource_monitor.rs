@@ -16,7 +16,7 @@
 //! dominant-share notice; a shared cap that no single Session crossed is never
 //! blamed on an arbitrary Session.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use agent_core::resource_caps::SessionResourceUsage;
@@ -417,7 +417,7 @@ pub(super) fn spawn_session_resource_monitor(state: AppState) {
     tokio::spawn(async move {
         let mut states: HashMap<String, SessionObservationState> = HashMap::new();
         loop {
-            sample_sessions(&state, &mut states);
+            sample_sessions(&state, &mut states).await;
             tokio::time::sleep(SAMPLE_INTERVAL).await;
         }
     });
@@ -429,7 +429,10 @@ struct SessionSample {
     observations: Vec<ResourceObservation>,
 }
 
-fn sample_sessions(state: &AppState, states: &mut HashMap<String, SessionObservationState>) {
+/// Async wrapper: cgroup accounting is a burst of synchronous file reads.
+/// Move the whole sweep to the blocking pool so a slow filesystem or many
+/// Sessions cannot stall the Tokio timers that drive the rest of the host.
+async fn sample_sessions(state: &AppState, states: &mut HashMap<String, SessionObservationState>) {
     if state
         .session_restore_in_progress
         .load(std::sync::atomic::Ordering::SeqCst)
@@ -446,12 +449,29 @@ fn sample_sessions(state: &AppState, states: &mut HashMap<String, SessionObserva
             .map(|session| session.session_id.clone())
             .collect()
     };
-    states.retain(|session_id, _| session_ids.iter().any(|id| id == session_id));
-    let host_cores = agent_core::resource_caps::system_cpu_cores();
-    let total_memory_bytes = agent_core::resource_caps::system_mem_total_bytes();
-    let mut samples = Vec::with_capacity(session_ids.len());
-    for session_id in session_ids {
-        let usage = match agent_core::resource_caps::session_resource_usage(&session_id) {
+    let alive: HashSet<&str> = session_ids.iter().map(String::as_str).collect();
+    states.retain(|session_id, _| alive.contains(session_id.as_str()));
+    let ids = session_ids.clone();
+    let Ok((host_cores, total_memory_bytes, usage_by_session)) =
+        tokio::task::spawn_blocking(move || {
+            let host_cores = agent_core::resource_caps::system_cpu_cores();
+            let total_memory_bytes = agent_core::resource_caps::system_mem_total_bytes();
+            let usages = ids
+                .into_iter()
+                .map(|session_id| {
+                    let usage = agent_core::resource_caps::session_resource_usage(&session_id);
+                    (session_id, usage)
+                })
+                .collect::<Vec<_>>();
+            (host_cores, total_memory_bytes, usages)
+        })
+        .await
+    else {
+        return;
+    };
+    let mut samples = Vec::with_capacity(usage_by_session.len());
+    for (session_id, usage) in usage_by_session {
+        let usage = match usage {
             Ok(Some(usage)) => usage,
             // No scope yet, or the platform cannot account for it: stay quiet
             // instead of paging the model on every sample.

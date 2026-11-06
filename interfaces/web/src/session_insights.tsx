@@ -13,7 +13,7 @@
  * - persisted values are presentation preferences only (order, position, pin);
  * - every sample command is read-only and bounded by the Host.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -339,11 +339,24 @@ export function SessionInsights({
     };
   }, [open, pinned]);
 
-  const runtimeTotals = session ? sessionRuntimeUsage(session) : undefined;
-  const telemetry = session ? sessionModelTelemetry(session) : undefined;
-  const pulse = session ? sessionModelPulse(session) : undefined;
-  const cacheHitPercent = session ? sessionCacheHitPercent(session) : undefined;
-  const contextUsage = session ? sessionContextUsage(session) : undefined;
+  // These projections scan the whole Session history. Memoize on the Session
+  // object identity so panel drags, hovers, and pin/collapse state changes do
+  // not re-walk every turn just to repaint the same numbers.
+  const metrics = useMemo(() => {
+    if (!session) return undefined;
+    return {
+      runtimeTotals: sessionRuntimeUsage(session),
+      telemetry: sessionModelTelemetry(session),
+      pulse: sessionModelPulse(session),
+      cacheHitPercent: sessionCacheHitPercent(session),
+      contextUsage: sessionContextUsage(session),
+    };
+  }, [session]);
+  const runtimeTotals = metrics?.runtimeTotals;
+  const telemetry = metrics?.telemetry;
+  const pulse = metrics?.pulse;
+  const cacheHitPercent = metrics?.cacheHitPercent;
+  const contextUsage = metrics?.contextUsage;
   const contextLimit = session?.max_llm_input_tokens || undefined;
   const contextTokens = contextUsage?.prompt_tokens ?? 0;
   const contextPercent = contextLimit

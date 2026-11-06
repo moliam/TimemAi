@@ -51,6 +51,8 @@ Timem 实例运行时派生的 shell job（构建、测试、索引等）可能�
 - `memory.high = memory.max × 85%` 是软节流点：超过后内核回收 page cache/换出 anon 并
   节流分配，通常把用量钉在 high 附近而不杀进程；只有回收也无法满足时才走到 max 的 OOM。
   有 swap 时内核优先换出（实测 64MiB max、512MiB 分配存活，`max` 事件增长而 `oom_kill=0`）。
+- `memory.high` 与 `memory.max` 作为一个维度成对应用：任一文件写入失败时，平台把两者都
+  回滚到写入前的值，再报告 `Unavailable`，避免 UI 显示“未生效”而内核仍残留半套限制。
 - 需要 systemd delegated cgroup v2 子树；权限不足时 `cpu`/`mem` 分别报告 `Unavailable`
   及原因，`probe_instance_resource_caps` 会进一步分类：无需 root 即可用（`Ready`）、
   root 可修复（`NeedsEscalation`，附最小动作计划）或 root 也修不了（`Unavailable`）。

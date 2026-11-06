@@ -1,9 +1,38 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import {
+  applyContextWindowChoice,
+  contextWindowSelectionMode,
+} from "../src/model_endpoints";
 
 const read = (relative: string): string =>
   readFileSync(join(import.meta.dirname, "..", "src", relative), "utf8");
+
+describe("endpoint context window mapping", () => {
+  it("keeps an explicitly requested custom mode at preset and model values", () => {
+    expect(contextWindowSelectionMode(100_000, 200_000, false)).toBe("100000");
+    expect(contextWindowSelectionMode(200_000, 200_000, false)).toBe("model");
+    // Choosing custom must win over the coincidental preset value.
+    expect(contextWindowSelectionMode(100_000, 200_000, true)).toBe("custom");
+    expect(contextWindowSelectionMode(123_456, 200_000, false)).toBe("custom");
+    expect(contextWindowSelectionMode(123_456, undefined, false)).toBe("custom");
+  });
+
+  it("maps the unified window onto the input budget without touching output", () => {
+    type Draft = Parameters<typeof applyContextWindowChoice>[0];
+    const draft = {
+      max_llm_input_tokens: 1_000,
+      max_llm_output_tokens: 20_000,
+    } as unknown as Draft;
+    const wide = applyContextWindowChoice(draft, 200_000);
+    expect(wide.max_llm_input_tokens).toBe(180_000);
+    expect(wide.max_llm_output_tokens).toBe(20_000);
+    // A window smaller than the output budget clamps input to one token
+    // instead of going negative.
+    expect(applyContextWindowChoice(draft, 5_000).max_llm_input_tokens).toBe(1);
+  });
+});
 
 describe("unified endpoint context window UI", () => {
   it("wires the unified window select with presets, model shortcut and warning", () => {
@@ -13,6 +42,10 @@ describe("unified endpoint context window UI", () => {
     expect(main).toContain('t("endpoints.contextWindowOverLimit"');
     expect(main).toContain("endpoint-window-badge");
     expect(main).toContain("MODEL_CONTEXT_WINDOW_OPTIONS.map");
+    expect(main).toContain("contextWindowSelectionMode");
+    expect(main).toContain("contextWindowCustomMode");
+    expect(main).toContain("contextWindowCustomDraft");
+    expect(main).toContain("applyContextWindowTotal");
     expect(main).not.toContain('code === "context_budget"');
   });
 

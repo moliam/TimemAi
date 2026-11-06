@@ -1112,7 +1112,9 @@ export function upsertTurn(session: Session, incoming: WebTurn): Session {
   );
   const previousIsTerminal = !!(
     previous &&
-    (previous.state === "finished" || previous.completion)
+    (previous.state === "finished" ||
+      previous.state === "completed" ||
+      previous.completion)
   );
   // Turn state is monotonic. A delayed started/updated event from a cancelled
   // execution must not overwrite the terminal projection already shown by UI.

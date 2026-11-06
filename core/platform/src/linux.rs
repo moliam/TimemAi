@@ -1410,6 +1410,15 @@ fn apply_memory_bounds(
 ) -> ResourceCapStatus {
     let max_bytes = format_memory_max(percent, total_bytes);
     let high_bytes = format_memory_high(max_bytes);
+    let high_path = subtree.join("memory.high");
+    let max_path = subtree.join("memory.max");
+    // A dimension is two kernel files. If one write fails, restore both to
+    // their previous values: reporting `Unavailable` while leaving one bound
+    // applied would make the projection disagree with what the kernel
+    // enforces. Best effort — a restore failure is still reported as
+    // `Unavailable` below, never silently as success.
+    let previous_high = cgroup_read_trimmed(&high_path);
+    let previous_max = cgroup_read_trimmed(&max_path);
     let high = apply_dimension_bound(
         subtree,
         "memory.high",
@@ -1432,6 +1441,12 @@ fn apply_memory_bounds(
         }
         (ResourceCapStatus::Unavailable { reason }, _)
         | (_, ResourceCapStatus::Unavailable { reason }) => {
+            if let Some(previous) = previous_high.as_deref() {
+                let _ = cgroup_write_value(&high_path, previous);
+            }
+            if let Some(previous) = previous_max.as_deref() {
+                let _ = cgroup_write_value(&max_path, previous);
+            }
             ResourceCapStatus::Unavailable { reason }
         }
         _ => ResourceCapStatus::Disabled,
@@ -1624,6 +1639,44 @@ mod session_resource_tests {
             "+cpu +memory\n"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn memory_bounds_roll_back_both_files_when_enable_partially_fails() {
+        let root = temporary_scope("memory-rollback-enable");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("memory.high"), "111\n").unwrap();
+        // A directory at memory.max makes the hard-limit write fail after the
+        // soft limit has already been written.
+        fs::create_dir(root.join("memory.max")).unwrap();
+
+        let status = apply_memory_bounds(&root, true, 50.0, 1_000_000);
+        assert!(matches!(status, ResourceCapStatus::Unavailable { .. }));
+        assert_eq!(
+            fs::read_to_string(root.join("memory.high")).unwrap(),
+            "111\n",
+            "the soft limit must be restored when the hard limit fails"
+        );
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn memory_bounds_roll_back_when_disable_partially_fails() {
+        let root = temporary_scope("memory-rollback-disable");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("memory.high"), "111\n").unwrap();
+        fs::create_dir(root.join("memory.max")).unwrap();
+
+        let status = apply_memory_bounds(&root, false, 50.0, 1_000_000);
+        assert!(matches!(status, ResourceCapStatus::Unavailable { .. }));
+        assert_eq!(
+            fs::read_to_string(root.join("memory.high")).unwrap(),
+            "111\n",
+            "a failed disable must not leave the soft limit cleared"
+        );
+
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

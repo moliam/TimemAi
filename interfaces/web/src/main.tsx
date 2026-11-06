@@ -1,7 +1,7 @@
 import { useThrottledValue } from "./use_throttled_value";
 import { MailboxIcon, MailboxInvocation, MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation, TimerInvocation, TimerToolIcon } from "./tool_invocation";
 import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
-import { applyContextWindowChoice, initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, sessionReasoningOptions, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointContextWindowWarning, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
+import { applyContextWindowChoice, contextWindowSelectionMode, initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, sessionReasoningOptions, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointContextWindowWarning, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
 import { persistComposerDraftTexts, readComposerDraftTexts } from "./composer_drafts";
 import { createComposerWriteThrough, type ComposerWriteThrough } from "./composer_input";
 import type { CatalogModel } from "./model_endpoints";
@@ -18165,6 +18165,9 @@ function ModelEndpointEditor({
     private_ca_pem: revealedPrivateCaPem,
     reasoning_effort: endpoint?.reasoning_effort ?? null,
   }));
+  const [contextWindowCustomMode, setContextWindowCustomMode] = useState(false);
+  const [contextWindowCustomDraft, setContextWindowCustomDraft] = useState("");
+  const contextWindowCustomInputRef = useRef<HTMLInputElement | null>(null);
   const [headerRows, setHeaderRows] = useState<StructuredRow[]>(() =>
     structuredRows(revealedHeaders ?? endpoint?.http_headers ?? {}),
   );
@@ -18218,7 +18221,10 @@ function ModelEndpointEditor({
   const selectedTemplate = catalog.find((model) => model.id === draft.catalog_id);
   const selectedModel = capabilityModelForDraft(draft, catalog);
   const selectedProtocol = selectedModel?.protocols.find((p) => p.protocol === draft.api_protocol);
-  const selectModel = (id: string) => setDraft(current => applyEndpointTemplate(current, catalog.find(m => m.id === id)));
+  const selectModel = (id: string) => {
+    setContextWindowCustomMode(false);
+    setDraft(current => applyEndpointTemplate(current, catalog.find(m => m.id === id)));
+  };
   const edit = (patch: Partial<ModelEndpointDraft>) => setDraft(current => editEndpoint(current, patch));
   const editRequirements = (patch: Parameters<typeof editEndpointRequirements>[1]) => setDraft(current => editEndpointRequirements(current, patch));
   const allowed = draft.requirements?.allowed_reasoning;
@@ -18255,11 +18261,32 @@ function ModelEndpointEditor({
   const catalogInvalid = capabilityIssue !== null;
   const contextWindowTotal = draft.max_llm_input_tokens + draft.max_llm_output_tokens;
   const contextWindowWarning = endpointContextWindowWarning(draft, selectedModel);
-  const contextWindowMode = (() => {
-    if (selectedModel && contextWindowTotal === selectedModel.context_window) return "model";
-    const preset = MODEL_CONTEXT_WINDOW_OPTIONS.find((option) => option === contextWindowTotal);
-    return preset != null ? String(preset) : "custom";
-  })();
+  const contextWindowMode = contextWindowSelectionMode(
+    contextWindowTotal,
+    selectedModel?.context_window,
+    contextWindowCustomMode,
+  );
+  useEffect(() => {
+    if (contextWindowMode !== "custom") return;
+    // Seed the editable draft when the mode is entered or the underlying
+    // window changes from outside. While the user is typing, the field owns
+    // the raw text so a partial value is not normalized on every keystroke.
+    if (document.activeElement === contextWindowCustomInputRef.current) return;
+    setContextWindowCustomDraft(String(contextWindowTotal));
+  }, [contextWindowMode, contextWindowTotal]);
+  const applyContextWindowTotal = (raw: string) => {
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed < 1) {
+      setContextWindowCustomDraft(String(contextWindowTotal));
+      return;
+    }
+    const tokens = Math.floor(parsed);
+    const output = Math.max(0, Math.floor(draft.max_llm_output_tokens));
+    setDraft((current) => applyContextWindowChoice(current, tokens));
+    // The helper clamps input to at least one token, so the effective total
+    // can be larger than a typed value smaller than the output budget.
+    setContextWindowCustomDraft(String(Math.max(tokens, output + 1)));
+  };
   const dailyReasoningOptions = allowed != null
     ? displayedAllowed
     : selectedModel?.efforts ?? REASONING_EFFORT_OPTIONS;
@@ -18480,7 +18507,11 @@ function ModelEndpointEditor({
               value={contextWindowMode}
               onChange={(event) => {
                 const choice = event.target.value;
-                if (choice === "custom") return;
+                if (choice === "custom") {
+                  setContextWindowCustomMode(true);
+                  return;
+                }
+                setContextWindowCustomMode(false);
                 const tokens = choice === "model" && selectedModel
                   ? selectedModel.context_window
                   : Number(choice);
@@ -18500,17 +18531,26 @@ function ModelEndpointEditor({
             </select>
             {contextWindowMode === "custom" && (
               <input
+                ref={contextWindowCustomInputRef}
                 className="endpoint-token-budget"
                 type="number"
                 inputMode="numeric"
                 min={1}
                 step={1}
-                value={contextWindowTotal}
-                onKeyDown={(event) => { if (event.key === "ArrowUp" || event.key === "ArrowDown") event.preventDefault(); }}
-                onChange={(event) => {
-                  const tokens = Number(event.target.value);
-                  if (Number.isFinite(tokens) && tokens >= 1)
-                    setDraft((current) => applyContextWindowChoice(current, tokens));
+                value={contextWindowCustomDraft}
+                onChange={(event) =>
+                  setContextWindowCustomDraft(
+                    event.target.value.replace(/[^\d]/g, ""),
+                  )
+                }
+                onBlur={() => applyContextWindowTotal(contextWindowCustomDraft)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    applyContextWindowTotal(contextWindowCustomDraft);
+                  }
+                  if (event.key === "ArrowUp" || event.key === "ArrowDown")
+                    event.preventDefault();
                 }}
               />
             )}
