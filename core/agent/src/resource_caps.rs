@@ -173,6 +173,32 @@ pub fn system_cap_enabled_default() -> bool {
     true
 }
 
+/// The system-prompt note shown when this instance runs inside a managed
+/// containment facility (cgroup scope on Linux, job object on Windows).
+/// Governance and diagnostics work best for processes that stay inside the
+/// managed tree, so the model gets this soft guidance while calling tools.
+pub const INSTANCE_CONTAINMENT_NOTE: &str = "**Instance containment note**: this runtime runs inside a managed containment facility (for example a cgroup scope on Linux or a job object on Windows). When calling tools, keep the spawned work inside the runtime's managed process tree whenever possible; the runtime's governance and diagnostics — resource caps, usage accounting, session scopes, and cleanup — work best for processes that stay inside the managed tree. Avoid daemonizing or re-parenting processes outside the tree unless the task explicitly requires it.";
+
+/// Pure decision for [`INSTANCE_CONTAINMENT_NOTE`]: `Some` only when the
+/// platform actually has a containment facility. `Disabled` and
+/// `Unavailable` still mean the facility exists (scope isolation and usage
+/// accounting keep working), so they keep the note; only a platform without
+/// any kernel-level facility (`Unsupported` on both dimensions) hides it.
+pub fn containment_note_for_application(
+    application: Option<&ResourceCapsApplication>,
+) -> Option<&'static str> {
+    let application = application?;
+    let supported = !matches!(application.cpu, ResourceCapStatus::Unsupported)
+        || !matches!(application.mem, ResourceCapStatus::Unsupported);
+    supported.then_some(INSTANCE_CONTAINMENT_NOTE)
+}
+
+/// Convenience wrapper reading the process-wide application recorded at host
+/// startup; `None` before that first application attempt.
+pub fn instance_containment_prompt_note() -> Option<&'static str> {
+    containment_note_for_application(crate::os::instance_resource_caps_application().as_deref())
+}
+
 /// Remove the runtime's managed resource-limit scopes after a graceful shutdown
 /// (best effort; see the platform contract for the exact retention rules).
 /// Intended once the Web runtime finished its own cleanup, right before the

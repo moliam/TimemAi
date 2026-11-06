@@ -379,6 +379,13 @@ pub(crate) fn render_static_prompt_for_mode_with_preferences(
     } else {
         capabilities.enrich_static_prompt_for_protocol(&with_protocol, protocol_suite.lang_format())
     };
+    // A containment note is appended only when the platform actually runs
+    // inside a managed facility (cgroup scope / job object); platforms
+    // without one keep the catalog untouched.
+    let with_caps = match crate::resource_caps::instance_containment_prompt_note() {
+        Some(note) => format!("{with_caps}\n\n{note}"),
+        None => with_caps,
+    };
     // 3. Fill {{RESPONSE_V1_SCHEMA}} from prompt_spec
     let static_prompt = prompt_spec::enrich_static_prompt_with_response_schema(
         &with_caps,

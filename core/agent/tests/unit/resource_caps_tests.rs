@@ -1,8 +1,70 @@
+use crate::os::{InstanceResourceCaps, ResourceCapStatus, ResourceCapsApplication};
 use crate::resource_caps::{
-    SystemResourceCapConfigLoad, DEFAULT_SYSTEM_CPU_CAP_PERCENT, DEFAULT_SYSTEM_MEM_CAP_PERCENT,
-    SYSTEM_CPU_CAP_ENV, SYSTEM_MEM_CAP_ENV,
+    containment_note_for_application, SystemResourceCapConfigLoad, DEFAULT_SYSTEM_CPU_CAP_PERCENT,
+    DEFAULT_SYSTEM_MEM_CAP_PERCENT, INSTANCE_CONTAINMENT_NOTE, SYSTEM_CPU_CAP_ENV,
+    SYSTEM_MEM_CAP_ENV,
 };
 use std::collections::HashMap;
+
+fn caps_application(cpu: ResourceCapStatus, mem: ResourceCapStatus) -> ResourceCapsApplication {
+    ResourceCapsApplication {
+        caps: InstanceResourceCaps {
+            cpu_enabled: true,
+            cpu_percent: 85.0,
+            mem_enabled: true,
+            mem_percent: 85.0,
+        },
+        cpu,
+        mem,
+        scope: "/sys/fs/cgroup/user.slice/timem-scope-test".to_string(),
+    }
+}
+
+#[test]
+fn containment_note_requires_a_platform_facility() {
+    // Nothing recorded yet: nothing to say.
+    assert_eq!(containment_note_for_application(None), None);
+    // A platform without any kernel-level containment facility: no note.
+    let unsupported = caps_application(
+        ResourceCapStatus::Unsupported,
+        ResourceCapStatus::Unsupported,
+    );
+    assert_eq!(containment_note_for_application(Some(&unsupported)), None);
+    // The facility exists even when the bound is off or failed: keep the
+    // note, because scope isolation and usage accounting keep working.
+    for (cpu, mem) in [
+        (
+            ResourceCapStatus::Applied {
+                limit: "850000".to_string(),
+            },
+            ResourceCapStatus::Disabled,
+        ),
+        (
+            ResourceCapStatus::Disabled,
+            ResourceCapStatus::Unavailable {
+                reason: "cpu caps need root".to_string(),
+            },
+        ),
+        (
+            ResourceCapStatus::Unavailable {
+                reason: "temporary".to_string(),
+            },
+            ResourceCapStatus::Applied {
+                limit: "max".to_string(),
+            },
+        ),
+    ] {
+        let application = caps_application(cpu, mem);
+        assert_eq!(
+            containment_note_for_application(Some(&application)),
+            Some(INSTANCE_CONTAINMENT_NOTE)
+        );
+    }
+    // The note guides the model to keep tool work inside the managed tree.
+    assert!(INSTANCE_CONTAINMENT_NOTE.contains("managed process tree"));
+    assert!(INSTANCE_CONTAINMENT_NOTE.contains("cgroup"));
+    assert!(INSTANCE_CONTAINMENT_NOTE.contains("whenever possible"));
+}
 
 fn env_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
     pairs
