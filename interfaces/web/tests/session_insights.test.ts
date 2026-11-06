@@ -9,11 +9,16 @@ import {
   resourceCpuCores,
   resourceMemoryCapBytes,
   resourceMemorySeries,
+  resourceProtectionLevel,
   sparklinePoints,
   systemCpuPercentSeries,
   systemMemoryPercentSeries,
   type SessionResourcePulseSample,
 } from "../src/session_insights";
+import type {
+  ResourceCapKernelStatus,
+  ResourceCapsProjection,
+} from "../src/protocol";
 
 describe("session insights ordering preferences", () => {
   it("keeps the stored order, drops unknown/duplicate ids, and appends new items", () => {
@@ -141,5 +146,35 @@ describe("session insights panel position", () => {
     expect(parseInsightPanelPosition('{"left":"12","top":34}')).toBeNull();
     expect(parseInsightPanelPosition("not json")).toBeNull();
     expect(parseInsightPanelPosition(null)).toBeNull();
+  });
+});
+
+describe("session insights resource protection", () => {
+  const dimension = (kernel: ResourceCapKernelStatus) => ({
+    enabled: kernel === "applied",
+    percent: 85,
+    kernel,
+    limit: null,
+    reason: null,
+    escalation_required: false,
+  });
+  const caps = (
+    cpu: ResourceCapKernelStatus,
+    mem: ResourceCapKernelStatus,
+  ): ResourceCapsProjection => ({
+    cpu: dimension(cpu),
+    mem: dimension(mem),
+    scope: "/sys/fs/cgroup/test.scope",
+  });
+
+  it("counts only enforced dimensions as protection", () => {
+    expect(resourceProtectionLevel(caps("disabled", "unavailable"))).toBe("none");
+    expect(resourceProtectionLevel(caps("applied", "disabled"))).toBe("partial");
+    expect(resourceProtectionLevel(caps("unavailable", "applied"))).toBe("partial");
+    expect(resourceProtectionLevel(caps("applied", "applied"))).toBe("full");
+  });
+
+  it("stays unknown until the Host projection arrives", () => {
+    expect(resourceProtectionLevel(undefined)).toBeNull();
   });
 });

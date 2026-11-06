@@ -881,6 +881,10 @@ export const zh = {
     cpuUsed: "{used} 核",
     swap: "swap {value}",
     unavailable: "不可用",
+    protectionNone: "无资源防护：CPU 与内存均未受限",
+    protectionPartialCpu: "部分资源防护：仅 CPU 受限（{percent}%）",
+    protectionPartialMem: "部分资源防护：仅内存受限（{percent}%）",
+    protectionFull: "资源防护全开启：CPU {cpu}% · 内存 {mem}%",
   },
   context: {
     reasoningUpgrade: "(仅本次)推理加强: {from} → {to}",

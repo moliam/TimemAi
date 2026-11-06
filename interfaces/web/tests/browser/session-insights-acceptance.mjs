@@ -68,7 +68,12 @@ const makeSession = () => ({
   message_queue: { revision: 0, items: [], auto_send_enabled: true,
     continuation: { state: "awaiting_normal_completion" }, dispatching_command_id: null },
 });
-const makeSnapshot = (session) => ({
+const fullResourceCaps = {
+  cpu: { enabled: true, percent: 85, kernel: "applied", limit: "2380000 100000", reason: null, escalation_required: false },
+  mem: { enabled: true, percent: 85, kernel: "applied", limit: "28310351872", reason: null, escalation_required: false },
+  scope: "/sys/fs/cgroup/user.slice/ui.scope",
+};
+const makeSnapshot = (session, resourceCaps = fullResourceCaps) => ({
   server: {
     version: "ui-acceptance", protocol_version: 1, port: 0,
     bind_host: "127.0.0.1", public_access: false, debug_mode: false,
@@ -83,11 +88,7 @@ const makeSnapshot = (session) => ({
       context_compress_threshold_percent: 90, restore_prompt_context_on_startup: false,
       system_cpu_cap_percent: 85, system_mem_cap_percent: 85,
       system_cpu_cap_enabled: true, system_mem_cap_enabled: true,
-      resource_caps: {
-        cpu: { enabled: true, percent: 85, kernel: "applied", limit: "2380000 100000", reason: null, escalation_required: false },
-        mem: { enabled: true, percent: 85, kernel: "applied", limit: "28310351872", reason: null, escalation_required: false },
-        scope: "/sys/fs/cgroup/user.slice/ui.scope",
-      },
+      resource_caps: resourceCaps,
     },
     runtime_options: [], session_env_defaults: {}, workspace_dirs: ["/work"],
     mcp_servers: [], model_endpoints: [],
@@ -133,6 +134,7 @@ function makePeer(socket, onJson) {
 
 async function startHost(session) {
   let authoritative = session;
+  let authoritativeCaps = fullResourceCaps;
   const peers = new Set();
   const mime = {
     ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
@@ -206,10 +208,20 @@ async function startHost(session) {
       event_cursor: 40, event_replay_floor: 0,
     });
   });
+  const broadcastHello = () => {
+    for (const peer of peers) {
+      peer.send({
+        type: "hello",
+        snapshot: makeSnapshot(authoritative, authoritativeCaps),
+        event_cursor: 40, event_replay_floor: 0,
+      });
+    }
+  };
   await new Promise((settle) => server.listen(0, "127.0.0.1", settle));
   return {
     url: `http://127.0.0.1:${server.address().port}/`,
     setSession(next) { authoritative = next; },
+    setResourceCaps(next) { authoritativeCaps = next; broadcastHello(); },
     close() { return new Promise((settle) => server.close(settle)); },
   };
 }
@@ -327,6 +339,11 @@ async function click(browser, point) {
 
 async function main() {
   const host = await startHost(makeSession());
+  const resourceCaps = (cpuKernel, memKernel) => ({
+    cpu: { enabled: cpuKernel === "applied", percent: 85, kernel: cpuKernel, limit: null, reason: null, escalation_required: false },
+    mem: { enabled: memKernel === "applied", percent: 85, kernel: memKernel, limit: null, reason: null, escalation_required: false },
+    scope: "/sys/fs/cgroup/user.slice/ui.scope",
+  });
   const browser = await startBrowser(host.url);
   try {
     await browser.call("Page.bringToFront");
@@ -338,6 +355,16 @@ async function main() {
     // Collapsed header: only the top item + chevron, no title bar.
     assert(await browser.evaluate(`!!document.querySelector('.session-insights-chip')`), "compact chip exists in the header");
     assert(await browser.evaluate(`!document.querySelector('.session-insights-panel')`), "panel starts collapsed");
+    assert(await browser.evaluate(`!!document.querySelector('.session-insights-shield.full')`), "collapsed header shows the full-protection shield");
+    assert(await browser.evaluate(`document.querySelector('.session-insights-shield').title.includes('Full protection')`), "shield exposes the current protection status on hover");
+    host.setResourceCaps(resourceCaps("applied", "disabled"));
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.session-insights-shield.partial')`), "partial-protection shield");
+    assert(await browser.evaluate(`document.querySelector('.session-insights-shield').title.includes('Partial protection: CPU capped at 85% only')`), "partial shield hover text");
+    host.setResourceCaps(resourceCaps("disabled", "unavailable"));
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.session-insights-shield.none')`), "no-protection shield");
+    assert(await browser.evaluate(`document.querySelector('.session-insights-shield').title.includes('No resource protection')`), "no-protection shield hover text");
+    host.setResourceCaps(fullResourceCaps);
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.session-insights-shield.full')`), "full-protection shield restored");
     assert(await browser.evaluate(`document.querySelector('.session-insights-chip-label').textContent === 'tokens/s'`), "default top item is the token speed label");
     assert(await browser.evaluate(`!document.querySelector('.chat-header').textContent.includes('Session Insights')`), "collapsed header does not render the Session Insights title");
 
@@ -345,6 +372,7 @@ async function main() {
     await click(browser, chip);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.session-insights-panel')`), "panel opens on chip click");
     assert(await browser.evaluate(`document.querySelectorAll('.session-insight-row').length === 10`), "panel lists all ten items");
+    assert(await browser.evaluate(`!document.querySelector('.session-insights-shield')`), "shield leaves the header while the panel is open");
     // Typography: compact and refined; values keep the bold tabular scale,
     // labels stay sentence-case at a small size, especially for CJK text.
     await waitFor(() => browser.evaluate(`document.fonts.check('700 11.5px Rajdhani')

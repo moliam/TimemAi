@@ -28,11 +28,14 @@ import {
   Pin,
   PinOff,
   RotateCcw,
+  ShieldAlert,
+  ShieldCheck,
+  ShieldX,
   Sparkles,
   Wrench,
 } from "lucide-react";
 import { t, useT } from "./i18n";
-import type { Session } from "./protocol";
+import type { ResourceCapsProjection, Session } from "./protocol";
 import { formatTokensCoarse } from "./token_format";
 import {
   sessionCacheHitPercent,
@@ -226,6 +229,42 @@ export function systemMemoryPercentSeries(
   return percents;
 }
 
+export type ResourceProtectionLevel = "none" | "partial" | "full";
+
+/** Collapses the two enforced cap dimensions into the header shield state.
+ * Only `kernel === "applied"` counts: a saved but inert cap is not protection.
+ * Returns null until the first Host projection arrives. */
+export function resourceProtectionLevel(
+  caps: ResourceCapsProjection | undefined,
+): ResourceProtectionLevel | null {
+  if (!caps) return null;
+  const applied =
+    (caps.cpu.kernel === "applied" ? 1 : 0) +
+    (caps.mem.kernel === "applied" ? 1 : 0);
+  return applied === 0 ? "none" : applied === 1 ? "partial" : "full";
+}
+
+function protectionTitleFor(
+  caps: ResourceCapsProjection,
+  level: ResourceProtectionLevel,
+): string {
+  const cpu = caps.cpu.kernel === "applied";
+  const mem = caps.mem.kernel === "applied";
+  if (level === "full") {
+    return t("insights.protectionFull", {
+      cpu: caps.cpu.percent,
+      mem: caps.mem.percent,
+    });
+  }
+  if (cpu) {
+    return t("insights.protectionPartialCpu", { percent: caps.cpu.percent });
+  }
+  if (mem) {
+    return t("insights.protectionPartialMem", { percent: caps.mem.percent });
+  }
+  return t("insights.protectionNone");
+}
+
 /** CPU quota attached to the latest sample; undefined when the platform
  * cannot account for a quota. */
 export function resourceCpuCapCores(
@@ -334,6 +373,8 @@ function Sparkline({
 export type SessionInsightsProps = {
   session: Session | undefined;
   resourceSamples: SessionResourcePulseSample[] | undefined;
+  /** Host projection of the instance CPU/memory caps; absent before snapshot. */
+  resourceCaps?: ResourceCapsProjection;
   onReset: (() => void) | null;
   /** Requests one read-only resource sample for the active session. */
   onSample: (() => void) | null;
@@ -342,6 +383,7 @@ export type SessionInsightsProps = {
 export function SessionInsights({
   session,
   resourceSamples,
+  resourceCaps,
   onReset,
   onSample,
 }: SessionInsightsProps) {
@@ -428,6 +470,11 @@ export function SessionInsights({
   const memorySeries = resourceMemorySeries(recentResourceSamples);
   const memoryNow = memorySeries[memorySeries.length - 1];
   const latestResource = recentResourceSamples?.[recentResourceSamples.length - 1];
+  const protectionLevel = resourceProtectionLevel(resourceCaps);
+  const protectionTitle =
+    resourceCaps && protectionLevel
+      ? protectionTitleFor(resourceCaps, protectionLevel)
+      : undefined;
   const systemCpuSeries = systemCpuPercentSeries(recentResourceSamples);
   const systemCpuNow = systemCpuSeries[systemCpuSeries.length - 1];
   const systemMemorySeries = systemMemoryPercentSeries(recentResourceSamples);
@@ -820,21 +867,39 @@ export function SessionInsights({
 
   return (
     <>
-      <button
-        ref={chipRef}
-        type="button"
-        className={`session-insights-chip${open ? " open" : ""}`}
-        aria-expanded={open}
-        aria-haspopup="dialog"
-        aria-label={t("insights.open")}
-        title={t("insights.open")}
-        onClick={() => (open ? setOpen(false) : openPanel())}
-      >
-        <Activity size={12} aria-hidden="true" />
-        <span className="session-insights-chip-label">{topItem.label}</span>
-        <span className="session-insights-chip-value">{topItem.value}</span>
-        <ChevronDown size={11} aria-hidden="true" />
-      </button>
+      <span className="session-insights-cluster">
+        <button
+          ref={chipRef}
+          type="button"
+          className={`session-insights-chip${open ? " open" : ""}`}
+          aria-expanded={open}
+          aria-haspopup="dialog"
+          aria-label={t("insights.open")}
+          title={t("insights.open")}
+          onClick={() => (open ? setOpen(false) : openPanel())}
+        >
+          <Activity size={12} aria-hidden="true" />
+          <span className="session-insights-chip-label">{topItem.label}</span>
+          <span className="session-insights-chip-value">{topItem.value}</span>
+          <ChevronDown size={11} aria-hidden="true" />
+        </button>
+        {!open && protectionLevel && protectionTitle && (
+          <span
+            className={`session-insights-shield ${protectionLevel}`}
+            role="img"
+            aria-label={protectionTitle}
+            title={protectionTitle}
+          >
+            {protectionLevel === "full" ? (
+              <ShieldCheck size={13} aria-hidden="true" />
+            ) : protectionLevel === "partial" ? (
+              <ShieldAlert size={13} aria-hidden="true" />
+            ) : (
+              <ShieldX size={13} aria-hidden="true" />
+            )}
+          </span>
+        )}
+      </span>
       {open &&
         clampedPosition &&
         createPortal(

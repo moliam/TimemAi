@@ -884,6 +884,10 @@ export const en: Strings = {
     cpuUsed: "{used} cores",
     swap: "swap {value}",
     unavailable: "unavailable",
+    protectionNone: "No resource protection: CPU and memory are unrestricted",
+    protectionPartialCpu: "Partial protection: CPU capped at {percent}% only",
+    protectionPartialMem: "Partial protection: memory capped at {percent}% only",
+    protectionFull: "Full protection: CPU {cpu}% · memory {mem}%",
   },
   context: {
     reasoningUpgrade: "Reasoning boost (this call only): {from} → {to}",

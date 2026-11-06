@@ -5047,6 +5047,7 @@ function TimemApp() {
             <div className="header-context-actions">
               <SessionInsights
                 session={activeSession}
+                resourceCaps={server?.mem.resource_caps}
                 resourceSamples={
                   activeSession
                     ? resourcePulseBySession[activeSession.session_id]
