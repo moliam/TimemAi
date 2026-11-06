@@ -191,6 +191,23 @@ function withSessionMaxInput(session, tokens) {
     runtime_profile: { ...profile, max_llm_input_tokens: tokens },
   };
 }
+function withSessionReasoning(session, effort) {
+  const profile = session.runtime_profile ?? {};
+  return { ...session, runtime_profile: { ...profile, reasoning_effort: effort } };
+}
+function withChain(session, ids) {
+  const profile = session.runtime_profile ?? {};
+  const active = profile.active_model_endpoint_id;
+  return {
+    ...session,
+    runtime_profile: {
+      ...profile,
+      model_endpoint_ids: ids,
+      model_endpoint_id: ids[0] ?? null,
+      active_model_endpoint_id: ids.includes(active) ? active : (ids[0] ?? null),
+    },
+  };
+}
 
 async function startHost(session) {
   let authoritative = session;
@@ -241,6 +258,17 @@ async function startHost(session) {
       } else if (command.type === "session_runtime_update" && command.key === "TIMEM_MAX_LLM_INPUT") {
         authoritative = withSessionMaxInput(authoritative, Number(command.value));
         broadcastHello();
+      } else if (command.type === "session_runtime_update" && command.key === "TIMEM_REASONING_EFFORT") {
+        authoritative = withSessionReasoning(authoritative, command.value);
+        broadcastHello();
+      } else if (command.type === "model_endpoint_chain_apply") {
+        const ids = Array.isArray(command.endpoint_ids) ? [...command.endpoint_ids] : [];
+        // Keep the pending draft visible long enough to prove the UI does not
+        // treat a submitted command as an applied Host state.
+        setTimeout(() => {
+          authoritative = withChain(authoritative, ids);
+          broadcastHello();
+        }, 350);
       } else if (command.type === "session_resource_usage_query") {
         // Two samples 2s apart: the second poll answers with a delta so the
         // CPU curve can derive cores exactly like a live Host would.
@@ -447,6 +475,25 @@ async function main() {
     const modelControl = await center(browser, ".header-model-control");
     await click(browser, modelControl);
     await waitFor(() => browser.evaluate(`!!document.querySelector('#header-model-popover')`), "model popover opens");
+    const headerPopoverLayout = await browser.evaluate(`(() => {
+      const labels = [...document.querySelectorAll('.header-model-popover-label')];
+      const control = document.querySelector('.header-model-control');
+      const controlStyle = getComputedStyle(control);
+      return {
+        labels: labels.map((el) => {
+          const r = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          return { text: el.textContent, h: Math.round(r.height), ws: style.whiteSpace };
+        }),
+        controlHeight: Math.round(control.getBoundingClientRect().height),
+        controlBackground: controlStyle.backgroundImage,
+        controlBorder: controlStyle.borderTopWidth,
+        pillSize: getComputedStyle(document.querySelector('.header-model-control-reasoning')).fontSize,
+      };
+    })()`);
+    assert(headerPopoverLayout.labels.length === 4 && headerPopoverLayout.labels.every((label) => label.h <= 16 && label.ws === 'nowrap'), `popover labels stay on one line: ${JSON.stringify(headerPopoverLayout)}`);
+    assert(headerPopoverLayout.controlHeight === 30 && headerPopoverLayout.controlBorder === '1px' && headerPopoverLayout.controlBackground.includes('linear-gradient'), `header control surface: ${JSON.stringify(headerPopoverLayout)}`);
+    assert(headerPopoverLayout.pillSize === '8.5px', `reasoning pill size: ${JSON.stringify(headerPopoverLayout)}`);
     assert(await browser.evaluate(`document.querySelector('#header-model-popover').textContent.includes('Context management')`), "popover carries the context management row");
     assert(await browser.evaluate(`document.querySelector('#header-model-popover .header-model-popover-length input').value === '16000'`), "popover shows the current context length");
     assert(await browser.evaluate(`document.querySelector('#header-model-popover .header-model-popover-context').textContent.includes('1.0K / 16K')`), "context row shows used and limit tokens");
@@ -466,6 +513,22 @@ async function main() {
       const buttons = [...document.querySelectorAll('#header-model-popover .header-model-popover-context-actions button')];
       return buttons.map(b => b.textContent).join(',') === 'Compress,Clear';
     })()`), "idle session offers compress and clear");
+    const compressPoint = await browser.evaluate(`(() => { const b = document.querySelectorAll('#header-model-popover .header-model-popover-context-actions button')[0]; const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+    await click(browser, compressPoint);
+    await waitFor(() => host.commands.some((command) => command.type === 'session_request_context_compress'), "context compression command");
+    await waitFor(() => browser.evaluate(`(() => {
+      const buttons = [...document.querySelectorAll('#header-model-popover .header-model-popover-context-actions button')];
+      return buttons.length === 2
+        && buttons[0].textContent === 'Compressing...'
+        && buttons[0].disabled
+        && buttons[1].textContent === 'Clear'
+        && buttons[1].disabled;
+    })()`), "compressing locks compress and clear");
+    const lockedCompressPoint = await browser.evaluate(`(() => { const b = document.querySelectorAll('#header-model-popover .header-model-popover-context-actions button')[0]; const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+    await click(browser, lockedCompressPoint);
+    await sleep(120);
+    assert(host.commands.filter((command) => command.type === 'session_request_context_compress').length === 1, "compressing ignores a second compress click");
+    assert(!host.commands.some((command) => command.type === 'session_clear_context'), "compressing never clears the context");
     host.setSession(makeSession());
     await waitFor(() => browser.evaluate(`document.querySelectorAll('#header-model-popover .header-model-popover-context-actions button').length === 1`), "busy session hides clear again");
     await browser.evaluate(`(() => {
@@ -512,12 +575,38 @@ async function main() {
     await click(browser, switchPoint);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.endpoint-menu')`), "Switch opens the model endpoint panel");
     assert(await browser.evaluate(`!!document.querySelector('.endpoint-menu-close')`), "endpoint panel exposes a close control");
+    const endpointPanelLayout = await browser.evaluate(`(() => {
+      const box = (el) => el ? el.getBoundingClientRect().toJSON() : null;
+      const overlap = (a, b) => !!a && !!b && a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+      const badge = box(document.querySelector('.endpoint-chain-active-badge'));
+      const remove = box(document.querySelector('.endpoint-chain-remove'));
+      return {
+        menuWidth: Math.round(document.querySelector('.endpoint-menu').getBoundingClientRect().width),
+        badge,
+        remove,
+        overlap: overlap(badge, remove),
+        close: box(document.querySelector('.endpoint-menu-close')),
+      };
+    })()`);
+    assert(endpointPanelLayout.menuWidth >= 600, `endpoint panel width: ${JSON.stringify(endpointPanelLayout)}`);
+    assert(!endpointPanelLayout.overlap, `current check must not collide with remove: ${JSON.stringify(endpointPanelLayout)}`);
+    assert(endpointPanelLayout.close.width === 27 && endpointPanelLayout.close.height === 27, `endpoint close target: ${JSON.stringify(endpointPanelLayout)}`);
     assert(await browser.evaluate(`(() => {
       const badges = [...document.querySelectorAll('.endpoint-chain-active-badge')];
       return badges.length >= 1
         && badges.every((badge) => badge.title === 'In use')
         && badges.every((badge) => !badge.textContent.includes('本轮配置'));
     })()`), "active endpoint carries the refined top-right check");
+    // Chain edits are a pending draft until the Host projection confirms them.
+    const chainRow = await center(browser, ".endpoint-chain-col.available .endpoint-chain-row");
+    await click(browser, chainRow);
+    await waitFor(() => browser.evaluate(`document.querySelector('.endpoint-chain-pending')?.textContent === 'Applying…'`), "chain edit marks the pending draft");
+    await waitFor(() => host.commands.some((command) => command.type === 'model_endpoint_chain_apply' && Array.isArray(command.endpoint_ids) && command.endpoint_ids.length === 0), "chain removal command");
+    await waitFor(() => browser.evaluate(`!document.querySelector('.endpoint-chain-pending') && document.querySelectorAll('.endpoint-chain-col.selected .endpoint-chain-row').length === 0`), "chain removal is confirmed by the host");
+    const restoreChainRow = await center(browser, ".endpoint-chain-col.available .endpoint-chain-row");
+    await click(browser, restoreChainRow);
+    await waitFor(() => host.commands.some((command) => command.type === 'model_endpoint_chain_apply' && Array.isArray(command.endpoint_ids) && command.endpoint_ids.length === 1), "chain restore command");
+    await waitFor(() => browser.evaluate(`document.querySelectorAll('.endpoint-chain-col.selected .endpoint-chain-row').length === 1 && !document.querySelector('.endpoint-chain-pending')`), "chain restore is confirmed by the host");
     const closeEndpointPanel = await center(browser, ".endpoint-menu-close");
     await click(browser, closeEndpointPanel);
     await waitFor(() => browser.evaluate(`!document.querySelector('.endpoint-menu')`), "close control dismisses the endpoint panel");
@@ -539,6 +628,14 @@ async function main() {
     const unboundControl = await center(browser, ".header-model-control");
     await click(browser, unboundControl);
     await waitFor(() => browser.evaluate(`!!document.querySelector('#header-model-popover')`), "unbound popover opens");
+    await browser.evaluate(`(() => {
+      const select = document.querySelector('.header-model-popover-select');
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+      setter.call(select, 'high');
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await waitFor(() => host.commands.some((command) => command.type === 'session_runtime_update' && command.key === 'TIMEM_REASONING_EFFORT' && command.value === 'high'), "unbound reasoning falls back to the session runtime setting");
+    await waitFor(() => browser.evaluate(`document.querySelector('.header-model-control-reasoning').textContent === 'high'`), "unbound reasoning is echoed by the host");
     await browser.evaluate(`(() => {
       const input = document.querySelector('#header-model-popover .header-model-popover-length input');
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
@@ -576,6 +673,8 @@ async function main() {
     await click(browser, closeSettings);
     await waitFor(() => browser.evaluate(`!document.querySelector('#settings-center')`), "settings closed after shield jump");
     assert(await browser.evaluate(`document.querySelector('.session-insights-chip-label').textContent === 'tokens/s'`), "default top item is the token speed label");
+    const chipValueTracking = await browser.evaluate(`getComputedStyle(document.querySelector('.session-insights-chip-value')).letterSpacing`);
+    assert(parseFloat(chipValueTracking) <= -0.1, `chip value tracking tightened: ${chipValueTracking}`);
     assert(await browser.evaluate(`!document.querySelector('.chat-header').textContent.includes('Session Insights')`), "collapsed header does not render the Session Insights title");
 
     const chip = await center(browser, ".session-insights-chip");
@@ -600,6 +699,7 @@ async function main() {
         valueWeight: value.fontWeight,
         valueFamily: value.fontFamily,
         valueFeatures: value.fontFeatureSettings,
+        valueLetterSpacing: value.letterSpacing,
         labelSize: label.fontSize,
         labelWeight: label.fontWeight,
         labelTransform: label.textTransform,
@@ -620,6 +720,7 @@ async function main() {
     assert(typography.titleFamily.includes('Space Grotesk') && typography.titleWeight === '600', `title font: ${JSON.stringify(typography)}`);
     assert(typography.detailFamily.includes('IBM Plex Mono') && typography.flowNumberFamily.includes('IBM Plex Mono'), `mono values: ${JSON.stringify(typography)}`);
     assert(typography.valueFeatures.includes('tnum'), `tabular numerals enabled: ${JSON.stringify(typography)}`);
+    assert(parseFloat(typography.valueLetterSpacing) <= -0.15, `insight value tracking tightened: ${JSON.stringify(typography)}`);
     assert(await browser.evaluate(`document.querySelector('.session-insights-panel').getBoundingClientRect().width > 300`), "panel renders as a floating card");
     assert(await browser.evaluate(`[...document.querySelectorAll('.session-insight-flow-number')].map(e => e.textContent).every(t => t && t !== '0')`), "token flow shows numeric values");
     assert(await browser.evaluate(`(() => {

@@ -56,7 +56,12 @@ describe("endpoint chain selection panel", () => {
 
   it("separates the Host-observed current route from the next-Turn preference", () => {
     expect(panel).toContain("active_model_endpoint_id");
-    expect(panel).toContain("model_endpoint_id ?? null");
+    expect(panel).toContain("model_endpoint_id ??");
+    // The top-right check always follows the Host-observed route, matching the
+    // header, instead of switching to the next preference when idle.
+    expect(panel).toContain("const currentEndpointId =");
+    expect(panel).toMatch(/active_model_endpoint_id \?\?[\s\S]{0,80}model_endpoint_id \?\?/);
+    expect(panel).not.toContain("working\n    ? session?.runtime_profile?.active_model_endpoint_id");
     expect(source).toContain('t("endpoints.chainCurrent")');
     expect(zhCatalog.endpoints.chainCurrent).toBe("当前使用");
     expect(enCatalog.endpoints.chainCurrent).toBe("In use");
@@ -72,6 +77,17 @@ describe("endpoint chain selection panel", () => {
     expect(source).toContain("endpoint-chain-index");
     expect(panel).not.toContain('t(working ? "endpoints.chainNextApplied" : "endpoints.chainSynced")');
     expect(panel).not.toContain("effectiveEndpointForProfile");
+  });
+
+  it("rolls back undelivered chain edits and marks the pending draft", () => {
+    expect(panel).toContain("onApply: (endpointIds: string[]) => boolean");
+    expect(panel).toContain("const accepted = onApply(next);");
+    expect(panel).toContain("if (!accepted) {");
+    expect(panel).toContain("setChain(boundChain);");
+    expect(panel).toContain("endpoints.chainApplying");
+    expect(panel).toContain('aria-live="polite"');
+    expect(zhCatalog.endpoints.chainApplying).toBe("正在应用…");
+    expect(enCatalog.endpoints.chainApplying).toBe("Applying…");
   });
 
   it("keeps the availability refresh button and probing animation wired", () => {

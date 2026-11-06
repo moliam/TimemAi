@@ -3778,16 +3778,27 @@ function TimemApp() {
     !!server && server.model_endpoints.length === 0;
   const activeEndpointId = activeSession?.runtime_profile?.active_model_endpoint_id
     ?? activeSession?.runtime_profile?.model_endpoint_id;
-  const headerModelEndpoint = activeEndpointId
-    ? (server?.model_endpoints ?? []).find((endpoint) => endpoint.id === activeEndpointId)
-    : (server?.model_endpoints ?? []).find(
-        (endpoint) => endpointMatchesProfile(endpoint, activeSession?.runtime_profile),
-      ) ??
-      // A session-level context-window adjustment changes the effective input
-      // cap without rebinding the endpoint; keep the display identity stable.
-      (server?.model_endpoints ?? []).find(
-        (endpoint) => endpointMatchesProfileShape(endpoint, activeSession?.runtime_profile),
+  const modelEndpoints = server?.model_endpoints ?? [];
+  const headerModelEndpointById = activeEndpointId
+    ? modelEndpoints.find((endpoint) => endpoint.id === activeEndpointId)
+    : undefined;
+  const headerModelEndpointByProfile = activeEndpointId
+    ? undefined
+    : modelEndpoints.find((endpoint) =>
+        endpointMatchesProfile(endpoint, activeSession?.runtime_profile),
       );
+  // A session-level context-window adjustment changes the effective input cap
+  // without rebinding the endpoint. Only use the relaxed shape match when it
+  // identifies exactly one endpoint; ambiguity must not guess a model.
+  const headerModelEndpointByShape = activeEndpointId
+    ? []
+    : modelEndpoints.filter((endpoint) =>
+        endpointMatchesProfileShape(endpoint, activeSession?.runtime_profile),
+      );
+  const headerModelEndpoint =
+    headerModelEndpointById ??
+    headerModelEndpointByProfile ??
+    (headerModelEndpointByShape.length === 1 ? headerModelEndpointByShape[0] : undefined);
   const headerModelLabel =
     headerModelEndpoint?.name ??
     (activeEndpointId
@@ -3814,6 +3825,9 @@ function TimemApp() {
     (activeSession?.runtime_profile?.model_endpoint_ids ?? []).includes(
       headerModelEndpoint.id,
     );
+  const headerReasoningBound =
+    !!activeSession?.runtime_profile?.active_model_endpoint_id ||
+    !!activeSession?.runtime_profile?.model_endpoint_id;
   const headerContextOverride =
     !!headerModelEndpoint &&
     Object.hasOwn(
@@ -5119,16 +5133,24 @@ function TimemApp() {
                     reasoningLocked={runtimeLocked}
                     contextUsed={headerContextUsed}
                     contextLimit={headerContextLimit}
-                    contextOverride={headerContextOverride}
+                    contextOverride={headerContextOverride && headerContextBound}
                     compressPending={headerContextCompressPending}
                     buttonRef={runtimeButtonRef}
                     onReasoningChange={(effort) => {
                       if (!activeSession) return;
-                      if (!sendCommand({
-                        type: "session_reasoning_effort_update",
-                        session_id: activeSession.session_id,
-                        reasoning_effort: effort,
-                      })) {
+                      const accepted = headerReasoningBound
+                        ? sendCommand({
+                            type: "session_reasoning_effort_update",
+                            session_id: activeSession.session_id,
+                            reasoning_effort: effort,
+                          })
+                        : sendCommand({
+                            type: "session_runtime_update",
+                            session_id: activeSession.session_id,
+                            key: "TIMEM_REASONING_EFFORT",
+                            value: effort,
+                          });
+                      if (!accepted) {
                         reportUiError(
                           "Reasoning update failed",
                           t("errors.checkConnection"),
@@ -5164,10 +5186,18 @@ function TimemApp() {
                     onCompact={
                       activeSession
                         ? () => {
-                            sendCommand({
+                            const accepted = sendCommand({
                               type: "session_request_context_compress",
                               session_id: activeSession.session_id,
                             });
+                            if (!accepted) {
+                              reportUiError(
+                                "Context compression failed",
+                                t("errors.checkConnection"),
+                                activeSession.session_id,
+                              );
+                            }
+                            return accepted;
                           }
                         : null
                     }
@@ -5473,8 +5503,8 @@ function TimemApp() {
               session={activeSession}
               onEdit={openEndpointSettings}
               onApply={(endpointIds) => {
-                if (!activeSession) return;
-                sendCommand({
+                if (!activeSession) return false;
+                return sendCommand({
                   type: "model_endpoint_chain_apply",
                   session_id: activeSession.session_id,
                   endpoint_ids: endpointIds,
@@ -13926,7 +13956,7 @@ function HeaderModelControl({
   buttonRef: MutableRefObject<HTMLButtonElement | null>;
   onReasoningChange: (effort: string) => void;
   onContextLimitChange: (tokens: number | null) => void;
-  onCompact: (() => void) | null;
+  onCompact: (() => boolean) | null;
   onClear: (() => void) | null;
   onOpenModelPanel: () => void;
 }) {
@@ -13936,9 +13966,55 @@ function HeaderModelControl({
     contextLimit ? String(contextLimit) : "",
   );
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const [compactRequested, setCompactRequested] = useState(false);
+  const compactRequestedRef = useRef(false);
+  const compactTimerRef = useRef<number | null>(null);
+  const sessionIdRef = useRef(session?.session_id);
+  const clearCompactTimer = () => {
+    if (compactTimerRef.current === null) return;
+    window.clearTimeout(compactTimerRef.current);
+    compactTimerRef.current = null;
+  };
+  useEffect(() => clearCompactTimer, []);
+  // The Host's requested notice is authoritative; once it arrives the local
+  // bridge is no longer needed.
+  useEffect(() => {
+    if (!compressPending) return;
+    compactRequestedRef.current = false;
+    setCompactRequested(false);
+    clearCompactTimer();
+  }, [compressPending]);
+  useEffect(() => {
+    if (sessionIdRef.current === session?.session_id) return;
+    sessionIdRef.current = session?.session_id;
+    compactRequestedRef.current = false;
+    setCompactRequested(false);
+    clearCompactTimer();
+  }, [session?.session_id]);
+  const requestCompact = () => {
+    // The ref guards a same-tick double click before React commits state.
+    if (!onCompact || compressPending || compactRequestedRef.current) return;
+    compactRequestedRef.current = true;
+    setCompactRequested(true);
+    clearCompactTimer();
+    compactTimerRef.current = window.setTimeout(() => {
+      compactTimerRef.current = null;
+      compactRequestedRef.current = false;
+      setCompactRequested(false);
+    }, 10000);
+    if (!onCompact()) {
+      compactRequestedRef.current = false;
+      setCompactRequested(false);
+      clearCompactTimer();
+    }
+  };
+  const compressing = compressPending || compactRequested;
   const savedLimitRef = useRef<number | undefined>(contextLimit);
   const draftValue = Number(lengthDraft.trim());
-  const draftValid = Number.isInteger(draftValue) && draftValue > 0;
+  const draftValid =
+    Number.isInteger(draftValue) &&
+    draftValue > 0 &&
+    draftValue <= MAX_LLM_INPUT_TOKENS_CEILING;
   const draftDirty = draftValid && draftValue !== contextLimit;
   const resetDraft = () => setLengthDraft(contextLimit ? String(contextLimit) : "");
   const closePopover = () => {
@@ -14079,6 +14155,7 @@ function HeaderModelControl({
                 type="number"
                 inputMode="numeric"
                 min={1}
+                max={MAX_LLM_INPUT_TOKENS_CEILING}
                 step={1}
                 value={lengthDraft}
                 disabled={!endpoint}
@@ -14119,14 +14196,24 @@ function HeaderModelControl({
               <ContextDonut ratio={ratio} size={22} />
               <span>{contextLimit ? `${formatTokens(contextUsed) ?? "0"} / ${formatTokens(contextLimit) ?? "0"}` : t("insights.unavailable")}</span>
             </span>
-            <span className="header-model-popover-context-actions">
+            <span className="header-model-popover-context-actions" aria-busy={compressing}>
               {onCompact && (
-                <button type="button" className="header-model-popover-action" disabled={compressPending} onClick={onCompact}>
-                  {compressPending ? t("context.compressingAction") : t("context.compressAction")}
+                <button
+                  type="button"
+                  className="header-model-popover-action"
+                  disabled={compressing}
+                  onClick={requestCompact}
+                >
+                  {compressing ? t("context.compressingAction") : t("context.compressAction")}
                 </button>
               )}
               {onClear && (
-                <button type="button" className="header-model-popover-action" onClick={onClear}>
+                <button
+                  type="button"
+                  className="header-model-popover-action"
+                  disabled={compressing}
+                  onClick={onClear}
+                >
                   {t("context.clearAction")}
                 </button>
               )}
@@ -18099,7 +18186,7 @@ function ModelEndpointPanel({
   server: Snapshot["server"] | null;
   session: Session | undefined;
   onEdit: () => void;
-  onApply: (endpointIds: string[]) => void;
+  onApply: (endpointIds: string[]) => boolean;
   onRefreshAvailability: () => void;
   onEndpointReasoning: (endpointId: string, effort: string) => void;
   onEndpointMaxInput: (endpointId: string, tokens: number | null) => void;
@@ -18123,19 +18210,43 @@ function ModelEndpointPanel({
       coordinateGetter: sortableKeyboardCoordinates,
     }),
   );
-  const working = session?.state === "working";
-  const nextEndpointId = session?.runtime_profile?.model_endpoint_id ?? null;
-  const currentEndpointId = working
-    ? session?.runtime_profile?.active_model_endpoint_id ?? null
-    : nextEndpointId;
+  const currentEndpointId =
+    session?.runtime_profile?.active_model_endpoint_id ??
+    session?.runtime_profile?.model_endpoint_id ??
+    null;
   const anyProbing = endpoints.some((endpoint) => endpoint.probing);
   const dirty = chain.join(",") !== boundChainKey;
+  const boundChainRef = useRef(boundChain);
+  boundChainRef.current = boundChain;
+  const revertTimerRef = useRef<number | null>(null);
+  const clearRevertTimer = () => {
+    if (revertTimerRef.current === null) return;
+    window.clearTimeout(revertTimerRef.current);
+    revertTimerRef.current = null;
+  };
+  useEffect(() => clearRevertTimer, []);
+  // A committed chain arrives through the Host projection; clear the pending
+  // marker as soon as it does.
+  useEffect(() => clearRevertTimer, [boundChainKey]);
   // Selection is commit-on-click: every toggle, reorder, or removal applies
-  // immediately. There is no separate confirm button; the status badge shows
-  // the in-flight state until the Host projection confirms the new chain.
+  // immediately. Keep the local order as a pending draft, revert it when the
+  // command cannot even be delivered, and stop showing it as applied if the
+  // Host never confirms.
   const applyImmediately = (next: string[]) => {
     if (!session || next.join(",") === boundChainKey) return;
-    onApply(next);
+    const accepted = onApply(next);
+    if (!accepted) {
+      setChain(boundChain);
+      return;
+    }
+    clearRevertTimer();
+    const expected = next.join(",");
+    revertTimerRef.current = window.setTimeout(() => {
+      revertTimerRef.current = null;
+      setChain((current) =>
+        current.join(",") === expected ? boundChainRef.current : current,
+      );
+    }, 10000);
   };
   const toggleChainMember = (endpointId: string) => {
     if (
@@ -18208,11 +18319,16 @@ function ModelEndpointPanel({
           </button>
         </div>
       </div>
-      <div className={`endpoint-chain-actions ${dirty ? "has-changes" : ""}`}>
+      <div className={`endpoint-chain-actions ${dirty ? "has-changes" : ""}`} aria-live="polite">
         <div className="endpoint-chain-action-copy">
           <strong>
             {t("endpoints.selectedCount", { count: chain.length })}
           </strong>
+          {dirty && (
+            <small className="endpoint-chain-pending">
+              {t("endpoints.chainApplying")}
+            </small>
+          )}
         </div>
       </div>
       <div className="endpoint-chain">

@@ -38,9 +38,17 @@ describe("header endpoint selector", () => {
     expect(source).toContain('className="header-model-popover"');
     expect(source).toContain('className="header-model-popover-context"');
     expect(source).toContain('type: "session_reasoning_effort_update"');
+    expect(source).toContain('key: "TIMEM_REASONING_EFFORT"');
     expect(source).toContain('type: "session_endpoint_max_input_tokens_update"');
+    expect(source).toContain('key: "TIMEM_MAX_LLM_INPUT"');
     expect(source).toContain('t("modelService.reasoningUnavailable")');
     expect(source).toContain("aria-expanded={open}");
+    // A compression click must lock both actions immediately, not only after
+    // the Host's requested notice arrives.
+    expect(source).toContain("const compressing = compressPending || compactRequested;");
+    expect(source).toContain("disabled={compressing}");
+    expect(source).toContain("setCompactRequested(true)");
+    expect(source).toContain('aria-busy={compressing}');
   });
 
   it("moves the ctx readout into the model control instead of header actions", () => {
@@ -282,7 +290,7 @@ it("allows endpoint selection while a request is working and explains the reques
   const apply = source.slice(applyStart, applyEnd);
   expect(panel).toContain("disabled={!session}");
   expect(panel).not.toContain('disabled={!session || session.state === "working"}');
-  expect(apply).toContain("if (!activeSession) return;");
+  expect(apply).toContain("if (!activeSession) return false;");
   expect(apply).toContain('type: "model_endpoint_chain_apply"');
   expect(apply).not.toContain('activeSession.state === "working"');
   expect(zhCatalog.endpoints.workingNote).toContain("下一次请求生效");
