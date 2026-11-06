@@ -885,6 +885,7 @@ export const zh = {
     protectionPartialCpu: "部分资源防护：仅 CPU 受限（{percent}%）",
     protectionPartialMem: "部分资源防护：仅内存受限（{percent}%）",
     protectionFull: "资源防护全开启：CPU {cpu}% · 内存 {mem}%",
+    openResourceSettings: "点击打开系统资源设置",
   },
   context: {
     reasoningUpgrade: "(仅本次)推理加强: {from} → {to}",

@@ -888,6 +888,7 @@ export const en: Strings = {
     protectionPartialCpu: "Partial protection: CPU capped at {percent}% only",
     protectionPartialMem: "Partial protection: memory capped at {percent}% only",
     protectionFull: "Full protection: CPU {cpu}% · memory {mem}%",
+    openResourceSettings: "Click to open system resource settings",
   },
   context: {
     reasoningUpgrade: "Reasoning boost (this call only): {from} → {to}",

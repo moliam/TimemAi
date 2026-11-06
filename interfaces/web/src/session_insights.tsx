@@ -375,6 +375,8 @@ export type SessionInsightsProps = {
   resourceSamples: SessionResourcePulseSample[] | undefined;
   /** Host projection of the instance CPU/memory caps; absent before snapshot. */
   resourceCaps?: ResourceCapsProjection;
+  /** Opens the settings center at the instance resource-cap block. */
+  onOpenResourceSettings: (() => void) | null;
   onReset: (() => void) | null;
   /** Requests one read-only resource sample for the active session. */
   onSample: (() => void) | null;
@@ -384,6 +386,7 @@ export function SessionInsights({
   session,
   resourceSamples,
   resourceCaps,
+  onOpenResourceSettings,
   onReset,
   onSample,
 }: SessionInsightsProps) {
@@ -884,11 +887,12 @@ export function SessionInsights({
           <ChevronDown size={11} aria-hidden="true" />
         </button>
         {!open && protectionLevel && protectionTitle && (
-          <span
+          <button
+            type="button"
             className={`session-insights-shield ${protectionLevel}`}
-            role="img"
-            aria-label={protectionTitle}
-            title={protectionTitle}
+            aria-label={`${protectionTitle} · ${t("insights.openResourceSettings")}`}
+            title={`${protectionTitle} · ${t("insights.openResourceSettings")}`}
+            onClick={onOpenResourceSettings ?? undefined}
           >
             {protectionLevel === "full" ? (
               <ShieldCheck size={13} aria-hidden="true" />
@@ -897,7 +901,7 @@ export function SessionInsights({
             ) : (
               <ShieldX size={13} aria-hidden="true" />
             )}
-          </span>
+          </button>
         )}
       </span>
       {open &&

@@ -699,6 +699,7 @@ function TimemApp() {
   const [showAppearance, setShowAppearance] = useState(false);
   const [settingsSection, setSettingsSection] =
     useState<SettingsSection>("appearance");
+  const [resourceCapsPulse, setResourceCapsPulse] = useState(0);
   const [memTemporaryItems, setMemTemporaryItems] = useState<
     MemTemporaryItem[]
   >([]);
@@ -1221,6 +1222,12 @@ function TimemApp() {
     pendingMemSwitch,
     pendingRestorePromptContext,
   ]);
+  const openResourceCapsSettings = useCallback(() => {
+    setChatLibraryMode(null);
+    setSettingsSection("system");
+    setShowAppearance(true);
+    setResourceCapsPulse((current) => current + 1);
+  }, []);
   const refreshMemTemporaryItems = useCallback(() => {
     setMemTemporaryItemsLoading(true);
     setMemTemporaryItemsError("");
@@ -5048,6 +5055,7 @@ function TimemApp() {
               <SessionInsights
                 session={activeSession}
                 resourceCaps={server?.mem.resource_caps}
+                onOpenResourceSettings={openResourceCapsSettings}
                 resourceSamples={
                   activeSession
                     ? resourcePulseBySession[activeSession.session_id]
@@ -5366,6 +5374,7 @@ function TimemApp() {
                 server?.mem?.system_mem_cap_enabled ?? true
               }
               resourceCaps={server?.mem?.resource_caps}
+              resourceCapsPulse={resourceCapsPulse}
               resourceCapsPending={pendingResourceCaps}
               onResourceCapsChange={saveResourceCaps}
               onResourceCapsEscalate={escalateResourceCaps}
@@ -15408,6 +15417,7 @@ type SettingsCenterProps = {
   systemCpuCapEnabled: boolean;
   systemMemCapEnabled: boolean;
   resourceCaps: ResourceCapsProjection | undefined;
+  resourceCapsPulse: number;
   resourceCapsPending: boolean;
   onResourceCapsChange: (
     cpuEnabled: boolean,
@@ -15501,6 +15511,7 @@ const SettingsCenter = memo(function SettingsCenter(
     systemCpuCapEnabled,
     systemMemCapEnabled,
     resourceCaps,
+    resourceCapsPulse,
     resourceCapsPending,
     onResourceCapsEscalate,
     onResourceCapsChange,
@@ -15741,6 +15752,15 @@ const SettingsCenter = memo(function SettingsCenter(
     setPath(memPath);
     setMemoryPage("overview");
   }, [memPath]);
+  useEffect(() => {
+    if (section !== "system" || resourceCapsPulse === 0) return;
+    const frame = requestAnimationFrame(() => {
+      panelRef.current
+        ?.querySelector(".system-resource-caps")
+        ?.scrollIntoView({ block: "start", behavior: "smooth" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [panelRef, resourceCapsPulse, section]);
   useEffect(() => {
     const availableIds = new Set(
       deletableTemporaryItems.map((item) => item.id),

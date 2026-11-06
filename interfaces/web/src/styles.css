@@ -3590,6 +3590,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .settings-group-heading strong { font-size: 13px; }
 .settings-group-heading p { margin: 5px 0 0; color: #7f8b86; font-size: 11px; line-height: 1.45; }
 .settings-group-heading > svg { flex: none; color: #72837d; }
+.system-resource-caps { scroll-margin-top: 8px; }
 .settings-field { display: grid; gap: 7px; margin-top: 15px; color: #a7b2ad; font-size: 11px; font-weight: 700; }
 .settings-field input, .settings-field select { width: 100%; min-width: 0; height: 38px; border: 1px solid #3a4541; border-radius: 7px; padding: 0 10px; outline: none; background: #111513; color: #e3e9e6; }
 .settings-field input { font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; }
@@ -6516,11 +6517,12 @@ body.workspace-modal-open .app-shell { user-select: none; }
   white-space: nowrap;
 }
 .session-insights-cluster { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
-.session-insights-shield { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 16px; height: 16px; border-radius: 4px; color: #7e908a; cursor: default; transition: color .16s ease, background .16s ease; }
+.session-insights-shield { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 16px; height: 16px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: #7e908a; font: inherit; cursor: pointer; transition: color .16s ease, background .16s ease; }
 .session-insights-shield.full { color: #6fd3c0; }
 .session-insights-shield.partial { color: #e4bd76; }
 .session-insights-shield.none { color: #d9927c; }
 .session-insights-shield:hover { background: #17242b; color: #c2d0d6; }
+.session-insights-shield:focus-visible { outline: 1px solid #3d6b78; outline-offset: 1px; }
 .session-insights-chip > svg:first-child { color: #65a990; flex: none; }
 .session-insights-chip > svg:last-child { flex: none; color: #647a73; transition: transform .16s ease; }
 .session-insights-chip.open > svg:last-child { transform: rotate(180deg); }

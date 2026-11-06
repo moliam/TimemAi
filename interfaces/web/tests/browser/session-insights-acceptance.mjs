@@ -365,6 +365,13 @@ async function main() {
     assert(await browser.evaluate(`document.querySelector('.session-insights-shield').title.includes('No resource protection')`), "no-protection shield hover text");
     host.setResourceCaps(fullResourceCaps);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.session-insights-shield.full')`), "full-protection shield restored");
+    const shield = await center(browser, ".session-insights-shield");
+    await click(browser, shield);
+    await waitFor(() => browser.evaluate(`!!document.querySelector('#settings-center .system-resource-caps')`), "shield opens system resource settings");
+    assert(await browser.evaluate(`document.querySelector('.settings-center-nav button.active')?.textContent.includes('System')`), "system settings section is active");
+    const closeSettings = await center(browser, ".settings-center-header .icon-button");
+    await click(browser, closeSettings);
+    await waitFor(() => browser.evaluate(`!document.querySelector('#settings-center')`), "settings closed after shield jump");
     assert(await browser.evaluate(`document.querySelector('.session-insights-chip-label').textContent === 'tokens/s'`), "default top item is the token speed label");
     assert(await browser.evaluate(`!document.querySelector('.chat-header').textContent.includes('Session Insights')`), "collapsed header does not render the Session Insights title");
 
