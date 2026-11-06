@@ -3,6 +3,10 @@ use serde_json::Value;
 
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
 const MAX_SSE_EVENT_BYTES: usize = 4 * 1024 * 1024;
+/// Latest-reasoning window carried by preview frames. The full chain stays
+/// transient; only this bounded tail crosses the UI boundary, so preview
+/// payloads and DOM work stay flat while thinking grows.
+const MAX_THINKING_TAIL_CHARS: usize = 4096;
 
 /// Provider-neutral reasoning delta extraction. Unknown/custom event shapes
 /// intentionally return `None` so telemetry can degrade without affecting the
@@ -865,6 +869,9 @@ pub struct TurnResponsePreview {
     first_output_at: Option<std::time::Duration>,
     thinking_started_at: Option<std::time::Instant>,
     thinking_words: u64,
+    thinking_tail: String,
+    thinking_tail_chars: usize,
+    thinking_truncated: bool,
     reasoning_in_word: bool,
     reasoning_tokens: Option<u64>,
     stream_phase: Option<&'static str>,
@@ -880,6 +887,9 @@ impl TurnResponsePreview {
         self.first_output_at = None;
         self.thinking_started_at = None;
         self.thinking_words = 0;
+        self.thinking_tail.clear();
+        self.thinking_tail_chars = 0;
+        self.thinking_truncated = false;
         self.reasoning_in_word = false;
         self.reasoning_tokens = None;
         self.stream_phase = None;
@@ -923,6 +933,7 @@ impl TurnResponsePreview {
                     self.reasoning_in_word = false;
                 }
             }
+            self.append_thinking_tail(text);
         }
         if public_text_delta(event).is_some() {
             if self.first_output_at.is_none() {
@@ -932,9 +943,34 @@ impl TurnResponsePreview {
                 self.stream_phase = Some("responding");
                 changed = true;
             }
+            // The inline thinking window is only live during reasoning. Once
+            // the answer starts, stop carrying its tail on every preview frame.
+            if !self.thinking_tail.is_empty() || self.thinking_tail_chars != 0 {
+                self.thinking_tail.clear();
+                self.thinking_tail_chars = 0;
+            }
         }
         changed
     }
+    fn append_thinking_tail(&mut self, text: &str) {
+        self.thinking_tail.push_str(text);
+        self.thinking_tail_chars = self
+            .thinking_tail_chars
+            .saturating_add(text.chars().count());
+        if self.thinking_tail_chars > MAX_THINKING_TAIL_CHARS {
+            let excess = self.thinking_tail_chars - MAX_THINKING_TAIL_CHARS;
+            if let Some((cut, _)) = self.thinking_tail.char_indices().nth(excess) {
+                self.thinking_tail.drain(..cut);
+            }
+            self.thinking_tail_chars = MAX_THINKING_TAIL_CHARS;
+            self.thinking_truncated = true;
+        }
+    }
+
+    pub fn thinking_active(&self) -> bool {
+        self.stream_phase == Some("thinking")
+    }
+
     pub fn ttft(&self) -> Option<std::time::Duration> {
         self.first_output_at
     }
@@ -1023,6 +1059,8 @@ impl TurnResponsePreview {
             serde_json::json!({"turn_id": turn_id, "attempt": self.attempt, "round": self.round,
                 "revision": self.revision, "interruption": self.interruption, "response": self.response.visible(),
                 "thinking_words": self.thinking_words,
+                "thinking_tail": self.thinking_tail.as_str(),
+                "thinking_truncated": self.thinking_truncated,
                 "thinking_elapsed_ms": self.thinking_elapsed().map(|value| value.as_millis()),
                 "ttft_ms": self.ttft().map(|value| value.as_millis()),
                 "reasoning_tokens": self.reasoning_tokens,

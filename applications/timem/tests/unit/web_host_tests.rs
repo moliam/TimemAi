@@ -11126,6 +11126,8 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
             round: 1,
             usage: UsageStats::zero(),
             content: "I will inspect the workspace.".to_string(),
+            reasoning: String::new(),
+            reasoning_truncated: false,
             tool_calls: vec![agent_core::NativeToolCall {
                 assistant_continuation: None,
                 id: "call_current".to_string(),
@@ -11531,6 +11533,8 @@ fn live_model_usage_is_retained_in_the_active_turn_and_correct_session() {
         CoreSessionWorkerEvent::ModelResponse {
             round: 2,
             content: String::new(),
+            reasoning: String::new(),
+            reasoning_truncated: false,
             tool_calls: Vec::new(),
             truncated: false,
             runtime_phase: None,
@@ -11548,6 +11552,8 @@ fn live_model_usage_is_retained_in_the_active_turn_and_correct_session() {
         CoreSessionWorkerEvent::ModelResponse {
             round: 3,
             content: String::new(),
+            reasoning: String::new(),
+            reasoning_truncated: false,
             tool_calls: Vec::new(),
             truncated: false,
             runtime_phase: Some("toolgen".to_string()),
@@ -23398,6 +23404,97 @@ fn streaming_preview_broadcasts_are_throttled_and_terminal_answer_drops_pending(
         }),
         "a finished turn must not leak its withheld preview frame"
     );
+}
+
+#[test]
+fn thinking_preview_frames_bypass_answer_throttle() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let _web_turn = start_web_turn(&state, session_id, "keep thinking fluid").unwrap();
+    let worker_id = test_worker_id(session_id);
+    let core_turn_id = "core_turn_thinking_live";
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Active(
+            agent_core::ActiveTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.to_string(),
+                    turn_id: core_turn_id.to_string(),
+                    epoch: 1,
+                },
+                stop_requested: false,
+                input_admission: agent_core::TurnInputAdmission::Open,
+                activity: agent_core::TurnActivity::Running,
+            },
+        )),
+    );
+    let mut receiver = state.events.subscribe();
+    let thinking = |revision: u64, tail: &str| {
+        CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new("core.model.preview", json!({})),
+            CoreSessionState::WaitingModel,
+            json!({
+                "turn_id": core_turn_id,
+                "attempt": 1,
+                "revision": revision,
+                "interruption": null,
+                "response": null,
+                "stream_phase": "thinking",
+                "thinking_words": 12,
+                "thinking_tail": tail,
+                "thinking_elapsed_ms": 500
+            }),
+        )
+        .with_worker_scope(test_context_id(session_id), worker_id.clone())
+    };
+
+    // Thinking frames are cheap and must not wait behind the answer-preview
+    // throttle: each new tail should reach the wire immediately.
+    for revision in 1..=3 {
+        response_preview::publish(
+            &state,
+            session_id,
+            &worker_id,
+            &thinking(revision, &format!("tail-{revision}")),
+        );
+        assert_eq!(
+            drain_wire_events(&mut receiver).len(),
+            1,
+            "thinking frame {revision} was withheld"
+        );
+        assert!(
+            state.sessions.lock().unwrap()[session_id]
+                .preview_throttle
+                .pending
+                .is_none(),
+            "thinking frame {revision} left a pending preview"
+        );
+    }
+
+    // The answer-preview path keeps the original throttle.
+    let answer = CoreTopicEvent::new(
+        session_id,
+        CoreTopic::new("core.model.preview", json!({})),
+        CoreSessionState::WaitingModel,
+        json!({
+            "turn_id": core_turn_id,
+            "attempt": 1,
+            "revision": 4,
+            "interruption": null,
+            "response": {"attempt": 1, "revision": 4, "text": "answer", "status": "streaming"},
+            "stream_phase": "responding",
+            "thinking_tail": ""
+        }),
+    )
+    .with_worker_scope(test_context_id(session_id), worker_id.clone());
+    response_preview::publish(&state, session_id, &worker_id, &answer);
+    assert_eq!(drain_wire_events(&mut receiver).len(), 0);
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_some());
 }
 
 #[test]

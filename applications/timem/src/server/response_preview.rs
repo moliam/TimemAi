@@ -104,6 +104,14 @@ pub(super) fn publish(state: &AppState, session_id: &str, worker_id: &str, event
         .and_then(|response| response.get("status"))
         .and_then(Value::as_str)
         == Some("final");
+    // Thinking frames carry only a bounded reasoning tail and no answer text,
+    // so bypass the 150ms answer-preview window to keep the strip fluid.
+    let live_thinking = !final_preview
+        && preview.get("stream_phase").and_then(Value::as_str) == Some("thinking")
+        && preview
+            .get("thinking_tail")
+            .and_then(Value::as_str)
+            .is_some_and(|tail| !tail.is_empty());
     // The server-side projection always tracks the newest frame; only the
     // broadcast is throttled.
     turn.preview = Some(preview.clone());
@@ -114,7 +122,7 @@ pub(super) fn publish(state: &AppState, session_id: &str, worker_id: &str, event
         let now = now_ms();
         let throttle = &mut session.preview_throttle;
         let mut due: Vec<PendingPreview> = Vec::new();
-        if final_preview {
+        if final_preview || live_thinking {
             // Terminal frames never wait: flush any withheld streaming frame
             // first so wire order stays monotonic, then publish the Final
             // frame immediately. Otherwise the following terminal turn event

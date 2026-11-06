@@ -1,4 +1,5 @@
 import { useThrottledValue } from "./use_throttled_value";
+import { compactThinkingTail } from "./thinking_preview";
 import { MailboxIcon, MailboxInvocation, MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation, TimerInvocation, TimerToolIcon } from "./tool_invocation";
 import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
 import { applyContextWindowChoice, contextWindowSelectionMode, initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, sessionReasoningOptions, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointContextWindowWarning, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
@@ -13117,6 +13118,20 @@ function modelPhaseForStream(waitingModel: boolean, status?: string): boolean {
   return waitingModel || status === "streaming";
 }
 
+const ThinkingPreviewWindow = memo(function ThinkingPreviewWindow({
+  text,
+}: {
+  text: string;
+}) {
+  const compact = useMemo(() => compactThinkingTail(text), [text]);
+  if (!text) return null;
+  return (
+    <span className="stream-thinking-window">
+      <span className="stream-thinking-window-text">{compact}</span>
+    </span>
+  );
+});
+
 function TurnAnswerDelivery({
   streamRetained,
   workExpanded,
@@ -13174,6 +13189,7 @@ function TurnAnswerDelivery({
     preview?.thinking_words ?? 0,
     1000,
   );
+  const thinkingTailShown = preview?.thinking_tail ?? "";
   const isThinking = modelPhaseForStream(waitingModel, preview?.response?.status) &&
     preview?.stream_phase === "thinking";
   const isWaiting = !!modelRetryStatus && waitingModel && !preview?.stream_phase;
@@ -13260,6 +13276,9 @@ function TurnAnswerDelivery({
             ) : isThinking ? (
               <span className="stream-working-detail">
                 <span>thinking</span>
+                {thinkingTailShown && (
+                  <ThinkingPreviewWindow text={thinkingTailShown} />
+                )}
                 <strong>{t("tools.thinkingWords", { count: thinkingWordsShown })}</strong>
                 <WorkingElapsed
                   createdAtMs={Date.now() - (preview?.thinking_elapsed_ms ?? 0)}

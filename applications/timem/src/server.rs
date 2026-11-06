@@ -17948,6 +17948,8 @@ fn handle_scoped_worker_event(
             round,
             usage,
             content,
+            reasoning,
+            reasoning_truncated,
             tool_calls,
             truncated,
             runtime_phase,
@@ -17960,6 +17962,8 @@ fn handle_scoped_worker_event(
                     crate::debug_session::DebugLlmResponse {
                         usage: &usage,
                         content: &content,
+                        reasoning: &reasoning,
+                        reasoning_truncated,
                         tool_calls: &tool_calls,
                         truncated,
                     },

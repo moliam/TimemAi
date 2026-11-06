@@ -23,7 +23,9 @@ const LLM_TTFT_BOUNDARIES_MS: [u64; 7] = [50, 100, 200, 400, 800, 1600, 3200];
 const LLM_TTFT_LABELS: [&str; 8] = [
     "50 ms", "100 ms", "200 ms", "400 ms", "800 ms", "1.6 s", "3.2 s", "3.2 s+",
 ];
-const MAX_LLM_RESPONSE_DUMP_ENTRIES: usize = 10;
+/// Newest-first response retention. Fifty entries keep a full debugging
+/// session available in one file while still bounding the dump size.
+const MAX_LLM_RESPONSE_DUMP_ENTRIES: usize = 50;
 const STATISTICS_REFRESH_MS: u64 = 2_000;
 static NEXT_DEBUG_STORE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -85,6 +87,8 @@ struct LlmResponseDumpEntry {
     round: u32,
     received_at_ms: u128,
     content: String,
+    reasoning: String,
+    reasoning_truncated: bool,
     tool_calls: Vec<agent_core::NativeToolCall>,
 }
 
@@ -92,6 +96,8 @@ struct LlmResponseDumpEntry {
 pub(crate) struct DebugLlmResponse<'a> {
     pub(crate) usage: &'a agent_core::UsageStats,
     pub(crate) content: &'a str,
+    pub(crate) reasoning: &'a str,
+    pub(crate) reasoning_truncated: bool,
     pub(crate) tool_calls: &'a [agent_core::NativeToolCall],
     pub(crate) truncated: bool,
 }
@@ -547,6 +553,8 @@ impl DebugStore {
         let DebugLlmResponse {
             usage,
             content,
+            reasoning,
+            reasoning_truncated,
             tool_calls,
             truncated,
         } = response;
@@ -580,6 +588,8 @@ impl DebugStore {
                 round,
                 received_at_ms,
                 content: content.to_string(),
+                reasoning: reasoning.to_string(),
+                reasoning_truncated,
                 tool_calls: tool_calls.to_vec(),
             });
             stats.responses.truncate(MAX_LLM_RESPONSE_DUMP_ENTRIES);
@@ -1034,8 +1044,31 @@ fn render_llm_response_dump(
             format_timestamp_ms(response.received_at_ms)
         ));
         out.push_str(&format!("content_bytes: {}\n", response.content.len()));
+        out.push_str(&format!("thinking_bytes: {}\n", response.reasoning.len()));
+        out.push_str(&format!(
+            "thinking_chars: {}\n",
+            response.reasoning.chars().count()
+        ));
+        out.push_str(&format!(
+            "thinking_truncated: {}\n",
+            response.reasoning_truncated
+        ));
         out.push_str(&format!("tool_call_count: {}\n", response.tool_calls.len()));
         out.push_str("------------------------------------------------------------\n");
+        out.push_str("----------------- THINKING (reasoning_content) --------------\n");
+        if response.reasoning.is_empty() {
+            out.push_str("(empty or unavailable)\n");
+        } else {
+            out.push_str(&response.reasoning);
+            if !response.reasoning.ends_with('\n') {
+                out.push('\n');
+            }
+            if response.reasoning_truncated {
+                out.push_str("(reasoning capture truncated)\n");
+            }
+        }
+        out.push_str("-------------------- END THINKING --------------------------\n");
+        out.push_str("------------------- ASSISTANT CONTENT ----------------------\n");
         if response.content.is_empty() {
             out.push_str("(empty assistant text)\n");
         } else {
@@ -1044,6 +1077,7 @@ fn render_llm_response_dump(
                 out.push('\n');
             }
         }
+        out.push_str("----------------- END ASSISTANT CONTENT --------------------\n");
         if !response.tool_calls.is_empty() {
             out.push_str("-------------------- NATIVE TOOL CALLS ---------------------\n");
             out.push_str(
@@ -2009,6 +2043,8 @@ mod tests {
                         ..agent_core::UsageStats::zero()
                     },
                     content: "ok",
+                    reasoning: "",
+                    reasoning_truncated: false,
                     tool_calls: &[],
                     truncated: false,
                 },
@@ -2142,6 +2178,8 @@ mod tests {
                     DebugLlmResponse {
                         usage: &agent_core::UsageStats::zero(),
                         content,
+                        reasoning: "",
+                        reasoning_truncated: false,
                         tool_calls: &[],
                         truncated: true,
                     },
@@ -2208,6 +2246,8 @@ mod tests {
                     DebugLlmResponse {
                         usage: &agent_core::UsageStats::zero(),
                         content,
+                        reasoning: "",
+                        reasoning_truncated: false,
                         tool_calls: &[],
                         truncated,
                     },
@@ -2280,6 +2320,8 @@ mod tests {
                                 DebugLlmResponse {
                                     usage: &agent_core::UsageStats::zero(),
                                     content: "ok",
+                                    reasoning: "",
+                                    reasoning_truncated: false,
                                     tool_calls: &[],
                                     truncated: false,
                                 },
@@ -2301,7 +2343,7 @@ mod tests {
         assert!(html.contains("<strong>12</strong>"));
         assert!(prompt.ends_with("</html>"));
         assert_eq!(prompt.matches("class=\"message\"").count(), 0);
-        assert!(response.contains("retained_responses: 10"));
+        assert!(response.contains("retained_responses: 12"));
         let artifact_names = fs::read_dir(&session_dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
@@ -2711,12 +2753,12 @@ mod tests {
     }
 
     #[test]
-    fn llm_response_dump_keeps_newest_ten_in_reverse_chronological_order() {
+    fn llm_response_dump_keeps_newest_fifty_in_reverse_chronological_order() {
         let _guard = debug_store_test_guard();
         let store = DebugStore::create().unwrap();
         let session_dir = store.session_dir("session_responses").unwrap();
-        for index in 1..=12 {
-            let tool_calls = if index == 12 {
+        for index in 1..=52 {
+            let tool_calls = if index == 52 {
                 vec![agent_core::NativeToolCall {
                     assistant_continuation: None,
                     id: "call_latest".to_string(),
@@ -2735,6 +2777,8 @@ mod tests {
                     DebugLlmResponse {
                         usage: &agent_core::UsageStats::zero(),
                         content: &format!("response-{index}"),
+                        reasoning: "",
+                        reasoning_truncated: false,
                         tool_calls: &tool_calls,
                         truncated: false,
                     },
@@ -2742,14 +2786,79 @@ mod tests {
                 .unwrap();
         }
         let dump = fs::read_to_string(session_dir.join("llm_response.dump")).unwrap();
-        assert!(dump.contains("retained_responses: 10"));
-        assert!(dump.find("response-12").unwrap() < dump.find("response-11").unwrap());
+        assert!(dump.contains("retained_responses: 50"));
+        assert!(dump.find("response-52").unwrap() < dump.find("response-51").unwrap());
         assert!(!dump.contains("response-1\n"));
         assert!(!dump.contains("response-2\n"));
+        assert!(dump.contains("response-3\n"));
         assert!(dump.contains("tool_call_count: 1"));
         assert!(dump.contains("NATIVE TOOL CALLS"));
         assert!(dump.contains("call_latest"));
         assert!(dump.contains("raw_arguments"));
+        store.cleanup().unwrap();
+    }
+
+    #[test]
+    fn llm_response_dump_renders_structured_thinking_and_content_sections() {
+        let _guard = debug_store_test_guard();
+        let store = DebugStore::create().unwrap();
+        let session_dir = store.session_dir("session_thinking_dump").unwrap();
+        store
+            .record_llm_response(
+                "session_thinking_dump",
+                "worker_0",
+                1,
+                DebugLlmResponse {
+                    usage: &agent_core::UsageStats::zero(),
+                    content: "final answer",
+                    reasoning: "step 1: inspect\nstep 2: answer",
+                    reasoning_truncated: false,
+                    tool_calls: &[],
+                    truncated: false,
+                },
+            )
+            .unwrap();
+        let dump = fs::read_to_string(session_dir.join("llm_response.dump")).unwrap();
+        assert!(dump.contains("thinking_bytes: 30"), "{dump}");
+        assert!(dump.contains("thinking_chars: 30"), "{dump}");
+        assert!(dump.contains("thinking_truncated: false"), "{dump}");
+        assert!(dump.contains("THINKING (reasoning_content)"), "{dump}");
+        assert!(dump.contains("END THINKING"), "{dump}");
+        assert!(dump.contains("ASSISTANT CONTENT"), "{dump}");
+        let thinking = dump.find("step 1: inspect").unwrap();
+        let content = dump.find("final answer").unwrap();
+        assert!(thinking < content, "{dump}");
+        store.cleanup().unwrap();
+    }
+
+    #[test]
+    fn llm_response_dump_marks_empty_and_truncated_thinking() {
+        let _guard = debug_store_test_guard();
+        let store = DebugStore::create().unwrap();
+        let session_dir = store.session_dir("session_thinking_flags").unwrap();
+        for (round, reasoning, truncated) in
+            [(1, "", false), (2, "partial reasoning that was cut", true)]
+        {
+            store
+                .record_llm_response(
+                    "session_thinking_flags",
+                    "worker_0",
+                    round,
+                    DebugLlmResponse {
+                        usage: &agent_core::UsageStats::zero(),
+                        content: "answer",
+                        reasoning,
+                        reasoning_truncated: truncated,
+                        tool_calls: &[],
+                        truncated: false,
+                    },
+                )
+                .unwrap();
+        }
+        let dump = fs::read_to_string(session_dir.join("llm_response.dump")).unwrap();
+        assert!(dump.contains("(empty or unavailable)"), "{dump}");
+        assert!(dump.contains("thinking_truncated: true"), "{dump}");
+        assert!(dump.contains("(reasoning capture truncated)"), "{dump}");
         store.cleanup().unwrap();
     }
 
@@ -2803,6 +2912,8 @@ mod tests {
         let response = DebugLlmResponse {
             usage: &agent_core::UsageStats::zero(),
             content: "thinking answer",
+            reasoning: "",
+            reasoning_truncated: false,
             tool_calls: &[],
             truncated: false,
         };

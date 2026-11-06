@@ -171,6 +171,15 @@ describe("splitMarkdownBlocks incremental stability", () => {
     expect(css).toContain(':root[data-theme="light"] .stream-working-trailer.model-waiting { color: #286a9b; }');
     expect(css).toMatch(/\.stream-working-trailer \{[^}]*justify-content: space-between/);
     expect(css).toContain('.stream-working-total { gap: 6px; margin-left: auto; color: #77857e; }');
+    expect(mainSource).toContain('const ThinkingPreviewWindow = memo(function ThinkingPreviewWindow(');
+    expect(mainSource).toContain('className="stream-thinking-window"');
+    expect(mainSource).toContain('const thinkingTailShown = preview?.thinking_tail ?? "";');
+    expect(css).toMatch(/\.stream-working-trailer \{[^}]*column-gap: 4ch/);
+    expect(css).toMatch(/\.stream-working-current \{[^}]*flex: 1 1 auto/);
+    expect(css).toContain('.stream-thinking-window {');
+    expect(css).toContain('mask-image: linear-gradient');
+    expect(css).toContain('border: 0;');
+    expect(css).not.toContain('.stream-thinking-tooltip');
     expect(css).toMatch(/\.stream-working-wrench \{[^}]*animation: stream-working-wrench-sway/);
     expect(css).toContain("@keyframes stream-working-wrench-sway");
     expect(css).toMatch(/prefers-reduced-motion: reduce[\s\S]*\.stream-working-wrench \{ animation: none/);

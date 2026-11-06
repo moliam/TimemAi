@@ -404,6 +404,27 @@ async function main() {
       payload: { turn_id: "turn-1", ...preview },
     }});
   };
+  const publishThinking = (revision, tail, truncated = false) => {
+    const preview = {
+      attempt: 2,
+      revision,
+      chat: [],
+      interruption: null,
+      thinking_words: 1234,
+      thinking_tail: tail,
+      thinking_truncated: truncated,
+      thinking_elapsed_ms: 1500,
+      stream_phase: "thinking",
+      response: { attempt: 2, revision, text: "", status: "streaming" },
+    };
+    const session = host.getSession();
+    host.setSession({ ...session, turns: session.turns.map(t => ({ ...t, preview })) });
+    host.send({ type: "core_topic", turn_id: "turn-1", turn_event_id: null, event: {
+      session_id: "session-1", context_id: "context-1", worker_id: "worker-1",
+      topic: { name: "core.model.preview", attributes: {} }, state: "waiting_model",
+      payload: { turn_id: "turn-1", ...preview },
+    }});
+  };
   try {
     await waitFor(() => contains("body", "Long task"), "initial snapshot missing");
     if (process.env.STREAM_CPU_BENCH === "1") {
@@ -658,6 +679,73 @@ async function main() {
     assert(!(await contains(".response-preview", "Unique thought N")), "intermediate thought duplicated in preview");
     assert(await contains(".stream-tool-row", "tool-old"), "current tool missing");
     assert(await browser.evaluate(`!!document.querySelector('.stream-working-trailer')`), "working trailer missing");
+    const thinkingNeedle = "LATEST_THINKING_WINDOW";
+    const thinkingTail = `${"older reasoning ".repeat(80)}${thinkingNeedle}`;
+    publishThinking(30, thinkingTail);
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-thinking-window')`), "thinking window missing");
+    const thinkingGeometry = await browser.evaluate(`(() => {
+      const trailer = document.querySelector('.stream-working-trailer');
+      const windowEl = document.querySelector('.stream-thinking-window');
+      const elapsed = document.querySelector('.stream-working-detail .stream-working-phase-elapsed');
+      const total = document.querySelector('.stream-working-total');
+      const probe = document.createElement('span');
+      probe.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;';
+      probe.style.font = getComputedStyle(trailer).font;
+      probe.textContent = '0000';
+      document.body.appendChild(probe);
+      const fourCh = probe.getBoundingClientRect().width;
+      probe.remove();
+      const w = windowEl.getBoundingClientRect();
+      const e = elapsed.getBoundingClientRect();
+      const t = total.getBoundingClientRect();
+      return { gap: t.left - e.right, fourCh, windowWidth: w.width, trailerWidth: trailer.getBoundingClientRect().width,
+        text: windowEl.textContent, elapsedRight: e.right, totalLeft: t.left };
+    })()`);
+    assert(thinkingGeometry.text.includes(thinkingNeedle), `thinking window must show newest reasoning: ${JSON.stringify(thinkingGeometry)}`);
+    assert(thinkingGeometry.gap >= thinkingGeometry.fourCh - 1, `thinking row keeps 4ch before the right time cluster: ${JSON.stringify(thinkingGeometry)}`);
+    assert(thinkingGeometry.windowWidth < thinkingGeometry.trailerWidth * 0.72, `thinking window stays length-limited: ${JSON.stringify(thinkingGeometry)}`);
+    await browser.evaluate(`document.documentElement.dataset.theme = 'dark'`);
+    const thinkingChrome = await browser.evaluate(`(() => {
+      const win = document.querySelector('.stream-thinking-window');
+      const text = win.querySelector('.stream-thinking-window-text');
+      const ws = getComputedStyle(win);
+      return { winBorderWidth: ws.borderTopWidth, winBackground: ws.backgroundImage, winShadow: ws.boxShadow,
+        winMask: ws.maskImage,
+        windowRect: win.getBoundingClientRect().toJSON(), textRect: text.getBoundingClientRect().toJSON() };
+    })()`);
+    assert(thinkingChrome.winBorderWidth === '0px' && thinkingChrome.winBackground === 'none' && thinkingChrome.winShadow === 'none' && thinkingChrome.winMask.includes('linear-gradient'), `inline thinking strip is frameless with a natural fade edge: ${JSON.stringify(thinkingChrome)}`);
+    assert(thinkingChrome.textRect.right >= thinkingChrome.windowRect.right - 9 && thinkingChrome.textRect.left < thinkingChrome.windowRect.left, `inline thinking strip clips to the newest text at its right edge: ${JSON.stringify(thinkingChrome)}`);
+    await browser.evaluate(`document.documentElement.dataset.theme = 'light'`);
+    const lightThinkingChrome = await browser.evaluate(`(() => {
+      const win = document.querySelector('.stream-thinking-window');
+      const ws = getComputedStyle(win);
+      return { winBackground: ws.backgroundImage, winBorderWidth: ws.borderTopWidth,
+        winColor: ws.color, winMask: ws.maskImage };
+    })()`);
+    assert(lightThinkingChrome.winBackground === 'none' && lightThinkingChrome.winBorderWidth === '0px' && lightThinkingChrome.winColor === 'rgb(47, 111, 94)' && lightThinkingChrome.winMask.includes('linear-gradient'), `light thinking strip stays frameless: ${JSON.stringify(lightThinkingChrome)}`);
+    await browser.evaluate(`document.documentElement.dataset.theme = 'dark'`);
+    const beforeTick = await browser.evaluate(`(() => {
+      const win = document.querySelector('.stream-thinking-window');
+      const elapsed = document.querySelector('.stream-working-detail .stream-working-phase-elapsed');
+      const total = document.querySelector('.stream-working-total');
+      return { windowWidth: win.getBoundingClientRect().width,
+        gap: total.getBoundingClientRect().left - elapsed.getBoundingClientRect().right,
+        text: win.textContent };
+    })()`);
+    publishThinking(32, `${thinkingTail} newest tick`);
+    await sleep(180);
+    const afterTick = await browser.evaluate(`(() => {
+      const win = document.querySelector('.stream-thinking-window');
+      const elapsed = document.querySelector('.stream-working-detail .stream-working-phase-elapsed');
+      const total = document.querySelector('.stream-working-total');
+      return { windowWidth: win.getBoundingClientRect().width,
+        gap: total.getBoundingClientRect().left - elapsed.getBoundingClientRect().right,
+        text: win.textContent };
+    })()`);
+    assert(afterTick.text.includes("newest tick"), `inline thinking strip follows newest reasoning: ${JSON.stringify(afterTick)}`);
+    assert(Math.abs(afterTick.windowWidth - beforeTick.windowWidth) < 1 && Math.abs(afterTick.gap - beforeTick.gap) < 1, `inline thinking strip updates without shifting the row: ${JSON.stringify({ beforeTick, afterTick })}`);
+    publish(33, null, []);
+    await waitFor(() => browser.evaluate(`!document.querySelector('.stream-thinking-window')`), "thinking window must clear when reasoning ends");
     assert(await browser.evaluate(`!document.querySelector('.stream-thought-card, .stream-reading-hold')`), "extra thought frame exists");
     for (const theme of ["dark", "light"]) {
       assert(await browser.evaluate(`(() => {

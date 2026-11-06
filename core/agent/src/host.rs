@@ -2011,6 +2011,10 @@ pub trait TurnUi {
 
     fn on_model_response(&mut self, _round: u32, _usage: &UsageStats, _content: &str) {}
 
+    /// Full provider reasoning text collected for this round. Hosts use it
+    /// only for diagnostics; it must never be surfaced as assistant content.
+    fn on_model_interaction_reasoning(&mut self, _round: u32, _reasoning: &str, _truncated: bool) {}
+
     fn on_model_interaction_response(&mut self, round: u32, response: &crate::LlmResponse) {
         self.on_model_response(round, &response.usage, &response.content);
     }

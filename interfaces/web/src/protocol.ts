@@ -326,6 +326,9 @@ export type ResponsePreview = {
   timeline_seq?: number;
   revision: number;
   thinking_words?: number;
+  /** Bounded newest-reasoning tail carried by preview frames. */
+  thinking_tail?: string;
+  thinking_truncated?: boolean;
   thinking_elapsed_ms?: number | null;
   ttft_ms?: number | null;
   reasoning_tokens?: number | null;

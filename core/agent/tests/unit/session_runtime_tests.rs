@@ -8562,3 +8562,37 @@ fn invalid_native_tool_call_arguments_get_a_bounded_repair_round() {
     );
     let _ = fs::remove_dir_all(dir);
 }
+
+#[test]
+fn debug_reasoning_capture_is_bounded_and_char_safe() {
+    let mut buffer = String::new();
+    let mut truncated = false;
+    append_debug_reasoning(&mut buffer, "", &mut truncated);
+    assert!(buffer.is_empty());
+    assert!(!truncated);
+
+    append_debug_reasoning(&mut buffer, "思考abc", &mut truncated);
+    assert_eq!(buffer, "思考abc");
+    assert!(!truncated);
+
+    let mut exact = String::new();
+    let mut exact_truncated = false;
+    append_debug_reasoning(
+        &mut exact,
+        &"a".repeat(MAX_DEBUG_REASONING_BYTES),
+        &mut exact_truncated,
+    );
+    assert_eq!(exact.len(), MAX_DEBUG_REASONING_BYTES);
+    assert!(!exact_truncated);
+
+    // Multi-byte text must be cut on a character boundary and never split a
+    // UTF-8 code point while filling the remaining capacity.
+    let chunk = "中".repeat(MAX_DEBUG_REASONING_BYTES);
+    append_debug_reasoning(&mut buffer, &chunk, &mut truncated);
+    assert_eq!(buffer.len(), MAX_DEBUG_REASONING_BYTES - 1);
+    assert_eq!(buffer.chars().filter(|ch| *ch == '中').count(), 21_842);
+    assert!(truncated);
+
+    append_debug_reasoning(&mut buffer, "tail", &mut truncated);
+    assert_eq!(buffer.len(), MAX_DEBUG_REASONING_BYTES - 1);
+}

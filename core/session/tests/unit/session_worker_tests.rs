@@ -86,6 +86,7 @@ fn manual_compact_ui(
         pending_bash_always_allow: false,
         pending_runtime_updates: Arc::new(Mutex::new(Vec::new())),
         interaction_profile: None,
+        pending_debug_reasoning: None,
     };
     (ui, mailbox, manual_flag)
 }
@@ -2281,6 +2282,7 @@ fn toolgen_approval_topic_keeps_session_context_and_worker_scope() {
         pending_bash_always_allow: false,
         pending_runtime_updates: Arc::new(Mutex::new(Vec::new())),
         interaction_profile: None,
+        pending_debug_reasoning: None,
     };
     let waiter = std::thread::spawn(move || {
         ui.request_host_decision_topic(
@@ -6342,4 +6344,83 @@ fn manual_compact_at_finish_is_handed_off_without_waiting_for_user_input() {
         assert!(ui.close_supplements_for_host_handoff().is_empty());
         assert!(!mailbox.lock().unwrap().accepting);
     }
+}
+
+#[test]
+fn model_response_event_carries_debug_reasoning_for_the_matching_round() {
+    use agent_core::TurnUi as _;
+
+    fn ui_with_events() -> (
+        WorkerTurnUi,
+        std::sync::mpsc::Receiver<CoreSessionWorkerEvent>,
+    ) {
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let (_reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let ui = WorkerTurnUi {
+            event_tx,
+            session_id: "session_debug_reasoning".to_string(),
+            context_id: "context_0".to_string(),
+            worker_id: "worker_0".to_string(),
+            supplement_mailbox: Arc::new(Mutex::new(SupplementMailbox {
+                accepting: true,
+                queue: Vec::new(),
+            })),
+            command_ids: Arc::new(Mutex::new(CoreCommandIdTracker::default())),
+            cancel_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            manual_compact_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reply_rx,
+            runtime: CoreSessionWorkerRuntime::new(),
+            current_turn_active: None,
+            phase: None,
+            accept_supplements: true,
+            user_supplement_model_dispatch_timeout: std::time::Duration::from_secs(120),
+            supplement_dispatch_timeout: None,
+            continue_supplements_after_final_answer: true,
+            pending_bash_always_allow: false,
+            pending_runtime_updates: Arc::new(Mutex::new(Vec::new())),
+            interaction_profile: None,
+            pending_debug_reasoning: None,
+        };
+        (ui, event_rx)
+    }
+
+    let (mut ui, event_rx) = ui_with_events();
+    let response = LlmResponse {
+        content: "answer".to_string(),
+        tool_calls: Vec::new(),
+        model_name: "test-model".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    };
+
+    ui.on_model_interaction_reasoning(3, "保留的思考", true);
+    ui.on_model_interaction_response(3, &response);
+    let CoreSessionWorkerEvent::ModelResponse {
+        reasoning,
+        reasoning_truncated,
+        ..
+    } = event_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("model response event")
+    else {
+        panic!("expected ModelResponse");
+    };
+    assert_eq!(reasoning, "保留的思考");
+    assert!(reasoning_truncated);
+
+    // A stale capture must not leak into a response from another round.
+    ui.on_model_interaction_reasoning(4, "stale", false);
+    ui.on_model_interaction_response(5, &response);
+    let CoreSessionWorkerEvent::ModelResponse {
+        reasoning,
+        reasoning_truncated,
+        ..
+    } = event_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("second model response event")
+    else {
+        panic!("expected ModelResponse");
+    };
+    assert!(reasoning.is_empty());
+    assert!(!reasoning_truncated);
 }

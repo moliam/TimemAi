@@ -315,6 +315,8 @@ pub enum CoreSessionWorkerEvent {
         round: u32,
         usage: UsageStats,
         content: String,
+        reasoning: String,
+        reasoning_truncated: bool,
         tool_calls: Vec<agent_core::NativeToolCall>,
         truncated: bool,
         runtime_phase: Option<String>,
@@ -1909,6 +1911,7 @@ impl CoreSessionWorker {
                 pending_bash_always_allow: false,
                 pending_runtime_updates,
                 interaction_profile: None,
+                pending_debug_reasoning: None,
             };
 
             let context_id = identity.context_id.clone();
@@ -2421,6 +2424,9 @@ struct WorkerTurnUi {
     pending_bash_always_allow: bool,
     pending_runtime_updates: Arc<Mutex<Vec<PendingRuntimeUpdate>>>,
     interaction_profile: Option<agent_core::InteractionProfile>,
+    /// Reasoning captured for the in-flight round; attached to the matching
+    /// ModelResponse event for the debug dump and never shown as content.
+    pending_debug_reasoning: Option<(u32, String, bool)>,
 }
 
 fn toolgen_completion_instruction(protocol: ResponseProtocolKind) -> &'static str {
@@ -2956,11 +2962,23 @@ impl TurnUi for WorkerTurnUi {
             });
     }
 
+    fn on_model_interaction_reasoning(&mut self, round: u32, reasoning: &str, truncated: bool) {
+        self.pending_debug_reasoning = Some((round, reasoning.to_string(), truncated));
+    }
+
     fn on_model_interaction_response(&mut self, round: u32, response: &agent_core::LlmResponse) {
+        let (reasoning, reasoning_truncated) = match self.pending_debug_reasoning.take() {
+            Some((pending_round, reasoning, truncated)) if pending_round == round => {
+                (reasoning, truncated)
+            }
+            _ => (String::new(), false),
+        };
         let _ = self.event_tx.send(CoreSessionWorkerEvent::ModelResponse {
             round,
             usage: response.usage.clone(),
             content: response.content.clone(),
+            reasoning,
+            reasoning_truncated,
             tool_calls: response.tool_calls.clone(),
             truncated: response.truncated,
             runtime_phase: self.phase.clone(),

@@ -722,6 +722,11 @@ fn run_session_turn_with_model_client_and_reminder_override(
                             }
                         }
                         latest_usage = Some(response.response.usage.clone());
+                        ui.on_model_interaction_reasoning(
+                            rounds,
+                            &response.reasoning,
+                            response.reasoning_truncated,
+                        );
                         if !core.should_suppress_model_response(&response.response) {
                             ui.on_model_interaction_response(rounds, &response.response);
                         }
@@ -1232,6 +1237,28 @@ impl ActionRuntime for TurnActionRuntime<'_> {
     }
 }
 
+/// Debug-only reasoning capture bound. The dump is meant for developers, so
+/// keep enough text to understand the model's thinking without letting a
+/// pathological stream grow the retained entry without limit.
+const MAX_DEBUG_REASONING_BYTES: usize = 64 * 1024;
+
+fn append_debug_reasoning(buffer: &mut String, text: &str, truncated: &mut bool) {
+    if text.is_empty() || *truncated {
+        return;
+    }
+    let remaining = MAX_DEBUG_REASONING_BYTES.saturating_sub(buffer.len());
+    if text.len() <= remaining {
+        buffer.push_str(text);
+        return;
+    }
+    let mut cut = remaining;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    buffer.push_str(&text[..cut]);
+    *truncated = true;
+}
+
 #[allow(clippy::too_many_arguments)]
 fn call_model_with_system_retries(
     model_client: &mut dyn ModelClient,
@@ -1258,6 +1285,11 @@ fn call_model_with_system_retries(
     let mut last_preview_publish: Option<Instant> = None;
     for attempt in 0..=retry_policy.max_attempts {
         let model_wait_start = Instant::now();
+        // Only the attempt that actually produces the accepted response is
+        // retained; a retried attempt's partial reasoning must not merge into
+        // the final dump entry.
+        let mut reasoning = String::new();
+        let mut reasoning_truncated = false;
         preview.begin(round);
         let mut json = JsonPublicTextStream::default();
         let mut xml = XmlPublicTextStream::default();
@@ -1272,6 +1304,9 @@ fn call_model_with_system_retries(
             &mut |event| {
                 if preview_error {
                     return;
+                }
+                if let Some(text) = crate::model_stream::reasoning_delta(event) {
+                    append_debug_reasoning(&mut reasoning, text, &mut reasoning_truncated);
                 }
                 let mut changed = preview.observe_stream_event(event);
                 let mut append_error = false;
@@ -1304,8 +1339,17 @@ fn call_model_with_system_retries(
                     changed = true;
                 }
                 if changed {
+                    // Thinking text is a tiny, bounded strip and is cheap to
+                    // paint; publish it at ~20fps so it reads as continuous.
+                    // Answer previews keep the 100ms coalescing window because
+                    // each one re-runs the markdown pipeline.
+                    let preview_interval = if preview.thinking_active() {
+                        Duration::from_millis(50)
+                    } else {
+                        Duration::from_millis(100)
+                    };
                     let due = last_preview_publish
-                        .map(|last| last.elapsed() >= Duration::from_millis(100))
+                        .map(|last| last.elapsed() >= preview_interval)
                         .unwrap_or(true);
                     // Retraction / parse-failure states must not be swallowed
                     // by the coalescing window: nothing else republishes them.
@@ -1357,6 +1401,8 @@ fn call_model_with_system_retries(
                     model_wait: total_model_wait,
                     retry_wait: total_retry_wait,
                     parallel_tool_control_omitted,
+                    reasoning,
+                    reasoning_truncated,
                 });
             }
             Err(err) => {

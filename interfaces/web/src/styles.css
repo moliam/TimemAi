@@ -5974,6 +5974,39 @@ body.workspace-modal-open .app-shell { user-select: none; }
 }
 .stream-working-total > svg { flex: none; }
 
+/* Live thinking window: a bounded newest-reasoning tail sits inline; the full
+   retained text is mounted only while hovered/focused. */
+.stream-working-trailer { column-gap: 4ch; }
+.stream-working-current { flex: 1 1 auto; min-width: 0; overflow: hidden; }
+.stream-working-detail { flex: 1 1 auto; min-width: 0; overflow: hidden; }
+.stream-working-detail > span:first-child,
+.stream-working-detail > strong,
+.stream-working-detail > .stream-working-phase-elapsed { flex: 0 0 auto; }
+.stream-thinking-window {
+  flex: 0 1 36ch;
+  width: 36ch;
+  min-width: 0;
+  max-width: 36ch;
+  height: 17px;
+  padding: 0 2px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  overflow: hidden;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  color: #8fb8a9;
+  font-family: var(--insights-cn-font);
+  font-size: 10.5px;
+  font-weight: 400;
+  line-height: 15px;
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 14%, #000 98%, transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 14%, #000 98%, transparent 100%);
+}
+.stream-thinking-window-text { flex: 0 0 auto; white-space: nowrap; }
+:root[data-theme="light"] .stream-thinking-window { color: #2f6f5e; }
+
 .system-notice {
   --system-notice-accent: #78d2be;
   --system-notice-text: #9db2c1;

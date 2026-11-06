@@ -63,6 +63,11 @@ pub struct ModelCallOutcome<T> {
     /// parallel-tool control field. The caller must keep native tools enabled
     /// but schedule returned sibling calls sequentially.
     pub parallel_tool_control_omitted: bool,
+    /// Provider reasoning/thinking text observed while streaming this response.
+    /// Diagnostics only; never rendered as assistant content.
+    pub reasoning: String,
+    /// The reasoning capture exceeded its byte bound and was cut off.
+    pub reasoning_truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
