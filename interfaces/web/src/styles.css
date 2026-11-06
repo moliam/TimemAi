@@ -2197,8 +2197,6 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: var(--ma
 .endpoint-chain-grip:hover { color: #b7cedb; }
 .endpoint-chain-remove { flex: none; border: 0; background: transparent; color: #93a7b3; display: grid; place-items: center; padding: 3px; border-radius: 4px; }
 .endpoint-chain-remove:hover { color: #f0967f; background: rgba(240, 150, 127, .12); }
-.endpoint-chain-active-badge { position: absolute; top: 3px; right: 3px; display: grid; place-items: center; width: 15px; height: 15px; padding: 0; border: 1px solid #2f8f76; background: #2e8f78; color: #fff; border-radius: 999px; line-height: 0; }
-.endpoint-chain-active-badge svg { display: block; }
 .endpoint-chain-index { flex: none; min-width: 14px; text-align: center; color: #7e908a; font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; }
 :root[data-theme="light"] .endpoint-chain-index { color: #718791; }
 .endpoint-rate-flag { color: #e8b264; display: inline-flex; align-items: center; }
@@ -2215,7 +2213,6 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: var(--ma
 :root[data-theme="light"] .endpoint-chain-pick strong { color: var(--management-text); }
 :root[data-theme="light"] .endpoint-chain-pick small { color: #4a6774; }
 :root[data-theme="light"] .endpoint-chain-empty { color: #4a6774; border-color: var(--management-accent-border); background: var(--management-panel-soft); }
-:root[data-theme="light"] .endpoint-chain-active-badge { border-color: #2f9077; background: #2f9077; color: #fff; }
 :root[data-theme="light"] .endpoint-chain-checkbox.selected { color: #fff; }
 :root[data-theme="light"] .endpoint-rate-flag { color: #8a5f1d; }
 :root[data-theme="light"] .endpoint-chain-probing-flag { color: #1f5e8a; }
@@ -6772,7 +6769,6 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 .endpoint-chain-maxinput { width: 72px; }
 .endpoint-chain-effort:focus, .endpoint-chain-maxinput:focus { border-color: #4f9d8b; box-shadow: 0 0 0 2px #4f9d8b1f; }
 .endpoint-chain-token-cap { color: #8fb8c2; font-size: 9.5px; }
-.endpoint-chain-active-badge { top: 2px; right: 2px; width: 13px; height: 13px; padding: 0; border: 1px solid #5cc6a9; border-radius: 999px; background: #2e8f78; color: #fff; line-height: 0; box-shadow: 0 0 0 2px #0b1419, 0 0 8px #4fd3ad40; }
 .endpoint-chain-empty { border-color: #2f4b55; border-radius: 7px; background: #0d191e; color: #8198a4; font-size: 10.5px; }
 .endpoint-chain-remove { color: #7f949c; }
 @media (min-width: 721px) { .endpoint-menu:not(.editing) { width: fit-content; min-width: min(480px, calc(100vw - 48px)); max-width: min(600px, calc(100vw - 48px)); } }
@@ -6800,7 +6796,6 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
 :root[data-theme="light"] .endpoint-chain-index { color: #718791; }
 :root[data-theme="light"] .endpoint-chain-effort, :root[data-theme="light"] .endpoint-chain-maxinput { border-color: #c6d8d2; background: #ffffff; }
 :root[data-theme="light"] .endpoint-chain-token-cap { color: #4a7066; }
-:root[data-theme="light"] .endpoint-chain-active-badge { border-color: #2f9077; background: #2f9077; color: #fff; box-shadow: 0 0 0 2px #ffffff, 0 0 6px #2f907733; }
 :root[data-theme="light"] .endpoint-chain-empty { border-color: #c5d7d2; background: #f4faf7; color: #526a75; }
 
 
@@ -6890,16 +6885,65 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   :root[data-theme="light"] .endpoint-settings-row { background: #fff; box-shadow: 0 8px 22px #29443b1c; }
 }
 
-/* The in-use endpoint in the selected chain glows blue instead of carrying a check badge. */
-.endpoint-chain-row.in-chain.current {
-  border-color: #3b82f6;
-  background: linear-gradient(180deg, #14263a 0%, #112331 100%);
-  box-shadow: 0 0 0 1px #3b82f633, 0 0 16px #3b82f659, inset 0 1px 0 #ffffff0a;
+/* The in-use endpoint in the selected chain is marked by a blue border only. */
+.endpoint-chain-row.in-chain.current { border-color: #3b82f6; }
+:root[data-theme="light"] .endpoint-chain-row.in-chain.current { border-color: #3b82f6; }
+
+/* Available endpoint rows read as plain list rows at rest; the button surface appears on hover/focus. */
+.endpoint-chain-col.available .endpoint-chain-row,
+.endpoint-chain-col.available .endpoint-chain-row.in-chain {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
 }
-.endpoint-chain-row.in-chain.current .endpoint-chain-pick small { color: #9dc4e8; }
-:root[data-theme="light"] .endpoint-chain-row.in-chain.current {
-  border-color: #3b82f6;
-  background: linear-gradient(180deg, #f3f8ff 0%, #eaf3ff 100%);
-  box-shadow: 0 0 0 1px #3b82f626, 0 0 14px #3b82f640;
+@media (hover: hover) {
+  .endpoint-chain-col.available .endpoint-chain-row:hover:not(:disabled),
+  .endpoint-chain-col.available .endpoint-chain-row:focus-visible,
+  .endpoint-chain-col.available .endpoint-chain-row.in-chain:hover:not(:disabled),
+  .endpoint-chain-col.available .endpoint-chain-row.in-chain:focus-visible {
+    border-color: var(--management-accent-border);
+    background: var(--management-card-hover);
+  }
 }
-:root[data-theme="light"] .endpoint-chain-row.in-chain.current .endpoint-chain-pick small { color: #356fae; }
+@media (hover: none) {
+  .endpoint-chain-col.available .endpoint-chain-row,
+  .endpoint-chain-col.available .endpoint-chain-row.in-chain {
+    border-color: var(--management-border);
+    background: var(--management-card);
+  }
+}
+:root[data-theme="light"] .endpoint-chain-col.available .endpoint-chain-row,
+:root[data-theme="light"] .endpoint-chain-col.available .endpoint-chain-row.in-chain {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+@media (hover: hover) {
+  :root[data-theme="light"] .endpoint-chain-col.available .endpoint-chain-row:hover:not(:disabled),
+  :root[data-theme="light"] .endpoint-chain-col.available .endpoint-chain-row:focus-visible,
+  :root[data-theme="light"] .endpoint-chain-col.available .endpoint-chain-row.in-chain:hover:not(:disabled),
+  :root[data-theme="light"] .endpoint-chain-col.available .endpoint-chain-row.in-chain:focus-visible {
+    border-color: #9cc4b8;
+    background: #f4fbf8;
+  }
+}
+@media (hover: none) {
+  :root[data-theme="light"] .endpoint-chain-col.available .endpoint-chain-row,
+  :root[data-theme="light"] .endpoint-chain-col.available .endpoint-chain-row.in-chain {
+    border-color: var(--management-border);
+    background: var(--management-card);
+  }
+}
+
+/* Header model control stays unboxed at rest; the pill surface appears on hover/focus/open. */
+.header-session-cluster .header-model { transition: background-color .15s ease, border-color .15s ease, box-shadow .15s ease; }
+.header-session-cluster .header-model:not(:hover):not(:focus-visible):not(.selected):not([aria-expanded="true"]) {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+:root[data-theme="light"] .header-session-cluster .header-model:not(:hover):not(:focus-visible):not(.selected):not([aria-expanded="true"]) {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}

@@ -62,19 +62,16 @@ describe("endpoint chain selection panel", () => {
     expect(panel).toContain("const currentEndpointId =");
     expect(panel).toMatch(/active_model_endpoint_id \?\?[\s\S]{0,80}model_endpoint_id \?\?/);
     expect(panel).not.toContain("working\n    ? session?.runtime_profile?.active_model_endpoint_id");
-    expect(source).toContain('t("endpoints.chainCurrent")');
     expect(zhCatalog.endpoints.chainCurrent).toBe("当前使用");
     expect(enCatalog.endpoints.chainCurrent).toBe("In use");
-    // The available list keeps a compact top-right check; the selected chain
-    // marks the in-use row itself with a blue glow instead.
-    expect(source).toContain('className="endpoint-chain-active-badge"');
-    expect(source).toContain('aria-label={t("endpoints.chainCurrent")}');
-    expect(source).toContain('<Check size={9} strokeWidth={2.6} aria-hidden="true" />');
-    expect(source.match(/className="endpoint-chain-active-badge"/g)?.length).toBe(1);
+    // Neither column uses a check badge for the in-use route; the selected
+    // chain marks it with a quiet blue border instead.
+    expect(source).not.toContain('className="endpoint-chain-active-badge"');
     expect(source).toContain('current ? "current" : ""');
-    expect(styles).toContain(".endpoint-chain-active-badge { top: 2px; right: 2px; width: 13px; height: 13px;");
+    expect(styles).not.toContain(".endpoint-chain-active-badge");
     expect(styles).toContain(".endpoint-chain-row.in-chain.current {");
-    expect(styles).toContain("box-shadow: 0 0 0 1px #3b82f633, 0 0 16px #3b82f659");
+    expect(styles).toContain("border-color: #3b82f6;");
+    expect(styles).not.toContain("0 0 9px #3b82f633");
     expect(styles).toContain(".endpoint-chain-row { position: relative; }");
     expect(source).not.toContain("endpoints.chainPreferred");
     expect(source).not.toContain("endpoints.chainNextPreferred");
@@ -135,8 +132,10 @@ describe("endpoint chain selection panel", () => {
     expect(styles).not.toContain(".endpoint-chain-row.in-chain { border-color: #4a9c8a; background: #18333a; }");
     // Remove button hover must not silently blend into the row.
     expect(styles).toContain(".endpoint-chain-remove:hover { color: #f0967f;");
-    // Active badge is a filled pill, not a ghost outline.
-    expect(styles).toContain("background: #2e8f78; color: #fff;");
+    // The in-use route is a quiet blue border, not a filled badge.
+    expect(styles).toContain(".endpoint-chain-row.in-chain.current { border-color: #3b82f6; }");
+    // Available rows stay flat at rest; their button surface only appears on hover/focus.
+    expect(styles).toContain(".endpoint-chain-col.available .endpoint-chain-row,\n.endpoint-chain-col.available .endpoint-chain-row.in-chain {\n  border-color: transparent;\n  background: transparent;\n  box-shadow: none;\n}");
     expect(styles).toContain(':root[data-theme="light"] .endpoint-rate-flag { color: #8a5f1d; }');
   });
 
@@ -148,14 +147,10 @@ describe("endpoint chain selection panel", () => {
     expect(styles).toContain("@media (max-width: 720px) { .endpoint-chain { grid-template-columns: 1fr; } }");
   });
 
-  it("keeps the current-route badge a solid green circle with a white centered check", () => {
-    // The old runtime-card divider rule used to add padding-left to badges
-    // inside the endpoint menu and push the check outside the circle.
-    expect(styles).toContain(".runtime-card .runtime-summary > span + span {");
-    expect(styles).not.toContain(".runtime-card span + span {");
-    expect(styles).toContain("padding: 0; border: 1px solid #5cc6a9; border-radius: 999px; background: #2e8f78; color: #fff; line-height: 0;");
-    expect(styles).toContain(':root[data-theme="light"] .endpoint-chain-active-badge { border-color: #2f9077; background: #2f9077; color: #fff;');
-    expect(styles).toContain(".endpoint-chain-active-badge { position: absolute; top: 3px; right: 3px; display: grid; place-items: center; width: 15px; height: 15px; padding: 0;");
+  it("marks the in-use chain row with a blue border instead of a check badge", () => {
+    expect(styles).not.toContain(".endpoint-chain-active-badge");
+    expect(styles).toContain(".endpoint-chain-row.in-chain.current { border-color: #3b82f6; }");
+    expect(styles).toContain(':root[data-theme="light"] .endpoint-chain-row.in-chain.current { border-color: #3b82f6; }');
   });
 
   it("subscribes locale-reactive chain components to the catalog", () => {

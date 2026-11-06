@@ -157,6 +157,27 @@ export function computeStreamRetention(
 }
 
 /**
+ * Drop repeated free-talk snapshots of the same text regardless of where they
+ * sit in the turn. Host replays and live/history merges can deliver the same
+ * commentary twice around a tool call; the second copy adds no new information
+ * and would read as a duplicate paragraph in the process stream.
+ */
+export function dedupeFreeTalkItems<T extends { activity: Activity | null }>(
+  items: readonly T[],
+): T[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const activity = item.activity;
+    if (activity?.kind !== "free_talk") return true;
+    const text = (activity.detail ?? "").trim();
+    if (!text) return true;
+    if (seen.has(text)) return false;
+    seen.add(text);
+    return true;
+  });
+}
+
+/**
  * Collapses each consecutive run of free-talk snapshots (null activities are
  * transparent) into its latest item, so both the frame and the stream show
  * one growing thought instead of stacking redundant snapshots.

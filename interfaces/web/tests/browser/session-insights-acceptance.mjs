@@ -571,7 +571,21 @@ async function main() {
     })()`);
     assert(modelNameFont.family.includes('IBM Plex Mono') && modelNameFont.weight === '600' && modelNameFont.loaded, `model name renders in bold IBM Plex Mono: ${JSON.stringify(modelNameFont)}`);
     assert(await browser.evaluate(`!document.querySelector('.header-actions .header-context-control')`), "the old standalone context chip is gone");
+    const modelControlRest = await browser.evaluate(`(() => {
+      const control = document.querySelector('.header-model-control');
+      const style = getComputedStyle(control);
+      return { border: style.borderTopColor, background: style.backgroundImage, shadow: style.boxShadow };
+    })()`);
+    assert(modelControlRest.border === 'rgba(0, 0, 0, 0)' && modelControlRest.background === 'none' && modelControlRest.shadow === 'none', `header model control is unboxed at rest: ${JSON.stringify(modelControlRest)}`);
     const modelControl = await center(browser, ".header-model-control");
+    await browser.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: modelControl.x, y: modelControl.y });
+    await sleep(220);
+    const modelControlHovered = await browser.evaluate(`(() => {
+      const control = document.querySelector('.header-model-control');
+      const style = getComputedStyle(control);
+      return { border: style.borderTopColor, background: style.backgroundImage };
+    })()`);
+    assert(modelControlHovered.border !== 'rgba(0, 0, 0, 0)' && modelControlHovered.background !== 'none', `hovering the header model control reveals its pill: ${JSON.stringify(modelControlHovered)}`);
     await click(browser, modelControl);
     await waitFor(() => browser.evaluate(`!!document.querySelector('#header-model-popover')`), "model popover opens");
     const headerPopoverLayout = await browser.evaluate(`(() => {
@@ -678,26 +692,8 @@ async function main() {
     assert(await browser.evaluate(`!!document.querySelector('.endpoint-menu-close')`), "endpoint panel exposes a close control");
     const endpointPanelLayout = await browser.evaluate(`(() => {
       const box = (el) => el ? el.getBoundingClientRect().toJSON() : null;
-      const overlap = (a, b) => !!a && !!b && a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
-      const badge = box(document.querySelector('.endpoint-chain-active-badge'));
-      const remove = box(document.querySelector('.endpoint-chain-remove'));
-      const round = (v) => Math.round(v * 100) / 100;
-      const badgeGeometry = [...document.querySelectorAll('.endpoint-chain-active-badge')].map((node) => {
-        const b = node.getBoundingClientRect();
-        const svg = node.querySelector('svg');
-        const s = svg.getBoundingClientRect();
-        const path = svg.querySelector('path');
-        const p = path.getBoundingClientRect();
-        const cs = getComputedStyle(node);
-        return {
-          badge: { left: round(b.left), top: round(b.top), right: round(b.right), bottom: round(b.bottom), cx: round(b.x + b.width / 2), cy: round(b.y + b.height / 2) },
-          svg: { left: round(s.left), top: round(s.top), right: round(s.right), bottom: round(s.bottom), cx: round(s.x + s.width / 2), cy: round(s.y + s.height / 2) },
-          path: { left: round(p.left), top: round(p.top), right: round(p.right), bottom: round(p.bottom), cx: round(p.x + p.width / 2), cy: round(p.y + p.height / 2) },
-          paddingLeft: cs.paddingLeft,
-          background: cs.backgroundColor,
-          color: cs.color,
-        };
-      });
+      const availableRow = document.querySelector('.endpoint-chain-col.available .endpoint-chain-row');
+      const availableStyle = getComputedStyle(availableRow);
       const picks = [...document.querySelectorAll('.endpoint-chain-pick')].map((node) => {
         const cs = getComputedStyle(node);
         return { paddingLeft: cs.paddingLeft, borderLeftWidth: cs.borderLeftWidth };
@@ -705,19 +701,17 @@ async function main() {
       const efforts = [...document.querySelectorAll('.endpoint-chain-effort')].map((node) => Math.round(node.getBoundingClientRect().width * 10) / 10);
       return {
         menuWidth: Math.round(document.querySelector('.endpoint-menu').getBoundingClientRect().width),
-        badge,
-        remove,
-        overlap: overlap(badge, remove),
+        availableBorder: availableStyle.borderTopColor,
+        availableBackground: availableStyle.backgroundColor,
         close: box(document.querySelector('.endpoint-menu-close')),
-        badgeGeometry,
         picks,
         efforts,
       };
     })()`);
     assert(endpointPanelLayout.menuWidth >= 460 && endpointPanelLayout.menuWidth <= 600, `endpoint panel width follows its content: ${JSON.stringify(endpointPanelLayout)}`);
-    assert(!endpointPanelLayout.overlap, `current check must not collide with remove: ${JSON.stringify(endpointPanelLayout)}`);
     assert(endpointPanelLayout.close.width === 27 && endpointPanelLayout.close.height === 27, `endpoint close target: ${JSON.stringify(endpointPanelLayout)}`);
-    assert(endpointPanelLayout.badgeGeometry.length >= 1, `active endpoint badge present: ${JSON.stringify(endpointPanelLayout)}`);
+    assert(endpointPanelLayout.availableBorder === 'rgba(0, 0, 0, 0)' && endpointPanelLayout.availableBackground === 'rgba(0, 0, 0, 0)', `available endpoint rows are flat at rest, not buttons: ${JSON.stringify(endpointPanelLayout)}`);
+    assert(await browser.evaluate(`document.querySelectorAll('.endpoint-chain-active-badge').length === 0`), "no in-use check badge in either column");
     const selectedCurrentRow = await browser.evaluate(`(() => {
       const row = document.querySelector('.endpoint-chain-col.selected .endpoint-chain-row.current');
       if (!row) return null;
@@ -730,26 +724,19 @@ async function main() {
     })()`);
     assert(selectedCurrentRow, "selected chain marks the in-use endpoint");
     assert(selectedCurrentRow.badges === 0, `the in-use selected row does not use a check badge: ${JSON.stringify(selectedCurrentRow)}`);
-    assert(selectedCurrentRow.borderColor === 'rgb(59, 130, 246)' && selectedCurrentRow.shadow !== 'none', `the in-use selected row glows the same blue as the working session dot: ${JSON.stringify(selectedCurrentRow)}`);
-    for (const geo of endpointPanelLayout.badgeGeometry) {
-      assert(geo.paddingLeft === '0px', `badge has no inherited padding: ${JSON.stringify(geo)}`);
-      assert(geo.background !== 'rgba(0, 0, 0, 0)' && geo.color === 'rgb(255, 255, 255)', `badge is a solid green circle with a white check: ${JSON.stringify(geo)}`);
-      for (const part of ['svg', 'path']) {
-        const rect = geo[part];
-        assert(rect.left >= geo.badge.left - 0.5 && rect.right <= geo.badge.right + 0.5 && rect.top >= geo.badge.top - 0.5 && rect.bottom <= geo.badge.bottom + 0.5, `check ${part} stays inside the circle: ${JSON.stringify(geo)}`);
-        assert(Math.abs(rect.cx - geo.badge.cx) <= 0.5 && Math.abs(rect.cy - geo.badge.cy) <= 0.5, `check ${part} is centered in the circle: ${JSON.stringify(geo)}`);
-      }
-    }
+    assert(selectedCurrentRow.borderColor === 'rgb(59, 130, 246)' && !selectedCurrentRow.shadow.includes('59, 130, 246'), `the in-use selected row is marked by a blue border only: ${JSON.stringify(selectedCurrentRow)}`);
     assert(endpointPanelLayout.picks.every((pick) => pick.paddingLeft === '0px' && pick.borderLeftWidth === '0px'), `chain rows keep the runtime-card divider out: ${JSON.stringify(endpointPanelLayout.picks)}`);
     assert(endpointPanelLayout.efforts.every((width) => width <= 84.5), `reasoning selects stay compact: ${JSON.stringify(endpointPanelLayout.efforts)}`);
-    assert(await browser.evaluate(`(() => {
-      const badges = [...document.querySelectorAll('.endpoint-chain-active-badge')];
-      return badges.length >= 1
-        && badges.every((badge) => badge.title === 'In use')
-        && badges.every((badge) => !badge.textContent.includes('本轮配置'));
-    })()`), "active endpoint carries the refined top-right check");
     // Chain edits are a pending draft until the Host projection confirms them.
     const chainRow = await center(browser, ".endpoint-chain-col.available .endpoint-chain-row");
+    await browser.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: chainRow.x, y: chainRow.y });
+    await sleep(220);
+    const availableHovered = await browser.evaluate(`(() => {
+      const row = document.querySelector('.endpoint-chain-col.available .endpoint-chain-row');
+      const style = getComputedStyle(row);
+      return { border: style.borderTopColor, background: style.backgroundColor };
+    })()`);
+    assert(availableHovered.border !== 'rgba(0, 0, 0, 0)' && availableHovered.background !== 'rgba(0, 0, 0, 0)', `hovering an available endpoint reveals its surface: ${JSON.stringify(availableHovered)}`);
     await click(browser, chainRow);
     await waitFor(() => browser.evaluate(`document.querySelector('.endpoint-chain-pending')?.textContent === 'Applying…'`), "chain edit marks the pending draft");
     await waitFor(() => host.commands.some((command) => command.type === 'model_endpoint_chain_apply' && Array.isArray(command.endpoint_ids) && command.endpoint_ids.length === 0), "chain removal command");

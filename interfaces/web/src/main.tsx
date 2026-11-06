@@ -335,6 +335,7 @@ import {
 } from "./token_format";
 import {
   computeStreamRetention,
+  dedupeFreeTalkItems,
   streamToolHandoffIds,
   summarizeConsecutiveToolActivities,
   ToolActivitySummary,
@@ -12143,7 +12144,9 @@ const TurnInteraction = memo(function TurnInteraction({
   }, [visibleItems, turn.completion]);
   const scrollItems = useMemo(
     () =>
-      visibleItems.filter((item) => !persistentToolGenItemKeys.has(item.key) && !compactSupersededKeys.has(item.key)),
+      dedupeFreeTalkItems(
+        visibleItems.filter((item) => !persistentToolGenItemKeys.has(item.key) && !compactSupersededKeys.has(item.key)),
+      ),
     [persistentToolGenItemKeys, compactSupersededKeys, visibleItems],
   );
   const isWorking = turn.state === "working" && !isCancelling;
@@ -12833,13 +12836,26 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
       activity: null,
       thoughtText,
     }] : []),
-  ].map(entry => ({ ...entry, createdAt: entry.time })).sort(compareTurnStreamItems);
+  ].map(entry => ({ ...entry, createdAt: entry.time }));
+  // One text, one home: drop a duplicate free-talk activity or a trailing
+  // preview that repeats commentary already present in this process stream.
+  const seenThoughtTexts = new Set<string>();
+  const uniqueEntries = entries.filter(entry => {
+    const text = entry.activity?.kind === "free_talk"
+      ? (entry.activity.detail ?? "").trim()
+      : entry.thoughtText.trim();
+    if (!text) return true;
+    if (seenThoughtTexts.has(text)) return false;
+    seenThoughtTexts.add(text);
+    return true;
+  });
+  uniqueEntries.sort(compareTurnStreamItems);
   const groups: (typeof entries)[] = [];
   // Timer lifecycle rows are standalone system-status lines in stream mode
   // too: they never merge into the foldable tool runs.
   const foldable = (entry: { activity?: { tone?: string; timer?: unknown } | null } | undefined) =>
     entry?.activity?.tone === "action" && !entry.activity.timer;
-  for (const entry of entries) {
+  for (const entry of uniqueEntries) {
     const previous = groups.at(-1);
     if (previous && foldable(entry) && foldable(previous[0])) previous.push(entry);
     else groups.push([entry]);
@@ -18500,16 +18516,6 @@ function ModelEndpointPanel({
                         </span>
                       </small>
                     </span>
-                    {endpoint.id === currentEndpointId && (
-                      <span
-                        className="endpoint-chain-active-badge"
-                        role="img"
-                        aria-label={t("endpoints.chainCurrent")}
-                        title={t("endpoints.chainCurrent")}
-                      >
-                        <Check size={9} strokeWidth={2.6} aria-hidden="true" />
-                      </span>
-                    )}
                   </button>
                 );
               })
