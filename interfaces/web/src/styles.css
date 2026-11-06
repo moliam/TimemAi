@@ -6612,6 +6612,8 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .session-insight-value.coral { color: #d9927c; }
 .session-insight-value.cpu { color: #9ed0b4; }
 .session-insight-value.mem { color: #a9c1e0; }
+.session-insight-value.syscpu { color: #d6c28a; }
+.session-insight-value.sysmem { color: #b9b0d9; }
 .session-insight-inline { display: inline-flex; align-items: center; gap: 4px; }
 .session-insight-inline svg { color: #7e9f92; }
 .session-insight-inline svg + svg { margin-left: 5px; }
@@ -6647,5 +6649,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
 :root[data-theme="light"] .session-insight-value.coral { color: #a75b42; }
 :root[data-theme="light"] .session-insight-value.cpu { color: #3f7767; }
 :root[data-theme="light"] .session-insight-value.mem { color: #45688c; }
+:root[data-theme="light"] .session-insight-value.syscpu { color: #7d6a2f; }
+:root[data-theme="light"] .session-insight-value.sysmem { color: #5f5480; }
 :root[data-theme="light"] .session-insight-detail { color: #6d8189; }
 :root[data-theme="light"] .session-insight-flow-track { background: #e3ebee; }

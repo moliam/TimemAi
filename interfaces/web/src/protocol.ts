@@ -576,6 +576,15 @@ export type SessionResourceUsage = {
   oom_kill_count: number;
 };
 
+/// Machine-wide counters sampled with the Session resource query. CPU values
+/// are cumulative ticks; the dashboard derives utilization from two samples.
+export type SystemResourceUsage = {
+  cpu_busy_ticks?: number;
+  cpu_total_ticks?: number;
+  memory_total_bytes?: number;
+  memory_available_bytes?: number;
+};
+
 export type MemStorageUsage = {
   temporary_bytes: number;
   conversation_bytes: number;
@@ -816,6 +825,7 @@ export type WireEvent =
       session_id: string;
       sampled_at_ms: number;
       usage: SessionResourceUsage | null;
+      system?: SystemResourceUsage | null;
     }
   | { type: "mem_temporary_items"; items: MemTemporaryItem[]; error?: string }
   | { type: "file_uploaded"; session_id: string; file: Attachment }

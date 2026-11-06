@@ -27,6 +27,7 @@ pub use crate::os::{
     apply_resource_cap_escalation_plan, instance_resource_caps_application,
     probe_instance_resource_caps, JobResourceUsage, ResourceCapEscalationAction,
     ResourceCapReadiness, ResourceCapStatus, ResourceCapsReadiness, SessionResourceUsage,
+    SystemResourceUsage,
 };
 
 /// Read-only resource snapshot of one Session's managed job scope. Returns
@@ -43,6 +44,11 @@ pub fn system_cpu_cores() -> Option<u32> {
 /// Total system memory in bytes, when the platform can report it.
 pub fn system_mem_total_bytes() -> Option<u64> {
     os::system_mem_total_bytes()
+}
+
+/// Machine-wide CPU/memory counters for the Session Insights dashboard.
+pub fn system_resource_usage() -> std::io::Result<Option<SystemResourceUsage>> {
+    os::system_resource_usage()
 }
 
 pub const DEFAULT_SYSTEM_CPU_CAP_PERCENT: f64 = 85.0;

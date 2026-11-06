@@ -10,6 +10,8 @@ import {
   resourceMemoryCapBytes,
   resourceMemorySeries,
   sparklinePoints,
+  systemCpuPercentSeries,
+  systemMemoryPercentSeries,
   type SessionResourcePulseSample,
 } from "../src/session_insights";
 
@@ -24,6 +26,8 @@ describe("session insights ordering preferences", () => {
       "flow",
       "calls",
       "cpu",
+      "systemCpu",
+      "systemMem",
     ]);
     expect(normalizeInsightOrder(null)).toEqual(DEFAULT_INSIGHT_ORDER);
     expect(normalizeInsightOrder({ order: ["mem"] })).toEqual(DEFAULT_INSIGHT_ORDER);
@@ -32,7 +36,7 @@ describe("session insights ordering preferences", () => {
   it("moves one item to the drop target and ignores invalid ranges", () => {
     const order = DEFAULT_INSIGHT_ORDER;
     expect(moveInsightItem(order, 0, 3).slice(0, 4)).toEqual(["ttft", "cache", "context", "speed"]);
-    expect(moveInsightItem(order, 7, 0)[0]).toBe("mem");
+    expect(moveInsightItem(order, 8, 0)[0]).toBe("mem");
     expect(moveInsightItem(order, 0, 0)).toBe(order);
     expect(moveInsightItem(order, -1, 2)).toBe(order);
     expect(moveInsightItem(order, 2, 99)).toBe(order);
@@ -72,6 +76,37 @@ describe("session insights resource sampling", () => {
       100, 300,
     ]);
     expect(resourceMemorySeries(undefined)).toEqual([]);
+  });
+
+  it("derives machine-wide CPU and memory usage from system samples", () => {
+    const samples: SessionResourcePulseSample[] = [
+      {
+        at: 0,
+        systemCpuBusyTicks: 500,
+        systemCpuTotalTicks: 1_000,
+        systemMemTotalBytes: 8 * 1024 ** 3,
+        systemMemAvailableBytes: 6 * 1024 ** 3,
+      },
+      {
+        at: 2000,
+        systemCpuBusyTicks: 700,
+        systemCpuTotalTicks: 1_400,
+        systemMemTotalBytes: 8 * 1024 ** 3,
+        systemMemAvailableBytes: 4 * 1024 ** 3,
+      },
+      { at: 4000, systemCpuBusyTicks: 900, systemCpuTotalTicks: 1_800 },
+    ];
+    expect(systemCpuPercentSeries(samples)).toEqual([50, 50]);
+    expect(systemMemoryPercentSeries(samples)).toEqual([25, 50]);
+    // Non-monotonic or missing counters never claim load.
+    expect(
+      systemCpuPercentSeries([
+        { at: 0, systemCpuBusyTicks: 900, systemCpuTotalTicks: 1_000 },
+        { at: 2000, systemCpuBusyTicks: 100, systemCpuTotalTicks: 1_400 },
+      ]),
+    ).toEqual([]);
+    expect(systemCpuPercentSeries(undefined)).toEqual([]);
+    expect(systemMemoryPercentSeries(undefined)).toEqual([]);
   });
 
   it("reads the active CPU and memory caps without inventing one", () => {

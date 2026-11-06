@@ -792,7 +792,7 @@ fn current_cgroup_v2_path() -> std::io::Result<PathBuf> {
 
 use crate::api::{
     InstanceResourceCaps, ResourceCapEscalationAction, ResourceCapReadiness, ResourceCapStatus,
-    ResourceCapsApplication, ResourceCapsReadiness,
+    ResourceCapsApplication, ResourceCapsReadiness, SystemResourceUsage,
 };
 
 /// Platform-native unbounded values: writing these clears a bound.
@@ -833,6 +833,52 @@ pub(super) fn parse_meminfo_total_bytes(content: &str) -> Option<u64> {
 
 pub(super) fn system_mem_total_bytes() -> Option<u64> {
     parse_meminfo_total_bytes(&fs::read_to_string("/proc/meminfo").ok()?)
+}
+
+/// Parse `MemAvailable:` from /proc/meminfo.
+pub(super) fn parse_meminfo_available_bytes(content: &str) -> Option<u64> {
+    content.lines().find_map(|line| {
+        let value = line.strip_prefix("MemAvailable:")?;
+        let kb = value
+            .trim()
+            .strip_suffix(" kB")?
+            .trim()
+            .parse::<u64>()
+            .ok()?;
+        Some(kb.saturating_mul(1024))
+    })
+}
+
+/// Parse the aggregate `cpu` line from /proc/stat into (busy, total) ticks.
+/// Fields are user nice system idle iowait irq softirq steal; guest time is
+/// already included in user/nice, so only the first eight fields are summed.
+pub(super) fn parse_proc_stat_cpu(content: &str) -> Option<(u64, u64)> {
+    let line = content.lines().find(|line| line.starts_with("cpu "))?;
+    let mut ticks = [0u64; 8];
+    let mut values = line.split_whitespace().skip(1);
+    for tick in &mut ticks {
+        *tick = values.next()?.parse::<u64>().ok()?;
+    }
+    let total = ticks.iter().copied().sum::<u64>();
+    let idle = ticks[3].saturating_add(ticks[4]);
+    Some((total.saturating_sub(idle), total))
+}
+
+pub(super) fn system_resource_usage() -> std::io::Result<Option<SystemResourceUsage>> {
+    let stat = match fs::read_to_string("/proc/stat") {
+        Ok(content) => content,
+        Err(_) => return Ok(None),
+    };
+    let Some((cpu_busy_ticks, cpu_total_ticks)) = parse_proc_stat_cpu(&stat) else {
+        return Ok(None);
+    };
+    let meminfo = fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    Ok(Some(SystemResourceUsage {
+        cpu_busy_ticks: Some(cpu_busy_ticks),
+        cpu_total_ticks: Some(cpu_total_ticks),
+        memory_total_bytes: parse_meminfo_total_bytes(&meminfo),
+        memory_available_bytes: parse_meminfo_available_bytes(&meminfo),
+    }))
 }
 
 /// `cpu.max` bounding the job tree to `percent` of `cores` cores, expressed

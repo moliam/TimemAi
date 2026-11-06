@@ -1174,6 +1174,28 @@ pub fn system_mem_total_bytes() -> Option<u64> {
     platform_system_mem_total_bytes()
 }
 
+/// Point-in-time machine-wide resource counters.
+///
+/// CPU values are cumulative kernel ticks, so consumers derive utilization
+/// from two consecutive samples; memory fields are direct snapshots.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SystemResourceUsage {
+    /// Cumulative busy CPU ticks across all CPUs (kernel USER_HZ units).
+    pub cpu_busy_ticks: Option<u64>,
+    /// Cumulative total CPU ticks across all CPUs.
+    pub cpu_total_ticks: Option<u64>,
+    /// Total physical memory in bytes.
+    pub memory_total_bytes: Option<u64>,
+    /// Available memory in bytes, when the platform reports it.
+    pub memory_available_bytes: Option<u64>,
+}
+
+/// Read machine-wide CPU/memory counters. Returns `Ok(None)` when the
+/// platform has no equivalent accounting facility.
+pub fn system_resource_usage() -> std::io::Result<Option<SystemResourceUsage>> {
+    platform_system_resource_usage()
+}
+
 /// Point-in-time resource accounting for one Session's managed job scope.
 ///
 /// Values aggregate every managed Job leaf below the Session scope. Limits are
@@ -1304,6 +1326,16 @@ fn platform_system_mem_total_bytes() -> Option<u64> {
 #[cfg(not(target_os = "linux"))]
 fn platform_system_mem_total_bytes() -> Option<u64> {
     None
+}
+
+#[cfg(target_os = "linux")]
+fn platform_system_resource_usage() -> std::io::Result<Option<SystemResourceUsage>> {
+    crate::linux::system_resource_usage()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_system_resource_usage() -> std::io::Result<Option<SystemResourceUsage>> {
+    Ok(None)
 }
 
 /// One cap dimension's escalation-free availability right now.

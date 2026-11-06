@@ -169,10 +169,10 @@ async function startHost(session) {
         // Two samples 2s apart: the second poll answers with a delta so the
         // CPU curve can derive cores exactly like a live Host would.
         for (const sample of [
-          { at: 10000, usec: 1_000_000, mem: 1_200_000_000 },
-          { at: 12000, usec: 5_600_000, mem: 1_300_000_000 },
-          { at: 14000, usec: 10_200_000, mem: 1_450_000_000 },
-          { at: 16000, usec: 14_800_000, mem: 1_600_000_000 },
+          { at: 10000, usec: 1_000_000, mem: 1_200_000_000, busy: 5_000, total: 10_000, memTotal: 34_359_738_368, memAvailable: 21_474_836_480 },
+          { at: 12000, usec: 5_600_000, mem: 1_300_000_000, busy: 7_000, total: 14_000, memTotal: 34_359_738_368, memAvailable: 20_401_094_656 },
+          { at: 14000, usec: 10_200_000, mem: 1_450_000_000, busy: 9_000, total: 18_000, memTotal: 34_359_738_368, memAvailable: 19_327_352_832 },
+          { at: 16000, usec: 14_800_000, mem: 1_600_000_000, busy: 11_000, total: 22_000, memTotal: 34_359_738_368, memAvailable: 17_179_869_184 },
         ]) {
           peer.send({
             type: "session_resource_usage",
@@ -187,6 +187,12 @@ async function startHost(session) {
               memory_high_bytes: 1_800_000_000,
               memory_max_bytes: 2_000_000_000,
               oom_kill_count: 0,
+            },
+            system: {
+              cpu_busy_ticks: sample.busy,
+              cpu_total_ticks: sample.total,
+              memory_total_bytes: sample.memTotal,
+              memory_available_bytes: sample.memAvailable,
             },
           });
         }
@@ -338,7 +344,7 @@ async function main() {
     const chip = await center(browser, ".session-insights-chip");
     await click(browser, chip);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.session-insights-panel')`), "panel opens on chip click");
-    assert(await browser.evaluate(`document.querySelectorAll('.session-insight-row').length === 8`), "panel lists all eight items");
+    assert(await browser.evaluate(`document.querySelectorAll('.session-insight-row').length === 10`), "panel lists all ten items");
     assert(await browser.evaluate(`document.querySelector('.session-insights-panel').getBoundingClientRect().width > 300`), "panel renders as a floating card");
     assert(await browser.evaluate(`[...document.querySelectorAll('.session-insight-flow-number')].map(e => e.textContent).every(t => t && t !== '0')`), "token flow shows numeric values");
     assert(await browser.evaluate(`(() => {
@@ -379,7 +385,7 @@ async function main() {
     assert(await browser.evaluate(`document.querySelector('.session-insights-chip-value').textContent.includes('/')`), "collapsed chip shows average/latest for the top item");
 
     // Sparklines: speed/TTFT have 15 samples, CPU/MEM have a 20s window.
-    await waitFor(() => browser.evaluate(`document.querySelectorAll('.session-insight-sparkline').length === 5`), "sparklines render for speed/TTFT/cache/CPU/MEM");
+    await waitFor(() => browser.evaluate(`document.querySelectorAll('.session-insight-sparkline').length === 7`), "sparklines render for speed/TTFT/cache/CPU/systemCPU/MEM/systemMEM");
     assert(await browser.evaluate(`(() => {
       const rows = [...document.querySelectorAll('.session-insight-row')];
       const speed = rows.find(r => r.textContent.includes('tokens/s'));
@@ -390,8 +396,8 @@ async function main() {
     })()`), "token speed, TTFT, and cache rows carry sparklines");
     await waitFor(() => browser.evaluate(`(() => {
       const rows = [...document.querySelectorAll('.session-insight-row')];
-      const cpu = rows.find(r => r.textContent.includes('CPU'));
-      const mem = rows.find(r => r.textContent.includes('MEM'));
+      const cpu = rows.find(r => r.textContent.includes('CPU usage'));
+      const mem = rows.find(r => r.textContent.includes('Memory usage'));
       return !!cpu?.querySelector('polyline') && !!mem?.querySelector('polyline');
     })()`), "CPU/MEM rows carry resource sparklines");
     // Each row states its enforced cap in the label and the current usage as
@@ -399,11 +405,19 @@ async function main() {
     // / 1.49G used. Limits come from the Host sample, never from a UI guess.
     assert(await browser.evaluate(`(() => {
       const rows = [...document.querySelectorAll('.session-insight-row')];
-      const cpu = rows.find(r => r.textContent.includes('CPU'));
-      const mem = rows.find(r => r.textContent.includes('MEM'));
+      const cpu = rows.find(r => r.textContent.includes('CPU usage'));
+      const mem = rows.find(r => r.textContent.includes('Memory usage'));
       return !!cpu && /cap 2\\.80 cores/.test(cpu.textContent) && /2\\.30 cores/.test(cpu.textContent)
         && !!mem && /cap 1\\.86 G/.test(mem.textContent) && /1\\.49G/.test(mem.textContent);
     })()`), "CPU/MEM rows show the active cap and current usage");
+    assert(await browser.evaluate(`(() => {
+      const rows = [...document.querySelectorAll('.session-insight-row')];
+      const systemCpu = rows.find(r => r.textContent.includes('System CPU'));
+      const systemMem = rows.find(r => r.textContent.includes('System memory'));
+      return !!systemCpu && systemCpu.textContent.includes('50%') && !!systemCpu.querySelector('polyline')
+        && !!systemMem && systemMem.textContent.includes('50%') && systemMem.textContent.includes('16G/32G')
+        && !!systemMem.querySelector('polyline');
+    })()`), "System CPU/memory rows show whole-machine usage with curves");
 
     // Drag the panel by its header.
     const before = await browser.evaluate(`(() => { const r = document.querySelector('.session-insights-panel').getBoundingClientRect(); return { x: r.x, y: r.y }; })()`);
@@ -451,7 +465,7 @@ async function main() {
     assert(Math.abs(reopened.x - after.x) <= 2 && Math.abs(reopened.y - after.y) <= 2, `panel position persists: ${JSON.stringify(after)} vs ${JSON.stringify(reopened)}`);
 
     // The shipped Chinese copy must render the requested label shape:
-    // CPU (限额 2.80 核) / 2.30 核 and 内存 (限额 1.86 G) / 1.49G.
+    // CPU 消耗（限额 2.80 核）/ 2.30 核 and 内存消耗（限额 1.86 G）/ 1.49G.
     await browser.evaluate(`localStorage.setItem('timem-web-locale-v1','zh')`);
     await browser.call("Page.reload");
     await waitFor(() => browser.evaluate(`document.body.textContent.includes('Insights acceptance turn')`), "snapshot after Chinese locale");
@@ -460,11 +474,19 @@ async function main() {
     await waitFor(() => browser.evaluate(`!!document.querySelector('.session-insights-panel')`), "panel opens in Chinese");
     assert(await browser.evaluate(`(() => {
       const rows = [...document.querySelectorAll('.session-insight-row')];
-      const cpu = rows.find(r => r.textContent.includes('CPU'));
-      const mem = rows.find(r => r.textContent.includes('内存'));
-      return !!cpu && cpu.textContent.includes('CPU (限额 2.80 核)') && cpu.textContent.includes('2.30 核')
-        && !!mem && mem.textContent.includes('内存 (限额 1.86 G)') && mem.textContent.includes('1.49G');
+      const cpu = rows.find(r => r.textContent.includes('CPU 消耗'));
+      const mem = rows.find(r => r.textContent.includes('内存消耗'));
+      return !!cpu && cpu.textContent.includes('CPU 消耗（限额 2.80 核）') && cpu.textContent.includes('2.30 核')
+        && !!mem && mem.textContent.includes('内存消耗（限额 1.86 G）') && mem.textContent.includes('1.49G');
     })()`), "Chinese CPU/MEM rows state the cap in the label and usage as the value");
+    assert(await browser.evaluate(`(() => {
+      const rows = [...document.querySelectorAll('.session-insight-row')];
+      const systemCpu = rows.find(r => r.textContent.includes('系统 CPU'));
+      const systemMem = rows.find(r => r.textContent.includes('系统内存'));
+      return !!systemCpu && systemCpu.textContent.includes('50%') && !!systemCpu.querySelector('polyline')
+        && !!systemMem && systemMem.textContent.includes('50%') && systemMem.textContent.includes('16G/32G')
+        && systemCpu.title.includes('整机') && systemMem.title.includes('整机');
+    })()`), "Chinese system rows show whole-machine usage with curves");
     assert(await browser.evaluate(`(() => {
       const rows = [...document.querySelectorAll('.session-insight-row')];
       const speed = rows.find(r => r.textContent.includes('tokens/s'));

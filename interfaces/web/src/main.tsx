@@ -2323,6 +2323,10 @@ function TimemApp() {
             swapBytes: event.usage?.swap_current_bytes,
             memHighBytes: event.usage?.memory_high_bytes,
             memMaxBytes: event.usage?.memory_max_bytes,
+            systemCpuBusyTicks: event.system?.cpu_busy_ticks,
+            systemCpuTotalTicks: event.system?.cpu_total_ticks,
+            systemMemTotalBytes: event.system?.memory_total_bytes,
+            systemMemAvailableBytes: event.system?.memory_available_bytes,
           };
           // 2s cadence: a bounded 12-slot ring keeps the visible 20s window
           // even when a sample arrives late or early.

@@ -1114,6 +1114,29 @@ fn memory_max_scales_system_total_and_high_tracks_eighty_five_percent() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn meminfo_available_parses_kb_scale() {
+    let content = "MemTotal: 32878012 kB\nMemAvailable: 9876543 kB\n";
+    assert_eq!(
+        crate::linux::parse_meminfo_available_bytes(content),
+        Some(9_876_543u64 * 1024)
+    );
+    assert_eq!(
+        crate::linux::parse_meminfo_available_bytes("MemTotal: 1 kB\n"),
+        None
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn proc_stat_cpu_pairs_busy_and_total_ticks() {
+    let content = "cpu  10 2 3 20 5 1 2 1 0 0\ncpu0 1 1 1 1 1 1 1 1 0 0\n";
+    // user+nice+system+idle+iowait+irq+softirq+steal = 44; idle+iowait = 25.
+    assert_eq!(crate::linux::parse_proc_stat_cpu(content), Some((19, 44)));
+    assert_eq!(crate::linux::parse_proc_stat_cpu("intr 1\n"), None);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn meminfo_total_parses_kb_scale() {
     let content =
         "MemFree:         123 kB\nMemTotal:       32878012 kB\nMemAvailable:   9876543 kB\n";

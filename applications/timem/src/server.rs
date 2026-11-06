@@ -1003,6 +1003,8 @@ enum WireEvent {
         session_id: String,
         sampled_at_ms: u128,
         usage: Option<WebSessionResourceUsage>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        system: Option<WebSystemResourceUsage>,
     },
     SessionRestartCwdResolved {
         session: Box<WebSession>,
@@ -1234,6 +1236,18 @@ enum CommandAckStatus {
 
 /// Read-only resource sample for the Session Insights dashboard. `None`
 /// fields mean the platform cannot account for that dimension right now.
+#[derive(Debug, Clone, Serialize)]
+struct WebSystemResourceUsage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu_busy_ticks: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu_total_ticks: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_total_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_available_bytes: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct WebSessionResourceUsage {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5459,6 +5473,14 @@ fn handle_command_with_id(
             ensure_session_exists(state, &session_id)?;
             let usage = agent_core::resource_caps::session_resource_usage(&session_id)
                 .map_err(|error| format!("session_resource_usage_failed:{error}"))?;
+            let system = agent_core::resource_caps::system_resource_usage()
+                .map_err(|error| format!("system_resource_usage_failed:{error}"))?
+                .map(|usage| WebSystemResourceUsage {
+                    cpu_busy_ticks: usage.cpu_busy_ticks,
+                    cpu_total_ticks: usage.cpu_total_ticks,
+                    memory_total_bytes: usage.memory_total_bytes,
+                    memory_available_bytes: usage.memory_available_bytes,
+                });
             return Ok(Some(WireEvent::SessionResourceUsage {
                 session_id,
                 sampled_at_ms: now_ms(),
@@ -5472,6 +5494,7 @@ fn handle_command_with_id(
                     memory_max_bytes: usage.memory_max_bytes,
                     oom_kill_count: usage.oom_kill_count,
                 }),
+                system,
             }));
         }
         ClientCommand::ModelEndpointShareExport {

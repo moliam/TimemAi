@@ -54,7 +54,9 @@ export const INSIGHT_ITEM_IDS = [
   "flow",
   "calls",
   "cpu",
+  "systemCpu",
   "mem",
+  "systemMem",
 ] as const;
 export type InsightItemId = (typeof INSIGHT_ITEM_IDS)[number];
 
@@ -66,7 +68,9 @@ export const DEFAULT_INSIGHT_ORDER: InsightItemId[] = [
   "flow",
   "calls",
   "cpu",
+  "systemCpu",
   "mem",
+  "systemMem",
 ];
 
 export type SessionResourcePulseSample = {
@@ -77,6 +81,10 @@ export type SessionResourcePulseSample = {
   swapBytes?: number;
   memHighBytes?: number;
   memMaxBytes?: number;
+  systemCpuBusyTicks?: number;
+  systemCpuTotalTicks?: number;
+  systemMemTotalBytes?: number;
+  systemMemAvailableBytes?: number;
 };
 
 export type InsightPanelPosition = { left: number; top: number };
@@ -172,6 +180,52 @@ export function resourceMemorySeries(
     .filter((value): value is number => value !== undefined);
 }
 
+/** Machine-wide CPU utilization from consecutive cumulative tick samples. */
+export function systemCpuPercentSeries(
+  samples: SessionResourcePulseSample[] | undefined,
+): number[] {
+  if (!samples || samples.length < 2) return [];
+  const percents: number[] = [];
+  for (let index = 1; index < samples.length; index += 1) {
+    const previous = samples[index - 1];
+    const current = samples[index];
+    const previousBusy = previous.systemCpuBusyTicks;
+    const previousTotal = previous.systemCpuTotalTicks;
+    const busy = current.systemCpuBusyTicks;
+    const total = current.systemCpuTotalTicks;
+    if (
+      previousBusy === undefined ||
+      previousTotal === undefined ||
+      busy === undefined ||
+      total === undefined ||
+      busy < previousBusy ||
+      total <= previousTotal
+    ) {
+      continue;
+    }
+    percents.push(
+      Math.min(100, Math.max(0, ((busy - previousBusy) * 100) / (total - previousTotal))),
+    );
+  }
+  return percents;
+}
+
+/** Machine-wide memory in use as a percentage of total memory. */
+export function systemMemoryPercentSeries(
+  samples: SessionResourcePulseSample[] | undefined,
+): number[] {
+  if (!samples) return [];
+  const percents: number[] = [];
+  for (const sample of samples) {
+    const total = sample.systemMemTotalBytes;
+    const available = sample.systemMemAvailableBytes;
+    if (total === undefined || total <= 0 || available === undefined) continue;
+    const used = total - Math.min(available, total);
+    percents.push(Math.min(100, Math.max(0, (used * 100) / total)));
+  }
+  return percents;
+}
+
 /** CPU quota attached to the latest sample; undefined when the platform
  * cannot account for a quota. */
 export function resourceCpuCapCores(
@@ -240,6 +294,11 @@ function writeStorage(key: string, value: string | null) {
 
 function formatGiB(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)}G`;
+}
+
+function formatGiBCompact(bytes: number): string {
+  const gib = bytes / (1024 * 1024 * 1024);
+  return `${gib >= 10 ? Math.round(gib) : gib.toFixed(1)}G`;
 }
 
 function defaultPanelPosition(chip: HTMLElement | null): InsightPanelPosition {
@@ -369,6 +428,12 @@ export function SessionInsights({
   const memorySeries = resourceMemorySeries(recentResourceSamples);
   const memoryNow = memorySeries[memorySeries.length - 1];
   const latestResource = recentResourceSamples?.[recentResourceSamples.length - 1];
+  const systemCpuSeries = systemCpuPercentSeries(recentResourceSamples);
+  const systemCpuNow = systemCpuSeries[systemCpuSeries.length - 1];
+  const systemMemorySeries = systemMemoryPercentSeries(recentResourceSamples);
+  const systemMemoryNow = systemMemorySeries[systemMemorySeries.length - 1];
+  const systemMemoryTotal = latestResource?.systemMemTotalBytes;
+  const systemMemoryAvailable = latestResource?.systemMemAvailableBytes;
 
   const formatSpeed = (value: number | undefined): string =>
     value === undefined
@@ -440,6 +505,16 @@ export function SessionInsights({
       : t("insights.memWithCap", {
           cap: (memoryCap / (1024 * 1024 * 1024)).toFixed(2),
         });
+  const systemCpuValueLabel =
+    systemCpuNow === undefined ? t("insights.unavailable") : `${Math.round(systemCpuNow)}%`;
+  const systemMemoryValueLabel =
+    systemMemoryNow === undefined ||
+    systemMemoryTotal === undefined ||
+    systemMemoryAvailable === undefined
+      ? t("insights.unavailable")
+      : `${Math.round(systemMemoryNow)}% \u00b7 ${formatGiBCompact(
+          systemMemoryTotal - Math.min(systemMemoryAvailable, systemMemoryTotal),
+        )}/${formatGiBCompact(systemMemoryTotal)}`;
   const swapLabel =
     latestResource?.swapBytes && latestResource.swapBytes > 0
       ? t("insights.swap", { value: formatGiB(latestResource.swapBytes) })
@@ -602,6 +677,20 @@ export function SessionInsights({
         tone = "mem";
         hint = t("insights.memHint");
         break;
+      case "systemCpu":
+        label = t("insights.systemCpu");
+        value = systemCpuValueLabel;
+        sparkline = systemCpuSeries;
+        tone = "syscpu";
+        hint = t("insights.systemCpuHint");
+        break;
+      case "systemMem":
+        label = t("insights.systemMem");
+        value = systemMemoryValueLabel;
+        sparkline = systemMemorySeries;
+        tone = "sysmem";
+        hint = t("insights.systemMemHint");
+        break;
     }
     return (
       <div
@@ -710,6 +799,16 @@ export function SessionInsights({
         };
       case "mem":
         return { label: t("insights.mem"), value: memoryNow === undefined ? "\u2014" : formatGiB(memoryNow) };
+      case "systemCpu":
+        return {
+          label: t("insights.systemCpu"),
+          value: systemCpuNow === undefined ? "\u2014" : `${Math.round(systemCpuNow)}%`,
+        };
+      case "systemMem":
+        return {
+          label: t("insights.systemMem"),
+          value: systemMemoryNow === undefined ? "\u2014" : `${Math.round(systemMemoryNow)}%`,
+        };
     }
   };
 
