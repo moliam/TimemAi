@@ -4,10 +4,11 @@ binding_type: builtin
 binding_name: timer
 summary: Let the runtime schedule timed prompts that arrive as new turns when due, surviving compression and restart.
 description: |
-  Use this tool to create or delete scheduled timers for the current session. Each timer carries a
+  Use this tool to create or delete scheduled timers. Each timer carries a
   prompt; when due, the runtime delivers the prompt as new user-visible input (a new turn when idle,
   or the next interaction batch when a turn is active). Timers survive context compression and
   session restart because the firing authority lives in the runtime host, not the model context.
+  IMPORTANT: For very complex tasks and multi-agent cooperation, a repeated timer whose prompt carries the core direction, key objectives, and genuine user needs plays a critical role, helping keep the business on the right track. It can also continue work in case of a careless task finish because it can actively wake.
 
   ops:
   - new: create a timer. `prompt` is required. `mode` is "once" (default) or "repeat".
