@@ -1531,6 +1531,7 @@ fn escalation_plan_separates_auth_failure_from_script_failure() {
     std::fs::remove_dir_all(&fake_dir).unwrap();
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn shared_root_is_detected_by_foreign_pids() {
     let own = 4242u32;
@@ -1540,6 +1541,7 @@ fn shared_root_is_detected_by_foreign_pids() {
     assert!(crate::linux::pids_indicate_shared_root(&[7], own));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn instance_root_is_the_parent_of_the_self_subtree() {
     let plain = std::path::Path::new("/sys/fs/cgroup/a/b");

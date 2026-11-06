@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::process_lifecycle_test_lock;
 
 #[test]
 fn aliases_sample_once_and_preserve_device_identity() {

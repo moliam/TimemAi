@@ -1779,6 +1779,7 @@ fn stale_started_event_is_isolated_to_its_session() {
 
 #[test]
 fn stale_turn_started_cannot_revive_an_interrupted_turn_but_new_pending_turn_can_start() {
+    let _home_sandbox = home_sandbox_guard();
     let state = routing_test_state();
     let session_id = "session_a";
     let worker_id = state.sessions.lock().unwrap()[session_id]
@@ -4717,6 +4718,7 @@ fn session_create_command_returns_session_with_runtime_overrides_applied() {
 
 #[test]
 fn missing_workspace_session_restores_with_silent_fallback_without_losing_metadata_or_history() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("missing_workspace_restore"));
     let data_dir = root.join("data");
@@ -4826,6 +4828,7 @@ fn missing_workspace_session_restores_with_silent_fallback_without_losing_metada
 
 #[test]
 fn legacy_session_roles_migrate_into_the_mem_scoped_global_library() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_role_migration"));
     std::fs::create_dir_all(&root).unwrap();
@@ -5028,6 +5031,7 @@ fn restart_cwd_path_display_preserves_non_verbatim_and_special_namespace_paths()
 
 #[test]
 fn runtime_restart_keeps_restored_sessions_on_their_stored_cwd_without_a_gate() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_restart_cwd"));
     let previous_cwd = root.join("previous");
@@ -5092,6 +5096,7 @@ fn runtime_restart_keeps_restored_sessions_on_their_stored_cwd_without_a_gate() 
 
 #[test]
 fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_session"));
     std::fs::create_dir_all(&root).unwrap();
@@ -5204,6 +5209,7 @@ fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
 
 #[test]
 fn web_host_startup_restore_appends_a_visible_raw_chat_restart_marker() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_restart_marker"));
     std::fs::create_dir_all(&root).unwrap();
@@ -5288,6 +5294,7 @@ fn web_host_startup_restore_appends_a_visible_raw_chat_restart_marker() {
 
 #[test]
 fn restore_keeps_multiple_legacy_sessions_when_retired_provider_cache_is_present() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_legacy_sessions"));
     std::fs::create_dir_all(&root).unwrap();
@@ -5345,6 +5352,7 @@ fn restore_keeps_multiple_legacy_sessions_when_retired_provider_cache_is_present
 #[cfg(unix)]
 #[test]
 fn session_create_and_restore_defer_unavailable_mcp_discovery_until_send() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_deferred_mcp_restore"));
     std::fs::create_dir_all(&root).unwrap();
@@ -5484,6 +5492,7 @@ fn session_create_and_restore_defer_unavailable_mcp_discovery_until_send() {
 
 #[test]
 fn restored_web_session_keeps_original_task_with_supplement_in_an_oversized_turn() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_long_turn"));
     std::fs::create_dir_all(&root).unwrap();
@@ -5576,6 +5585,7 @@ fn restored_web_session_keeps_original_task_with_supplement_in_an_oversized_turn
 
 #[test]
 fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_overrides"));
     std::fs::create_dir_all(&root).unwrap();
@@ -5945,6 +5955,7 @@ fn restored_web_turns_preserve_user_entry_kinds() {
 
 #[test]
 fn runtime_restart_preserves_never_dispatched_queue_items_in_message_queue() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("restart_queued_interrupted"));
     std::fs::create_dir_all(&root).unwrap();
@@ -6925,6 +6936,7 @@ fn restore_prompt_context_on_startup_covers_off_on_off_toggle_cycle() {
 
 #[test]
 fn corrupt_snapshot_degrades_to_history_only_restore_without_blocking_session() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("corrupt_snapshot_restore"));
     let data_dir = root.join("data");
@@ -7786,6 +7798,7 @@ fn mem_temporary_retention_rejects_invalid_values() {
 
 #[test]
 fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let data_dir_raw = std::env::temp_dir().join(unique_web_id("timem_web_mem_switch"));
     std::fs::create_dir_all(&data_dir_raw).unwrap();
@@ -12303,6 +12316,7 @@ fn repeated_user_sends_during_an_active_turn_are_ordered_supplements() {
 
 #[test]
 fn runtime_restart_preserves_persisted_message_queue_without_dispatch_grant() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("restart_restores_queue"));
     std::fs::create_dir_all(&root).unwrap();
@@ -18011,6 +18025,7 @@ fn task_finished_outcome_persists_assistant_history_and_turn_final_answer() {
 
 #[test]
 fn queued_message_turn_uses_consume_time_not_enqueue_time_for_chat_order() {
+    let _home_sandbox = home_sandbox_guard();
     let state = routing_test_state();
     let session_id = "session_a";
     let worker_id = state.sessions.lock().unwrap()[session_id]
@@ -18878,6 +18893,7 @@ fn catalog_legacy_session_restore_accepts_missing_empty_and_explicit_binding() {
 
 #[test]
 fn catalog_persisted_sessions_restore_missing_and_empty_bindings_with_history() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_legacy_sessions"));
     std::fs::create_dir_all(&root).unwrap();
@@ -21153,6 +21169,18 @@ fn mailbox_deadline_reached_honors_zero_negative_and_boundary() {
 // These tests run against a fake HOME and never touch the developer's spool.
 static MAILBOX_E2E_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Any test that directly or indirectly triggers `restore_stored_sessions`
+/// (whose one-time spool sweep reads the HOME-derived mailbox root) must hold
+/// this guard, so it cannot interleave with the mailbox-e2e tests that
+/// repoint the process-global HOME at a per-test fake home. Without the
+/// mutual exclusion a foreign sweep can claim another test's acquired
+/// `mb-` directory first and strand its envelopes before the identity pass.
+fn home_sandbox_guard() -> std::sync::MutexGuard<'static, ()> {
+    MAILBOX_E2E_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 struct MailboxE2eGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     original_home: Option<PathBuf>,
@@ -21183,9 +21211,7 @@ impl Drop for MailboxE2eGuard {
 }
 
 fn mailbox_e2e_setup(worker_label: &'static str) -> (MailboxE2eGuard, AppState, String) {
-    let lock = MAILBOX_E2E_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let lock = home_sandbox_guard();
     let original_home = std::env::var("HOME").ok().map(PathBuf::from);
     let fake_home = std::env::temp_dir().join(unique_web_id("mailbox_e2e_home"));
     std::fs::create_dir_all(&fake_home).unwrap();
