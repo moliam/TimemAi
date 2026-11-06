@@ -692,6 +692,30 @@ async function main() {
     assert(await browser.evaluate(`!!document.querySelector('.endpoint-menu-close')`), "endpoint panel exposes a close control");
     const endpointPanelLayout = await browser.evaluate(`(() => {
       const box = (el) => el ? el.getBoundingClientRect().toJSON() : null;
+      const menu = document.querySelector('.endpoint-menu');
+      const captureTheme = () => {
+        const menuStyle = getComputedStyle(menu);
+        const headingStyle = getComputedStyle(document.querySelector('.endpoint-menu-heading'));
+        return {
+          menu: {
+            background: menuStyle.backgroundColor,
+            border: menuStyle.borderTopColor,
+            radius: menuStyle.borderTopLeftRadius,
+            shadow: menuStyle.boxShadow,
+          },
+          heading: {
+            background: headingStyle.backgroundColor,
+            border: headingStyle.borderBottomColor,
+          },
+        };
+      };
+      const originalTheme = document.documentElement.dataset.theme || 'dark';
+      document.documentElement.dataset.theme = 'dark';
+      const darkTheme = captureTheme();
+      document.documentElement.dataset.theme = 'light';
+      const lightTheme = captureTheme();
+      document.documentElement.dataset.theme = originalTheme;
+      const chainTitleStyle = getComputedStyle(document.querySelector('.endpoint-chain-title'));
       const availableRow = document.querySelector('.endpoint-chain-col.available .endpoint-chain-row');
       const availableStyle = getComputedStyle(availableRow);
       const picks = [...document.querySelectorAll('.endpoint-chain-pick')].map((node) => {
@@ -700,7 +724,13 @@ async function main() {
       });
       const efforts = [...document.querySelectorAll('.endpoint-chain-effort')].map((node) => Math.round(node.getBoundingClientRect().width * 10) / 10);
       return {
-        menuWidth: Math.round(document.querySelector('.endpoint-menu').getBoundingClientRect().width),
+        menuWidth: Math.round(menu.getBoundingClientRect().width),
+        themes: { dark: darkTheme, light: lightTheme },
+        chainTitle: {
+          font: chainTitleStyle.fontFamily,
+          size: chainTitleStyle.fontSize,
+          transform: chainTitleStyle.textTransform,
+        },
         availableBorder: availableStyle.borderTopColor,
         availableBackground: availableStyle.backgroundColor,
         close: box(document.querySelector('.endpoint-menu-close')),
@@ -709,7 +739,36 @@ async function main() {
       };
     })()`);
     assert(endpointPanelLayout.menuWidth >= 460 && endpointPanelLayout.menuWidth <= 600, `endpoint panel width follows its content: ${JSON.stringify(endpointPanelLayout)}`);
-    assert(endpointPanelLayout.close.width === 27 && endpointPanelLayout.close.height === 27, `endpoint close target: ${JSON.stringify(endpointPanelLayout)}`);
+    assert(endpointPanelLayout.close.width === 23 && endpointPanelLayout.close.height === 23, `endpoint close target: ${JSON.stringify(endpointPanelLayout)}`);
+    const { dark: darkEndpointTheme, light: lightEndpointTheme } = endpointPanelLayout.themes;
+    assert(
+      darkEndpointTheme.menu.radius === '9px' &&
+        darkEndpointTheme.menu.background === 'rgb(16, 25, 31)' &&
+        darkEndpointTheme.menu.border === 'rgb(43, 61, 71)' &&
+        darkEndpointTheme.menu.shadow.includes('18px'),
+      `dark endpoint panel adopts the session insights card surface: ${JSON.stringify(darkEndpointTheme.menu)}`,
+    );
+    assert(
+      lightEndpointTheme.menu.radius === '9px' &&
+        lightEndpointTheme.menu.background === 'rgb(255, 255, 255)' &&
+        lightEndpointTheme.menu.border === 'rgb(201, 214, 218)' &&
+        lightEndpointTheme.menu.shadow.includes('18px'),
+      `light endpoint panel adopts the session insights card surface: ${JSON.stringify(lightEndpointTheme.menu)}`,
+    );
+    assert(
+      darkEndpointTheme.heading.background === 'rgb(19, 33, 42)' && darkEndpointTheme.heading.border === 'rgb(34, 50, 58)',
+      `dark endpoint panel heading uses the quiet insights band: ${JSON.stringify(darkEndpointTheme.heading)}`,
+    );
+    assert(
+      lightEndpointTheme.heading.background === 'rgb(243, 248, 249)' && lightEndpointTheme.heading.border === 'rgb(219, 229, 232)',
+      `light endpoint panel heading uses the quiet insights band: ${JSON.stringify(lightEndpointTheme.heading)}`,
+    );
+    assert(
+      endpointPanelLayout.chainTitle.font.includes('Space Grotesk') &&
+        endpointPanelLayout.chainTitle.size === '9px' &&
+        endpointPanelLayout.chainTitle.transform === 'uppercase',
+      `endpoint column titles share the insights title voice: ${JSON.stringify(endpointPanelLayout.chainTitle)}`,
+    );
     assert(endpointPanelLayout.availableBorder === 'rgba(0, 0, 0, 0)' && endpointPanelLayout.availableBackground === 'rgba(0, 0, 0, 0)', `available endpoint rows are flat at rest, not buttons: ${JSON.stringify(endpointPanelLayout)}`);
     assert(await browser.evaluate(`document.querySelectorAll('.endpoint-chain-active-badge').length === 0`), "no in-use check badge in either column");
     const selectedCurrentRow = await browser.evaluate(`(() => {
