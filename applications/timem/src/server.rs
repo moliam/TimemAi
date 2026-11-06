@@ -3454,6 +3454,14 @@ fn mime_for_path(path: &str) -> &'static str {
         "image/png"
     } else if path.ends_with(".ico") {
         "image/x-icon"
+    } else if path.ends_with(".woff2") {
+        "font/woff2"
+    } else if path.ends_with(".woff") {
+        "font/woff"
+    } else if path.ends_with(".ttf") {
+        "font/ttf"
+    } else if path.ends_with(".otf") {
+        "font/otf"
     } else {
         "application/octet-stream"
     }

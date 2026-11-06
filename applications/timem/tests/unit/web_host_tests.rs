@@ -3887,6 +3887,13 @@ fn embedded_frontend_assets_receive_browser_safe_content_types() {
         "application/javascript; charset=utf-8"
     );
     assert_eq!(mime_for_path("/timem_logo.png"), "image/png");
+    assert_eq!(
+        mime_for_path("/fonts/SpaceGrotesk-Latin-600.woff2"),
+        "font/woff2"
+    );
+    assert_eq!(mime_for_path("/fonts/legacy.woff"), "font/woff");
+    assert_eq!(mime_for_path("/fonts/legacy.ttf"), "font/ttf");
+    assert_eq!(mime_for_path("/fonts/legacy.otf"), "font/otf");
     assert!(embedded_web_asset("/timem_logo.png").is_some());
 }
 
