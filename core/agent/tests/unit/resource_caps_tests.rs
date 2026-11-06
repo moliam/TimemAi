@@ -60,10 +60,15 @@ fn containment_note_requires_a_platform_facility() {
             Some(INSTANCE_CONTAINMENT_NOTE)
         );
     }
-    // The note guides the model to keep tool work inside the managed tree.
+    // The note guides the model to spawn tool work in the most constrained
+    // way inside the managed tree, leaving only when truly unavoidable or
+    // the user explicitly asks for it.
     assert!(INSTANCE_CONTAINMENT_NOTE.contains("managed process tree"));
     assert!(INSTANCE_CONTAINMENT_NOTE.contains("cgroup"));
-    assert!(INSTANCE_CONTAINMENT_NOTE.contains("whenever possible"));
+    assert!(INSTANCE_CONTAINMENT_NOTE.contains("spawn work in the most constrained way possible"));
+    assert!(
+        INSTANCE_CONTAINMENT_NOTE.contains("truly unavoidable or the user explicitly asks for it")
+    );
 }
 
 fn env_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
