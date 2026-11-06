@@ -1268,6 +1268,112 @@ pub(super) fn probe_instance_resource_caps() -> ResourceCapsReadiness {
     }
 }
 
+/// Whether the current process can only obtain usable cpu+memory caps after
+/// moving into its own delegated scope: a shared instance root and a
+/// threaded/domain-invalid cgroup both make the kernel reject domain
+/// controllers for memory, and no in-process repair can change that shape.
+#[cfg(not(test))]
+pub(super) fn instance_scope_needs_isolation() -> bool {
+    let Ok(current) = current_cgroup_mounted_path() else {
+        return false;
+    };
+    let root = instance_root_cgroup(&current);
+    if root_shared_with_other_processes(root) {
+        return true;
+    }
+    !matches!(cgroup_type(root).as_deref(), Some("domain") | None)
+        || !cgroup_controllers_include(root, "memory")
+}
+
+#[cfg(test)]
+pub(super) fn instance_scope_needs_isolation() -> bool {
+    false
+}
+
+#[cfg(not(test))]
+fn cgroup_type(root: &Path) -> Option<String> {
+    fs::read_to_string(root.join("cgroup.type"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// A root that does not even list the memory controller has no parent
+/// delegation to enable it with: this covers per-command fence cgroups that
+/// are `domain` and unshared but structurally CPU-less as well. An unreadable
+/// file is not evidence of a missing controller, so it keeps the legacy path.
+pub(super) fn cgroup_controllers_include(root: &Path, controller: &str) -> bool {
+    match fs::read_to_string(root.join("cgroup.controllers")) {
+        Ok(value) => value.split_whitespace().any(|name| name == controller),
+        Err(_) => true,
+    }
+}
+
+/// Re-launch this process as the only member of a transient delegated
+/// `systemd-run --user --scope` unit. `--scope` moves the caller into the new
+/// unit and then execs the command in place (verified on systemd 249), so the
+/// process keeps its pid, stdio, working directory, terminal and signal
+/// relationships; systemd collects the transient unit after exit. The new
+/// instance root is a private `domain` cgroup whose controllers are delegated
+/// by the user manager, which is the only shape where memory caps can be
+/// enabled without root.
+///
+/// Failures are returned to the caller before the exec; callers fall back to
+/// the current scope with a visible warning instead of aborting startup.
+pub(super) fn relaunch_in_private_user_scope(
+    program: &Path,
+    args: &[OsString],
+) -> std::io::Result<()> {
+    if !private_user_scope_available() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "user systemd manager socket is unavailable",
+        ));
+    }
+    let unit = private_scope_unit_name();
+    let mut command = private_scope_command(program, args, &unit);
+    use std::os::unix::process::CommandExt;
+    // `exec` only returns on failure; success replaces this process image.
+    Err(command.exec())
+}
+
+fn private_user_scope_available() -> bool {
+    let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    Path::new(&runtime_dir)
+        .join("systemd")
+        .join("private")
+        .exists()
+}
+
+fn private_scope_unit_name() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.subsec_nanos())
+        .unwrap_or_default();
+    format!("timem-scope-{}-{nanos}", std::process::id())
+}
+
+pub(super) fn private_scope_command(
+    program: &Path,
+    args: &[OsString],
+    unit: &str,
+) -> std::process::Command {
+    let mut command = std::process::Command::new("systemd-run");
+    command
+        .arg("--user")
+        .arg("--scope")
+        .arg("--collect")
+        .arg(format!("--unit={unit}"))
+        .arg("--")
+        .arg(program)
+        .args(args)
+        .env(crate::api::INDEPENDENT_SCOPE_ENV, "1");
+    command
+}
+
 fn validate_escalation_cgroup(path: &str) -> Result<(), String> {
     let well_formed = path.starts_with("/sys/fs/cgroup/")
         && path.len() <= 512

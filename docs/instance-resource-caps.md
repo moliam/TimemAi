@@ -146,6 +146,20 @@ root 修复，动作只有两类白名单操作：
   任务所有权），因此能看到当前 session 全部任务的 cgroup 落点——裸终端任务在 session
   scope，systemd-run 任务在其 scope。该信息仅用于观察，不参与调度或限额判定。
 
+### 启动时自动进入独立 scope（默认行为，2026-11-06）
+
+- 启动早期（`run_web` 的第一件事，早于进程安全网、workspace 锁与 cgroup 探测）检查当前实例根是否具备承载内存控制器的结构。以下任一成立即自动迁移：
+  - 实例根与其它进程共享（内核会把 populated 根强制转为只支持 cpu 的 threaded 子树）；
+  - `cgroup.type` 不是 `domain`（已是 `domain threaded` / `domain invalid` / `threaded`）；
+  - 实例根 `cgroup.controllers` 不含 `memory`（例如运行期 per-job 围栏 cgroup：单进程、`domain`，但整条链没有控制器委托）。
+- 迁移命令为 `systemd-run --user --scope --collect --unit=timem-scope-<pid>-<nanos> -- <exe> <args...>`，并通过 `exec` 原地替换当前进程。实测 systemd 249 下 `--scope` 会把调用进程移入新 unit 后直接 exec，PID、stdio、工作目录、终端与会话关系不变；scope 位于 `user@<uid>.service/app.slice/`，只含 Timem 一个进程。
+- 新 scope 的根是空 `domain`，`cgroup.controllers=[cpu memory pids]`；随后既有的 `timem.self` 自迁移、控制器启用与三限额写入链路零 root 生效（实测 85% 档写入 `cpu.max=2380000 100000`、`memory.high≈22.41GB`、`memory.max≈26.37GB`，启动日志 `CPU limit: 85% applied` / `MEM limit: 85% applied`）。
+- 防循环：迁移时设置 `TIMEM_INDEPENDENT_SCOPE=1`；子进程即使仍看到共享/threaded 根也只打印告警，不再嵌套迁移。
+- 显式关闭：`TIMEM_NO_INDEPENDENT_SCOPE=1`，供自行管理 scope 的操作者使用。
+- 失败回退：`systemd-run` 不存在、用户 systemd manager socket 不可用或迁移后仍不满足条件时，Timem 继续在当前 scope 启动并打印 `[timem_scope_isolation] ...` 告警；资源管控仍按原有 fail-closed 语义显示 `Unavailable`，不阻塞启动。
+- `-h`/`--help`/`-V`/`--version` 不触发迁移，避免帮助/版本输出产生进程副作用。
+- 已运行的实例不会热迁移：升级二进制后需重启一次，新进程启动时自动完成。
+
 ## 4. 可观测性
 
 - RUNTIME_INFO 新增 `resource` reporter（`core/agent/src/runtime_info.rs`）：
@@ -308,11 +322,20 @@ user@1000.service 委托,此前 `cgroup.controllers` 仅为 `memory pids`)。CPU
 
 - 不监控系统整体负载做动态退避：caps 是静态实例配额，语义是"本实例最多占用多少系统资源"。
 - 不做系统级全局配置（不写 `/etc`、不改 systemd 全局单元、不杀其他进程）。
-- 不接管启动方式：优先 `systemd-run --user --scope`，无 systemd 时退回直接操作 cgroup；
+- 不强制接管启动方式：默认在启动早期把自身迁移到独立 `systemd-run --user --scope` scope（可用
+  `TIMEM_NO_INDEPENDENT_SCOPE=1` 关闭）；无 systemd 用户管理器时留在当前 scope 并告警，
   cgroup v2 设施缺失时 caps fail-open 降级、命令执行回退进程组，均不阻塞实例启动。
 - 不约束 Timem 主进程本体；如未来需要，应另立显式契约评估（自我 cgroup 迁移会与
   process-Job 所有权模型交互，不能顺手做）。
 
+
+### 6.7 启动自动隔离验证（2026-11-06）
+
+从现有共享登录会话的 per-job cgroup（`type=domain`、单进程、`cgroup.controllers` 为空）启动新二进制，验证：
+
+- 进程自动 exec 到 `user@1000.service/app.slice/timem-scope-<pid>-<nanos>.scope`；scope 根 `cgroup.procs` 为空、`type=domain`、`controllers=[cpu memory pids]`、`subtree_control=[cpu memory]`，`timem.self` 仅含主进程。
+- `timem.jobs` 三限额真实写入：`cpu.max=2380000 100000`、`memory.high=24063819776`、`memory.max=28310372352`（31.0GiB 的 85%），启动日志明确输出 `CPU limit: 85% applied` 与 `MEM limit: 85% applied`。
+- SIGTERM 优雅退出后，瞬态 unit、scope 目录与 `timem.self`/`timem.jobs` 全部被 systemd 回收，无残留；临时 space 已清理，现役实例未受影响。
 
 ## 6.5 memory.max 行为与 OOM 归因实测（2026-11-05）
 

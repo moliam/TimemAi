@@ -689,7 +689,7 @@ export const zh = {
     resourceMemUnavailableHint: "当前系统暂时无法使用内存管控",
     resourceMemUnsupportedHint: "当前系统不支持内存管控",
     resourceMemSharedRootHint:
-      "当前登录会话的 cgroup 与其他进程共享，内核已把它转为只支持 CPU 的 threaded 子树，内存上限无法启用。请用独立 scope 启动 Timem（例如 systemd-run --user --scope timem）后重试。",
+      "当前登录会话的 cgroup 与其他进程共享，内核已把它转为只支持 CPU 的 threaded 子树，内存上限无法启用。Timem 默认会在启动时自动进入独立 scope；若仍看到此提示，请确认 systemd 用户管理器可用后重启 Timem，或手动用 systemd-run --user --scope timem 启动。",
     resourceCapsEscalateTitle: "需要管理员授权",
     resourceCapsEscalateDesc: "开启所选资源管控需要管理员权限。输入系统管理员密码完成一次性授权；密码仅用于本次操作，不会被保存或记录。",
     resourceCapsEscalatePassword: "管理员密码",

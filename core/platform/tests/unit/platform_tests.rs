@@ -1621,3 +1621,60 @@ fn escalation_plan_runs_migration_before_controller_enablement() {
     );
     std::fs::remove_dir_all(&fake_dir).unwrap();
 }
+
+#[cfg(target_os = "linux")]
+mod private_scope {
+    use super::*;
+    use crate::api::INDEPENDENT_SCOPE_ENV;
+    use crate::linux;
+
+    #[test]
+    fn private_scope_command_forwards_program_arguments_and_marker() {
+        let command = linux::private_scope_command(
+            Path::new("/opt/timem bin/timem"),
+            &[OsString::from("--public"), OsString::from("--space=/tmp/x")],
+            "timem-scope-42-7",
+        );
+        assert_eq!(command.get_program(), OsStr::new("systemd-run"));
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "--user",
+                "--scope",
+                "--collect",
+                "--unit=timem-scope-42-7",
+                "--",
+                "/opt/timem bin/timem",
+                "--public",
+                "--space=/tmp/x",
+            ]
+        );
+        let marker = command
+            .get_envs()
+            .find(|(key, _)| *key == OsStr::new(INDEPENDENT_SCOPE_ENV))
+            .and_then(|(_, value)| value);
+        assert_eq!(marker, Some(OsStr::new("1")));
+    }
+
+    #[test]
+    fn controller_membership_is_whitespace_delimited_and_exact() {
+        let root =
+            std::env::temp_dir().join(format!("timem-scope-controllers-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("cgroup.controllers"), "cpu memory pids\n").unwrap();
+        assert!(linux::cgroup_controllers_include(&root, "memory"));
+        assert!(!linux::cgroup_controllers_include(&root, "io"));
+        std::fs::write(root.join("cgroup.controllers"), "cpu pids\n").unwrap();
+        assert!(!linux::cgroup_controllers_include(&root, "memory"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn test_builds_never_request_relaunch() {
+        assert!(!linux::instance_scope_needs_isolation());
+    }
+}

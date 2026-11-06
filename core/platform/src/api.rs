@@ -1344,6 +1344,10 @@ fn platform_system_resource_usage() -> std::io::Result<Option<SystemResourceUsag
 /// cpu; memory caps cannot be enforced until Timem runs in its own scope.
 pub const SHARED_INSTANCE_ROOT_REASON: &str = "instance root is shared with other processes: the kernel converts a populated root to a threaded subtree that carries only cpu, so memory caps cannot be enforced here";
 
+/// Environment marker set on the re-exec into a private user scope. It keeps a
+/// process that still cannot reach a private root from nesting another scope.
+pub const INDEPENDENT_SCOPE_ENV: &str = "TIMEM_INDEPENDENT_SCOPE";
+
 /// One cap dimension's escalation-free availability right now.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResourceCapReadiness {
@@ -1402,6 +1406,21 @@ pub fn probe_instance_resource_caps() -> ResourceCapsReadiness {
     platform_probe_instance_resource_caps()
 }
 
+/// True when the current instance root cannot structurally carry memory
+/// controllers: it is shared with unrelated processes or already sits in a
+/// threaded/invalid cgroup. Platforms without a cgroup-v2 instance scope
+/// report false because there is nothing to relocate into.
+pub fn instance_scope_needs_isolation() -> bool {
+    platform_instance_scope_needs_isolation()
+}
+
+/// Replace this process with a re-launch inside a transient, delegated
+/// `systemd-run --user --scope` unit. Returns only on failure; callers keep
+/// running in the current scope in that case.
+pub fn relaunch_in_private_user_scope(program: &Path, args: &[OsString]) -> std::io::Result<()> {
+    platform_relaunch_in_private_user_scope(program, args)
+}
+
 /// Execute a root-authorized escalation plan via `sudo -S`. The password is
 /// streamed to sudo's stdin and is never logged, stored, or embedded in
 /// errors; clearing the caller's buffer stays the caller's duty.
@@ -1415,6 +1434,35 @@ pub fn apply_resource_cap_escalation_plan(
 #[cfg(target_os = "linux")]
 fn platform_probe_instance_resource_caps() -> ResourceCapsReadiness {
     crate::linux::probe_instance_resource_caps()
+}
+
+#[cfg(target_os = "linux")]
+fn platform_instance_scope_needs_isolation() -> bool {
+    crate::linux::instance_scope_needs_isolation()
+}
+
+#[cfg(target_os = "linux")]
+fn platform_relaunch_in_private_user_scope(
+    program: &Path,
+    args: &[OsString],
+) -> std::io::Result<()> {
+    crate::linux::relaunch_in_private_user_scope(program, args)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_instance_scope_needs_isolation() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_relaunch_in_private_user_scope(
+    _program: &Path,
+    _args: &[OsString],
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "independent user scopes are only supported on Linux",
+    ))
 }
 
 #[cfg(target_os = "linux")]
