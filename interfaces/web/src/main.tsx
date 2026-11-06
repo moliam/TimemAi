@@ -8625,7 +8625,7 @@ function TimerPanel({
                       </label>
                     )}
                   </div>
-                  <label className="timer-create-checkbox">
+                  <label className="timer-queue-field">
                     <input
                       type="number"
                       min={0}
@@ -8639,7 +8639,7 @@ function TimerPanel({
                         })
                       }
                     />
-                    {t("timer.queueLabel")}
+                    <span>{t("timer.queueLabel")}</span>
                   </label>
                   {!canEditSave && (
                     <div className="timer-form-hint error">
@@ -8883,7 +8883,7 @@ function TimerPanel({
             </label>
           )}
         </div>
-        <label className="timer-create-checkbox">
+        <label className="timer-queue-field">
           <input
             type="number"
             min={0}
@@ -8892,7 +8892,7 @@ function TimerPanel({
             title={t("timer.queueHint")}
             onChange={(event) => setQueueTimeoutMinutes(event.target.value)}
           />
-          {t("timer.queueLabel")}
+          <span>{t("timer.queueLabel")}</span>
         </label>
         {showInvalidHint && (
           <div className="timer-form-hint error">

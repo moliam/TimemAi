@@ -1168,17 +1168,15 @@ button:disabled { cursor: not-allowed; }
 .timer-create-area { border-top: 1px solid #25303c; padding: 12px; display: grid; gap: 8px; }
 .timer-create-form { display: grid; gap: 8px; }
 .timer-edit-form { display: grid; gap: 8px; padding-top: 2px; }
+.timer-queue-field { display: inline-flex; align-items: center; gap: 7px; }
+.timer-queue-field input { width: 76px; height: 23px; border: 1px solid #22343d; border-radius: 5px; padding: 0 6px; background: #0c151a; color: #dbe8e4; font-family: var(--insights-mono-font); font-size: 10px; appearance: textfield; -moz-appearance: textfield; }
+.timer-queue-field input::-webkit-inner-spin-button, .timer-queue-field input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.timer-queue-field input:focus { outline: none; border-color: #3d6b78; box-shadow: 0 0 0 2px #3d6b7826; }
+.timer-queue-field span { color: #8fa2af; font-size: 11px; }
+:root[data-theme="light"] .timer-queue-field input { border-color: #c9d6da; background: #fff; color: #33484f; }
+:root[data-theme="light"] .timer-queue-field span { color: #526872; }
 .timer-create-toggle { display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px dashed #365363; border-radius: 5px; padding: 8px 10px; background: transparent; color: #91a5b1; font-size: 12px; font-weight: 700; }
 .timer-create-toggle:hover { border-color: #4a7183; background: #17242e; color: #d5e1e8; }
-.timer-create-form .timer-create-checkbox, .timer-edit-form .timer-create-checkbox { display: flex; align-items: center; gap: 5px; padding: 4px 7px; border: 1px solid #2c3b49; border-radius: 5px; background: #131c26; color: #8fa2af; font-size: 11px; font-weight: 650; cursor: pointer; transition: border-color .15s ease, color .15s ease; }
-.timer-create-form .timer-create-checkbox:hover, .timer-edit-form .timer-create-checkbox:hover { border-color: #3d6b7d; color: #c4d2dc; }
-.timer-create-form .timer-create-checkbox input, .timer-edit-form .timer-create-checkbox input { appearance: none; -webkit-appearance: none; box-sizing: content-box; padding: 0; width: 13px; height: 13px; flex: none; margin: 0; border: 1px solid #3a5461; border-radius: 4px; background: #0d1b22; cursor: pointer; display: inline-grid; place-items: center; transition: background-color .12s ease, border-color .12s ease; }
-.timer-create-checkbox input::after { content: ""; width: 9px; height: 9px; transform: scale(0); transition: transform .12s ease; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23eafff7' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E") center/contain no-repeat; }
-.timer-create-form .timer-create-checkbox input:checked, .timer-edit-form .timer-create-checkbox input:checked { background-color: #2f6d5d; border-color: #2f6d5d; }
-.timer-create-checkbox input:checked::after { transform: scale(1); }
-.timer-create-form .timer-create-checkbox input:focus-visible, .timer-edit-form .timer-create-checkbox input:focus-visible { outline: 1px solid #4a9c8a; outline-offset: 1px; }
-:root[data-theme="light"] .timer-create-checkbox input { border-color: #bfd3d8; background: #f7fbfc; }
-:root[data-theme="light"] .timer-create-checkbox input:checked { background-color: #2d8068; border-color: #2d8068; }
 .timer-item-origin.immediate { background: #3a2f1d; color: #d9b96a; }
 .timer-create-actions { display: flex; gap: 8px; }
 .timer-create-actions .timer-create-submit { flex: 1; }
@@ -1208,8 +1206,6 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .timer-create-area { border-color: #d3dde2; }
 :root[data-theme="light"] .timer-create-toggle { border-color: #bfd3d8; color: #5f7480; }
 :root[data-theme="light"] .timer-create-toggle:hover { border-color: #9fb9c1; background: #eef4f6; color: #263b43; }
-:root[data-theme="light"] .timer-create-form .timer-create-checkbox, :root[data-theme="light"] .timer-edit-form .timer-create-checkbox { border-color: #bfd3d8; background: #f7fbfc; color: #526872; }
-:root[data-theme="light"] .timer-create-form .timer-create-checkbox:hover, :root[data-theme="light"] .timer-edit-form .timer-create-checkbox:hover { border-color: #9fb9c1; color: #263b43; }
 :root[data-theme="light"] .timer-create-collapse { border-color: #bfd3d8; color: #5f7480; }
 :root[data-theme="light"] .timer-create-collapse:hover { color: #263b43; }
 :root[data-theme="light"] .timer-create-form input, :root[data-theme="light"] .timer-create-form select, :root[data-theme="light"] .timer-create-form textarea, :root[data-theme="light"] .timer-edit-form input, :root[data-theme="light"] .timer-edit-form select, :root[data-theme="light"] .timer-edit-form textarea { background: #ffffff; border-color: #c6d2da; color: #2c3a44; }
