@@ -34,8 +34,8 @@ const NATIVE_RESPONSE_MODE_INSTRUCTION: &str = "Use the API tool-call channel fo
 const INLINE_RESPONSE_MODE_INSTRUCTION: &str =
     "Your response MUST be exactly protocol-compliant in the response protocol below.";
 const INLINE_TOOL_CATALOG_SECTION_HEADING: &str = "## Actions\n\nGenerate actions to drive the runtime to do things for you. There are several builtin actions:\n\n### Available capabilities";
-const NATIVE_BUILTIN_TOOL_DESCRIPTIONS_HEADING: &str =
-    "## Built-in Tool Descriptions\n\nBuilt-in tool parameter schemas are provided separately through the model API. One response can reasonably contain multiple tool calls for better performance.";
+const NATIVE_BUILTIN_TOOLS_HEADING: &str =
+    "## Built-in Tools\n\nBuilt-in tool parameter schemas and descriptions are provided separately through the model API. One response can reasonably contain multiple tool calls for better performance.";
 pub(crate) const MAX_ACTION_RESULT_PROMPT_BYTES: usize =
     tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES;
 pub(crate) const REASONING_INTENSITY_UPGRADE_TRAILER: &str = "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. Please continue the work and respond as protocol requires in user's language:";
@@ -364,7 +364,7 @@ pub(crate) fn render_static_prompt_for_mode_with_preferences(
     let with_protocol = with_protocol.replace("{{ASSSISTANT_ID}}", assistant_heading);
     let with_protocol = with_protocol.replace("ASSSISTANT_ID", assistant_heading);
     let tool_catalog_heading = if tool_call_mode == ToolCallMode::Native {
-        NATIVE_BUILTIN_TOOL_DESCRIPTIONS_HEADING
+        NATIVE_BUILTIN_TOOLS_HEADING
     } else {
         INLINE_TOOL_CATALOG_SECTION_HEADING
     };
@@ -374,7 +374,7 @@ pub(crate) fn render_static_prompt_for_mode_with_preferences(
     let with_caps = if tool_call_mode == ToolCallMode::Native {
         with_protocol.replace(
             "{{TOOL_CATALOG}}",
-            &capabilities.render_native_builtin_tool_descriptions_markdown(),
+            &capabilities.render_native_builtin_tool_names_markdown(),
         )
     } else {
         capabilities.enrich_static_prompt_for_protocol(&with_protocol, protocol_suite.lang_format())

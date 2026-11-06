@@ -741,21 +741,28 @@ fn native_prompt_contains_builtin_descriptions_without_schemas_or_dynamic_tools(
         ToolCallMode::Native,
     );
 
-    assert!(
-        rendered.contains("## Built-in Tool Descriptions"),
-        "{rendered}"
-    );
-    assert!(rendered.contains("### `run_bash`"), "{rendered}");
+    assert!(rendered.contains("## Built-in Tools"), "{rendered}");
     assert!(
         rendered.contains(
             "One response can reasonably contain multiple tool calls for better performance."
         ),
         "{rendered}"
     );
+    // The native catalog only names the tools once and points at the API
+    // tool schema descriptions; the full description text lives solely in
+    // the tool definitions sent through the model API.
     assert!(
-        rendered.contains("`run_bash` runs a shell command"),
+        rendered.contains(
+            "They are also provided as tool schema definitions in this request; refer to each tool's schema description for usage details."
+        ),
         "{rendered}"
     );
+    assert!(rendered.contains("`run_bash`"), "{rendered}");
+    assert!(
+        !rendered.contains("`run_bash` runs a shell command"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("Valid argument examples"), "{rendered}");
     assert!(!rendered.contains("input_schema"), "{rendered}");
     assert!(!rendered.contains("properties"), "{rendered}");
     assert!(

@@ -855,12 +855,21 @@ impl CapabilityRegistry {
             .collect()
     }
 
-    pub(crate) fn render_native_builtin_tool_descriptions_markdown(&self) -> String {
-        self.native_builtin_tool_definitions()
+    /// Native tool-call mode catalog: the full tool descriptions and
+    /// parameter schemas are already delivered through the API tool
+    /// definitions, so the prompt only names the tools once and points at
+    /// the schema descriptions. Inline mode keeps the full catalog because
+    /// there the prompt is the only carrier.
+    pub(crate) fn render_native_builtin_tool_names_markdown(&self) -> String {
+        let names = self
+            .native_builtin_tool_definitions()
             .into_iter()
-            .map(|tool| format!("### `{}`\n\n{}", tool.name, tool.description.trim()))
+            .map(|tool| format!("`{}`", tool.name))
             .collect::<Vec<_>>()
-            .join("\n\n")
+            .join(", ");
+        format!(
+            "The runtime exposes the following tools: {names}. They are also provided as tool schema definitions in this request; refer to each tool's schema description for usage details."
+        )
     }
 
     pub fn render_tool_catalog_json(&self) -> String {

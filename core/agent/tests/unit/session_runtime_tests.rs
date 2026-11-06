@@ -6270,10 +6270,11 @@ impl ModelClient for NativeRoundTripModel {
             && !request
                 .rendered_prompt
                 .contains("# ASSISTANT Response Protocol")
+            && request.rendered_prompt.contains("## Built-in Tools")
             && request
                 .rendered_prompt
-                .contains("## Built-in Tool Descriptions")
-            && request.rendered_prompt.contains("### `run_bash`")
+                .contains("refer to each tool's schema description for usage details")
+            && request.rendered_prompt.contains("`run_bash`")
             && !request.rendered_prompt.contains("## Actions")
             && !request
                 .rendered_prompt
