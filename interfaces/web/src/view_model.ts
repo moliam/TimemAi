@@ -2357,6 +2357,8 @@ export type SessionModelPulse = {
   tokensPerSecond: number[];
   /** TTFT seconds for the last `MODEL_PULSE_LIMIT` completed requests. */
   ttftSeconds: number[];
+  /** Cache-hit percent for the last `MODEL_PULSE_LIMIT` completed requests. */
+  cacheHitPercent: number[];
 };
 
 const MODEL_PULSE_LIMIT = 15;
@@ -2366,6 +2368,7 @@ type ModelPulseSample = {
   eventId: string;
   tokensPerSecond?: number;
   ttftSeconds?: number;
+  cacheHitPercent?: number;
 };
 
 function compareModelPulseSamples(
@@ -2409,6 +2412,8 @@ export function sessionModelPulse(session: Session): SessionModelPulse {
       const latencyMs = finitePayloadNumber(completed.payload, "latency_ms");
       const outputTokens = finitePayloadNumber(usage as UsageStats, "completion_tokens");
       const ttftMs = finitePayloadNumber(completed.payload, "ttft_ms");
+      const promptTokens = finitePayloadNumber(usage as UsageStats, "prompt_tokens");
+      const cachedTokens = finitePayloadNumber(usage as UsageStats, "cached_tokens");
       retainRecentModelPulseSample(recent, {
         createdAtMs: response.created_at_ms,
         eventId: response.event_id,
@@ -2417,6 +2422,10 @@ export function sessionModelPulse(session: Session): SessionModelPulse {
             ? outputTokens * 1000 / latencyMs
             : undefined,
         ttftSeconds: ttftMs === undefined ? undefined : ttftMs / 1000,
+        cacheHitPercent:
+          promptTokens !== undefined && promptTokens > 0 && cachedTokens !== undefined
+            ? Math.min(100, Math.max(0, (cachedTokens * 100) / promptTokens))
+            : undefined,
       });
     }
   }
@@ -2426,6 +2435,9 @@ export function sessionModelPulse(session: Session): SessionModelPulse {
       .filter((value): value is number => value !== undefined),
     ttftSeconds: recent
       .map((sample) => sample.ttftSeconds)
+      .filter((value): value is number => value !== undefined),
+    cacheHitPercent: recent
+      .map((sample) => sample.cacheHitPercent)
       .filter((value): value is number => value !== undefined),
   };
 }

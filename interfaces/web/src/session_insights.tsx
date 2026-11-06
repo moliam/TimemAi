@@ -378,6 +378,8 @@ export function SessionInsights({
         : Math.round(value).toLocaleString();
   const formatSeconds = (value: number | undefined): string =>
     value === undefined ? "\u2014" : `${value.toFixed(2)}s`;
+  const formatPercent = (value: number | undefined): string =>
+    value === undefined ? "\u2014" : `${value.toFixed(1)}%`;
   const speedAverage = telemetry?.tokensPerSecond;
   const speedLatest = pulse?.tokensPerSecond[pulse.tokensPerSecond.length - 1];
   const ttftAverage = telemetry?.ttftMeanSeconds;
@@ -399,8 +401,15 @@ export function SessionInsights({
             ttftSpread === undefined ? "\u2014" : `\u00b1${formatSeconds(ttftSpread)}`,
           latest: formatSeconds(ttftLatest),
         });
+  const cacheAverage = cacheHitPercent;
+  const cacheLatest = pulse?.cacheHitPercent[pulse.cacheHitPercent.length - 1];
   const cacheLabel =
-    cacheHitPercent === undefined ? t("insights.unavailable") : `${cacheHitPercent.toFixed(1)}%`;
+    cacheAverage === undefined && cacheLatest === undefined
+      ? t("insights.unavailable")
+      : t("insights.cacheSummary", {
+          average: formatPercent(cacheAverage),
+          latest: formatPercent(cacheLatest),
+        });
   const contextLabel = contextPercent === undefined
     ? t("insights.unavailable")
     : `${contextPercent}% \u00b7 ${formatTokensCoarse(contextTokens) ?? "0"}/${formatTokensCoarse(contextLimit) ?? "\u2014"}`;
@@ -549,6 +558,7 @@ export function SessionInsights({
       case "cache":
         label = t("insights.cache");
         value = cacheLabel;
+        sparkline = pulse?.cacheHitPercent;
         tone = "violet";
         hint = t("insights.cacheHint");
         break;
@@ -674,7 +684,13 @@ export function SessionInsights({
               : `${formatSeconds(ttftAverage)} / ${formatSeconds(ttftLatest)}`,
         };
       case "cache":
-        return { label: t("insights.cache"), value: cacheLabel };
+        return {
+          label: t("insights.cache"),
+          value:
+            cacheAverage === undefined && cacheLatest === undefined
+              ? "\u2014"
+              : `${formatPercent(cacheAverage)} / ${formatPercent(cacheLatest)}`,
+        };
       case "context":
         return { label: t("insights.context"), value: contextPercent === undefined ? "\u2014" : `${contextPercent}%` };
       case "flow":

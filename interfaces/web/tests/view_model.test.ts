@@ -5261,9 +5261,9 @@ describe("model response telemetry", () => {
     ...turn("turn-model-telemetry"),
     events: [
       { event_id: "complete-2", source: "worker_activity", created_at_ms: 20, payload: { kind: "model_request_completed", round: 2, latency_ms: 4_000, ttft_ms: 1_000 } },
-      { event_id: "response-1", source: "worker_activity", created_at_ms: 10, payload: { kind: "model_response", round: 1, usage: { completion_tokens: 100, reasoning_tokens: 30 } } },
+      { event_id: "response-1", source: "worker_activity", created_at_ms: 10, payload: { kind: "model_response", round: 1, usage: { completion_tokens: 100, reasoning_tokens: 30, prompt_tokens: 1_000, cached_tokens: 250 } } },
       { event_id: "complete-1", source: "worker_activity", created_at_ms: 9, payload: { kind: "model_request_completed", round: 1, latency_ms: 2_000, ttft_ms: 0 } },
-      { event_id: "response-2", source: "worker_activity", created_at_ms: 21, payload: { kind: "model_response", round: 2, usage: { completion_tokens: 200, reasoning_tokens: 70 } } },
+      { event_id: "response-2", source: "worker_activity", created_at_ms: 21, payload: { kind: "model_response", round: 2, usage: { completion_tokens: 200, reasoning_tokens: 70, prompt_tokens: 2_000, cached_tokens: 1_000 } } },
     ],
   });
 
@@ -5288,6 +5288,7 @@ describe("model response telemetry", () => {
     const pulse = sessionModelPulse(value);
     expect(pulse.tokensPerSecond).toEqual([50, 50]);
     expect(pulse.ttftSeconds).toEqual([0, 1]);
+    expect(pulse.cacheHitPercent).toEqual([25, 50]);
     // Exact percentiles over the whole history would require an O(n) sample
     // buffer; the dashboard uses the O(1) Welford mean/spread instead.
     expect("ttftP50Seconds" in pulse).toBe(false);
@@ -5297,6 +5298,7 @@ describe("model response telemetry", () => {
     const reset = sessionModelPulse(value);
     expect(reset.tokensPerSecond).toEqual([50]);
     expect(reset.ttftSeconds).toEqual([1]);
+    expect(reset.cacheHitPercent).toEqual([50]);
   });
 
   it("keeps only the newest fifteen pulse samples", () => {
@@ -5310,7 +5312,11 @@ describe("model response telemetry", () => {
         payload: {
           kind: "model_response",
           round,
-          usage: { completion_tokens: round * 10 },
+          usage: {
+            completion_tokens: round * 10,
+            prompt_tokens: 1_000,
+            cached_tokens: round * 50,
+          },
         },
       });
       events.push({
@@ -5329,9 +5335,12 @@ describe("model response telemetry", () => {
     const pulse = sessionModelPulse(value);
     expect(pulse.tokensPerSecond).toHaveLength(15);
     expect(pulse.ttftSeconds).toHaveLength(15);
+    expect(pulse.cacheHitPercent).toHaveLength(15);
     // Rounds 6..20 survive; the first five have been evicted.
     expect(pulse.ttftSeconds[0]).toBeCloseTo(0.006, 8);
     expect(pulse.ttftSeconds[14]).toBeCloseTo(0.02, 8);
+    expect(pulse.cacheHitPercent[0]).toBeCloseTo(30, 8);
+    expect(pulse.cacheHitPercent[14]).toBeCloseTo(100, 8);
 
     // Averages/spread stay whole-history: the window alone would be 0.011
     // mean and a different deviation. Welford keeps O(1) state while covering

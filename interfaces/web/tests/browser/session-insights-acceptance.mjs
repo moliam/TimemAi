@@ -353,9 +353,12 @@ async function main() {
       const rows = [...document.querySelectorAll('.session-insight-row')];
       const speed = rows.find(r => r.textContent.includes('tokens/s'));
       const ttft = rows.find(r => r.textContent.includes('TTFT'));
+      const cache = rows.find(r => r.textContent.includes('Cache hit'));
       return !!speed && /avg .* now /.test(speed.textContent)
-        && !!ttft && /avg .* std dev .* current /.test(ttft.textContent);
-    })()`), "speed shows average/latest and TTFT shows average/stddev/current");
+        && !!ttft && /avg .* std dev .* current /.test(ttft.textContent)
+        && !!cache && /avg .* now /.test(cache.textContent)
+        && cache.textContent.includes('59.5%') && cache.textContent.includes('59.1%');
+    })()`), "speed/TTFT/cache show average/latest; cache curve covers the last requests");
     // The mock has 16 requests: TTFT 120..420 ms. Whole-history mean is 0.27s
     // and population sigma is 0.09s; a 15-sample window would show 0.28s.
     assert(await browser.evaluate(`(() => {
@@ -376,13 +379,15 @@ async function main() {
     assert(await browser.evaluate(`document.querySelector('.session-insights-chip-value').textContent.includes('/')`), "collapsed chip shows average/latest for the top item");
 
     // Sparklines: speed/TTFT have 15 samples, CPU/MEM have a 20s window.
-    await waitFor(() => browser.evaluate(`document.querySelectorAll('.session-insight-sparkline').length === 4`), "sparklines render for speed/TTFT/CPU/MEM");
+    await waitFor(() => browser.evaluate(`document.querySelectorAll('.session-insight-sparkline').length === 5`), "sparklines render for speed/TTFT/cache/CPU/MEM");
     assert(await browser.evaluate(`(() => {
       const rows = [...document.querySelectorAll('.session-insight-row')];
       const speed = rows.find(r => r.textContent.includes('tokens/s'));
       const ttft = rows.find(r => r.textContent.includes('TTFT'));
-      return !!speed?.querySelector('polyline') && !!ttft?.querySelector('polyline');
-    })()`), "token speed and TTFT rows carry sparklines");
+      const cache = rows.find(r => r.textContent.includes('Cache hit'));
+      return !!speed?.querySelector('polyline') && !!ttft?.querySelector('polyline')
+        && !!cache?.querySelector('polyline');
+    })()`), "token speed, TTFT, and cache rows carry sparklines");
     await waitFor(() => browser.evaluate(`(() => {
       const rows = [...document.querySelectorAll('.session-insight-row')];
       const cpu = rows.find(r => r.textContent.includes('CPU'));
@@ -464,10 +469,13 @@ async function main() {
       const rows = [...document.querySelectorAll('.session-insight-row')];
       const speed = rows.find(r => r.textContent.includes('tokens/s'));
       const ttft = rows.find(r => r.textContent.includes('TTFT'));
+      const cache = rows.find(r => r.textContent.includes('Cache hit'));
       return !!speed && speed.textContent.includes('平均') && speed.textContent.includes('本次')
         && !!ttft && ttft.textContent.includes('平均 0.27s') && ttft.textContent.includes('标准差 ±0.09s') && ttft.textContent.includes('当前 0.42s')
+        && !!cache && cache.textContent.includes('平均 59.5%') && cache.textContent.includes('本次 59.1%')
         && speed.title.includes('生成速度') && speed.title.includes('全部历史')
-        && ttft.title.includes('首 token 延迟') && ttft.title.includes('全部历史请求');
+        && ttft.title.includes('首 token 延迟') && ttft.title.includes('全部历史请求')
+        && cache.title.includes('缓存命中率') && cache.title.includes('最近 15 次');
     })()`), "Chinese rows show whole-history average/stddev and hover copy states it");
 
     console.log("PASS Session Insights: compact chip, draggable panel, persisted order/position, pin and collapse all verified in a real browser.");
