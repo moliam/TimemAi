@@ -795,14 +795,27 @@ async function main() {
     assert(await browser.evaluate(`!!document.querySelector('.session-insights-chip')`), "compact chip exists in the header");
     assert(await browser.evaluate(`!document.querySelector('.session-insights-panel')`), "panel starts collapsed");
     assert(await browser.evaluate(`!!document.querySelector('.session-insights-shield.full')`), "collapsed header shows the full-protection shield");
+    await browser.evaluate(`document.documentElement.dataset.theme = 'dark'`);
+    await sleep(200);
     const fullShieldStyle = await browser.evaluate(`(() => {
       const el = document.querySelector('.session-insights-shield.full');
       if (!el) return null;
       const style = getComputedStyle(el);
-      return { background: style.backgroundColor, color: style.color };
+      const rect = el.getBoundingClientRect();
+      const silhouette = el.querySelector('svg path');
+      return {
+        background: style.backgroundColor,
+        color: style.color,
+        width: rect.width,
+        height: rect.height,
+        silhouetteFill: silhouette ? getComputedStyle(silhouette).fill : null,
+        silhouetteStroke: silhouette ? getComputedStyle(silhouette).stroke : null,
+      };
     })()`);
-    assert(fullShieldStyle?.background === 'rgb(46, 143, 120)', `full shield uses the health-green field: ${fullShieldStyle?.background}`);
-    assert(fullShieldStyle?.color === 'rgb(255, 255, 255)', `full shield inverts to white lines: ${fullShieldStyle?.color}`);
+    assert(fullShieldStyle?.background === 'rgba(0, 0, 0, 0)', `full shield keeps a transparent button field: ${fullShieldStyle?.background}`);
+    assert(fullShieldStyle?.silhouetteFill === 'rgb(22, 163, 74)', `only the shield silhouette is filled vivid green: ${fullShieldStyle?.silhouetteFill}`);
+    assert(fullShieldStyle?.color === 'rgb(255, 255, 255)' && fullShieldStyle?.silhouetteStroke === 'rgb(255, 255, 255)', `full shield keeps white lines: ${JSON.stringify(fullShieldStyle)}`);
+    assert(fullShieldStyle?.width === 16 && fullShieldStyle?.height === 16, `full shield hit target stays 16x16: ${JSON.stringify(fullShieldStyle)}`);
     const chipTextStyle = await browser.evaluate(`(() => {
       const text = document.querySelector('.session-insights-chip-text');
       const label = document.querySelector('.session-insights-chip-label');
@@ -816,6 +829,39 @@ async function main() {
     })()`);
     assert(chipTextStyle?.alignItems === 'baseline', `chip label and value share a baseline: ${chipTextStyle?.alignItems}`);
     assert(chipTextStyle?.labelInText && chipTextStyle?.valueInText, "chip label and value live in one baseline-aligned row");
+    const shieldPoint = await center(browser, ".session-insights-shield.full");
+    await browser.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: shieldPoint.x, y: shieldPoint.y });
+    await sleep(260);
+    const hoveredShield = await browser.evaluate(`(() => {
+      const el = document.querySelector('.session-insights-shield.full');
+      const style = getComputedStyle(el);
+      const silhouette = el.querySelector('svg path');
+      return { background: style.backgroundColor, fill: getComputedStyle(silhouette).fill, color: style.color };
+    })()`);
+    assert(hoveredShield.background === 'rgb(23, 36, 43)', `hover uses a neutral field instead of a green square: ${JSON.stringify(hoveredShield)}`);
+    assert(hoveredShield.fill === 'rgb(22, 163, 74)' && hoveredShield.color === 'rgb(255, 255, 255)', `hover keeps the green silhouette and white lines: ${JSON.stringify(hoveredShield)}`);
+    await browser.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: 8, y: 8 });
+    await sleep(200);
+    await browser.evaluate(`document.documentElement.dataset.theme = 'light'`);
+    await sleep(200);
+    const lightShield = await browser.evaluate(`(() => {
+      const el = document.querySelector('.session-insights-shield.full');
+      const style = getComputedStyle(el);
+      const silhouette = el.querySelector('svg path');
+      return { background: style.backgroundColor, fill: getComputedStyle(silhouette).fill, color: style.color };
+    })()`);
+    assert(lightShield.background === 'rgba(0, 0, 0, 0)' && lightShield.fill === 'rgb(22, 163, 74)' && lightShield.color === 'rgb(255, 255, 255)', `light theme keeps the green silhouette only: ${JSON.stringify(lightShield)}`);
+    const lightShieldPoint = await center(browser, ".session-insights-shield.full");
+    await browser.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: lightShieldPoint.x, y: lightShieldPoint.y });
+    await sleep(260);
+    const lightHover = await browser.evaluate(`(() => {
+      const el = document.querySelector('.session-insights-shield.full');
+      return { background: getComputedStyle(el).backgroundColor, fill: getComputedStyle(el.querySelector('svg path')).fill };
+    })()`);
+    assert(lightHover.background === 'rgb(238, 245, 247)' && lightHover.fill === 'rgb(22, 163, 74)', `light hover uses the neutral surface and keeps the green silhouette: ${JSON.stringify(lightHover)}`);
+    await browser.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: 8, y: 8 });
+    await browser.evaluate(`document.documentElement.dataset.theme = 'dark'`);
+    await sleep(200);
     assert(await browser.evaluate(`document.querySelector('.session-insights-shield').title.includes('Full protection')`), "shield exposes the current protection status on hover");
     host.setResourceCaps(resourceCaps("applied", "disabled"));
     await waitFor(() => browser.evaluate(`!!document.querySelector('.session-insights-shield.partial')`), "partial-protection shield");
@@ -829,6 +875,34 @@ async function main() {
     await click(browser, shield);
     await waitFor(() => browser.evaluate(`!!document.querySelector('#settings-center .system-resource-caps')`), "shield opens system resource settings");
     assert(await browser.evaluate(`document.querySelector('.settings-center-nav button.active')?.textContent.includes('System')`), "system settings section is active");
+    await browser.evaluate(`document.querySelectorAll('.settings-center-nav button')[1].click()`);
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.endpoint-settings-pane')`), "endpoint settings pane opens for the spacing regression");
+    await sleep(200);
+    const spacing = () => browser.evaluate(`(() => {
+      const content = document.querySelector('.settings-center-content');
+      const nav = document.querySelector('.settings-center-nav');
+      const pane = document.querySelector('.endpoint-settings-pane');
+      const modal = document.querySelector('.settings-center');
+      const nr = nav.getBoundingClientRect();
+      const pr = pane.getBoundingClientRect();
+      const mr = modal.getBoundingClientRect();
+      return {
+        leftGap: pr.left - nr.right,
+        rightGap: mr.right - pr.right,
+        gutter: getComputedStyle(content).scrollbarGutter,
+        scrollbar: content.offsetWidth - content.clientWidth,
+        scrollable: content.scrollHeight > content.clientHeight,
+      };
+    })()`);
+    const spacingAtRest = await spacing();
+    assert(spacingAtRest.gutter === 'stable both-edges', `settings content reserves symmetric scrollbar gutters: ${JSON.stringify(spacingAtRest)}`);
+    assert(Math.abs(spacingAtRest.leftGap - spacingAtRest.rightGap) <= 1, `endpoint pane is centered between the nav and modal edge at rest: ${JSON.stringify(spacingAtRest)}`);
+    await browser.evaluate(`(() => { const spacer = document.createElement('div'); spacer.id = 'spacing-spacer'; spacer.style.height = '1600px'; document.querySelector('.settings-center-content').appendChild(spacer); })()`);
+    await waitFor(() => browser.evaluate(`(() => { const c = document.querySelector('.settings-center-content'); return c.scrollHeight > c.clientHeight; })()`), "endpoint content becomes scrollable");
+    const spacingScrolled = await spacing();
+    assert(spacingScrolled.scrollable, `spacing probe reproduces a scrollable endpoint pane: ${JSON.stringify(spacingScrolled)}`);
+    assert(Math.abs(spacingScrolled.leftGap - spacingScrolled.rightGap) <= 1, `a visible scrollbar does not shift the endpoint pane: ${JSON.stringify(spacingScrolled)}`);
+    await browser.evaluate(`document.querySelector('#spacing-spacer')?.remove()`);
     const closeSettings = await center(browser, ".settings-center-header .icon-button");
     await click(browser, closeSettings);
     await waitFor(() => browser.evaluate(`!document.querySelector('#settings-center')`), "settings closed after shield jump");
