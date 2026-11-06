@@ -5322,7 +5322,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
   gap: 6px;
   border: 1px solid #2a4742;
   border-radius: 7px;
-  padding: 2px 9px 2px 10px;
+  padding: 2px 8px 2px 10px;
   background: linear-gradient(180deg, #1a312d 0%, #142725 100%);
   color: #d3e4de;
   box-shadow: 0 1px 0 #ffffff0a inset, 0 6px 16px #00000024;

@@ -529,6 +529,23 @@ async function main() {
       const title = document.querySelector('.header-model-control').title;
       return !title.includes(' / ') && !title.includes('/ ') && !title.includes(' /');
     })()`), "collapsed header context readout has no padded slash");
+    const headerPillSpacing = await browser.evaluate(`(() => {
+      const control = document.querySelector('.header-model-control');
+      const name = control.querySelector('.header-model-control-name');
+      const path = control.querySelector('.header-model-control-chevron path');
+      const cr = control.getBoundingClientRect();
+      const range = document.createRange();
+      range.selectNodeContents(name);
+      const tr = range.getBoundingClientRect();
+      const pr = path.getBoundingClientRect();
+      const cs = getComputedStyle(control);
+      return {
+        leftGap: tr.left - cr.left,
+        rightGap: cr.right - pr.right,
+        padding: cs.paddingLeft + ' ' + cs.paddingRight,
+      };
+    })()`);
+    assert(Math.abs(headerPillSpacing.leftGap - headerPillSpacing.rightGap) <= 1, `header model pill optical padding is symmetric: ${JSON.stringify(headerPillSpacing)}`);
     assert(await browser.evaluate(`!document.querySelector('.header-actions .header-context-control')`), "the old standalone context chip is gone");
     const modelControl = await center(browser, ".header-model-control");
     await click(browser, modelControl);
