@@ -3500,7 +3500,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .worker-role-restore:hover { background: #ffffff09 !important; color: #d1ddd9 !important; }
 .chat-header { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: 7px; }
 .header-context-actions { min-width: 0; display: flex; align-items: center; gap: 5px; grid-column: 2; grid-row: 1; justify-self: start; }
-.header-session-cluster { width: fit-content; max-width: 420px; min-width: 0; display: grid; grid-column: 1; grid-row: 1; align-self: end; justify-items: start; justify-self: start; text-align: left; }
+.header-session-cluster { width: fit-content; max-width: 420px; min-width: 0; display: grid; grid-column: 1; grid-row: 1; align-self: center; align-items: center; justify-items: start; justify-self: start; text-align: left; }
 .header-model-meta-row { min-width: 0; display: flex; align-items: center; gap: 5px; margin-top: 2px; margin-left: 2px; }
 .header-session-model-row { min-width: 0; display: flex; align-items: center; gap: 8px; }
 .header-model-guide-anchor { position: relative; }
@@ -3515,7 +3515,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 :root[data-theme="light"] .header-model-meta-model { color: #5f7370; }
 .header-session-cluster .header-model { width: auto; max-width: 152px; min-height: 23px; justify-content: flex-start; margin-left: -6px; padding: 2px 6px; color: #697773; font-size: 10px; }
 .header-session-cluster .header-model svg:first-child { color: #6c8c83; }
-.header-actions { grid-column: 3; grid-row: 1; justify-self: end; }
+.header-actions { grid-column: 3; grid-row: 1; align-self: center; align-items: center; justify-self: end; }
 :root[data-theme="light"] .worker-role-panel .worker-role-collapse { border: 0; background: transparent; color: #698078; box-shadow: none; }
 :root[data-theme="light"] .worker-role-panel .worker-role-collapse:hover:not(:disabled),
 :root[data-theme="light"] .worker-role-panel .worker-role-collapse:focus-visible { border: 0; background: #3f796b0d; color: #35675a; box-shadow: 0 0 0 1px #5d8d802b; }

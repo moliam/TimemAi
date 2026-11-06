@@ -513,6 +513,52 @@ async function main() {
     await browser.call("Page.reload");
     await waitFor(() => browser.evaluate(`document.body.textContent.includes('Insights acceptance turn')`), "snapshot after preference reset");
 
+    // Header elements must share one vertical center line at every responsive
+    // width and in both themes: the endpoint/model pill, the insights chip,
+    // the context-actions divider band, and the right-side icon actions.
+    const headerCenterSnapshot = () => browser.evaluate(`(() => {
+      const rect = (element) => {
+        if (!element) return null;
+        const r = element.getBoundingClientRect();
+        return { center: r.top + r.height / 2, height: r.height };
+      };
+      const visibleActionButton = Array.from(document.querySelectorAll('.header-actions .icon-button'))
+        .find((element) => element.getBoundingClientRect().height > 0);
+      const contextActions = document.querySelector('.header-context-actions');
+      const contextVisible = !!contextActions && contextActions.getBoundingClientRect().height > 0;
+      return {
+        header: rect(document.querySelector('.chat-header')),
+        cluster: rect(document.querySelector('.header-session-cluster')),
+        pill: rect(document.querySelector('.header-model-control')),
+        contextActions: contextVisible ? rect(contextActions) : null,
+        insightsChip: contextVisible ? rect(document.querySelector('.session-insights-chip')) : null,
+        actions: rect(document.querySelector('.header-actions')),
+        actionButton: rect(visibleActionButton),
+      };
+    })()`);
+    const headerCentersFor = (snapshot) => ['cluster', 'pill', 'contextActions', 'insightsChip', 'actions', 'actionButton']
+      .map((key) => snapshot[key]?.center)
+      .filter((center) => typeof center === 'number');
+    for (const [width, theme] of [[1440, 'dark'], [1200, 'dark'], [1051, 'dark'], [1050, 'dark'], [900, 'dark'], [720, 'dark'], [390, 'dark'], [1440, 'light']]) {
+      await browser.call("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
+      await browser.evaluate(`document.documentElement.dataset.theme = '${theme}'`);
+      await browser.evaluate(`new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+      await sleep(80);
+      const snapshot = await headerCenterSnapshot();
+      const centers = headerCentersFor(snapshot);
+      assert(centers.length >= 4, `header alignment targets present at ${width}px/${theme}: ${JSON.stringify(snapshot)}`);
+      assert(
+        Math.max(...centers) - Math.min(...centers) <= 1,
+        `header controls share one horizontal center line at ${width}px/${theme}: ${JSON.stringify(snapshot)}`,
+      );
+      assert(
+        Math.abs(snapshot.header.center - centers[0]) <= 1.5,
+        `header controls are centered in the header band at ${width}px/${theme}: ${JSON.stringify(snapshot)}`,
+      );
+    }
+    await browser.call("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await browser.evaluate(`document.documentElement.dataset.theme = 'dark'`);
+
     // Header model/context cluster: collapsed it shows the current model name,
     // reasoning strength and the context donut in that fixed order; expanding it
     // is the single place for model switching, reasoning, context length and tools.
@@ -529,6 +575,36 @@ async function main() {
     })()`), "collapsed order is model name, reasoning, donut");
     assert(await browser.evaluate(`!document.querySelector('.header-model-control .lucide-sparkles')`), "collapsed control has no decorative sparkles");
     assert(await browser.evaluate(`document.querySelector('.header-model-control').title.includes('Context usage 7%')`), "collapsed control exposes context usage on hover");
+    const headerAlignment = await browser.evaluate(`(() => {
+      const rect = (element) => {
+        if (!element) return null;
+        const r = element.getBoundingClientRect();
+        return { top: r.top, bottom: r.bottom, center: r.top + r.height / 2, height: r.height };
+      };
+      const visibleActionButton = Array.from(document.querySelectorAll('.header-actions .icon-button'))
+        .find((element) => element.getBoundingClientRect().height > 0);
+      return {
+        header: rect(document.querySelector('.chat-header')),
+        cluster: rect(document.querySelector('.header-session-cluster')),
+        pill: rect(document.querySelector('.header-model-control')),
+        contextActions: rect(document.querySelector('.header-context-actions')),
+        insightsChip: rect(document.querySelector('.session-insights-chip')),
+        actions: rect(document.querySelector('.header-actions')),
+        actionButton: rect(visibleActionButton),
+      };
+    })()`);
+    const headerCenters = ['cluster', 'pill', 'contextActions', 'insightsChip', 'actions', 'actionButton']
+      .map((key) => headerAlignment[key]?.center)
+      .filter((center) => typeof center === 'number');
+    assert(headerCenters.length === 6, `header alignment probe found every target: ${JSON.stringify(headerAlignment)}`);
+    assert(
+      Math.max(...headerCenters) - Math.min(...headerCenters) <= 1,
+      `all header controls share one horizontal center line: ${JSON.stringify(headerAlignment)}`,
+    );
+    assert(
+      Math.abs(headerAlignment.header.center - headerCenters[0]) <= 1.5,
+      `header controls are centered in the header band: ${JSON.stringify(headerAlignment)}`,
+    );
     assert(await browser.evaluate(`(() => {
       const title = document.querySelector('.header-model-control').title;
       return !title.includes(' / ') && !title.includes('/ ') && !title.includes(' /');
