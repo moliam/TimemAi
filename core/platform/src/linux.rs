@@ -1256,7 +1256,7 @@ pub(super) fn probe_instance_resource_caps() -> ResourceCapsReadiness {
         // threaded subtree (cpu only). Disclose instead of planning a repair
         // that cannot succeed.
         ResourceCapReadiness::Unavailable {
-            reason: "instance root is shared with other processes: the kernel converts a populated root to a threaded subtree that carries only cpu, so memory caps cannot be enforced here".to_string(),
+            reason: crate::api::SHARED_INSTANCE_ROOT_REASON.to_string(),
         }
     } else {
         dimension("memory")

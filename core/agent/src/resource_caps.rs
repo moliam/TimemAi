@@ -27,7 +27,7 @@ pub use crate::os::{
     apply_resource_cap_escalation_plan, instance_resource_caps_application,
     probe_instance_resource_caps, JobResourceUsage, ResourceCapEscalationAction,
     ResourceCapReadiness, ResourceCapStatus, ResourceCapsReadiness, SessionResourceUsage,
-    SystemResourceUsage,
+    SystemResourceUsage, SHARED_INSTANCE_ROOT_REASON,
 };
 
 /// Read-only resource snapshot of one Session's managed job scope. Returns

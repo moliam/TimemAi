@@ -213,7 +213,7 @@ button:disabled { cursor: not-allowed; }
 @keyframes connection-retry { 50% { opacity: .45; transform: scale(.78); } }
 @keyframes upload-button-pulse { 50% { box-shadow: 0 0 0 3px #4bbaa522; } }
 @keyframes upload-dot-pulse { 50% { opacity: .35; transform: scale(.72); } }
-@media (max-width: 1050px) { .app-shell { grid-template-columns: 214px minmax(0, 1fr); }.side-panel-backdrop { display: block; position: fixed; z-index: 3; inset: 0; width: 100%; border: 0; background: #02060973; }.toolrepo-side-panel { position: fixed; z-index: 4; right: 0; top: 0; bottom: 0; width: min(360px, 88vw); box-shadow: -16px 0 40px #0006; }.chat-scroll, .composer-wrap { padding-left: 22px; padding-right: 22px; } }
+@media (width < 1051px) { .app-shell { grid-template-columns: 214px minmax(0, 1fr); }.side-panel-backdrop { display: block; position: fixed; z-index: 3; inset: 0; width: 100%; border: 0; background: #02060973; }.toolrepo-side-panel { position: fixed; z-index: 4; right: 0; top: 0; bottom: 0; width: min(360px, 88vw); box-shadow: -16px 0 40px #0006; }.chat-scroll, .composer-wrap { padding-left: 22px; padding-right: 22px; } }
 @media (max-width: 1320px) {
   .header-telemetry-unit { display: none; }
   .header-ttft { padding-left: 6px; }
@@ -532,7 +532,7 @@ button:disabled { cursor: not-allowed; }
 
 @media (max-width: 720px) { .user-message-navigation { left: 6px; }.user-message-navigation button { width: 30px; height: 30px; border-radius: 8px; } }
 @media (prefers-reduced-motion: reduce) { .chat-scroll { scroll-behavior: auto; }.live-turn-usage, .pulse, .connection.offline, .session-row.working, .session-working-icon, .load-history.loading svg, .send-button.sending svg, .stop-button.sending svg, .decision-actions .primary.sending svg, .completion-toolgen.sending svg, .turn-assistant-frame.working, .working-chip.toolgen-working svg, .turn-work-item, .toolrepo-header-button.count-pulse .toolrepo-header-count, .attach-button.uploading:disabled, .attach-button.uploading svg, .toolrepo-search-pending, .toolrepo-empty.searching svg, .upload-dot { animation: none; }.mcp-session-toggle-thumb { transition: none; }.user-message-navigation, .user-message-navigation button, .session-row .session, .session-expand { transition: none; } }
-@media (max-width: 1050px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 214px minmax(0, 1fr); }.side-panel-backdrop { display: block; position: fixed; z-index: 3; inset: 0; width: 100%; border: 0; background: #02060973; }.toolrepo-side-panel { position: fixed; z-index: 4; right: 0; top: 0; bottom: 0; width: min(360px, 88vw); } }
+@media (width < 1051px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 214px minmax(0, 1fr); }.side-panel-backdrop { display: block; position: fixed; z-index: 3; inset: 0; width: 100%; border: 0; background: #02060973; }.toolrepo-side-panel { position: fixed; z-index: 4; right: 0; top: 0; bottom: 0; width: min(360px, 88vw); } }
 @media (max-width: 720px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 1fr; } }
 @media (max-width: 720px) { .session-runtime-grid { grid-template-columns: 1fr; } }
 @media (max-width: 720px) { .live-turn-usage { padding-left: 10px; } }
@@ -1987,7 +1987,7 @@ body {
 :root[data-theme="light"] .worker-role-panel .worker-role-edit:hover:not(:disabled) { border-color: #aebfc6; background: #eaf0f2; color: #344c56; }
 :root[data-theme="light"] .worker-role-panel .worker-role-delete:hover:not(:disabled) { border-color: #dab3b0; background: #f8eae9; color: #9e4c47; }
 :root[data-theme="light"] .worker-role-panel .worker-role-action:focus-visible { border-color: #6f9b8e; box-shadow: 0 0 0 2px #6f9b8e33; color: #315f52; }
-@media (max-width: 1050px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 200px minmax(0, 1fr); }.mobile-role-button { display: grid; }.worker-role-panel .worker-role-close { display: grid; }.role-panel-backdrop { display: block; position: fixed; z-index: 13; inset: 0; width: 100%; border: 0; background: #02060999; }.worker-role-panel { visibility: hidden; position: fixed; z-index: 14; top: 0; right: 0; bottom: 0; width: min(320px, 90vw); transform: translateX(105%); transition: transform .2s ease, visibility 0s linear .2s; box-shadow: -18px 0 42px #0008; }.worker-role-panel.mobile-open { visibility: visible; transform: translateX(0); transition-delay: 0s; } }
+@media (width < 1051px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 200px minmax(0, 1fr); }.mobile-role-button { display: grid; }.worker-role-panel .worker-role-close { display: grid; }.role-panel-backdrop { display: block; position: fixed; z-index: 13; inset: 0; width: 100%; border: 0; background: #02060999; }.worker-role-panel { visibility: hidden; position: fixed; z-index: 14; top: 0; right: 0; bottom: 0; width: min(320px, 90vw); transform: translateX(105%); transition: transform .2s ease, visibility 0s linear .2s; box-shadow: -18px 0 42px #0008; }.worker-role-panel.mobile-open { visibility: visible; transform: translateX(0); transition-delay: 0s; } }
 @media (max-width: 720px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 1fr; } }
 
 .runtime-restart-divider { width: 100%; max-width: 760px; margin: 4px auto 30px; display: grid; grid-template-columns: minmax(28px, 1fr) auto minmax(28px, 1fr); align-items: center; gap: 14px; color: #83949d; text-align: center; }
@@ -3422,6 +3422,12 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: var(--ma
   .sidebar,
   .worker-role-panel,
   .toolrepo-side-panel { position: relative; }
+  /* Keep the right-hand panels in the third column explicitly. If a future
+     grid child or an accidental static-position rule appears, auto-placement
+     must never push the role panel into an implicit second row under the
+     left sidebar. */
+  .worker-role-panel,
+  .toolrepo-side-panel { grid-column: 3; grid-row: 1; }
 }
 .sidebar-resize-handle { position: absolute; z-index: 7; top: 0; bottom: 0; width: 10px; appearance: none; border: 0; border-radius: 0; padding: 0; outline: 0; background: transparent; box-shadow: none; color: transparent; cursor: col-resize; touch-action: none; }
 /* The right resize control is a button inside the role panel. Keep it isolated from
@@ -3534,7 +3540,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 :root[data-theme="light"] .worker-role-restore:hover { background: #263b3509 !important; color: #2f554a !important; }
 :root[data-theme="light"] .collapsed-memory { color: #71817b; }
 :root[data-theme="light"] .header-session-cluster .header-model { color: #71807b; }
-@media (max-width: 1050px) {
+@media (width < 1051px) {
   .sidebar-resize-handle,
   .desktop-sidebar-toggle,
   .collapsed-brand,
@@ -3764,7 +3770,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 :root[data-theme="light"] .sidebar-settings-button { color: #687a74; }
 :root[data-theme="light"] .sidebar-settings-button:hover:not(:disabled) { background: #263b3509; color: #2f554a; }
 :root[data-theme="light"] .settings-runtime-status { color: #667973; }
-@media (max-width: 1050px) {
+@media (width < 1051px) {
   .sidebar-settings-button { justify-content: flex-start; }
 }
 
@@ -6281,6 +6287,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .resource-cap-rows { display: flex; flex-direction: column; gap: 10px; }
 .resource-cap-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .resource-cap-desc { flex-basis: 100%; }
+.resource-cap-hint { flex-basis: 100%; margin-top: -4px; color: #b08a5a; font-size: 11px; line-height: 1.5; }
 .resource-cap-switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
 .resource-cap-switch input { position: absolute; opacity: 0; pointer-events: none; }
 .resource-cap-slider { width: 34px; height: 19px; border-radius: 999px; background: #303936; position: relative; transition: background 0.15s ease; flex: none; }
@@ -6298,6 +6305,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .resource-cap-row.is-inert .resource-cap-select { opacity: 0.4; }
 .resource-cap-row.is-inert .resource-cap-slider { opacity: 0.35; }
 .resource-cap-row.is-inert .resource-cap-desc { opacity: 0.55; }
+:root[data-theme="light"] .resource-cap-hint { color: #8a6d2f; }
 /* Native title only: the settings pane scrolls (and .settings-center clips),
    so an absolutely positioned custom tooltip would be cut off at the pane
    edge. Keep the icon focusable for keyboard/AT users. */

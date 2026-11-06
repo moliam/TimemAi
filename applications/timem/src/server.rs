@@ -3126,6 +3126,11 @@ struct WireResourceCapDimension {
     /// the byte bound), for display.
     limit: Option<String>,
     reason: Option<String>,
+    /// Stable machine-readable blocker for locally actionable guidance.
+    /// Today: "shared-instance-root" when the login session cgroup is shared
+    /// with unrelated processes, which makes memory caps unenforceable until
+    /// Timem runs in its own scope.
+    blocker: Option<String>,
     /// True when root can make this dimension usable right now.
     escalation_required: bool,
 }
@@ -3148,6 +3153,24 @@ fn wire_cap_dimension(
         readiness,
         agent_core::resource_caps::ResourceCapReadiness::NeedsEscalation { .. }
     );
+    // A structural readiness verdict is more truthful than the low-level
+    // kernel write error that follows from it (for example EACCES on a
+    // controller that the kernel cannot enable in a threaded subtree). The
+    // apply error stays the fallback when readiness itself is fine.
+    let readiness_reason = match readiness {
+        agent_core::resource_caps::ResourceCapReadiness::Unavailable { reason } => {
+            Some(reason.clone())
+        }
+        _ => None,
+    };
+    let blocker = match readiness {
+        agent_core::resource_caps::ResourceCapReadiness::Unavailable { reason }
+            if reason == agent_core::resource_caps::SHARED_INSTANCE_ROOT_REASON =>
+        {
+            Some("shared-instance-root".to_string())
+        }
+        _ => None,
+    };
     let (kernel, reason, limit) = match applied {
         Some(agent_core::resource_caps::ResourceCapStatus::Applied { limit }) => {
             ("applied", None, Some(limit.clone()))
@@ -3156,9 +3179,11 @@ fn wire_cap_dimension(
         Some(agent_core::resource_caps::ResourceCapStatus::Unsupported) => {
             ("unsupported", None, None)
         }
-        Some(agent_core::resource_caps::ResourceCapStatus::Unavailable { reason }) => {
-            ("unavailable", Some(reason.clone()), None)
-        }
+        Some(agent_core::resource_caps::ResourceCapStatus::Unavailable { reason }) => (
+            "unavailable",
+            readiness_reason.clone().or_else(|| Some(reason.clone())),
+            None,
+        ),
         None => (
             "unavailable",
             Some("caps have not been applied yet".to_string()),
@@ -3171,6 +3196,7 @@ fn wire_cap_dimension(
         kernel: kernel.to_string(),
         limit,
         reason,
+        blocker,
         escalation_required,
     }
 }

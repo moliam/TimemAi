@@ -296,6 +296,7 @@ import {
   reconcileRuntimeDrafts,
   resourceCapability,
   resourceCapabilityIsInert,
+  resourceCapHintKind,
   runtimeOptionLabel,
   sessionRuntimeOptions,
   shouldAutoRevealSessionApiKey,
@@ -1058,7 +1059,7 @@ function TimemApp() {
 
   const startSidebarResize = useCallback(
     (side: "left" | "right", event: React.PointerEvent<HTMLButtonElement>) => {
-      if (window.matchMedia("(max-width: 1050px)").matches) return;
+      if (window.matchMedia("(width < 1051px)").matches) return;
       event.preventDefault();
       const startX = event.clientX;
       const startWidth =
@@ -15945,6 +15946,32 @@ const SettingsCenter = memo(function SettingsCenter(
   );
   const resourceCpuCapability = resourceCapability(resourceCaps?.cpu);
   const resourceMemCapability = resourceCapability(resourceCaps?.mem);
+  const resourceCapHint = (
+    dimension: "cpu" | "mem",
+    capability: ReturnType<typeof resourceCapability>,
+  ): string => {
+    const kind = resourceCapHintKind(
+      dimension === "cpu" ? resourceCaps?.cpu : resourceCaps?.mem,
+    );
+    if (kind === null || capability === "manageable" || capability === "needs-permission") {
+      return "";
+    }
+    if (kind === "shared-instance-root") {
+      // The shared-root blocker is memory-specific: CPU stays enforceable in
+      // the kernel's threaded subtree.
+      return dimension === "mem" ? t("system.resourceMemSharedRootHint") : "";
+    }
+    if (kind === "unsupported") {
+      return dimension === "cpu"
+        ? t("system.resourceCpuUnsupportedHint")
+        : t("system.resourceMemUnsupportedHint");
+    }
+    return dimension === "cpu"
+      ? t("system.resourceCpuUnavailableHint")
+      : t("system.resourceMemUnavailableHint");
+  };
+  const resourceCpuHint = resourceCapHint("cpu", resourceCpuCapability);
+  const resourceMemHint = resourceCapHint("mem", resourceMemCapability);
   // The switch reflects enforcement, not the saved desire: a dimension the
   // kernel cannot manage right now renders OFF even when the stored flag says
   // on. "needs-permission" stays interactive and asks for a one-shot password
@@ -16539,10 +16566,7 @@ const SettingsCenter = memo(function SettingsCenter(
                         title: t("system.resourceCpuCapTitle"),
                         aria: t("system.resourceCpuCapAria"),
                         desc: t("system.resourceCpuCapDesc"),
-                        hint:
-                          resourceCpuCapability === "unavailable"
-                            ? t("system.resourceCpuUnavailableHint")
-                            : t("system.resourceCpuUnsupportedHint"),
+                        hint: resourceCpuHint,
                         capability: resourceCpuCapability,
                         enabled: resourceCpuEnabledDraft,
                         setEnabled: (enabled: boolean) =>
@@ -16555,10 +16579,7 @@ const SettingsCenter = memo(function SettingsCenter(
                         title: t("system.resourceMemCapTitle"),
                         aria: t("system.resourceMemCapAria"),
                         desc: t("system.resourceMemCapDesc"),
-                        hint:
-                          resourceMemCapability === "unavailable"
-                            ? t("system.resourceMemUnavailableHint")
-                            : t("system.resourceMemUnsupportedHint"),
+                        hint: resourceMemHint,
                         capability: resourceMemCapability,
                         enabled: resourceMemEnabledDraft,
                         setEnabled: (enabled: boolean) =>
@@ -16630,6 +16651,9 @@ const SettingsCenter = memo(function SettingsCenter(
                         <span className="system-select-desc resource-cap-desc">
                           {row.desc}
                         </span>
+                        {row.hint && resourceCapabilityIsInert(row.capability) && (
+                          <small className="resource-cap-hint">{row.hint}</small>
+                        )}
                       </div>
                     ))}
                   </div>

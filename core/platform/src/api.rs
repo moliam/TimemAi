@@ -1338,6 +1338,12 @@ fn platform_system_resource_usage() -> std::io::Result<Option<SystemResourceUsag
     Ok(None)
 }
 
+/// Fixed, machine-consumable reason for the shared-instance-root memory
+/// limitation. The login session cgroup already holds unrelated processes, so
+/// enabling a controller converts it to a threaded subtree that carries only
+/// cpu; memory caps cannot be enforced until Timem runs in its own scope.
+pub const SHARED_INSTANCE_ROOT_REASON: &str = "instance root is shared with other processes: the kernel converts a populated root to a threaded subtree that carries only cpu, so memory caps cannot be enforced here";
+
 /// One cap dimension's escalation-free availability right now.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResourceCapReadiness {

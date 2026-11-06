@@ -24003,6 +24003,7 @@ fn resource_caps_startup_summary_reports_both_dimensions() {
             kernel: "applied".to_string(),
             limit: Some("2380000 100000".to_string()),
             reason: None,
+            blocker: None,
             escalation_required: false,
         },
         mem: WireResourceCapDimension {
@@ -24011,6 +24012,7 @@ fn resource_caps_startup_summary_reports_both_dimensions() {
             kernel: "unavailable".to_string(),
             limit: None,
             reason: Some("shared cgroup root is not owned by this instance".to_string()),
+            blocker: None,
             escalation_required: false,
         },
         scope: "/sys/fs/cgroup/test.scope".to_string(),
@@ -24036,6 +24038,7 @@ fn resource_caps_startup_summary_marks_disabled_dimensions() {
             kernel: "disabled".to_string(),
             limit: None,
             reason: None,
+            blocker: None,
             escalation_required: false,
         },
         mem: WireResourceCapDimension {
@@ -24044,6 +24047,7 @@ fn resource_caps_startup_summary_marks_disabled_dimensions() {
             kernel: "applied".to_string(),
             limit: Some("123456".to_string()),
             reason: None,
+            blocker: None,
             escalation_required: false,
         },
         scope: String::new(),
@@ -24057,6 +24061,36 @@ fn resource_caps_startup_summary_marks_disabled_dimensions() {
 }
 
 #[test]
+fn wire_cap_dimension_prefers_structural_readiness_reason_and_marks_shared_root() {
+    let applied = agent_core::resource_caps::ResourceCapStatus::Unavailable {
+        reason: "clearing the existing bound failed: EACCES".to_string(),
+    };
+    let readiness = agent_core::resource_caps::ResourceCapReadiness::Unavailable {
+        reason: agent_core::resource_caps::SHARED_INSTANCE_ROOT_REASON.to_string(),
+    };
+    let dimension = wire_cap_dimension(true, 85.0, Some(&applied), &readiness);
+    assert_eq!(dimension.kernel, "unavailable");
+    assert_eq!(
+        dimension.reason.as_deref(),
+        Some(agent_core::resource_caps::SHARED_INSTANCE_ROOT_REASON)
+    );
+    assert_eq!(dimension.blocker.as_deref(), Some("shared-instance-root"));
+    assert!(!dimension.escalation_required);
+}
+
+#[test]
+fn wire_cap_dimension_keeps_apply_error_when_readiness_is_ready() {
+    let applied = agent_core::resource_caps::ResourceCapStatus::Unavailable {
+        reason: "write failed: EACCES".to_string(),
+    };
+    let readiness = agent_core::resource_caps::ResourceCapReadiness::Ready;
+    let dimension = wire_cap_dimension(true, 85.0, Some(&applied), &readiness);
+    assert_eq!(dimension.reason.as_deref(), Some("write failed: EACCES"));
+    assert!(dimension.blocker.is_none());
+    assert!(!dimension.escalation_required);
+}
+
+#[test]
 fn resource_caps_startup_summary_humanizes_applied_limits() {
     let caps = WireResourceCaps {
         cpu: WireResourceCapDimension {
@@ -24065,6 +24099,7 @@ fn resource_caps_startup_summary_humanizes_applied_limits() {
             kernel: "applied".to_string(),
             limit: Some("2380000 100000".to_string()),
             reason: None,
+            blocker: None,
             escalation_required: false,
         },
         mem: WireResourceCapDimension {
@@ -24073,6 +24108,7 @@ fn resource_caps_startup_summary_humanizes_applied_limits() {
             kernel: "applied".to_string(),
             limit: Some("high=24063819806; max=28310376243".to_string()),
             reason: None,
+            blocker: None,
             escalation_required: false,
         },
         scope: String::new(),

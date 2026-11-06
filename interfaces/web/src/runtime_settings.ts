@@ -116,7 +116,9 @@ export type ResourceCapability =
 ///   switch stays interactive and a toggle prompts for a one-shot password.
 /// - "manageable": the kernel facility is present and usable now.
 export function resourceCapability(
-  dimension: { kernel: string; escalation_required: boolean } | undefined,
+  dimension:
+    | { kernel: string; escalation_required: boolean; blocker?: string | null }
+    | undefined,
 ): ResourceCapability {
   if (!dimension) return "manageable";
   if (dimension.kernel === "unsupported") return "unsupported";
@@ -124,6 +126,30 @@ export function resourceCapability(
     return dimension.escalation_required ? "needs-permission" : "unavailable";
   }
   return "manageable";
+}
+
+export type ResourceCapHintKind =
+  | "unsupported"
+  | "unavailable"
+  | "shared-instance-root";
+
+/// Picks the explanation a dimension should surface. The host reports a
+/// structural blocker for limits the kernel can never apply in the current
+/// layout (a session cgroup shared with other processes becomes a CPU-only
+/// threaded subtree), so the UI can name the real cause and the remedy
+/// instead of calling the whole facility unsupported. Permission-gated
+/// dimensions return null: their switch opens the one-shot password dialog.
+export function resourceCapHintKind(
+  dimension:
+    | { kernel: string; escalation_required: boolean; blocker?: string | null }
+    | undefined,
+): ResourceCapHintKind | null {
+  const capability = resourceCapability(dimension);
+  if (capability === "unsupported") return "unsupported";
+  if (capability !== "unavailable") return null;
+  return dimension?.blocker === "shared-instance-root"
+    ? "shared-instance-root"
+    : "unavailable";
 }
 
 /// Both non-actionable states render the same inert controls. They differ only

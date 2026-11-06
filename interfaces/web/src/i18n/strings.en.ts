@@ -691,6 +691,8 @@ export const en: Strings = {
     resourceCpuUnavailableHint: "CPU cap management is temporarily unavailable on this system",
     resourceMemUnavailableHint: "Memory cap management is temporarily unavailable on this system",
     resourceMemUnsupportedHint: "Memory cap management is not supported on this system",
+    resourceMemSharedRootHint:
+      "This login session's cgroup is shared with other processes, so the kernel converted it to a CPU-only threaded subtree and memory caps cannot be enabled. Start Timem in its own scope (for example, systemd-run --user --scope timem) and retry.",
     resourceCapsEscalateTitle: "Administrator authorization required",
     resourceCapsEscalateDesc: "Enabling the selected resource cap requires administrator permission. Enter the administrator password for a one-time authorization; it is used only for this action and is never stored or logged.",
     resourceCapsEscalatePassword: "Administrator password",

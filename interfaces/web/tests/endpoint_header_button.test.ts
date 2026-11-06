@@ -103,7 +103,7 @@ describe("header endpoint selector", () => {
     );
     expect(styles).not.toContain("writing-mode: vertical-rl");
     expect(styles).toMatch(
-      /@media \(max-width: 1050px\) \{[\s\S]*\.collapsed-brand,[\s\S]*\.collapsed-session-card,[\s\S]*display: none;/,
+      /@media \(width < 1051px\) \{[\s\S]*\.collapsed-brand,[\s\S]*\.collapsed-session-card,[\s\S]*display: none;/,
     );
   });
 

@@ -5,6 +5,7 @@ import {
   RESOURCE_CAP_PERCENT_OPTIONS,
   resourceCapability,
   resourceCapabilityIsInert,
+  resourceCapHintKind,
 } from "../src/runtime_settings";
 import { zh } from "../src/i18n/strings.zh";
 import { en } from "../src/i18n/strings.en";
@@ -51,6 +52,30 @@ describe("resource caps ui", () => {
     expect(resourceCapabilityIsInert("unsupported")).toBe(true);
     expect(resourceCapabilityIsInert("manageable")).toBe(false);
     expect(resourceCapabilityIsInert("needs-permission")).toBe(false);
+  });
+
+  it("maps the shared session-root blocker to actionable guidance", () => {
+    expect(
+      resourceCapHintKind({
+        kernel: "unavailable",
+        escalation_required: false,
+        blocker: "shared-instance-root",
+      }),
+    ).toBe("shared-instance-root");
+    expect(
+      resourceCapHintKind({ kernel: "unavailable", escalation_required: false }),
+    ).toBe("unavailable");
+    expect(
+      resourceCapHintKind({ kernel: "unsupported", escalation_required: false }),
+    ).toBe("unsupported");
+    // Permission-gated dimensions stay interactive and use the password
+    // dialog; they must never be mislabelled as unsupported.
+    expect(
+      resourceCapHintKind({ kernel: "unavailable", escalation_required: true }),
+    ).toBeNull();
+    expect(
+      resourceCapHintKind({ kernel: "applied", escalation_required: false }),
+    ).toBeNull();
   });
 
   it("wires switches, preset selects, and the initial capability state end to end", () => {
@@ -103,6 +128,9 @@ describe("resource caps ui", () => {
     expect(mainSource).toContain("resourceMemUnsupportedHint");
     expect(mainSource).toContain("resourceCpuUnavailableHint");
     expect(mainSource).toContain("resourceMemUnavailableHint");
+    expect(mainSource).toContain("resourceMemSharedRootHint");
+    expect(mainSource).toContain("resourceCapHintKind");
+    expect(mainSource).toContain("resource-cap-hint");
     expect(mainSource).toContain("title={row.hint}");
     // The settings pane scrolls and clips, so the old absolutely positioned
     // CSS tooltip was cut off; only the native title remains.
@@ -178,6 +206,7 @@ describe("resource caps ui", () => {
       "resourceCpuUnavailableHint",
       "resourceMemUnsupportedHint",
       "resourceMemUnavailableHint",
+      "resourceMemSharedRootHint",
       "resourceCapsSave",
       "resourceCapsInvalid",
       "resourceCapsErrorTitle",
