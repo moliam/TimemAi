@@ -930,6 +930,11 @@ async function main() {
     await browser.evaluate(`localStorage.setItem('timem-web-locale-v1','zh')`);
     await browser.call("Page.reload");
     await waitFor(() => browser.evaluate(`document.body.textContent.includes('Insights acceptance turn')`), "snapshot after Chinese locale");
+    // The sidebar always starts collapsed after a reload, so verify the
+    // accessible names now and the visible expanded title at the end.
+    assert(await browser.evaluate(`document.querySelector('.worker-role-panel')?.getAttribute('aria-label') === '角色'`), "right sidebar accessible name must read 角色 in Chinese");
+    assert(await browser.evaluate(`document.querySelector('.worker-role-restore')?.getAttribute('aria-label') === '显示角色面板'`), "collapsed right sidebar control must be localized in Chinese");
+    assert(await browser.evaluate(`document.querySelector('.mobile-role-button')?.getAttribute('aria-label') === '打开角色面板'`), "mobile role entry must be localized in Chinese");
     const chipZh = await center(browser, ".session-insights-chip");
     await click(browser, chipZh);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.session-insights-panel')`), "panel opens in Chinese");
@@ -960,6 +965,11 @@ async function main() {
         && ttft.title.includes('首 token 延迟') && ttft.title.includes('全部历史请求')
         && cache.title.includes('缓存命中率') && cache.title.includes('最近 15 次');
     })()`), "Chinese rows show whole-history average/stddev and hover copy states it");
+
+    // Expand the sidebar last: its visible header must render 角色, not the
+    // old hard-coded English title.
+    await browser.evaluate(`document.querySelector('.worker-role-restore')?.click()`);
+    await waitFor(() => browser.evaluate(`document.querySelector('.worker-role-panel > header > span')?.textContent?.trim() === '角色'`), "right sidebar title must read 角色 in Chinese");
 
     console.log("PASS Session Insights: compact chip, draggable panel, persisted order/position, pin and collapse all verified in a real browser.");
   } finally {

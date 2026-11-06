@@ -5350,8 +5350,8 @@ function TimemApp() {
               </button>
               <button
                 type="button"
-                title="Open worker roles"
-                aria-label="Open worker roles"
+                title={t("roles.openPanel")}
+                aria-label={t("roles.openPanel")}
                 className="icon-button mobile-role-button"
                 aria-expanded={showRoles}
                 aria-controls="worker-role-panel"
@@ -6936,14 +6936,14 @@ function WorkerRolePanel({
     <aside
       id="worker-role-panel"
       className={`worker-role-panel ${collapsed ? "collapsed" : ""} ${mobileOpen ? "mobile-open" : ""}`}
-      aria-label="Worker roles"
+      aria-label={t("roles.title")}
     >
       {collapsed ? (
         <button
           type="button"
           className="worker-role-restore"
-          title="Show worker roles"
-          aria-label="Show worker roles"
+          title={t("roles.showPanel")}
+          aria-label={t("roles.showPanel")}
           onClick={onRestore}
         >
           <ChevronLeft size={15} />
@@ -6953,20 +6953,20 @@ function WorkerRolePanel({
           <button
             type="button"
             className="sidebar-resize-handle right"
-            title="Resize worker roles"
-            aria-label="Resize worker roles"
+            title={t("roles.resizePanel")}
+            aria-label={t("roles.resizePanel")}
             onPointerDown={onResizeStart}
           />
           <header>
             <span>
-              <BriefcaseBusiness size={16} /> Roles
+              <BriefcaseBusiness size={16} /> {t("roles.title")}
             </span>
             <div>
               <button
                 type="button"
                 className="desktop-sidebar-toggle worker-role-collapse"
-                title="Hide worker roles"
-                aria-label="Hide worker roles"
+                title={t("roles.hidePanel")}
+                aria-label={t("roles.hidePanel")}
                 onClick={onCollapse}
               >
                 <ChevronRight size={15} />

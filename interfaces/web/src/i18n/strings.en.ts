@@ -147,6 +147,7 @@ export const en: Strings = {
   },
   roles: {
     panel: "Role",
+    title: "Roles",
     appliedAria: "Roles: {names}",
     dragRole: "Drag {name}",
     cancelDelete: "Cancel deleting roles",
@@ -164,7 +165,10 @@ export const en: Strings = {
     createGroup: "Group",
     groupNameAria: "Role group name",
     descEyebrow: "ROLE DESCRIPTION",
+    showPanel: "Show worker roles",
     hidePanel: "Hide worker roles",
+    resizePanel: "Resize worker roles",
+    openPanel: "Open worker roles",
     editRole: "Edit role",
     newRole: "New role",
     namePlaceholder: "Name, e.g. Rigorous reviewer",
