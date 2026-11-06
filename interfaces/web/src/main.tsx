@@ -18188,7 +18188,7 @@ function SortableEndpointChainRow({
       {...sortable.attributes}
       {...sortable.listeners}
       role="group"
-      className={`endpoint-chain-row in-chain ${sortable.isDragging ? "dragging" : ""}`}
+      className={`endpoint-chain-row in-chain ${current ? "current" : ""} ${sortable.isDragging ? "dragging" : ""}`}
       style={{
         transform: CSS.Transform.toString(sortable.transform),
         transition: sortable.transition,
@@ -18262,16 +18262,6 @@ function SortableEndpointChainRow({
           />
         </span>
       </span>
-      {current && (
-        <span
-          className="endpoint-chain-active-badge"
-          role="img"
-          aria-label={t("endpoints.chainCurrent")}
-          title={t("endpoints.chainCurrent")}
-        >
-          <Check size={9} strokeWidth={2.6} aria-hidden="true" />
-        </span>
-      )}
       <button
         type="button"
         className="endpoint-chain-remove"

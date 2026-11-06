@@ -373,6 +373,10 @@ async function startBrowser(url) {
     "--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
     "--no-first-run", "--no-default-browser-check",
     "--disable-background-networking", "--disable-component-update", "--disable-sync",
+    // Headless otherwise reports (hover: none), which would skip the real
+    // desktop hover-reveal behavior under test; force desktop hover/pointer
+    // capabilities to match the production environment.
+    "--blink-settings=primaryHoverType=2,availableHoverType=2,primaryPointerType=4,availablePointerType=4",
     "--window-size=1440,1000", "about:blank",
   ], { stdio: ["ignore", "ignore", "pipe"] });
   const startup = createStartupDiagnostics(child, chrome);
@@ -559,6 +563,13 @@ async function main() {
       };
     })()`);
     assert(Math.abs(headerClusterSpacing.gapSidebarToPill - headerClusterSpacing.gapPillToDivider) <= 1.5, `model pill sits symmetrically between the sidebar edge and the insights divider: ${JSON.stringify(headerClusterSpacing)}`);
+    await waitFor(() => browser.evaluate(`document.fonts.check('600 11px "IBM Plex Mono"')`), "bold IBM Plex Mono face loads");
+    const modelNameFont = await browser.evaluate(`(() => {
+      const name = document.querySelector('.header-model-control-name');
+      const style = getComputedStyle(name);
+      return { family: style.fontFamily, weight: style.fontWeight, loaded: document.fonts.check('600 11px "IBM Plex Mono"') };
+    })()`);
+    assert(modelNameFont.family.includes('IBM Plex Mono') && modelNameFont.weight === '600' && modelNameFont.loaded, `model name renders in bold IBM Plex Mono: ${JSON.stringify(modelNameFont)}`);
     assert(await browser.evaluate(`!document.querySelector('.header-actions .header-context-control')`), "the old standalone context chip is gone");
     const modelControl = await center(browser, ".header-model-control");
     await click(browser, modelControl);
@@ -707,6 +718,19 @@ async function main() {
     assert(!endpointPanelLayout.overlap, `current check must not collide with remove: ${JSON.stringify(endpointPanelLayout)}`);
     assert(endpointPanelLayout.close.width === 27 && endpointPanelLayout.close.height === 27, `endpoint close target: ${JSON.stringify(endpointPanelLayout)}`);
     assert(endpointPanelLayout.badgeGeometry.length >= 1, `active endpoint badge present: ${JSON.stringify(endpointPanelLayout)}`);
+    const selectedCurrentRow = await browser.evaluate(`(() => {
+      const row = document.querySelector('.endpoint-chain-col.selected .endpoint-chain-row.current');
+      if (!row) return null;
+      const style = getComputedStyle(row);
+      return {
+        badges: row.querySelectorAll('.endpoint-chain-active-badge').length,
+        borderColor: style.borderTopColor,
+        shadow: style.boxShadow,
+      };
+    })()`);
+    assert(selectedCurrentRow, "selected chain marks the in-use endpoint");
+    assert(selectedCurrentRow.badges === 0, `the in-use selected row does not use a check badge: ${JSON.stringify(selectedCurrentRow)}`);
+    assert(selectedCurrentRow.borderColor === 'rgb(59, 130, 246)' && selectedCurrentRow.shadow !== 'none', `the in-use selected row glows the same blue as the working session dot: ${JSON.stringify(selectedCurrentRow)}`);
     for (const geo of endpointPanelLayout.badgeGeometry) {
       assert(geo.paddingLeft === '0px', `badge has no inherited padding: ${JSON.stringify(geo)}`);
       assert(geo.background !== 'rgba(0, 0, 0, 0)' && geo.color === 'rgb(255, 255, 255)', `badge is a solid green circle with a white check: ${JSON.stringify(geo)}`);
@@ -849,7 +873,7 @@ async function main() {
     assert(fullShieldStyle?.background === 'rgba(0, 0, 0, 0)', `full shield keeps a transparent button field: ${fullShieldStyle?.background}`);
     assert(fullShieldStyle?.silhouetteFill === 'rgb(22, 163, 74)', `only the shield silhouette is filled vivid green: ${fullShieldStyle?.silhouetteFill}`);
     assert(fullShieldStyle?.color === 'rgb(255, 255, 255)' && fullShieldStyle?.silhouetteStroke === 'rgb(255, 255, 255)', `full shield keeps white lines: ${JSON.stringify(fullShieldStyle)}`);
-    assert(fullShieldStyle?.width === 16 && fullShieldStyle?.height === 16, `full shield hit target stays 16x16: ${JSON.stringify(fullShieldStyle)}`);
+    assert(fullShieldStyle?.width === 20 && fullShieldStyle?.height === 20, `full shield hit target stays 20x20: ${JSON.stringify(fullShieldStyle)}`);
     const chipTextStyle = await browser.evaluate(`(() => {
       const text = document.querySelector('.session-insights-chip-text');
       const label = document.querySelector('.session-insights-chip-label');
@@ -937,6 +961,38 @@ async function main() {
     assert(spacingScrolled.scrollable, `spacing probe reproduces a scrollable endpoint pane: ${JSON.stringify(spacingScrolled)}`);
     assert(Math.abs(spacingScrolled.leftGap - spacingScrolled.rightGap) <= 1, `a visible scrollbar does not shift the endpoint pane: ${JSON.stringify(spacingScrolled)}`);
     await browser.evaluate(`document.querySelector('#spacing-spacer')?.remove()`);
+    const rowSurfaceAtRest = await browser.evaluate(`(() => {
+      const row = document.querySelector('.endpoint-settings-row');
+      const style = getComputedStyle(row);
+      return { background: style.backgroundColor, shadow: style.boxShadow, borderTop: style.borderTopWidth };
+    })()`);
+    assert(rowSurfaceAtRest.background === 'rgba(0, 0, 0, 0)' && rowSurfaceAtRest.shadow === 'none' && parseFloat(rowSurfaceAtRest.borderTop) === 0, `endpoint row is a flat list row at rest, not a button: ${JSON.stringify(rowSurfaceAtRest)}`);
+    const rowActionsAtRest = await browser.evaluate(`(() => {
+      const actions = document.querySelector('.endpoint-settings-row .endpoint-settings-actions');
+      const style = getComputedStyle(actions);
+      return { visibility: style.visibility, opacity: style.opacity };
+    })()`);
+    assert(rowActionsAtRest.visibility === 'hidden' && parseFloat(rowActionsAtRest.opacity) === 0, `endpoint row actions stay hidden until hover: ${JSON.stringify(rowActionsAtRest)}`);
+    const rowPoint = await center(browser, ".endpoint-settings-row");
+    await browser.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: rowPoint.x, y: rowPoint.y });
+    await sleep(280);
+    const rowActionsHovered = await browser.evaluate(`(() => {
+      const actions = document.querySelector('.endpoint-settings-row .endpoint-settings-actions');
+      const style = getComputedStyle(actions);
+      return { visibility: style.visibility, opacity: style.opacity };
+    })()`);
+    assert(rowActionsHovered.visibility === 'visible' && parseFloat(rowActionsHovered.opacity) === 1, `hovering the endpoint row reveals its actions: ${JSON.stringify(rowActionsHovered)}`);
+    const rowSurfaceHovered = await browser.evaluate(`(() => {
+      const row = document.querySelector('.endpoint-settings-row');
+      const style = getComputedStyle(row);
+      return { background: style.backgroundColor, shadow: style.boxShadow };
+    })()`);
+    assert(rowSurfaceHovered.background !== 'rgba(0, 0, 0, 0)' && rowSurfaceHovered.shadow !== 'none', `hovering the endpoint row reveals its surface: ${JSON.stringify(rowSurfaceHovered)}`);
+    const editPoint = await center(browser, ".endpoint-settings-edit");
+    await browser.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: editPoint.x, y: editPoint.y });
+    await sleep(200);
+    await click(browser, editPoint);
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.endpoint-settings-pane.editing')`), "hover-revealed edit action is really clickable");
     const closeSettings = await center(browser, ".settings-center-header .icon-button");
     await click(browser, closeSettings);
     await waitFor(() => browser.evaluate(`!document.querySelector('#settings-center')`), "settings closed after shield jump");

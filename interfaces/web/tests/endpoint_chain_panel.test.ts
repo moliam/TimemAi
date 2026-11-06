@@ -65,12 +65,16 @@ describe("endpoint chain selection panel", () => {
     expect(source).toContain('t("endpoints.chainCurrent")');
     expect(zhCatalog.endpoints.chainCurrent).toBe("当前使用");
     expect(enCatalog.endpoints.chainCurrent).toBe("In use");
-    // The current-route marker is a compact check in the row's top-right
-    // corner; it must not sit inline and squeeze the endpoint name.
+    // The available list keeps a compact top-right check; the selected chain
+    // marks the in-use row itself with a blue glow instead.
     expect(source).toContain('className="endpoint-chain-active-badge"');
     expect(source).toContain('aria-label={t("endpoints.chainCurrent")}');
     expect(source).toContain('<Check size={9} strokeWidth={2.6} aria-hidden="true" />');
+    expect(source.match(/className="endpoint-chain-active-badge"/g)?.length).toBe(1);
+    expect(source).toContain('current ? "current" : ""');
     expect(styles).toContain(".endpoint-chain-active-badge { top: 2px; right: 2px; width: 13px; height: 13px;");
+    expect(styles).toContain(".endpoint-chain-row.in-chain.current {");
+    expect(styles).toContain("box-shadow: 0 0 0 1px #3b82f633, 0 0 16px #3b82f659");
     expect(styles).toContain(".endpoint-chain-row { position: relative; }");
     expect(source).not.toContain("endpoints.chainPreferred");
     expect(source).not.toContain("endpoints.chainNextPreferred");

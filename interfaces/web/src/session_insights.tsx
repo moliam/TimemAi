@@ -897,11 +897,11 @@ export function SessionInsights({
             onClick={onOpenResourceSettings ?? undefined}
           >
             {protectionLevel === "full" ? (
-              <ShieldCheck size={13} aria-hidden="true" />
+              <ShieldCheck size={17} aria-hidden="true" />
             ) : protectionLevel === "partial" ? (
-              <ShieldAlert size={13} aria-hidden="true" />
+              <ShieldAlert size={17} aria-hidden="true" />
             ) : (
-              <ShieldX size={13} aria-hidden="true" />
+              <ShieldX size={17} aria-hidden="true" />
             )}
           </button>
         )}

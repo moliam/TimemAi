@@ -1,5 +1,6 @@
 @font-face { font-family: "IBM Plex Mono"; src: url("/fonts/IBMPlexMono-Latin-300.woff2") format("woff2"); font-style: normal; font-weight: 300; font-display: swap; }
 @font-face { font-family: "IBM Plex Mono"; src: url("/fonts/IBMPlexMono-Latin-400.woff2") format("woff2"); font-style: normal; font-weight: 400; font-display: swap; }
+@font-face { font-family: "IBM Plex Mono"; src: url("/fonts/IBMPlexMono-Latin-600.woff2") format("woff2"); font-style: normal; font-weight: 600; font-display: swap; }
 @font-face { font-family: "Space Grotesk"; src: url("/fonts/SpaceGrotesk-Latin-600.woff2") format("woff2"); font-style: normal; font-weight: 600; font-display: swap; }
 @font-face { font-family: "Rajdhani"; src: url("/fonts/Rajdhani-Latin-700.woff2") format("woff2"); font-style: normal; font-weight: 700; font-display: swap; }
 :root { --insights-title-font: "Space Grotesk", Inter, Arial, "Source Han Sans SC", "Noto Sans CJK SC", "MiSans", "PingFang SC", "Microsoft YaHei", sans-serif; --insights-number-font: "Rajdhani", Inter, Arial, "Source Han Sans SC", "Noto Sans CJK SC", "MiSans", "PingFang SC", "Microsoft YaHei", sans-serif; --insights-mono-font: "IBM Plex Mono", ui-monospace, "Source Han Sans SC", "Noto Sans CJK SC", "MiSans", "PingFang SC", "Microsoft YaHei", monospace; --insights-cn-font: "Source Han Sans SC", "Noto Sans CJK SC", "MiSans", "PingFang SC", "Microsoft YaHei", sans-serif; --ui-font: Inter, Arial, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; --user-other-font: Inter, Arial; --user-chinese-font: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; --user-font-weight: 400; --agent-other-font: Inter, Arial; --agent-chinese-font: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif; --agent-font-weight: 400; --content-size: 13.5px; color-scheme: dark; font-family: var(--ui-font); background: #0c1117; color: #e9eef5; }
@@ -3710,6 +3711,11 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .endpoint-settings-select small { color: #87938e; font-size: 10px; }
 .endpoint-settings-select code { color: #6f817a; font: 10px/1.35 "SFMono-Regular", Consolas, monospace; }
 .endpoint-settings-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding: 8px 10px 8px 4px; }
+@media (hover: hover) {
+  .endpoint-settings-actions { visibility: hidden; opacity: 0; transition: opacity .14s ease, visibility 0s linear .14s; }
+  .endpoint-settings-row:hover .endpoint-settings-actions,
+  .endpoint-settings-row:focus-within .endpoint-settings-actions { visibility: visible; opacity: 1; transition: opacity .14s ease; }
+}
 .endpoint-settings-action { flex: none; white-space: nowrap; }
 .endpoint-settings-edit { color: #9baca5; }
 .endpoint-settings-edit:hover { color: #dce8e3; }
@@ -5362,7 +5368,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
 
 .header-session-cluster .header-model-control { max-width: min(40vw, 340px); }
 .header-model-control-anchor { position: relative; min-width: 0; display: inline-flex; }
-.header-model-control-name { min-width: 0; max-width: 168px; overflow: hidden; text-overflow: ellipsis; font-size: 11px; font-weight: 600; letter-spacing: .005em; }
+.header-model-control-name { min-width: 0; max-width: 168px; overflow: hidden; text-overflow: ellipsis; font-family: var(--insights-mono-font); font-size: 11px; font-weight: 600; letter-spacing: .005em; }
 .header-model-control-reasoning { flex: none; padding: 0 5px; border: 1px solid #3f6f62a6; border-radius: 999px; background: #6fd3c017; color: #a9e2d2; font-family: var(--insights-number-font); font-size: 8.5px; font-weight: 600; line-height: 14px; letter-spacing: .03em; text-transform: lowercase; }
 .header-model-control-chevron { opacity: .6; transition: transform .16s ease, opacity .16s ease; }
 .header-session-cluster .header-model-control:hover .header-model-control-chevron { opacity: .9; }
@@ -6568,7 +6574,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
   white-space: nowrap;
 }
 .session-insights-cluster { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
-.session-insights-shield { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 16px; height: 16px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: #7e908a; font: inherit; cursor: pointer; transition: color .16s ease, background .16s ease; }
+.session-insights-shield { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: #7e908a; font: inherit; cursor: pointer; transition: color .16s ease, background .16s ease; }
 .session-insights-shield.full { background: transparent; color: #fff; }
 .session-insights-shield.full svg path:first-child { fill: #16a34a; }
 .session-insights-shield.partial { color: #e4bd76; }
@@ -6863,3 +6869,37 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: #4a8a77;
   .timer-panel,
   .mailbox-panel { position: fixed; inset: 62px 12px auto; width: auto; max-height: min(560px, calc(100vh - 76px)); }
 }
+
+/* Endpoint rows read as flat list rows at rest; the button surface appears only on hover/focus. */
+.endpoint-settings-row { background: transparent; box-shadow: none; transition: background-color .15s ease, box-shadow .15s ease; }
+@media (hover: hover) {
+  .endpoint-settings-row:hover:not(.delete-selected),
+  .endpoint-settings-row:focus-within:not(.delete-selected),
+  .endpoint-settings-row.delete-selecting:not(.delete-selected) { background: #1e2522; box-shadow: 0 10px 25px #0005; }
+}
+@media (hover: none) {
+  .endpoint-settings-row { background: #1e2522; box-shadow: 0 8px 22px #0004; }
+}
+:root[data-theme="light"] .endpoint-settings-row { background: transparent; box-shadow: none; }
+@media (hover: hover) {
+  :root[data-theme="light"] .endpoint-settings-row:hover:not(.delete-selected),
+  :root[data-theme="light"] .endpoint-settings-row:focus-within:not(.delete-selected),
+  :root[data-theme="light"] .endpoint-settings-row.delete-selecting:not(.delete-selected) { background: #f2f7f5; box-shadow: 0 10px 25px #29443b1c; }
+}
+@media (hover: none) {
+  :root[data-theme="light"] .endpoint-settings-row { background: #fff; box-shadow: 0 8px 22px #29443b1c; }
+}
+
+/* The in-use endpoint in the selected chain glows blue instead of carrying a check badge. */
+.endpoint-chain-row.in-chain.current {
+  border-color: #3b82f6;
+  background: linear-gradient(180deg, #14263a 0%, #112331 100%);
+  box-shadow: 0 0 0 1px #3b82f633, 0 0 16px #3b82f659, inset 0 1px 0 #ffffff0a;
+}
+.endpoint-chain-row.in-chain.current .endpoint-chain-pick small { color: #9dc4e8; }
+:root[data-theme="light"] .endpoint-chain-row.in-chain.current {
+  border-color: #3b82f6;
+  background: linear-gradient(180deg, #f3f8ff 0%, #eaf3ff 100%);
+  box-shadow: 0 0 0 1px #3b82f626, 0 0 14px #3b82f640;
+}
+:root[data-theme="light"] .endpoint-chain-row.in-chain.current .endpoint-chain-pick small { color: #356fae; }
