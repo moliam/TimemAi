@@ -315,6 +315,7 @@ import {
   REASONING_EFFORT_DISABLED,
   REASONING_EFFORT_OPTIONS,
   endpointMatchesProfile,
+  endpointMatchesProfileShape,
   endpointLabelForProfile,
   apiProtocolShort,
   formatContextWindowTokens,
@@ -3777,18 +3778,24 @@ function TimemApp() {
     !!server && server.model_endpoints.length === 0;
   const activeEndpointId = activeSession?.runtime_profile?.active_model_endpoint_id
     ?? activeSession?.runtime_profile?.model_endpoint_id;
-  const headerModelLabel = activeEndpointId
-    ? (server?.model_endpoints ?? []).find((endpoint) => endpoint.id === activeEndpointId)?.name
-      ?? t("modelService.endpointDeleted")
-    : endpointLabelForProfile(
-        server?.model_endpoints ?? [],
-        activeSession?.runtime_profile,
-      );
   const headerModelEndpoint = activeEndpointId
     ? (server?.model_endpoints ?? []).find((endpoint) => endpoint.id === activeEndpointId)
     : (server?.model_endpoints ?? []).find(
         (endpoint) => endpointMatchesProfile(endpoint, activeSession?.runtime_profile),
+      ) ??
+      // A session-level context-window adjustment changes the effective input
+      // cap without rebinding the endpoint; keep the display identity stable.
+      (server?.model_endpoints ?? []).find(
+        (endpoint) => endpointMatchesProfileShape(endpoint, activeSession?.runtime_profile),
       );
+  const headerModelLabel =
+    headerModelEndpoint?.name ??
+    (activeEndpointId
+      ? t("modelService.endpointDeleted")
+      : endpointLabelForProfile(
+          server?.model_endpoints ?? [],
+          activeSession?.runtime_profile,
+        ));
   const headerReasoningOptions = sessionReasoningOptions(
     headerModelEndpoint,
     server?.model_catalog ?? [],
@@ -3802,6 +3809,17 @@ function TimemApp() {
     : undefined;
   const headerContextUsed = headerContextUsage?.prompt_tokens ?? 0;
   const headerContextLimit = activeSession?.max_llm_input_tokens || undefined;
+  const headerContextBound =
+    !!headerModelEndpoint &&
+    (activeSession?.runtime_profile?.model_endpoint_ids ?? []).includes(
+      headerModelEndpoint.id,
+    );
+  const headerContextOverride =
+    !!headerModelEndpoint &&
+    Object.hasOwn(
+      activeSession?.runtime_profile?.endpoint_max_input_tokens ?? {},
+      headerModelEndpoint.id,
+    );
   const headerContextCompressPending = activeSession
     ? sessionContextCompressPending(activeSession)
     : false;
@@ -5101,6 +5119,7 @@ function TimemApp() {
                     reasoningLocked={runtimeLocked}
                     contextUsed={headerContextUsed}
                     contextLimit={headerContextLimit}
+                    contextOverride={headerContextOverride}
                     compressPending={headerContextCompressPending}
                     buttonRef={runtimeButtonRef}
                     onReasoningChange={(effort) => {
@@ -5119,12 +5138,28 @@ function TimemApp() {
                     }}
                     onContextLimitChange={(tokens) => {
                       if (!activeSession || !headerModelEndpoint) return;
-                      sendCommand({
-                        type: "session_endpoint_max_input_tokens_update",
-                        session_id: activeSession.session_id,
-                        endpoint_id: headerModelEndpoint.id,
-                        max_input_tokens: tokens,
-                      });
+                      const accepted = headerContextBound
+                        ? sendCommand({
+                            type: "session_endpoint_max_input_tokens_update",
+                            session_id: activeSession.session_id,
+                            endpoint_id: headerModelEndpoint.id,
+                            max_input_tokens: tokens,
+                          })
+                        : sendCommand({
+                            type: "session_runtime_update",
+                            session_id: activeSession.session_id,
+                            key: "TIMEM_MAX_LLM_INPUT",
+                            value: String(
+                              tokens ?? headerModelEndpoint.max_llm_input_tokens,
+                            ),
+                          });
+                      if (!accepted) {
+                        reportUiError(
+                          "Context window update failed",
+                          t("errors.checkConnection"),
+                          activeSession.session_id,
+                        );
+                      }
                     }}
                     onCompact={
                       activeSession
@@ -5466,6 +5501,7 @@ function TimemApp() {
               onRefreshAvailability={() => {
                 sendCommand({ type: "model_endpoint_availability_refresh" });
               }}
+              onClose={() => closeRuntimePanel()}
             />
           )}
           <TimemThread
@@ -13822,7 +13858,7 @@ function ContextDonut({
   size?: number;
 }) {
   const clamped = Math.max(0, Math.min(100, ratio));
-  const stroke = size >= 20 ? 3 : 2.4;
+  const stroke = size >= 20 ? 2.8 : 2;
   const radius = (size - stroke) / 2;
   const circumference = 2 * Math.PI * radius;
   const level = clamped >= 90 ? "critical" : clamped >= 75 ? "warning" : "normal";
@@ -13867,6 +13903,7 @@ function HeaderModelControl({
   reasoningLocked,
   contextUsed,
   contextLimit,
+  contextOverride,
   compressPending,
   buttonRef,
   onReasoningChange,
@@ -13884,6 +13921,7 @@ function HeaderModelControl({
   reasoningLocked: boolean;
   contextUsed: number;
   contextLimit: number | undefined;
+  contextOverride: boolean;
   compressPending: boolean;
   buttonRef: MutableRefObject<HTMLButtonElement | null>;
   onReasoningChange: (effort: string) => void;
@@ -13898,16 +13936,43 @@ function HeaderModelControl({
     contextLimit ? String(contextLimit) : "",
   );
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const savedLimitRef = useRef<number | undefined>(contextLimit);
+  const draftValue = Number(lengthDraft.trim());
+  const draftValid = Number.isInteger(draftValue) && draftValue > 0;
+  const draftDirty = draftValid && draftValue !== contextLimit;
+  const resetDraft = () => setLengthDraft(contextLimit ? String(contextLimit) : "");
+  const closePopover = () => {
+    setOpen(false);
+    resetDraft();
+  };
   useEffect(() => {
-    setLengthDraft(contextLimit ? String(contextLimit) : "");
-  }, [contextLimit]);
+    const previousLimit = savedLimitRef.current;
+    savedLimitRef.current = contextLimit;
+    if (!open) {
+      setLengthDraft(contextLimit ? String(contextLimit) : "");
+      return;
+    }
+    // Follow the Host projection when the draft still mirrors the value that
+    // just changed (apply/reset); keep a genuinely unsaved edit untouched.
+    setLengthDraft((draft) =>
+      Number(draft.trim()) === previousLimit
+        ? contextLimit
+          ? String(contextLimit)
+          : ""
+        : draft,
+    );
+  }, [contextLimit, open]);
   useEffect(() => {
     if (!open) return;
     const onDocDown = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      if (rootRef.current?.contains(event.target as Node)) return;
+      setOpen(false);
+      setLengthDraft(contextLimit ? String(contextLimit) : "");
     };
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      if (event.key !== "Escape") return;
+      setOpen(false);
+      setLengthDraft(contextLimit ? String(contextLimit) : "");
     };
     document.addEventListener("mousedown", onDocDown);
     document.addEventListener("keydown", onKey);
@@ -13915,7 +13980,7 @@ function HeaderModelControl({
       document.removeEventListener("mousedown", onDocDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open]);
+  }, [open, contextLimit]);
   const ratio = contextLimit
     ? Math.min(100, Math.ceil((contextUsed * 100) / contextLimit))
     : 0;
@@ -13929,13 +13994,10 @@ function HeaderModelControl({
     ? `Context usage ${ratio}% · ${formatTokens(contextUsed) ?? "0"} / ${formatTokens(contextLimit) ?? "0"} input tokens`
     : "Context usage waiting for runtime usage";
   const modelName = endpoint?.model ?? session?.runtime_profile?.model ?? "";
+  const collapsedName = modelName || endpointLabel;
   const applyContextLength = () => {
-    const parsed = Number(lengthDraft.trim());
-    if (!Number.isFinite(parsed) || parsed <= 0 || !Number.isInteger(parsed)) {
-      setLengthDraft(contextLimit ? String(contextLimit) : "");
-      return;
-    }
-    onContextLimitChange(parsed);
+    if (!draftValid || !draftDirty) return;
+    onContextLimitChange(draftValue);
   };
   return (
     <span className="header-model-control-anchor" ref={rootRef}>
@@ -13943,21 +14005,27 @@ function HeaderModelControl({
         ref={buttonRef}
         type="button"
         className={`header-model header-model-control${open ? " selected" : ""}`}
-        title={contextTitle}
+        title={`${collapsedName} · ${contextTitle}`}
         aria-expanded={open}
         aria-controls="header-model-popover"
-        aria-label={`${endpointLabel} · ${contextTitle}`}
-        onClick={() => setOpen((value) => !value)}
+        aria-label={`${collapsedName} · ${contextTitle}`}
+        onClick={() => {
+          if (open) {
+            closePopover();
+            return;
+          }
+          resetDraft();
+          setOpen(true);
+        }}
       >
-        <Sparkles size={10} aria-hidden="true" />
         <span className="header-model-control-name" title={endpointLabel}>
-          {endpointLabel}
+          {collapsedName}
         </span>
-        <ContextDonut ratio={ratio} size={15} />
         {selectedReasoning && (
           <span className="header-model-control-reasoning">{selectedReasoning}</span>
         )}
-        <ChevronDown size={11} aria-hidden="true" />
+        <ContextDonut ratio={ratio} size={15} />
+        <ChevronDown className="header-model-control-chevron" size={11} aria-hidden="true" />
       </button>
       {open && (
         <div
@@ -13976,7 +14044,7 @@ function HeaderModelControl({
               type="button"
               className="header-model-popover-action"
               onClick={() => {
-                setOpen(false);
+                closePopover();
                 onOpenModelPanel();
               }}
             >
@@ -14026,10 +14094,21 @@ function HeaderModelControl({
               <span>tokens</span>
             </span>
             <span className="header-model-popover-length-actions">
-              <button type="button" className="header-model-popover-action" disabled={!endpoint} onClick={applyContextLength}>
+              <button
+                type="button"
+                className="header-model-popover-action"
+                disabled={!endpoint || !draftDirty}
+                onClick={applyContextLength}
+              >
                 {t("headerModel.apply")}
               </button>
-              <button type="button" className="header-model-popover-action" disabled={!endpoint} onClick={() => onContextLimitChange(null)}>
+              <button
+                type="button"
+                className="header-model-popover-action"
+                disabled={!endpoint || !contextOverride}
+                title={contextOverride ? undefined : t("headerModel.resetHint")}
+                onClick={() => onContextLimitChange(null)}
+              >
                 {t("headerModel.reset")}
               </button>
             </span>
@@ -17883,7 +17962,6 @@ function SortableEndpointChainRow({
   endpoint,
   index,
   current,
-  working,
   onRemove,
   reasoningValue,
   reasoningOptions,
@@ -17894,7 +17972,6 @@ function SortableEndpointChainRow({
   endpoint: ModelEndpoint;
   index: number;
   current: boolean;
-  working: boolean;
   onRemove: (endpointId: string) => void;
   reasoningValue: string;
   reasoningOptions: string[];
@@ -17984,14 +18061,14 @@ function SortableEndpointChainRow({
           />
         </span>
       </span>
-      {working && current && (
+      {current && (
         <span
           className="endpoint-chain-active-badge"
           role="img"
           aria-label={t("endpoints.chainCurrent")}
           title={t("endpoints.chainCurrent")}
         >
-          <Check size={11} aria-hidden="true" />
+          <Check size={9} strokeWidth={2.6} aria-hidden="true" />
         </span>
       )}
       <button
@@ -18016,6 +18093,7 @@ function ModelEndpointPanel({
   onRefreshAvailability,
   onEndpointReasoning,
   onEndpointMaxInput,
+  onClose,
 }: {
   panelRef: MutableRefObject<HTMLElement | null>;
   server: Snapshot["server"] | null;
@@ -18025,6 +18103,7 @@ function ModelEndpointPanel({
   onRefreshAvailability: () => void;
   onEndpointReasoning: (endpointId: string, effort: string) => void;
   onEndpointMaxInput: (endpointId: string, tokens: number | null) => void;
+  onClose: () => void;
 }) {
   useT();
   const endpoints = server?.model_endpoints ?? [];
@@ -18118,6 +18197,15 @@ function ModelEndpointPanel({
           >
             <Settings size={13} />
           </button>
+          <button
+            type="button"
+            className="endpoint-menu-close"
+            onClick={onClose}
+            aria-label={t("common.close")}
+            title={t("common.close")}
+          >
+            <X size={14} />
+          </button>
         </div>
       </div>
       <div className={`endpoint-chain-actions ${dirty ? "has-changes" : ""}`}>
@@ -18192,6 +18280,16 @@ function ModelEndpointPanel({
                         </span>
                       </small>
                     </span>
+                    {endpoint.id === currentEndpointId && (
+                      <span
+                        className="endpoint-chain-active-badge"
+                        role="img"
+                        aria-label={t("endpoints.chainCurrent")}
+                        title={t("endpoints.chainCurrent")}
+                      >
+                        <Check size={9} strokeWidth={2.6} aria-hidden="true" />
+                      </span>
+                    )}
                   </button>
                 );
               })
@@ -18226,7 +18324,6 @@ function ModelEndpointPanel({
                       endpoint={endpoint}
                       index={index + 1}
                       current={endpoint.id === currentEndpointId}
-                      working={working}
                       onRemove={toggleChainMember}
                       reasoningValue={
                         endpointReasoningEfforts[endpoint.id] ??

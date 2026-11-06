@@ -174,6 +174,22 @@ export function endpointMatchesEffectiveProfile(
   );
 }
 
+export function endpointMatchesProfileShape(
+  endpoint: ModelEndpoint,
+  profile: ModelEndpointProfile | undefined,
+): boolean {
+  return (
+    !!profile &&
+    endpoint.model === profile.model &&
+    endpoint.api_protocol === profile.api_protocol &&
+    endpoint.response_protocol === profile.response_protocol &&
+    endpoint.base_url === profile.base_url &&
+    endpoint.max_llm_output_tokens === profile.max_llm_output_tokens &&
+    endpoint.stream === profile.stream &&
+    endpoint.api_key_configured === profile.api_key_configured
+  );
+}
+
 export function endpointMatchesProfile(
   endpoint: ModelEndpoint,
   profile: ModelEndpointProfile | undefined,

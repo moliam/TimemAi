@@ -59,7 +59,7 @@ describe("header endpoint selector", () => {
     expect(styles).toContain('.header-cache-token { display: inline-flex; align-items: center; gap: 1px; }');
   });
 
-  it("uses a deep borderless surface with the same height as the ctx/cache readout", () => {
+  it("uses a compact tinted surface coordinated with the donut and reasoning pill", () => {
     expect(styles).toContain(
       ".header-context-actions { align-self: center; border-left: 1px solid #2a3944; padding-left: 12px; margin-left: 2px; height: 34px; }",
     );
@@ -68,14 +68,13 @@ describe("header endpoint selector", () => {
     );
     expect(styles).toContain(".header-context { min-height: 34px; }");
     expect(styles).toMatch(
-      /\.header-session-cluster \.header-model \{[\s\S]*font-size: 13px;/,
+      /\.header-session-cluster \.header-model \{[\s\S]*height: 30px;[\s\S]*border: 1px solid #2a4742;[\s\S]*border-radius: 7px;[\s\S]*background: linear-gradient\(180deg, #1a312d 0%, #142725 100%\);[\s\S]*color: #d3e4de;[\s\S]*font-size: 11px;/,
     );
     expect(styles).toMatch(
-      /\.header-session-cluster \.header-model \{[\s\S]*height: 34px;[\s\S]*border: 0;[\s\S]*background: #244a40;[\s\S]*color: #fff;[\s\S]*box-shadow: none;/,
+      /:root\[data-theme="light"\] \.header-session-cluster \.header-model \{[\s\S]*border: 1px solid #b9d2c9;[\s\S]*background: linear-gradient\(180deg, #f4fbf8 0%, #e9f5f0 100%\);[\s\S]*color: #295247;/,
     );
-    expect(styles).toMatch(
-      /:root\[data-theme="light"\] \.header-session-cluster \.header-model \{[\s\S]*border: 0;[\s\S]*background: #315f52;[\s\S]*color: #fff;[\s\S]*box-shadow: none;/,
-    );
+    expect(styles).toContain(".header-model-control-chevron { opacity: .6;");
+    expect(styles).toContain(".context-donut-value { stroke: #7cd8c2;");
   });
   it("moves the current session name out of the header and into the collapsed sidebar", () => {
     expect(source).not.toContain(

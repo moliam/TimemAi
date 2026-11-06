@@ -459,7 +459,7 @@ export const en: Strings = {
     empty: "No endpoints yet. Add one in Settings first.",
     chainAvailable: "All endpoints",
     chainSelected: "Selected chain",
-    chainCurrent: "Current request",
+    chainCurrent: "In use",
     chainSelectedHint: "Drag to reorder; the first endpoint is preferred and rate-limited endpoints fail over",
     chainEmptyHint: "Pick endpoints from the left",
     chainActive: "In use",
@@ -850,6 +850,7 @@ export const en: Strings = {
     contextLength: "Context length",
     apply: "Apply",
     reset: "Default",
+    resetHint: "No custom value yet; following the endpoint default",
     contextManagement: "Context management",
   },
   insights: {

@@ -154,6 +154,44 @@ function makePeer(socket, onJson) {
   return { send: (event) => socket.write(encodeFrame(event)) };
 }
 
+// Mirrors the Host's authoritative projection for the model-config commands:
+// the header can only show what the Host accepted, and the active route is
+// updated before the next model request (the mock updates state synchronously).
+function withEndpointMaxInput(session, endpointId, tokens) {
+  const profile = session.runtime_profile ?? {};
+  const overrides = { ...(profile.endpoint_max_input_tokens ?? {}) };
+  if (tokens === null || tokens === undefined) delete overrides[endpointId];
+  else overrides[endpointId] = tokens;
+  const effective = overrides[endpointId] ?? headerEndpoint.max_llm_input_tokens;
+  return {
+    ...session,
+    max_llm_input_tokens: effective,
+    runtime_profile: { ...profile, endpoint_max_input_tokens: overrides, max_llm_input_tokens: effective },
+  };
+}
+function withReasoningEffort(session, effort) {
+  const profile = session.runtime_profile ?? {};
+  return {
+    ...session,
+    runtime_profile: { ...profile, reasoning_effort: effort, endpoint_reasoning_efforts: { ...(profile.endpoint_reasoning_efforts ?? {}), [profile.active_model_endpoint_id ?? profile.model_endpoint_id]: effort } },
+  };
+}
+function withEndpointReasoningEffort(session, endpointId, effort) {
+  const profile = session.runtime_profile ?? {};
+  return {
+    ...session,
+    runtime_profile: { ...profile, endpoint_reasoning_efforts: { ...(profile.endpoint_reasoning_efforts ?? {}), [endpointId]: effort } },
+  };
+}
+function withSessionMaxInput(session, tokens) {
+  const profile = session.runtime_profile ?? {};
+  return {
+    ...session,
+    max_llm_input_tokens: tokens,
+    runtime_profile: { ...profile, max_llm_input_tokens: tokens },
+  };
+}
+
 async function startHost(session) {
   let authoritative = session;
   let authoritativeCaps = fullResourceCaps;
@@ -191,7 +229,19 @@ async function startHost(session) {
         peer.send({ type: "command_ack", command_id: command.command_id, status: "accepted" });
         peer.send({ type: "command_ack", command_id: command.command_id, status: "committed" });
       }
-      if (command.type === "session_resource_usage_query") {
+      if (command.type === "session_endpoint_max_input_tokens_update") {
+        authoritative = withEndpointMaxInput(authoritative, command.endpoint_id, command.max_input_tokens);
+        broadcastHello();
+      } else if (command.type === "session_reasoning_effort_update") {
+        authoritative = withReasoningEffort(authoritative, command.reasoning_effort);
+        broadcastHello();
+      } else if (command.type === "session_endpoint_reasoning_effort_update") {
+        authoritative = withEndpointReasoningEffort(authoritative, command.endpoint_id, command.reasoning_effort);
+        broadcastHello();
+      } else if (command.type === "session_runtime_update" && command.key === "TIMEM_MAX_LLM_INPUT") {
+        authoritative = withSessionMaxInput(authoritative, Number(command.value));
+        broadcastHello();
+      } else if (command.type === "session_resource_usage_query") {
         // Two samples 2s apart: the second poll answers with a delta so the
         // CPU curve can derive cores exactly like a live Host would.
         for (const sample of [
@@ -377,13 +427,21 @@ async function main() {
     await browser.call("Page.reload");
     await waitFor(() => browser.evaluate(`document.body.textContent.includes('Insights acceptance turn')`), "snapshot after preference reset");
 
-    // Header model/context cluster: collapsed it shows the endpoint name, the
-    // context donut and the reasoning effort; expanding it is the single place
-    // for model switching, reasoning, context length and context tools.
+    // Header model/context cluster: collapsed it shows the current model name,
+    // reasoning strength and the context donut in that fixed order; expanding it
+    // is the single place for model switching, reasoning, context length and tools.
     assert(await browser.evaluate(`!!document.querySelector('.header-model-control')`), "collapsed header renders the model control");
-    assert(await browser.evaluate(`document.querySelector('.header-model-control-name').textContent === 'Header Model'`), "collapsed control shows the endpoint name");
-    assert(await browser.evaluate(`document.querySelector('.header-model-control-reasoning').textContent === 'high'`), "collapsed control shows the reasoning effort");
-    assert(await browser.evaluate(`!!document.querySelector('.header-model-control .context-donut')`), "collapsed control renders the context donut");
+    assert(await browser.evaluate(`document.querySelector('.header-model-control-name').textContent === 'header-model-1'`), "collapsed control shows the current model name");
+    assert(await browser.evaluate(`(() => {
+      const control = document.querySelector('.header-model-control');
+      const name = control.querySelector('.header-model-control-name');
+      const reasoning = control.querySelector('.header-model-control-reasoning');
+      const donut = control.querySelector('.context-donut');
+      return !!name && !!reasoning && !!donut
+        && name.compareDocumentPosition(reasoning) === Node.DOCUMENT_POSITION_FOLLOWING
+        && reasoning.compareDocumentPosition(donut) === Node.DOCUMENT_POSITION_FOLLOWING;
+    })()`), "collapsed order is model name, reasoning, donut");
+    assert(await browser.evaluate(`!document.querySelector('.header-model-control .lucide-sparkles')`), "collapsed control has no decorative sparkles");
     assert(await browser.evaluate(`document.querySelector('.header-model-control').title.includes('Context usage 7%')`), "collapsed control exposes context usage on hover");
     assert(await browser.evaluate(`!document.querySelector('.header-actions .header-context-control')`), "the old standalone context chip is gone");
     const modelControl = await center(browser, ".header-model-control");
@@ -393,6 +451,10 @@ async function main() {
     assert(await browser.evaluate(`document.querySelector('#header-model-popover .header-model-popover-length input').value === '16000'`), "popover shows the current context length");
     assert(await browser.evaluate(`document.querySelector('#header-model-popover .header-model-popover-context').textContent.includes('1.0K / 16K')`), "context row shows used and limit tokens");
     assert(await browser.evaluate(`!!document.querySelector('#header-model-popover .header-model-popover-context .context-donut')`), "context row renders the donut");
+    assert(await browser.evaluate(`(() => {
+      const buttons = [...document.querySelectorAll('#header-model-popover .header-model-popover-length-actions button')];
+      return buttons.length === 2 && buttons[0].disabled && buttons[1].disabled;
+    })()`), "apply and default start disabled");
     // Clear is unavailable while the session is busy (it would discard the
     // active turn's context); it appears once the session is idle.
     assert(await browser.evaluate(`(() => {
@@ -413,29 +475,85 @@ async function main() {
       select.dispatchEvent(new Event('change', { bubbles: true }));
     })()`);
     await waitFor(() => host.commands.some((command) => command.type === 'session_reasoning_effort_update' && command.reasoning_effort === 'medium'), "reasoning update command");
+    await waitFor(() => browser.evaluate(`document.querySelector('.header-model-control-reasoning').textContent === 'medium'`), "collapsed reasoning follows the host projection");
     await browser.evaluate(`(() => {
       const input = document.querySelector('#header-model-popover .header-model-popover-length input');
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
       setter.call(input, '32000');
       input.dispatchEvent(new Event('input', { bubbles: true }));
     })()`);
+    assert(await browser.evaluate(`!document.querySelectorAll('#header-model-popover .header-model-popover-length-actions button')[0].disabled`), "apply enables after a dirty draft");
     const applyPoint = await browser.evaluate(`(() => { const b = document.querySelectorAll('#header-model-popover .header-model-popover-length-actions button')[0]; const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
     await click(browser, applyPoint);
     await waitFor(() => host.commands.some((command) => command.type === 'session_endpoint_max_input_tokens_update' && command.endpoint_id === 'ep-header' && command.max_input_tokens === 32000), "context length update command");
+    await waitFor(() => browser.evaluate(`document.querySelector('#header-model-popover .header-model-popover-length input').value === '32000'
+      && document.querySelector('#header-model-popover .header-model-popover-context').textContent.includes('1.0K / 32K')`), "applied context window comes back from the host");
+    await waitFor(() => browser.evaluate(`!document.querySelectorAll('#header-model-popover .header-model-popover-length-actions button')[1].disabled`), "default enables once an override exists");
     const resetPoint = await browser.evaluate(`(() => { const b = document.querySelectorAll('#header-model-popover .header-model-popover-length-actions button')[1]; const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
     await click(browser, resetPoint);
     await waitFor(() => host.commands.some((command) => command.type === 'session_endpoint_max_input_tokens_update' && command.max_input_tokens === null), "context length reset command");
+    await waitFor(() => browser.evaluate(`document.querySelector('#header-model-popover .header-model-popover-length input').value === '16000'
+      && document.querySelector('#header-model-popover .header-model-popover-context').textContent.includes('1.0K / 16K')
+      && document.querySelectorAll('#header-model-popover .header-model-popover-length-actions button')[1].disabled`), "reset restores the endpoint default");
+    // An unsaved draft is discarded when the popover closes.
+    await browser.evaluate(`(() => {
+      const input = document.querySelector('#header-model-popover .header-model-popover-length input');
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(input, '33000');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await waitFor(() => browser.evaluate(`document.querySelector('#header-model-popover .header-model-popover-length input').value === '33000'`), "dirty draft typed");
     await browser.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape" });
     await browser.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape" });
     await waitFor(() => browser.evaluate(`!document.querySelector('#header-model-popover')`), "Escape closes the model popover");
     await click(browser, modelControl);
-    await waitFor(() => browser.evaluate(`!!document.querySelector('#header-model-popover')`), "model popover reopens for switching");
+    await waitFor(() => browser.evaluate(`document.querySelector('#header-model-popover .header-model-popover-length input').value === '16000'`), "reopening discards the unsaved draft");
     const switchPoint = await browser.evaluate(`(() => { const b = document.querySelector('#header-model-popover .header-model-popover-row .header-model-popover-action'); const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
     await click(browser, switchPoint);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.endpoint-menu')`), "Switch opens the model endpoint panel");
+    assert(await browser.evaluate(`!!document.querySelector('.endpoint-menu-close')`), "endpoint panel exposes a close control");
+    assert(await browser.evaluate(`(() => {
+      const badges = [...document.querySelectorAll('.endpoint-chain-active-badge')];
+      return badges.length >= 1
+        && badges.every((badge) => badge.title === 'In use')
+        && badges.every((badge) => !badge.textContent.includes('本轮配置'));
+    })()`), "active endpoint carries the refined top-right check");
+    const closeEndpointPanel = await center(browser, ".endpoint-menu-close");
+    await click(browser, closeEndpointPanel);
+    await waitFor(() => browser.evaluate(`!document.querySelector('.endpoint-menu')`), "close control dismisses the endpoint panel");
+    // A session without an endpoint chain falls back to the session-level
+    // runtime setting; the Host projection still drives the next request.
+    const unbound = makeSession();
+    unbound.runtime_profile = {
+      ...unbound.runtime_profile,
+      // The effort pill is an observable proof that this snapshot (and not the
+      // previous bound one) has been applied before the next interaction.
+      reasoning_effort: "low",
+      model_endpoint_id: null,
+      active_model_endpoint_id: null,
+      model_endpoint_ids: [],
+    };
+    host.setSession(unbound);
+    await waitFor(() => browser.evaluate(`document.querySelector('.header-model-control-reasoning')?.textContent === 'low'`), "unbound snapshot applied");
+    assert(await browser.evaluate(`document.querySelector('.header-model-control-name').textContent === 'header-model-1'`), "unbound header keeps the model identity");
+    const unboundControl = await center(browser, ".header-model-control");
+    await click(browser, unboundControl);
+    await waitFor(() => browser.evaluate(`!!document.querySelector('#header-model-popover')`), "unbound popover opens");
+    await browser.evaluate(`(() => {
+      const input = document.querySelector('#header-model-popover .header-model-popover-length input');
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(input, '24000');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await waitFor(() => browser.evaluate(`!document.querySelectorAll('#header-model-popover .header-model-popover-length-actions button')[0].disabled`), "unbound apply enables after a dirty draft");
+    const unboundApply = await browser.evaluate(`(() => { const b = document.querySelectorAll('#header-model-popover .header-model-popover-length-actions button')[0]; const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+    await click(browser, unboundApply);
+    await waitFor(() => host.commands.some((command) => command.type === 'session_runtime_update' && command.key === 'TIMEM_MAX_LLM_INPUT' && command.value === '24000'), "unbound context update falls back to the session runtime setting");
+    await waitFor(() => browser.evaluate(`document.querySelector('#header-model-popover .header-model-popover-length input').value === '24000'`), "session-level context update is echoed by the host");
+    host.setSession(makeSession());
     await browser.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape" });
     await browser.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape" });
-    await waitFor(() => browser.evaluate(`!document.querySelector('.endpoint-menu')`), "Escape closes the model endpoint panel");
+    await waitFor(() => browser.evaluate(`!document.querySelector('#header-model-popover')`), "unbound popover closes");
 
     // Collapsed header: only the top item + chevron, no title bar.
     assert(await browser.evaluate(`!!document.querySelector('.session-insights-chip')`), "compact chip exists in the header");
