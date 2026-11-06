@@ -23891,3 +23891,65 @@ mod session_work_file_update_persistence_tests {
         assert_eq!(event.payload["kind"], "work_file_notice");
     }
 }
+
+#[test]
+fn resource_caps_startup_summary_reports_both_dimensions() {
+    let caps = WireResourceCaps {
+        cpu: WireResourceCapDimension {
+            enabled: true,
+            percent: 85.0,
+            kernel: "applied".to_string(),
+            limit: Some("2380000 100000".to_string()),
+            reason: None,
+            escalation_required: false,
+        },
+        mem: WireResourceCapDimension {
+            enabled: true,
+            percent: 85.0,
+            kernel: "unavailable".to_string(),
+            limit: None,
+            reason: Some("shared cgroup root is not owned by this instance".to_string()),
+            escalation_required: false,
+        },
+        scope: "/sys/fs/cgroup/test.scope".to_string(),
+    };
+    let lines = resource_caps_summary_lines(&caps);
+    assert_eq!(lines.len(), 2);
+    assert_eq!(
+        lines[0],
+        "[resource_caps] CPU limit: 85% applied (quota period: 2380000 100000)"
+    );
+    assert_eq!(
+        lines[1],
+        "[resource_caps] MEM limit: 85% unavailable (shared cgroup root is not owned by this instance)"
+    );
+}
+
+#[test]
+fn resource_caps_startup_summary_marks_disabled_dimensions() {
+    let caps = WireResourceCaps {
+        cpu: WireResourceCapDimension {
+            enabled: false,
+            percent: 85.0,
+            kernel: "disabled".to_string(),
+            limit: None,
+            reason: None,
+            escalation_required: false,
+        },
+        mem: WireResourceCapDimension {
+            enabled: true,
+            percent: 50.0,
+            kernel: "applied".to_string(),
+            limit: Some("123456".to_string()),
+            reason: None,
+            escalation_required: false,
+        },
+        scope: String::new(),
+    };
+    let lines = resource_caps_summary_lines(&caps);
+    assert_eq!(lines[0], "[resource_caps] CPU limit: off disabled");
+    assert_eq!(
+        lines[1],
+        "[resource_caps] MEM limit: 50% applied (bytes: 123456)"
+    );
+}

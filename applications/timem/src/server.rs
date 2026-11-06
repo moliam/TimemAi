@@ -2056,6 +2056,10 @@ pub async fn run(
     // allowed. Unattended starts skip the prompt and keep degrading loudly.
     crate::resource_caps_prompt::prompt_escalation_and_apply_if_needed();
     apply_instance_resource_caps_from_mem(&initial_mem);
+    // Always state the full cap picture at startup, whether or not any
+    // dimension needed root; operators should not have to open the WebUI to
+    // learn which limits are actually enforced.
+    print_instance_resource_caps_summary(&initial_mem);
     let instance_path = web_instance_path(&initial_mem);
     let web_instance = match open_web_instance_after_handoff(
         &instance_path,
@@ -2966,6 +2970,41 @@ fn apply_instance_resource_caps_from_mem(mem: &WebMemState) {
             mem_percent: mem.settings.system_mem_cap_percent,
         },
     );
+}
+
+/// One startup-log line for one cap dimension. The line always states the
+/// configured intent and the kernel outcome, including disabled/unavailable
+/// dimensions, so the startup log is a complete picture.
+fn cap_summary_line(label: &str, unit: &str, dimension: &WireResourceCapDimension) -> String {
+    let intent = if dimension.enabled {
+        format!("{}%", dimension.percent)
+    } else {
+        "off".to_string()
+    };
+    let state = match (
+        dimension.kernel.as_str(),
+        dimension.limit.as_deref(),
+        dimension.reason.as_deref(),
+    ) {
+        ("applied", Some(limit), _) => format!("applied ({unit}: {limit})"),
+        ("applied", None, _) => "applied".to_string(),
+        (kernel, _, Some(reason)) => format!("{kernel} ({reason})"),
+        (kernel, _, None) => kernel.to_string(),
+    };
+    format!("[resource_caps] {label} limit: {intent} {state}")
+}
+
+fn resource_caps_summary_lines(caps: &WireResourceCaps) -> Vec<String> {
+    vec![
+        cap_summary_line("CPU", "quota period", &caps.cpu),
+        cap_summary_line("MEM", "bytes", &caps.mem),
+    ]
+}
+
+fn print_instance_resource_caps_summary(mem: &WebMemState) {
+    for line in resource_caps_summary_lines(&resource_caps_projection(&mem.settings)) {
+        eprintln!("{line}");
+    }
 }
 
 /// Password buffer that zeroizes its bytes on drop, so every early-return
