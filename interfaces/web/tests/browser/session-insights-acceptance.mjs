@@ -795,6 +795,27 @@ async function main() {
     assert(await browser.evaluate(`!!document.querySelector('.session-insights-chip')`), "compact chip exists in the header");
     assert(await browser.evaluate(`!document.querySelector('.session-insights-panel')`), "panel starts collapsed");
     assert(await browser.evaluate(`!!document.querySelector('.session-insights-shield.full')`), "collapsed header shows the full-protection shield");
+    const fullShieldStyle = await browser.evaluate(`(() => {
+      const el = document.querySelector('.session-insights-shield.full');
+      if (!el) return null;
+      const style = getComputedStyle(el);
+      return { background: style.backgroundColor, color: style.color };
+    })()`);
+    assert(fullShieldStyle?.background === 'rgb(46, 143, 120)', `full shield uses the health-green field: ${fullShieldStyle?.background}`);
+    assert(fullShieldStyle?.color === 'rgb(255, 255, 255)', `full shield inverts to white lines: ${fullShieldStyle?.color}`);
+    const chipTextStyle = await browser.evaluate(`(() => {
+      const text = document.querySelector('.session-insights-chip-text');
+      const label = document.querySelector('.session-insights-chip-label');
+      const value = document.querySelector('.session-insights-chip-value');
+      if (!text || !label || !value) return null;
+      return {
+        alignItems: getComputedStyle(text).alignItems,
+        labelInText: text.contains(label),
+        valueInText: text.contains(value),
+      };
+    })()`);
+    assert(chipTextStyle?.alignItems === 'baseline', `chip label and value share a baseline: ${chipTextStyle?.alignItems}`);
+    assert(chipTextStyle?.labelInText && chipTextStyle?.valueInText, "chip label and value live in one baseline-aligned row");
     assert(await browser.evaluate(`document.querySelector('.session-insights-shield').title.includes('Full protection')`), "shield exposes the current protection status on hover");
     host.setResourceCaps(resourceCaps("applied", "disabled"));
     await waitFor(() => browser.evaluate(`!!document.querySelector('.session-insights-shield.partial')`), "partial-protection shield");

@@ -882,8 +882,10 @@ export function SessionInsights({
           onClick={() => (open ? setOpen(false) : openPanel())}
         >
           <Activity size={12} aria-hidden="true" />
-          <span className="session-insights-chip-label">{topItem.label}</span>
-          <span className="session-insights-chip-value">{topItem.value}</span>
+          <span className="session-insights-chip-text">
+            <span className="session-insights-chip-label">{topItem.label}</span>
+            <span className="session-insights-chip-value">{topItem.value}</span>
+          </span>
           <ChevronDown size={11} aria-hidden="true" />
         </button>
         {!open && protectionLevel && protectionTitle && (

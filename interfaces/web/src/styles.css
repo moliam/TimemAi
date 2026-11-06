@@ -6569,16 +6569,18 @@ body.workspace-modal-open .app-shell { user-select: none; }
 }
 .session-insights-cluster { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
 .session-insights-shield { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 16px; height: 16px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: #7e908a; font: inherit; cursor: pointer; transition: color .16s ease, background .16s ease; }
-.session-insights-shield.full { color: #6fd3c0; }
+.session-insights-shield.full { background: #2e8f78; color: #fff; }
 .session-insights-shield.partial { color: #e4bd76; }
 .session-insights-shield.none { color: #d9927c; }
 .session-insights-shield:hover { background: #17242b; color: #c2d0d6; }
+.session-insights-shield.full:hover { background: #267a66; color: #fff; }
 .session-insights-shield:focus-visible { outline: 1px solid #3d6b78; outline-offset: 1px; }
 .session-insights-chip > svg:first-child { color: #65a990; flex: none; }
 .session-insights-chip > svg:last-child { flex: none; color: #647a73; transition: transform .16s ease; }
 .session-insights-chip.open > svg:last-child { transform: rotate(180deg); }
 .session-insights-chip:hover,
 .session-insights-chip.open { border-color: #33505b; background: #17242b; color: #c2d0d6; }
+.session-insights-chip-text { display: inline-flex; align-items: baseline; gap: 5px; min-width: 0; }
 .session-insights-chip-label { color: #647a73; font-family: var(--insights-title-font); font-size: 9px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
 .session-insights-chip-value { color: #8fb8a9; font-family: var(--insights-mono-font); font-size: 10.5px; font-weight: 400; font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; letter-spacing: -.015em; }
 :root[data-theme="light"] .session-insights-chip { color: #61746d; }
@@ -6586,10 +6588,11 @@ body.workspace-modal-open .app-shell { user-select: none; }
 :root[data-theme="light"] .session-insights-chip.open { border-color: #bfd0d6; background: #eef5f7; color: #34484f; }
 :root[data-theme="light"] .session-insights-chip-value { color: #3f7767; }
 :root[data-theme="light"] .session-insights-chip-label { color: #71827c; }
-:root[data-theme="light"] .session-insights-shield.full { color: #2f7f6a; }
+:root[data-theme="light"] .session-insights-shield.full { background: #2e8f78; color: #fff; }
 :root[data-theme="light"] .session-insights-shield.partial { color: #9a7334; }
 :root[data-theme="light"] .session-insights-shield.none { color: #a75b42; }
 :root[data-theme="light"] .session-insights-shield:hover { background: #eef5f7; color: #34484f; }
+:root[data-theme="light"] .session-insights-shield.full:hover { background: #267a66; color: #fff; }
 
 .session-insights-panel {
   position: fixed;
