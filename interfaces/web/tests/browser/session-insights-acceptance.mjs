@@ -451,6 +451,60 @@ async function main() {
   try {
     await browser.call("Page.bringToFront");
     await waitFor(() => browser.evaluate(`document.body.textContent.includes('Insights acceptance turn')`), "initial snapshot");
+
+    // Responsive sidebar regression: at desktop widths the collapsed role
+    // panel is the 44px right rail; below 1051px it must become a fixed
+    // off-canvas drawer instead of wrapping into a grid row under the left
+    // sidebar. At <=720px the left sidebar must also stay off-canvas.
+    for (const width of [1440, 1200, 1060, 1051]) {
+      await browser.call("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
+      await browser.evaluate(`new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+      await sleep(260);
+      const layout = await browser.evaluate(`(() => {
+        const panel = document.querySelector('.worker-role-panel');
+        const restore = document.querySelector('.worker-role-restore');
+        const p = panel.getBoundingClientRect();
+        return { position: getComputedStyle(panel).position, left: p.left, top: p.top, width: p.width, restoreDisplay: getComputedStyle(restore).display, viewport: innerWidth };
+      })()`);
+      assert(layout.position === 'relative', `desktop role panel stays in the grid at ${width}: ${JSON.stringify(layout)}`);
+      assert(Math.abs(layout.left - (layout.viewport - 44)) <= 1, `desktop role panel occupies the right rail at ${width}: ${JSON.stringify(layout)}`);
+      assert(layout.top === 0, `desktop role panel starts at the top at ${width}: ${JSON.stringify(layout)}`);
+      assert(layout.restoreDisplay === 'grid', `desktop restore control is visible at ${width}: ${JSON.stringify(layout)}`);
+    }
+    for (const width of [1050, 900, 721]) {
+      await browser.call("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
+      await browser.evaluate(`new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+      await sleep(260);
+      const layout = await browser.evaluate(`(() => {
+        const panel = document.querySelector('.worker-role-panel');
+        const restore = document.querySelector('.worker-role-restore');
+        const p = panel.getBoundingClientRect();
+        return { position: getComputedStyle(panel).position, left: p.left, top: p.top, visibility: getComputedStyle(panel).visibility, restoreDisplay: getComputedStyle(restore).display, viewport: innerWidth };
+      })()`);
+      assert(layout.position === 'fixed', `mid-width role panel must be a fixed drawer at ${width}: ${JSON.stringify(layout)}`);
+      assert(layout.top === 0, `mid-width role panel must be anchored to the top at ${width}: ${JSON.stringify(layout)}`);
+      assert(layout.left >= layout.viewport - 1, `mid-width role panel must stay off-canvas on the right at ${width}: ${JSON.stringify(layout)}`);
+      assert(layout.visibility === 'hidden', `mid-width role panel must be hidden at ${width}: ${JSON.stringify(layout)}`);
+      assert(layout.restoreDisplay === 'none', `mid-width role restore control must be hidden at ${width}: ${JSON.stringify(layout)}`);
+    }
+    for (const width of [720, 390]) {
+      await browser.call("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
+      await browser.evaluate(`new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+      await sleep(260);
+      const layout = await browser.evaluate(`(() => {
+        const panel = document.querySelector('.worker-role-panel');
+        const sidebar = document.querySelector('.sidebar');
+        const p = panel.getBoundingClientRect();
+        const s = sidebar.getBoundingClientRect();
+        return { panelPosition: getComputedStyle(panel).position, panelLeft: p.left, panelTop: p.top, sidebarPosition: getComputedStyle(sidebar).position, sidebarLeft: s.left, sidebarRight: s.right, sidebarTop: s.top, viewport: innerWidth };
+      })()`);
+      assert(layout.panelPosition === 'fixed', `mobile role panel must be a fixed drawer at ${width}: ${JSON.stringify(layout)}`);
+      assert(layout.panelLeft >= layout.viewport - 1, `mobile role panel must stay off-canvas on the right at ${width}: ${JSON.stringify(layout)}`);
+      assert(layout.sidebarPosition === 'fixed', `mobile left sidebar must be fixed at ${width}: ${JSON.stringify(layout)}`);
+      assert(layout.sidebarRight <= 0, `mobile left sidebar must stay off-canvas on the left at ${width}: ${JSON.stringify(layout)}`);
+      assert(layout.sidebarTop === 0, `mobile left sidebar must not take a grid row at ${width}: ${JSON.stringify(layout)}`);
+    }
+    await browser.call("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await browser.evaluate(`localStorage.setItem('timem-web-locale-v1','en'); localStorage.removeItem('timem.sessionInsights.order.v1'); localStorage.removeItem('timem.sessionInsights.position.v1'); localStorage.removeItem('timem.sessionInsights.pinned.v1')`);
     await browser.call("Page.reload");
     await waitFor(() => browser.evaluate(`document.body.textContent.includes('Insights acceptance turn')`), "snapshot after preference reset");

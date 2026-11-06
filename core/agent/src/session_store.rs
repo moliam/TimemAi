@@ -1559,7 +1559,7 @@ fn persist_history_index(history_path: &Path, indexed_len: u64, entries: &[Histo
         Ok(bytes) => bytes,
         Err(error) => {
             eprintln!(
-                "[timem_web_warning] chat_history_index_serialize_failed path={:?} reason={error}",
+                "[chat_history_index_warning] chat_history_index_serialize_failed path={:?} reason={error}",
                 history_path
             );
             return;
@@ -1567,7 +1567,7 @@ fn persist_history_index(history_path: &Path, indexed_len: u64, entries: &[Histo
     };
     if let Err(error) = atomic_write_file(&persisted_history_index_path(history_path), &bytes) {
         eprintln!(
-            "[timem_web_warning] chat_history_index_persist_failed path={:?} reason={error}",
+            "[chat_history_index_warning] chat_history_index_persist_failed path={:?} reason={error}",
             history_path
         );
     }

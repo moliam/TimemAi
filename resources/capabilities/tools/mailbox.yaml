@@ -71,4 +71,4 @@ input_schema: |
     }
   }
 example_json: |
-  {"mailbox":{"action":"send","to":"id_3ybe2","msg":"please run the regression suite","queue_timeout":"300s","resp_timeout":"600s"}}
+  {"mailbox":{"send":{"to":"id_3ybe2","msg":"please run the regression suite","queue_timeout":"300s","resp_timeout":"600s"}}}

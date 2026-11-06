@@ -3418,9 +3418,11 @@ button.endpoint-chain-row.in-chain:hover:not(:disabled) { border-color: var(--ma
   .app-shell.right-sidebar-collapsed { grid-template-columns: var(--left-sidebar-width, 200px) minmax(0, 1fr) 44px; }
   .app-shell.left-sidebar-collapsed.right-sidebar-collapsed { grid-template-columns: 58px minmax(0, 1fr) 44px; }
 }
-.sidebar,
-.worker-role-panel,
-.toolrepo-side-panel { position: relative; }
+@media (min-width: 1051px) {
+  .sidebar,
+  .worker-role-panel,
+  .toolrepo-side-panel { position: relative; }
+}
 .sidebar-resize-handle { position: absolute; z-index: 7; top: 0; bottom: 0; width: 10px; appearance: none; border: 0; border-radius: 0; padding: 0; outline: 0; background: transparent; box-shadow: none; color: transparent; cursor: col-resize; touch-action: none; }
 /* The right resize control is a button inside the role panel. Keep it isolated from
    the panel's generic button borders/shadows, which otherwise draw a full-height seam. */
