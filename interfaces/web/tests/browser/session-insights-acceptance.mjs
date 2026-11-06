@@ -345,6 +345,26 @@ async function main() {
     await click(browser, chip);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.session-insights-panel')`), "panel opens on chip click");
     assert(await browser.evaluate(`document.querySelectorAll('.session-insight-row').length === 10`), "panel lists all ten items");
+    // Typography: values carry the larger semibold tabular-numeral scale,
+    // labels stay in sentence case, and the panel base is slightly larger.
+    const typography = await browser.evaluate(`(() => {
+      const value = getComputedStyle(document.querySelector('.session-insight-value'));
+      const label = getComputedStyle(document.querySelector('.session-insight-label'));
+      const panel = getComputedStyle(document.querySelector('.session-insights-panel'));
+      return {
+        valueSize: value.fontSize,
+        valueWeight: value.fontWeight,
+        valueFeatures: value.fontFeatureSettings,
+        labelSize: label.fontSize,
+        labelWeight: label.fontWeight,
+        labelTransform: label.textTransform,
+        panelSize: panel.fontSize,
+      };
+    })()`);
+    assert(typography.panelSize === '11.5px', `panel base font: ${JSON.stringify(typography)}`);
+    assert(typography.valueSize === '11.5px' && typography.valueWeight === '600', `value typography: ${JSON.stringify(typography)}`);
+    assert(typography.labelSize === '10.5px' && typography.labelWeight === '600' && typography.labelTransform === 'none', `label typography: ${JSON.stringify(typography)}`);
+    assert(typography.valueFeatures.includes('tnum'), `tabular numerals enabled: ${JSON.stringify(typography)}`);
     assert(await browser.evaluate(`document.querySelector('.session-insights-panel').getBoundingClientRect().width > 300`), "panel renders as a floating card");
     assert(await browser.evaluate(`[...document.querySelectorAll('.session-insight-flow-number')].map(e => e.textContent).every(t => t && t !== '0')`), "token flow shows numeric values");
     assert(await browser.evaluate(`(() => {
