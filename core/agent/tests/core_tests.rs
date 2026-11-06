@@ -8933,7 +8933,9 @@ fn rendered_static_prompt_preserves_source_rule_order() {
     };
 
     let role_pos = prompt.find("## Role").expect("role section should render");
-    let style_pos = prompt.find("## Soul").expect("soul section should render");
+    let style_pos = prompt
+        .find("## Guide")
+        .expect("guide section should render");
     let memory_pos = prompt
         .find("## Memory")
         .expect("memory section should render");
