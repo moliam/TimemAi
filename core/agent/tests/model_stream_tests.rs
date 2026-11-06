@@ -412,7 +412,11 @@ fn preview_streams_reasoning_telemetry_across_provider_shapes() {
     assert_eq!(snapshot["stream_phase"], "responding");
     assert_eq!(snapshot["reasoning_tokens"], 512);
     assert_eq!(snapshot["thinking_words"], 7);
-    assert_eq!(snapshot["thinking_tail"], "让我 think next进一步");
+    assert_eq!(
+        snapshot["thinking_tail"], "",
+        "answer text must clear the inline reasoning tail"
+    );
+    assert_eq!(snapshot["thinking_truncated"], false);
 }
 
 #[test]
@@ -426,7 +430,6 @@ fn preview_thinking_tail_is_bounded_and_keeps_the_latest_text() {
             "choices": [{"delta": {"reasoning_content": "abcdefghij"}}]
         }));
     }
-    state.append(PublicTextTarget::Response, "answer").unwrap();
     state.publish(&mut ui, "session", "turn");
     let snapshot = ui.0.last().unwrap();
     let tail = snapshot["thinking_tail"].as_str().unwrap();
@@ -440,6 +443,43 @@ fn preview_thinking_tail_is_bounded_and_keeps_the_latest_text() {
         "tail keeps the newest reasoning"
     );
     assert_eq!(snapshot["thinking_truncated"], true);
+    state.append(PublicTextTarget::Response, "answer").unwrap();
+    state.publish(&mut ui, "session", "turn");
+    let snapshot = ui.0.last().unwrap();
+    assert_eq!(snapshot["thinking_tail"], "");
+    assert_eq!(snapshot["thinking_truncated"], false);
+}
+
+#[test]
+fn preview_retract_and_interrupt_clear_inline_thinking_state() {
+    use agent_core::model_stream::TurnResponsePreview;
+    let mut state = TurnResponsePreview::default();
+    let mut ui = PreviewCapture::default();
+    let thinking = serde_json::json!({
+        "choices": [{"delta": {"reasoning_content": "stale reasoning"}}]
+    });
+
+    state.begin(1);
+    state.observe_stream_event(&thinking);
+    assert!(state.thinking_active());
+    state.retract();
+    state.publish(&mut ui, "session", "turn");
+    let snapshot = ui.0.last().unwrap();
+    assert_eq!(snapshot["thinking_tail"], "");
+    assert_eq!(snapshot["thinking_truncated"], false);
+    assert!(snapshot["stream_phase"].is_null());
+    assert!(!state.thinking_active());
+
+    state.begin(2);
+    state.observe_stream_event(&thinking);
+    assert!(state.thinking_active());
+    state.interrupt("network_error");
+    state.publish(&mut ui, "session", "turn");
+    let snapshot = ui.0.last().unwrap();
+    assert_eq!(snapshot["thinking_tail"], "");
+    assert_eq!(snapshot["thinking_truncated"], false);
+    assert!(snapshot["stream_phase"].is_null());
+    assert_eq!(snapshot["interruption"], "network_error");
 }
 
 #[test]

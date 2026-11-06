@@ -13124,7 +13124,9 @@ const ThinkingPreviewWindow = memo(function ThinkingPreviewWindow({
   text: string;
 }) {
   const compact = useMemo(() => compactThinkingTail(text), [text]);
-  if (!text) return null;
+  // Whitespace-only reasoning compacts to nothing; rendering the fixed-width
+  // shell would leave a visible 36ch gap in the trailer.
+  if (!compact) return null;
   return (
     <span className="stream-thinking-window">
       <span className="stream-thinking-window-text">{compact}</span>

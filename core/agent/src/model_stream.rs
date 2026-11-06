@@ -945,13 +945,16 @@ impl TurnResponsePreview {
             }
             // The inline thinking window is only live during reasoning. Once
             // the answer starts, stop carrying its tail on every preview frame.
-            if !self.thinking_tail.is_empty() || self.thinking_tail_chars != 0 {
-                self.thinking_tail.clear();
-                self.thinking_tail_chars = 0;
-            }
+            self.clear_inline_thinking();
         }
         changed
     }
+    fn clear_inline_thinking(&mut self) {
+        self.thinking_tail.clear();
+        self.thinking_tail_chars = 0;
+        self.thinking_truncated = false;
+    }
+
     fn append_thinking_tail(&mut self, text: &str) {
         self.thinking_tail.push_str(text);
         self.thinking_tail_chars = self
@@ -992,8 +995,13 @@ impl TurnResponsePreview {
             self.response.replace_prior(self.attempt);
             self.interruption = None;
         }
-        if !text.is_empty() && self.stream_phase != Some("responding") {
+        if !text.is_empty() {
             self.stream_phase = Some("responding");
+            // `append` is the single public-text entry point, including the
+            // native finish-summary stream which has no public text delta
+            // event. Clear here so a completed reasoning attempt never leaks
+            // its tail into an answer preview.
+            self.clear_inline_thinking();
         }
         let result = self.response.append(self.attempt, text);
         if result.is_err() {
@@ -1044,10 +1052,18 @@ impl TurnResponsePreview {
     pub fn interrupt(&mut self, reason: &str) {
         self.failed = true;
         self.interruption = Some(reason.to_string());
+        self.clear_inline_thinking();
+        if self.stream_phase == Some("thinking") {
+            self.stream_phase = None;
+        }
     }
     pub fn retract(&mut self) {
         self.failed = true;
         self.interruption = None;
+        self.clear_inline_thinking();
+        if self.stream_phase == Some("thinking") {
+            self.stream_phase = None;
+        }
         self.response.retract(self.attempt);
     }
     pub fn publish(&mut self, ui: &mut dyn crate::TurnUi, session: &str, turn_id: &str) {

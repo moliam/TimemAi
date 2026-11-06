@@ -744,7 +744,13 @@ async function main() {
     })()`);
     assert(afterTick.text.includes("newest tick"), `inline thinking strip follows newest reasoning: ${JSON.stringify(afterTick)}`);
     assert(Math.abs(afterTick.windowWidth - beforeTick.windowWidth) < 1 && Math.abs(afterTick.gap - beforeTick.gap) < 1, `inline thinking strip updates without shifting the row: ${JSON.stringify({ beforeTick, afterTick })}`);
-    publish(33, null, []);
+    publishThinking(33, "   \n  ");
+    await sleep(160);
+    assert(
+      await browser.evaluate(`!document.querySelector('.stream-thinking-window')`),
+      "whitespace-only reasoning must not render an empty strip",
+    );
+    publish(34, null, []);
     await waitFor(() => browser.evaluate(`!document.querySelector('.stream-thinking-window')`), "thinking window must clear when reasoning ends");
     assert(await browser.evaluate(`!document.querySelector('.stream-thought-card, .stream-reading-hold')`), "extra thought frame exists");
     for (const theme of ["dark", "light"]) {
@@ -761,19 +767,34 @@ async function main() {
       const style = getComputedStyle(command);
       return style.animationName === 'stream-tool-enter' && style.animationDuration === '0.16s';
     })()`), "command entrance transition missing");
-    assert(await browser.evaluate(`(() => {
+    // Clearing the response snapshot is asynchronous; wait for the local-work
+    // trailer to settle before reading CSS animation state so this check does
+    // not race a transient model-waiting render.
+    await waitFor(() => browser.evaluate(`(() => {
+      const trailer = document.querySelector('.stream-working-trailer');
+      return !!trailer && trailer.classList.contains('tool-active') &&
+        !!document.querySelector('.stream-working-wrench');
+    })()`), "local work phase with a wrench did not settle");
+    const cueState = await browser.evaluate(`(() => {
       const sessionIcon = document.querySelector('.session-working-icon');
       const sessionAnim = sessionIcon ? getComputedStyle(sessionIcon) : null;
-      const sessionDot = sessionIcon ? sessionIcon.getBoundingClientRect() : null;
-      const workerStatic = [...document.querySelectorAll('.worker-working-icon')].every(node => getComputedStyle(node).animationName === 'none');
+      const workerAnims = [...document.querySelectorAll('.worker-working-icon')].map(node => getComputedStyle(node).animationName);
       const localWrench = document.querySelector('.stream-working-wrench');
       const wrenchAnim = localWrench ? getComputedStyle(localWrench) : null;
-      return !!sessionAnim && sessionAnim.animationName === 'stream-working-grow' &&
-        parseFloat(sessionAnim.animationDuration) === 1.2 &&
-        !!sessionDot && workerStatic && !!wrenchAnim &&
-        wrenchAnim.animationName === 'stream-working-wrench-sway' &&
-        parseFloat(wrenchAnim.animationDuration) === 1;
-    })()`), "sidebar session cue must keep breathing, local work must sway a wrench, and workers must stay static");
+      return {
+        sessionAnim: sessionAnim?.animationName ?? null,
+        sessionDuration: sessionAnim?.animationDuration ?? null,
+        workerAnims,
+        wrenchAnim: wrenchAnim?.animationName ?? null,
+        wrenchDuration: wrenchAnim?.animationDuration ?? null,
+      };
+    })()`);
+    assert(cueState.sessionAnim === 'stream-working-grow' &&
+      parseFloat(cueState.sessionDuration) === 1.2 &&
+      cueState.workerAnims.every(name => name === 'none') &&
+      cueState.wrenchAnim === 'stream-working-wrench-sway' &&
+      parseFloat(cueState.wrenchDuration) === 1,
+      `sidebar session cue must keep breathing, local work must sway a wrench, and workers must stay static: ${JSON.stringify(cueState)}`);
     assert(await browser.evaluate(`['.user-message-navigation button', '.session-group-heading', '.final-answer-outline-toggle'].every(selector => [...document.querySelectorAll(selector)].every(node => getComputedStyle(node).backdropFilter === 'none'))`), "scroll overlays must not sample blurred backdrops");
     await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
     assert(await browser.evaluate(`['.stream-tool-head', '.stream-tool-command', '.stream-tool-dot', '.stream-working-wrench'].every(selector => { const node = document.querySelector(selector); return !node || getComputedStyle(node).animationName === 'none'; })`), "reduced motion must disable tool entrance");
