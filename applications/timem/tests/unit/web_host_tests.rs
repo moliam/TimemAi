@@ -23407,6 +23407,106 @@ fn streaming_preview_broadcasts_are_throttled_and_terminal_answer_drops_pending(
 }
 
 #[test]
+fn streaming_preview_interruption_frame_survives_terminal_flush() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let _web_turn =
+        start_web_turn(&state, session_id, "stop keeps the interruption banner").unwrap();
+    let worker_id = test_worker_id(session_id);
+    let core_turn_id = "core_turn_stop";
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Active(
+            agent_core::ActiveTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.to_string(),
+                    turn_id: core_turn_id.to_string(),
+                    epoch: 1,
+                },
+                stop_requested: false,
+                input_admission: agent_core::TurnInputAdmission::Open,
+                activity: agent_core::TurnActivity::Running,
+            },
+        )),
+    );
+    let mut receiver = state.events.subscribe();
+    let preview = |attempt: u64, revision: u64, interruption: &str| {
+        CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new("core.model.preview", json!({})),
+            CoreSessionState::WaitingModel,
+            json!({
+                "turn_id": core_turn_id,
+                "attempt": attempt,
+                "revision": revision,
+                "interruption": if interruption.is_empty() {
+                    json!(null)
+                } else {
+                    json!(interruption)
+                },
+                "response": {
+                    "attempt": attempt,
+                    "revision": revision,
+                    "text": "HTTP early response",
+                    "status": "intermediate"
+                }
+            }),
+        )
+        .with_worker_scope(test_context_id(session_id), worker_id.clone())
+    };
+
+    // The last streaming chunk broadcasts immediately; the Stop frame that
+    // follows lands inside the same throttle window and is withheld.
+    response_preview::publish(&state, session_id, &worker_id, &preview(1, 1, ""));
+    assert_eq!(drain_wire_events(&mut receiver).len(), 1);
+    response_preview::publish(&state, session_id, &worker_id, &preview(1, 2, "cancelled"));
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_some());
+
+    // The turn reaches its terminal cancelled projection before the window
+    // elapses. Ordinary stale stream frames are dropped on terminal flush,
+    // but the interruption frame is the only carrier of the Stopped banner
+    // and must be broadcast instead.
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Finished(
+            agent_core::FinishedTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.to_string(),
+                    turn_id: core_turn_id.to_string(),
+                    epoch: 1,
+                },
+                outcome: agent_core::TurnProjectionOutcome::Cancelled,
+            },
+        )),
+    );
+    // The terminal projection itself reaches the wire; drain it before the
+    // flush so the remaining assertions only see the interruption frame.
+    drain_wire_events(&mut receiver);
+    response_preview::flush_pending(&state, session_id);
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_none());
+    let drained = drain_wire_events(&mut receiver);
+    assert_eq!(
+        drained.len(),
+        1,
+        "the interruption frame must be broadcast, not dropped as stale"
+    );
+    assert!(drained.iter().any(|event| match event {
+        WireEvent::CoreTopic { event, .. } => {
+            event["payload"]["interruption"] == json!("cancelled")
+        }
+        _ => false,
+    }));
+}
+
+#[test]
 fn thinking_preview_frames_bypass_answer_throttle() {
     let state = routing_test_state();
     let session_id = "session_a";

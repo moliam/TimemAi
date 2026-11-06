@@ -204,12 +204,28 @@ pub(super) fn flush_pending(state: &AppState, session_id: &str) {
         let Some(pending) = throttle.pending.as_ref() else {
             return;
         };
-        if active_turn_web_id.as_deref() != Some(pending.turn_id.as_str()) {
+        // An interruption frame is the only carrier of the Stopped /
+        // network-error banner on the client. Stop usually lands right after
+        // the last streaming chunk, so the cleared frame is withheld inside
+        // the throttle window exactly when the terminal turn event races it;
+        // dropping it there would silence the interruption notice forever.
+        // It is safe to broadcast late: interrupt() keeps the partial answer
+        // and clears the thinking tail, so the frame cannot resurrect a stale
+        // strip and its revision is still the newest one.
+        let interruption_frame = pending
+            .wire_event
+            .get("payload")
+            .and_then(|payload| payload.get("interruption"))
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty());
+        if !interruption_frame && active_turn_web_id.as_deref() != Some(pending.turn_id.as_str()) {
             throttle.pending = None;
             return;
         }
         let now = now_ms();
-        if now.saturating_sub(throttle.window_started_ms) < PREVIEW_THROTTLE_WINDOW_MS {
+        if !interruption_frame
+            && now.saturating_sub(throttle.window_started_ms) < PREVIEW_THROTTLE_WINDOW_MS
+        {
             return;
         }
         throttle.last_flush_ms = now;

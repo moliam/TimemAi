@@ -1141,7 +1141,6 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .mailbox-item-state.status-failed { background: #f7e1e5; color: #b3445a; }
 :root[data-theme="light"] .mailbox-item-badge { background: #f5ecd7; color: #92690f; }
 :root[data-theme="light"] .mailbox-clear { color: #5a6b76; border-color: #c6d2db; }
-:root[data-theme="light"] .mailbox-item-top { color: #2c3a44; }
 .mailbox-more { margin-top: 2px; }
 .mailbox-more > summary { display: flex; align-items: center; gap: 6px; padding: 6px 9px; border: 1px dashed #22303d; border-radius: 6px; background: #0e151d; color: #6f8491; font-size: 11px; font-weight: 700; list-style: none; cursor: pointer; user-select: none; }
 .mailbox-more > summary::-webkit-details-marker { display: none; }
