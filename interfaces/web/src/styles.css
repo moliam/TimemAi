@@ -5378,34 +5378,41 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .context-donut.warning .context-donut-value { stroke: #e5c07d; }
 .context-donut.critical { filter: drop-shadow(0 0 2px #d9927c4d); }
 .context-donut.critical .context-donut-value { stroke: #de9a84; }
-.header-model-popover { position: absolute; top: calc(100% + 8px); left: 0; z-index: 60; width: min(380px, calc(100vw - 24px)); display: grid; border: 1px solid #2e4a45; border-radius: 11px; background: linear-gradient(180deg, #111d22 0%, #0c151a 100%); box-shadow: 0 22px 56px #000000b8, 0 1px 0 #ffffff0a inset; color: #bccbc8; font-family: var(--insights-cn-font); font-size: 10.5px; overflow: hidden; }
-.header-model-popover-row { display: grid; grid-template-columns: 92px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 9px 11px; border-bottom: 1px solid #20323a; }
+.header-model-popover { position: absolute; top: calc(100% + 8px); left: 0; z-index: 60; width: min(380px, calc(100vw - 24px)); display: grid; border: 1px solid #2b3d47; border-radius: 9px; background: #10191f; box-shadow: 0 18px 48px #00000099; color: #b7c6cc; font-family: var(--insights-cn-font); font-size: 10.5px; font-feature-settings: "tnum" 1, "lnum" 1; overflow: hidden; }
+.header-model-popover-heading { padding: 7px 12px; border-bottom: 1px solid #22323a; background: #13212a; }
+.header-model-popover-heading strong { color: #e0ece8; font-family: var(--insights-title-font); font-size: 12px; font-weight: 600; letter-spacing: .01em; }
+.header-model-popover-row { display: grid; grid-template-columns: 92px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 9px 12px; border-bottom: 1px solid #22323a; }
 .header-model-popover-row:last-child { border-bottom: 0; }
-.header-model-popover-label { color: #7f958d; font-size: 9px; font-weight: 600; letter-spacing: .02em; white-space: nowrap; }
+.header-model-popover-label { color: #8fb0b8; font-family: var(--insights-title-font); font-size: 9px; font-weight: 600; letter-spacing: .08em; white-space: nowrap; }
 .header-model-popover-model { min-width: 0; display: grid; gap: 1px; }
-.header-model-popover-model strong { color: #dbe9e4; font-family: var(--insights-title-font); font-size: 10.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.header-model-popover-model small { color: #7f958d; font-family: var(--insights-mono-font); font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.header-model-popover-action { border: 1px solid #33544c; border-radius: 999px; padding: 3px 8px; background: #ffffff08; color: #a9cfc1; font: inherit; font-size: 9px; cursor: pointer; white-space: nowrap; transition: border-color .15s ease, background-color .15s ease, color .15s ease; }
-.header-model-popover-action:hover:not(:disabled) { border-color: #4a8577; background: #17332e; color: #e2f2ec; }
+.header-model-popover-model strong { color: #e0ece8; font-family: var(--insights-title-font); font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.header-model-popover-model small { color: #8fa3aa; font-family: var(--insights-mono-font); font-size: 9.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.header-model-popover-action { min-height: 23px; border: 1px solid transparent; border-radius: 5px; padding: 0 7px; background: transparent; color: #8fa3aa; font: inherit; font-size: 9.5px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: border-color .15s ease, background-color .15s ease, color .15s ease; }
+.header-model-popover-action:hover:not(:disabled) { border-color: #33505b; background: #18333a; color: #c2d0d6; }
 .header-model-popover-action:disabled { opacity: .38; cursor: default; }
-.header-model-popover-select { justify-self: start; min-width: 64px; max-width: 100%; height: 23px; border: 1px solid #315044; border-radius: 6px; padding: 0 6px; background: #0f211b; color: #a5dcc4; font: inherit; font-size: 10px; }
-.header-model-popover-muted { color: #84918d; font-size: 9.5px; }
+.header-model-popover-select { justify-self: start; min-width: 64px; max-width: 100%; height: 23px; border: 1px solid #22343d; border-radius: 5px; padding: 0 6px; background: #0c151a; color: #b7c6cc; font: inherit; font-size: 9.5px; }
+.header-model-popover-select:focus,
+.header-model-popover-length input:focus { outline: none; border-color: #3d6b78; box-shadow: 0 0 0 2px #3d6b7826; }
+.header-model-popover-muted { color: #6f8590; font-size: 9.5px; }
 .header-model-popover-length { min-width: 0; display: inline-flex; align-items: center; gap: 4px; }
-.header-model-popover-length input { width: 84px; height: 23px; border: 1px solid #315044; border-radius: 6px; padding: 0 6px; background: #0b171d; color: #d4e1de; font-family: var(--insights-mono-font); font-size: 10px; }
-.header-model-popover-length span { color: #7f958d; font-size: 9px; }
+.header-model-popover-length input { width: 84px; height: 23px; border: 1px solid #22343d; border-radius: 5px; padding: 0 6px; background: #0c151a; color: #dbe8e4; font-family: var(--insights-mono-font); font-size: 10px; }
+.header-model-popover-length span { color: #8fa3aa; font-size: 9px; }
 .header-model-popover-length-actions { display: inline-flex; gap: 4px; }
 .header-model-popover-context { min-width: 0; display: inline-flex; align-items: center; gap: 7px; }
-.header-model-popover-context > span:last-child { color: #c3d3cf; font-family: var(--insights-mono-font); font-size: 9.5px; letter-spacing: -.01em; white-space: nowrap; }
+.header-model-popover-context > span:last-child { color: #c3d6d1; font-family: var(--insights-mono-font); font-size: 9.5px; letter-spacing: -.01em; white-space: nowrap; }
 .header-model-popover-context-actions { display: inline-flex; gap: 4px; }
-:root[data-theme="light"] .header-model-popover { border-color: #c6d8d2; background: linear-gradient(180deg, #ffffff 0%, #f6faf8 100%); color: #3f5057; box-shadow: 0 22px 56px #1c3a4633, 0 1px 0 #ffffff inset; }
-:root[data-theme="light"] .header-model-popover-row { border-bottom-color: #e3ecef; }
-:root[data-theme="light"] .header-model-popover-label { color: #71827c; }
-:root[data-theme="light"] .header-model-popover-model strong { color: #33484f; }
-:root[data-theme="light"] .header-model-popover-model small { color: #71827c; }
-:root[data-theme="light"] .header-model-popover-action { border-color: #b9d6c7; background: #ffffff; color: #33764f; }
-:root[data-theme="light"] .header-model-popover-action:hover:not(:disabled) { background: #eef8f1; color: #245c3d; }
-:root[data-theme="light"] .header-model-popover-select { border-color: #b9d6c7; background: #eef8f1; color: #33764f; }
-:root[data-theme="light"] .header-model-popover-length input { border-color: #b9d6c7; background: #fbfdfc; color: #33484f; }
+:root[data-theme="light"] .header-model-popover { border-color: #c9d6da; background: #fff; color: #3f5057; box-shadow: 0 18px 48px #1c3a4633; }
+:root[data-theme="light"] .header-model-popover-heading { border-bottom-color: #dbe5e8; background: #f3f8f9; }
+:root[data-theme="light"] .header-model-popover-heading strong { color: #263b43; }
+:root[data-theme="light"] .header-model-popover-row { border-bottom-color: #dbe5e8; }
+:root[data-theme="light"] .header-model-popover-label { color: #4f6d75; }
+:root[data-theme="light"] .header-model-popover-model strong { color: #263b43; }
+:root[data-theme="light"] .header-model-popover-model small { color: #6d8189; }
+:root[data-theme="light"] .header-model-popover-action { color: #61746d; }
+:root[data-theme="light"] .header-model-popover-action:hover:not(:disabled) { border-color: #bfd0d6; background: #eef5f7; color: #34484f; }
+:root[data-theme="light"] .header-model-popover-select,
+:root[data-theme="light"] .header-model-popover-length input { border-color: #c9d6da; background: #fff; color: #33484f; }
+:root[data-theme="light"] .header-model-popover-muted { color: #6d8189; }
 :root[data-theme="light"] .context-donut-track { stroke: #d7e3e0; }
 :root[data-theme="light"] .context-donut-value { stroke: #2f9a80; filter: none; }
 :root[data-theme="light"] .context-donut.warning .context-donut-value { stroke: #b8893f; }

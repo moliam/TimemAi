@@ -14231,6 +14231,9 @@ function HeaderModelControl({
           role="dialog"
           aria-label={t("headerModel.title")}
         >
+          <div className="header-model-popover-heading">
+            <strong>{t("headerModel.title")}</strong>
+          </div>
           <div className="header-model-popover-row">
             <span className="header-model-popover-label">{t("headerModel.model")}</span>
             <span className="header-model-popover-model">

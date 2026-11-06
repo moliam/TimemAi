@@ -664,6 +664,52 @@ async function main() {
     assert(modelControlHovered.border !== 'rgba(0, 0, 0, 0)' && modelControlHovered.background !== 'none', `hovering the header model control reveals its pill: ${JSON.stringify(modelControlHovered)}`);
     await click(browser, modelControl);
     await waitFor(() => browser.evaluate(`!!document.querySelector('#header-model-popover')`), "model popover opens");
+    const popoverChrome = await browser.evaluate(`(() => {
+      const pop = document.querySelector('#header-model-popover');
+      const ps = getComputedStyle(pop);
+      const heading = document.querySelector('.header-model-popover-heading');
+      const hs = heading ? getComputedStyle(heading) : null;
+      const action = document.querySelector('.header-model-popover-action');
+      const as = getComputedStyle(action);
+      const select = document.querySelector('.header-model-popover-select');
+      const ss = getComputedStyle(select);
+      return {
+        radius: ps.borderRadius,
+        borderColor: ps.borderTopColor,
+        background: ps.backgroundColor,
+        headingBackground: hs?.backgroundColor ?? null,
+        actionRadius: as.borderRadius,
+        actionHeight: Math.round(action.getBoundingClientRect().height),
+        actionBackground: as.backgroundColor,
+        selectBorder: ss.borderTopColor,
+        selectRadius: ss.borderRadius,
+      };
+    })()`);
+    assert(popoverChrome.radius === '9px' && popoverChrome.borderColor === 'rgb(43, 61, 71)' &&
+      popoverChrome.background === 'rgb(16, 25, 31)' && popoverChrome.headingBackground === 'rgb(19, 33, 42)' &&
+      popoverChrome.actionRadius === '5px' && popoverChrome.actionHeight === 23 &&
+      popoverChrome.actionBackground === 'rgba(0, 0, 0, 0)' &&
+      popoverChrome.selectBorder === 'rgb(34, 52, 61)' && popoverChrome.selectRadius === '5px',
+      `model popover adopts the endpoint card language: ${JSON.stringify(popoverChrome)}`);
+    const lightPopoverChrome = await browser.evaluate(`(() => {
+      const original = document.documentElement.dataset.theme || 'dark';
+      document.documentElement.dataset.theme = 'light';
+      const pop = document.querySelector('#header-model-popover');
+      const ps = getComputedStyle(pop);
+      const heading = document.querySelector('.header-model-popover-heading');
+      const hs = heading ? getComputedStyle(heading) : null;
+      const result = {
+        background: ps.backgroundColor,
+        borderColor: ps.borderTopColor,
+        headingBackground: hs?.backgroundColor ?? null,
+      };
+      document.documentElement.dataset.theme = original;
+      return result;
+    })()`);
+    assert(lightPopoverChrome.background === 'rgb(255, 255, 255)' &&
+      lightPopoverChrome.borderColor === 'rgb(201, 214, 218)' &&
+      lightPopoverChrome.headingBackground === 'rgb(243, 248, 249)',
+      `model popover mirrors the endpoint card in light theme: ${JSON.stringify(lightPopoverChrome)}`);
     const headerPopoverLayout = await browser.evaluate(`(() => {
       const labels = [...document.querySelectorAll('.header-model-popover-label')];
       const control = document.querySelector('.header-model-control');
