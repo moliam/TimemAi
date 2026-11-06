@@ -177,7 +177,7 @@ pub fn system_cap_enabled_default() -> bool {
 /// containment facility (cgroup scope on Linux, job object on Windows).
 /// Governance and diagnostics work best for processes that stay inside the
 /// managed tree, so the model gets this soft guidance while calling tools.
-pub const INSTANCE_CONTAINMENT_NOTE: &str = "**Instance containment note**: this runtime runs inside a managed containment facility (for example a cgroup scope on Linux or a job object on Windows). When calling tools, spawn work in the most constrained way possible and keep it inside the runtime's managed process tree; the runtime's governance and diagnostics — resource caps, usage accounting, session scopes, and cleanup — work best for processes that stay inside the managed tree. Step outside the tree only when it is truly unavoidable or the user explicitly asks for it, and avoid daemonizing or re-parenting processes outside it.";
+pub const INSTANCE_CONTAINMENT_NOTE: &str = "**Session containment note**: this timem runtime runs inside a cgroup containment facility used for governance and diagnostics. When spawning new tasks or jobs, do not add special settings that would move them out of this containment (for example systemd-run, setsid, or nice) unless it is truly unavoidable or the user explicitly asks for it.";
 
 /// Pure decision for [`INSTANCE_CONTAINMENT_NOTE`]: `Some` only when the
 /// platform actually has a containment facility. `Disabled` and
