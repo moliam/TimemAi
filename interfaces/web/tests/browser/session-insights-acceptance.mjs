@@ -935,6 +935,13 @@ async function main() {
     assert(await browser.evaluate(`document.querySelector('.worker-role-panel')?.getAttribute('aria-label') === '角色'`), "right sidebar accessible name must read 角色 in Chinese");
     assert(await browser.evaluate(`document.querySelector('.worker-role-restore')?.getAttribute('aria-label') === '显示角色面板'`), "collapsed right sidebar control must be localized in Chinese");
     assert(await browser.evaluate(`document.querySelector('.mobile-role-button')?.getAttribute('aria-label') === '打开角色面板'`), "mobile role entry must be localized in Chinese");
+    assert(await browser.evaluate(`document.querySelector('.mailbox-header-button')?.getAttribute('title') === '跨会话信息，在 AI 提示词中提供会话ID 可进行跨会话 AI 交流合作。'`), "mailbox header hover must explain cross-session collaboration");
+    await browser.evaluate(`document.querySelector('.mailbox-header-button')?.click()`);
+    await waitFor(() => browser.evaluate(`!!document.querySelector('#mailbox-panel')`), "mailbox panel opens in Chinese");
+    assert(await browser.evaluate(`document.querySelector('#mailbox-panel .side-panel-title strong')?.textContent === '跨会话信息'`), "mailbox panel title must read 跨会话信息");
+    assert(await browser.evaluate(`[...document.querySelectorAll('#mailbox-panel .mailbox-address-label')].some((node) => node.textContent === '本会话 ID')`), "mailbox session label must read 本会话 ID");
+    await browser.evaluate(`document.querySelector('#mailbox-panel .side-panel-header .icon-button')?.click()`);
+    await waitFor(() => browser.evaluate(`!document.querySelector('#mailbox-panel')`), "mailbox panel closes after Chinese copy check");
     const chipZh = await center(browser, ".session-insights-chip");
     await click(browser, chipZh);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.session-insights-panel')`), "panel opens in Chinese");

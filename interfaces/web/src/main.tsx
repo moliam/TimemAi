@@ -5445,7 +5445,7 @@ function TimemApp() {
               <button
                 type="button"
                 ref={mailboxButtonRef}
-                title={t("mailbox.title")}
+                title={t("mailbox.headerHint")}
                 aria-label={mailboxLabel}
                 className={`icon-button mailbox-header-button ${showMailbox ? "selected" : ""} ${mailboxAttention ? "has-unread" : ""}`}
                 aria-expanded={showMailbox}

@@ -35,6 +35,8 @@ describe("floating panel anchoring", () => {
     expect(source).toContain('"--session-popover-right": `${anchorRight}px`');
     expect(source).toContain("const [timersPanelAnchorRight, setTimersPanelAnchorRight] = useState<");
     expect(source).toContain("const [mailboxPanelAnchorRight, setMailboxPanelAnchorRight] = useState<");
+    expect(source).toContain('title={t("mailbox.headerHint")}');
+    expect(source).not.toContain('title={t("mailbox.title")}');
     expect(source).toContain("const closeTimersPanel = useCallback((restoreFocus = true) => {");
     expect(source).toContain("timersButtonRef.current?.contains(target) ||");
     expect(source).toContain("mailboxButtonRef.current?.contains(target) ||");
