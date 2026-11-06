@@ -132,14 +132,26 @@ describe("endpoint chain selection panel", () => {
     // Remove button hover must not silently blend into the row.
     expect(styles).toContain(".endpoint-chain-remove:hover { color: #f0967f;");
     // Active badge is a filled pill, not a ghost outline.
-    expect(styles).toContain("background: rgba(47, 143, 118, .18); color: #7ee0c3;");
+    expect(styles).toContain("background: #2e8f78; color: #fff;");
     expect(styles).toContain(':root[data-theme="light"] .endpoint-rate-flag { color: #8a5f1d; }');
   });
 
 
-  it("widens the desktop panel without breaking the mobile layout", () => {
-    expect(styles).toContain('@media (min-width: 721px) { .endpoint-menu:not(.editing) { width: min(600px, calc(100vw - 48px)); } }');
+  it("sizes the desktop panel to its content without breaking the mobile layout", () => {
+    // The desktop panel follows its content between a readable floor and a
+    // 600px ceiling; it is no longer a fixed 640px slab with dead space.
+    expect(styles).toContain('width: fit-content; min-width: min(480px, calc(100vw - 48px)); max-width: min(600px, calc(100vw - 48px));');
     expect(styles).toContain("@media (max-width: 720px) { .endpoint-chain { grid-template-columns: 1fr; } }");
+  });
+
+  it("keeps the current-route badge a solid green circle with a white centered check", () => {
+    // The old runtime-card divider rule used to add padding-left to badges
+    // inside the endpoint menu and push the check outside the circle.
+    expect(styles).toContain(".runtime-card .runtime-summary > span + span {");
+    expect(styles).not.toContain(".runtime-card span + span {");
+    expect(styles).toContain("padding: 0; border: 1px solid #5cc6a9; border-radius: 999px; background: #2e8f78; color: #fff; line-height: 0;");
+    expect(styles).toContain(':root[data-theme="light"] .endpoint-chain-active-badge { border-color: #2f9077; background: #2f9077; color: #fff;');
+    expect(styles).toContain(".endpoint-chain-active-badge { position: absolute; top: 3px; right: 3px; display: grid; place-items: center; width: 15px; height: 15px; padding: 0;");
   });
 
   it("subscribes locale-reactive chain components to the catalog", () => {

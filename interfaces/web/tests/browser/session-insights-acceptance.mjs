@@ -489,11 +489,13 @@ async function main() {
         controlBackground: controlStyle.backgroundImage,
         controlBorder: controlStyle.borderTopWidth,
         pillSize: getComputedStyle(document.querySelector('.header-model-control-reasoning')).fontSize,
+        reasoningSelectWidth: Math.round(document.querySelector('#header-model-popover .header-model-popover-select').getBoundingClientRect().width),
       };
     })()`);
     assert(headerPopoverLayout.labels.length === 4 && headerPopoverLayout.labels.every((label) => label.h <= 16 && label.ws === 'nowrap'), `popover labels stay on one line: ${JSON.stringify(headerPopoverLayout)}`);
     assert(headerPopoverLayout.controlHeight === 30 && headerPopoverLayout.controlBorder === '1px' && headerPopoverLayout.controlBackground.includes('linear-gradient'), `header control surface: ${JSON.stringify(headerPopoverLayout)}`);
     assert(headerPopoverLayout.pillSize === '8.5px', `reasoning pill size: ${JSON.stringify(headerPopoverLayout)}`);
+    assert(headerPopoverLayout.reasoningSelectWidth <= 120, `reasoning select hugs its content: ${JSON.stringify(headerPopoverLayout)}`);
     assert(await browser.evaluate(`document.querySelector('#header-model-popover').textContent.includes('Context management')`), "popover carries the context management row");
     assert(await browser.evaluate(`document.querySelector('#header-model-popover .header-model-popover-length input').value === '16000'`), "popover shows the current context length");
     assert(await browser.evaluate(`document.querySelector('#header-model-popover .header-model-popover-context').textContent.includes('1.0K / 16K')`), "context row shows used and limit tokens");
@@ -580,17 +582,54 @@ async function main() {
       const overlap = (a, b) => !!a && !!b && a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
       const badge = box(document.querySelector('.endpoint-chain-active-badge'));
       const remove = box(document.querySelector('.endpoint-chain-remove'));
+      const round = (v) => Math.round(v * 100) / 100;
+      const badgeGeometry = [...document.querySelectorAll('.endpoint-chain-active-badge')].map((node) => {
+        const b = node.getBoundingClientRect();
+        const svg = node.querySelector('svg');
+        const s = svg.getBoundingClientRect();
+        const path = svg.querySelector('path');
+        const p = path.getBoundingClientRect();
+        const cs = getComputedStyle(node);
+        return {
+          badge: { left: round(b.left), top: round(b.top), right: round(b.right), bottom: round(b.bottom), cx: round(b.x + b.width / 2), cy: round(b.y + b.height / 2) },
+          svg: { left: round(s.left), top: round(s.top), right: round(s.right), bottom: round(s.bottom), cx: round(s.x + s.width / 2), cy: round(s.y + s.height / 2) },
+          path: { left: round(p.left), top: round(p.top), right: round(p.right), bottom: round(p.bottom), cx: round(p.x + p.width / 2), cy: round(p.y + p.height / 2) },
+          paddingLeft: cs.paddingLeft,
+          background: cs.backgroundColor,
+          color: cs.color,
+        };
+      });
+      const picks = [...document.querySelectorAll('.endpoint-chain-pick')].map((node) => {
+        const cs = getComputedStyle(node);
+        return { paddingLeft: cs.paddingLeft, borderLeftWidth: cs.borderLeftWidth };
+      });
+      const efforts = [...document.querySelectorAll('.endpoint-chain-effort')].map((node) => Math.round(node.getBoundingClientRect().width * 10) / 10);
       return {
         menuWidth: Math.round(document.querySelector('.endpoint-menu').getBoundingClientRect().width),
         badge,
         remove,
         overlap: overlap(badge, remove),
         close: box(document.querySelector('.endpoint-menu-close')),
+        badgeGeometry,
+        picks,
+        efforts,
       };
     })()`);
-    assert(endpointPanelLayout.menuWidth >= 600, `endpoint panel width: ${JSON.stringify(endpointPanelLayout)}`);
+    assert(endpointPanelLayout.menuWidth >= 460 && endpointPanelLayout.menuWidth <= 600, `endpoint panel width follows its content: ${JSON.stringify(endpointPanelLayout)}`);
     assert(!endpointPanelLayout.overlap, `current check must not collide with remove: ${JSON.stringify(endpointPanelLayout)}`);
     assert(endpointPanelLayout.close.width === 27 && endpointPanelLayout.close.height === 27, `endpoint close target: ${JSON.stringify(endpointPanelLayout)}`);
+    assert(endpointPanelLayout.badgeGeometry.length >= 1, `active endpoint badge present: ${JSON.stringify(endpointPanelLayout)}`);
+    for (const geo of endpointPanelLayout.badgeGeometry) {
+      assert(geo.paddingLeft === '0px', `badge has no inherited padding: ${JSON.stringify(geo)}`);
+      assert(geo.background !== 'rgba(0, 0, 0, 0)' && geo.color === 'rgb(255, 255, 255)', `badge is a solid green circle with a white check: ${JSON.stringify(geo)}`);
+      for (const part of ['svg', 'path']) {
+        const rect = geo[part];
+        assert(rect.left >= geo.badge.left - 0.5 && rect.right <= geo.badge.right + 0.5 && rect.top >= geo.badge.top - 0.5 && rect.bottom <= geo.badge.bottom + 0.5, `check ${part} stays inside the circle: ${JSON.stringify(geo)}`);
+        assert(Math.abs(rect.cx - geo.badge.cx) <= 0.5 && Math.abs(rect.cy - geo.badge.cy) <= 0.5, `check ${part} is centered in the circle: ${JSON.stringify(geo)}`);
+      }
+    }
+    assert(endpointPanelLayout.picks.every((pick) => pick.paddingLeft === '0px' && pick.borderLeftWidth === '0px'), `chain rows keep the runtime-card divider out: ${JSON.stringify(endpointPanelLayout.picks)}`);
+    assert(endpointPanelLayout.efforts.every((width) => width <= 84.5), `reasoning selects stay compact: ${JSON.stringify(endpointPanelLayout.efforts)}`);
     assert(await browser.evaluate(`(() => {
       const badges = [...document.querySelectorAll('.endpoint-chain-active-badge')];
       return badges.length >= 1
@@ -610,6 +649,21 @@ async function main() {
     const closeEndpointPanel = await center(browser, ".endpoint-menu-close");
     await click(browser, closeEndpointPanel);
     await waitFor(() => browser.evaluate(`!document.querySelector('.endpoint-menu')`), "close control dismisses the endpoint panel");
+    // The MCP dropdown belongs to the top-right trigger; it must not open at
+    // the old fixed left inset.
+    const mcpButtonPoint = await center(browser, ".mcp-button");
+    await click(browser, mcpButtonPoint);
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.mcp-panel')`), "MCP panel opens");
+    const mcpPanelLayout = await browser.evaluate(`(() => {
+      const button = document.querySelector('.mcp-button').getBoundingClientRect();
+      const panel = document.querySelector('.mcp-panel').getBoundingClientRect();
+      return { button: button.toJSON(), panel: panel.toJSON(), viewport: innerWidth };
+    })()`);
+    assert(Math.abs(mcpPanelLayout.panel.right - mcpPanelLayout.button.right) <= 1, `MCP panel anchors to its trigger: ${JSON.stringify(mcpPanelLayout)}`);
+    assert(mcpPanelLayout.panel.left > mcpPanelLayout.viewport / 2, `MCP panel opens on the right half: ${JSON.stringify(mcpPanelLayout)}`);
+    const closeMcpPanelPoint = await center(browser, ".mcp-panel-header-actions .icon-button");
+    await click(browser, closeMcpPanelPoint);
+    await waitFor(() => browser.evaluate(`!document.querySelector('.mcp-panel')`), "MCP panel closes");
     // A session without an endpoint chain falls back to the session-level
     // runtime setting; the Host projection still drives the next request.
     const unbound = makeSession();

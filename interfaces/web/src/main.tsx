@@ -717,6 +717,7 @@ function TimemApp() {
   memorySettingsOpenRef.current =
     showAppearance && settingsSection === "memory";
   const [showMcp, setShowMcp] = useState(false);
+  const [mcpPanelAnchorRight, setMcpPanelAnchorRight] = useState<number | null>(null);
   const [newSessionTarget, setNewSessionTarget] = useState<{
     groupId: string | null;
     groupName: string;
@@ -945,6 +946,26 @@ function TimemApp() {
     setRevealedMcpSecrets({});
     if (restoreFocus) mcpButtonRef.current?.focus({ preventScroll: true });
   }, []);
+  // Open the MCP panel next to its trigger instead of at a fixed left inset.
+  // The panel's containing block is the chat shell, so measure the trigger's
+  // right edge against that same boundary and clamp away from the edge.
+  useLayoutEffect(() => {
+    if (!showMcp) return;
+    const anchor = () => {
+      const button = mcpButtonRef.current;
+      if (!button) return;
+      const boundary =
+        (button.offsetParent as HTMLElement | null)?.getBoundingClientRect()
+          .right ?? window.innerWidth;
+      const rect = button.getBoundingClientRect();
+      setMcpPanelAnchorRight(
+        Math.max(12, Math.min(Math.round(boundary - rect.right), window.innerWidth - 48)),
+      );
+    };
+    anchor();
+    window.addEventListener("resize", anchor);
+    return () => window.removeEventListener("resize", anchor);
+  }, [showMcp]);
   const closeMobileSidebar = useCallback((restoreFocus = true) => {
     setShowMobileSessions(false);
     if (restoreFocus)
@@ -5474,6 +5495,7 @@ function TimemApp() {
             <McpPanel
               key={activeSession?.session_id ?? "no-session"}
               panelRef={mcpPanelRef}
+              anchorRight={mcpPanelAnchorRight}
               servers={server?.mcp_servers ?? []}
               session={activeSession}
               pendingKeys={pendingMcpKeys}
@@ -14843,6 +14865,7 @@ function prefersReducedMotion() {
 
 function McpPanel({
   panelRef,
+  anchorRight,
   servers,
   session,
   pendingKeys,
@@ -14851,6 +14874,7 @@ function McpPanel({
   onCommand,
 }: {
   panelRef: MutableRefObject<HTMLElement | null>;
+  anchorRight: number | null;
   servers: McpServerReport[];
   session: Session | undefined;
   pendingKeys: Set<string>;
@@ -14904,6 +14928,11 @@ function McpPanel({
       id="mcp-panel"
       ref={panelRef}
       className="mcp-panel"
+      style={
+        anchorRight === null
+          ? undefined
+          : ({ "--mcp-anchor-right": `${anchorRight}px` } as CSSProperties)
+      }
       role="dialog"
       aria-modal="false"
       aria-label="MCP servers"
