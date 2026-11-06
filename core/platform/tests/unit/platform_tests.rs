@@ -1077,3 +1077,524 @@ fn reaper_backoff_restores_fast_cadence_on_activity_and_caps_idle_growth() {
     }
     assert_eq!(backoff, std::time::Duration::from_secs(4));
 }
+
+// ---------------------------------------------------------------------------
+// Instance resource caps
+
+#[test]
+fn instance_resource_caps_validation_rejects_out_of_range() {
+    assert!(InstanceResourceCaps::validated(true, 0.0, true, 85.0).is_err());
+    assert!(InstanceResourceCaps::validated(true, -1.0, true, 85.0).is_err());
+    assert!(InstanceResourceCaps::validated(true, f64::NAN, true, 85.0).is_err());
+    assert!(InstanceResourceCaps::validated(true, f64::INFINITY, true, 85.0).is_err());
+    assert!(InstanceResourceCaps::validated(true, 85.0, true, 100.0001).is_err());
+    assert!(InstanceResourceCaps::validated(true, 1.0, true, 100.0).is_ok());
+    assert!(InstanceResourceCaps::validated(true, 85.0, true, 85.0).is_ok());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cpu_max_formats_percent_of_cores_with_kernel_minimum() {
+    assert_eq!(crate::linux::format_cpu_max(85.0, 16), "1360000 100000");
+    assert_eq!(crate::linux::format_cpu_max(100.0, 4), "400000 100000");
+    // Kernel minimum quota is 1000 microseconds.
+    assert_eq!(crate::linux::format_cpu_max(1.0, 1), "1000 100000");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn memory_max_scales_system_total_and_high_tracks_eighty_five_percent() {
+    assert_eq!(crate::linux::format_memory_max(85.0, 1_000_000), 850_000);
+    assert_eq!(crate::linux::format_memory_high(850_000), 722_500);
+    assert_eq!(crate::linux::format_memory_max(50.0, 3), 2);
+    assert_eq!(crate::linux::format_memory_high(2), 1);
+    assert_eq!(crate::linux::format_memory_max(100.0, 0), 0);
+    assert_eq!(crate::linux::format_memory_high(0), 0);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn meminfo_total_parses_kb_scale() {
+    let content =
+        "MemFree:         123 kB\nMemTotal:       32878012 kB\nMemAvailable:   9876543 kB\n";
+    assert_eq!(
+        crate::linux::parse_meminfo_total_bytes(content),
+        Some(32_878_012u64 * 1024)
+    );
+    assert_eq!(
+        crate::linux::parse_meminfo_total_bytes("SwapTotal: 1 kB\n"),
+        None
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn instance_resource_caps_apply_is_idempotent_and_update_rewrites_kernel_bound() {
+    // One test drives the process-global state: apply fixes the first
+    // outcome, update rewrites it, invalid updates keep the old bound.
+    let first = apply_instance_resource_caps(InstanceResourceCaps {
+        cpu_enabled: true,
+        cpu_percent: 85.0,
+        mem_enabled: true,
+        mem_percent: 85.0,
+    });
+    let replay = apply_instance_resource_caps(InstanceResourceCaps {
+        cpu_enabled: true,
+        cpu_percent: 90.0,
+        mem_enabled: true,
+        mem_percent: 90.0,
+    });
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &replay),
+        "later applies return the recorded outcome"
+    );
+    assert_eq!(
+        first.caps,
+        InstanceResourceCaps {
+            cpu_enabled: true,
+            cpu_percent: 85.0,
+            mem_enabled: true,
+            mem_percent: 85.0,
+        }
+    );
+    let (
+        crate::ResourceCapStatus::Applied { limit: cpu_limit },
+        crate::ResourceCapStatus::Applied { limit: mem_limit },
+    ) = (&first.cpu, &first.mem)
+    else {
+        eprintln!(
+            "skipping real cgroup-v2 caps write test: cpu {:?}; mem {:?}",
+            first.cpu, first.mem
+        );
+        return;
+    };
+    let period = 100_000.0f64;
+    let (quota, read_period) = cpu_limit.split_once(' ').expect("cpu.max shape");
+    assert_eq!(read_period, "100000");
+    let cores = system_cpu_cores().expect("online cores");
+    let expected_quota = ((85.0 / 100.0) * f64::from(cores) * period).round() as u64;
+    assert_eq!(quota.parse::<u64>().expect("quota number"), expected_quota);
+    let mem_total = system_mem_total_bytes().expect("mem total");
+    let expected_max = (0.85 * mem_total as f64).round() as u64;
+    let expected_high = expected_max * 85 / 100;
+    assert_eq!(
+        mem_limit.as_str(),
+        format!("high={expected_high}; max={expected_max}").as_str()
+    );
+    let scope = PathBuf::from(&first.scope);
+    assert!(scope.ends_with("timem.jobs"), "{}", first.scope);
+    assert_eq!(
+        std::fs::read_to_string(scope.join("cpu.max")).expect("cpu.max readable"),
+        format!("{expected_quota} 100000\n")
+    );
+    assert_eq!(
+        std::fs::read_to_string(scope.join("memory.high")).expect("memory.high readable"),
+        format!("{expected_high}\n")
+    );
+    assert_eq!(
+        std::fs::read_to_string(scope.join("memory.max")).expect("memory.max readable"),
+        format!("{expected_max}\n")
+    );
+
+    // Runtime update rewrites both kernel files and the recorded outcome.
+    let updated_cpu = ((70.0 / 100.0) * f64::from(cores) * period).round() as u64;
+    let updated_max = (0.70 * mem_total as f64).round() as u64;
+    let updated_high = updated_max * 85 / 100;
+    let updated = update_instance_resource_caps(InstanceResourceCaps {
+        cpu_enabled: true,
+        cpu_percent: 70.0,
+        mem_enabled: true,
+        mem_percent: 70.0,
+    })
+    .expect("runtime update applies");
+    assert_eq!(updated.caps.cpu_percent, 70.0);
+    assert_eq!(
+        std::fs::read_to_string(scope.join("cpu.max")).expect("cpu.max readable"),
+        format!("{updated_cpu} 100000\n")
+    );
+    assert_eq!(
+        std::fs::read_to_string(scope.join("memory.high")).expect("memory.high readable"),
+        format!("{updated_high}\n")
+    );
+    assert_eq!(
+        std::fs::read_to_string(scope.join("memory.max")).expect("memory.max readable"),
+        format!("{updated_max}\n")
+    );
+
+    // Invalid updates change nothing.
+    assert!(update_instance_resource_caps(InstanceResourceCaps {
+        cpu_enabled: true,
+        cpu_percent: 150.0,
+        mem_enabled: true,
+        mem_percent: 70.0,
+    })
+    .is_err());
+    assert_eq!(
+        std::fs::read_to_string(scope.join("cpu.max")).expect("cpu.max readable"),
+        format!("{updated_cpu} 100000\n"),
+        "invalid update keeps the previous kernel bound"
+    );
+
+    // Restore unbounded parent defaults so later job-scoped tests inherit no quota.
+    let _ = std::fs::write(scope.join("cpu.max"), "max 100000\n");
+    let _ = std::fs::write(scope.join("memory.high"), "max\n");
+    let _ = std::fs::write(scope.join("memory.max"), "max\n");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn escalation_script_renders_whitelisted_actions_only() {
+    let actions = vec![
+        crate::ResourceCapEscalationAction::MigrateSelf {
+            cgroup: "/sys/fs/cgroup/user.slice/timem.self".to_string(),
+            pid: 4242,
+        },
+        crate::ResourceCapEscalationAction::EnableController {
+            cgroup: "/sys/fs/cgroup/user.slice".to_string(),
+            controller: "cpu".to_string(),
+        },
+        crate::ResourceCapEscalationAction::MakeWritable {
+            cgroup: "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice"
+                .to_string(),
+            uid: 1000,
+            gid: 1000,
+        },
+    ];
+    let script = crate::linux::render_escalation_script(&actions).expect("render");
+    assert!(script.contains(
+        "mkdir -p '/sys/fs/cgroup/user.slice/timem.self' && echo '4242' > '/sys/fs/cgroup/user.slice/timem.self/cgroup.procs' || exit 77"
+    ));
+    assert!(script.contains(
+        "grep -qw 'cpu' '/sys/fs/cgroup/user.slice/cgroup.subtree_control' 2>/dev/null || echo '+cpu' > '/sys/fs/cgroup/user.slice/cgroup.subtree_control' || exit 77"
+    ));
+    assert!(script.contains(
+        "chown -R '1000:1000' '/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice' || exit 77"
+    ));
+
+    for bad in [
+        "/sys/fs/cgroup/x; rm -rf /",
+        "/sys/fs/cgroup/../..",
+        "/etc/passwd",
+        "/sys/fs/cgroup/a b",
+    ] {
+        let plan = vec![crate::ResourceCapEscalationAction::EnableController {
+            cgroup: bad.to_string(),
+            controller: "cpu".to_string(),
+        }];
+        assert!(
+            crate::linux::render_escalation_script(&plan).is_err(),
+            "unsafe path must be rejected: {bad}"
+        );
+    }
+    let plan = vec![crate::ResourceCapEscalationAction::EnableController {
+        cgroup: "/sys/fs/cgroup/user.slice".to_string(),
+        controller: "cpu;reboot".to_string(),
+    }];
+    assert!(crate::linux::render_escalation_script(&plan).is_err());
+    let plan = vec![crate::ResourceCapEscalationAction::MigrateSelf {
+        cgroup: "/etc/passwd".to_string(),
+        pid: 1,
+    }];
+    assert!(crate::linux::render_escalation_script(&plan).is_err());
+    assert!(crate::linux::render_escalation_script(&[]).is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn probe_reports_well_formed_readiness() {
+    let readiness = crate::probe_instance_resource_caps();
+    for status in [&readiness.cpu, &readiness.mem] {
+        match status {
+            crate::ResourceCapReadiness::NeedsEscalation { actions } => {
+                assert!(!actions.is_empty());
+                for action in actions {
+                    match action {
+                        crate::ResourceCapEscalationAction::EnableController {
+                            cgroup,
+                            controller,
+                        } => {
+                            assert!(cgroup.starts_with("/sys/fs/cgroup/"));
+                            assert!(matches!(controller.as_str(), "cpu" | "memory"));
+                        }
+                        crate::ResourceCapEscalationAction::MakeWritable { cgroup, .. } => {
+                            assert!(cgroup.starts_with("/sys/fs/cgroup/"));
+                        }
+                        crate::ResourceCapEscalationAction::MigrateSelf { cgroup, pid } => {
+                            assert!(cgroup.starts_with("/sys/fs/cgroup/"));
+                            assert!(*pid > 0);
+                        }
+                    }
+                }
+            }
+            crate::ResourceCapReadiness::Ready | crate::ResourceCapReadiness::Unsupported => {}
+            crate::ResourceCapReadiness::Unavailable { reason } => {
+                assert!(!reason.is_empty());
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn dimension_bound_disable_reports_disabled_or_unavailable() {
+    use crate::linux::{apply_dimension_bound, MEMORY_LIMIT_UNBOUNDED};
+    let root = std::env::temp_dir().join(format!("timem-caps-bound-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    // Disabling a fresh dimension writes the unbounded value and reports Disabled.
+    let status = apply_dimension_bound(&root, "memory.high", false, MEMORY_LIMIT_UNBOUNDED, || {
+        "1".to_string()
+    });
+    assert_eq!(status, crate::ResourceCapStatus::Disabled);
+    assert_eq!(
+        std::fs::read_to_string(root.join("memory.high"))
+            .unwrap()
+            .trim(),
+        MEMORY_LIMIT_UNBOUNDED
+    );
+    // Clearing a bound inside a missing directory fails closed as Unavailable.
+    let status = apply_dimension_bound(
+        &root.join("missing"),
+        "memory.high",
+        false,
+        MEMORY_LIMIT_UNBOUNDED,
+        || "1".to_string(),
+    );
+    assert!(matches!(
+        status,
+        crate::ResourceCapStatus::Unavailable { .. }
+    ));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn instance_resource_caps_validate_percent_independently_of_enabled() {
+    assert!(InstanceResourceCaps::validated(true, 85.0, false, 85.0).is_ok());
+    assert!(InstanceResourceCaps::validated(false, 0.0, false, 150.0).is_err());
+    assert!(InstanceResourceCaps::validated(false, -1.0, true, 100.0).is_err());
+    assert!(InstanceResourceCaps::validated(false, f64::NAN, false, 85.0).is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn escalation_plan_streams_script_and_password_through_sudo() {
+    // Development-time privilege simulation: a fake `sudo` on PATH records
+    // argv and stdin, proving the real call chain (spawn, script argument,
+    // password stream, exit-code handling) without any root power.
+    let _guard = crate::test_support::process_lifecycle_test_lock();
+    let fake_dir = std::env::temp_dir().join(format!(
+        "timem-fake-sudo-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&fake_dir).unwrap();
+    let sudo = fake_dir.join("sudo");
+    std::fs::write(
+        &sudo,
+        "#!/bin/sh\n{ printf '%s\\n' \"$@\"; echo '--STDIN--'; cat; } > \"$FAKE_SUDO_LOG\"\nexit 0\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&sudo, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let log = fake_dir.join("invocation.log");
+    let original_path = std::env::var_os("PATH").unwrap();
+    // Serialized by the lifecycle lock: PATH and the log target are process-global.
+    std::env::set_var(
+        "PATH",
+        format!("{}:{}", fake_dir.display(), original_path.to_string_lossy()),
+    );
+    std::env::set_var("FAKE_SUDO_LOG", &log);
+    let outcome = crate::apply_resource_cap_escalation_plan(
+        &[crate::ResourceCapEscalationAction::EnableController {
+            cgroup: "/sys/fs/cgroup/user.slice".to_string(),
+            controller: "cpu".to_string(),
+        }],
+        b"stub-root-password",
+    );
+    std::env::set_var("PATH", &original_path);
+    std::env::remove_var("FAKE_SUDO_LOG");
+    outcome.expect("fake sudo invocation succeeds");
+    let invocation = std::fs::read_to_string(&log).unwrap();
+    assert!(invocation.contains("-S"), "sudo stdin mode: {invocation}");
+    assert!(invocation.contains("sh"), "script shell: {invocation}");
+    assert!(
+        invocation.contains("cgroup.subtree_control"),
+        "controller enablement: {invocation}"
+    );
+    assert!(
+        invocation.contains("+cpu"),
+        "enable action reaches the script: {invocation}"
+    );
+    assert!(
+        invocation.contains("stub-root-password"),
+        "password streams through stdin: {invocation}"
+    );
+    std::fs::remove_dir_all(&fake_dir).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn escalation_plan_separates_auth_failure_from_script_failure() {
+    // Development-time privilege simulation, serialized by the lifecycle lock
+    // like the other fake-sudo test: PATH swaps are process-global.
+    let _guard = crate::test_support::process_lifecycle_test_lock();
+    let fake_dir = std::env::temp_dir().join(format!(
+        "timem-fake-sudo-rc-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&fake_dir).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let actions = [crate::ResourceCapEscalationAction::EnableController {
+        cgroup: "/sys/fs/cgroup/user.slice".to_string(),
+        controller: "memory".to_string(),
+    }];
+    let original_path = std::env::var_os("PATH").unwrap();
+    std::env::set_var(
+        "PATH",
+        format!("{}:{}", fake_dir.display(), original_path.to_string_lossy()),
+    );
+
+    // sudo itself refuses before running the script: its own exit code 1
+    // must keep the fixed authorization-rejected attribution.
+    std::fs::write(
+        fake_dir.join("sudo"),
+        "#!/bin/sh\ncat >/dev/null\necho 'sudo: 1 incorrect password attempt' >&2\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        fake_dir.join("sudo"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let error = crate::apply_resource_cap_escalation_plan(&actions, b"stub")
+        .expect_err("auth failure must surface");
+    assert_eq!(
+        error, "root authorization rejected",
+        "sudo-level rc=1: {error}"
+    );
+
+    // The rendered script exits 77 when an action fails; the kernel sh error
+    // tail is disclosed, and the stub password can never appear anywhere.
+    std::fs::write(
+        fake_dir.join("sudo"),
+        "#!/bin/sh\ncat >/dev/null\necho \"sh: echo: write error: Operation not permitted\" >&2\nexit 77\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        fake_dir.join("sudo"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let error = crate::apply_resource_cap_escalation_plan(&actions, b"stub")
+        .expect_err("script failure must surface");
+    assert!(
+        error.starts_with("escalation script failed:"),
+        "script failure attribution: {error}"
+    );
+    assert!(
+        error.contains("Operation not permitted"),
+        "kernel error tail disclosed: {error}"
+    );
+    assert!(!error.contains("stub"), "password never leaks: {error}");
+
+    std::env::set_var("PATH", &original_path);
+    std::fs::remove_dir_all(&fake_dir).unwrap();
+}
+
+#[test]
+fn shared_root_is_detected_by_foreign_pids() {
+    let own = 4242u32;
+    assert!(!crate::linux::pids_indicate_shared_root(&[], own));
+    assert!(!crate::linux::pids_indicate_shared_root(&[own], own));
+    assert!(crate::linux::pids_indicate_shared_root(&[own, 7], own));
+    assert!(crate::linux::pids_indicate_shared_root(&[7], own));
+}
+
+#[test]
+fn instance_root_is_the_parent_of_the_self_subtree() {
+    let plain = std::path::Path::new("/sys/fs/cgroup/a/b");
+    assert_eq!(crate::linux::instance_root_cgroup(plain), plain);
+    let migrated = std::path::Path::new("/sys/fs/cgroup/a/b/timem.self");
+    assert_eq!(
+        crate::linux::instance_root_cgroup(migrated),
+        std::path::Path::new("/sys/fs/cgroup/a/b")
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn escalation_plan_runs_migration_before_controller_enablement() {
+    // Caller merges per-dimension plans in arbitrary order; the apply entry
+    // must render the migration ahead of every controller enablement, since
+    // enabling under a populated root force-converts the cgroup to a threaded
+    // subtree that carries only cpu.
+    let _guard = crate::test_support::process_lifecycle_test_lock();
+    let fake_dir = std::env::temp_dir().join(format!(
+        "timem-fake-sudo-order-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&fake_dir).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let sudo = fake_dir.join("sudo");
+    std::fs::write(
+        &sudo,
+        "#!/bin/sh\n{ printf '%s\\n' \"$@\"; echo '--STDIN--'; cat; } > \"$FAKE_SUDO_LOG\"\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&sudo, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let log = fake_dir.join("invocation.log");
+    let original_path = std::env::var_os("PATH").unwrap();
+    std::env::set_var(
+        "PATH",
+        format!("{}:{}", fake_dir.display(), original_path.to_string_lossy()),
+    );
+    std::env::set_var("FAKE_SUDO_LOG", &log);
+    let outcome = crate::apply_resource_cap_escalation_plan(
+        &[
+            crate::ResourceCapEscalationAction::EnableController {
+                cgroup: "/sys/fs/cgroup/user.slice".to_string(),
+                controller: "memory".to_string(),
+            },
+            crate::ResourceCapEscalationAction::MakeWritable {
+                cgroup: "/sys/fs/cgroup/user.slice".to_string(),
+                uid: 1000,
+                gid: 1000,
+            },
+            crate::ResourceCapEscalationAction::MigrateSelf {
+                cgroup: "/sys/fs/cgroup/user.slice/timem.self".to_string(),
+                pid: 4242,
+            },
+        ],
+        b"stub-root-password",
+    );
+    std::env::set_var("PATH", &original_path);
+    std::env::remove_var("FAKE_SUDO_LOG");
+    outcome.expect("fake sudo invocation succeeds");
+    let invocation = std::fs::read_to_string(&log).unwrap();
+    let migration = invocation
+        .find("mkdir -p '/sys/fs/cgroup/user.slice/timem.self'")
+        .expect("migration rendered");
+    let enablement = invocation
+        .find("echo '+memory'")
+        .expect("enablement rendered");
+    let ownership = invocation
+        .find("chown -R '1000:1000'")
+        .expect("ownership repair rendered");
+    assert!(
+        migration < enablement && enablement < ownership,
+        "layers must run migration, enablement, then ownership repair: {invocation}"
+    );
+    std::fs::remove_dir_all(&fake_dir).unwrap();
+}

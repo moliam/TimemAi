@@ -95,6 +95,10 @@ pub fn default_registry() -> RuntimeInfoRegistry {
         name: "sysstat",
         report: sysstat_report,
     });
+    registry.register(RuntimeInfoReporter {
+        name: "resource",
+        report: resource_report,
+    });
     registry
 }
 
@@ -237,6 +241,155 @@ pub fn jobmanager_report(inputs: &RuntimeInfoInputs) -> Option<String> {
     } else {
         Some(parts.join("\n\n"))
     }
+}
+
+/// Identity of the last rendered caps outcome, so a runtime update (WebUI
+/// system settings) is reported again while an unchanged healthy outcome is
+/// not repeated on every request.
+static RESOURCE_CAPS_LAST_RENDERED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn resource_caps_identity(application: &crate::os::ResourceCapsApplication) -> String {
+    format!(
+        "{:?}|{:?}|{:?}",
+        application.caps, application.cpu, application.mem
+    )
+}
+
+/// resource reporter: instance resource caps visibility. Reports the caps the
+/// host applied plus their kernel-side scope. A healthy outcome is reported
+/// once per distinct value; a degraded, unsupported, or invalid outcome
+/// stays visible on every request, because the kernel-side bound is then
+/// missing and lighter shell-job usage is the only soft compensation.
+pub fn resource_report(_inputs: &RuntimeInfoInputs) -> Option<String> {
+    let application = crate::os::instance_resource_caps_application()?;
+    let identity = resource_caps_identity(&application);
+    let already_rendered = match RESOURCE_CAPS_LAST_RENDERED.lock() {
+        Ok(guard) => guard.as_deref() == Some(identity.as_str()),
+        Err(_) => false,
+    };
+    let rendered = render_resource_caps_report(
+        &application,
+        crate::os::system_cpu_cores(),
+        crate::os::system_mem_total_bytes(),
+        already_rendered,
+    )?;
+    if let Ok(mut guard) = RESOURCE_CAPS_LAST_RENDERED.lock() {
+        *guard = Some(identity);
+    }
+    Some(rendered)
+}
+
+fn describe_cap_status(status: &crate::os::ResourceCapStatus) -> String {
+    match status {
+        crate::os::ResourceCapStatus::Applied { limit } => format!("applied \"{limit}\""),
+        crate::os::ResourceCapStatus::Disabled => {
+            "disabled (kernel bound cleared to unbounded)".to_string()
+        }
+        crate::os::ResourceCapStatus::Unsupported => "not supported on this platform".to_string(),
+        crate::os::ResourceCapStatus::Unavailable { reason } => format!("unavailable: {reason}"),
+    }
+}
+
+/// `cpu.max` limit `"quota period"` approximated as cores for display.
+fn cpu_max_cores(limit: &str) -> Option<f64> {
+    let (quota, period) = limit.split_once(' ')?;
+    let quota: f64 = quota.trim().parse().ok()?;
+    let period: f64 = period.trim().parse().ok()?;
+    (period > 0.0).then_some(quota / period)
+}
+
+/// Parsed `max=` component of the composite memory limit status. Legacy
+/// single-number statuses are still accepted.
+fn memory_max_bytes(limit: &str) -> Option<u64> {
+    limit
+        .split(';')
+        .find_map(|part| part.trim().strip_prefix("max=")?.trim().parse().ok())
+        .or_else(|| limit.trim().parse().ok())
+}
+
+fn memory_high_bytes(limit: &str) -> Option<u64> {
+    limit
+        .split(';')
+        .find_map(|part| part.trim().strip_prefix("high=")?.trim().parse().ok())
+}
+
+fn memory_limit_detail(limit: &str) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    match (memory_max_bytes(limit), memory_high_bytes(limit)) {
+        (Some(max), Some(high)) => format!(
+            " {:.1}GiB (high {:.1}GiB)",
+            max as f64 / GIB,
+            high as f64 / GIB
+        ),
+        (Some(max), None) => format!(" ({:.1}GiB)", max as f64 / GIB),
+        _ => format!(" \"{limit}\""),
+    }
+}
+
+fn render_resource_caps_report(
+    application: &crate::os::ResourceCapsApplication,
+    cores: Option<u32>,
+    mem_total_bytes: Option<u64>,
+    already_reported: bool,
+) -> Option<String> {
+    if application.fully_applied() && already_reported {
+        return None;
+    }
+    let caps = &application.caps;
+    let cores_text = cores
+        .map(|value| format!("{value} cores"))
+        .unwrap_or_else(|| "? cores".to_string());
+    let total_text = mem_total_bytes
+        .map(|value| format!("{:.1}GiB", value as f64 / (1024.0 * 1024.0 * 1024.0)))
+        .unwrap_or_else(|| "?".to_string());
+    let cpu_text = match &application.cpu {
+        crate::os::ResourceCapStatus::Applied { limit } => {
+            let approx = cpu_max_cores(limit)
+                .map(|value| format!(" (~{value:.1} cores)"))
+                .unwrap_or_default();
+            format!(
+                "cpu {}% of {} -> applied cpu.max \"{limit}\"{approx}",
+                caps.cpu_percent, cores_text
+            )
+        }
+        other => format!(
+            "cpu {}% of {} -> {}",
+            caps.cpu_percent,
+            cores_text,
+            describe_cap_status(other)
+        ),
+    };
+    let mem_text = match &application.mem {
+        crate::os::ResourceCapStatus::Applied { limit } => format!(
+            "mem {}% of {} -> applied memory.max{}",
+            caps.mem_percent,
+            total_text,
+            memory_limit_detail(limit)
+        ),
+        other => format!(
+            "mem {}% of {} -> {}",
+            caps.mem_percent,
+            total_text,
+            describe_cap_status(other)
+        ),
+    };
+    let mut lines = vec![format!("caps: {cpu_text}; {mem_text}")];
+    if !application.scope.is_empty() {
+        lines.push(format!("scope: {}", application.scope));
+    }
+    let intentionally_unbounded = matches!(application.cpu, crate::os::ResourceCapStatus::Disabled)
+        || matches!(application.mem, crate::os::ResourceCapStatus::Disabled);
+    lines.push(if !application.fully_applied() {
+        "note: no kernel-side bound is active for the job tree; keep shell jobs few and light until caps apply."
+            .to_string()
+    } else if intentionally_unbounded {
+        "note: disabled dimensions leave the job tree intentionally unbounded."
+            .to_string()
+    } else {
+        "note: the kernel bounds this instance's job tree; runaway shell jobs cannot exhaust the machine."
+            .to_string()
+    });
+    Some(lines.join("\n"))
 }
 
 /// sysstat reporter: filesystem pressure and suspicious job kills. Reports
@@ -453,6 +606,117 @@ mod tests {
         });
         let inputs = RuntimeInfoInputs::default();
         assert!(registry.render(&inputs).is_none());
+    }
+
+    #[test]
+    fn resource_caps_report_renders_applied_once_and_degraded_repeatedly() {
+        let caps =
+            crate::os::InstanceResourceCaps::validated(true, 85.0, true, 85.0).expect("valid caps");
+        let applied = crate::os::ResourceCapsApplication {
+            caps,
+            cpu: crate::os::ResourceCapStatus::Applied {
+                limit: "1360000 100000".into(),
+            },
+            mem: crate::os::ResourceCapStatus::Applied {
+                limit: "high=25098715136; max=29527900160".into(),
+            },
+            scope: "cgroup: /sys/fs/cgroup/demo/timem.jobs".into(),
+        };
+        let first = render_resource_caps_report(&applied, Some(16), Some(34_738_921_472), false)
+            .expect("first render");
+        assert!(first.contains("cpu 85% of 16 cores"), "{first}");
+        assert!(
+            first.contains("applied cpu.max \"1360000 100000\" (~13.6 cores)"),
+            "{first}"
+        );
+        assert!(first.contains("mem 85% of 32.4GiB"), "{first}");
+        assert!(
+            first.contains("applied memory.max 27.5GiB (high 23.4GiB)"),
+            "{first}"
+        );
+        assert!(
+            first.contains("scope: cgroup: /sys/fs/cgroup/demo/timem.jobs"),
+            "{first}"
+        );
+        assert!(
+            first.contains("runaway shell jobs cannot exhaust the machine"),
+            "{first}"
+        );
+        assert!(
+            render_resource_caps_report(&applied, Some(16), Some(34_738_921_472), true).is_none(),
+            "fully applied outcome is reported once"
+        );
+        assert!(
+            render_resource_caps_report(&applied, Some(16), Some(34_738_921_472), false).is_some(),
+            "unreported healthy state still renders once"
+        );
+
+        let degraded = crate::os::ResourceCapsApplication {
+            caps,
+            cpu: crate::os::ResourceCapStatus::Applied {
+                limit: "1000 100000".into(),
+            },
+            mem: crate::os::ResourceCapStatus::Unavailable {
+                reason: "permission denied".into(),
+            },
+            scope: "cgroup: /sys/fs/cgroup/demo/timem.jobs".into(),
+        };
+        let degraded_text =
+            render_resource_caps_report(&degraded, Some(16), Some(34_738_921_472), true)
+                .expect("degraded render");
+        assert!(
+            degraded_text.contains("mem 85% of 32.4GiB -> unavailable: permission denied"),
+            "{degraded_text}"
+        );
+        assert!(
+            degraded_text.contains("keep shell jobs few and light"),
+            "{degraded_text}"
+        );
+
+        let unsupported = crate::os::ResourceCapsApplication {
+            caps,
+            cpu: crate::os::ResourceCapStatus::Unsupported,
+            mem: crate::os::ResourceCapStatus::Unsupported,
+            scope: "no kernel-level instance quota facility on this platform yet".into(),
+        };
+        let unsupported_text = render_resource_caps_report(&unsupported, None, None, true)
+            .expect("unsupported render");
+        assert!(
+            unsupported_text.contains("cpu 85% of ? cores -> not supported on this platform"),
+            "{unsupported_text}"
+        );
+        assert!(
+            unsupported_text.contains("mem 85% of ? -> not supported"),
+            "{unsupported_text}"
+        );
+    }
+
+    #[test]
+    fn resource_caps_report_renders_disabled_dimensions() {
+        let caps = crate::os::InstanceResourceCaps::validated(false, 50.0, true, 85.0)
+            .expect("valid caps");
+        let disabled = crate::os::ResourceCapsApplication {
+            caps,
+            cpu: crate::os::ResourceCapStatus::Disabled,
+            mem: crate::os::ResourceCapStatus::Applied {
+                limit: "29527900160".into(),
+            },
+            scope: "cgroup: /sys/fs/cgroup/demo/timem.jobs".into(),
+        };
+        let text = render_resource_caps_report(&disabled, Some(16), Some(34_738_921_472), false)
+            .expect("disabled render");
+        assert!(
+            text.contains("-> disabled (kernel bound cleared to unbounded)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("disabled dimensions leave the job tree intentionally unbounded"),
+            "{text}"
+        );
+        assert!(
+            render_resource_caps_report(&disabled, Some(16), Some(34_738_921_472), true).is_none(),
+            "stable disabled state is reported once"
+        );
     }
 }
 

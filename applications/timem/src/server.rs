@@ -6,6 +6,8 @@ mod model_endpoint_import;
 mod model_endpoint_share;
 mod response_preview;
 mod self_upgrade;
+mod session_resource_monitor;
+mod session_work_file_monitor;
 mod websocket_delivery;
 
 #[cfg(test)]
@@ -287,6 +289,10 @@ struct ModelEndpointHealthState {
     rate_limited_since_ms: Option<u128>,
     /// An availability probe is currently in flight for this endpoint.
     probing: bool,
+    /// When the last availability probe finished, regardless of its result.
+    /// Transport errors leave the judgement unchanged, so the automatic
+    /// re-probe cadence is anchored here instead of retrying every scan tick.
+    last_probe_ms: Option<u128>,
 }
 
 #[derive(Debug, Clone)]
@@ -372,6 +378,11 @@ impl WebMemState {
             model_tool_result_bytes: self.settings.model_tool_result_bytes,
             context_compress_threshold_percent: self.settings.context_compress_threshold_percent,
             restore_prompt_context_on_startup: self.settings.restore_prompt_context_on_startup,
+            system_cpu_cap_percent: self.settings.system_cpu_cap_percent,
+            system_mem_cap_percent: self.settings.system_mem_cap_percent,
+            system_cpu_cap_enabled: self.settings.system_cpu_cap_enabled,
+            system_mem_cap_enabled: self.settings.system_mem_cap_enabled,
+            resource_caps: resource_caps_projection(&self.settings),
         }
     }
 }
@@ -988,6 +999,11 @@ enum WireEvent {
         session_id: String,
         reset_at_ms: u128,
     },
+    SessionResourceUsage {
+        session_id: String,
+        sampled_at_ms: u128,
+        usage: Option<WebSessionResourceUsage>,
+    },
     SessionRestartCwdResolved {
         session: Box<WebSession>,
     },
@@ -1123,6 +1139,11 @@ enum WireEvent {
         model_tool_result_bytes: usize,
         context_compress_threshold_percent: u8,
         restore_prompt_context_on_startup: bool,
+        system_cpu_cap_percent: f64,
+        system_mem_cap_percent: f64,
+        system_cpu_cap_enabled: bool,
+        system_mem_cap_enabled: bool,
+        resource_caps: WireResourceCaps,
     },
     MemStorageUsage {
         temporary_bytes: u64,
@@ -1211,6 +1232,27 @@ enum CommandAckStatus {
     Rejected,
 }
 
+/// Read-only resource sample for the Session Insights dashboard. `None`
+/// fields mean the platform cannot account for that dimension right now.
+#[derive(Debug, Clone, Serialize)]
+struct WebSessionResourceUsage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu_usage_usec: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu_quota_cores: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_current_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_peak_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    swap_current_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_high_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_max_bytes: Option<u64>,
+    oom_kill_count: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct WebSnapshot {
     server: ServerInfo,
@@ -1253,6 +1295,11 @@ struct WebMemInfo {
     model_tool_result_bytes: usize,
     context_compress_threshold_percent: u8,
     restore_prompt_context_on_startup: bool,
+    system_cpu_cap_percent: f64,
+    system_mem_cap_percent: f64,
+    system_cpu_cap_enabled: bool,
+    system_mem_cap_enabled: bool,
+    resource_caps: WireResourceCaps,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1654,6 +1701,9 @@ enum ClientCommand {
     SessionUsageReset {
         session_id: String,
     },
+    SessionResourceUsageQuery {
+        session_id: String,
+    },
     ModelEndpointShareExport {
         request_id: String,
         endpoint_id: String,
@@ -1744,6 +1794,19 @@ enum ClientCommand {
     SystemRestorePromptContextOnStartupUpdate {
         enabled: bool,
     },
+    SystemResourceCapsUpdate {
+        cpu_enabled: bool,
+        cpu_percent: f64,
+        mem_enabled: bool,
+        mem_percent: f64,
+    },
+    SystemResourceCapsEscalate {
+        cpu_enabled: bool,
+        cpu_percent: f64,
+        mem_enabled: bool,
+        mem_percent: f64,
+        password: String,
+    },
     MemTemporaryItemsList,
     MemTemporaryItemsDelete {
         ids: Vec<String>,
@@ -1774,6 +1837,8 @@ impl ClientCommand {
             | Self::SystemModelToolResultBytesUpdate { .. }
             | Self::SystemContextCompressThresholdUpdate { .. }
             | Self::SystemRestorePromptContextOnStartupUpdate { .. }
+            | Self::SystemResourceCapsUpdate { .. }
+            | Self::SystemResourceCapsEscalate { .. }
             | Self::MemTemporaryItemsDelete { .. }
             | Self::McpServerDelete { .. }
             | Self::ModelEndpointUpsert { .. }
@@ -1829,6 +1894,7 @@ impl ClientCommand {
             | Self::SessionEndpointReasoningEffortUpdate { session_id, .. }
             | Self::SessionEndpointMaxInputTokensUpdate { session_id, .. }
             | Self::SessionUsageReset { session_id }
+            | Self::SessionResourceUsageQuery { session_id }
             | Self::ModelEndpointApply { session_id, .. }
             | Self::ModelEndpointChainApply { session_id, .. }
             | Self::McpSessionToggle { session_id, .. }
@@ -1854,6 +1920,8 @@ impl ClientCommand {
                 | Self::SystemModelToolResultBytesUpdate { .. }
                 | Self::SystemContextCompressThresholdUpdate { .. }
                 | Self::SystemRestorePromptContextOnStartupUpdate { .. }
+                | Self::SystemResourceCapsUpdate { .. }
+                | Self::SystemResourceCapsEscalate { .. }
                 | Self::MemTemporaryItemsDelete { .. }
                 | Self::McpServerDelete { .. }
                 | Self::ModelEndpointUpsert { .. }
@@ -1904,6 +1972,7 @@ impl ClientCommand {
                 | Self::MemTemporaryItemsList
                 | Self::MemTemporaryItemsDelete { .. }
                 | Self::MemStorageUsageQuery
+                | Self::SessionResourceUsageQuery { .. }
         )
     }
 
@@ -1982,6 +2051,11 @@ pub async fn run(
         template.initial_space.clone(),
         launch.debug,
     )?;
+    // Offer a one-shot root repair before the caps apply, so the web URL is
+    // only served after the instance's caps are as enforced as the user
+    // allowed. Unattended starts skip the prompt and keep degrading loudly.
+    crate::resource_caps_prompt::prompt_escalation_and_apply_if_needed();
+    apply_instance_resource_caps_from_mem(&initial_mem);
     let instance_path = web_instance_path(&initial_mem);
     let web_instance = match open_web_instance_after_handoff(
         &instance_path,
@@ -2082,6 +2156,8 @@ pub async fn run(
     // restore finishes.
     spawn_event_bridge(state.clone());
     spawn_timer_scheduler(state.clone());
+    session_resource_monitor::spawn_session_resource_monitor(state.clone());
+    session_work_file_monitor::spawn_session_work_file_monitor(state.clone());
     spawn_mailbox_scheduler(state.clone());
     spawn_conversation_rolling_loop(state.clone());
 
@@ -2185,6 +2261,7 @@ pub async fn run(
     serve_result?;
     diagnostics.event("graceful_shutdown_cleanup_started", serde_json::Value::Null);
     cleanup_guard.cleanup()?;
+    agent_core::resource_caps::cleanup_instance_resource_limits();
     diagnostics.event("graceful_shutdown_completed", serde_json::Value::Null);
     let reason = shutdown_reason
         .lock()
@@ -2874,6 +2951,129 @@ async fn upgrade_restart(
             Json(json!({"error": "restart_requires_pending_upgrade"})),
         )
             .into_response(),
+    }
+}
+
+/// Apply the instance resource caps recorded in the active space settings.
+/// Called after the settings load at startup and after a space switch, so
+/// the kernel bound always matches the settings the UI shows.
+fn apply_instance_resource_caps_from_mem(mem: &WebMemState) {
+    agent_core::resource_caps::configure_instance_resource_caps_from_config(
+        agent_core::resource_caps::SystemResourceCapConfig {
+            cpu_enabled: mem.settings.system_cpu_cap_enabled,
+            cpu_percent: mem.settings.system_cpu_cap_percent,
+            mem_enabled: mem.settings.system_mem_cap_enabled,
+            mem_percent: mem.settings.system_mem_cap_percent,
+        },
+    );
+}
+
+/// Password buffer that zeroizes its bytes on drop, so every early-return
+/// path wipes the secret instead of leaving it in freed heap memory.
+struct ZeroizingPassword(String);
+
+impl ZeroizingPassword {
+    fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl Drop for ZeroizingPassword {
+    fn drop(&mut self) {
+        // Safety: the buffer is dropped immediately after zeroizing, so the
+        // (possibly non-UTF-8) transient state is never observable.
+        for byte in unsafe { self.0.as_mut_vec() } {
+            *byte = 0;
+        }
+    }
+}
+
+/// Kernel-facing projection of one cap dimension for the WebUI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct WireResourceCapDimension {
+    enabled: bool,
+    percent: f64,
+    /// applied | disabled | unavailable | unsupported
+    kernel: String,
+    /// The platform-native kernel value while applied ("quota period" or
+    /// the byte bound), for display.
+    limit: Option<String>,
+    reason: Option<String>,
+    /// True when root can make this dimension usable right now.
+    escalation_required: bool,
+}
+
+/// Kernel-facing projection of both cap dimensions for the WebUI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct WireResourceCaps {
+    cpu: WireResourceCapDimension,
+    mem: WireResourceCapDimension,
+    scope: String,
+}
+
+fn wire_cap_dimension(
+    enabled: bool,
+    percent: f64,
+    applied: Option<&agent_core::resource_caps::ResourceCapStatus>,
+    readiness: &agent_core::resource_caps::ResourceCapReadiness,
+) -> WireResourceCapDimension {
+    let escalation_required = matches!(
+        readiness,
+        agent_core::resource_caps::ResourceCapReadiness::NeedsEscalation { .. }
+    );
+    let (kernel, reason, limit) = match applied {
+        Some(agent_core::resource_caps::ResourceCapStatus::Applied { limit }) => {
+            ("applied", None, Some(limit.clone()))
+        }
+        Some(agent_core::resource_caps::ResourceCapStatus::Disabled) => ("disabled", None, None),
+        Some(agent_core::resource_caps::ResourceCapStatus::Unsupported) => {
+            ("unsupported", None, None)
+        }
+        Some(agent_core::resource_caps::ResourceCapStatus::Unavailable { reason }) => {
+            ("unavailable", Some(reason.clone()), None)
+        }
+        None => (
+            "unavailable",
+            Some("caps have not been applied yet".to_string()),
+            None,
+        ),
+    };
+    WireResourceCapDimension {
+        enabled,
+        percent,
+        kernel: kernel.to_string(),
+        limit,
+        reason,
+        escalation_required,
+    }
+}
+
+fn resource_caps_projection(settings: &WebMemSettings) -> WireResourceCaps {
+    let readiness = agent_core::resource_caps::probe_instance_resource_caps();
+    let application = agent_core::resource_caps::instance_resource_caps_application();
+    let (cpu_status, mem_status) = match application.as_ref() {
+        Some(application) => (Some(&application.cpu), Some(&application.mem)),
+        None => (None, None),
+    };
+    let scope = application
+        .as_ref()
+        .map(|application| application.scope.clone())
+        .filter(|scope| !scope.is_empty())
+        .unwrap_or_else(|| readiness.scope.clone());
+    WireResourceCaps {
+        cpu: wire_cap_dimension(
+            settings.system_cpu_cap_enabled,
+            settings.system_cpu_cap_percent,
+            cpu_status,
+            &readiness.cpu,
+        ),
+        mem: wire_cap_dimension(
+            settings.system_mem_cap_enabled,
+            settings.system_mem_cap_percent,
+            mem_status,
+            &readiness.mem,
+        ),
+        scope,
     }
 }
 
@@ -5142,6 +5342,25 @@ fn handle_command_with_id(
             };
             publish_semantic(state, event.clone());
         }
+        ClientCommand::SessionResourceUsageQuery { session_id } => {
+            ensure_session_exists(state, &session_id)?;
+            let usage = agent_core::resource_caps::session_resource_usage(&session_id)
+                .map_err(|error| format!("session_resource_usage_failed:{error}"))?;
+            return Ok(Some(WireEvent::SessionResourceUsage {
+                session_id,
+                sampled_at_ms: now_ms(),
+                usage: usage.map(|usage| WebSessionResourceUsage {
+                    cpu_usage_usec: usage.cpu_usage_usec,
+                    cpu_quota_cores: usage.cpu_quota_cores,
+                    memory_current_bytes: usage.memory_current_bytes,
+                    memory_peak_bytes: usage.memory_peak_bytes,
+                    swap_current_bytes: usage.swap_current_bytes,
+                    memory_high_bytes: usage.memory_high_bytes,
+                    memory_max_bytes: usage.memory_max_bytes,
+                    oom_kill_count: usage.oom_kill_count,
+                }),
+            }));
+        }
         ClientCommand::ModelEndpointShareExport {
             request_id,
             endpoint_id,
@@ -5417,6 +5636,11 @@ fn handle_command_with_id(
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+                system_cpu_cap_percent: settings.system_cpu_cap_percent,
+                system_mem_cap_percent: settings.system_mem_cap_percent,
+                system_cpu_cap_enabled: settings.system_cpu_cap_enabled,
+                system_mem_cap_enabled: settings.system_mem_cap_enabled,
+                resource_caps: resource_caps_projection(&settings),
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -5466,6 +5690,11 @@ fn handle_command_with_id(
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+                system_cpu_cap_percent: settings.system_cpu_cap_percent,
+                system_mem_cap_percent: settings.system_mem_cap_percent,
+                system_cpu_cap_enabled: settings.system_cpu_cap_enabled,
+                system_mem_cap_enabled: settings.system_mem_cap_enabled,
+                resource_caps: resource_caps_projection(&settings),
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -5505,6 +5734,11 @@ fn handle_command_with_id(
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+                system_cpu_cap_percent: settings.system_cpu_cap_percent,
+                system_mem_cap_percent: settings.system_mem_cap_percent,
+                system_cpu_cap_enabled: settings.system_cpu_cap_enabled,
+                system_mem_cap_enabled: settings.system_mem_cap_enabled,
+                resource_caps: resource_caps_projection(&settings),
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -5557,6 +5791,11 @@ fn handle_command_with_id(
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+                system_cpu_cap_percent: settings.system_cpu_cap_percent,
+                system_mem_cap_percent: settings.system_mem_cap_percent,
+                system_cpu_cap_enabled: settings.system_cpu_cap_enabled,
+                system_mem_cap_enabled: settings.system_mem_cap_enabled,
+                resource_caps: resource_caps_projection(&settings),
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -5588,6 +5827,11 @@ fn handle_command_with_id(
                 model_tool_result_bytes: max_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+                system_cpu_cap_percent: settings.system_cpu_cap_percent,
+                system_mem_cap_percent: settings.system_mem_cap_percent,
+                system_cpu_cap_enabled: settings.system_cpu_cap_enabled,
+                system_mem_cap_enabled: settings.system_mem_cap_enabled,
+                resource_caps: resource_caps_projection(&settings),
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -5619,6 +5863,11 @@ fn handle_command_with_id(
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: percent,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+                system_cpu_cap_percent: settings.system_cpu_cap_percent,
+                system_mem_cap_percent: settings.system_mem_cap_percent,
+                system_cpu_cap_enabled: settings.system_cpu_cap_enabled,
+                system_mem_cap_enabled: settings.system_mem_cap_enabled,
+                resource_caps: resource_caps_projection(&settings),
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -5648,6 +5897,140 @@ fn handle_command_with_id(
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
                 restore_prompt_context_on_startup: enabled,
+                system_cpu_cap_percent: settings.system_cpu_cap_percent,
+                system_mem_cap_percent: settings.system_mem_cap_percent,
+                system_cpu_cap_enabled: settings.system_cpu_cap_enabled,
+                system_mem_cap_enabled: settings.system_mem_cap_enabled,
+                resource_caps: resource_caps_projection(&settings),
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
+        }
+        ClientCommand::SystemResourceCapsUpdate {
+            cpu_enabled,
+            cpu_percent,
+            mem_enabled,
+            mem_percent,
+        } => {
+            // Kernel first: if the bound cannot be applied, nothing is saved
+            // and the UI reports the error, so the stored setting is always
+            // what the kernel enforces.
+            agent_core::resource_caps::update_system_resource_caps(
+                cpu_enabled,
+                cpu_percent,
+                mem_enabled,
+                mem_percent,
+            )
+            .map_err(|error| format!("invalid_system_resource_caps:{error}"))?;
+            let (memory_dir, settings) = {
+                let mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                let mut settings = mem.settings.clone();
+                settings.system_cpu_cap_enabled = cpu_enabled;
+                settings.system_cpu_cap_percent = cpu_percent;
+                settings.system_mem_cap_enabled = mem_enabled;
+                settings.system_mem_cap_percent = mem_percent;
+                (mem.layout.memory_dir(), settings)
+            };
+            save_web_mem_settings(&memory_dir, &settings)?;
+            state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .settings = settings.clone();
+            let event = WireEvent::MemSettingsUpdated {
+                temporary_retention_days: settings.temporary_retention_days,
+                temporary_capacity_bytes: settings.temporary_capacity_bytes,
+                conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                mailbox_capacity_bytes: settings.mailbox_capacity_bytes,
+                claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
+                model_tool_result_bytes: settings.model_tool_result_bytes,
+                context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+                system_cpu_cap_percent: settings.system_cpu_cap_percent,
+                system_mem_cap_percent: settings.system_mem_cap_percent,
+                system_cpu_cap_enabled: settings.system_cpu_cap_enabled,
+                system_mem_cap_enabled: settings.system_mem_cap_enabled,
+                resource_caps: resource_caps_projection(&settings),
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
+        }
+        ClientCommand::SystemResourceCapsEscalate {
+            cpu_enabled,
+            cpu_percent,
+            mem_enabled,
+            mem_percent,
+            password,
+        } => {
+            // Root repair first (only when the probe says root can help),
+            // then the kernel, then persistence: a stored setting must
+            // always be what the kernel enforces. The password is zeroized
+            // on drop and never logged, echoed, or persisted.
+            let password = ZeroizingPassword(password);
+            let readiness = agent_core::resource_caps::probe_instance_resource_caps();
+            let mut actions: Vec<agent_core::resource_caps::ResourceCapEscalationAction> =
+                Vec::new();
+            for status in [&readiness.cpu, &readiness.mem] {
+                if let agent_core::resource_caps::ResourceCapReadiness::NeedsEscalation {
+                    actions: plan,
+                } = status
+                {
+                    for action in plan {
+                        if !actions.contains(action) {
+                            actions.push(action.clone());
+                        }
+                    }
+                }
+            }
+            if !actions.is_empty() {
+                agent_core::resource_caps::apply_resource_cap_escalation_plan(
+                    &actions,
+                    password.as_bytes(),
+                )
+                .map_err(|error| format!("invalid_system_resource_caps:{error}"))?;
+            }
+            agent_core::resource_caps::update_system_resource_caps(
+                cpu_enabled,
+                cpu_percent,
+                mem_enabled,
+                mem_percent,
+            )
+            .map_err(|error| format!("invalid_system_resource_caps:{error}"))?;
+            let (memory_dir, settings) = {
+                let mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                let mut settings = mem.settings.clone();
+                settings.system_cpu_cap_enabled = cpu_enabled;
+                settings.system_cpu_cap_percent = cpu_percent;
+                settings.system_mem_cap_enabled = mem_enabled;
+                settings.system_mem_cap_percent = mem_percent;
+                (mem.layout.memory_dir(), settings)
+            };
+            save_web_mem_settings(&memory_dir, &settings)?;
+            state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .settings = settings.clone();
+            let event = WireEvent::MemSettingsUpdated {
+                temporary_retention_days: settings.temporary_retention_days,
+                temporary_capacity_bytes: settings.temporary_capacity_bytes,
+                conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                mailbox_capacity_bytes: settings.mailbox_capacity_bytes,
+                claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
+                model_tool_result_bytes: settings.model_tool_result_bytes,
+                context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+                system_cpu_cap_percent: settings.system_cpu_cap_percent,
+                system_mem_cap_percent: settings.system_mem_cap_percent,
+                system_cpu_cap_enabled: settings.system_cpu_cap_enabled,
+                system_mem_cap_enabled: settings.system_mem_cap_enabled,
+                resource_caps: resource_caps_projection(&settings),
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -5668,6 +6051,7 @@ fn handle_command_with_id(
                 });
         }
     }
+
     Ok(None)
 }
 
@@ -5834,6 +6218,7 @@ fn switch_mem_space(
         let data_root = current_mem_state(state)?.layout.data_root().to_path_buf();
         WebMemState::new_with_debug_defaults(data_root, path.to_string(), state.debug.is_some())?
     };
+    apply_instance_resource_caps_from_mem(&next_mem);
     let current_path = absolute_path(current_mem_state(state)?.layout.space_dir());
     let next_path = absolute_path(next_mem.layout.space_dir());
     if current_path == next_path {
@@ -7914,6 +8299,22 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     events_slimmed: false,
                 });
                 turn.created_at_ms = turn.created_at_ms.min(created_at_ms as u128);
+                // Older builds recorded the work-file notice as a user entry.
+                // It is a system annotation, not user input: restore it into
+                // the work-stream event chain so both shapes render alike.
+                if role == ChatHistoryRole::User
+                    && kind.as_deref()
+                        == Some(session_work_file_monitor::LEGACY_WORK_FILE_UPDATE_ENTRY_KIND)
+                {
+                    turn.events.push(WebTurnEvent {
+                        event_id: format!("history_event_{turn_id}_{created_at_ms}_work_file"),
+                        source: "ui_activity".to_string(),
+                        payload: session_work_file_monitor::work_file_notice_payload(),
+                        created_at_ms: created_at_ms as u128,
+                        timeline_seq: Some(next_turn_timeline_seq(turn)),
+                    });
+                    continue;
+                }
                 match role {
                     ChatHistoryRole::User => turn.user_entries.push(WebTurnUserEntry {
                         kind: history_user_entry_kind(kind.as_deref()).to_string(),
@@ -8097,6 +8498,12 @@ fn web_message_from_history_record(record: ChatHistoryRecord) -> Option<WebChatM
             content,
             ..
         } => {
+            if role == ChatHistoryRole::User
+                && kind.as_deref()
+                    == Some(session_work_file_monitor::LEGACY_WORK_FILE_UPDATE_ENTRY_KIND)
+            {
+                return None;
+            }
             let role = match role {
                 ChatHistoryRole::User => "user",
                 ChatHistoryRole::Assistant => "assistant",
@@ -8121,20 +8528,26 @@ fn web_message_from_history_record(record: ChatHistoryRecord) -> Option<WebChatM
 }
 
 /// Entry kinds the runtime itself produces (mailbox delivery, timer fire,
-/// queued interruption). Their text must render as a runtime observation, not
-/// as a user question.
+/// queued interruption, resource observation). Their text must render as a
+/// runtime observation, not as a user question.
 fn entry_kind_is_system_input(kind: &str) -> bool {
     matches!(
         kind,
         "mailbox" | "mailbox_status" | "timer" | "queued_interrupted"
-    )
+    ) || kind == session_resource_monitor::RESOURCE_OBSERVATION_ENTRY_KIND
 }
 
 fn history_user_entry_kind(kind: Option<&str>) -> &str {
     match kind {
         Some(
-            kind @ ("task" | "supplement" | "approval" | "queued_interrupted" | "timer" | "mailbox"
-            | "mailbox_status"),
+            kind @ ("task"
+            | "supplement"
+            | "approval"
+            | "queued_interrupted"
+            | "timer"
+            | "mailbox"
+            | "mailbox_status"
+            | "resource_observation"),
         ) => kind,
         _ => "task",
     }
@@ -13774,6 +14187,24 @@ fn endpoint_in_rate_limit_cooldown(health: &ModelEndpointHealthState, now: u128)
     })
 }
 
+/// Whether the automatic scanner should re-probe this endpoint now. The
+/// cadence is anchored on the last completed probe as well as the rate-limit
+/// age, so a probe that ends in a transport error is retried on the same
+/// bounded interval instead of on every scan tick.
+fn endpoint_due_for_auto_probe(entry: &ModelEndpointHealthState, now: u128) -> bool {
+    if entry.probing {
+        return false;
+    }
+    let threshold = MODEL_ENDPOINT_AUTO_PROBE_AFTER.as_millis();
+    let Some(since) = entry.rate_limited_since_ms else {
+        return false;
+    };
+    now.saturating_sub(since) >= threshold
+        && entry
+            .last_probe_ms
+            .is_none_or(|last| now.saturating_sub(last) >= threshold)
+}
+
 /// First chain entry that exists and is outside its rate-limit cooldown.
 /// When every entry is cooling down, the first existing entry is returned so
 /// the turn still attempts the user's first preference (and surfaces its
@@ -14289,11 +14720,28 @@ fn apply_model_endpoint_probe_result(
     if let Ok(mut health) = state.model_endpoint_health.lock() {
         let entry = health.entry(endpoint_id.to_string()).or_default();
         entry.probing = false;
+        entry.last_probe_ms = Some(now);
         match result {
             Ok(true) => entry.rate_limited_since_ms = None,
             Ok(false) => entry.rate_limited_since_ms = Some(now),
             Err(_) => {}
         }
+    }
+}
+
+/// Commits one probe result and immediately re-resolves Sessions bound to the
+/// endpoint. A recovered higher-priority entry therefore switches back before
+/// the remaining probes finish; transport errors leave the availability
+/// judgement unchanged and need no re-selection.
+fn commit_model_endpoint_probe_result(
+    state: &AppState,
+    endpoint_id: &str,
+    result: Result<bool, String>,
+) {
+    let availability_changed = result.is_ok();
+    apply_model_endpoint_probe_result(state, endpoint_id, result);
+    if availability_changed {
+        refresh_sessions_bound_to_endpoints(state, &[endpoint_id.to_string()]);
     }
 }
 
@@ -14317,7 +14765,11 @@ fn refresh_sessions_bound_to_endpoints(state: &AppState, endpoint_ids: &[String]
         })
         .unwrap_or_default();
     for session_id in session_ids {
-        let _ = refresh_bound_model_endpoint(state, &session_id);
+        if let Err(error) = refresh_bound_model_endpoint(state, &session_id) {
+            eprintln!(
+                "[timem_web_debug_error] session_id={session_id:?} reason=model_endpoint_refresh_failed:{error}"
+            );
+        }
     }
 }
 
@@ -14362,7 +14814,7 @@ fn refresh_model_endpoint_availability(state: &AppState) -> Result<(), String> {
                     .as_ref()
                     .ok_or_else(|| "template_settings_poisoned".to_string())
                     .and_then(|base| probe_model_endpoint(endpoint, base));
-                apply_model_endpoint_probe_result(&state, &endpoint.id, result);
+                commit_model_endpoint_probe_result(&state, &endpoint.id, result);
                 if let Ok(updated) = model_endpoint_reports(&state) {
                     publish_semantic(
                         &state,
@@ -14370,13 +14822,6 @@ fn refresh_model_endpoint_availability(state: &AppState) -> Result<(), String> {
                     );
                 }
             }
-            refresh_sessions_bound_to_endpoints(
-                &state,
-                &endpoints
-                    .iter()
-                    .map(|endpoint| endpoint.id.clone())
-                    .collect::<Vec<_>>(),
-            );
         })
         .map_err(|_| "model_endpoint_probe_spawn_failed".to_string())?;
     Ok(())
@@ -14397,13 +14842,7 @@ fn spawn_model_endpoint_health_scanner(state: AppState) {
                     let now = now_ms();
                     health
                         .iter()
-                        .filter(|(_, entry)| {
-                            !entry.probing
-                                && entry.rate_limited_since_ms.is_some_and(|since| {
-                                    now.saturating_sub(since)
-                                        >= MODEL_ENDPOINT_AUTO_PROBE_AFTER.as_millis()
-                                })
-                        })
+                        .filter(|(_, entry)| endpoint_due_for_auto_probe(entry, now))
                         .map(|(id, _)| id.clone())
                         .collect::<Vec<_>>()
                 })
@@ -14444,7 +14883,7 @@ fn spawn_model_endpoint_health_scanner(state: AppState) {
                     .as_ref()
                     .ok_or_else(|| "template_settings_poisoned".to_string())
                     .and_then(|base| probe_model_endpoint(&endpoint, base));
-                apply_model_endpoint_probe_result(&state, endpoint_id, result);
+                commit_model_endpoint_probe_result(&state, endpoint_id, result);
                 if let Ok(updated) = model_endpoint_reports(&state) {
                     publish_semantic(
                         &state,
@@ -14452,7 +14891,6 @@ fn spawn_model_endpoint_health_scanner(state: AppState) {
                     );
                 }
             }
-            refresh_sessions_bound_to_endpoints(&state, &candidate_ids);
         });
 }
 
@@ -18013,6 +18451,11 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
             mailbox_capacity_bytes: default_mem_mailbox_capacity_bytes(),
             claude_codex_tool_discovery: false,
             model_tool_result_bytes: default_model_tool_result_bytes(),
+            system_cpu_cap_percent: agent_core::resource_caps::DEFAULT_SYSTEM_CPU_CAP_PERCENT,
+            system_mem_cap_percent: agent_core::resource_caps::DEFAULT_SYSTEM_MEM_CAP_PERCENT,
+            system_cpu_cap_enabled: true,
+            system_mem_cap_enabled: true,
+            resource_caps: resource_caps_projection(&WebMemSettings::default()),
             context_compress_threshold_percent: default_context_compress_threshold_percent(),
             restore_prompt_context_on_startup: default_restore_prompt_context_on_startup(),
         });

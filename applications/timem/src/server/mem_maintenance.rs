@@ -94,7 +94,7 @@ fn temporary_maintenance_hint_exists(mem: &WebMemState) -> bool {
     agent_core::api_audit_maintenance_hint_path(&mem.layout.api_audit_file()).exists()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(super) struct WebMemSettings {
     #[serde(
         default = "default_mem_temporary_retention_days",
@@ -115,6 +115,14 @@ pub(super) struct WebMemSettings {
     pub(super) context_compress_threshold_percent: u8,
     #[serde(default = "default_restore_prompt_context_on_startup")]
     pub(super) restore_prompt_context_on_startup: bool,
+    #[serde(default = "default_system_cpu_cap_percent")]
+    pub(super) system_cpu_cap_percent: f64,
+    #[serde(default = "default_system_mem_cap_percent")]
+    pub(super) system_mem_cap_percent: f64,
+    #[serde(default = "default_system_cap_enabled")]
+    pub(super) system_cpu_cap_enabled: bool,
+    #[serde(default = "default_system_cap_enabled")]
+    pub(super) system_mem_cap_enabled: bool,
 }
 
 impl Default for WebMemSettings {
@@ -138,8 +146,16 @@ impl WebMemSettings {
             model_tool_result_bytes: default_model_tool_result_bytes(),
             context_compress_threshold_percent: default_context_compress_threshold_percent(),
             restore_prompt_context_on_startup: default_restore_prompt_context_on_startup(),
+            system_cpu_cap_percent: default_system_cpu_cap_percent(),
+            system_mem_cap_percent: default_system_mem_cap_percent(),
+            system_cpu_cap_enabled: default_system_cap_enabled(),
+            system_mem_cap_enabled: default_system_cap_enabled(),
         }
     }
+}
+
+const fn default_system_cap_enabled() -> bool {
+    true
 }
 
 const fn default_claude_codex_tool_discovery() -> bool {
@@ -156,6 +172,22 @@ pub(super) fn validate_model_tool_result_bytes(max_bytes: usize) -> Result<(), S
 
 pub(super) const fn default_context_compress_threshold_percent() -> u8 {
     agent_core::DEFAULT_CONTEXT_COMPRESS_THRESHOLD_PERCENT
+}
+
+fn default_system_cpu_cap_percent() -> f64 {
+    agent_core::resource_caps::system_cpu_cap_percent_default_from_env()
+}
+
+fn default_system_mem_cap_percent() -> f64 {
+    agent_core::resource_caps::system_mem_cap_percent_default_from_env()
+}
+
+fn validate_system_resource_cap_percent(percent: f64, field: &str) -> Result<(), String> {
+    if percent.is_finite() && percent > 0.0 && percent <= 100.0 {
+        Ok(())
+    } else {
+        Err(format!("{field}_invalid"))
+    }
 }
 
 pub(super) const fn default_restore_prompt_context_on_startup() -> bool {
@@ -240,7 +272,12 @@ fn validate_web_mem_settings(settings: &WebMemSettings) -> Result<(), String> {
     validate_mem_conversation_capacity_bytes(settings.conversation_capacity_bytes)?;
     validate_mem_mailbox_capacity_bytes(settings.mailbox_capacity_bytes)?;
     validate_model_tool_result_bytes(settings.model_tool_result_bytes)?;
-    validate_context_compress_threshold_percent(settings.context_compress_threshold_percent)
+    validate_context_compress_threshold_percent(settings.context_compress_threshold_percent)?;
+    validate_system_resource_cap_percent(
+        settings.system_cpu_cap_percent,
+        "system_cpu_cap_percent",
+    )?;
+    validate_system_resource_cap_percent(settings.system_mem_cap_percent, "system_mem_cap_percent")
 }
 
 pub(super) fn web_mem_settings_path(memory_dir: &Path) -> PathBuf {

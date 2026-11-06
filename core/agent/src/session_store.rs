@@ -285,9 +285,7 @@ impl SessionStore {
     }
 
     pub fn history_path_for_session(&self, session_id: &str) -> PathBuf {
-        self.sessions_dir()
-            .join(sanitize_session_path_component(session_id))
-            .join("raw_chat_history.jsonl")
+        history_path_in(&self.sessions_dir(), session_id)
     }
 
     /// Persisted dynamic prompt context snapshot for one session. Written by
@@ -1460,7 +1458,7 @@ fn persisted_history_index_path(history_path: &Path) -> PathBuf {
     history_path.with_file_name("raw_chat_history.index.json")
 }
 
-fn invalidate_persisted_history_index(history_path: &Path) {
+pub(crate) fn invalidate_persisted_history_index(history_path: &Path) {
     let _ = fs::remove_file(persisted_history_index_path(history_path));
 }
 
@@ -1793,7 +1791,13 @@ fn validate_session_id(value: &str) -> Result<(), String> {
         .ok_or_else(|| "session_id_invalid".to_string())
 }
 
-fn sanitize_session_path_component(value: &str) -> String {
+pub(crate) fn history_path_in(sessions_dir: &Path, session_id: &str) -> PathBuf {
+    sessions_dir
+        .join(sanitize_session_path_component(session_id))
+        .join("raw_chat_history.jsonl")
+}
+
+pub(crate) fn sanitize_session_path_component(value: &str) -> String {
     let sanitized = value
         .chars()
         .map(|ch| {

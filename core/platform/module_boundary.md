@@ -5,7 +5,7 @@ low-level process primitives shared across Timem hosts.
 
 ## Layout
 
-- `src/api.rs`: general stable, UI-neutral platform API consumed by Core, including filesystem usage snapshots (local mount discovery, platform device identity, per-device deduplication and unavailable-path handling).
+- `src/api.rs`: general stable, UI-neutral platform API consumed by Core, including filesystem usage snapshots (local mount discovery, platform device identity, per-device deduplication and unavailable-path handling) and instance resource caps (kernel-enforced bounds on how much of the machine's total CPU capacity and total memory the current instance's managed job tree may consume).
 - `src/child_input.rs`: exclusively owned nonblocking child stdin; reports backpressure and errors without choosing deadlines or creating writer threads.
 - `src/child_output.rs`: exclusively owned child stdout/stderr pipes with bounded, interruptible reads; no job attribution or deadline policy.
 - `src/process_job.rs`: platform-neutral per-Job process-management facade and internal backend contract.
@@ -20,12 +20,15 @@ low-level process primitives shared across Timem hosts.
 - `agent_core` may consume only the public API; it must not duplicate platform
   selection or operating-system process lifecycle primitives.
 - Agent/Core consumers depend only on platform-neutral facades; cgroup, Job Object, and other backend types must not leak outside this crate.
+- Platform-neutral facades and their diagnostics must not name a single backend mechanism; cgroup/Job Object vocabulary stays inside the target modules.
 - A process-Job backend must establish ownership before user code can fork, target destructive operations only at that Job, and expose kernel-derived membership/completion facts.
 - Aggregate observation scopes are platform-owned, read-only facades to Agent/Core. Linux creates stable empty `runtime-<pid>-<start_ticks>/session-<opaque-key>` parents above per-Job leaves, exposes both current Runtime and current Session locations, and retains them until Runtime cleanup; raw Session ids must not enter platform paths.
 - Restart cleanup may remove only kernel-confirmed empty managed scopes. A previous Runtime scope with live members is never silently adopted, signalled, or deleted.
 - Target-specific modules compile only on their matching target.
 - Unsupported targets fail closed for ownership/destructive decisions.
 - Platform behavior changes require tests under `core/platform/tests`.
+- Session resource accounting is a read-only, bounded facade: it reports the Session scope's aggregated CPU time and memory charge plus the effective caps of the managed job tree. It never creates scopes, signals processes, or decides when to notify a model; sampling schedules, thresholds, and runtime notices belong to the Host/Agent.
+- Instance resource caps are applied once per process, are percentages of machine totals, and bind only the managed `timem.jobs` subtree (never Timem itself or sibling scopes). Memory is written as a hard `memory.max` plus a soft `memory.high` at 85% of it, so the kernel throttles/reclaims before it has to OOM-kill. The main process lives in the unlimited `timem.self` sibling under the same instance root; enabling controllers under a populated root makes the kernel force-convert the cgroup to a threaded subtree that carries only cpu, so the escalation plan always migrates before enablement. On a user-owned root the same repair runs without root (unprivileged migrate + enable along the writable ancestor chain), and a graceful shutdown removes the instance's managed subtrees (best effort: populated groups keep their fence). An instance root shared with sibling (non-Timem) processes never migrates: memory stays `Unavailable` there (fail closed) while cpu escalates exactly as before, so shared scopes keep full cpu availability. A cap that cannot be enforced is reported (`Unsupported`/`Unavailable`) instead of silently ignored; platform gaps (e.g. no kernel quota facility) are disclosed, never faked.
 - macOS mount enumeration uses caller-owned `getfsstat` storage and bounded field decoding; never retain or traverse `getmntinfo` process-global storage across concurrent callers.
 - Filesystem snapshots expose device identity, capacity and free bytes; consumers supply working paths. Sampling schedules, comparable-baseline policy, pressure thresholds and model notices belong to Agent, not Platform. Agent must not reconstruct mount/device sampling outside this facade.
 - Windows Platform behavior follows `docs/windows-support-matrix.md`; a compiling Platform backend

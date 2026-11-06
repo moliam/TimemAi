@@ -16700,7 +16700,7 @@ fn chain_standby_edits_and_cooldown_apply_at_the_next_api_request_boundary() {
         "endpoint-boundary-a".to_string(),
         ModelEndpointHealthState {
             rate_limited_since_ms: Some(now_ms()),
-            probing: false,
+            ..Default::default()
         },
     );
     apply_model_endpoint_chain(
@@ -16948,6 +16948,158 @@ fn rate_limit_failover_projects_the_committed_current_endpoint() {
         session.runtime_profile.active_model_endpoint_id.as_deref(),
         Some("endpoint-boundary-b")
     );
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn endpoint_auto_probe_waits_for_the_bounded_retry_interval() {
+    let now = 1_800_000_000_000u128;
+    let threshold = MODEL_ENDPOINT_AUTO_PROBE_AFTER.as_millis();
+    let mut entry = ModelEndpointHealthState {
+        rate_limited_since_ms: Some(now.saturating_sub(threshold + 1)),
+        ..Default::default()
+    };
+    assert!(endpoint_due_for_auto_probe(&entry, now));
+
+    // A probe that ended in a transport error minutes ago must not be retried
+    // on every scan tick.
+    entry.last_probe_ms = Some(now - 60_000);
+    assert!(!endpoint_due_for_auto_probe(&entry, now));
+    entry.last_probe_ms = Some(now.saturating_sub(threshold + 1));
+    assert!(endpoint_due_for_auto_probe(&entry, now));
+
+    entry.probing = true;
+    assert!(!endpoint_due_for_auto_probe(&entry, now));
+
+    let healthy = ModelEndpointHealthState::default();
+    assert!(!endpoint_due_for_auto_probe(&healthy, now));
+}
+
+#[test]
+fn probe_transport_error_keeps_cooldown_and_stamps_the_retry_anchor() {
+    let state = routing_test_state();
+    state.model_endpoint_health.lock().unwrap().insert(
+        "endpoint-probe-error".to_string(),
+        ModelEndpointHealthState {
+            rate_limited_since_ms: Some(1234),
+            probing: true,
+            last_probe_ms: None,
+        },
+    );
+    apply_model_endpoint_probe_result(
+        &state,
+        "endpoint-probe-error",
+        Err("probe_network_error".to_string()),
+    );
+    let health = state.model_endpoint_health.lock().unwrap();
+    let entry = &health["endpoint-probe-error"];
+    assert_eq!(entry.rate_limited_since_ms, Some(1234));
+    assert!(!entry.probing);
+    assert!(entry.last_probe_ms.is_some());
+}
+
+#[test]
+fn availability_refresh_switches_back_to_recovered_primary_endpoint() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_switch_back"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let worker_dir = root.join("worker");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let session_id = register_endpoint_boundary_worker(
+        &state,
+        Arc::clone(&captured),
+        entered_tx,
+        release_rx,
+        &worker_dir,
+    );
+    for endpoint in [
+        endpoint_boundary_input("endpoint-boundary-a", "medium"),
+        endpoint_boundary_input("endpoint-boundary-b", "low"),
+    ] {
+        upsert_model_endpoint(&state, endpoint).unwrap();
+    }
+    let chain = [
+        "endpoint-boundary-a".to_string(),
+        "endpoint-boundary-b".to_string(),
+    ];
+    apply_model_endpoint_chain(&state, &session_id, &chain).unwrap();
+    assert_eq!(
+        state.sessions.lock().unwrap()[&session_id]
+            .runtime_profile
+            .active_model_endpoint_id
+            .as_deref(),
+        Some("endpoint-boundary-a")
+    );
+
+    // The primary rate-limits: the availability pass moves the Session to the
+    // Standby but must keep the full preference chain for the switch back.
+    state.model_endpoint_health.lock().unwrap().insert(
+        "endpoint-boundary-a".to_string(),
+        ModelEndpointHealthState {
+            rate_limited_since_ms: Some(now_ms()),
+            ..Default::default()
+        },
+    );
+    refresh_sessions_bound_to_endpoints(&state, &chain);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(
+            session.runtime_profile.active_model_endpoint_id.as_deref(),
+            Some("endpoint-boundary-b")
+        );
+        assert_eq!(
+            session.runtime.model_endpoint_ids,
+            chain.to_vec(),
+            "degrading to the Standby must keep the preference chain"
+        );
+    }
+
+    // Still cooling: committing the probe keeps the Standby.
+    commit_model_endpoint_probe_result(&state, "endpoint-boundary-a", Ok(false));
+    assert_eq!(
+        state.sessions.lock().unwrap()[&session_id]
+            .runtime_profile
+            .active_model_endpoint_id
+            .as_deref(),
+        Some("endpoint-boundary-b")
+    );
+
+    // Recovered: committing the probe alone switches back to the primary,
+    // without waiting for the remaining probes of the same refresh pass.
+    commit_model_endpoint_probe_result(&state, "endpoint-boundary-a", Ok(true));
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(
+            session.runtime_profile.active_model_endpoint_id.as_deref(),
+            Some("endpoint-boundary-a")
+        );
+        assert_eq!(
+            session.runtime.model_endpoint_id.as_deref(),
+            Some("endpoint-boundary-a")
+        );
+        assert_eq!(session.runtime.model_endpoint_ids, chain.to_vec());
+    }
+
+    // The next API request must actually leave on the primary again.
+    submit_turn(&state, &session_id, "back on the primary".to_string()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+    assert_eq!(captured.lock().unwrap()[0].model, "boundary-model-a");
+    release_tx.send(()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+    release_tx.send(()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 3);
+    release_tx.send(()).unwrap();
+    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
 
     let manager = {
         let mut guard = state.manager.lock().unwrap();
@@ -22766,6 +22918,46 @@ fn storage_usage_query_reports_temporary_conversation_mailbox_and_favorite() {
 }
 
 #[test]
+fn session_resource_usage_query_returns_a_direct_well_formed_sample() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("session_resource_usage_query_direct");
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionResourceUsageQuery {
+            session_id: session_id.clone(),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::SessionResourceUsage {
+        session_id: answered,
+        sampled_at_ms,
+        ..
+    } = event
+    else {
+        panic!("expected a session resource usage event")
+    };
+    assert_eq!(answered, session_id);
+    assert!(sampled_at_ms > 0);
+    // A test Host has no managed job cgroup: the platform answers "no
+    // accounting" instead of fabricating zeros, and the event stays
+    // connection-local so polls never enter the replay stream.
+    let command = ClientCommand::SessionResourceUsageQuery {
+        session_id: session_id.clone(),
+    };
+    assert!(command.result_is_direct());
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionResourceUsageQuery {
+            session_id: "missing_session".to_string(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error, "session_not_found");
+}
+
+#[test]
 fn mailbox_body_is_admitted_when_conversation_history_budget_is_exhausted() {
     let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_shared_quota");
     let store = current_session_store(&state).unwrap();
@@ -23199,4 +23391,503 @@ fn streaming_preview_broadcasts_are_throttled_and_terminal_answer_drops_pending(
         }),
         "a finished turn must not leak its withheld preview frame"
     );
+}
+
+mod session_resource_observation_tests {
+    use crate::server::session_resource_monitor::{
+        dominant_memory_session, dominant_share_suffix, render_observation, ResourceObservation,
+        SessionObservationState,
+    };
+    use agent_core::resource_caps::{JobResourceUsage, SessionResourceUsage};
+
+    fn usage(
+        cpu_usage_usec: u64,
+        memory_current_bytes: Option<u64>,
+        memory_high_bytes: Option<u64>,
+        oom_kill_count: u64,
+    ) -> SessionResourceUsage {
+        SessionResourceUsage {
+            cpu_usage_usec: Some(cpu_usage_usec),
+            cpu_quota_cores: Some(2.8),
+            memory_current_bytes,
+            memory_peak_bytes: None,
+            swap_current_bytes: None,
+            memory_high_bytes,
+            memory_max_bytes: None,
+            oom_kill_count,
+            jobs: Vec::new(),
+        }
+    }
+
+    fn usage_with_jobs(
+        memory_current_bytes: Option<u64>,
+        memory_high_bytes: Option<u64>,
+        jobs: Vec<JobResourceUsage>,
+    ) -> SessionResourceUsage {
+        SessionResourceUsage {
+            cpu_usage_usec: Some(0),
+            cpu_quota_cores: Some(2.8),
+            memory_current_bytes,
+            memory_peak_bytes: None,
+            swap_current_bytes: None,
+            memory_high_bytes,
+            memory_max_bytes: None,
+            oom_kill_count: jobs.iter().map(|job| job.oom_kill_count).sum(),
+            jobs,
+        }
+    }
+
+    fn job(scope_name: &str, oom_kill_count: u64) -> JobResourceUsage {
+        JobResourceUsage {
+            scope_name: scope_name.to_string(),
+            oom_kill_count,
+            memory_current_bytes: Some(1024),
+        }
+    }
+
+    #[test]
+    fn cpu_alert_requires_forty_seconds_of_sustained_load() {
+        let mut state = SessionObservationState::default();
+        let step = std::time::Duration::from_secs(2);
+        let mut usage_usec = 1_000_000u64;
+        // First sample only establishes the baseline.
+        assert!(state
+            .observe(&usage(usage_usec, None, None, 0), step, Some(28))
+            .is_empty());
+        for sample in 1..=19 {
+            usage_usec += 5_600_000; // 2.8 cores over two seconds
+            assert!(
+                state
+                    .observe(&usage(usage_usec, None, None, 0), step, Some(28))
+                    .is_empty(),
+                "must stay quiet at {}s",
+                sample * 2
+            );
+        }
+        usage_usec += 5_600_000;
+        let observations = state.observe(&usage(usage_usec, None, None, 0), step, Some(28));
+        assert_eq!(observations.len(), 1);
+        assert!(matches!(
+            observations[0],
+            ResourceObservation::CpuHigh { .. }
+        ));
+    }
+
+    #[test]
+    fn cpu_alert_resets_after_a_low_load_window() {
+        let mut state = SessionObservationState::default();
+        let step = std::time::Duration::from_secs(2);
+        let mut usage_usec = 1_000_000u64;
+        state.observe(&usage(usage_usec, None, None, 0), step, Some(28));
+        for _ in 0..20 {
+            usage_usec += 5_600_000;
+            state.observe(&usage(usage_usec, None, None, 0), step, Some(28));
+        }
+        for _ in 0..3 {
+            state.observe(&usage(usage_usec, None, None, 0), step, Some(28));
+        }
+        for _ in 0..19 {
+            usage_usec += 5_600_000;
+            assert!(state
+                .observe(&usage(usage_usec, None, None, 0), step, Some(28))
+                .is_empty());
+        }
+        usage_usec += 5_600_000;
+        assert_eq!(
+            state
+                .observe(&usage(usage_usec, None, None, 0), step, Some(28))
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn oom_counter_increment_names_the_killed_job_once_per_kill() {
+        let mut state = SessionObservationState::default();
+        let step = std::time::Duration::from_secs(2);
+        assert!(state
+            .observe(
+                &usage_with_jobs(Some(1024), None, vec![job("job-1-1", 0)]),
+                step,
+                Some(28)
+            )
+            .is_empty());
+        let killed = state.observe(
+            &usage_with_jobs(Some(2048), None, vec![job("job-1-1", 1)]),
+            step,
+            Some(28),
+        );
+        assert_eq!(killed.len(), 1);
+        assert!(matches!(
+            &killed[0],
+            ResourceObservation::OomKilled {
+                killed_jobs,
+                killed_job_total: 1,
+                peak_bytes: Some(1024),
+                ..
+            } if killed_jobs == &vec!["job-1-1".to_string()]
+        ));
+        assert!(state
+            .observe(
+                &usage_with_jobs(Some(2048), None, vec![job("job-1-1", 1)]),
+                step,
+                Some(28)
+            )
+            .is_empty());
+        let second = state.observe(
+            &usage_with_jobs(Some(2048), None, vec![job("job-1-1", 2)]),
+            step,
+            Some(28),
+        );
+        assert_eq!(second.len(), 1);
+        assert!(matches!(
+            &second[0],
+            ResourceObservation::OomKilled {
+                killed_jobs,
+                killed_job_total: 1,
+                ..
+            } if killed_jobs == &vec!["job-1-1".to_string()]
+        ));
+    }
+
+    #[test]
+    fn historical_oom_counts_are_baselined_and_never_replayed() {
+        let mut state = SessionObservationState::default();
+        let step = std::time::Duration::from_secs(2);
+        let historical = vec![job("job-a", 3), job("job-b", 2)];
+        // First sample: counters already nonzero, but they predate this
+        // monitor and must not produce a prompt.
+        assert!(state
+            .observe(
+                &usage_with_jobs(Some(1024), None, historical.clone()),
+                step,
+                Some(28)
+            )
+            .is_empty());
+        // Unchanged counters stay silent.
+        assert!(state
+            .observe(
+                &usage_with_jobs(Some(1024), None, historical),
+                step,
+                Some(28)
+            )
+            .is_empty());
+        // Only job-b moved in this window; job-a's history is not mentioned.
+        let killed = state.observe(
+            &usage_with_jobs(Some(1536), None, vec![job("job-a", 3), job("job-b", 3)]),
+            step,
+            Some(28),
+        );
+        assert_eq!(killed.len(), 1);
+        assert!(matches!(
+            &killed[0],
+            ResourceObservation::OomKilled {
+                killed_jobs,
+                killed_job_total: 1,
+                peak_bytes: Some(1024),
+                ..
+            } if killed_jobs == &vec!["job-b".to_string()]
+        ));
+    }
+
+    #[test]
+    fn oom_without_a_job_leaf_still_reports_the_session() {
+        let mut state = SessionObservationState::default();
+        let step = std::time::Duration::from_secs(2);
+        state.observe(&usage(0, Some(1024), None, 0), step, Some(28));
+        let killed = state.observe(&usage(0, Some(2048), None, 1), step, Some(28));
+        assert_eq!(killed.len(), 1);
+        assert!(matches!(
+            &killed[0],
+            ResourceObservation::OomKilled {
+                killed_jobs,
+                killed_job_total: 0,
+                peak_bytes: Some(1024),
+                ..
+            } if killed_jobs.is_empty()
+        ));
+    }
+
+    #[test]
+    fn dominant_share_picks_the_largest_current_session() {
+        let samples = vec![
+            ("session-a".to_string(), Some(3 * 1024 * 1024 * 1024)),
+            ("session-b".to_string(), Some(1024 * 1024 * 1024)),
+            ("session-c".to_string(), None),
+        ];
+        assert_eq!(
+            dominant_memory_session(&samples),
+            Some((
+                "session-a".to_string(),
+                3 * 1024 * 1024 * 1024,
+                4 * 1024 * 1024 * 1024
+            ))
+        );
+        assert_eq!(
+            dominant_memory_session(&[("empty".to_string(), Some(0))]),
+            None
+        );
+    }
+
+    #[test]
+    fn observations_render_the_requested_runtime_wording() {
+        let cpu = render_observation(
+            &ResourceObservation::CpuHigh {
+                cores: 2.8,
+                quota_cores: Some(2.8),
+                memory_current_bytes: Some(3 * 1024 * 1024 * 1024),
+            },
+            Some(32 * 1024 * 1024 * 1024),
+        );
+        assert!(cpu.starts_with(
+            "Runtime observation: task CPU load in this session has stayed high for more than 40s"
+        ));
+        assert!(cpu.contains("3.0G"));
+        assert!(cpu.contains("9% of total memory"));
+
+        let oom = render_observation(
+            &ResourceObservation::OomKilled {
+                killed_jobs: vec!["job-1-1".to_string()],
+                killed_job_total: 1,
+                peak_bytes: Some(2 * 1024 * 1024 * 1024),
+                high_bytes: Some(1_600_000_000),
+            },
+            Some(32 * 1024 * 1024 * 1024),
+        );
+        assert!(oom.starts_with(
+            "Runtime observation: job-1-1 in this session was OOM-killed; total task memory usage 2.0G (6% of total memory)"
+        ));
+        assert!(oom.ends_with("above the quota threshold."));
+
+        let oom_without_quota = render_observation(
+            &ResourceObservation::OomKilled {
+                killed_jobs: vec!["job-1-1".to_string(), "job-1-2".to_string()],
+                killed_job_total: 3,
+                peak_bytes: Some(2 * 1024 * 1024 * 1024),
+                high_bytes: Some(3 * 1024 * 1024 * 1024),
+            },
+            None,
+        );
+        assert!(oom_without_quota.starts_with(
+            "Runtime observation: job-1-1, job-1-2 and 1 more job in this session were OOM-killed"
+        ));
+        assert!(oom_without_quota.contains("total task memory usage 2.0G."));
+        assert!(!oom_without_quota.contains("quota threshold"));
+
+        let oom_unattributed = render_observation(
+            &ResourceObservation::OomKilled {
+                killed_jobs: Vec::new(),
+                killed_job_total: 0,
+                peak_bytes: None,
+                high_bytes: None,
+            },
+            None,
+        );
+        assert!(oom_unattributed.starts_with(
+            "Runtime observation: Tasks in this session were OOM-killed; total task memory usage memory stats unavailable."
+        ));
+
+        let dominant = render_observation(
+            &ResourceObservation::OomDominantShare {
+                top_bytes: 3 * 1024 * 1024 * 1024,
+                total_bytes: 4 * 1024 * 1024 * 1024,
+            },
+            Some(32 * 1024 * 1024 * 1024),
+        );
+        assert!(dominant.contains("an OOM kill just happened"));
+        assert!(dominant.contains("largest memory usage of all sessions"));
+        assert!(dominant.contains("3.0G, 75% of the total across sessions"));
+
+        let suffix = dominant_share_suffix(75.4);
+        assert_eq!(
+            suffix,
+            " This session now has the largest memory usage of all sessions (75% of the total across sessions)."
+        );
+    }
+}
+
+mod session_work_file_update_tests {
+    use crate::server::session_work_file_monitor::{WorkFileStamp, WorkFileWatchState};
+    use std::collections::HashSet;
+    use std::time::{Duration, Instant, SystemTime};
+
+    fn stamp(seconds: u64, len: u64) -> WorkFileStamp {
+        WorkFileStamp {
+            modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)),
+            len,
+        }
+    }
+
+    #[test]
+    fn existing_file_is_only_a_baseline() {
+        let mut state = WorkFileWatchState::default();
+        let start = Instant::now();
+        assert!(!state.observe("s1", Some(stamp(1, 10)), start));
+        assert!(!state.observe("s1", Some(stamp(1, 10)), start + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_changed_stamp_notifies_once() {
+        let mut state = WorkFileWatchState::default();
+        let start = Instant::now();
+        assert!(!state.observe("s1", Some(stamp(1, 10)), start));
+        assert!(state.observe("s1", Some(stamp(2, 11)), start + Duration::from_secs(2)));
+        assert!(!state.observe("s1", Some(stamp(2, 11)), start + Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn burst_writes_coalesce_inside_the_cooldown_window() {
+        let mut state = WorkFileWatchState::default();
+        let start = Instant::now();
+        assert!(!state.observe("s1", Some(stamp(1, 10)), start));
+        assert!(state.observe("s1", Some(stamp(2, 11)), start + Duration::from_secs(1)));
+        assert!(!state.observe("s1", Some(stamp(3, 12)), start + Duration::from_secs(2)));
+        assert!(state.observe("s1", Some(stamp(4, 13)), start + Duration::from_secs(4)));
+    }
+
+    #[test]
+    fn creating_a_missing_file_is_a_change_but_deletion_is_quiet() {
+        let mut state = WorkFileWatchState::default();
+        let start = Instant::now();
+        assert!(!state.observe("s1", None, start));
+        assert!(state.observe("s1", Some(stamp(1, 10)), start + Duration::from_secs(2)));
+        assert!(!state.observe("s1", None, start + Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn removed_sessions_lose_their_baseline() {
+        let mut state = WorkFileWatchState::default();
+        let start = Instant::now();
+        assert!(!state.observe("s1", Some(stamp(1, 10)), start));
+        state.retain_sessions(&HashSet::new());
+        assert!(!state.observe("s1", Some(stamp(2, 11)), start + Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn legacy_work_file_update_is_no_longer_a_user_entry_kind() {
+        assert_eq!(
+            crate::server::history_user_entry_kind(Some("work_file_update")),
+            "task"
+        );
+    }
+}
+
+mod session_work_file_update_persistence_tests {
+    use super::*;
+
+    #[test]
+    fn update_notice_is_appended_to_the_latest_turn_and_persisted() {
+        let state = routing_test_state();
+        let created_at_ms = now_ms();
+        {
+            let mut sessions = state.sessions.lock().unwrap();
+            let session = sessions.get_mut("session_a").expect("test session");
+            session.turns.push(WebTurn {
+                preview: None,
+                turn_id: "turn-work-file".to_string(),
+                state: "finished".to_string(),
+                created_at_ms,
+                interrupted_at_ms: None,
+                user_entries: vec![WebTurnUserEntry {
+                    kind: "task".to_string(),
+                    text: "do the work".to_string(),
+                    attachments: Vec::new(),
+                    created_at_ms,
+                    timeline_seq: Some(0),
+                    command_id: None,
+                    delivery_state: None,
+                    worker_roles: Vec::new(),
+                }],
+                events: Vec::new(),
+                final_answer: Some("done".to_string()),
+                completion: Some(serde_json::json!({ "stop_reason": "Completed" })),
+                events_slimmed: false,
+            });
+        }
+
+        let turn = crate::server::session_work_file_monitor::append_work_file_update_notice(
+            &state,
+            "session_a",
+        )
+        .unwrap()
+        .expect("a session with a turn can host the notice");
+        assert_eq!(turn.turn_id, "turn-work-file");
+        // The notice rides the work-stream event chain; it never becomes a
+        // user entry or model input.
+        let event = turn.events.last().expect("notice event");
+        assert_eq!(event.source, "ui_activity");
+        assert_eq!(event.payload["kind"], "work_file_notice");
+        assert!(event.timeline_seq.is_some());
+        assert_eq!(turn.user_entries.len(), 1);
+        assert_eq!(turn.user_entries[0].kind, "task");
+
+        let store = current_session_store(&state).unwrap();
+        let records = read_all_history_records(&store.history_path_for_session("session_a"))
+            .expect("history records");
+        assert!(records.iter().any(|record| matches!(
+            record,
+            agent_core::session_store::ChatHistoryRecord::Event {
+                kind: agent_core::session_store::ChatHistoryEventKind::RuntimeNotice,
+                turn_id,
+                extra,
+                ..
+            } if turn_id == "turn-work-file"
+                && extra.get("source").and_then(serde_json::Value::as_str) == Some("ui_activity")
+                && extra
+                    .get("payload")
+                    .and_then(|payload| payload.get("kind"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("work_file_notice")
+        )));
+
+        // The persisted shape must round-trip through restore as a work-stream
+        // notice, not as user input.
+        let restored = crate::server::restored_turns_from_history_records(&records);
+        let restored_turn = restored
+            .iter()
+            .find(|turn| turn.turn_id == "turn-work-file")
+            .expect("restored turn");
+        // Only the notice event was persisted, so restore must not invent a
+        // user entry for it.
+        assert!(restored_turn.user_entries.is_empty());
+        assert!(restored_turn.events.iter().any(|event| {
+            event.source == "ui_activity" && event.payload["kind"] == "work_file_notice"
+        }));
+    }
+
+    #[test]
+    fn update_notice_has_no_position_without_a_turn() {
+        let state = routing_test_state();
+        let appended = crate::server::session_work_file_monitor::append_work_file_update_notice(
+            &state,
+            "session_a",
+        )
+        .unwrap();
+        assert!(appended.is_none());
+    }
+
+    #[test]
+    fn restore_migrates_a_legacy_notice_into_the_work_stream() {
+        let records = vec![agent_core::session_store::ChatHistoryRecord::Message {
+            role: agent_core::session_store::ChatHistoryRole::User,
+            turn_id: "turn-legacy".to_string(),
+            created_at_ms: 10,
+            kind: Some("work_file_update".to_string()),
+            command_id: None,
+            delivery_state: None,
+            content: "Session work notes updated.".to_string(),
+        }];
+
+        let turns = crate::server::restored_turns_from_history_records(&records);
+
+        assert_eq!(turns.len(), 1);
+        let turn = &turns[0];
+        assert_eq!(turn.turn_id, "turn-legacy");
+        // Legacy rows were user entries; restoring must move them onto the
+        // notice event chain instead of replaying them as user input.
+        assert!(turn.user_entries.is_empty());
+        let event = turn.events.last().expect("restored notice event");
+        assert_eq!(event.source, "ui_activity");
+        assert_eq!(event.payload["kind"], "work_file_notice");
+    }
 }

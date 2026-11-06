@@ -1,7 +1,7 @@
 use rusqlite::{params_from_iter, types::ValueRef, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::fs::{self, OpenOptions};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -74,6 +74,7 @@ pub mod prompt_spec;
 pub mod readfile;
 pub mod redaction;
 pub mod reminder_config;
+pub mod resource_caps;
 pub mod response_protocol;
 pub mod retry_policy;
 pub mod rolling_file_store;
@@ -5964,7 +5965,7 @@ impl AgentCore {
         let snapshot = self.current_process_aggregate_scope_snapshot(&session_id)?;
         self.process_scope_prompted_session = Some(session_id);
         Some(format!(
-            "{}\n- Runtime process scope: {}\n- Current Session process scope: {}\nThese are aggregate observation directories; exact process ownership and cancellation use their per-Job child scopes. Inspect standard cgroup files there when resource or process diagnosis is needed.",
+            "{}\n- Runtime process scope: {}\n- Current Session process scope: {}\nThese are aggregate observation directories; exact process ownership and cancellation use their per-Job child scopes. Inspect the platform-native resource-control files there when resource or process diagnosis is needed.",
             Self::PROCESS_AGGREGATE_SCOPES_MARKER,
             snapshot.runtime_observation_note,
             snapshot.session_observation_note,
@@ -8909,30 +8910,40 @@ impl FileScratchStore {
 
 #[derive(Debug, Clone)]
 struct FileChatHistoryStore {
-    audit_file: PathBuf,
-    legacy_audit_file: PathBuf,
+    sessions_dir: PathBuf,
 }
+
+/// Minimal view of a persisted `ChatHistoryRecord::Message`. Event records
+/// (tool output, LLM payloads, runtime notices) make up most of a history file
+/// and are skipped by the byte prefix before this type is ever parsed.
+#[derive(Debug, Deserialize)]
+struct RawChatMessageRecord {
+    role: session_store::ChatHistoryRole,
+    #[serde(default)]
+    turn_id: String,
+    #[serde(default)]
+    created_at_ms: i64,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    content: String,
+}
+
+#[derive(Debug)]
+struct RawChatTurn {
+    session: String,
+    turn_id: String,
+    user_parts: Vec<(i64, String)>,
+    assistant: Option<(i64, String)>,
+    saw_user_record: bool,
+}
+
 impl FileChatHistoryStore {
     fn new(memory_dir: &Path) -> Self {
         let space_dir = space_dir_for_memory_dir(memory_dir);
-        let audit_file = space_dir.join("audit").join("api_audit.json");
-        let legacy_audit_file = space_dir.join("api_audit.jsonl");
         Self {
-            audit_file,
-            legacy_audit_file,
+            sessions_dir: space_dir.join("sessions"),
         }
-    }
-
-    fn audit_files(&self) -> Vec<PathBuf> {
-        let mut files = vec![self.audit_file.clone()];
-        let audit_dir_jsonl = self.audit_file.with_extension("jsonl");
-        if audit_dir_jsonl != self.audit_file {
-            files.push(audit_dir_jsonl);
-        }
-        if self.legacy_audit_file != self.audit_file {
-            files.push(self.legacy_audit_file.clone());
-        }
-        files
     }
 
     fn query(
@@ -8956,18 +8967,19 @@ impl FileChatHistoryStore {
         session: Option<&str>,
     ) -> std::io::Result<Vec<RawChatHistoryRecord>> {
         let terms = search_terms(query);
-        let mut rows = self.read_all_unlocked()?;
-        rows.retain(|record| time_in_window(record.started_at_ms, after_ms, before_ms));
-        if let Some(session_id) = session {
-            // Filter by session before the newest-first truncation so a busy
-            // sibling session cannot crowd out this session's newest records.
-            rows.retain(|record| record.session == session_id);
-        }
-        if !terms.is_empty() {
-            rows.retain(|record| chat_record_matches(record, &terms));
-        }
-        rows.sort_by_key(|row| std::cmp::Reverse(row.started_at_ms));
-        rows.truncate(limit.clamp(1, 50));
+        let limit = limit.clamp(1, 50);
+        // Keep only the newest `limit` matches while scanning so a global
+        // search never holds every session's transcript in memory at once.
+        let mut rows = Vec::new();
+        self.for_each_message_pair(session, |record| {
+            if !time_in_window(record.started_at_ms, after_ms, before_ms) {
+                return;
+            }
+            if !terms.is_empty() && !chat_record_matches(&record, &terms) {
+                return;
+            }
+            keep_newest(&mut rows, record, limit);
+        })?;
         Ok(rows)
     }
 
@@ -8994,184 +9006,265 @@ impl FileChatHistoryStore {
         if targets.is_empty() {
             return Ok(0);
         }
-        MemGuard::for_audit_file(&self.audit_file).with_write(|| {
-            let mut deleted_turn_ids = HashSet::new();
-            for audit_file in self.audit_files() {
-                if !audit_file.exists()
-                    && !rolling_file_store::segmented_directory(&audit_file).exists()
-                {
-                    continue;
-                }
-                let events = read_audit_events_unlocked(&audit_file)
-                    .map_err(|_| "chat_history_read_failed".to_string())?;
-                let mut retained = Vec::new();
-                for value in events {
-                    let turn_id = value
+        let mut deleted_turn_ids = HashSet::new();
+        let space_dir = self.sessions_dir.parent().unwrap_or(&self.sessions_dir);
+        for path in self.session_history_files()? {
+            let Some(session_id) = path
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let guard = MemGuard::for_space_domain(space_dir, format!("session-data-{session_id}"));
+            guard
+                .with_write(|| {
+                    Self::remove_turns_from_history(&path, &targets, &mut deleted_turn_ids)
+                })
+                .map_err(|_| "chat_history_write_failed".to_string())??;
+        }
+        Ok(deleted_turn_ids.len())
+    }
+
+    fn session_history_files(&self) -> Result<Vec<PathBuf>, String> {
+        let entries = match fs::read_dir(&self.sessions_dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(_) => return Err("chat_history_read_failed".to_string()),
+        };
+        let mut files = Vec::new();
+        for entry in entries {
+            let Ok(entry) = entry else { continue };
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let path = entry.path().join("raw_chat_history.jsonl");
+            if path.exists() {
+                files.push(path);
+            }
+        }
+        Ok(files)
+    }
+
+    fn remove_turns_from_history(
+        path: &Path,
+        targets: &HashSet<String>,
+        deleted_turn_ids: &mut HashSet<String>,
+    ) -> Result<(), String> {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err("chat_history_read_failed".to_string()),
+        };
+        let mut retained = Vec::with_capacity(bytes.len());
+        let mut removed = false;
+        for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+            let turn_id = serde_json::from_slice::<Value>(line)
+                .ok()
+                .and_then(|value| {
+                    value
                         .get("turn_id")
                         .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    if !turn_id.is_empty() && targets.contains(&turn_id) {
-                        deleted_turn_ids.insert(turn_id);
-                    } else {
-                        retained.push(value);
-                    }
+                        .map(str::to_string)
+                });
+            match turn_id {
+                Some(turn_id) if targets.contains(&turn_id) => {
+                    deleted_turn_ids.insert(turn_id);
+                    removed = true;
                 }
-                write_audit_events_unlocked(&audit_file, &retained)
-                    .map_err(|_| "chat_history_write_failed".to_string())?;
-            }
-            Ok::<_, String>(deleted_turn_ids.len())
-        })?
-    }
-
-    fn read_all_unlocked(&self) -> std::io::Result<Vec<RawChatHistoryRecord>> {
-        let mut rows = Vec::<RawChatHistoryRecord>::new();
-        for audit_file in self.audit_files() {
-            for value in read_audit_events_unlocked(&audit_file)? {
-                let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
-                let turn_id = value
-                    .get("turn_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim();
-                if turn_id.is_empty() {
-                    continue;
-                }
-                match event_type {
-                    "turn_start" => {
-                        let user_input = value
-                            .get("user_input")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .trim();
-                        if user_input.is_empty() {
-                            continue;
-                        }
-                        rows.push(RawChatHistoryRecord {
-                            session: value
-                                .get("session")
-                                .and_then(Value::as_str)
-                                .unwrap_or("")
-                                .to_string(),
-                            turn_id: turn_id.to_string(),
-                            started_at_ms: turn_id_millis(turn_id)
-                                .or_else(|| value.get("time_ms").and_then(Value::as_i64))
-                                .or_else(|| value.get("created_at").and_then(Value::as_i64))
-                                .unwrap_or_default(),
-                            user_input: user_input.to_string(),
-                            assistant_output: String::new(),
-                        });
-                    }
-                    "turn_final" => {
-                        let assistant_output = value
-                            .get("assistant_output")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .trim();
-                        if assistant_output.is_empty() {
-                            continue;
-                        }
-                        if let Some(existing) =
-                            rows.iter_mut().rev().find(|row| row.turn_id == turn_id)
-                        {
-                            existing.assistant_output = assistant_output.to_string();
-                        } else {
-                            rows.push(RawChatHistoryRecord {
-                                session: value
-                                    .get("session")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("")
-                                    .to_string(),
-                                turn_id: turn_id.to_string(),
-                                started_at_ms: turn_id_millis(turn_id)
-                                    .or_else(|| value.get("time_ms").and_then(Value::as_i64))
-                                    .or_else(|| value.get("created_at").and_then(Value::as_i64))
-                                    .unwrap_or_default(),
-                                user_input: String::new(),
-                                assistant_output: assistant_output.to_string(),
-                            });
-                        }
-                    }
-                    _ => {}
-                }
+                _ => retained.extend_from_slice(line),
             }
         }
-        Ok(rows
-            .into_iter()
-            .filter(|row| {
-                !row.user_input.trim().is_empty() || !row.assistant_output.trim().is_empty()
-            })
-            .collect())
-    }
-}
-
-fn read_audit_events_unlocked(path: &Path) -> std::io::Result<Vec<Value>> {
-    if rolling_file_store::segmented_directory(path).exists() {
-        return Ok(rolling_file_store::read_segmented_records(path)?
-            .into_iter()
-            .filter_map(|record| serde_json::from_slice::<Value>(&record).ok())
-            .collect());
-    }
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err),
-    };
-    if text.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    if let Ok(value) = serde_json::from_str::<Value>(&text) {
-        if let Some(events) = value.get("events").and_then(Value::as_array) {
-            return Ok(events.clone());
-        }
-    }
-    Ok(text
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .collect())
-}
-
-fn write_audit_events_unlocked(path: &Path, events: &[Value]) -> std::io::Result<()> {
-    let mut bytes = Vec::new();
-    if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-        let mut records = Vec::with_capacity(events.len());
-        for event in events {
-            let mut record = serde_json::to_vec(event).map_err(std::io::Error::other)?;
-            record.push(b'\n');
-            records.push(record);
-        }
-        if rolling_file_store::segmented_directory(path).exists() {
-            let stable_bytes = records
-                .iter()
-                .map(|record| record.len() as u64)
-                .sum::<u64>();
-            let slices = stable_bytes
-                .div_ceil(rolling_file_store::AUDIT_ROLLING_SLICE_BYTES)
-                .max(1);
-            let capacity = rolling_file_store::RollingCapacity::with_slice_bytes(
-                slices
-                    .saturating_add(1)
-                    .saturating_mul(rolling_file_store::AUDIT_ROLLING_SLICE_BYTES),
-                rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
-            )
-            .map_err(std::io::Error::other)?;
-            rolling_file_store::rewrite_segmented_records(
-                path,
-                &records,
-                capacity,
-                rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
-            )?;
+        if !removed {
             return Ok(());
         }
-        for record in records {
-            bytes.extend_from_slice(&record);
-        }
-    } else {
-        let doc = json!({"version": 1, "events": events});
-        let text = serde_json::to_string_pretty(&doc).map_err(std::io::Error::other)?;
-        bytes.extend_from_slice(format!("{text}\n").as_bytes());
+        atomic_write_file(path, &retained).map_err(|_| "chat_history_write_failed".to_string())?;
+        // The persisted offset index no longer matches the rewritten file.
+        // It is a derived cache: deleting it makes the next reader rebuild from
+        // the file instead of trusting stale offsets.
+        session_store::invalidate_persisted_history_index(path);
+        Ok(())
     }
-    atomic_write_file(path, &bytes)
+
+    fn for_each_message_pair(
+        &self,
+        session: Option<&str>,
+        mut sink: impl FnMut(RawChatHistoryRecord),
+    ) -> std::io::Result<()> {
+        match session {
+            Some(session_id) => {
+                let path = session_store::history_path_in(&self.sessions_dir, session_id);
+                read_session_message_pairs(session_id, &path, &mut sink)?;
+            }
+            None => {
+                let entries = match fs::read_dir(&self.sessions_dir) {
+                    Ok(entries) => entries,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                    Err(err) => return Err(err),
+                };
+                for entry in entries {
+                    let Ok(entry) = entry else { continue };
+                    let Ok(file_type) = entry.file_type() else {
+                        continue;
+                    };
+                    if !file_type.is_dir() {
+                        continue;
+                    }
+                    let Ok(session_id) = entry.file_name().into_string() else {
+                        continue;
+                    };
+                    let path = entry.path().join("raw_chat_history.jsonl");
+                    // Storage-capacity eviction can remove one session while a
+                    // global search runs; that must not fail the other sessions.
+                    let _ = read_session_message_pairs(&session_id, &path, &mut sink);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Keeps `rows` ordered newest-first and bounded to `limit` records.
+fn keep_newest(rows: &mut Vec<RawChatHistoryRecord>, record: RawChatHistoryRecord, limit: usize) {
+    let position = rows.partition_point(|row| row.started_at_ms >= record.started_at_ms);
+    rows.insert(position, record);
+    rows.truncate(limit);
+}
+
+/// Reads user/AI pairs from one session history file.
+///
+/// History files can be trimmed or deleted at any time by capacity eviction, so
+/// a missing file is an empty result rather than an error, and malformed or
+/// partially written lines are skipped instead of failing the whole read. No
+/// index is consulted: the file itself is the single source of truth.
+fn read_session_message_pairs(
+    session_id: &str,
+    path: &Path,
+    sink: &mut impl FnMut(RawChatHistoryRecord),
+) -> std::io::Result<()> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    if !file.metadata().map(|meta| meta.is_file()).unwrap_or(false) {
+        return Ok(());
+    }
+    let mut turns: Vec<RawChatTurn> = Vec::new();
+    let mut turn_indexes: HashMap<String, usize> = HashMap::new();
+    let mut reader = BufReader::new(file);
+    let mut buffer = Vec::new();
+    loop {
+        buffer.clear();
+        let read = match reader.read_until(b'\n', &mut buffer) {
+            Ok(read) => read,
+            // A truncated or partly unreadable tail must not discard the
+            // records that were already parsed from this session.
+            Err(_) => break,
+        };
+        if read == 0 {
+            break;
+        }
+        // Invalid UTF-8 inside a line only poisons that line; lossy decoding
+        // keeps the rest of the transcript searchable.
+        let line = String::from_utf8_lossy(&buffer);
+        // A BOM may precede the record and may itself be followed by padding;
+        // trim on both sides of it before the cheap prefix check.
+        let line = line.trim_start();
+        let line = line.trim_start_matches('\u{feff}').trim_start();
+        // Event records are the bulk of the file; only message records can
+        // answer a chat search, so reject them from their leading bytes
+        // without paying for a full JSON parse.
+        if !line.starts_with("{\"type\":\"message\"") {
+            continue;
+        }
+        let Ok(message) = serde_json::from_str::<RawChatMessageRecord>(line) else {
+            continue;
+        };
+        let turn_id = message.turn_id.trim().to_string();
+        if turn_id.is_empty() {
+            continue;
+        }
+        let position = *turn_indexes.entry(turn_id.clone()).or_insert_with(|| {
+            turns.push(RawChatTurn {
+                session: session_id.to_string(),
+                turn_id: turn_id.clone(),
+                user_parts: Vec::new(),
+                assistant: None,
+                saw_user_record: false,
+            });
+            turns.len() - 1
+        });
+        let content = message.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        let turn = &mut turns[position];
+        match message.role {
+            session_store::ChatHistoryRole::User
+                if is_searchable_user_message_kind(message.kind.as_deref()) =>
+            {
+                turn.saw_user_record = true;
+                turn.user_parts
+                    .push((message.created_at_ms, content.to_string()));
+            }
+            session_store::ChatHistoryRole::User => {
+                turn.saw_user_record = true;
+            }
+            session_store::ChatHistoryRole::Assistant => {
+                // The last assistant message of a turn is its final answer;
+                // earlier ones are superseded.
+                turn.assistant = Some((message.created_at_ms, content.to_string()));
+            }
+            session_store::ChatHistoryRole::System => {}
+        }
+    }
+    for mut turn in turns {
+        turn.user_parts
+            .sort_by_key(|(created_at_ms, _)| *created_at_ms);
+        let user_input = turn
+            .user_parts
+            .iter()
+            .map(|(_, content)| content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let (assistant_ms, assistant_output) = turn.assistant.unwrap_or((0, String::new()));
+        let started_at_ms = turn
+            .user_parts
+            .first()
+            .map(|(created_at_ms, _)| *created_at_ms)
+            .unwrap_or(assistant_ms);
+        let has_user_messages = !turn.user_parts.is_empty();
+        // Turns that only carry machine-injected user entries (mailbox/timer/
+        // resume/...) are runtime control flow, so their assistant reply is not
+        // part of the user's conversation record either. Legacy files that have
+        // no user record at all still expose their assistant message.
+        let legacy_assistant_only = !turn.saw_user_record && !assistant_output.is_empty();
+        if !has_user_messages && !legacy_assistant_only {
+            continue;
+        }
+        if user_input.is_empty() && assistant_output.is_empty() {
+            continue;
+        }
+        sink(RawChatHistoryRecord {
+            session: turn.session,
+            turn_id: turn.turn_id,
+            started_at_ms,
+            user_input,
+            assistant_output,
+        });
+    }
+    Ok(())
+}
+
+fn is_searchable_user_message_kind(kind: Option<&str>) -> bool {
+    // Machine-injected user entries (mailbox/timer/resume/work-file notices)
+    // are runtime control input, not part of the user's own conversation.
+    matches!(kind, None | Some("task") | Some("supplement"))
 }
 
 fn validate_memory_sql(sql: &str) -> Result<(), String> {
@@ -9374,6 +9467,16 @@ fn search_terms(query: &str) -> Vec<String> {
     for token in lowered.split(|c: char| !c.is_alphanumeric()) {
         push_search_term(token.trim(), &mut seen, &mut terms);
     }
+    if terms.is_empty() {
+        // Queries made only of punctuation or emoji carry no alphanumeric
+        // token. Keep them as literal terms instead of degrading into an
+        // unfiltered recent list.
+        for token in lowered.split_whitespace() {
+            if seen.insert(token.to_string()) {
+                terms.push(token.to_string());
+            }
+        }
+    }
     terms
 }
 
@@ -9397,21 +9500,14 @@ fn push_search_term(token: &str, seen: &mut HashSet<String>, terms: &mut Vec<Str
     }
 }
 
-fn turn_id_millis(turn_id: &str) -> Option<i64> {
-    let remainder = turn_id.strip_prefix("turn_")?;
-    // Turn ids are `turn_<start_millis>[_<sequence>]`; the optional sequence
-    // suffix must not invalidate the millisecond prefix.
-    let millis = remainder.split('_').next()?;
-    millis.parse::<i64>().ok()
-}
-
 fn chat_record_matches(record: &RawChatHistoryRecord, terms: &[String]) -> bool {
-    let haystack = format!(
-        "{} {} {} {}",
-        record.session, record.turn_id, record.user_input, record.assistant_output
-    )
-    .to_lowercase();
-    terms.iter().any(|term| haystack.contains(term))
+    // All terms must appear in the same user/AI pair; matching on any single
+    // term made multi-word queries return unrelated turns.
+    // Session and turn IDs are routing metadata, not conversation text;
+    // folding them into the haystack made queries like "session" or "turn"
+    // match every record.
+    let haystack = format!("{} {}", record.user_input, record.assistant_output).to_lowercase();
+    terms.iter().all(|term| haystack.contains(term))
 }
 
 fn time_in_window(time_ms: i64, after_ms: Option<i64>, before_ms: Option<i64>) -> bool {
@@ -9804,6 +9900,10 @@ fn step_to_json(step: CoreStep) -> serde_json::Value {
         }),
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/resource_caps_tests.rs"]
+mod resource_caps_tests;
 
 #[cfg(test)]
 #[path = "../tests/unit/lib_tests.rs"]

@@ -555,6 +555,16 @@ impl FallbackProcessReaper {
     }
 }
 
+/// Remove the runtime's managed resource-limit scopes (`timem.self` and
+/// `timem.jobs`) after a graceful shutdown. Best effort: populated groups
+/// (live orphan jobs keep their fence) and layers the user does not own are
+/// kept; the next startup re-derives everything idempotently. Platforms
+/// without a kernel quota facility no-op.
+pub fn cleanup_instance_resource_limits() {
+    #[cfg(target_os = "linux")]
+    crate::linux::cleanup_instance_cgroup_subtrees();
+}
+
 /// Live orphaned descendants reparented to this runtime that escaped into a
 /// different session (for example via `setsid`). This is an observation API,
 /// not proof that a particular job owns the process.
@@ -1014,4 +1024,382 @@ fn platform_graphical_session_available() -> bool {
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn platform_graphical_session_available() -> bool {
     false
+}
+
+// ---------------------------------------------------------------------------
+// Instance resource caps
+//
+// Instance-scoped upper bounds on how much of the machine's total CPU
+// capacity and total memory the current Timem instance's managed job tree may
+// consume. Caps are percentages of system totals; the kernel enforces them so
+// a runaway job tree cannot starve the whole machine. Scheduling, reporting,
+// and policy stay with Agent; this facade only records facts and applies
+// kernel bounds.
+
+/// Caps for the current instance as percentages (0 < p <= 100) of the
+/// machine's total CPU capacity and total memory. Each dimension carries an
+/// independent enable flag: a disabled dimension is written back to the
+/// kernel as unbounded ("max"), so the switch reflects the actual bound.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InstanceResourceCaps {
+    pub cpu_enabled: bool,
+    pub cpu_percent: f64,
+    pub mem_enabled: bool,
+    pub mem_percent: f64,
+}
+
+impl InstanceResourceCaps {
+    /// Validate caller-provided percentages. Values must be finite and inside
+    /// `(0, 100]` regardless of the enable flag (a stored preset stays valid
+    /// for when the dimension is re-enabled); 100 keeps the kernel tracking
+    /// without throttling below full capacity.
+    pub fn validated(
+        cpu_enabled: bool,
+        cpu_percent: f64,
+        mem_enabled: bool,
+        mem_percent: f64,
+    ) -> Result<Self, String> {
+        fn check(value: f64, name: &str) -> Result<(), String> {
+            if !value.is_finite() || value <= 0.0 || value > 100.0 {
+                return Err(format!("{name} cap {value} is outside (0, 100]"));
+            }
+            Ok(())
+        }
+        check(cpu_percent, "cpu")?;
+        check(mem_percent, "mem")?;
+        Ok(Self {
+            cpu_enabled,
+            cpu_percent,
+            mem_enabled,
+            mem_percent,
+        })
+    }
+}
+
+/// Kernel-side application result of one cap dimension.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResourceCapStatus {
+    /// The kernel now bounds the instance job tree; `limit` is the
+    /// platform-native value written to the kernel.
+    Applied { limit: String },
+    /// The user disabled this dimension; the kernel bound was cleared back
+    /// to the platform-native unbounded value ("max").
+    Disabled,
+    /// This platform has no kernel-level instance quota facility yet.
+    Unsupported,
+    /// The facility exists but the bound could not be established now.
+    Unavailable { reason: String },
+}
+
+/// Outcome snapshot for both cap dimensions, the requested caps, and the
+/// platform-native scope (diagnostic location) the bounds were applied to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResourceCapsApplication {
+    pub caps: InstanceResourceCaps,
+    pub cpu: ResourceCapStatus,
+    pub mem: ResourceCapStatus,
+    pub scope: String,
+}
+
+impl ResourceCapsApplication {
+    /// True only when both dimensions reached their configured intent right
+    /// now: bounded (`Applied`) or intentionally unbounded (`Disabled`).
+    pub fn fully_applied(&self) -> bool {
+        matches!(
+            self.cpu,
+            ResourceCapStatus::Applied { .. } | ResourceCapStatus::Disabled
+        ) && matches!(
+            self.mem,
+            ResourceCapStatus::Applied { .. } | ResourceCapStatus::Disabled
+        )
+    }
+}
+
+static INSTANCE_RESOURCE_CAPS: std::sync::RwLock<Option<std::sync::Arc<ResourceCapsApplication>>> =
+    std::sync::RwLock::new(None);
+
+/// Apply instance resource caps exactly once per process. The first call
+/// wins; later calls return the recorded outcome regardless of the caps
+/// passed, so host startup is the only natural writer. Invalid caps never
+/// take effect as wrong quotas: they are recorded as `Unavailable` outcomes
+/// so the failure stays visible to consumers. Runtime changes go through
+/// [`update_instance_resource_caps`].
+pub fn apply_instance_resource_caps(
+    caps: InstanceResourceCaps,
+) -> std::sync::Arc<ResourceCapsApplication> {
+    if let Some(existing) = instance_resource_caps_application() {
+        return existing;
+    }
+    let mut guard = INSTANCE_RESOURCE_CAPS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(existing) = guard.clone() {
+        return existing;
+    }
+    let application = std::sync::Arc::new(platform_apply_instance_resource_caps(caps));
+    *guard = Some(application.clone());
+    application
+}
+
+/// The recorded outcome, or `None` before the first application attempt.
+pub fn instance_resource_caps_application() -> Option<std::sync::Arc<ResourceCapsApplication>> {
+    INSTANCE_RESOURCE_CAPS
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+/// Update the caps at runtime (WebUI system-settings path). Validates the
+/// request, rewrites the kernel bound, and records the new outcome. On
+/// validation or kernel failure nothing changes and the error is returned,
+/// so a stored setting can never drift away from what the kernel enforces.
+pub fn update_instance_resource_caps(
+    caps: InstanceResourceCaps,
+) -> Result<ResourceCapsApplication, String> {
+    let application = platform_update_instance_resource_caps(caps)?;
+    let mut guard = INSTANCE_RESOURCE_CAPS
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some(std::sync::Arc::new(application.clone()));
+    Ok(application)
+}
+
+/// Logical CPUs online, when the platform can report them.
+pub fn system_cpu_cores() -> Option<u32> {
+    platform_system_cpu_cores()
+}
+
+/// Total system memory in bytes, when the platform can report it.
+pub fn system_mem_total_bytes() -> Option<u64> {
+    platform_system_mem_total_bytes()
+}
+
+/// Point-in-time resource accounting for one Session's managed job scope.
+///
+/// Values aggregate every managed Job leaf below the Session scope. Limits are
+/// the effective values the instance enforces for its managed job tree; a
+/// child scope can show `max` while an ancestor bound still applies, so the
+/// limit fields are read where the instance writes them. Optional fields stay
+/// `None` when the platform lacks that dimension instead of being faked.
+/// One managed Job leaf under a Session scope.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JobResourceUsage {
+    /// Opaque managed scope name (`job-*`). The same name appears in the
+    /// process observation note the model receives for that job.
+    pub scope_name: String,
+    /// OOM kills recorded by this Job leaf (cumulative counter).
+    pub oom_kill_count: u64,
+    /// Memory currently charged to this Job leaf, in bytes.
+    pub memory_current_bytes: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SessionResourceUsage {
+    /// CPU time consumed by the Session's job tree, in microseconds.
+    pub cpu_usage_usec: Option<u64>,
+    /// Effective CPU bandwidth quota in cores, when a quota is enforced.
+    pub cpu_quota_cores: Option<f64>,
+    /// Memory currently charged to the Session's job tree, in bytes.
+    pub memory_current_bytes: Option<u64>,
+    /// Peak memory charged to the Session's job tree, in bytes, when the
+    /// platform tracks a peak.
+    pub memory_peak_bytes: Option<u64>,
+    /// Swap currently charged to the Session's job tree, in bytes.
+    pub swap_current_bytes: Option<u64>,
+    /// Effective soft memory bound for the managed tree, in bytes.
+    pub memory_high_bytes: Option<u64>,
+    /// Effective hard memory bound for the managed tree, in bytes.
+    pub memory_max_bytes: Option<u64>,
+    /// OOM kills observed in the Session's job tree (cumulative counter).
+    pub oom_kill_count: u64,
+    /// Managed Job leaves under the Session scope, sorted by scope name and
+    /// bounded by the scope entry cap.
+    pub jobs: Vec<JobResourceUsage>,
+}
+
+/// Read-only snapshot of one Session's managed job scope. Returns `Ok(None)`
+/// when the platform has no accounting scope for that Session (no jobs have
+/// been started yet, or the platform provides no equivalent facility). The
+/// call never creates scopes and never signals processes.
+pub fn session_resource_usage(session_id: &str) -> std::io::Result<Option<SessionResourceUsage>> {
+    #[cfg(target_os = "linux")]
+    return crate::linux::session_resource_usage(session_id);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = session_id;
+        Ok(None)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn platform_apply_instance_resource_caps(caps: InstanceResourceCaps) -> ResourceCapsApplication {
+    match InstanceResourceCaps::validated(
+        caps.cpu_enabled,
+        caps.cpu_percent,
+        caps.mem_enabled,
+        caps.mem_percent,
+    ) {
+        Ok(caps) => crate::linux::apply_instance_resource_caps(&caps),
+        Err(reason) => ResourceCapsApplication {
+            caps,
+            cpu: ResourceCapStatus::Unavailable {
+                reason: reason.clone(),
+            },
+            mem: ResourceCapStatus::Unavailable { reason },
+            scope: String::new(),
+        },
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_apply_instance_resource_caps(caps: InstanceResourceCaps) -> ResourceCapsApplication {
+    // Kernel-level instance quota facilities today: Linux cgroup v2
+    // (`cpu.max` + `memory.max` / `memory.high`). Future platform plans: Windows Job Object
+    // CPU rate control + JobMemoryLimit on the runtime-wide job; macOS has no
+    // kernel-level quota facility (soft priorities only). Report the gap
+    // instead of pretending the caps are enforced.
+    ResourceCapsApplication {
+        caps,
+        cpu: ResourceCapStatus::Unsupported,
+        mem: ResourceCapStatus::Unsupported,
+        scope: "no kernel-level instance quota facility on this platform yet".to_string(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn platform_update_instance_resource_caps(
+    caps: InstanceResourceCaps,
+) -> Result<ResourceCapsApplication, String> {
+    let validated = InstanceResourceCaps::validated(
+        caps.cpu_enabled,
+        caps.cpu_percent,
+        caps.mem_enabled,
+        caps.mem_percent,
+    )?;
+    Ok(crate::linux::apply_instance_resource_caps(&validated))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_update_instance_resource_caps(
+    _caps: InstanceResourceCaps,
+) -> Result<ResourceCapsApplication, String> {
+    Err("instance resource caps are not supported on this platform yet".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn platform_system_cpu_cores() -> Option<u32> {
+    crate::linux::system_cpu_cores()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_system_cpu_cores() -> Option<u32> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn platform_system_mem_total_bytes() -> Option<u64> {
+    crate::linux::system_mem_total_bytes()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_system_mem_total_bytes() -> Option<u64> {
+    None
+}
+
+/// One cap dimension's escalation-free availability right now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResourceCapReadiness {
+    /// The controller is reachable and the process cgroup is writable
+    /// without root; caps can apply as-is.
+    Ready,
+    /// Root can make this dimension usable right now; `actions` is the
+    /// minimal plan for [`apply_resource_cap_escalation_plan`].
+    NeedsEscalation {
+        actions: Vec<ResourceCapEscalationAction>,
+    },
+    /// Root cannot repair this either (unexpected kernel layout).
+    Unavailable { reason: String },
+    /// This platform has no kernel-level instance quota facility.
+    Unsupported,
+}
+
+/// Per-dimension readiness probe for the current platform resource-control scope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResourceCapsReadiness {
+    /// The platform-native scope the managed job tree hangs off of.
+    pub scope: String,
+    pub cpu: ResourceCapReadiness,
+    pub mem: ResourceCapReadiness,
+}
+
+impl ResourceCapsReadiness {
+    /// True when any dimension could become usable through root.
+    pub fn needs_escalation(&self) -> bool {
+        matches!(self.cpu, ResourceCapReadiness::NeedsEscalation { .. })
+            || matches!(self.mem, ResourceCapReadiness::NeedsEscalation { .. })
+    }
+}
+
+/// One root-authorized step toward usable caps. Plans contain only cgroup-v2
+/// self migration, subtree enablement, and ownership repair; nothing else is
+/// ever executed. This vocabulary is Linux-specific: platforms without a
+/// cgroup-v2 facility report `Unsupported` and never produce a plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResourceCapEscalationAction {
+    /// Move the main process into the managed `timem.self` sibling so the
+    /// instance root stays unpopulated. Enabling controllers under a
+    /// populated root makes the kernel force-convert the cgroup to a
+    /// threaded subtree, which carries only cpu — memory would stay
+    /// permanently unusable.
+    MigrateSelf { cgroup: String, pid: u32 },
+    /// Enable a controller in a cgroup's `cgroup.subtree_control`.
+    EnableController { cgroup: String, controller: String },
+    /// Give the current user ownership of a cgroup directory so the
+    /// `timem.jobs` subtree can be created without root.
+    MakeWritable { cgroup: String, uid: u32, gid: u32 },
+}
+
+/// Probe whether each cap dimension is usable right now without root.
+pub fn probe_instance_resource_caps() -> ResourceCapsReadiness {
+    platform_probe_instance_resource_caps()
+}
+
+/// Execute a root-authorized escalation plan via `sudo -S`. The password is
+/// streamed to sudo's stdin and is never logged, stored, or embedded in
+/// errors; clearing the caller's buffer stays the caller's duty.
+pub fn apply_resource_cap_escalation_plan(
+    actions: &[ResourceCapEscalationAction],
+    password: &[u8],
+) -> Result<(), String> {
+    platform_apply_resource_cap_escalation_plan(actions, password)
+}
+
+#[cfg(target_os = "linux")]
+fn platform_probe_instance_resource_caps() -> ResourceCapsReadiness {
+    crate::linux::probe_instance_resource_caps()
+}
+
+#[cfg(target_os = "linux")]
+fn platform_apply_resource_cap_escalation_plan(
+    actions: &[ResourceCapEscalationAction],
+    password: &[u8],
+) -> Result<(), String> {
+    crate::linux::apply_resource_cap_escalation_plan(actions, password)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_probe_instance_resource_caps() -> ResourceCapsReadiness {
+    ResourceCapsReadiness {
+        scope: String::new(),
+        cpu: ResourceCapReadiness::Unsupported,
+        mem: ResourceCapReadiness::Unsupported,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn platform_apply_resource_cap_escalation_plan(
+    _actions: &[ResourceCapEscalationAction],
+    _password: &[u8],
+) -> Result<(), String> {
+    Err("root escalation is not supported on this platform yet".to_string())
 }

@@ -2,6 +2,7 @@ mod debug_session;
 mod lifecycle_diagnostics;
 mod mailbox;
 mod os;
+mod resource_caps_prompt;
 mod runtime_log;
 mod semantic_delivery;
 mod server;
@@ -62,7 +63,8 @@ fn exit_with_process_cleanup(code: i32) -> ! {
 
 pub fn run_web(args: Vec<String>) {
     // Best-effort orphan safety net. Exact ownership still requires a writable,
-    // delegated cgroup-v2 subtree; unsupported environments use process groups.
+    // delegated resource-control subtree (cgroup v2 on Linux); unsupported
+    // environments use process groups.
     let _process_safety_net = agent_core::os::ensure_process_safety_net();
     let memory_root = match lifecycle_diagnostics::memory_root_from_args(&args) {
         Ok(path) => path,

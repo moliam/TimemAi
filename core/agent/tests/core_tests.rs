@@ -4442,13 +4442,19 @@ fn memmgr_raw_chat_search_reads_persisted_chat_records() {
     let root = tmp_dir("memmgr_raw_chat");
     let dir = root.join("memory");
     fs::create_dir_all(&dir).unwrap();
-    write_audit_doc(
-        &root.join("audit").join("api_audit.json"),
-        vec![
-            json!({"type":"turn_start","session":"shell_old","turn_id":"turn_1781760000000","user_input":"我昨天提到了测试物品 BLUE-17"}),
-            json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781760000000","assistant_output":"我记下了测试物品 BLUE-17这个说法。"}),
-        ],
-    );
+    let session_dir = root.join("sessions").join("shell_old");
+    fs::create_dir_all(&session_dir).unwrap();
+    // Keep the persisted shape: internally tagged enums always serialize
+    // `"type"` as the first key of the line.
+    let lines = [
+        r#"{"type":"message","role":"user","turn_id":"turn_1781760000000","created_at_ms":1781760000000,"kind":"task","content":"我昨天提到了测试物品 BLUE-17"}"#,
+        r#"{"type":"message","role":"assistant","turn_id":"turn_1781760000000","created_at_ms":1781760001000,"content":"我记下了测试物品 BLUE-17这个说法。"}"#,
+    ];
+    fs::write(
+        session_dir.join("raw_chat_history.jsonl"),
+        lines.join("\n") + "\n",
+    )
+    .unwrap();
     let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("我之前说过什么物品", None);
     let step = core.apply_model_response(LlmResponse {
@@ -6578,14 +6584,20 @@ fn chat_history_query_reads_persisted_chat_records() {
     let root = tmp_dir("chat_history_persisted");
     let dir = root.join("memory");
     fs::create_dir_all(&dir).unwrap();
-    let audit_file = root.join("audit").join("api_audit.json");
-    write_audit_doc(
-        &audit_file,
-        vec![
-            json!({"type":"turn_start","session":"shell_old","turn_id":"turn_1781760000000","user_input":"我昨天提到了测试物品 BLUE-17"}),
-            json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781760000000","assistant_output":"我记下了测试物品 BLUE-17这个说法。"}),
-        ],
-    );
+    // Persisted chat lives in the session history file; the search reads it
+    // directly, so the fixture mirrors the real JSONL record shape.
+    let session_dir = root.join("sessions").join("shell_old");
+    fs::create_dir_all(&session_dir).unwrap();
+    fs::write(
+        session_dir.join("raw_chat_history.jsonl"),
+        concat!(
+            r#"{"type":"message","role":"user","turn_id":"turn_1781760000000","created_at_ms":1781760000000,"kind":"task","content":"我昨天提到了测试物品 BLUE-17"}"#,
+            "\n",
+            r#"{"type":"message","role":"assistant","turn_id":"turn_1781760000000","created_at_ms":1781760001000,"content":"我记下了测试物品 BLUE-17这个说法。"}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
     let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("我之前说过什么物品", None);
     let step = core.apply_model_response(LlmResponse {
@@ -6605,38 +6617,6 @@ fn chat_history_query_reads_persisted_chat_records() {
     assert!(prompt.contains("shell_old"));
     assert!(prompt.contains("测试物品 BLUE-17"));
     assert!(prompt.contains("我记下了测试物品 BLUE-17这个说法"));
-}
-
-#[test]
-fn chat_history_query_reads_legacy_jsonl_audit_records() {
-    let root = tmp_dir("chat_history_legacy_jsonl");
-    let dir = root.join("memory");
-    fs::create_dir_all(&dir).unwrap();
-    let audit_file = root.join("api_audit.jsonl");
-    fs::write(
-        &audit_file,
-        r#"{"type":"turn_start","session":"legacy_shell","turn_id":"turn_1781760000000","user_input":"旧格式提到了测试物品 GREEN-29"}
-{"type":"turn_final","session":"legacy_shell","turn_id":"turn_1781760000000","assistant_output":"我记下了测试物品 GREEN-29。"}
-"#,
-    )
-    .unwrap();
-    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
-    let _ = core.begin_turn("旧格式里说过什么", None);
-    let step = core.apply_model_response(LlmResponse {
-        tool_calls: Vec::new(),
-        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","scope":"global","search_text":"测试物品 GREEN-29","limit":5}}]}"#),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let prompt = match step {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(!action_results(&prompt).is_empty());
-    assert!(prompt.contains("source=chat_history"));
-    assert!(prompt.contains("legacy_shell"));
-    assert!(prompt.contains("测试物品 GREEN-29"));
 }
 
 #[test]
@@ -6673,16 +6653,22 @@ fn chat_history_search_empty_text_lists_recent_records() {
     let root = tmp_dir("chat_history_recent_empty");
     let dir = root.join("memory");
     fs::create_dir_all(&dir).unwrap();
-    let audit_file = root.join("audit").join("api_audit.json");
-    write_audit_doc(
-        &audit_file,
-        vec![
-            json!({"type":"turn_start","session":"shell_old","turn_id":"turn_1781760000000","user_input":"第一条历史"}),
-            json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781760000000","assistant_output":"第一条回复"}),
-            json!({"type":"turn_start","session":"shell_old","turn_id":"turn_1781846400000","user_input":"第二条历史"}),
-            json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781846400000","assistant_output":"第二条回复"}),
-        ],
-    );
+    let session_dir = root.join("sessions").join("shell_old");
+    fs::create_dir_all(&session_dir).unwrap();
+    fs::write(
+        session_dir.join("raw_chat_history.jsonl"),
+        concat!(
+            r#"{"type":"message","role":"user","turn_id":"turn_1781760000000","created_at_ms":1781760000000,"kind":"task","content":"第一条历史"}"#,
+            "\n",
+            r#"{"type":"message","role":"assistant","turn_id":"turn_1781760000000","created_at_ms":1781760001000,"content":"第一条回复"}"#,
+            "\n",
+            r#"{"type":"message","role":"user","turn_id":"turn_1781846400000","created_at_ms":1781846400000,"kind":"task","content":"第二条历史"}"#,
+            "\n",
+            r#"{"type":"message","role":"assistant","turn_id":"turn_1781846400000","created_at_ms":1781846401000,"content":"第二条回复"}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
     let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("列最近聊天", None);
     let step = core.apply_model_response(LlmResponse {
@@ -6831,20 +6817,31 @@ fn memory_sql_query_rejects_chat_history_delete_sql() {
 }
 
 #[test]
-fn chat_history_delete_removes_matching_turn_from_audit_log() {
+fn chat_history_delete_removes_matching_turn_from_session_history() {
     let root = tmp_dir("chat_delete_action");
     let dir = root.join("memory");
     fs::create_dir_all(&dir).unwrap();
-    let audit_file = root.join("audit").join("api_audit.json");
-    write_audit_doc(
-        &audit_file,
-        vec![
-            json!({"type":"turn_start","session":"shell_old","turn_id":"turn_1781760000000","user_input":"删除目标聊天"}),
-            json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781760000000","assistant_output":"删除目标回复"}),
-            json!({"type":"turn_start","session":"shell_old","turn_id":"turn_1781846400000","user_input":"保留聊天"}),
-            json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781846400000","assistant_output":"保留回复"}),
-        ],
-    );
+    let session_dir = root.join("sessions").join("shell_old");
+    fs::create_dir_all(&session_dir).unwrap();
+    let history_file = session_dir.join("raw_chat_history.jsonl");
+    fs::write(
+        &history_file,
+        concat!(
+            r#"{"type":"message","role":"user","turn_id":"turn_1781760000000","created_at_ms":1781760000000,"kind":"task","content":"删除目标聊天"}"#,
+            "\n",
+            r#"{"type":"message","role":"assistant","turn_id":"turn_1781760000000","created_at_ms":1781760001000,"content":"删除目标回复"}"#,
+            "\n",
+            r#"{"type":"message","role":"user","turn_id":"turn_1781846400000","created_at_ms":1781846400000,"kind":"task","content":"保留聊天"}"#,
+            "\n",
+            r#"{"type":"message","role":"assistant","turn_id":"turn_1781846400000","created_at_ms":1781846401000,"content":"保留回复"}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    // A stale persisted index must be invalidated by the delete so the next
+    // reader rebuilds offsets instead of trusting stale entries.
+    let index_file = session_dir.join("raw_chat_history.index.json");
+    fs::write(&index_file, r#"{"indexed_len":0,"entries":[]}"#).unwrap();
     let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("删除包含目标的聊天记录", None);
     let step = core.apply_model_response(LlmResponse {
@@ -6860,7 +6857,8 @@ fn chat_history_delete_removes_matching_turn_from_audit_log() {
     };
     assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("deleted_count: 1"));
-    let stored = fs::read_to_string(&audit_file).unwrap();
+    assert!(!index_file.exists(), "stale index must be invalidated");
+    let stored = fs::read_to_string(&history_file).unwrap();
     assert!(!stored.contains("删除目标"));
     assert!(stored.contains("保留聊天"));
     assert!(stored.contains("保留回复"));
@@ -8557,15 +8555,18 @@ fn scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering() {
 "#,
     )
     .unwrap();
-    let audit_dir = dir.join("audit");
-    fs::create_dir_all(&audit_dir).unwrap();
-    write_audit_doc(
-        &audit_dir.join("api_audit.json"),
-        vec![
-            json!({"type":"turn_start","session":"scenario_memory","turn_id":"turn_1780000010000_1","created_at":1780000010000u64,"user_input":"测试时段我们聊了 测试发布检查"}),
-            json!({"type":"turn_final","session":"scenario_memory","turn_id":"turn_1780000010000_1","created_at":1780000015000u64,"assistant_output":"我建议先跑完整 CI 和真实 TTY smoke。"}),
-        ],
-    );
+    let session_dir = dir.join("sessions").join("scenario_memory");
+    fs::create_dir_all(&session_dir).unwrap();
+    fs::write(
+        session_dir.join("raw_chat_history.jsonl"),
+        concat!(
+            r#"{"type":"message","role":"user","turn_id":"turn_1780000010000_1","created_at_ms":1780000010000,"kind":"task","content":"测试时段我们聊了 测试发布检查"}"#,
+            "\n",
+            r#"{"type":"message","role":"assistant","turn_id":"turn_1780000010000_1","created_at_ms":1780000015000,"content":"我建议先跑完整 CI 和真实 TTY smoke。"}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
 
     let mut core = test_core("STATIC", profile("qwen-plus"), &memory_dir);
     core.set_capability_registry(test_registry());
