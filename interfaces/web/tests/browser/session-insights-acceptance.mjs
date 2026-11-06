@@ -345,11 +345,11 @@ async function main() {
     await click(browser, chip);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.session-insights-panel')`), "panel opens on chip click");
     assert(await browser.evaluate(`document.querySelectorAll('.session-insight-row').length === 10`), "panel lists all ten items");
-    // Typography: values carry the larger semibold tabular-numeral scale,
-    // labels stay in sentence case, and the panel base is slightly larger.
-    await waitFor(() => browser.evaluate(`document.fonts.check('700 13px Rajdhani')
-      && document.fonts.check('600 10.5px "Space Grotesk"')
-      && document.fonts.check('400 10.5px "IBM Plex Mono"')`), "custom Insight fonts load");
+    // Typography: compact and refined; values keep the bold tabular scale,
+    // labels stay sentence-case at a small size, especially for CJK text.
+    await waitFor(() => browser.evaluate(`document.fonts.check('700 11.5px Rajdhani')
+      && document.fonts.check('600 9.5px "Space Grotesk"')
+      && document.fonts.check('400 9.5px "IBM Plex Mono"')`), "custom Insight fonts load");
     const typography = await browser.evaluate(`(() => {
       const value = getComputedStyle(document.querySelector('.session-insight-value'));
       const label = getComputedStyle(document.querySelector('.session-insight-label'));
@@ -374,10 +374,10 @@ async function main() {
         flowNumberFamily: flowNumber.fontFamily,
       };
     })()`);
-    assert(typography.panelSize === '11.5px', `panel base font: ${JSON.stringify(typography)}`);
-    assert(typography.valueSize === '13px' && typography.valueWeight === '700', `value typography: ${JSON.stringify(typography)}`);
+    assert(typography.panelSize === '10.5px', `panel base font: ${JSON.stringify(typography)}`);
+    assert(typography.valueSize === '11.5px' && typography.valueWeight === '700', `value typography: ${JSON.stringify(typography)}`);
     assert(typography.valueFamily.includes('Rajdhani'), `value font family: ${JSON.stringify(typography)}`);
-    assert(typography.labelSize === '10.5px' && typography.labelWeight === '600' && typography.labelTransform === 'none', `label typography: ${JSON.stringify(typography)}`);
+    assert(typography.labelSize === '9.5px' && typography.labelWeight === '500' && typography.labelTransform === 'none', `label typography: ${JSON.stringify(typography)}`);
     assert(typography.panelFamily.includes('Source Han Sans SC') && typography.labelFamily.includes('Noto Sans CJK SC'), `Chinese stack: ${JSON.stringify(typography)}`);
     assert(typography.titleFamily.includes('Space Grotesk') && typography.titleWeight === '600', `title font: ${JSON.stringify(typography)}`);
     assert(typography.detailFamily.includes('IBM Plex Mono') && typography.flowNumberFamily.includes('IBM Plex Mono'), `mono values: ${JSON.stringify(typography)}`);
