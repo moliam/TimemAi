@@ -943,7 +943,7 @@ fn mcp_action_runs_through_protocol_registry_and_executor() {
 }
 
 #[test]
-fn native_mode_puts_builtin_descriptions_in_static_and_mcp_descriptions_in_api_field() {
+fn native_mode_lists_builtin_names_in_static_and_mcp_descriptions_in_api_field() {
     let memory_dir = tmp_dir("native_mcp_not_static");
     let mut core = test_core(
         "STATIC\n{{TOOL_CATALOG}}\n{{RESPONSE_PROTOCOL_SECTION}}",
@@ -1007,11 +1007,16 @@ fn native_mode_puts_builtin_descriptions_in_static_and_mcp_descriptions_in_api_f
     assert!(prompt.starts_with("[BEGIN SYSTEM PROMPT]\n"), "{prompt}");
     assert!(!prompt.contains("<Timem System Prompt>"));
     let static_end = prompt.find("[END SYSTEM PROMPT]").unwrap();
-    assert!(prompt.contains("### `run_bash`"), "{prompt}");
-    assert!(prompt.contains("### `self_tool`"), "{prompt}");
     assert!(
-        prompt.contains("`run_bash` runs a shell command"),
+        prompt.contains("The runtime exposes the following tools:"),
         "{prompt}"
+    );
+    assert!(prompt.contains("`run_bash`"), "{prompt}");
+    assert!(prompt.contains("`self_tool`"), "{prompt}");
+    assert!(!prompt.contains("### `run_bash`"), "{prompt}");
+    assert!(
+        !prompt.contains("`run_bash` runs a shell command"),
+        "native mode must not duplicate tool descriptions in the static prompt: {prompt}"
     );
     assert!(!prompt.contains("\"input_schema\""), "{prompt}");
     assert!(!prompt.contains("mcp_demo_mcp__echo"), "{prompt}");
