@@ -179,6 +179,12 @@ fn higher_than_h0_trailer_preserves_context_compression_protocol() {
 fn every_context_compression_trailer_carries_the_data_loss_caution() {
     let caution = crate::prompt_render::CONTEXT_COMPRESS_CAUTION;
     assert!(caution.contains("prone to data loss and directional drift"));
+    // The trailer must tell the model which state the runtime re-provides so
+    // the summary spends its budget on the model's own work state.
+    assert!(caution.contains("automatically re-provides"));
+    assert!(caution.contains("session work file"));
+    assert!(caution.contains("AGENTS.md"));
+    assert!(caution.contains("running background jobs"));
     assert!(caution.contains("strictly avoid deviating from the primary objective"));
     assert!(caution.contains("Synthesize historical memos—especially the ##USER inputs history"));
     assert!(caution.contains("when executing context compression"));
