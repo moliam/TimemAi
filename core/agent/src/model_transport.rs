@@ -26,9 +26,18 @@ thread_local! {
         RefCell::new(HttpModelClient::default());
 }
 
-#[derive(Default)]
 pub struct HttpModelClient {
     transport: Option<NativeHttpTransport>,
+    use_environment_proxy: bool,
+}
+
+impl Default for HttpModelClient {
+    fn default() -> Self {
+        Self {
+            transport: None,
+            use_environment_proxy: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +48,7 @@ struct ClientTransportKey {
 struct NativeHttpTransport {
     runtime: Runtime,
     client: Option<(ClientTransportKey, reqwest::Client)>,
+    use_environment_proxy: bool,
 }
 
 #[derive(Debug)]
@@ -54,7 +64,7 @@ struct NativeHttpResponse {
 }
 
 impl NativeHttpTransport {
-    fn new() -> Result<Self, String> {
+    fn new(use_environment_proxy: bool) -> Result<Self, String> {
         let runtime = Builder::new_current_thread()
             .enable_io()
             .enable_time()
@@ -65,6 +75,7 @@ impl NativeHttpTransport {
         Ok(Self {
             runtime,
             client: None,
+            use_environment_proxy,
         })
     }
 
@@ -79,6 +90,9 @@ impl NativeHttpTransport {
         }
 
         let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+        if !self.use_environment_proxy {
+            builder = builder.no_proxy();
+        }
         if let Some(pem) = &key.private_ca_pem {
             let certificates = parse_model_private_ca_pem(pem)?;
             for certificate in certificates {
@@ -511,6 +525,14 @@ fn error_chain_text(error: &(dyn std::error::Error + 'static)) -> String {
 }
 
 impl HttpModelClient {
+    #[cfg(test)]
+    fn without_environment_proxy() -> Self {
+        Self {
+            transport: None,
+            use_environment_proxy: false,
+        }
+    }
+
     fn discard_transport(&mut self) {
         if let Some(transport) = self.transport.take() {
             // A dropped response only notifies Hyper's connection task. Our
@@ -525,7 +547,7 @@ impl HttpModelClient {
 
     fn transport(&mut self) -> Result<&mut NativeHttpTransport, String> {
         if self.transport.is_none() {
-            self.transport = Some(NativeHttpTransport::new()?);
+            self.transport = Some(NativeHttpTransport::new(self.use_environment_proxy)?);
         }
         self.transport
             .as_mut()
