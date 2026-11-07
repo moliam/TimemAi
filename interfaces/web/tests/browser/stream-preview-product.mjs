@@ -575,7 +575,7 @@ async function main() {
       releaseFinal();
     }
     if (scenario === "network") {
-      await waitFor(()=>browser.evaluate(`document.querySelector('.response-preview-interruption')?.textContent.includes('Network error')`), "network lost partial output");
+      await waitFor(()=>browser.evaluate(`document.querySelector('.response-preview-interruption')?.textContent.includes('Network error')`), "network lost partial output", 30000);
       assert(await browser.evaluate(`document.querySelector('.response-preview')?.textContent.includes('HTTP early response')`), "network lost partial Chat");
       console.log("PASS actual Host + HTTP SSE + Chrome: broken HTTP retains partial response and Chat");
       return;

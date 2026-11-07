@@ -38,7 +38,7 @@ const now = Date.now();
 const timers = () => [
   {
     timer_id: "timer-u1", name: "每日提醒",
-    prompt: "检查长构建结果并汇报：跑 ctest --output-on-failure，失败用例列出清单与原因；\n全绿则一句话汇报，并顺带检查磁盘占用，超过 85% 时清理 target 旧产物。",
+    prompt: "检查长构建结果并汇报：跑 ctest --output-on-failure，失败用例列出清单与原因；\n全绿则一句话汇报，并顺带检查磁盘占用，超过 85% 时清理 target 旧产物。\n补充检查：逐一核对告警等级、产物哈希与安装包体积，确认没有遗留的临时目录或未合并的配置分叉，并把结论按优先级排序列成简报，供后续追踪与复盘使用。",
     mode: "once", after_ms: 60000, at: null, interval_ms: null,
     created_by: "user", created_at_ms: now, enabled: true,
     next_fire_ms: now + 60000, last_fired_ms: null,
