@@ -7703,10 +7703,16 @@ where
     serializer.serialize_str(&windows_verbatim_path_for_user_display(path))
 }
 
+
+/// User-facing display form of a path: hides Windows verbatim prefixes
+/// while keeping the rendered text canonicalizable back to the same path.
+pub(crate) fn path_for_user_display(path: &std::path::Path) -> String {
+    windows_verbatim_path_for_user_display(&path.to_string_lossy())
+}
+
 /// Converts canonical Windows drive and UNC paths out of the Win32 verbatim
 /// namespace for presentation. Other namespace paths remain untouched because
-/// removing their prefix could change their meaning.
-fn windows_verbatim_path_for_user_display(path: &str) -> String {
+/// removing their prefix could change their meaning.fn windows_verbatim_path_for_user_display(path: &str) -> String {
     if let Some(unc_path) = path.strip_prefix(r"\\?\UNC\") {
         if !unc_path.is_empty() {
             return format!(r"\\{}", unc_path);
