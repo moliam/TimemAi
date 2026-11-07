@@ -1,9 +1,19 @@
 # Changelog
 
-## [2.6.0] - 2026-10-19
+## [3.0.0] - 2026-11-07
 
 ### Added
 
+- aarch64-unknown-linux-gnu joins the prebuilt release matrix as a fifth
+  target. Linux builds (x86_64 and aarch64) are produced with cargo-zigbuild
+  against a glibc 2.31 baseline (Ubuntu 20.04 LTS or newer), and the packaged
+  README-ASSETS documents the Linux requirements (glibc 2.31+, bash) per
+  target while the macOS/Windows packages stay free of the Linux section.
+- The system prompt carries an instance containment note when the runtime
+  runs inside a governed cgroup/job facility, asking spawned work to stay in
+  the managed process tree so governance and diagnostics keep working.
+- Thinking gets an inline window with a display toggle; debug dumps record
+  thought content and keep the most recent 50 model responses.
 - Settings -> System -> "Show answers as they arrive" gains a nested sub-setting
   "Collapse interim conversation after the task finishes" (default off). Off
   keeps the interim conversation and tool rows expanded beside the final answer
@@ -25,6 +35,55 @@
   updater one uniform archive format on every supported platform.
 
 ### Fixed
+
+- Multi-session streaming benchmark fixtures no longer crash on 64 KiB
+  WebSocket frames: every hand-written frame encoder (multi-session-cpu,
+  memo tooltip, image attachment, tool presentation) implements the 64-bit
+  extended-length branch, and the multi-session benchmark carries
+  regression budgets (zero page errors, long tasks, main-thread time)
+  enforced by the performance guard.
+- Browser acceptance scripts discover Chrome through CHROME_BIN and a
+  platform candidate list that includes the macOS application path instead
+  of hard-coded Linux paths. catalog-endpoint-e2e additionally repairs its
+  stale assertion chain (Chrome discovery, template-switch URL semantics
+  aligned with the user-owned address retention design, effort option
+  count, property-based value assertions, and budget-scoped selectors for
+  the context-window custom field) and now passes end to end.
+- Model transport test fixtures no longer trust ambient proxy environment
+  variables; the dedicated proxy smoke keeps production proxy discovery.
+- Admission-time runtime notes (process scopes, config notices, state
+  reminders, memory prechecks) are committed before the user entry that
+  closes its delta, so a first message after a restart is no longer
+  sandwiched between runtime notices.
+- Native mode renders the built-in tool catalog as tool names only; full
+  parameter schemas arrive through the API tool parameters, with the
+  inline (no-tools) mode keeping the complete catalog.
+- The timer queue-timeout field is usable again (a checkbox CSS class was
+  forcing it into a 13px square).
+- Mailbox single-line rows no longer stretch the layout horizontally;
+  long previews ellipsize and expand in place, and bodies wrap.
+- The Stop interruption banner is no longer dropped by preview throttling.
+- Clearing context reports connection errors instead of failing silently.
+- The endpoint collapse control shows the active endpoint name on hover.
+- run_bash returns a cmd alias hint when `command` is used, and raw_chat
+  retrieval fallback keeps only user entries.
+- Comment-only SSE streams are no longer treated as response bodies.
+- Rate-limit switching consumes the latest endpoint route before retrying.
+- Context application deduplicates work and back-pressures command sends;
+  background shell jobs are bounded to 32 concurrent.
+- Timer merges no longer overwrite user edits with stale Core projections.
+- Context reduction trailers state the trigger first and match the
+  runtime's actual reinjection checklist.
+- macOS gating tests scope their platform locks locally and no longer race
+  on HOME; Session Insights memory shows the real working set versus
+  reclaimable cache.
+- Thinking tail cleanup, blank-thought rendering, header control
+  centering, and light-theme popover contrast fixes.
+
+### Performance
+
+- Statistics page and Session Insights polling dropped to a lower CPU
+  profile while keeping the sampling cadence for pinned dashboards.
 
 - `scripts/package_release_assets.sh` resolves a relative output directory
   before archiving from inside its staging directory; release backfills no
