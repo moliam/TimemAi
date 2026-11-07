@@ -3115,9 +3115,7 @@ impl Drop for ZeroizingPassword {
     fn drop(&mut self) {
         // Safety: the buffer is dropped immediately after zeroizing, so the
         // (possibly non-UTF-8) transient state is never observable.
-        for byte in unsafe { self.0.as_mut_vec() } {
-            *byte = 0;
-        }
+        unsafe { self.0.as_mut_vec() }.fill(0);
     }
 }
 
