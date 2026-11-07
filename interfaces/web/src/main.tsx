@@ -8148,8 +8148,10 @@ function MailboxPanel({
       className={`mailbox-item-line${mail.read ? " read" : ""}${mail.kind === "receipt" ? " receipt" : ""}`}
     >
       <summary>
-        <b>{mail.from}</b>
-        <span className="mailbox-item-preview">{mail.msg}</span>
+        <b title={mail.from}>{mail.from}</b>
+        <span className="mailbox-item-preview" title={mail.msg}>
+          {mail.msg}
+        </span>
         <span className="mailbox-item-time">
           {formatMailboxStamp(mail.created_at_ms)}
         </span>
@@ -8175,8 +8177,10 @@ function MailboxPanel({
       className={`mailbox-item-line sent ${entry.status === "read" ? "status-read" : entry.status === "failed" || entry.status === "timeout" || entry.status === "discarded" ? "status-failed" : ""}`}
     >
       <summary>
-        <b>{entry.to}</b>
-        <span className="mailbox-item-preview">{entry.msg}</span>
+        <b title={entry.to}>{entry.to}</b>
+        <span className="mailbox-item-preview" title={entry.msg}>
+          {entry.msg}
+        </span>
         <span className="mailbox-item-time">
           {formatMailboxStamp(entry.created_at_ms)}
         </span>
