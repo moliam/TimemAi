@@ -26,7 +26,44 @@ const LLM_TTFT_LABELS: [&str; 8] = [
 /// Newest-first response retention. Fifty entries keep a full debugging
 /// session available in one file while still bounding the dump size.
 const MAX_LLM_RESPONSE_DUMP_ENTRIES: usize = 50;
-const STATISTICS_REFRESH_MS: u64 = 2_000;
+const STATISTICS_REFRESH_MS: u64 = 5_000;
+
+/// Refresh script for the debug statistics page. Kept as a standalone
+/// template so the hidden-tab pause, unchanged-DOM check, and rescheduling
+/// behavior can be unit-tested without rendering a full page.
+const STATISTICS_REFRESH_JS: &str = r#"
+window.__timemStatsSchedule=()=>{
+  clearTimeout(window.__timemStatsRefresh);
+  if(document.hidden)return;
+  window.__timemStatsRefresh=setTimeout(refresh,__REFRESH_MS__);
+};
+async function refresh(){
+  if(document.hidden){window.__timemStatsSchedule();return;}
+  try{
+    const res=await fetch(location.href,{cache:'no-store'});
+    if(res.ok){
+      const doc=new DOMParser().parseFromString(await res.text(),'text/html');
+      document.title=doc.title;
+      const fresh=doc.querySelector('main.shell');
+      const current=document.querySelector('main.shell');
+      if(fresh&&current&&fresh.innerHTML!==current.innerHTML){
+        current.replaceWith(fresh);
+        window.wireStatisticsPage();
+      }
+    }
+  }catch(e){}
+  window.__timemStatsSchedule();
+}
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){clearTimeout(window.__timemStatsRefresh);}
+  else{refresh();}
+});
+window.__timemStatsSchedule();
+"#;
+
+fn statistics_refresh_script() -> String {
+    STATISTICS_REFRESH_JS.replace("__REFRESH_MS__", &STATISTICS_REFRESH_MS.to_string())
+}
 static NEXT_DEBUG_STORE_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
@@ -1211,9 +1248,7 @@ fn render_statistics_html(session_id: &str, stats: &SessionDebug) -> String {
     }
     out.push_str("<footer>Request counts cover logical model-turn requests; retry attempts are folded into their final outcome. Capability-probe traffic is reported in endpoint negotiation details.</footer></main><script>");
     out.push_str(STATISTICS_JS);
-    out.push_str(&format!(
-        "window.__timemStatsRefresh=setTimeout(refresh,{STATISTICS_REFRESH_MS});async function refresh(){{try{{const res=await fetch(location.href,{{cache:'no-store'}});if(!res.ok)return;const doc=new DOMParser().parseFromString(await res.text(),'text/html');document.title=doc.title;const fresh=doc.querySelector('main.shell');const current=document.querySelector('main.shell');if(fresh&&current){{current.replaceWith(fresh);window.wireStatisticsPage();}}}}catch(e){{}}window.__timemStatsRefresh=setTimeout(refresh,{STATISTICS_REFRESH_MS});}}"
-    ));
+    out.push_str(&statistics_refresh_script());
     out.push_str("</script></body></html>");
     out
 }
@@ -1828,13 +1863,22 @@ const STATISTICS_CSS: &str = r#"
 "#;
 
 const STATISTICS_JS: &str = r#"
-window.wireStatisticsPage=()=>{const key=`timem-statistics-tab:${location.pathname}`;const buttons=[...document.querySelectorAll('[data-endpoint-tab]')];const panels=[...document.querySelectorAll('.endpoint-panel')];const load=()=>{try{return sessionStorage.getItem(key)}catch{return null}};const save=id=>{try{sessionStorage.setItem(key,id)}catch{return}};function select(id){if(!panels.some(p=>p.id===id))id=panels[0]?.id;buttons.forEach(b=>b.setAttribute('aria-selected',String(b.dataset.endpointTab===id)));panels.forEach(p=>p.classList.toggle('active',p.id===id));if(id)save(id)}buttons.forEach(b=>b.addEventListener('click',()=>select(b.dataset.endpointTab)));select(load()||panels[0]?.id);document.getElementById('reset-stats')?.addEventListener('click',async(ev)=>{ev.preventDefault();clearTimeout(window.__timemStatsRefresh);if(!confirm('Reset cumulative statistics for this session?')){window.__timemStatsRefresh=setTimeout(refresh,2000);return;}ev.target.disabled=true;const params=new URLSearchParams(location.search);params.delete('path');params.delete('download');try{await fetch('/api/debug/reset?'+params.toString(),{method:'POST'});}catch(e){alert('Reset request failed: '+e);return;}refresh();});};
+window.wireStatisticsPage=()=>{const key=`timem-statistics-tab:${location.pathname}`;const buttons=[...document.querySelectorAll('[data-endpoint-tab]')];const panels=[...document.querySelectorAll('.endpoint-panel')];const load=()=>{try{return sessionStorage.getItem(key)}catch{return null}};const save=id=>{try{sessionStorage.setItem(key,id)}catch{return}};function select(id){if(!panels.some(p=>p.id===id))id=panels[0]?.id;buttons.forEach(b=>b.setAttribute('aria-selected',String(b.dataset.endpointTab===id)));panels.forEach(p=>p.classList.toggle('active',p.id===id));if(id)save(id)}buttons.forEach(b=>b.addEventListener('click',()=>select(b.dataset.endpointTab)));select(load()||panels[0]?.id);document.getElementById('reset-stats')?.addEventListener('click',async(ev)=>{ev.preventDefault();clearTimeout(window.__timemStatsRefresh);if(!confirm('Reset cumulative statistics for this session?')){window.__timemStatsSchedule?.();return;}ev.target.disabled=true;const params=new URLSearchParams(location.search);params.delete('path');params.delete('download');try{await fetch('/api/debug/reset?'+params.toString(),{method:'POST'});}catch(e){alert('Reset request failed: '+e);return;}refresh();});};
 window.wireStatisticsPage();
 "#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn statistics_refresh_script_pauses_hidden_tabs_and_skips_unchanged_dom() {
+        let script = statistics_refresh_script();
+        assert!(script.contains("document.hidden"));
+        assert!(script.contains("fresh.innerHTML!==current.innerHTML"));
+        assert!(script.contains("__timemStatsSchedule"));
+        assert!(script.contains(&format!("setTimeout(refresh,{STATISTICS_REFRESH_MS})")));
+    }
 
     static DEBUG_STORE_TEST_LOCK: Mutex<()> = Mutex::new(());
 

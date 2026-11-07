@@ -57,6 +57,14 @@ describe("header endpoint selector", () => {
     expect(source).toContain('type: "session_clear_context"');
   });
 
+  it("samples resources less often while Session Insights is collapsed", () => {
+    expect(insightsSource).toContain("const RESOURCE_SAMPLE_IDLE_INTERVAL_MS = 10000;");
+    expect(insightsSource).toContain("open || pinned");
+    expect(insightsSource).toContain("RESOURCE_SAMPLE_INTERVAL_MS");
+    expect(insightsSource).toContain("RESOURCE_SAMPLE_IDLE_INTERVAL_MS");
+    expect(insightsSource).toContain('document.visibilityState !== "hidden"');
+  });
+
   it("shows the current endpoint name in the collapsed control tooltip", () => {
     expect(source).toContain("const endpointName = endpointLabel.trim();");
     expect(source).toContain('endpointName !== collapsedName ? endpointName : ""');

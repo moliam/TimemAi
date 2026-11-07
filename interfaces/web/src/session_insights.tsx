@@ -98,6 +98,7 @@ const PANEL_WIDTH = 376;
 const PANEL_MARGIN = 8;
 const RESOURCE_WINDOW_SAMPLES = 10;
 const RESOURCE_SAMPLE_INTERVAL_MS = 2000;
+const RESOURCE_SAMPLE_IDLE_INTERVAL_MS = 10000;
 
 export function normalizeInsightOrder(raw: unknown): InsightItemId[] {
   const known = new Set<string>(INSIGHT_ITEM_IDS);
@@ -436,9 +437,13 @@ export function SessionInsights({
       if (document.visibilityState !== "hidden") sampleRef.current?.();
     };
     tick();
-    const timer = window.setInterval(tick, RESOURCE_SAMPLE_INTERVAL_MS);
+    const interval =
+      open || pinned
+        ? RESOURCE_SAMPLE_INTERVAL_MS
+        : RESOURCE_SAMPLE_IDLE_INTERVAL_MS;
+    const timer = window.setInterval(tick, interval);
     return () => window.clearInterval(timer);
-  }, [session?.session_id]);
+  }, [session?.session_id, open, pinned]);
 
   useEffect(() => {
     if (!open) return;
