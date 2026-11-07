@@ -14276,6 +14276,14 @@ function HeaderModelControl({
     : "Context usage waiting for runtime usage";
   const modelName = endpoint?.model ?? session?.runtime_profile?.model ?? "";
   const collapsedName = modelName || endpointLabel;
+  const endpointName = endpointLabel.trim();
+  const controlTitle = [
+    endpointName && endpointName !== collapsedName ? endpointName : "",
+    collapsedName,
+    contextTitle,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   const applyContextLength = () => {
     if (!draftValid || !draftDirty) return;
     onContextLimitChange(draftValue);
@@ -14286,10 +14294,10 @@ function HeaderModelControl({
         ref={buttonRef}
         type="button"
         className={`header-model header-model-control${open ? " selected" : ""}`}
-        title={`${collapsedName} · ${contextTitle}`}
+        title={controlTitle}
         aria-expanded={open}
         aria-controls="header-model-popover"
-        aria-label={`${collapsedName} · ${contextTitle}`}
+        aria-label={controlTitle}
         onClick={() => {
           if (open) {
             closePopover();

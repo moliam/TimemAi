@@ -51,6 +51,13 @@ describe("header endpoint selector", () => {
     expect(source).toContain('aria-busy={compressing}');
   });
 
+  it("shows the current endpoint name in the collapsed control tooltip", () => {
+    expect(source).toContain("const endpointName = endpointLabel.trim();");
+    expect(source).toContain('endpointName !== collapsedName ? endpointName : ""');
+    expect(source).toContain("title={controlTitle}");
+    expect(source).toContain("aria-label={controlTitle}");
+  });
+
   it("moves the ctx readout into the model control instead of header actions", () => {
     expect(source).not.toContain("<HeaderContextControl");
     expect(source).toContain("header-model-popover-context");
