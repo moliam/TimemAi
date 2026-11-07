@@ -572,6 +572,16 @@ fn session_resource_usage_at(
     let memory_current_bytes = read(session_path.join("memory.current"))
         .as_deref()
         .and_then(|content| content.trim().parse::<u64>().ok());
+    // `memory.stat` separates the non-reclaimable working set (`anon` plus
+    // mapped file pages) from reclaimable page cache (`file`). `memory.current`
+    // alone cannot explain why a Session charge can exceed machine-wide "used"
+    // memory, which excludes reclaimable cache.
+    let memory_stat = read(session_path.join("memory.stat"));
+    let memory_stat = memory_stat.as_deref();
+    let memory_anon_bytes = memory_stat.and_then(|content| parse_stat_value(content, "anon"));
+    let memory_file_bytes = memory_stat.and_then(|content| parse_stat_value(content, "file"));
+    let memory_file_mapped_bytes =
+        memory_stat.and_then(|content| parse_stat_value(content, "file_mapped"));
     // memory.peak exists only on newer kernels. Do not substitute the current
     // charge: by the time an OOM kill is observed it has already dropped.
     let memory_peak_bytes = read(session_path.join("memory.peak"))
@@ -590,6 +600,9 @@ fn session_resource_usage_at(
         cpu_usage_usec,
         cpu_quota_cores,
         memory_current_bytes,
+        memory_anon_bytes,
+        memory_file_bytes,
+        memory_file_mapped_bytes,
         memory_peak_bytes,
         swap_current_bytes,
         memory_high_bytes,
@@ -1756,6 +1769,11 @@ mod session_resource_tests {
         )
         .unwrap();
         fs::write(session.join("memory.current"), "1048576\n").unwrap();
+        fs::write(
+            session.join("memory.stat"),
+            "anon 262144\nfile 786432\nfile_mapped 4096\n",
+        )
+        .unwrap();
         fs::write(session.join("swap.current"), "4096\n").unwrap();
         fs::write(job.join("memory.events"), "oom_kill 2\nhigh 0\n").unwrap();
         fs::write(session.join("memory.events"), "oom_kill 2\nhigh 3\n").unwrap();
@@ -1767,6 +1785,9 @@ mod session_resource_tests {
         assert_eq!(usage.cpu_usage_usec, Some(123456));
         assert_eq!(usage.cpu_quota_cores, Some(0.5));
         assert_eq!(usage.memory_current_bytes, Some(1048576));
+        assert_eq!(usage.memory_anon_bytes, Some(262144));
+        assert_eq!(usage.memory_file_bytes, Some(786432));
+        assert_eq!(usage.memory_file_mapped_bytes, Some(4096));
         // No memory.peak file here: the snapshot must not fake a peak.
         assert_eq!(usage.memory_peak_bytes, None);
         assert_eq!(usage.swap_current_bytes, Some(4096));
@@ -1841,6 +1862,9 @@ mod session_resource_tests {
         let usage = session_resource_usage_at(&session, &root);
         assert_eq!(usage.cpu_usage_usec, Some(7));
         assert_eq!(usage.memory_current_bytes, None);
+        assert_eq!(usage.memory_anon_bytes, None);
+        assert_eq!(usage.memory_file_bytes, None);
+        assert_eq!(usage.memory_file_mapped_bytes, None);
         assert_eq!(usage.memory_peak_bytes, None);
         assert_eq!(usage.cpu_quota_cores, None);
         assert_eq!(usage.oom_kill_count, 0);

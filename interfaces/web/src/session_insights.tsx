@@ -80,6 +80,9 @@ export type SessionResourcePulseSample = {
   cpuUsageUsec?: number;
   quotaCores?: number;
   memBytes?: number;
+  anonBytes?: number;
+  fileBytes?: number;
+  fileMappedBytes?: number;
   swapBytes?: number;
   memHighBytes?: number;
   memMaxBytes?: number;
@@ -173,13 +176,29 @@ export function resourceCpuCores(
   return cores;
 }
 
+/// Real working set: anonymous memory plus mapped file pages. Reclaimable
+/// page cache is intentionally excluded; samples from Hosts that predate the
+/// breakdown fall back to the raw cgroup charge.
 export function resourceMemorySeries(
   samples: SessionResourcePulseSample[] | undefined,
 ): number[] {
   if (!samples) return [];
   return samples
-    .map((sample) => sample.memBytes)
+    .map((sample) =>
+      sample.anonBytes === undefined
+        ? sample.memBytes
+        : sample.anonBytes + (sample.fileMappedBytes ?? 0),
+    )
     .filter((value): value is number => value !== undefined);
+}
+
+/// Reclaimable page cache charged to the Session: total file cache minus the
+/// mapped pages already counted in the working set.
+export function resourceMemoryCacheBytes(
+  sample: SessionResourcePulseSample | undefined,
+): number | undefined {
+  if (sample?.fileBytes === undefined) return undefined;
+  return Math.max(0, sample.fileBytes - (sample.fileMappedBytes ?? 0));
 }
 
 /** Machine-wide CPU utilization from consecutive cumulative tick samples. */
@@ -535,6 +554,7 @@ export function SessionInsights({
 
   const cpuCap = resourceCpuCapCores(latestResource);
   const memoryCap = resourceMemoryCapBytes(latestResource);
+  const memoryCacheNow = resourceMemoryCacheBytes(latestResource);
   const cpuValueLabel =
     cpuNow === undefined
       ? t("insights.unavailable")
@@ -565,6 +585,13 @@ export function SessionInsights({
     latestResource?.swapBytes && latestResource.swapBytes > 0
       ? t("insights.swap", { value: formatGiB(latestResource.swapBytes) })
       : undefined;
+  const memoryCacheLabel =
+    memoryCacheNow !== undefined && memoryCacheNow > 0
+      ? t("insights.memCache", { value: formatGiB(memoryCacheNow) })
+      : undefined;
+  const memoryDetail = [memoryCacheLabel, swapLabel]
+    .filter((value): value is string => Boolean(value))
+    .join(" \u00b7 ");
 
   const commitOrder = (next: InsightItemId[]) => {
     setOrder(next);
@@ -718,7 +745,9 @@ export function SessionInsights({
       case "mem":
         label = memoryRowLabel;
         value = memoryValueLabel;
-        detail = swapLabel ? <span className="session-insight-detail">{swapLabel}</span> : null;
+        detail = memoryDetail ? (
+          <span className="session-insight-detail">{memoryDetail}</span>
+        ) : null;
         sparkline = memorySeries;
         tone = "mem";
         hint = t("insights.memHint");

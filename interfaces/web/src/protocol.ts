@@ -572,6 +572,9 @@ export type SessionResourceUsage = {
   cpu_usage_usec?: number;
   cpu_quota_cores?: number;
   memory_current_bytes?: number;
+  memory_anon_bytes?: number;
+  memory_file_bytes?: number;
+  memory_file_mapped_bytes?: number;
   memory_peak_bytes?: number;
   swap_current_bytes?: number;
   memory_high_bytes?: number;

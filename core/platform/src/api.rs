@@ -1221,8 +1221,19 @@ pub struct SessionResourceUsage {
     pub cpu_usage_usec: Option<u64>,
     /// Effective CPU bandwidth quota in cores, when a quota is enforced.
     pub cpu_quota_cores: Option<f64>,
-    /// Memory currently charged to the Session's job tree, in bytes.
+    /// Memory currently charged to the Session's job tree, in bytes. This is
+    /// the kernel charge and includes reclaimable page cache.
     pub memory_current_bytes: Option<u64>,
+    /// Anonymous (non-reclaimable) memory charged to the Session's job tree,
+    /// in bytes, when the platform exposes a breakdown.
+    pub memory_anon_bytes: Option<u64>,
+    /// Page cache charged to the Session's job tree, in bytes, when the
+    /// platform exposes a breakdown. Mostly reclaimable.
+    pub memory_file_bytes: Option<u64>,
+    /// Mapped-file pages inside `memory_file_bytes`, in bytes, when the
+    /// platform exposes a breakdown. Mapped pages back live mappings and are
+    /// counted as part of the real working set.
+    pub memory_file_mapped_bytes: Option<u64>,
     /// Peak memory charged to the Session's job tree, in bytes, when the
     /// platform tracks a peak.
     pub memory_peak_bytes: Option<u64>,

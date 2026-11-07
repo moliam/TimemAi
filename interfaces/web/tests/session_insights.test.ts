@@ -7,6 +7,7 @@ import {
   parseInsightPanelPosition,
   resourceCpuCapCores,
   resourceCpuCores,
+  resourceMemoryCacheBytes,
   resourceMemoryCapBytes,
   resourceMemorySeries,
   resourceProtectionLevel,
@@ -81,6 +82,18 @@ describe("session insights resource sampling", () => {
       100, 300,
     ]);
     expect(resourceMemorySeries(undefined)).toEqual([]);
+  });
+
+  it("uses the real working set and keeps reclaimable page cache out of it", () => {
+    const samples: SessionResourcePulseSample[] = [
+      { at: 0, anonBytes: 100, fileMappedBytes: 20, fileBytes: 900 },
+      { at: 2000, memBytes: 500 },
+      { at: 4000, anonBytes: 300, fileMappedBytes: 50, fileBytes: 1000 },
+    ];
+    expect(resourceMemorySeries(samples)).toEqual([120, 500, 350]);
+    expect(resourceMemoryCacheBytes(samples[0])).toBe(880);
+    expect(resourceMemoryCacheBytes({ at: 6000, fileMappedBytes: 10, fileBytes: 5 })).toBe(0);
+    expect(resourceMemoryCacheBytes({ at: 8000 })).toBeUndefined();
   });
 
   it("derives machine-wide CPU and memory usage from system samples", () => {

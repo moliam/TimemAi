@@ -169,7 +169,9 @@ root 修复，动作只有两类白名单操作：
 - 降级同时在启动时打到 stderr（`[config_error]` 风格），不会静默。
 - WebUI 的 Session Insights 看板通过 `session_resource_usage_query`（只读、连接内
   直连应答、不进语义重放）每 2s 采样当前 session 的 CPU/mem，曲线只保留最近 20s；
-  平台无 cgroup 记账时返回 `usage: null`，前端显示“不可用”而不是伪造 0。
+  内存主值取 `memory.stat` 的 `anon + file_mapped`（真实占用），`file` 中未映射的
+  可回收页缓存单列显示，避免把 page cache 误当成真实占用；平台无 cgroup 记账时返回
+  `usage: null`，前端显示“不可用”而不是伪造 0。
 
 ## 5. WebUI 系统设置接口
 

@@ -1257,6 +1257,12 @@ struct WebSessionResourceUsage {
     #[serde(skip_serializing_if = "Option::is_none")]
     memory_current_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    memory_anon_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_file_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_file_mapped_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     memory_peak_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     swap_current_bytes: Option<u64>,
@@ -5522,6 +5528,9 @@ fn handle_command_with_id(
                     cpu_usage_usec: usage.cpu_usage_usec,
                     cpu_quota_cores: usage.cpu_quota_cores,
                     memory_current_bytes: usage.memory_current_bytes,
+                    memory_anon_bytes: usage.memory_anon_bytes,
+                    memory_file_bytes: usage.memory_file_bytes,
+                    memory_file_mapped_bytes: usage.memory_file_mapped_bytes,
                     memory_peak_bytes: usage.memory_peak_bytes,
                     swap_current_bytes: usage.swap_current_bytes,
                     memory_high_bytes: usage.memory_high_bytes,
