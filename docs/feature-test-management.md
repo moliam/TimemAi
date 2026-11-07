@@ -903,6 +903,14 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 测试：timer-ui-acceptance e2e 浏览器驱动新增原生对话框接管（`Page.javascriptDialogOpening` → `handleJavaScriptDialog`，闭包开关控制接受/取消、记录文案）——验证「取消：定时器保留且不产生 timer_delete 命令、文案点名 timer」与「确认：条目移除且命令送达」，1440/390 × 明暗全过。示意演示页删除同步加同款确认。
 - 验证：vitest 716、timer e2e 全绿；module_boundary/test_contract/diff 检查通过；dist 已重建。
 
+## 2026-11 测试基建平台对称加固与 catalog e2e 断言链修复
+
+- 触发背景：macOS 把关暴露三类平台/环境条件型测试缺陷（WS 帧 64KiB 编码、Chrome 发现路径、宿主代理劫持），Linux 侧对称排查加固。
+- WS 帧编码：memo-tooltip/image-attachment/tool-presentation 夹具 `encodeFrame` 补 64-bit 扩展长度分支（对齐 multi-session-cpu 修复），`test:browser` 33/33 全绿。
+- Chrome 发现：catalog-endpoint/endpoint-import/endpoint-share 硬编码 `/usr/bin/google-chrome` 改为 CHROME_BIN → macOS → Linux 候选列表，缺失时明确报错；endpoint-import/share 起真实 host 实测 PASS。
+- catalog-endpoint-e2e 断言链修复（历史从未全绿）：模板编辑器选择器 placeholder 锚定、template switch 断言对齐 `applyEndpointTemplate` 用户地址保留语义、effort 选项数对齐当前渲染（3 档+官方默认标注）、React 受控输入 property 断言、`endpoint-base-reset` 恢复模式、budget 场景排除上下文窗口自定义框（`:not(.endpoint-context-window *)`）、finally 清理容错防竞态掩盖主错误；终局全绿（8 组 PASS）。
+- multi-session 基准 Linux 首跑：taskMs 1.78s / longTasks 1 / 零页面错误（预算 6s/5），与 Apple Silicon 校准相当。
+
 ## 2026-10 Timer 面板 prompt 展开/编辑
 
 - 触发背景：用户反馈面板只见名字不见内容，prompt 是触发时投递给会话的核心载荷，需要可见、可核对、可修改。澄清：产品面板本有删除按钮与 prompt 全文（用户看到的是示意网页的简化画法），但「编辑 prompt」是真实产品缺口。
