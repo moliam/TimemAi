@@ -190,14 +190,14 @@ if names != expected:
 PYEOF
 
   local tar_names
-  tar_names="$(tar -tzf "$tar_asset" | sort | tr '\n' ' ')"
+  tar_names="$(tar -tzf "$tar_asset" | LC_ALL=C sort | tr '\n' ' ')"
   if [ "$tar_names" != "README-ASSETS.txt reminder_tips.json timem timem-web " ]; then
     echo "tar member mismatch: $tar_names" >&2
     exit 1
   fi
 
   local win_tar_names
-  win_tar_names="$(tar -tzf "$tmp/out/timem-v$version-x86_64-pc-windows-msvc.tar.gz" | sort | tr '\n' ' ')"
+  win_tar_names="$(tar -tzf "$tmp/out/timem-v$version-x86_64-pc-windows-msvc.tar.gz" | LC_ALL=C sort | tr '\n' ' ')"
   if [ "$win_tar_names" != "README-ASSETS.txt reminder_tips.json timem-web.cmd timem.exe " ]; then
     echo "windows tar member mismatch: $win_tar_names" >&2
     exit 1
