@@ -109,9 +109,11 @@ Expose Web access to another machine only when needed:
 timem --public
 ```
 
-Public mode binds to all interfaces and prints a token-protected URL. Open the
-complete URL, including `?token=...`. Put Timem behind HTTPS and suitable network
-access controls when it is reachable outside a trusted network.
+Public mode binds to all interfaces and prints a token-protected URL for remote
+clients. Open the complete URL, including `?token=...`. Requests from the same
+machine over loopback (`127.0.0.1` / `::1`) need no token, exactly like local
+mode. Put Timem behind HTTPS and suitable network access controls when it is
+reachable outside a trusted network.
 
 ## Local data and Sessions
 

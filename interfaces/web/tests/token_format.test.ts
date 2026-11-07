@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatTokens, formatTokensCoarse } from "../src/token_format";
+import { formatOutputWithThink, formatTokens, formatTokensCoarse } from "../src/token_format";
 
 describe("token count formatting", () => {
   it("preserves empty and sub-thousand values", () => {
@@ -40,5 +40,17 @@ describe("coarse token formatting", () => {
   it("uses 0.001G precision at one billion and above", () => {
     expect(formatTokensCoarse(1_000_000_000)).toBe("1.000G");
     expect(formatTokensCoarse(1_451_000_000)).toBe("1.451G");
+  });
+});
+
+
+describe("formatOutputWithThink", () => {
+  it("appends the think annotation only when reasoning tokens exist", () => {
+    expect(formatOutputWithThink(undefined, undefined)).toBeUndefined();
+    expect(formatOutputWithThink(0, 0)).toBeUndefined();
+    expect(formatOutputWithThink(24_000, undefined)).toBe("24K");
+    expect(formatOutputWithThink(24_000, 0)).toBe("24K");
+    expect(formatOutputWithThink(24_000, 583)).toBe("24K(think 583)");
+    expect(formatOutputWithThink(120_000, 6_000)).toBe("120K(think 6.0K)");
   });
 });

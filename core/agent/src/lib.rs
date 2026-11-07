@@ -1,7 +1,7 @@
 use rusqlite::{params_from_iter, types::ValueRef, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{CStr, CString};
 use std::fs::{self, OpenOptions};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -28,6 +28,9 @@ type ApprovedParallelBashHandle = thread::JoinHandle<ApprovedParallelBashResult>
 
 pub mod audit;
 pub mod capability;
+#[path = "../../../resources/capabilities/tools/mailbox.rs"]
+mod mailbox;
+
 #[path = "../../../resources/capabilities/tools/capmgr.rs"]
 pub mod capmgr;
 pub mod chat_library;
@@ -71,6 +74,7 @@ pub mod prompt_spec;
 pub mod readfile;
 pub mod redaction;
 pub mod reminder_config;
+pub mod resource_caps;
 pub mod response_protocol;
 pub mod retry_policy;
 pub mod rolling_file_store;
@@ -145,14 +149,16 @@ pub use host::{
     CoreSessionState, CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopic,
     CoreTopicEvent, CoreTopicEventSink, CoreTopicStatusHint, CoreWorkInstructionLoadTopic,
     HostDecision, HostDecisionDefault, HostDecisionRequest, LongRunningCommandContinueRequest,
-    NoopTurnUi, OutputExpansionRequest, OutputExpansionResolution, RoundLimitDecisionRequest,
-    RoundLimitResolution, StoppedTurn, TopicReply, TopicReplyError, TurnInput, TurnOutcome,
-    TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi, UserSupplement, CORE_TOPIC_ACTION,
-    CORE_TOPIC_CONTEXT_COMPRESS, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST,
-    CORE_TOPIC_MEMO, CORE_TOPIC_MODEL_CAPABILITY_NEGOTIATION, CORE_TOPIC_MODEL_REPAIR,
-    CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
-    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TIMER,
-    CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    MailSendReply, NoopTurnUi, OutputExpansionRequest, OutputExpansionResolution,
+    RoundLimitDecisionRequest, RoundLimitResolution, StoppedTurn, TopicReply, TopicReplyError,
+    TurnInput, TurnOutcome, TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi,
+    UserSupplement, CORE_TOPIC_ACTION, CORE_TOPIC_CONTEXT_COMPRESS, CORE_TOPIC_LIFECYCLE,
+    CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST, CORE_TOPIC_MAILBOX, CORE_TOPIC_MEMO,
+    CORE_TOPIC_MODEL_CAPABILITY_NEGOTIATION, CORE_TOPIC_MODEL_ENDPOINT_FAILOVER,
+    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST,
+    CORE_TOPIC_ROUND_LIMIT_REQUEST, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP,
+    CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TIMER, CORE_TOPIC_TOOLGEN,
+    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
     DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT, USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT,
 };
 pub use interaction::{
@@ -211,10 +217,14 @@ use response_protocol::{
     ActionGroupOrder, ParsedAction, ParsedActionGroup, ParsedContextCompress, ParsedEnvelope,
 };
 pub use retry_policy::{
-    is_explicit_native_tools_unsupported, is_model_input_too_large_error,
-    is_retryable_model_system_error, model_retry_decision, ModelCallOutcome, ModelRetryDecision,
-    ModelSystemRetryPolicy, DEFAULT_MODEL_SYSTEM_ERROR_RETRIES,
-    DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY,
+    is_endpoint_unavailable_error, is_explicit_native_tools_unsupported,
+    is_invalid_native_tool_call_error, is_model_input_too_large_error, is_model_rate_limited_error,
+    is_retryable_model_system_error, model_failover_failure_threshold, model_failover_strike_delay,
+    model_retry_decision, ModelCallOutcome, ModelRetryDecision, ModelSystemRetryPolicy,
+    DEFAULT_MODEL_SYSTEM_ERROR_RETRIES, DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY,
+    MODEL_ENDPOINT_FAILOVER_RATE_LIMIT_FAILURES, MODEL_ENDPOINT_FAILOVER_RATE_LIMIT_STRIKE_DELAY,
+    MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_FAILURES,
+    MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_STRIKE_DELAY,
 };
 pub use runtime_context::{
     local_datetime_label, local_time_label, runtime_time_context, LocalTimeParts,
@@ -222,7 +232,9 @@ pub use runtime_context::{
 use self_tool::{SelfToolAbout, SelfToolPaths, SelfToolProcess, SelfToolState};
 pub use session_runtime::{
     cancelled_turn_result, run_direct_resume_turn, run_direct_resume_turn_with_model_client,
-    run_session_turn, run_session_turn_with_model_client, ModelClient,
+    run_direct_resume_turn_with_model_client_and_failover, run_session_turn,
+    run_session_turn_with_model_client, run_session_turn_with_model_client_and_failover,
+    run_system_turn_with_model_client_and_failover, ModelClient,
 };
 use shell_exec::ShellJobManager;
 pub use shell_exec::{RunningShellJob, ShellJobExitUpdate};
@@ -287,6 +299,8 @@ pub struct UsageStats {
     pub mem_writes: u32,
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
+    #[serde(default)]
+    pub reasoning_tokens: u32,
     pub total_tokens: u32,
     pub cached_tokens: u32,
     pub cache_created_tokens: u32,
@@ -302,6 +316,7 @@ impl UsageStats {
             mem_writes: 0,
             prompt_tokens: 0,
             completion_tokens: 0,
+            reasoning_tokens: 0,
             total_tokens: 0,
             cached_tokens: 0,
             cache_created_tokens: 0,
@@ -316,6 +331,7 @@ impl UsageStats {
         self.mem_writes += other.mem_writes;
         self.prompt_tokens += other.prompt_tokens;
         self.completion_tokens += other.completion_tokens;
+        self.reasoning_tokens += other.reasoning_tokens;
         self.total_tokens += other.total_tokens;
         self.cached_tokens += other.cached_tokens;
         self.cache_created_tokens += other.cache_created_tokens;
@@ -448,7 +464,9 @@ pub enum CoreStep {
     RoundLimitReached {
         max_rounds: u32,
     },
-    Final(TurnFinal),
+    /// Boxed: `TurnFinal` is by far the largest payload and `CoreStep` moves
+    /// through hot loops; boxing keeps the enum small (clippy::large_enum_variant).
+    Final(Box<TurnFinal>),
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelInputOverflowRecovery {
@@ -529,6 +547,26 @@ pub const MAX_TIMERS: usize = 32;
 /// the trigger description); the Host owns the wall clock: it computes the
 /// concrete fire time, persists timers across restarts, and delivers the
 /// prompt as a turn when due.
+/// Legacy timer files stored a boolean `deliver_immediately`; map it onto
+/// the minute-based queue timeout (true -> 0, false -> u64::MAX, i.e. queue
+/// indefinitely) so old persisted timers keep their delivery semantics.
+fn deserialize_queue_timeout_minutes<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: serde_json::Value = serde::Deserialize::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Number(number) => number
+            .as_u64()
+            .ok_or_else(|| serde::de::Error::custom("queue_timeout_minutes_must_be_unsigned")),
+        serde_json::Value::Bool(true) => Ok(0),
+        serde_json::Value::Bool(false) => Ok(u64::MAX),
+        other => Err(serde::de::Error::custom(format!(
+            "queue_timeout_minutes_invalid_value:{other}"
+        ))),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TimerSpec {
     pub timer_id: String,
@@ -550,6 +588,15 @@ pub struct TimerSpec {
     /// Refire period in milliseconds; present only for mode "repeat".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval_ms: Option<u64>,
+    /// Maximum minutes a fired prompt may wait in the session message queue
+    /// before being dispatched immediately out of queue order. 0 (also the
+    /// serde default): never queue — deliver at once; an active turn
+    /// receives the fired prompt as an immediate supplement and an idle
+    /// session starts a new turn directly, even ahead of queued messages.
+    /// Legacy files storing the removed boolean field map true to 0 and
+    /// false to u64::MAX (queue indefinitely, the old false semantics).
+    #[serde(default, deserialize_with = "deserialize_queue_timeout_minutes")]
+    pub queue_timeout_minutes: u64,
     /// Who created the timer: "model" (timer tool) or "user" (interface).
     pub created_by: String,
 }
@@ -698,7 +745,7 @@ impl PendingApprovedAction {
                 tail_out,
                 edited_files,
             } => json!({
-                "command": command,
+                "cmd": command,
                 "background": background,
                 "timeout_ms": timeout_ms,
                 "interval_ms": interval_ms,
@@ -739,6 +786,13 @@ pub fn validate_context_compress_threshold_percent(percent: u8) -> Result<u8, St
         .ok_or_else(|| "context_compress_threshold_percent_invalid".to_string())
 }
 pub const MAX_PROTOCOL_REPAIR_ATTEMPTS: u32 = 20;
+
+/// Maximum consecutive model responses that ignore the automatic threshold
+/// compaction requirement before Core abandons it. A model that never runs
+/// `context_compress` must not loop model requests (and their cost) forever;
+/// the Exhausted latch afterwards blocks only new automatic cycles. Explicit
+/// user compaction requests are never abandoned by this gate.
+pub const MAX_CONSECUTIVE_FORCED_COMPACTION_REFUSALS: u32 = 2;
 const RUNTIME_CONFIG_CHANGED_NOTICE: &str =
     "User changes some runtime config, retrieve again when you need it.";
 const MEM_GUARD_WAIT_STEP: Duration = Duration::from_millis(25);
@@ -1308,6 +1362,13 @@ pub trait ActionRuntime {
     }
 
     fn on_core_topic_events(&mut self, _events: &[host::CoreTopicEvent]) {}
+
+    /// Sends a mailbox send request to the runtime-owned mailbox ledger and
+    /// returns the mail id it assigned. Hosts without a mailbox return None;
+    /// callers must not invent an id in that case.
+    fn request_mail_send(&mut self, _event: &host::CoreTopicEvent) -> Option<host::MailSendReply> {
+        None
+    }
 
     /// Complete protocol validation result, before any response actions execute.
     /// Provisional display is never permission to execute an action.
@@ -1917,6 +1978,10 @@ pub struct AgentCore {
     context_compress_threshold_percent: u8,
     last_observed_prompt_tokens: u32,
     context_compress_required: bool,
+    /// Consecutive model responses that ignored the forced-compaction
+    /// requirement. Reaching MAX_CONSECUTIVE_FORCED_COMPACTION_REFUSALS
+    /// abandons the automatic requirement instead of looping forever.
+    forced_compaction_refusals: u32,
     /// True only when automatic context sizing crossed the forced-compaction
     /// threshold. This is the sole Core scheduling signal for an H1 request;
     /// manual compaction remains at the normal H0 baseline.
@@ -1960,6 +2025,17 @@ pub struct AgentCore {
     current_action_user_question: String,
     last_notifications: Vec<CoreNotification>,
     loaded_work_instruction_fingerprints: HashSet<String>,
+    loaded_session_work_file_fingerprints: HashSet<String>,
+    /// Last accepted work-instruction block: re-injected right after a
+    /// compaction so the remainder of the turn keeps the project-level
+    /// guidance before the next supporting context arrives.
+    last_work_instruction_context: Option<String>,
+    last_session_work_file_context: Option<String>,
+    /// Absolute path of this session's persistent work file (Timem.md in
+    /// the session's mem storage), synced from the Host. Durable, complex
+    /// work assigned to the session records its guidance, plans, and
+    /// progress there.
+    session_work_file: Option<String>,
     pending_prompt_components: Vec<PromptComponent>,
     pending_user_interruption_note: bool,
     prompt_component_sequence: u64,
@@ -1991,6 +2067,19 @@ pub struct AgentCore {
     /// Memo forcibly closed by the runtime when the user stopped/interrupted
     /// the turn. The note is injected once at the start of the next turn.
     pending_interrupted_memo_note: Option<String>,
+    /// Host-provided mailbox address. It is deliberately absent from every
+    /// request: restating it once after a compaction or a context clear is
+    /// enough for the model to know where it can be reached.
+    session_mailbox_name: Option<String>,
+    /// Set by a context clear so the next submission restates the runtime
+    /// known state (mailbox address, timers, memo, running shell jobs)
+    /// exactly once: compaction summaries may drop those facts, and a
+    /// cleared context definitely does.
+    pending_runtime_state_reminder: bool,
+    /// Compact restatement of the runtime restart notice observed at turn
+    /// admission. The notice rides only the first post-restart supporting
+    /// context; a later compaction may drop it, so Core keeps the fact.
+    restart_notice_restate: Option<String>,
     /// Memo text deleted during the current turn. Task finish in the same
     /// turn is challenged once (models may delete and immediately declare
     /// victory without genuinely re-checking the goal).
@@ -2072,6 +2161,7 @@ impl AgentCore {
             context_compress_threshold_percent: DEFAULT_CONTEXT_COMPRESS_THRESHOLD_PERCENT,
             last_observed_prompt_tokens: 0,
             context_compress_required: false,
+            forced_compaction_refusals: 0,
             threshold_compaction_reasoning_required: false,
             manual_compact_trailer_pending: false,
             pending_compact_request_notice: None,
@@ -2096,6 +2186,10 @@ impl AgentCore {
             current_action_user_question: String::new(),
             last_notifications: Vec::new(),
             loaded_work_instruction_fingerprints: HashSet::new(),
+            loaded_session_work_file_fingerprints: HashSet::new(),
+            last_work_instruction_context: None,
+            last_session_work_file_context: None,
+            session_work_file: None,
             pending_prompt_components: Vec::new(),
             pending_user_interruption_note: false,
             prompt_component_sequence: 0,
@@ -2112,6 +2206,9 @@ impl AgentCore {
             native_exchanges: Vec::new(),
             turn_finished_summary: None,
             active_memo: None,
+            session_mailbox_name: None,
+            pending_runtime_state_reminder: false,
+            restart_notice_restate: None,
             timers: Vec::new(),
             memo_finish_guard_tokens: MEMO_FINISH_GUARD_TOKEN_CAP,
             pending_forcible_memo_note: None,
@@ -2824,6 +2921,7 @@ impl AgentCore {
                 != ThresholdCompactionFollowupState::FollowupPending
         {
             self.context_compress_required = false;
+            self.forced_compaction_refusals = 0;
             self.threshold_compaction_reasoning_required = false;
             self.pending_compact_request_notice = None;
             self.require_context_compress_if_needed(0);
@@ -3397,6 +3495,18 @@ impl AgentCore {
         // lives in the Host scheduler, so Core state is a projection that
         // must follow the snapshot across restarts.
         self.timers = snapshot.active_timers;
+        // An import restores its own context. The invariant stays: if the
+        // address is known but the restored context lacks it (snapshot taken
+        // before the address was restated), the next request restates it
+        // once; a snapshot that already carries the line stays silent.
+        self.restart_notice_restate = None;
+        self.pending_runtime_state_reminder = match self.session_mailbox_name.as_ref() {
+            Some(name) => {
+                let line = format!("Current session's mailbox is: {name}");
+                !self.visible_context_contains_line(&line)
+            }
+            None => false,
+        };
         if let Some(max_seq) = self
             .deltas
             .iter()
@@ -3409,6 +3519,27 @@ impl AgentCore {
     }
 
     pub fn clear_dynamic_context(&mut self) {
+        // A cleared context loses runtime-known state the model cannot
+        // recover on its own (mailbox address, timers, memo, live jobs);
+        // schedule the one-shot restatement. The cwd note re-emits through
+        // its own pending flag.
+        self.pending_runtime_state_reminder = self.session_mailbox_name.is_some()
+            || !self.timers.is_empty()
+            || self.active_memo.is_some()
+            || self
+                .current_session_id
+                .as_deref()
+                .map(|session| {
+                    !self
+                        .shell_jobs
+                        .query_running_for_session(session)
+                        .is_empty()
+                })
+                .unwrap_or(false);
+        self.restart_notice_restate = None;
+        self.last_work_instruction_context = None;
+        self.last_session_work_file_context = None;
+        self.cwd_note_pending = true;
         self.deltas.clear();
         self.native_exchanges.clear();
         self.pending_native_exchange = None;
@@ -3421,6 +3552,7 @@ impl AgentCore {
         self.touched_paths.clear();
         self.last_observed_prompt_tokens = 0;
         self.context_compress_required = false;
+        self.forced_compaction_refusals = 0;
         self.threshold_compaction_reasoning_required = false;
         self.manual_compact_trailer_pending = false;
         self.pending_compact_request_notice = None;
@@ -3438,10 +3570,11 @@ impl AgentCore {
         self.current_action_user_question.clear();
         self.last_notifications.clear();
         self.turn_finished_summary = None;
+        self.loaded_session_work_file_fingerprints.clear();
         self.loaded_work_instruction_fingerprints.clear();
-        // The memo is persisted beside the dynamic context as one consistency
-        // unit; clearing the context clears the reminder with it.
-        self.active_memo = None;
+        // The memo intentionally survives a plain clear: it is the long-task
+        // anchor, the Host projection keeps it active, and the one-shot
+        // runtime state restatement re-injects it on the next request.
     }
     pub fn resolve_stale_context_with_audit(
         &mut self,
@@ -3555,6 +3688,7 @@ impl AgentCore {
 
     fn filter_supporting_context(&mut self, supporting_context: &str) -> String {
         let context = self.filter_repeated_work_instructions(supporting_context);
+        let context = self.filter_repeated_session_work_file(&context);
         self.filter_repeated_worker_roles(&context)
     }
 
@@ -3567,7 +3701,31 @@ impl AgentCore {
             .loaded_work_instruction_fingerprints
             .insert(fingerprint)
         {
+            self.last_work_instruction_context = Some(block.to_string());
             return supporting_context.trim().to_string();
+        }
+
+        let mut filtered = String::new();
+        filtered.push_str(supporting_context[..start].trim_end());
+        let tail = supporting_context[end..].trim_start();
+        if !filtered.trim().is_empty() && !tail.is_empty() {
+            filtered.push_str("\n\n");
+        }
+        filtered.push_str(tail);
+        filtered.trim().to_string()
+    }
+
+    fn filter_repeated_session_work_file(&mut self, supporting_context: &str) -> String {
+        let Some((start, end, block)) = session_work_file_context_block(supporting_context) else {
+            return supporting_context.to_string();
+        };
+        let fingerprint = stable_text_fingerprint(block);
+        if self
+            .loaded_session_work_file_fingerprints
+            .insert(fingerprint)
+        {
+            self.last_session_work_file_context = Some(block.to_string());
+            return supporting_context.to_string();
         }
 
         let mut filtered = String::new();
@@ -3676,6 +3834,121 @@ impl AgentCore {
     /// Confirmation line appended to the post-compression runtime slice so
     /// the compacted context still knows which timers will fire. Each entry
     /// carries created_by so user-created timers stay attributable.
+    /// Host updates the session's mailbox address. No prompt text is emitted
+    /// here on the steady path. The restating rule is: the address must
+    /// appear at least once in every context lifetime, however that context
+    /// came to be (fresh worker, restored snapshot, post-clear). The one-shot
+    /// reminder fires whenever the visible context does not already carry it.
+    /// Projects the Host-owned session work file path (Timem.md) into
+    /// Core: the compaction confirmation and the post-clear restatement
+    /// carry it so durable work stays re-anchorable.
+    pub fn update_session_work_file(&mut self, path: Option<String>) {
+        self.session_work_file = path;
+    }
+
+    pub fn update_session_mailbox_name(&mut self, name: Option<String>) {
+        let name = name
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
+        if self.session_mailbox_name == name {
+            return;
+        }
+        self.session_mailbox_name = name;
+        self.pending_runtime_state_reminder = match self.session_mailbox_name.as_ref() {
+            Some(name) => {
+                let line = format!("Current session's mailbox is: {name}");
+                !self.visible_context_contains_line(&line)
+            }
+            None => false,
+        };
+    }
+
+    fn visible_context_contains_line(&self, line: &str) -> bool {
+        if self
+            .pending_prompt_components
+            .iter()
+            .any(|component| component.content.contains(line))
+        {
+            return true;
+        }
+        self.deltas.iter().any(|delta| {
+            delta.slices.iter().any(|slice| {
+                !delta.hidden_slice_ids.contains(&slice.slice_id) && slice.text.contains(line)
+            })
+        })
+    }
+
+    fn mailbox_reminder_line(&self) -> Option<String> {
+        self.session_mailbox_name
+            .as_ref()
+            .map(|name| format!("Current session's mailbox is: {name}"))
+    }
+
+    /// Detached shell jobs that are still alive. A compaction summary may
+    /// drop them and the model cannot re-derive them, so runtime restates
+    /// them after compaction or a context clear.
+    fn running_jobs_reminder_line(&self) -> Option<String> {
+        let session_id = self.current_session_id.as_deref()?;
+        let jobs = self.shell_jobs.query_running_for_session(session_id);
+        if jobs.is_empty() {
+            return None;
+        }
+        let now = now_ms();
+        let shown = jobs
+            .iter()
+            .take(8)
+            .map(|job| {
+                let elapsed_ms = (now - job.created_at_ms).max(0);
+                format!(
+                    "pid={} cmd={:?} elapsed_ms={}",
+                    job.pid, job.command, elapsed_ms
+                )
+            })
+            .collect::<Vec<_>>();
+        let more = jobs.len() - shown.len();
+        let more_note = if more > 0 {
+            format!(" ...and {more} more")
+        } else {
+            String::new()
+        };
+        Some(format!(
+            "running shell jobs (still alive; do not assume they finished): {}{more_note}",
+            shown.join("; ")
+        ))
+    }
+
+    /// One-shot restatement of runtime-known state after a context clear:
+    /// mailbox address, timers, memo, and still-running shell jobs. A cleared
+    /// context has none of them, and the model cannot recover them alone.
+    fn runtime_state_reminder_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(line) = self.mailbox_reminder_line() {
+            lines.push(line);
+        }
+        let timers = self.active_timers_confirmation_line();
+        if !timers.is_empty() {
+            lines.push(timers.trim_start().to_string());
+        }
+        if let Some(memo) = self.active_memo.as_ref() {
+            lines.push(format!("memo active: {memo}"));
+        }
+        if let Some(line) = self.running_jobs_reminder_line() {
+            lines.push(line);
+        }
+        if let Some(path) = self.session_work_file.as_ref() {
+            // The Host session context restates a one-line work-file pointer
+            // every turn, and the compaction confirmation carries the raw
+            // path too; only restate it here when the visible context does
+            // not already carry it (mirrors the mailbox restatement rule).
+            let carried = self.visible_context_contains_line(&format!("Session work file: {path}"))
+                || self.visible_context_contains_line(&format!("session work file: {path}"));
+            if !carried {
+                lines.push(format!("session work file: {path}"));
+            }
+        }
+        lines
+    }
+
     pub(crate) fn active_timers_confirmation_line(&self) -> String {
         if self.timers.is_empty() {
             return String::new();
@@ -3699,11 +3972,24 @@ impl AgentCore {
     }
 
     pub fn begin_direct_resume_turn(&mut self, supporting_context: Option<&str>) -> CoreStep {
-        self.begin_turn_with_input_kind("", supporting_context, true)
+        self.begin_turn_with_input_kind("", supporting_context, true, false)
     }
 
     pub fn begin_turn(&mut self, user_input: &str, supporting_context: Option<&str>) -> CoreStep {
-        self.begin_turn_with_input_kind(user_input, supporting_context, false)
+        self.begin_turn_with_input_kind(user_input, supporting_context, false, false)
+    }
+
+    /// Starts a Turn whose input was produced by the runtime itself (mailbox
+    /// delivery, timer fire, queued interruption). Such input must never be
+    /// presented as a `USER` question: it is a runtime observation the model
+    /// reacts to, so it renders under the runtime role and skips the
+    /// user-question admission work (memory precheck).
+    pub fn begin_runtime_turn(
+        &mut self,
+        runtime_input: &str,
+        supporting_context: Option<&str>,
+    ) -> CoreStep {
+        self.begin_turn_with_input_kind(runtime_input, supporting_context, false, true)
     }
 
     fn begin_turn_with_input_kind(
@@ -3711,6 +3997,7 @@ impl AgentCore {
         user_input: &str,
         supporting_context: Option<&str>,
         direct_resume: bool,
+        system_input: bool,
     ) -> CoreStep {
         self.current_round = 0;
         self.round_budget = self.configured_round_budget;
@@ -3762,13 +4049,32 @@ impl AgentCore {
                 "runtime",
             );
         }
-        let should_memory_precheck = !text.is_empty()
+        let should_memory_precheck = !system_input
+            && !text.is_empty()
             && supporting_context
                 .map(should_run_memory_precheck)
                 .unwrap_or(false);
         let filtered_supporting_context = supporting_context
             .map(|ctx| self.filter_supporting_context(ctx))
             .filter(|ctx| !ctx.trim().is_empty());
+        // A restart notice rides only the first post-restart supporting
+        // context. Keep a compact restatement so a later compaction cannot
+        // silently drop the restart fact. The restatement carries the time
+        // and one positioning sentence only: a post-compaction context
+        // already holds the working state through its summary, so the full
+        // recovery guidance stays exclusive to the cold-start notice.
+        if let Some(ctx) = filtered_supporting_context.as_deref() {
+            let trimmed = ctx.trim_start();
+            if trimmed.starts_with("Runtime restarted at ") {
+                let first_sentence = match trimmed.find("(local time).") {
+                    Some(idx) => trimmed[..idx + "(local time).".len()].trim(),
+                    None => trimmed.lines().next().unwrap_or(trimmed).trim(),
+                };
+                self.restart_notice_restate = Some(format!(
+                    "{first_sentence} This context continues across that restart."
+                ));
+            }
+        }
         let mut system_texts = Vec::new();
         if let Some(ctx) = filtered_supporting_context.as_deref() {
             system_texts.push(ctx.trim().to_string());
@@ -3788,19 +4094,23 @@ impl AgentCore {
                 "runtime",
             );
         }
-        // Supporting context describes state already present at turn admission
-        // (notably restart/history notices), so it precedes the user input.
-        if direct_resume || !text.is_empty() {
-            self.submit_prompt_component(
-                PromptComponentRole::user(),
-                if direct_resume {
-                    "user_resume_directly"
-                } else {
-                    "user_question"
-                },
-                text,
-                "user_input",
-            );
+        // Every admission-time runtime note (cwd change, config change, state
+        // reminder, memory precheck) describes state that already existed when
+        // the user entry arrived. Submit them before the entry so the user
+        // entry closes its delta instead of being buried between notes.
+        self.submit_process_aggregate_scopes_if_needed();
+        self.submit_runtime_config_changed_notice_if_pending();
+        if self.pending_runtime_state_reminder {
+            let lines = self.runtime_state_reminder_lines();
+            if !lines.is_empty() {
+                self.submit_prompt_component(
+                    PromptComponentRole::system(),
+                    "runtime_note",
+                    lines.join("\n"),
+                    "runtime",
+                );
+            }
+            self.pending_runtime_state_reminder = false;
         }
         if should_memory_precheck {
             let result = self.runtime_memory_precheck(user_input, 5);
@@ -3812,6 +4122,25 @@ impl AgentCore {
             );
         }
         self.submit_cwd_note_if_pending();
+        // Supporting context describes state already present at turn admission
+        // (notably restart/history notices); the user entry is the newest
+        // event, so it closes the delta after every admission-time note.
+        if direct_resume || !text.is_empty() {
+            // Runtime-triggered input keeps its structured origin: it must not
+            // masquerade as a user question in the rendered prompt.
+            let (role, kind, source) = if system_input {
+                (PromptComponentRole::system(), "runtime_input", "runtime")
+            } else if direct_resume {
+                (
+                    PromptComponentRole::user(),
+                    "user_resume_directly",
+                    "user_input",
+                )
+            } else {
+                (PromptComponentRole::user(), "user_question", "user_input")
+            };
+            self.submit_prompt_component(role, kind, text, source);
+        }
         CoreStep::NeedModel {
             prompt: self.build_next_prompt(),
             rounds_remaining: self.round_budget,
@@ -3895,12 +4224,12 @@ impl AgentCore {
                     "host_context",
                 );
             }
-            self.submit_prompt_component(
-                PromptComponentRole::user(),
-                "user_supplement",
-                text,
-                "user_input",
-            );
+            let (role, kind, source) = if supplement.system_input {
+                (PromptComponentRole::system(), "runtime_input", "runtime")
+            } else {
+                (PromptComponentRole::user(), "user_supplement", "user_input")
+            };
+            self.submit_prompt_component(role, kind, text, source);
             added = true;
         }
         added.then(|| CoreStep::NeedModel {
@@ -3950,24 +4279,53 @@ impl AgentCore {
         if self.context_compress_required
             && (parsed.context_compresses.len() != 1 || parsed.repair_issue.is_some())
         {
-            self.current_round = self.current_round.saturating_sub(1);
-            let mut prompt = self.render_prompt();
-            let (body, response_trailer) = prompt_render::split_formatted_response_trailer(&prompt);
-            prompt = body.trim_end().to_string();
-            prompt.push_str("\n\n");
-            if self.manual_compact_trailer_pending {
-                prompt.push_str(prompt_render::MANUAL_CONTEXT_COMPRESS_TRAILER);
-            } else {
-                prompt.push_str(prompt_render::CONTEXT_COMPRESS_REQUIRED_TRAILER);
+            // A user-initiated request keeps its manual wording across retries
+            // unconditionally; only the automatic threshold requirement is
+            // bounded, so a non-compliant model cannot loop requests forever.
+            if !self.manual_compact_trailer_pending {
+                self.forced_compaction_refusals = self.forced_compaction_refusals.saturating_add(1);
             }
-            if let Some(response_trailer) = response_trailer {
+            if self.manual_compact_trailer_pending
+                || self.forced_compaction_refusals < MAX_CONSECUTIVE_FORCED_COMPACTION_REFUSALS
+            {
+                self.current_round = self.current_round.saturating_sub(1);
+                let mut prompt = self.render_prompt();
+                let (body, response_trailer) =
+                    prompt_render::split_formatted_response_trailer(&prompt);
+                prompt = body.trim_end().to_string();
                 prompt.push_str("\n\n");
-                prompt.push_str(&response_trailer);
+                if self.manual_compact_trailer_pending {
+                    prompt.push_str(prompt_render::MANUAL_CONTEXT_COMPRESS_TRAILER);
+                } else {
+                    prompt.push_str(prompt_render::CONTEXT_COMPRESS_REQUIRED_TRAILER);
+                }
+                if let Some(response_trailer) = response_trailer {
+                    prompt.push_str("\n\n");
+                    prompt.push_str(&response_trailer);
+                }
+                return CoreStep::NeedModel {
+                    prompt,
+                    rounds_remaining: self.remaining_rounds(),
+                };
             }
-            return CoreStep::NeedModel {
-                prompt,
-                rounds_remaining: self.remaining_rounds(),
-            };
+            // The model keeps refusing to run context_compress. Abandon the
+            // automatic requirement instead of looping model requests (and
+            // their cost) forever: honoring the response beats an unbounded
+            // forced-compaction loop. The Exhausted latch afterwards blocks
+            // only new automatic cycles; an explicit user compaction request
+            // stays allowed, so its pending state is dropped here.
+            self.forced_compaction_refusals = 0;
+            self.context_compress_required = false;
+            self.threshold_compaction_reasoning_required = false;
+            self.manual_compact_trailer_pending = false;
+            self.post_compaction_verification = None;
+            self.threshold_compaction_followup_state = ThresholdCompactionFollowupState::Exhausted;
+            self.submit_prompt_component(
+                PromptComponentRole::system(),
+                "forced_compaction_abandoned",
+                "The model did not run context_compress as required, so the automatic compression requirement was dropped. Keep context small during later work or request a manual compression.",
+                "turn_runtime",
+            );
         }
         if response.truncated && self.repair_attempts < MAX_PROTOCOL_REPAIR_ATTEMPTS {
             let instruction = protocol_suite
@@ -4018,19 +4376,19 @@ impl AgentCore {
                     Some(&final_text),
                 ));
                 self.defer_next_turn_slices(slices);
-                return CoreStep::Final(TurnFinal {
+                return CoreStep::Final(Box::new(TurnFinal {
                     final_answer: final_text,
                     toolgen_retrospect: String::new(),
                     stats: self.current_stats.clone(),
                     profile_label: self.profile.label(),
                     repair_issue: Some("invalid_json_plain_text_fallback".to_string()),
                     stop_summary: None,
-                });
+                }));
             }
             let final_text = parsed.final_text();
             let first_issue = self.last_repair_issue.as_deref().unwrap_or(&issue);
             if final_text.is_empty() {
-                return CoreStep::Final(TurnFinal {
+                return CoreStep::Final(Box::new(TurnFinal {
                     final_answer: String::new(),
                     toolgen_retrospect: String::new(),
                     stats: self.current_stats.clone(),
@@ -4044,7 +4402,7 @@ impl AgentCore {
                         self.current_stats.clone(),
                         Some(response.usage.clone()),
                     )),
-                });
+                }));
             }
             slices.extend(self.assistant_replay_slices(
                 &raw_model_output,
@@ -4052,14 +4410,14 @@ impl AgentCore {
                 Some(&final_text),
             ));
             self.defer_next_turn_slices(slices);
-            return CoreStep::Final(TurnFinal {
+            return CoreStep::Final(Box::new(TurnFinal {
                 final_answer: final_text,
                 toolgen_retrospect: parsed.toolgen_retrospect.clone(),
                 stats: self.current_stats.clone(),
                 profile_label: self.profile.label(),
                 repair_issue: Some(issue),
                 stop_summary: None,
-            });
+            }));
         }
         if parsed.context_compresses.is_empty() {
             if let Some(note) =
@@ -4093,6 +4451,7 @@ impl AgentCore {
         let compact_result_slice_start = slices.len();
         let mut compacted_successfully = false;
         let mut successful_compact_summaries = Vec::new();
+        let mut successful_compact_keywords = Vec::new();
         let threshold_compaction_requested = self.threshold_compaction_reasoning_required;
         let mut threshold_followup_required = false;
         for compact in &parsed.context_compresses {
@@ -4173,7 +4532,8 @@ impl AgentCore {
                     ));
                 }
                 let estimated_after = self.dynamic_context_token_estimate();
-                let summary_tokens = estimate_prompt_tokens(&compact.summary);
+                let summary_tokens = estimate_prompt_tokens(&compact.summary)
+                    .saturating_add(estimate_prompt_tokens(&compact.keywords));
                 let estimated_before_tokens = estimated_before.total_tokens();
                 let estimated_after_tokens = estimated_after
                     .total_tokens()
@@ -4226,6 +4586,7 @@ impl AgentCore {
                     slices.push(("runtime_note".to_string(), note));
                 }
                 successful_compact_summaries.push(compact.summary.trim().to_string());
+                successful_compact_keywords.push(compact.keywords.trim().to_string());
                 compacted_successfully = true;
             } else {
                 let outcome = ActionOutcome::failed(format!(
@@ -4251,12 +4612,40 @@ impl AgentCore {
             // be quantified reliably by the model, so depth guidance lives in
             // the compact trailers (discard stale deltas/tool noise, extract
             // a valuable short summary) rather than a numeric gate.
+            self.forced_compaction_refusals = 0;
             self.context_compress_required = threshold_followup_required;
             self.threshold_compaction_reasoning_required = threshold_followup_required;
             self.manual_compact_trailer_pending = false;
             self.process_scope_prompted_session = None;
+            // The compacted context may have dropped the work-instruction
+            // block. Re-inject the last accepted block right away so the
+            // remainder of this turn keeps the project-level guidance (a
+            // new supporting context only arrives with the next turn), and
+            // re-register its fingerprint so that next supporting context
+            // stays filtered as a duplicate.
+            self.loaded_work_instruction_fingerprints.clear();
+            if let Some(block) = self.last_work_instruction_context.clone() {
+                self.loaded_work_instruction_fingerprints
+                    .insert(stable_text_fingerprint(&block));
+                slices.push(("runtime_note".to_string(), block));
+            }
+            // The session work file follows the same survival rule: the
+            // compacted context may have dropped its content block, so
+            // re-inject the last accepted block right away and re-register
+            // its fingerprint so the next supporting context stays filtered.
+            self.loaded_session_work_file_fingerprints.clear();
+            if let Some(block) = self.last_session_work_file_context.clone() {
+                self.loaded_session_work_file_fingerprints
+                    .insert(stable_text_fingerprint(&block));
+                slices.push(("runtime_note".to_string(), block));
+            }
             if let Some(note) = self.take_process_aggregate_scopes_if_needed() {
                 slices.push(("runtime_note".to_string(), note));
+            }
+            // The restart fact must survive compaction summaries that dropped
+            // the original notice.
+            if let Some(restate) = self.restart_notice_restate.clone() {
+                slices.push(("runtime_note".to_string(), restate));
             }
         }
         if compacted_successfully {
@@ -4271,10 +4660,20 @@ impl AgentCore {
                     parsed.thought.trim().to_string(),
                 ));
             }
+            // The keyword index is echoed back by the runtime as its own
+            // section. The model supplied it via the dedicated `keywords`
+            // argument; rendering it here keeps the next prompt's checkpoint
+            // self-contained without trusting summary-embedded copies.
             assistant_slices.extend(
                 successful_compact_summaries
                     .into_iter()
-                    .map(|summary| ("context_compression_summary".to_string(), summary)),
+                    .zip(successful_compact_keywords)
+                    .map(|(summary, keywords)| {
+                        (
+                            "context_compression_summary".to_string(),
+                            format!("{summary}\n\nThought pieces: {keywords}"),
+                        )
+                    }),
             );
             slices.splice(
                 compact_result_slice_start..compact_result_slice_start,
@@ -4305,13 +4704,32 @@ impl AgentCore {
             // Timers survive compaction; restate them so the compacted
             // context still expects their prompts to arrive later.
             let timers_line = self.active_timers_confirmation_line();
+            // The compacted context no longer carries the mailbox address;
+            // restate it once in this runtime confirmation instead of on every
+            // request.
+            let mailbox_line = self
+                .mailbox_reminder_line()
+                .map(|line| format!("\n{line}"))
+                .unwrap_or_default();
+            // Detached jobs are invisible to the summary; restate them so the
+            // model does not assume everything finished.
+            let jobs_line = self
+                .running_jobs_reminder_line()
+                .map(|line| format!("\n{line}"))
+                .unwrap_or_default();
+            let work_file_line = self
+                .session_work_file
+                .as_ref()
+                .map(|path| format!("\nsession work file: {path}"))
+                .unwrap_or_default();
             slices.push((
                 "context_compressed".to_string(),
                 format!(
-                    "context compressed successfully.\nCWD: {}{memo_line}{timers_line}",
+                    "context compressed successfully.\nCWD: {}{memo_line}{timers_line}{mailbox_line}{jobs_line}{work_file_line}",
                     self.current_prompt_cwd.display()
                 ),
             ));
+            self.pending_runtime_state_reminder = false;
         }
         if !parsed.context_compresses.is_empty() && !compacted_successfully {
             // context_compress is a barrier: later actions were authored against the
@@ -4351,6 +4769,7 @@ impl AgentCore {
                     runtime.on_core_topic_events(&[crate::host::memo_stops_finish_topic_event(
                         self.current_session_id().to_string(),
                         &memo,
+                        &final_text,
                     )]);
                     slices.extend(self.assistant_replay_slices(
                         &raw_model_output,
@@ -4382,7 +4801,7 @@ impl AgentCore {
             // delta_id places them on the same append-only context timeline, so
             // provider projection stays byte-stable and cacheable.
             self.defer_next_turn_slices(slices);
-            return CoreStep::Final(TurnFinal {
+            return CoreStep::Final(Box::new(TurnFinal {
                 final_answer: final_text,
                 toolgen_retrospect: parsed.toolgen_retrospect.clone(),
                 stats: self.current_stats.clone(),
@@ -4395,7 +4814,7 @@ impl AgentCore {
                     None
                 },
                 stop_summary: None,
-            });
+            }));
         }
 
         // Omitted status is an intentional shorthand for status:working.
@@ -4449,8 +4868,23 @@ impl AgentCore {
                             crate::host::memo_stops_finish_topic_event(
                                 self.current_session_id().to_string(),
                                 &memo,
+                                &stop_summary,
                             ),
                         ]);
+                        // The summary is the model's expression to the user:
+                        // interception blocks only the finish action, never
+                        // the summary itself. Inline protocol replays the
+                        // narrative as delta text; in native mode the
+                        // structured assistant message of the exchange below
+                        // already carries it verbatim, so the delta text must
+                        // not duplicate the model's own words.
+                        if native_calls.is_empty() {
+                            slices.extend(self.assistant_replay_slices(
+                                &raw_model_output,
+                                Some(&parsed),
+                                Some(&stop_summary),
+                            ));
+                        }
                         slices.push((
                             "memo_finish_guard".to_string(),
                             memo_finish_guard_reminder(&memo),
@@ -4490,12 +4924,16 @@ impl AgentCore {
                 }
                 // task_finished was executed among the actions above. Its native
                 // tool exchange is still recorded below so the provider message
-                // sequence stays valid; the turn ends here regardless.
-                slices.extend(self.assistant_replay_slices(
-                    &raw_model_output,
-                    Some(&parsed),
-                    Some(&stop_summary),
-                ));
+                // sequence stays valid; the turn ends here regardless. Inline
+                // protocol replays the narrative as delta text; native mode
+                // carries it verbatim inside the structured exchange only.
+                if native_calls.is_empty() {
+                    slices.extend(self.assistant_replay_slices(
+                        &raw_model_output,
+                        Some(&parsed),
+                        Some(&stop_summary),
+                    ));
+                }
                 if !native_calls.is_empty() {
                     let exchange_results = native_calls
                         .iter()
@@ -4518,14 +4956,14 @@ impl AgentCore {
                     self.defer_next_turn_slices(slices);
                 }
                 let stats = self.current_stats.clone();
-                return CoreStep::Final(TurnFinal {
+                return CoreStep::Final(Box::new(TurnFinal {
                     final_answer: stop_summary.clone(),
                     toolgen_retrospect: parsed.toolgen_retrospect,
                     stats: stats.clone(),
                     profile_label: self.profile.label(),
                     repair_issue: None,
                     stop_summary: Some(TurnStopSummary::turn_finished(stop_summary, stats)),
-                });
+                }));
             }
             let native_exchange = if native_calls.is_empty() {
                 None
@@ -4625,14 +5063,14 @@ impl AgentCore {
             Some(&final_text),
         ));
         self.defer_next_turn_slices(slices);
-        CoreStep::Final(TurnFinal {
+        CoreStep::Final(Box::new(TurnFinal {
             final_answer: final_text,
             toolgen_retrospect: parsed.toolgen_retrospect,
             stats: self.current_stats.clone(),
             profile_label: self.profile.label(),
             repair_issue: None,
             stop_summary: None,
-        })
+        }))
     }
 
     pub fn record_unapplied_model_response_usage(&mut self, usage: &UsageStats) {
@@ -5534,7 +5972,7 @@ impl AgentCore {
         let snapshot = self.current_process_aggregate_scope_snapshot(&session_id)?;
         self.process_scope_prompted_session = Some(session_id);
         Some(format!(
-            "{}\n- Runtime process scope: {}\n- Current Session process scope: {}\nThese are aggregate observation directories; exact process ownership and cancellation use their per-Job child scopes. Inspect standard cgroup files there when resource or process diagnosis is needed.",
+            "{}\n- Runtime process scope: {}\n- Current Session process scope: {}\nThese are aggregate observation directories; exact process ownership and cancellation use their per-Job child scopes. Inspect the platform-native resource-control files there when resource or process diagnosis is needed.",
             Self::PROCESS_AGGREGATE_SCOPES_MARKER,
             snapshot.runtime_observation_note,
             snapshot.session_observation_note,
@@ -5553,17 +5991,22 @@ impl AgentCore {
         );
     }
 
+    fn submit_runtime_config_changed_notice_if_pending(&mut self) {
+        if !self.runtime_config_changed_notice_pending {
+            return;
+        }
+        self.runtime_config_changed_notice_pending = false;
+        self.submit_prompt_component(
+            PromptComponentRole::system(),
+            "runtime_config_changed",
+            RUNTIME_CONFIG_CHANGED_NOTICE,
+            "runtime_config",
+        );
+    }
+
     pub fn build_next_prompt(&mut self) -> String {
         self.submit_process_aggregate_scopes_if_needed();
-        if self.runtime_config_changed_notice_pending {
-            self.runtime_config_changed_notice_pending = false;
-            self.submit_prompt_component(
-                PromptComponentRole::system(),
-                "runtime_config_changed",
-                RUNTIME_CONFIG_CHANGED_NOTICE,
-                "runtime_config",
-            );
-        }
+        self.submit_runtime_config_changed_notice_if_pending();
         self.guard_pending_action_output_budget();
         self.flush_pending_prompt_components();
         let rendered = self.render_prompt();
@@ -5662,6 +6105,45 @@ impl AgentCore {
         } else {
             self.round_budget.saturating_sub(self.current_round)
         }
+    }
+
+    /// A native tool-call payload was rejected by the transport parser before
+    /// any action executed (for example malformed JSON in `arguments`). That
+    /// is a model protocol violation, not a dead endpoint: ask the model for a
+    /// corrected tool-call response in a bounded repair round so a long turn
+    /// is not discarded. Returns `None` when repair is exhausted or when the
+    /// active interaction does not use native tool calls.
+    pub fn request_native_tool_call_repair(
+        &mut self,
+        error: &str,
+        runtime: &mut dyn ActionRuntime,
+    ) -> Option<CoreStep> {
+        if self.resolved_tool_call_mode != ToolCallMode::Native
+            || self.repair_attempts >= MAX_PROTOCOL_REPAIR_ATTEMPTS
+        {
+            return None;
+        }
+        self.repair_attempted = true;
+        self.repair_attempts = self.repair_attempts.saturating_add(1);
+        self.last_repair_issue = Some("invalid_native_tool_call_arguments".to_string());
+        self.current_stats.repair_calls = self.current_stats.repair_calls.saturating_add(1);
+        runtime.on_core_topic_events(&[host::model_repair_topic_event(
+            self.current_session_id(),
+            "invalid_native_tool_call_arguments",
+            "The previous native tool call carried invalid arguments JSON. No action was executed; the runtime is asking the model to reissue the tool calls.",
+            self.repair_attempts,
+            MAX_PROTOCOL_REPAIR_ATTEMPTS,
+        )]);
+        let repair_note = format!(
+            "{}'s previous response contained a native tool call whose `arguments` was not valid JSON, so none of the tool calls in that response were executed.\nerror: {error}\n\nReissue the intended tool calls now with syntactically valid JSON arguments. Parameters declared as JSON objects (for example `starter` and `ender` in `readfile`) must be objects such as {{\"line_nr\": 950}}, never arrays such as [\"line_nr\": 950]. Emit the corrected tool calls directly without restating the error.",
+            self.assistant_speaker_name
+        );
+        let prompt = self
+            .render_prompt_with_temporary_delta(vec![("response_repair".to_string(), repair_note)]);
+        Some(CoreStep::NeedModel {
+            prompt,
+            rounds_remaining: self.remaining_rounds(),
+        })
     }
 
     fn request_protocol_repair(
@@ -5834,10 +6316,12 @@ Runtime tool_call ids:",
                     }
                     for compact in &parsed.context_compresses {
                         if !compact.summary.trim().is_empty() {
-                            slices.push((
-                                "llm_response".to_string(),
-                                compact.summary.trim().to_string(),
-                            ));
+                            let mut text = compact.summary.trim().to_string();
+                            if !compact.keywords.trim().is_empty() {
+                                text.push_str("\n\nThought pieces: ");
+                                text.push_str(compact.keywords.trim());
+                            }
+                            slices.push(("llm_response".to_string(), text));
                         }
                     }
                 }
@@ -7056,7 +7540,9 @@ Runtime tool_call ids:",
                     if is_regular_command {
                         action.timeout_ms_i64(5000)
                     } else {
-                        action.input_i64("loop_timeout_ms").unwrap_or(600_000)
+                        action
+                            .input_i64("loop_timeout_ms")
+                            .unwrap_or(shell_exec::DEFAULT_LOOP_TIMEOUT_MS)
                     },
                     action.input_u64("interval_ms"),
                     action.input_u64("once_timeout_ms").unwrap_or(5000),
@@ -8475,30 +8961,40 @@ impl FileScratchStore {
 
 #[derive(Debug, Clone)]
 struct FileChatHistoryStore {
-    audit_file: PathBuf,
-    legacy_audit_file: PathBuf,
+    sessions_dir: PathBuf,
 }
+
+/// Minimal view of a persisted `ChatHistoryRecord::Message`. Event records
+/// (tool output, LLM payloads, runtime notices) make up most of a history file
+/// and are skipped by the byte prefix before this type is ever parsed.
+#[derive(Debug, Deserialize)]
+struct RawChatMessageRecord {
+    role: session_store::ChatHistoryRole,
+    #[serde(default)]
+    turn_id: String,
+    #[serde(default)]
+    created_at_ms: i64,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    content: String,
+}
+
+#[derive(Debug)]
+struct RawChatTurn {
+    session: String,
+    turn_id: String,
+    user_parts: Vec<(i64, String)>,
+    assistant: Option<(i64, String)>,
+    saw_user_record: bool,
+}
+
 impl FileChatHistoryStore {
     fn new(memory_dir: &Path) -> Self {
         let space_dir = space_dir_for_memory_dir(memory_dir);
-        let audit_file = space_dir.join("audit").join("api_audit.json");
-        let legacy_audit_file = space_dir.join("api_audit.jsonl");
         Self {
-            audit_file,
-            legacy_audit_file,
+            sessions_dir: space_dir.join("sessions"),
         }
-    }
-
-    fn audit_files(&self) -> Vec<PathBuf> {
-        let mut files = vec![self.audit_file.clone()];
-        let audit_dir_jsonl = self.audit_file.with_extension("jsonl");
-        if audit_dir_jsonl != self.audit_file {
-            files.push(audit_dir_jsonl);
-        }
-        if self.legacy_audit_file != self.audit_file {
-            files.push(self.legacy_audit_file.clone());
-        }
-        files
     }
 
     fn query(
@@ -8522,18 +9018,19 @@ impl FileChatHistoryStore {
         session: Option<&str>,
     ) -> std::io::Result<Vec<RawChatHistoryRecord>> {
         let terms = search_terms(query);
-        let mut rows = self.read_all_unlocked()?;
-        rows.retain(|record| time_in_window(record.started_at_ms, after_ms, before_ms));
-        if let Some(session_id) = session {
-            // Filter by session before the newest-first truncation so a busy
-            // sibling session cannot crowd out this session's newest records.
-            rows.retain(|record| record.session == session_id);
-        }
-        if !terms.is_empty() {
-            rows.retain(|record| chat_record_matches(record, &terms));
-        }
-        rows.sort_by_key(|row| std::cmp::Reverse(row.started_at_ms));
-        rows.truncate(limit.clamp(1, 50));
+        let limit = limit.clamp(1, 50);
+        // Keep only the newest `limit` matches while scanning so a global
+        // search never holds every session's transcript in memory at once.
+        let mut rows = Vec::new();
+        self.for_each_message_pair(session, |record| {
+            if !time_in_window(record.started_at_ms, after_ms, before_ms) {
+                return;
+            }
+            if !terms.is_empty() && !chat_record_matches(&record, &terms) {
+                return;
+            }
+            keep_newest(&mut rows, record, limit);
+        })?;
         Ok(rows)
     }
 
@@ -8560,184 +9057,265 @@ impl FileChatHistoryStore {
         if targets.is_empty() {
             return Ok(0);
         }
-        MemGuard::for_audit_file(&self.audit_file).with_write(|| {
-            let mut deleted_turn_ids = HashSet::new();
-            for audit_file in self.audit_files() {
-                if !audit_file.exists()
-                    && !rolling_file_store::segmented_directory(&audit_file).exists()
-                {
-                    continue;
-                }
-                let events = read_audit_events_unlocked(&audit_file)
-                    .map_err(|_| "chat_history_read_failed".to_string())?;
-                let mut retained = Vec::new();
-                for value in events {
-                    let turn_id = value
+        let mut deleted_turn_ids = HashSet::new();
+        let space_dir = self.sessions_dir.parent().unwrap_or(&self.sessions_dir);
+        for path in self.session_history_files()? {
+            let Some(session_id) = path
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let guard = MemGuard::for_space_domain(space_dir, format!("session-data-{session_id}"));
+            guard
+                .with_write(|| {
+                    Self::remove_turns_from_history(&path, &targets, &mut deleted_turn_ids)
+                })
+                .map_err(|_| "chat_history_write_failed".to_string())??;
+        }
+        Ok(deleted_turn_ids.len())
+    }
+
+    fn session_history_files(&self) -> Result<Vec<PathBuf>, String> {
+        let entries = match fs::read_dir(&self.sessions_dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(_) => return Err("chat_history_read_failed".to_string()),
+        };
+        let mut files = Vec::new();
+        for entry in entries {
+            let Ok(entry) = entry else { continue };
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let path = entry.path().join("raw_chat_history.jsonl");
+            if path.exists() {
+                files.push(path);
+            }
+        }
+        Ok(files)
+    }
+
+    fn remove_turns_from_history(
+        path: &Path,
+        targets: &HashSet<String>,
+        deleted_turn_ids: &mut HashSet<String>,
+    ) -> Result<(), String> {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err("chat_history_read_failed".to_string()),
+        };
+        let mut retained = Vec::with_capacity(bytes.len());
+        let mut removed = false;
+        for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+            let turn_id = serde_json::from_slice::<Value>(line)
+                .ok()
+                .and_then(|value| {
+                    value
                         .get("turn_id")
                         .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    if !turn_id.is_empty() && targets.contains(&turn_id) {
-                        deleted_turn_ids.insert(turn_id);
-                    } else {
-                        retained.push(value);
-                    }
+                        .map(str::to_string)
+                });
+            match turn_id {
+                Some(turn_id) if targets.contains(&turn_id) => {
+                    deleted_turn_ids.insert(turn_id);
+                    removed = true;
                 }
-                write_audit_events_unlocked(&audit_file, &retained)
-                    .map_err(|_| "chat_history_write_failed".to_string())?;
-            }
-            Ok::<_, String>(deleted_turn_ids.len())
-        })?
-    }
-
-    fn read_all_unlocked(&self) -> std::io::Result<Vec<RawChatHistoryRecord>> {
-        let mut rows = Vec::<RawChatHistoryRecord>::new();
-        for audit_file in self.audit_files() {
-            for value in read_audit_events_unlocked(&audit_file)? {
-                let event_type = value.get("type").and_then(Value::as_str).unwrap_or("");
-                let turn_id = value
-                    .get("turn_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim();
-                if turn_id.is_empty() {
-                    continue;
-                }
-                match event_type {
-                    "turn_start" => {
-                        let user_input = value
-                            .get("user_input")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .trim();
-                        if user_input.is_empty() {
-                            continue;
-                        }
-                        rows.push(RawChatHistoryRecord {
-                            session: value
-                                .get("session")
-                                .and_then(Value::as_str)
-                                .unwrap_or("")
-                                .to_string(),
-                            turn_id: turn_id.to_string(),
-                            started_at_ms: turn_id_millis(turn_id)
-                                .or_else(|| value.get("time_ms").and_then(Value::as_i64))
-                                .or_else(|| value.get("created_at").and_then(Value::as_i64))
-                                .unwrap_or_default(),
-                            user_input: user_input.to_string(),
-                            assistant_output: String::new(),
-                        });
-                    }
-                    "turn_final" => {
-                        let assistant_output = value
-                            .get("assistant_output")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .trim();
-                        if assistant_output.is_empty() {
-                            continue;
-                        }
-                        if let Some(existing) =
-                            rows.iter_mut().rev().find(|row| row.turn_id == turn_id)
-                        {
-                            existing.assistant_output = assistant_output.to_string();
-                        } else {
-                            rows.push(RawChatHistoryRecord {
-                                session: value
-                                    .get("session")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("")
-                                    .to_string(),
-                                turn_id: turn_id.to_string(),
-                                started_at_ms: turn_id_millis(turn_id)
-                                    .or_else(|| value.get("time_ms").and_then(Value::as_i64))
-                                    .or_else(|| value.get("created_at").and_then(Value::as_i64))
-                                    .unwrap_or_default(),
-                                user_input: String::new(),
-                                assistant_output: assistant_output.to_string(),
-                            });
-                        }
-                    }
-                    _ => {}
-                }
+                _ => retained.extend_from_slice(line),
             }
         }
-        Ok(rows
-            .into_iter()
-            .filter(|row| {
-                !row.user_input.trim().is_empty() || !row.assistant_output.trim().is_empty()
-            })
-            .collect())
-    }
-}
-
-fn read_audit_events_unlocked(path: &Path) -> std::io::Result<Vec<Value>> {
-    if rolling_file_store::segmented_directory(path).exists() {
-        return Ok(rolling_file_store::read_segmented_records(path)?
-            .into_iter()
-            .filter_map(|record| serde_json::from_slice::<Value>(&record).ok())
-            .collect());
-    }
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(err),
-    };
-    if text.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    if let Ok(value) = serde_json::from_str::<Value>(&text) {
-        if let Some(events) = value.get("events").and_then(Value::as_array) {
-            return Ok(events.clone());
-        }
-    }
-    Ok(text
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .collect())
-}
-
-fn write_audit_events_unlocked(path: &Path, events: &[Value]) -> std::io::Result<()> {
-    let mut bytes = Vec::new();
-    if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-        let mut records = Vec::with_capacity(events.len());
-        for event in events {
-            let mut record = serde_json::to_vec(event).map_err(std::io::Error::other)?;
-            record.push(b'\n');
-            records.push(record);
-        }
-        if rolling_file_store::segmented_directory(path).exists() {
-            let stable_bytes = records
-                .iter()
-                .map(|record| record.len() as u64)
-                .sum::<u64>();
-            let slices = stable_bytes
-                .div_ceil(rolling_file_store::AUDIT_ROLLING_SLICE_BYTES)
-                .max(1);
-            let capacity = rolling_file_store::RollingCapacity::with_slice_bytes(
-                slices
-                    .saturating_add(1)
-                    .saturating_mul(rolling_file_store::AUDIT_ROLLING_SLICE_BYTES),
-                rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
-            )
-            .map_err(std::io::Error::other)?;
-            rolling_file_store::rewrite_segmented_records(
-                path,
-                &records,
-                capacity,
-                rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
-            )?;
+        if !removed {
             return Ok(());
         }
-        for record in records {
-            bytes.extend_from_slice(&record);
-        }
-    } else {
-        let doc = json!({"version": 1, "events": events});
-        let text = serde_json::to_string_pretty(&doc).map_err(std::io::Error::other)?;
-        bytes.extend_from_slice(format!("{text}\n").as_bytes());
+        atomic_write_file(path, &retained).map_err(|_| "chat_history_write_failed".to_string())?;
+        // The persisted offset index no longer matches the rewritten file.
+        // It is a derived cache: deleting it makes the next reader rebuild from
+        // the file instead of trusting stale offsets.
+        session_store::invalidate_persisted_history_index(path);
+        Ok(())
     }
-    atomic_write_file(path, &bytes)
+
+    fn for_each_message_pair(
+        &self,
+        session: Option<&str>,
+        mut sink: impl FnMut(RawChatHistoryRecord),
+    ) -> std::io::Result<()> {
+        match session {
+            Some(session_id) => {
+                let path = session_store::history_path_in(&self.sessions_dir, session_id);
+                read_session_message_pairs(session_id, &path, &mut sink)?;
+            }
+            None => {
+                let entries = match fs::read_dir(&self.sessions_dir) {
+                    Ok(entries) => entries,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                    Err(err) => return Err(err),
+                };
+                for entry in entries {
+                    let Ok(entry) = entry else { continue };
+                    let Ok(file_type) = entry.file_type() else {
+                        continue;
+                    };
+                    if !file_type.is_dir() {
+                        continue;
+                    }
+                    let Ok(session_id) = entry.file_name().into_string() else {
+                        continue;
+                    };
+                    let path = entry.path().join("raw_chat_history.jsonl");
+                    // Storage-capacity eviction can remove one session while a
+                    // global search runs; that must not fail the other sessions.
+                    let _ = read_session_message_pairs(&session_id, &path, &mut sink);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Keeps `rows` ordered newest-first and bounded to `limit` records.
+fn keep_newest(rows: &mut Vec<RawChatHistoryRecord>, record: RawChatHistoryRecord, limit: usize) {
+    let position = rows.partition_point(|row| row.started_at_ms >= record.started_at_ms);
+    rows.insert(position, record);
+    rows.truncate(limit);
+}
+
+/// Reads user/AI pairs from one session history file.
+///
+/// History files can be trimmed or deleted at any time by capacity eviction, so
+/// a missing file is an empty result rather than an error, and malformed or
+/// partially written lines are skipped instead of failing the whole read. No
+/// index is consulted: the file itself is the single source of truth.
+fn read_session_message_pairs(
+    session_id: &str,
+    path: &Path,
+    sink: &mut impl FnMut(RawChatHistoryRecord),
+) -> std::io::Result<()> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    if !file.metadata().map(|meta| meta.is_file()).unwrap_or(false) {
+        return Ok(());
+    }
+    let mut turns: Vec<RawChatTurn> = Vec::new();
+    let mut turn_indexes: HashMap<String, usize> = HashMap::new();
+    let mut reader = BufReader::new(file);
+    let mut buffer = Vec::new();
+    loop {
+        buffer.clear();
+        let read = match reader.read_until(b'\n', &mut buffer) {
+            Ok(read) => read,
+            // A truncated or partly unreadable tail must not discard the
+            // records that were already parsed from this session.
+            Err(_) => break,
+        };
+        if read == 0 {
+            break;
+        }
+        // Invalid UTF-8 inside a line only poisons that line; lossy decoding
+        // keeps the rest of the transcript searchable.
+        let line = String::from_utf8_lossy(&buffer);
+        // A BOM may precede the record and may itself be followed by padding;
+        // trim on both sides of it before the cheap prefix check.
+        let line = line.trim_start();
+        let line = line.trim_start_matches('\u{feff}').trim_start();
+        // Event records are the bulk of the file; only message records can
+        // answer a chat search, so reject them from their leading bytes
+        // without paying for a full JSON parse.
+        if !line.starts_with("{\"type\":\"message\"") {
+            continue;
+        }
+        let Ok(message) = serde_json::from_str::<RawChatMessageRecord>(line) else {
+            continue;
+        };
+        let turn_id = message.turn_id.trim().to_string();
+        if turn_id.is_empty() {
+            continue;
+        }
+        let position = *turn_indexes.entry(turn_id.clone()).or_insert_with(|| {
+            turns.push(RawChatTurn {
+                session: session_id.to_string(),
+                turn_id: turn_id.clone(),
+                user_parts: Vec::new(),
+                assistant: None,
+                saw_user_record: false,
+            });
+            turns.len() - 1
+        });
+        let content = message.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        let turn = &mut turns[position];
+        match message.role {
+            session_store::ChatHistoryRole::User
+                if is_searchable_user_message_kind(message.kind.as_deref()) =>
+            {
+                turn.saw_user_record = true;
+                turn.user_parts
+                    .push((message.created_at_ms, content.to_string()));
+            }
+            session_store::ChatHistoryRole::User => {
+                turn.saw_user_record = true;
+            }
+            session_store::ChatHistoryRole::Assistant => {
+                // The last assistant message of a turn is its final answer;
+                // earlier ones are superseded.
+                turn.assistant = Some((message.created_at_ms, content.to_string()));
+            }
+            session_store::ChatHistoryRole::System => {}
+        }
+    }
+    for mut turn in turns {
+        turn.user_parts
+            .sort_by_key(|(created_at_ms, _)| *created_at_ms);
+        let user_input = turn
+            .user_parts
+            .iter()
+            .map(|(_, content)| content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let (assistant_ms, assistant_output) = turn.assistant.unwrap_or((0, String::new()));
+        let started_at_ms = turn
+            .user_parts
+            .first()
+            .map(|(created_at_ms, _)| *created_at_ms)
+            .unwrap_or(assistant_ms);
+        let has_user_messages = !turn.user_parts.is_empty();
+        // Turns that only carry machine-injected user entries (mailbox/timer/
+        // resume/...) are runtime control flow, so their assistant reply is not
+        // part of the user's conversation record either. Legacy files that have
+        // no user record at all still expose their assistant message.
+        let legacy_assistant_only = !turn.saw_user_record && !assistant_output.is_empty();
+        if !has_user_messages && !legacy_assistant_only {
+            continue;
+        }
+        if user_input.is_empty() && assistant_output.is_empty() {
+            continue;
+        }
+        sink(RawChatHistoryRecord {
+            session: turn.session,
+            turn_id: turn.turn_id,
+            started_at_ms,
+            user_input,
+            assistant_output,
+        });
+    }
+    Ok(())
+}
+
+fn is_searchable_user_message_kind(kind: Option<&str>) -> bool {
+    // Machine-injected user entries (mailbox/timer/resume/work-file notices)
+    // are runtime control input, not part of the user's own conversation.
+    matches!(kind, None | Some("task") | Some("supplement"))
 }
 
 fn validate_memory_sql(sql: &str) -> Result<(), String> {
@@ -8824,8 +9402,7 @@ fn split_text_for_prompt_slices(text: &str, limit: usize) -> Vec<String> {
 
 fn work_instruction_context_block(supporting_context: &str) -> Option<(usize, usize, &str)> {
     let start = supporting_context.find("work_directory_instructions:")?;
-    let relative_end_marker =
-        supporting_context[start..].rfind("[END WORK_DIRECTORY_INSTRUCTION")?;
+    let relative_end_marker = supporting_context[start..].rfind("[END PROJECT INSTRUCTION")?;
     let marker_start = start + relative_end_marker;
     let after_marker = supporting_context[marker_start..]
         .find(']')
@@ -8835,7 +9412,26 @@ fn work_instruction_context_block(supporting_context: &str) -> Option<(usize, us
         .map(|idx| after_marker + idx + 1)
         .unwrap_or(supporting_context.len());
     let block = supporting_context[start..end].trim();
-    if block.contains("[BEGIN WORK_DIRECTORY_INSTRUCTION") {
+    if block.contains("[BEGIN PROJECT INSTRUCTION") {
+        Some((start, end, block))
+    } else {
+        None
+    }
+}
+
+fn session_work_file_context_block(supporting_context: &str) -> Option<(usize, usize, &str)> {
+    let start = supporting_context.find("[BEGIN SESSION INSTRUCTION ")?;
+    let relative_end_marker = supporting_context[start..].find("[END SESSION INSTRUCTION")?;
+    let marker_start = start + relative_end_marker;
+    let after_marker = supporting_context[marker_start..]
+        .find(']')
+        .map(|idx| marker_start + idx + 1)?;
+    let end = supporting_context[after_marker..]
+        .find('\n')
+        .map(|idx| after_marker + idx + 1)
+        .unwrap_or(supporting_context.len());
+    let block = supporting_context[start..end].trim();
+    if block.contains("[BEGIN SESSION INSTRUCTION") {
         Some((start, end, block))
     } else {
         None
@@ -8922,6 +9518,16 @@ fn search_terms(query: &str) -> Vec<String> {
     for token in lowered.split(|c: char| !c.is_alphanumeric()) {
         push_search_term(token.trim(), &mut seen, &mut terms);
     }
+    if terms.is_empty() {
+        // Queries made only of punctuation or emoji carry no alphanumeric
+        // token. Keep them as literal terms instead of degrading into an
+        // unfiltered recent list.
+        for token in lowered.split_whitespace() {
+            if seen.insert(token.to_string()) {
+                terms.push(token.to_string());
+            }
+        }
+    }
     terms
 }
 
@@ -8945,21 +9551,14 @@ fn push_search_term(token: &str, seen: &mut HashSet<String>, terms: &mut Vec<Str
     }
 }
 
-fn turn_id_millis(turn_id: &str) -> Option<i64> {
-    let remainder = turn_id.strip_prefix("turn_")?;
-    // Turn ids are `turn_<start_millis>[_<sequence>]`; the optional sequence
-    // suffix must not invalidate the millisecond prefix.
-    let millis = remainder.split('_').next()?;
-    millis.parse::<i64>().ok()
-}
-
 fn chat_record_matches(record: &RawChatHistoryRecord, terms: &[String]) -> bool {
-    let haystack = format!(
-        "{} {} {} {}",
-        record.session, record.turn_id, record.user_input, record.assistant_output
-    )
-    .to_lowercase();
-    terms.iter().any(|term| haystack.contains(term))
+    // All terms must appear in the same user/AI pair; matching on any single
+    // term made multi-word queries return unrelated turns.
+    // Session and turn IDs are routing metadata, not conversation text;
+    // folding them into the haystack made queries like "session" or "turn"
+    // match every record.
+    let haystack = format!("{} {}", record.user_input, record.assistant_output).to_lowercase();
+    terms.iter().all(|term| haystack.contains(term))
 }
 
 fn time_in_window(time_ms: i64, after_ms: Option<i64>, before_ms: Option<i64>) -> bool {
@@ -9352,6 +9951,10 @@ fn step_to_json(step: CoreStep) -> serde_json::Value {
         }),
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/resource_caps_tests.rs"]
+mod resource_caps_tests;
 
 #[cfg(test)]
 #[path = "../tests/unit/lib_tests.rs"]

@@ -52,6 +52,20 @@ describe("i18n catalogs", () => {
     setLocale("zh");
   });
 
+  it("names the mailbox as cross-session info with the current session ID", () => {
+    setLocale("zh");
+    expect(t("mailbox.title")).toBe("跨会话信息");
+    expect(t("mailbox.sessionIdLabel")).toBe("本会话 ID");
+    expect(t("mailbox.copyAddress")).toBe("复制本会话 ID");
+    expect(t("mailbox.headerHint")).toBe(
+      "跨会话信息，在 AI 提示词中提供会话ID 可进行跨会话 AI 交流合作。",
+    );
+    setLocale("en");
+    expect(t("mailbox.title")).toBe("Cross-session info");
+    expect(t("mailbox.sessionIdLabel")).toBe("This session ID");
+    setLocale("zh");
+  });
+
   it("use a deterministic default locale in non-browser tests", () => {
     expect(["zh", "en"]).toContain(getLocale());
   });

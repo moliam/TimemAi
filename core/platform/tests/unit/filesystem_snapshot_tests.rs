@@ -71,6 +71,10 @@ fn native_snapshot_deduplicates_working_paths_and_mount_aliases() {
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_snapshot_tracks_real_disk_image_mount_and_unmount() {
+    // Function-local import: the only call sites live behind macOS gates, so
+    // a top-level import is unused (and clippy-fatal) on every other platform.
+    use crate::test_support::process_lifecycle_test_lock;
+    let _process_lifecycle = process_lifecycle_test_lock();
     use std::process::Command;
     struct Image {
         image: PathBuf,

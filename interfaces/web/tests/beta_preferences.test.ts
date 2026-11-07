@@ -24,6 +24,21 @@ describe("Beta browser preferences", () => {
     p.applyBetaDebugDefault(false);
     expect(p.getBetaPreference("stream")).toBe(false);
   });
+  it("keeps the archive sub-setting default-off even in debug mode", async () => {
+    let p = await setup();
+    expect(p.getBetaPreference("streamArchive")).toBe(false);
+    p.applyBetaDebugDefault(true);
+    expect(p.getBetaPreference("streamArchive")).toBe(false);
+    expect(p.getBetaPreference("stream")).toBe(true);
+    p.setBetaPreference("streamArchive", true);
+    expect(p.getBetaPreference("streamArchive")).toBe(true);
+    expect(p.data.get("timem-web-stream-archive-v1")).toBe("true");
+    const saved = Object.fromEntries(p.data);
+    vi.resetModules();
+    p = await setup(saved);
+    p.applyBetaDebugDefault(true);
+    expect(p.getBetaPreference("streamArchive")).toBe(true);
+  });
   it("preserves explicit true and false across reconnect and reload", async () => {
     let p = await setup();
     p.setBetaPreference("stream", false);

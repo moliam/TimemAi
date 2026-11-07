@@ -19,6 +19,30 @@ fn test_audit_file(label: &str) -> std::path::PathBuf {
     ))
 }
 
+fn test_http_client() -> HttpModelClient {
+    // Local listener fixtures must not depend on the developer or CI host's
+    // ambient proxy variables. The dedicated proxy smoke below intentionally
+    // uses HttpModelClient::default() to cover production proxy discovery.
+    HttpModelClient::without_environment_proxy()
+}
+
+fn call_model(
+    config: &ModelServiceConfig,
+    prompt: &str,
+    audit_file: &std::path::Path,
+) -> Result<LlmResponse, String> {
+    test_http_client().call_model(config, prompt, audit_file, &mut || false)
+}
+
+fn call_model_with_cancel(
+    config: &ModelServiceConfig,
+    prompt: &str,
+    audit_file: &std::path::Path,
+    should_cancel: &mut dyn FnMut() -> bool,
+) -> Result<LlmResponse, String> {
+    test_http_client().call_model(config, prompt, audit_file, should_cancel)
+}
+
 fn success_body(content: &str) -> String {
     serde_json::json!({
         "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
@@ -63,11 +87,14 @@ fn cancellation_interrupts_waiting_for_response_headers() {
 
     assert_eq!(error, "cancelled_by_user");
     // The stub server sleeps 5s before any response and the request timeout
-    // is 10s, so a genuine cancellation must return well before the server
-    // would ever answer. The 4s bound keeps that proof while staying stable
-    // under parallel test load (thread starvation delays the cancel check).
+    // is 10s, so a genuine cancellation must return before the server could
+    // ever answer. The bound only has to stay under that 5s sleep: with the
+    // full suite running in parallel, thread starvation can delay the cancel
+    // checks well past 4s (observed repeatedly on a loaded machine), so 5s
+    // keeps the proof (still before the server's first possible response and
+    // far under the 10s request timeout) while tolerating the starvation.
     assert!(
-        started.elapsed() < Duration::from_secs(4),
+        started.elapsed() < Duration::from_secs(5),
         "native HTTP cancellation took {:?}",
         started.elapsed()
     );
@@ -390,7 +417,7 @@ fn streaming_response_is_rejected_when_accumulated_body_crosses_limit() {
 
     let config = local_config(addr, 5);
     let audit_file = test_audit_file("streaming-oversized-response");
-    let mut client = HttpModelClient::default();
+    let mut client = test_http_client();
     let error = client
         .call_model(&config, "oversized stream", &audit_file, &mut || false)
         .unwrap_err();
@@ -871,7 +898,7 @@ fn native_http_client_reuses_keep_alive_connection() {
         matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
     });
     let config = local_config(addr, 2);
-    let mut client = HttpModelClient::default();
+    let mut client = test_http_client();
     let first_audit = test_audit_file("reuse-first");
     let second_audit = test_audit_file("reuse-second");
     assert_eq!(
@@ -995,7 +1022,7 @@ fn provisional_content_arrives_before_server_can_finish_response() {
     });
     let config = local_config(addr, 10);
     let request = prepare_model_http_request(&config, "stream test");
-    let mut transport = NativeHttpTransport::new().unwrap();
+    let mut transport = NativeHttpTransport::new(false).unwrap();
     let mut text = String::new();
     let response = transport
         .execute(
@@ -1052,7 +1079,7 @@ fn stream_failure_is_audited_without_response_body() {
         let config = local_config(addr, 10);
         let request = prepare_model_http_request(&config, label);
         let mut observer = |_: &serde_json::Value| {};
-        let error = HttpModelClient::default()
+        let error = test_http_client()
             .execute_model_http_request(
                 &config,
                 &request,
@@ -1108,7 +1135,7 @@ fn unsupported_reasoning_is_rejected_before_transport_initialization() {
             intensity: Some("xhigh".into()),
         },
     );
-    let mut client = HttpModelClient::default();
+    let mut client = test_http_client();
     let audit = test_audit_file("invalid-reasoning");
     let error = client
         .execute_prepared_request_with_cache_fallback(&config, request, &audit, &mut || false, None)
@@ -1216,7 +1243,7 @@ fn responses_provisional_content_arrives_before_terminal() {
     config.api_protocol = ApiProtocol::OpenAiResponses;
     config.openai_compatible.stream = true;
     let request = prepare_model_http_request(&config, "stream test");
-    let mut transport = NativeHttpTransport::new().unwrap();
+    let mut transport = NativeHttpTransport::new(false).unwrap();
     let mut text = String::new();
     let response = transport
         .execute(
@@ -1315,7 +1342,7 @@ fn zhipu_native_stream_tool_roundtrip_over_real_http() {
             critical_reasoning: false,
         };
         let audit = test_audit_file("zhipu-roundtrip");
-        let mut client = HttpModelClient::default();
+        let mut client = test_http_client();
         let first = client
             .call_model_interaction_streaming(&cfg, &request, &audit, &mut || false, &mut |_| {})
             .unwrap();

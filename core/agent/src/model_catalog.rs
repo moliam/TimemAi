@@ -8,6 +8,9 @@ use std::sync::OnceLock;
 pub enum ReasoningAdapter {
     EnumBodyField,
     ZhipuChatReasoning,
+    KimiChatReasoning,
+    KimiK2Thinking,
+    DeepSeekChatThinking,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -42,6 +45,21 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         allowed_protocols: &["openai-responses", "openai-compatible"],
         requires_catalog: true,
     },
+    ProviderSpec {
+        id: "kimi",
+        allowed_protocols: &["openai-responses", "openai-compatible"],
+        requires_catalog: true,
+    },
+    ProviderSpec {
+        id: "kimi_code",
+        allowed_protocols: &["openai-responses", "openai-compatible"],
+        requires_catalog: true,
+    },
+    ProviderSpec {
+        id: "deepseek",
+        allowed_protocols: &["openai-compatible"],
+        requires_catalog: true,
+    },
 ];
 
 pub fn provider_spec(id: &str) -> Option<&'static ProviderSpec> {
@@ -55,6 +73,11 @@ pub struct CatalogProtocol {
     pub base_url: String,
     pub reasoning_adapter: ReasoningAdapter,
     pub function_calling: FunctionCallingSupport,
+    /// Documented support for the `required` tool_choice level on this wire.
+    /// Bundled catalogs must state it explicitly; an absent declaration reads
+    /// as unsupported (fail-safe) so a new profile can never inherit an
+    /// optimistic assumption that shows up as a live 400 during compression.
+    pub required_tool_choice: bool,
     pub disabled_reason: Option<String>,
     pub fixed_effort: Option<String>,
     pub fixed_reason: Option<String>,
@@ -107,6 +130,9 @@ pub fn load_catalog(directory: Option<&std::path::Path>) -> Result<Vec<CatalogMo
     for resource in [
         include_str!("../../../resources/openai_model_catalog.json"),
         include_str!("../../../resources/zhipu_model_catalog.json"),
+        include_str!("../../../resources/kimi_model_catalog.json"),
+        include_str!("../../../resources/kimi_code_model_catalog.json"),
+        include_str!("../../../resources/deepseek_model_catalog.json"),
     ] {
         models.extend(parse(resource)?);
     }
@@ -175,7 +201,10 @@ pub fn parse(text: &str) -> Result<Vec<CatalogModel>, String> {
     }
     let mut result = Vec::new();
     for entry in entries {
-        if !matches!(entry["provider_id"].as_str(), Some("openai" | "zhipu")) {
+        if !matches!(
+            entry["provider_id"].as_str(),
+            Some("openai" | "zhipu" | "kimi" | "kimi_code" | "deepseek")
+        ) {
             return Err("catalog_provider_adapter_not_implemented".into());
         }
         let string = |v: &Value| {
@@ -235,20 +264,31 @@ pub fn parse(text: &str) -> Result<Vec<CatalogModel>, String> {
                 _ => return Err("catalog_unknown_protocol".into()),
             };
             let bindings = p["bindings"].as_array().ok_or("catalog_bindings_missing")?;
+            let expected_path = if matches!(
+                bindings[0]["handler"].as_str(),
+                Some("kimi_k2_thinking" | "deepseek_chat_thinking")
+            ) {
+                "/thinking"
+            } else {
+                path
+            };
             if p["route"] != route
                 || bindings.len() != 1
                 || bindings[0]["dimension"] != "reasoning.effort"
-                || bindings[0]["path"] != path
+                || bindings[0]["path"] != expected_path
             {
                 return Err("catalog_unsupported_binding".into());
             }
 
             let reasoning_adapter = match bindings[0]["handler"].as_str() {
-                // Zhipu Responses uses the standard enum body field binding; its
-                // chat protocol keeps the dedicated zhipu_chat_reasoning adapter.
+                // Zhipu/Kimi Responses use the standard enum body field binding;
+                // their chat protocols keep dedicated reasoning adapters.
                 Some("enum_body_field")
                     if entry["provider_id"] == "openai"
-                        || (entry["provider_id"] == "zhipu" && protocol == "openai-responses") =>
+                        || (entry["provider_id"] == "zhipu" && protocol == "openai-responses")
+                        || (entry["provider_id"] == "kimi" && protocol == "openai-responses")
+                        || (entry["provider_id"] == "kimi_code"
+                            && protocol == "openai-responses") =>
                 {
                     ReasoningAdapter::EnumBodyField
                 }
@@ -256,6 +296,22 @@ pub fn parse(text: &str) -> Result<Vec<CatalogModel>, String> {
                     if entry["provider_id"] == "zhipu" && protocol == "openai-compatible" =>
                 {
                     ReasoningAdapter::ZhipuChatReasoning
+                }
+                Some("kimi_chat_reasoning")
+                    if matches!(entry["provider_id"].as_str(), Some("kimi" | "kimi_code"))
+                        && protocol == "openai-compatible" =>
+                {
+                    ReasoningAdapter::KimiChatReasoning
+                }
+                Some("kimi_k2_thinking")
+                    if entry["provider_id"] == "kimi" && protocol == "openai-compatible" =>
+                {
+                    ReasoningAdapter::KimiK2Thinking
+                }
+                Some("deepseek_chat_thinking")
+                    if entry["provider_id"] == "deepseek" && protocol == "openai-compatible" =>
+                {
+                    ReasoningAdapter::DeepSeekChatThinking
                 }
                 _ => return Err("catalog_unsupported_binding".into()),
             };
@@ -266,6 +322,14 @@ pub fn parse(text: &str) -> Result<Vec<CatalogModel>, String> {
                 Some("unknown") => FunctionCallingSupport::Unknown,
                 _ => return Err("catalog_function_calling_missing".into()),
             };
+            // 线路事实没有“默认支持”这回事：目录没写就是没有证据，按不支持处理，
+            // 发送层据此把 Required 降级为 auto，压缩必调工具的语义由文本 trailer
+            // 保证。缺失被读成“支持”正是 DeepSeek 思考模式 400 的成因。
+            let required_tool_choice = match &p["required_tool_choice"] {
+                Value::Null => false,
+                Value::Bool(flag) => *flag,
+                _ => return Err("catalog_required_tool_choice_invalid".into()),
+            };
             let mut projection = CatalogProtocol {
                 protocol: protocol.clone(),
                 base_url: string(
@@ -274,6 +338,7 @@ pub fn parse(text: &str) -> Result<Vec<CatalogModel>, String> {
                 )?,
                 reasoning_adapter,
                 function_calling,
+                required_tool_choice,
                 disabled_reason: None,
                 fixed_effort: None,
                 fixed_reason: None,
@@ -489,6 +554,60 @@ pub fn validate_request(config: &crate::ModelServiceConfig, body: &Value) -> Res
             return Err("catalog_zhipu_reasoning_mismatch".into());
         }
     }
+    if uses_kimi_chat(config) {
+        // K3 always reasons via top-level reasoning_effort; thinking-style
+        // extensions are undocumented and stream_options.include_usage is
+        // documented and therefore allowed.
+        let effort = body.get("reasoning_effort").and_then(Value::as_str);
+        if effort.is_none()
+            || !matches!(effort, Some("low" | "high" | "max"))
+            || body.get("thinking").is_some()
+            || body.get("enable_thinking").is_some()
+        {
+            return Err("catalog_kimi_reasoning_mismatch".into());
+        }
+    }
+    if uses_kimi_k2_thinking(config) {
+        // K2 models have no reasoning_effort; the thinking object is the
+        // documented switch (kimi-k2.6: enabled/disabled, kimi-k2.7-code:
+        // always-on, so the field is omitted rather than disabled).
+        let allow_disable = crate::model_requirements::capabilities(config)
+            .is_some_and(|m| m.efforts.iter().any(|e| e == "none"));
+        let thinking = body.get("thinking");
+        let disabled = thinking == Some(&serde_json::json!({"type": "disabled"}));
+        let enabled = thinking == Some(&serde_json::json!({"type": "enabled", "keep": "all"}));
+        let shape_ok = if allow_disable {
+            disabled || enabled
+        } else {
+            thinking.is_none()
+        };
+        if !shape_ok
+            || body.get("reasoning_effort").is_some()
+            || body.get("enable_thinking").is_some()
+        {
+            return Err("catalog_kimi_reasoning_mismatch".into());
+        }
+    }
+    if uses_deepseek_chat(config) {
+        // DeepSeek V4 Chat: the thinking object toggles the mode and
+        // reasoning_effort (low/high/max) sets the strength while thinking
+        // is enabled; disabled sends no effort. `enable_thinking` is not
+        // part of the documented wire.
+        let effort = body.get("reasoning_effort").and_then(Value::as_str);
+        let thinking_type = body.pointer("/thinking/type").and_then(Value::as_str);
+        let shape_ok = matches!(
+            (thinking_type, effort),
+            (Some("disabled"), None) | (Some("enabled"), Some("low" | "high" | "max"))
+        );
+        if !shape_ok || body.get("enable_thinking").is_some() {
+            return Err("catalog_deepseek_reasoning_mismatch".into());
+        }
+    }
+    if !supports_required_tool_choice(config)
+        && body.get("tool_choice").and_then(Value::as_str) == Some("required")
+    {
+        return Err("catalog_required_tool_choice_not_supported".into());
+    }
     validate(
         id,
         &config.model,
@@ -509,6 +628,67 @@ pub fn known_id(id: &str) -> Option<String> {
 pub fn uses_zhipu_chat(config: &crate::ModelServiceConfig) -> bool {
     crate::model_requirements::provider(config) == Some("zhipu")
         && config.api_protocol == crate::ApiProtocol::OpenAiCompatible
+}
+
+pub fn uses_kimi_chat(config: &crate::ModelServiceConfig) -> bool {
+    crate::model_requirements::capabilities(config).is_some_and(|m| {
+        matches!(
+            crate::model_requirements::provider(config),
+            Some("kimi" | "kimi_code")
+        ) && config.api_protocol == crate::ApiProtocol::OpenAiCompatible
+            && m.protocols.iter().any(|p| {
+                p.protocol == "openai-compatible"
+                    && p.reasoning_adapter == ReasoningAdapter::KimiChatReasoning
+            })
+    })
+}
+
+/// Wire-level fact: whether the active protocol accepts the `required`
+/// tool_choice level. A catalog profile claims it only by declaring
+/// `required_tool_choice: true` from documentation or a live audit; an absent
+/// declaration reads as false and the send layer downgrades Required to auto
+/// there, keeping the textual compression trailer as the guarantee instead of
+/// the wire field. Endpoints outside the catalog carry no documented fact at
+/// all, so they keep the standard contract (true) instead of being downgraded
+/// on a guess.
+pub fn supports_required_tool_choice(config: &crate::ModelServiceConfig) -> bool {
+    crate::model_requirements::capabilities(config)
+        .and_then(|m| {
+            m.protocols
+                .iter()
+                .find(|p| p.protocol == config.api_protocol.label())
+        })
+        .map(|p| p.required_tool_choice)
+        .unwrap_or(true)
+}
+
+/// K2-era Kimi Chat models: reasoning is the documented `thinking` object,
+/// not top-level reasoning_effort.
+pub fn uses_kimi_k2_thinking(config: &crate::ModelServiceConfig) -> bool {
+    crate::model_requirements::capabilities(config).is_some_and(|m| {
+        crate::model_requirements::provider(config) == Some("kimi")
+            && config.api_protocol == crate::ApiProtocol::OpenAiCompatible
+            && m.protocols.iter().any(|p| {
+                p.protocol == "openai-compatible"
+                    && p.reasoning_adapter == ReasoningAdapter::KimiK2Thinking
+            })
+    })
+}
+
+/// DeepSeek Chat (V4): the thinking object toggles the mode while
+/// reasoning_effort carries the documented strength.
+pub fn uses_deepseek_chat(config: &crate::ModelServiceConfig) -> bool {
+    crate::model_requirements::provider(config) == Some("deepseek")
+        && config.api_protocol == crate::ApiProtocol::OpenAiCompatible
+}
+
+/// Chat providers whose documented multi-turn/tool contract requires replaying
+/// the full assistant message, including opaque reasoning_content.
+pub fn chat_preserves_reasoning(config: &crate::ModelServiceConfig) -> bool {
+    uses_zhipu_chat(config)
+        || uses_kimi_chat(config)
+        || uses_kimi_k2_thinking(config)
+        || uses_deepseek_chat(config)
 }
 
 // Runtime admission is deliberately closed, not a general JSON transformation

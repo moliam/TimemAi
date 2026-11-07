@@ -232,12 +232,12 @@ fn interrupted_projection_survives_retry_until_first_visible_text() {
     use agent_core::model_stream::{PublicTextTarget, TurnResponsePreview};
     let mut state = TurnResponsePreview::default();
     let mut ui = PreviewCapture::default();
-    state.begin();
+    state.begin(1);
     state
         .append(PublicTextTarget::Response, "partial response")
         .unwrap();
     state.interrupt("network_error");
-    state.begin();
+    state.begin(1);
     state.publish(&mut ui, "session", "turn");
     let snapshot = ui.0.last().unwrap();
     assert_eq!(snapshot["response"]["text"], "partial response");
@@ -369,4 +369,135 @@ fn finish_summary_stream_responses_api_events() {
         stream.push_event(&event, &mut |text| output.push_str(text));
     }
     assert_eq!(output, "response");
+}
+
+#[test]
+fn preview_streams_reasoning_telemetry_across_provider_shapes() {
+    use agent_core::model_stream::{PublicTextTarget, TurnResponsePreview};
+    let mut state = TurnResponsePreview::default();
+    let mut ui = PreviewCapture::default();
+    state.begin(2);
+    state.observe_stream_event(&serde_json::json!({
+        "choices": [{"delta": {"reasoning_content": "让我 think"}}]
+    }));
+    state.publish(&mut ui, "session", "turn");
+    let snapshot = ui.0.last().unwrap();
+    assert_eq!(snapshot["round"], 2);
+    assert_eq!(snapshot["stream_phase"], "thinking");
+    assert_eq!(
+        snapshot["thinking_words"], 3,
+        "two CJK chars + one latin word"
+    );
+    assert!(snapshot["ttft_ms"].is_u64());
+    assert_eq!(snapshot["thinking_tail"], "让我 think");
+    assert_eq!(snapshot["thinking_truncated"], false);
+    // OpenAI Responses reasoning summary delta
+    state.observe_stream_event(&serde_json::json!({
+        "type": "response.reasoning_summary_text.delta", "delta": " next"
+    }));
+    // Anthropic thinking delta
+    state.observe_stream_event(&serde_json::json!({
+        "type": "content_block_delta",
+        "delta": {"type": "thinking_delta", "thinking": "进一步"}
+    }));
+    // usage reasoning tokens (OpenAI-style details)
+    state.observe_stream_event(&serde_json::json!({
+        "usage": {"completion_tokens_details": {"reasoning_tokens": 512}}
+    }));
+    state
+        .append(PublicTextTarget::Response, "final answer")
+        .unwrap();
+    state.publish(&mut ui, "session", "turn");
+    let snapshot = ui.0.last().unwrap();
+    assert_eq!(snapshot["stream_phase"], "responding");
+    assert_eq!(snapshot["reasoning_tokens"], 512);
+    assert_eq!(snapshot["thinking_words"], 7);
+    assert_eq!(
+        snapshot["thinking_tail"], "",
+        "answer text must clear the inline reasoning tail"
+    );
+    assert_eq!(snapshot["thinking_truncated"], false);
+}
+
+#[test]
+fn preview_thinking_tail_is_bounded_and_keeps_the_latest_text() {
+    use agent_core::model_stream::{PublicTextTarget, TurnResponsePreview};
+    let mut state = TurnResponsePreview::default();
+    let mut ui = PreviewCapture::default();
+    state.begin(1);
+    for _ in 0..450 {
+        state.observe_stream_event(&serde_json::json!({
+            "choices": [{"delta": {"reasoning_content": "abcdefghij"}}]
+        }));
+    }
+    state.publish(&mut ui, "session", "turn");
+    let snapshot = ui.0.last().unwrap();
+    let tail = snapshot["thinking_tail"].as_str().unwrap();
+    assert_eq!(
+        tail.chars().count(),
+        4096,
+        "tail stays bounded by characters"
+    );
+    assert!(
+        tail.ends_with("abcdefghij"),
+        "tail keeps the newest reasoning"
+    );
+    assert_eq!(snapshot["thinking_truncated"], true);
+    state.append(PublicTextTarget::Response, "answer").unwrap();
+    state.publish(&mut ui, "session", "turn");
+    let snapshot = ui.0.last().unwrap();
+    assert_eq!(snapshot["thinking_tail"], "");
+    assert_eq!(snapshot["thinking_truncated"], false);
+}
+
+#[test]
+fn preview_retract_and_interrupt_clear_inline_thinking_state() {
+    use agent_core::model_stream::TurnResponsePreview;
+    let mut state = TurnResponsePreview::default();
+    let mut ui = PreviewCapture::default();
+    let thinking = serde_json::json!({
+        "choices": [{"delta": {"reasoning_content": "stale reasoning"}}]
+    });
+
+    state.begin(1);
+    state.observe_stream_event(&thinking);
+    assert!(state.thinking_active());
+    state.retract();
+    state.publish(&mut ui, "session", "turn");
+    let snapshot = ui.0.last().unwrap();
+    assert_eq!(snapshot["thinking_tail"], "");
+    assert_eq!(snapshot["thinking_truncated"], false);
+    assert!(snapshot["stream_phase"].is_null());
+    assert!(!state.thinking_active());
+
+    state.begin(2);
+    state.observe_stream_event(&thinking);
+    assert!(state.thinking_active());
+    state.interrupt("network_error");
+    state.publish(&mut ui, "session", "turn");
+    let snapshot = ui.0.last().unwrap();
+    assert_eq!(snapshot["thinking_tail"], "");
+    assert_eq!(snapshot["thinking_truncated"], false);
+    assert!(snapshot["stream_phase"].is_null());
+    assert_eq!(snapshot["interruption"], "network_error");
+}
+
+#[test]
+fn preview_unknown_event_shapes_are_ignored_safely() {
+    use agent_core::model_stream::{PublicTextTarget, TurnResponsePreview};
+    let mut state = TurnResponsePreview::default();
+    let mut ui = PreviewCapture::default();
+    state.begin(1);
+    assert!(!state.observe_stream_event(&serde_json::json!({
+        "type": "custom.vendor.event", "payload": {"opaque": true}
+    })));
+    state.observe_stream_event(&serde_json::json!({
+        "choices": [{"delta": {"content": "ok"}}]
+    }));
+    state.append(PublicTextTarget::Response, "ok").unwrap();
+    state.publish(&mut ui, "session", "turn");
+    let snapshot = ui.0.last().unwrap();
+    assert_eq!(snapshot["stream_phase"], "responding");
+    assert_eq!(snapshot["thinking_words"], 0);
+    assert!(snapshot["reasoning_tokens"].is_null());
 }

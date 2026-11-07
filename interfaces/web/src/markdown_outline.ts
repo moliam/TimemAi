@@ -180,6 +180,40 @@ export function finalAnswerNeedsOutline(answerHeight: number, viewportHeight: nu
 
 
 export const MARKDOWN_OUTLINE_START_ID = "__start";
+export const MARKDOWN_OUTLINE_SUMMARY_ID = "__summary";
+
+export type MarkdownOutlineDeliveryScope = {
+  /** The outline covers the retained process area plus the answer. */
+  spansProcess: boolean;
+  /** At least one process chapter renders in the outline. */
+  hasProcessChapters: boolean;
+  /** The Summary anchor marks the final-answer top. */
+  showsSummary: boolean;
+  /** Total sections counted for the outline visibility threshold. */
+  sectionCount: number;
+};
+
+/**
+ * Decouples outline scope from outline chapters. While the stream process
+ * area is retained, Start, geometry, and Summary cover the whole delivery
+ * even when no free-talk block carries a heading (chapters are simply absent
+ * then), so Start always returns to the beginning of this turn's reply.
+ * Without a retained process the outline stays answer-only.
+ */
+export function markdownOutlineDeliveryScope(
+  headingCount: number,
+  processRetained: boolean,
+  chapterCount: number,
+): MarkdownOutlineDeliveryScope {
+  const headings = Math.max(0, Math.floor(headingCount));
+  const chapters = processRetained ? Math.max(0, Math.floor(chapterCount)) : 0;
+  return {
+    spansProcess: processRetained,
+    hasProcessChapters: chapters > 0,
+    showsSummary: processRetained,
+    sectionCount: headings + chapters + (processRetained ? 1 : 0),
+  };
+}
 
 export function markdownOutlineFitsBesideContent(
   availableSpace: number,
@@ -205,6 +239,22 @@ export function markdownOutlineActiveId(
     else break;
   }
   return activeId;
+}
+
+/**
+ * Outline items are rebuilt on every stream/hydration commit. The active
+ * highlight must survive identical-id rebuilds (restored-turn hydration swaps
+ * event arrays while chapters keep their ids); it only falls back to Start
+ * when the current id really disappeared (the answer changed).
+ */
+export function markdownOutlineFallbackActiveId(
+  currentId: string,
+  items: readonly MarkdownOutlineItem[],
+): string {
+  if (currentId === MARKDOWN_OUTLINE_START_ID) return currentId;
+  return items.some((item) => item.id === currentId)
+    ? currentId
+    : MARKDOWN_OUTLINE_START_ID;
 }
 
 export function markdownOutlineRailScrollTop(

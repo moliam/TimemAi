@@ -1,4 +1,5 @@
-import { memorySearchPresentation, readFilePresentation, runBashEditPresentation, selfToolPresentation, timerPresentation } from "./tool_presentation";
+import { mailboxPresentation, memorySearchPresentation, readFilePresentation, runBashEditPresentation, selfToolPresentation, timerPresentation } from "./tool_presentation";
+import type { MarkdownOutlineItem } from "./markdown_outline";
 import {
   Activity,
   ChatHistoryRecord,
@@ -13,11 +14,13 @@ import {
   VersionedTurnProjection,
   WebTurn,
   WebTurnEvent,
+  UsageStats,
 } from "./protocol";
 import {
   humanizeToolStatus,
   TOOL_STATUS_BACKGROUND_RUNNING,
 } from "./tool_status";
+import { extractMarkdownOutline, markdownHeadingId, markdownHeadingText, MAX_OUTLINE_HEADINGS } from "./markdown_outline";
 import { t } from "./i18n";
 
 export const MAX_RENDERED_MESSAGES = 1000;
@@ -34,6 +37,7 @@ const USAGE_FIELDS = [
   "mem_writes",
   "prompt_tokens",
   "completion_tokens",
+  "reasoning_tokens",
   "total_tokens",
   "cached_tokens",
   "cache_created_tokens",
@@ -95,6 +99,117 @@ export type TurnTimelinePlacement = {
   resumedAfterRestart: boolean;
 };
 
+/**
+ * Stream UI with stream retention (not folded/archived) renders a completed
+ * turn's inline stream process directly, so slimmed restored events (the
+ * `…[truncated]` preview skeleton) must be hydrated with full detail via
+ * turn_history_page. Classic folded mode keeps previews until the user
+ * expands, and hidden timeline panes wait until they become active.
+ */
+export function turnNeedsFullEventFetch(
+  turn: WebTurn,
+  options: { streamUiMode: boolean; streamArchive: boolean; timelineActive: boolean },
+): boolean {
+  if (!options.streamUiMode || options.streamArchive) return false;
+  if (!options.timelineActive) return false;
+  if (turn.state === "working") return false;
+  return turn.events_slimmed === true;
+}
+
+/**
+ * Slimmed-turn hydration priority: newest turn first. The landing view shows
+ * the newest turn of the active timeline, and its reading outline depends on
+ * hydrated free-talk detail; an oldest-first request order makes the most
+ * visible directory wait behind every older turn's chained pages.
+ */
+export function turnHistoryHydrationOrder(
+  turns: readonly WebTurn[],
+  options: { streamUiMode: boolean; streamArchive: boolean; timelineActive: boolean },
+): WebTurn[] {
+  const ordered: WebTurn[] = [];
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index]!;
+    if (turnNeedsFullEventFetch(turn, options)) ordered.push(turn);
+  }
+  return ordered;
+}
+
+/**
+ * Stream retention process chapters for the reading outline: only retained
+ * free_talk blocks that carry a model-written markdown heading produce an
+ * entry (titled and leveled by that heading); plain narrative blocks produce
+ * none. Anchors are assigned positionally by the caller (the free_talk block
+ * order in the retained stream presentation).
+ */
+export type StreamProcessOutlineSection = MarkdownOutlineItem & {
+  /** Index among non-empty free_talk blocks; matches data-stream-chapter. */
+  sourceIndex: number;
+};
+
+export function streamProcessOutlineSections(texts: readonly string[]): StreamProcessOutlineSection[] {
+  const sections: StreamProcessOutlineSection[] = [];
+  const occurrences = new Map<string, number>();
+  let sourceIndex = -1;
+  let lastTitle = "";
+  for (const text of texts) {
+    if (sections.length >= MAX_OUTLINE_HEADINGS) break;
+    const trimmed = (text ?? "").trim();
+    if (!trimmed) continue;
+    sourceIndex += 1;
+    // Chapters come only from model-written markdown headings. Plain narrative
+    // blocks create none: one chapter per model turn would flood the outline.
+    const heading = extractMarkdownOutline(trimmed)[0];
+    if (!heading) continue;
+    const title = markdownHeadingText(heading.title);
+    // Consecutive same-title entries are snapshots of one growing thought;
+    // anchor the chapter at the run start instead of stacking duplicates.
+    if (!title || title === lastTitle) continue;
+    lastTitle = title;
+    sections.push({ id: markdownHeadingId(title, occurrences), level: heading.level, title, sourceIndex });
+  }
+  return sections;
+}
+
+/**
+ * FNV-1a content-weight signature over the rendered timeline. `events.length`
+ * alone cannot see restored-turn hydration (events_slimmed -> full events
+ * keeps the count stable while the DOM grows), which would otherwise strand
+ * the bottom follower mid-history after a restart.
+ */
+export function timelineEventsSignature(turns: readonly WebTurn[]): string {
+  let hash = 0x811c9dc5;
+  const mix = (text: string) => {
+    for (let index = 0; index < text.length; index += 1) {
+      hash = Math.imul(hash ^ text.charCodeAt(index), 0x01000193) >>> 0;
+    }
+  };
+  for (const turn of turns) {
+    mix(
+      `${turn.turn_id}\u0000${turn.events.length}\u0000${turn.events_slimmed ? 1 : 0}\u0000` +
+        `${turn.final_answer?.length ?? 0}\u0000${turn.user_entries.length}\u0000` +
+        `${turn.completion ? 1 : 0}\u0000${turn.preview?.revision ?? 0}\u0000`,
+    );
+  }
+  return hash.toString(16);
+}
+
+/**
+ * Structural timeline shape that can move portaled outlines: completed
+ * turns' hydration flag and event volume. Live streaming (preview revisions,
+ * working-turn events) only grows the newest turn and never moves content
+ * above it, so it stays out of the key; a restored-turn hydration commit or
+ * a history prepend changes the key and must invalidate every outline's
+ * measured geometry, because nothing inside those outline owners resizes.
+ */
+export function timelineOutlineShapeKey(turns: readonly WebTurn[]): string {
+  let key = "";
+  for (const turn of turns) {
+    if (turn.state === "working") continue;
+    key += `${turn.turn_id}:${turn.events_slimmed ? 1 : 0}:${turn.events.length};`;
+  }
+  return key;
+}
+
 export function turnShouldRenderInTimeline(turn: WebTurn): boolean {
   if (turn.state !== "pending") return true;
   return (
@@ -103,6 +218,9 @@ export function turnShouldRenderInTimeline(turn: WebTurn): boolean {
     turn.user_entries.some(
       (entry) => entry.kind === "task" && !!entry.text.trim(),
     ) ||
+    // The idle manual-compaction resume turn has empty user text; it must
+    // stay visible so the "compacting" notice keeps a timeline anchor.
+    turn.user_entries.some((entry) => entry.kind === "resume_directly") ||
     turn.events.length > 0 ||
     turn.user_entries.some((entry) => entry.kind === "approval") ||
     !!turn.final_answer ||
@@ -994,12 +1112,21 @@ export function upsertTurn(session: Session, incoming: WebTurn): Session {
   );
   const previousIsTerminal = !!(
     previous &&
-    (previous.state === "finished" || previous.completion)
+    (previous.state === "finished" ||
+      previous.state === "completed" ||
+      previous.completion)
   );
   // Turn state is monotonic. A delayed started/updated event from a cancelled
   // execution must not overwrite the terminal projection already shown by UI.
+  // A terminal projection may still be replaced by another terminal projection:
+  // restored turns (state "completed") gain late work-stream notices such as
+  // Timem.md updates, and the Host snapshot stays authoritative.
+  const incomingIsTerminal =
+    incoming.state === "finished" ||
+    incoming.state === "completed" ||
+    !!incoming.completion;
   const boundedIncoming =
-    previousIsTerminal && incoming.state !== "finished" ? previous : incoming;
+    previousIsTerminal && !incomingIsTerminal ? previous : incoming;
   const turns = trimTurns(
     previous
       ? session.turns.map((turn) =>
@@ -1179,6 +1306,23 @@ export function parseTimerEntryText(
   if (!match) return { name: null, prompt: text };
   const name = match[1].trim();
   return { name: name.length > 0 ? name : null, prompt: text.slice(match[0].length) };
+}
+
+/**
+ * Mailbox deliveries carry a runtime header "<sender> 发来 mail:" before the
+ * actual body (legacy history keeps the "[mailbox] " prefix). Presentation
+ * splits header from body without rewriting stored text; receipt/status
+ * notices do not match this shape and yield null so they stay pure meta.
+ */
+export function parseMailboxEntryText(
+  text: string,
+): { sender: string; body: string } | null {
+  const stripped = text.replace(/^\[mailbox\]\s*/, "");
+  // "\u53d1\u6765" is the host protocol word anchoring the mail-delivery
+  // header; escaped so no raw CJK literal ships inside view-model code.
+  const match = /^(\S+) \u53d1\u6765 mail:\n?([\s\S]*)$/.exec(stripped);
+  if (!match) return null;
+  return { sender: match[1], body: match[2] };
 }
 
 type ChatMessageHistoryRecord = Extract<ChatHistoryRecord, { type: "message" }>;
@@ -1582,7 +1726,12 @@ export function sessionContextUsage(
 export function sessionRuntimeUsage(
   session: Session,
 ): import("./protocol").UsageStats | undefined {
-  const runtimeRestartAtMs = sessionRuntimeRestartAtMs(session);
+  // Whole-history accounting, matching sessionModelTelemetry (speed & TTFT):
+  // restored turns and pre-restart requests still describe real model work,
+  // so the token/call readout stays consistent with the telemetry readout
+  // across runtime restarts instead of dropping to zero. The dashboard reset
+  // button moves the boundary forward to start a fresh recording window.
+  const resetAtMs = session.telemetry_reset_at_ms ?? undefined;
   const total: import("./protocol").UsageStats = {};
   let found = false;
 
@@ -1597,19 +1746,19 @@ export function sessionRuntimeUsage(
   };
 
   for (const turn of session.turns) {
-    if (turn.state === "restored") continue;
-    const live = turnLiveUsageSince(turn, runtimeRestartAtMs);
+    if (resetAtMs !== undefined && turn.created_at_ms < resetAtMs) continue;
+    // Completed turns carry the authoritative whole-turn stats: per-request
+    // model usage never tracks tool_calls, so the live feed alone would
+    // always report zero tools. Live aggregation only bridges working turns.
+    if (turn.state !== "working" && turn.completion?.stats) {
+      add(turn.completion.stats);
+      continue;
+    }
+    const live = turnLiveUsageSince(turn, resetAtMs);
     if (live) {
       add(live.total);
       continue;
     }
-    // Completion stats have no independent timestamp, so they count only when
-    // the complete turn started in this runtime instance.
-    if (
-      runtimeRestartAtMs !== undefined &&
-      turn.created_at_ms < runtimeRestartAtMs
-    )
-      continue;
     add(turn.completion?.stats);
   }
   return found ? total : undefined;
@@ -1807,9 +1956,19 @@ export function applyCoreTopicToSession(
     const id = turnId ?? event.payload.turn_id;
     const preview = event.payload as unknown as NonNullable<WebTurn["preview"]>;
     if (!Number.isSafeInteger(preview.revision)) return session;
-    return { ...session, turns: session.turns.map((turn) =>
-      turn.turn_id === id && preview.revision > (turn.preview?.revision ?? 0)
-        ? { ...turn, preview } : turn) };
+    // Streaming previews almost always target the newest turn; avoid scanning
+    // the whole timeline on every revision.
+    const lastIndex = session.turns.length - 1;
+    const turnIndex =
+      lastIndex >= 0 && session.turns[lastIndex].turn_id === id
+        ? lastIndex
+        : session.turns.findIndex((turn) => turn.turn_id === id);
+    if (turnIndex < 0) return session;
+    const target = session.turns[turnIndex];
+    if (preview.revision <= (target.preview?.revision ?? 0)) return session;
+    const turns = [...session.turns];
+    turns[turnIndex] = { ...target, preview };
+    return { ...session, turns };
   }
   const contextState = event.payload.context_state;
   const reportedDir =
@@ -2068,6 +2227,221 @@ export function completionStopReasonText(reason: string): string {
   return key ? t(key) : trimmed;
 }
 
+export type SessionModelTelemetry = {
+  tokensPerSecond?: number;
+  ttftMeanSeconds?: number;
+  ttftStdDevSeconds?: number;
+  samples: number;
+};
+
+export type TurnModelTelemetry = {
+  reasoningTokens?: number;
+  ttftMs?: number;
+  latencyMs?: number;
+};
+
+function finitePayloadNumber(
+  payload: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const value = payload[key];
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+/** Pair timing and usage by their explicit Core round, never by event order. */
+export function turnLatestModelTelemetry(
+  turn: WebTurn,
+  round?: number,
+): TurnModelTelemetry | undefined {
+  for (let index = turn.events.length - 1; index >= 0; index -= 1) {
+    const event = turn.events[index];
+    if (event.source !== "worker_activity" || event.payload.kind !== "model_response") continue;
+    const usage = event.payload.usage;
+    if (!usage || typeof usage !== "object") continue;
+    const responseRound = finitePayloadNumber(event.payload, "round");
+    if (round !== undefined && responseRound !== round) continue;
+    const matchedRound = round ?? responseRound;
+    let latencyMs: number | undefined;
+    let ttftMs: number | undefined;
+    if (matchedRound !== undefined) {
+      for (const candidate of turn.events) {
+        if (candidate.source !== "worker_activity" ||
+            candidate.payload.kind !== "model_request_completed" ||
+            finitePayloadNumber(candidate.payload, "round") !== matchedRound) continue;
+        latencyMs = finitePayloadNumber(candidate.payload, "latency_ms");
+        ttftMs = finitePayloadNumber(candidate.payload, "ttft_ms");
+        break;
+      }
+    }
+    return {
+      reasoningTokens: finitePayloadNumber(usage as UsageStats, "reasoning_tokens"),
+      latencyMs,
+      ttftMs,
+    };
+  }
+  return undefined;
+}
+
+/** Indexes `model_request_completed` events by round in one pass.
+ *
+ * Both telemetry helpers used to scan `turn.events` with `find` for every
+ * model response, which is O(responses × events) per turn. Keeping the first
+ * match per round preserves the previous `find` semantics for duplicated or
+ * out-of-order rounds.
+ */
+export function completedModelEventsByRound(
+  turn: WebTurn,
+): Map<number, WebTurnEvent> {
+  const completedByRound = new Map<number, WebTurnEvent>();
+  for (const event of turn.events) {
+    if (event.source !== "worker_activity") continue;
+    if (event.payload.kind !== "model_request_completed") continue;
+    const round = finitePayloadNumber(event.payload, "round");
+    if (round === undefined || completedByRound.has(round)) continue;
+    completedByRound.set(round, event);
+  }
+  return completedByRound;
+}
+
+/** Streaming Welford aggregation over completed model requests only. */
+export function sessionModelTelemetry(session: Session): SessionModelTelemetry {
+  let completionTokens = 0;
+  let modelLatencyMs = 0;
+  let samples = 0;
+  let ttftMean = 0;
+  let ttftM2 = 0;
+  const resetAtMs = session.telemetry_reset_at_ms ?? undefined;
+  for (const turn of session.turns) {
+    const completedByRound = completedModelEventsByRound(turn);
+    for (const response of turn.events) {
+      if (resetAtMs !== undefined && response.created_at_ms < resetAtMs) continue;
+      if (response.source !== "worker_activity" || response.payload.kind !== "model_response") continue;
+      const round = finitePayloadNumber(response.payload, "round");
+      if (round === undefined) continue;
+      const usage = response.payload.usage;
+      if (!usage || typeof usage !== "object") continue;
+      const completed = completedByRound.get(round);
+      if (!completed) continue;
+      const latencyMs = finitePayloadNumber(completed.payload, "latency_ms");
+      const outputTokens = finitePayloadNumber(usage as UsageStats, "completion_tokens");
+      if (latencyMs !== undefined && latencyMs > 0 && outputTokens !== undefined) {
+        completionTokens += outputTokens;
+        modelLatencyMs += latencyMs;
+      }
+      const ttftMs = finitePayloadNumber(completed.payload, "ttft_ms");
+      if (ttftMs !== undefined) {
+        samples += 1;
+        const seconds = ttftMs / 1000;
+        const delta = seconds - ttftMean;
+        ttftMean += delta / samples;
+        ttftM2 += delta * (seconds - ttftMean);
+      }
+    }
+  }
+  return {
+    tokensPerSecond: modelLatencyMs > 0 ? completionTokens * 1000 / modelLatencyMs : undefined,
+    ttftMeanSeconds: samples > 0 ? ttftMean : undefined,
+    ttftStdDevSeconds: samples > 0 ? Math.sqrt(ttftM2 / samples) : undefined,
+    samples,
+  };
+}
+
+/** Chronological per-request samples used by the Session Insights sparklines.
+ * Only the newest `MODEL_PULSE_LIMIT` requests are retained, so rendering a
+ * long session keeps a fixed-size working set instead of materializing every
+ * historical request just to draw a short curve. */
+export type SessionModelPulse = {
+  /** Tokens/sec for the last `MODEL_PULSE_LIMIT` completed requests. */
+  tokensPerSecond: number[];
+  /** TTFT seconds for the last `MODEL_PULSE_LIMIT` completed requests. */
+  ttftSeconds: number[];
+  /** Cache-hit percent for the last `MODEL_PULSE_LIMIT` completed requests. */
+  cacheHitPercent: number[];
+};
+
+const MODEL_PULSE_LIMIT = 15;
+
+type ModelPulseSample = {
+  createdAtMs: number;
+  eventId: string;
+  tokensPerSecond?: number;
+  ttftSeconds?: number;
+  cacheHitPercent?: number;
+};
+
+function compareModelPulseSamples(
+  left: ModelPulseSample,
+  right: ModelPulseSample,
+): number {
+  return left.createdAtMs - right.createdAtMs || left.eventId.localeCompare(right.eventId);
+}
+
+/** Inserts in chronological order and drops the oldest sample beyond the
+ * fixed window. The working set is always at most MODEL_PULSE_LIMIT entries. */
+function retainRecentModelPulseSample(
+  samples: ModelPulseSample[],
+  sample: ModelPulseSample,
+): void {
+  let insertAt = samples.length;
+  while (
+    insertAt > 0 &&
+    compareModelPulseSamples(samples[insertAt - 1], sample) > 0
+  ) {
+    insertAt -= 1;
+  }
+  samples.splice(insertAt, 0, sample);
+  if (samples.length > MODEL_PULSE_LIMIT) samples.shift();
+}
+
+export function sessionModelPulse(session: Session): SessionModelPulse {
+  const resetAtMs = session.telemetry_reset_at_ms ?? undefined;
+  const recent: ModelPulseSample[] = [];
+  for (const turn of session.turns) {
+    const completedByRound = completedModelEventsByRound(turn);
+    for (const response of turn.events) {
+      if (resetAtMs !== undefined && response.created_at_ms < resetAtMs) continue;
+      if (response.source !== "worker_activity" || response.payload.kind !== "model_response") continue;
+      const round = finitePayloadNumber(response.payload, "round");
+      if (round === undefined) continue;
+      const usage = response.payload.usage;
+      if (!usage || typeof usage !== "object") continue;
+      const completed = completedByRound.get(round);
+      if (!completed) continue;
+      const latencyMs = finitePayloadNumber(completed.payload, "latency_ms");
+      const outputTokens = finitePayloadNumber(usage as UsageStats, "completion_tokens");
+      const ttftMs = finitePayloadNumber(completed.payload, "ttft_ms");
+      const promptTokens = finitePayloadNumber(usage as UsageStats, "prompt_tokens");
+      const cachedTokens = finitePayloadNumber(usage as UsageStats, "cached_tokens");
+      retainRecentModelPulseSample(recent, {
+        createdAtMs: response.created_at_ms,
+        eventId: response.event_id,
+        tokensPerSecond:
+          latencyMs !== undefined && latencyMs > 0 && outputTokens !== undefined
+            ? outputTokens * 1000 / latencyMs
+            : undefined,
+        ttftSeconds: ttftMs === undefined ? undefined : ttftMs / 1000,
+        cacheHitPercent:
+          promptTokens !== undefined && promptTokens > 0 && cachedTokens !== undefined
+            ? Math.min(100, Math.max(0, (cachedTokens * 100) / promptTokens))
+            : undefined,
+      });
+    }
+  }
+  return {
+    tokensPerSecond: recent
+      .map((sample) => sample.tokensPerSecond)
+      .filter((value): value is number => value !== undefined),
+    ttftSeconds: recent
+      .map((sample) => sample.ttftSeconds)
+      .filter((value): value is number => value !== undefined),
+    cacheHitPercent: recent
+      .map((sample) => sample.cacheHitPercent)
+      .filter((value): value is number => value !== undefined),
+  };
+}
+
 export type ActiveModelRetryStatus = {
   kind:
     | "network-error"
@@ -2078,6 +2452,7 @@ export type ActiveModelRetryStatus = {
   label: string;
   progress?: string;
   detail: string;
+  startedAtMs?: number;
 };
 
 type ModelSystemRetryDisplay = Pick<
@@ -2187,7 +2562,13 @@ export function activeModelRetryStatus(
       ]
         .filter(Boolean)
         .join("\n\n");
-      status = { kind: display.kind, label: display.label, progress, detail };
+      status = {
+        kind: display.kind,
+        label: display.label,
+        progress,
+        detail,
+        startedAtMs: event.created_at_ms,
+      };
       continue;
     }
 
@@ -2282,6 +2663,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         readfile: readFilePresentation(action, redactedInput),
         run_bash_edit: runBashEditPresentation(action, redactedInput),
         timer: timerPresentation(action, redactedInput),
+        mailbox: mailboxPresentation(action, redactedInput),
         tool_status: status,
         tool_mode: toolMode,
         elapsed_ms:
@@ -2437,6 +2819,34 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
     default:
       return null;
   }
+}
+
+/**
+ * Expand one authoritative topic into its ordered presentation activities.
+ * A memo-blocked finish contains both model-authored assistant text and a memo
+ * notice. Keep them as two ordinary activity objects instead of a hybrid row
+ * with hand-copied typography.
+ */
+export function activitiesFromTopic(event: CoreTopicEvent): Activity[] {
+  const activity = activityFromTopic(event);
+  if (event.topic.name !== "core.memo" || event.payload.op !== "stops_finish")
+    return activity ? [activity] : [];
+  const summary =
+    typeof event.payload.summary === "string" ? event.payload.summary.trim() : "";
+  return [
+    ...(summary
+      ? [{
+          id: clientId(),
+          sessionId: event.session_id,
+          tone: "thinking" as const,
+          kind: "free_talk" as const,
+          title: "",
+          detail: summary,
+          createdAt: Date.now(),
+        }]
+      : []),
+    ...(activity ? [activity] : []),
+  ];
 }
 
 export function hasOnlyFreeTalkActivity(

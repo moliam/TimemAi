@@ -34,6 +34,7 @@ export type UsageStats = {
   mem_writes?: number;
   prompt_tokens?: number;
   completion_tokens?: number;
+  reasoning_tokens?: number;
   total_tokens?: number;
   cached_tokens?: number;
   cache_created_tokens?: number;
@@ -162,6 +163,14 @@ export type Session = {
   mcp_server_ids: string[];
   runtime_profile?: {
     model_endpoint_id?: string | null;
+    /** Host-observed route for the current request; pending snapshots apply before the next model API request. */
+    active_model_endpoint_id?: string | null;
+    model_endpoint_ids?: string[];
+    /** Per-endpoint session reasoning selections keyed by endpoint id. */
+    endpoint_reasoning_efforts?: Record<string, string>;
+    /** Per-endpoint session input-token window overrides keyed by endpoint id. */
+    endpoint_max_input_tokens?: Record<string, number>;
+    reasoning_effort?: string | null;
     model: string;
     api_protocol: string;
     response_protocol: string;
@@ -200,6 +209,7 @@ export type Session = {
   timers?: TimerInfo[];
   /** Wall-clock ms of the latest explicit context clear. */
   context_cleared_at_ms?: number | null;
+  telemetry_reset_at_ms?: number | null;
 };
 
 /** Flattened host timer projection (Core TimerSpec + host scheduling state). */
@@ -211,6 +221,8 @@ export type TimerInfo = {
   after_ms?: number | null;
   at?: string | null;
   interval_ms?: number | null;
+  /** Minutes a fired prompt may wait in the session queue when busy; 0 delivers immediately. */
+  queue_timeout_minutes?: number;
   created_by: "user" | "model" | string;
   created_at_ms: number;
   enabled: boolean;
@@ -218,6 +230,45 @@ export type TimerInfo = {
   last_fired_ms?: number | null;
   /** Why the runtime parked (auto-disabled) this timer; absent when user-paused. */
   parked_reason?: string | null;
+};
+
+/** One received mail in a session's mailbox (receipts included). */
+export type MailboxMailInfo = {
+  id: string;
+  from: string;
+  msg: string;
+  created_at_ms: number;
+  /** Seconds before a forced delivery attempt; -1 waits indefinitely. */
+  queue_timeout_secs?: number;
+  /** "mail" is a received letter; "receipt" acknowledges sent mail. */
+  kind?: string;
+  /** For receipts: the id of the original sent mail being acknowledged. */
+  receipt_for?: string | null;
+  delivered: boolean;
+  read: boolean;
+  /** True once the read receipt reached the sender's spool. */
+  receipt_sent?: boolean;
+};
+
+/** One outgoing mail in the session's sent ledger. */
+export type MailboxSentInfo = {
+  id: string;
+  to: string;
+  msg: string;
+  created_at_ms: number;
+  status: "failed" | "sent" | "read" | "timeout" | "discarded" | string;
+  /** Sender-side deadline for the read receipt; -1 waits indefinitely. */
+  resp_timeout_secs?: number;
+  /** True once the terminal transition was surfaced to the sending AI. */
+  notified?: boolean;
+};
+
+/** Host-authoritative mailbox snapshot for one session. */
+export type MailboxSnapshotInfo = {
+  mailbox_name: string;
+  mails: MailboxMailInfo[];
+  sent: MailboxSentInfo[];
+  unread: number;
 };
 
 export type McpTransport =
@@ -271,8 +322,17 @@ export type SessionWorker = {
 
 export type ResponsePreview = {
   attempt: number;
+  round?: number;
   timeline_seq?: number;
   revision: number;
+  thinking_words?: number;
+  /** Bounded newest-reasoning tail carried by preview frames. */
+  thinking_tail?: string;
+  thinking_truncated?: boolean;
+  thinking_elapsed_ms?: number | null;
+  ttft_ms?: number | null;
+  reasoning_tokens?: number | null;
+  stream_phase?: "thinking" | "responding" | null;
   interruption?: string | null;
   response?: { attempt: number; revision: number; text: string; status: "streaming" | "intermediate" | "final" } | null;
 };
@@ -285,6 +345,10 @@ export type WebTurn = {
   interrupted_at_ms?: number | null;
   user_entries: WebTurnUserEntry[];
   events: WebTurnEvent[];
+  /** Host flag: restored events were slimmed to previews (256-byte strings,
+   * action skeletons, snapshot tail). Clients fetch full detail via
+   * turn_history_page instead of rendering `…[truncated]` previews. */
+  events_slimmed?: boolean;
   final_answer?: string | null;
   completion?: TurnCompletion | null;
 };
@@ -360,6 +424,7 @@ export type Activity = {
   readfile?: import("./tool_presentation").ReadFilePresentation;
   run_bash_edit?: import("./tool_presentation").RunBashEditPresentation;
   timer?: import("./tool_presentation").TimerPresentation;
+  mailbox?: import("./tool_presentation").MailboxPresentation;
   elapsed_ms?: number;
   /** Bytes of the tool's own result output injected into the next prompt (runtime metadata excluded). */
   tool_output_bytes?: number;
@@ -376,6 +441,7 @@ export type Activity = {
     | "free_talk"
     | "user_supplement"
     | "memo_notice"
+    | "work_file_notice"
     | "reasoning_notice"
     | "model_service_issue";
   toolgen_phase?: string;
@@ -417,6 +483,8 @@ export type ModelEndpoint = {
   allow_cross_origin_redirects: boolean;
   private_ca_configured: boolean;
   reasoning_effort?: string | null;
+  rate_limited_since_ms?: number | null;
+  probing?: boolean;
 };
 
 export type ModelEndpointImportCandidate = {
@@ -476,6 +544,61 @@ export type ChatFavorite = {
   deleted?: boolean;
 };
 
+export type ResourceCapKernelStatus =
+  | "applied"
+  | "disabled"
+  | "unavailable"
+  | "unsupported";
+
+export type ResourceCapDimension = {
+  enabled: boolean;
+  percent: number;
+  kernel: ResourceCapKernelStatus;
+  limit: string | null;
+  reason: string | null;
+  escalation_required: boolean;
+};
+
+export type ResourceCapsProjection = {
+  cpu: ResourceCapDimension;
+  mem: ResourceCapDimension;
+  scope: string;
+};
+
+/// Read-only resource sample for the Session Insights dashboard. Absent
+/// dimensions mean the current platform cannot account for them; the UI must
+/// render an unavailable state instead of zero.
+export type SessionResourceUsage = {
+  cpu_usage_usec?: number;
+  cpu_quota_cores?: number;
+  memory_current_bytes?: number;
+  memory_anon_bytes?: number;
+  memory_file_bytes?: number;
+  memory_file_mapped_bytes?: number;
+  memory_peak_bytes?: number;
+  swap_current_bytes?: number;
+  memory_high_bytes?: number;
+  memory_max_bytes?: number;
+  oom_kill_count: number;
+};
+
+/// Machine-wide counters sampled with the Session resource query. CPU values
+/// are cumulative ticks; the dashboard derives utilization from two samples.
+export type SystemResourceUsage = {
+  cpu_busy_ticks?: number;
+  cpu_total_ticks?: number;
+  memory_total_bytes?: number;
+  memory_available_bytes?: number;
+};
+
+export type MemStorageUsage = {
+  temporary_bytes: number;
+  conversation_bytes: number;
+  mailbox_bytes: number;
+  mailbox_files: number;
+  favorite_bytes: number;
+};
+
 export type ModelToolResultBytes = 8192 | 10240 | 16384 | 20480 | 30720;
 export type ContextCompressThresholdPercent = 80 | 85 | 90 | 95 | 100;
 
@@ -497,10 +620,16 @@ export type Snapshot = {
       temporary_retention_days: 1 | 5 | 10 | null;
       temporary_capacity_bytes: number | null;
       conversation_capacity_bytes: number | null;
+      mailbox_capacity_bytes: number | null;
       claude_codex_tool_discovery: boolean;
       model_tool_result_bytes: ModelToolResultBytes;
       context_compress_threshold_percent: ContextCompressThresholdPercent;
       restore_prompt_context_on_startup: boolean;
+      system_cpu_cap_percent: number;
+      system_mem_cap_percent: number;
+      system_cpu_cap_enabled: boolean;
+      system_mem_cap_enabled: boolean;
+      resource_caps: ResourceCapsProjection;
     };
     runtime_options: Array<{
       key: string;
@@ -546,9 +675,19 @@ export type WireEvent =
       timers: TimerInfo[];
     }
   | {
+      type: "mailbox_updated";
+      session_id: string;
+      mailbox: MailboxSnapshotInfo;
+    }
+  | {
       type: "session_context_cleared";
       session_id: string;
       cleared_at_ms: number;
+    }
+  | {
+      type: "session_usage_reset";
+      session_id: string;
+      reset_at_ms: number;
     }
   | { type: "session_restart_cwd_resolved"; session: Session }
   | { type: "session_deleted"; session_id: string }
@@ -675,10 +814,24 @@ export type WireEvent =
       temporary_retention_days: 1 | 5 | 10 | null;
       temporary_capacity_bytes: number | null;
       conversation_capacity_bytes: number | null;
+      mailbox_capacity_bytes: number | null;
       claude_codex_tool_discovery: boolean;
       model_tool_result_bytes: ModelToolResultBytes;
       context_compress_threshold_percent: ContextCompressThresholdPercent;
       restore_prompt_context_on_startup: boolean;
+      system_cpu_cap_percent: number;
+      system_mem_cap_percent: number;
+      system_cpu_cap_enabled: boolean;
+      system_mem_cap_enabled: boolean;
+      resource_caps: ResourceCapsProjection;
+    }
+  | ({ type: "mem_storage_usage" } & MemStorageUsage)
+  | {
+      type: "session_resource_usage";
+      session_id: string;
+      sampled_at_ms: number;
+      usage: SessionResourceUsage | null;
+      system?: SystemResourceUsage | null;
     }
   | { type: "mem_temporary_items"; items: MemTemporaryItem[]; error?: string }
   | { type: "file_uploaded"; session_id: string; file: Attachment }
@@ -883,6 +1036,25 @@ export type ClientCommand =
       value: string;
     }
   | {
+      type: "session_reasoning_effort_update";
+      session_id: string;
+      reasoning_effort: string;
+    }
+  | {
+      type: "session_endpoint_reasoning_effort_update";
+      session_id: string;
+      endpoint_id: string;
+      reasoning_effort: string;
+    }
+  | {
+      type: "session_endpoint_max_input_tokens_update";
+      session_id: string;
+      endpoint_id: string;
+      max_input_tokens: number | null;
+    }
+  | { type: "session_usage_reset"; session_id: string }
+  | { type: "session_resource_usage_query"; session_id: string }
+  | {
       type: "model_endpoint_upsert";
       endpoint: {
         id?: string;
@@ -908,6 +1080,8 @@ export type ClientCommand =
   | { type: "model_endpoint_delete"; endpoint_id: string }
   | { type: "model_endpoint_delete_many"; endpoint_ids: string[] }
   | { type: "model_endpoint_apply"; session_id: string; endpoint_id: string }
+  | { type: "model_endpoint_chain_apply"; session_id: string; endpoint_ids: string[] }
+  | { type: "model_endpoint_availability_refresh" }
   | {
       type: "model_endpoint_import_scan";
       codex_dir?: string | null;
@@ -929,6 +1103,7 @@ export type ClientCommand =
       after_ms?: number;
       at?: string;
       interval_ms?: number;
+      queue_timeout_minutes?: number;
     }
   | { type: "timer_delete"; session_id: string; timer_id: string }
   | {
@@ -937,11 +1112,19 @@ export type ClientCommand =
       timer_id: string;
       enabled: boolean;
     }
+  | { type: "mailbox_get"; session_id: string }
+  | { type: "mailbox_clear"; session_id: string }
   | {
       type: "timer_update";
       session_id: string;
       timer_id: string;
       prompt: string;
+      name?: string;
+      mode?: "once" | "repeat";
+      after_ms?: number | null;
+      at?: string | null;
+      interval_ms?: number | null;
+      queue_timeout_minutes?: number;
     }
   | { type: "mcp_server_upsert"; session_id: string; config: McpServerConfig }
   | { type: "mcp_server_delete"; server_id: string }
@@ -960,11 +1143,28 @@ export type ClientCommand =
       max_bytes: number | null;
     }
   | { type: "mem_conversation_capacity_update"; max_bytes: number | null }
+  | { type: "mem_mailbox_capacity_update"; max_bytes: number | null }
+  | { type: "mem_storage_usage_query" }
   | { type: "beta_claude_codex_tool_discovery_update"; enabled: boolean }
   | { type: "system_model_tool_result_bytes_update"; max_bytes: ModelToolResultBytes }
   | {
       type: "system_context_compress_threshold_update";
       percent: ContextCompressThresholdPercent;
+    }
+  | {
+      type: "system_resource_caps_update";
+      cpu_enabled: boolean;
+      cpu_percent: number;
+      mem_enabled: boolean;
+      mem_percent: number;
+    }
+  | {
+      type: "system_resource_caps_escalate";
+      cpu_enabled: boolean;
+      cpu_percent: number;
+      mem_enabled: boolean;
+      mem_percent: number;
+      password: string;
     }
   | { type: "system_restore_prompt_context_on_startup_update"; enabled: boolean }
   | { type: "mem_temporary_items_list" }

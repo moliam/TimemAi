@@ -614,6 +614,21 @@ fn model_http_response_interpretation_is_core_owned() {
 }
 
 #[test]
+fn comment_only_sse_body_is_not_treated_as_plain_text_content() {
+    let config = config(ApiProtocol::OpenAiCompatible);
+    let body = ": keep-alive\n\n".repeat(30);
+    let interpreted = interpret_model_http_response(&config, 200, &body, "");
+    // Keep-alive comments belong to the SSE framing. They must never leak
+    // into the assistant text (and from there into the chat UI).
+    assert!(interpreted.raw_json.get("raw_text").is_none());
+    let text = match &interpreted.result {
+        Ok(response) => response.content.clone(),
+        Err(error) => error.clone(),
+    };
+    assert!(!text.contains("keep-alive"));
+}
+
+#[test]
 fn openai_compatible_sse_collects_content_and_usage_without_exposing_reasoning() {
     let config = config(ApiProtocol::OpenAiCompatible);
     let body = concat!(
@@ -1336,7 +1351,7 @@ fn builtin_tool_schemas_render_per_protocol_without_weakening_registry_validatio
         .iter()
         .find(|tool| tool.name == "run_bash")
         .expect("run_bash builtin");
-    assert!(original_run_bash.input_schema.get("oneOf").is_some());
+    assert!(original_run_bash.input_schema.get("oneOf").is_none());
     assert!(original_run_bash.input_schema.get("allOf").is_some());
 
     let request = ModelInteractionRequest {
@@ -2017,17 +2032,65 @@ fn catalog_request_payload_obeys_each_enabled_protocol_and_effort() {
                 cfg.request_fields
                     .insert("vendor_options".into(), json!({"flag":true}));
                 let body = build_model_request(&cfg, &[], StructuredOutputHint::None);
-                let (path, output) = if cfg.api_protocol == ApiProtocol::OpenAiResponses {
-                    ("/reasoning/effort", "max_output_tokens")
+                let output = if cfg.api_protocol == ApiProtocol::OpenAiResponses {
+                    "max_output_tokens"
                 } else {
-                    ("/reasoning_effort", "max_tokens")
+                    "max_tokens"
                 };
-                assert_eq!(
-                    body.pointer(path).and_then(Value::as_str),
-                    Some(effort.as_str()),
-                    "{}",
-                    model.id
-                );
+                if profile.reasoning_adapter
+                    == crate::model_catalog::ReasoningAdapter::KimiK2Thinking
+                {
+                    // K2 Chat maps the effort onto the thinking object instead
+                    // of reasoning_effort: none -> disabled, otherwise the
+                    // preserved-thinking form (or omitted when it cannot be
+                    // disabled at all).
+                    if model.efforts.iter().any(|e| e == "none") {
+                        let expected = if effort == "none" {
+                            json!({"type":"disabled"})
+                        } else {
+                            json!({"type":"enabled","keep":"all"})
+                        };
+                        assert_eq!(body.pointer("/thinking"), Some(&expected), "{}", model.id);
+                        assert!(body.get("reasoning_effort").is_none(), "{}", model.id);
+                    } else {
+                        assert!(body.get("thinking").is_none(), "{}", model.id);
+                        assert!(body.get("reasoning_effort").is_none(), "{}", model.id);
+                    }
+                } else if profile.reasoning_adapter
+                    == crate::model_catalog::ReasoningAdapter::DeepSeekChatThinking
+                {
+                    // DeepSeek V4 Chat maps none -> thinking disabled without
+                    // an effort value; low/high/max keep the enabled switch
+                    // next to the effort level.
+                    let expected = if effort == "none" {
+                        json!({"type":"disabled"})
+                    } else {
+                        json!({"type":"enabled"})
+                    };
+                    assert_eq!(body.pointer("/thinking"), Some(&expected), "{}", model.id);
+                    if effort == "none" {
+                        assert!(body.get("reasoning_effort").is_none(), "{}", model.id);
+                    } else {
+                        assert_eq!(
+                            body.get("reasoning_effort").and_then(Value::as_str),
+                            Some(effort.as_str()),
+                            "{}",
+                            model.id
+                        );
+                    }
+                } else {
+                    let path = if cfg.api_protocol == ApiProtocol::OpenAiResponses {
+                        "/reasoning/effort"
+                    } else {
+                        "/reasoning_effort"
+                    };
+                    assert_eq!(
+                        body.pointer(path).and_then(Value::as_str),
+                        Some(effort.as_str()),
+                        "{}",
+                        model.id
+                    );
+                }
                 assert_eq!(body[output], 8000);
                 assert_eq!(body["model"], model.model);
                 assert_eq!(body["vendor_options"], json!({"flag":true}));
@@ -2201,6 +2264,150 @@ fn zhipu_config(suffix: &str) -> ModelServiceConfig {
     cfg.openai_compatible.catalog_id = Some(format!("z-glm{suffix}"));
     cfg.openai_compatible.stream = true;
     cfg
+}
+
+fn kimi_config(catalog_id: &str, model_id: &str) -> ModelServiceConfig {
+    let mut cfg = config(ApiProtocol::OpenAiCompatible);
+    cfg.model = model_id.to_string();
+    cfg.openai_compatible.catalog_id = Some(catalog_id.to_string());
+    cfg.openai_compatible.stream = true;
+    cfg
+}
+
+#[test]
+fn kimi_code_responses_and_chat_wire() {
+    // Coding-plan templates share the K3 wire: Responses uses the standard
+    // enum body field; Chat uses top-level reasoning_effort with no thinking.
+    // An unspecified effort stays absent on Responses (server default is the
+    // documented model default) and falls back to the catalog default on Chat.
+    for (catalog_id, model_id, default) in [
+        ("kimicode_k3.1-pro", "k3.1-pro", "high"),
+        ("kimicode_k3.1-pro-highspeed", "k3.1-pro-highspeed", "high"),
+        ("kimicode_k3", "k3", "high"),
+        ("kimicode_k3-256k", "k3-256k", "high"),
+        ("kimicode_kimi-for-coding", "kimi-for-coding", "max"),
+    ] {
+        let mut responses = config(ApiProtocol::OpenAiResponses);
+        responses.model = model_id.to_string();
+        responses.openai_compatible.catalog_id = Some(catalog_id.to_string());
+        responses.openai_compatible.stream = true;
+        for effort in ["low", "high", "max"] {
+            let mut cfg = responses.clone();
+            cfg.openai_compatible.reasoning_effort = Some(effort.into());
+            let body = build_model_request(&cfg, &[], StructuredOutputHint::None);
+            assert_eq!(
+                body.pointer("/reasoning/effort").and_then(Value::as_str),
+                Some(effort),
+                "{model_id} responses {effort}"
+            );
+            crate::model_catalog::validate_request(&cfg, &body).unwrap();
+        }
+
+        let mut chat = config(ApiProtocol::OpenAiCompatible);
+        chat.model = model_id.to_string();
+        chat.openai_compatible.catalog_id = Some(catalog_id.to_string());
+        chat.openai_compatible.stream = true;
+        let body = build_model_request(&chat, &[], StructuredOutputHint::None);
+        assert_eq!(body["reasoning_effort"], default, "{model_id} chat default");
+        assert!(body.get("thinking").is_none(), "{model_id}");
+        crate::model_catalog::validate_request(&chat, &body).unwrap();
+        assert!(crate::model_catalog::uses_kimi_chat(&chat), "{model_id}");
+        assert!(
+            !crate::model_catalog::uses_kimi_chat(&responses),
+            "{model_id}"
+        );
+
+        // Coding plan rejects turning thinking off: no none档 in the catalog.
+        let mut wrong = chat.clone();
+        wrong.openai_compatible.reasoning_effort = Some("none".into());
+        assert!(
+            crate::model_requirements::validate_config(&wrong).is_err(),
+            "{model_id}"
+        );
+    }
+}
+
+#[test]
+fn kimi_k2_thinking_wire_and_guards() {
+    // kimi-k2.6: none/high档 map to the documented thinking object.
+    let mut cfg = kimi_config("k-k2.6", "kimi-k2.6");
+    let body = build_model_request(&cfg, &[], StructuredOutputHint::None);
+    assert_eq!(body["thinking"], json!({"type": "enabled", "keep": "all"}));
+    assert!(body.get("reasoning_effort").is_none());
+    assert!(body.get("enable_thinking").is_none());
+    crate::model_catalog::validate_request(&cfg, &body).unwrap();
+    assert!(crate::model_catalog::uses_kimi_k2_thinking(&cfg));
+    assert!(crate::model_catalog::chat_preserves_reasoning(&cfg));
+
+    cfg.openai_compatible.enable_thinking = Some(false);
+    let body = build_model_request(&cfg, &[], StructuredOutputHint::None);
+    assert_eq!(body["thinking"], json!({"type": "disabled"}));
+    crate::model_catalog::validate_request(&cfg, &body).unwrap();
+
+    cfg.openai_compatible.enable_thinking = None;
+    cfg.openai_compatible.reasoning_effort = Some("low".into());
+    assert!(crate::model_requirements::validate_config(&cfg).is_err());
+
+    // kimi-k2.7-code: thinking cannot be disabled; ordinary rounds omit it.
+    let mut cfg = kimi_config("k-k2.7-code", "kimi-k2.7-code");
+    let body = build_model_request(&cfg, &[], StructuredOutputHint::None);
+    assert!(body.get("thinking").is_none());
+    assert!(body.get("reasoning_effort").is_none());
+    crate::model_catalog::validate_request(&cfg, &body).unwrap();
+    cfg.openai_compatible.reasoning_effort = Some("none".into());
+    assert!(crate::model_requirements::validate_config(&cfg).is_err());
+}
+
+#[test]
+fn kimi_chat_reasoning_wire_and_guards() {
+    for (catalog_id, model_id) in [
+        ("k-k3.1-pro", "kimi-k3.1-pro"),
+        ("k-k3.1-pro-highspeed", "kimi-k3.1-pro-highspeed"),
+        ("k-k3", "kimi-k3"),
+    ] {
+        let cfg = kimi_config(catalog_id, model_id);
+        let body = build_model_request(&cfg, &[], StructuredOutputHint::None);
+        assert_eq!(body["reasoning_effort"], "max", "{model_id}");
+        assert!(body.get("thinking").is_none(), "{model_id}");
+        assert!(body.get("enable_thinking").is_none(), "{model_id}");
+        crate::model_catalog::validate_request(&cfg, &body).unwrap();
+        assert!(crate::model_catalog::uses_kimi_chat(&cfg));
+        assert!(crate::model_catalog::chat_preserves_reasoning(&cfg));
+
+        // Forbidden effort levels are rejected by the catalog contract.
+        let mut wrong = cfg.clone();
+        wrong.openai_compatible.reasoning_effort = Some("none".into());
+        assert!(crate::model_requirements::validate_config(&wrong).is_err());
+    }
+}
+
+#[test]
+fn kimi_chat_stream_preserves_reasoning_content_in_tool_continuation() {
+    let cfg = kimi_config("k-k3.1-pro", "kimi-k3.1-pro");
+    let first = json!({"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{
+        "index":0,"id":"call-1","type":"function",
+        "function":{"name":"run_bash","arguments":""}}]},"finish_reason":null}]});
+    let reasoning = json!({"choices":[{"index":0,"delta":{"reasoning_content":"plan the probe"},"finish_reason":null}]});
+    let tail = json!({"choices":[{"index":0,"delta":{"tool_calls":[{
+        "index":0,"function":{"arguments":"{\"cmd\":\"true\"}"}}]},"finish_reason":"tool_calls"}]});
+    let usage = json!({"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}});
+    let wire = format!("data: {first}\n\ndata: {reasoning}\n\ndata: {tail}\n\ndata: {usage}\n\n");
+    let interpreted = interpret_model_http_response(&cfg, 200, &wire, "");
+    let response = interpreted.result.unwrap();
+    assert_eq!(response.tool_calls.len(), 1);
+    assert!(response.tool_calls[0]
+        .assistant_continuation
+        .as_ref()
+        .is_some_and(|c| c.reasoning_content == "plan the probe"));
+    let exchange = crate::NativeExchange {
+        delta_id: "pd_test".to_string(),
+        assistant_text: String::new(),
+        calls: response.tool_calls,
+        results: Vec::new(),
+    };
+    let messages = openai_chat_exchange_messages(&cfg, &exchange);
+    let json = serde_json::to_value(&messages).unwrap();
+    assert!(json.to_string().contains("plan the probe"));
 }
 
 #[test]
@@ -2461,4 +2668,139 @@ fn clearing_endpoint_preferences_removes_stale_disable_and_effort() {
     }
     assert_eq!(options.enable_thinking, None);
     assert_eq!(options.reasoning_effort, None);
+}
+
+#[test]
+fn catalog_required_tool_choice_downgrades_to_auto_on_documented_rejections() {
+    let mut request = native_request();
+    request.tool_choice = NativeToolChoice::Required;
+
+    // Coding gateway Responses answers 400 on tool_choice=required (live
+    // audit 2026-10-24): downgrade to auto and keep the request admissible.
+    let mut responses = config(ApiProtocol::OpenAiResponses);
+    responses.model = "k3.1-pro".to_string();
+    responses.openai_compatible.catalog_id = Some("kimicode_k3.1-pro".to_string());
+    responses.openai_compatible.stream = true;
+    assert!(!crate::model_catalog::supports_required_tool_choice(
+        &responses
+    ));
+    let body = prepare_model_interaction_http_request(&responses, &request)
+        .model_request
+        .body;
+    assert_eq!(body["tool_choice"], json!("auto"));
+    crate::model_catalog::validate_request(&responses, &body).unwrap();
+    // Fail-closed: a raw required body never leaves on a rejected wire.
+    let mut raw = body.clone();
+    raw["tool_choice"] = json!("required");
+    assert!(crate::model_catalog::validate_request(&responses, &raw).is_err());
+
+    // Platform K2 chat rejects required per the official parameter table.
+    let k26 = kimi_config("k-k2.6", "kimi-k2.6");
+    assert!(!crate::model_catalog::supports_required_tool_choice(&k26));
+    let body = prepare_model_interaction_http_request(&k26, &request)
+        .model_request
+        .body;
+    assert_eq!(body["tool_choice"], json!("auto"));
+
+    // DeepSeek chat thinking mode answers 400 on tool_choice=required
+    // (live: "Thinking mode does not support this tool_choice"): the
+    // documented-rejection downgrade applies there too.
+    let ds = deepseek_config("ds-flash", "deepseek-flash");
+    assert!(!crate::model_catalog::supports_required_tool_choice(&ds));
+    let body = prepare_model_interaction_http_request(&ds, &request)
+        .model_request
+        .body;
+    assert_eq!(body["tool_choice"], json!("auto"));
+
+    // Documented-supported wires keep required: platform K3 chat and any
+    // non-catalog endpoint stay on the standard contract.
+    let k3 = kimi_config("k-k3", "kimi-k3");
+    assert!(crate::model_catalog::supports_required_tool_choice(&k3));
+    let body = prepare_model_interaction_http_request(&k3, &request)
+        .model_request
+        .body;
+    assert_eq!(body["tool_choice"], json!("required"));
+    let body =
+        prepare_model_interaction_http_request(&config(ApiProtocol::OpenAiCompatible), &request)
+            .model_request
+            .body;
+    assert_eq!(body["tool_choice"], json!("required"));
+}
+
+#[test]
+fn provider_usage_reasoning_tokens_are_normalized_and_missing_fields_are_safe() {
+    let cases = [
+        (
+            ApiProtocol::OpenAiCompatible,
+            json!({
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"completion_tokens": 12, "completion_tokens_details": {"reasoning_tokens": 7}}
+            }),
+        ),
+        (
+            ApiProtocol::OpenAiResponses,
+            json!({
+                "output_text": "ok",
+                "usage": {"input_tokens": 3, "output_tokens": 12, "output_tokens_details": {"reasoning_tokens": 7}}
+            }),
+        ),
+        (
+            ApiProtocol::Anthropic,
+            json!({
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {"input_tokens": 3, "output_tokens": 12, "thinking_tokens": 7}
+            }),
+        ),
+    ];
+    for (protocol, raw) in cases {
+        let response = parse_model_response(&config(protocol), &raw).unwrap();
+        assert_eq!(response.usage.reasoning_tokens, 7, "{protocol:?}");
+        assert_eq!(response.usage.completion_tokens, 12, "{protocol:?}");
+    }
+    let response = parse_model_response(
+        &config(ApiProtocol::OpenAiCompatible),
+        &json!({"choices": [{"message": {"content": "ok"}}], "custom_usage": {"opaque": true}}),
+    )
+    .unwrap();
+    assert_eq!(response.usage.reasoning_tokens, 0);
+}
+
+fn deepseek_config(catalog_id: &str, model_id: &str) -> ModelServiceConfig {
+    let mut cfg = config(ApiProtocol::OpenAiCompatible);
+    cfg.model = model_id.to_string();
+    cfg.openai_compatible.catalog_id = Some(catalog_id.to_string());
+    cfg.openai_compatible.stream = true;
+    cfg
+}
+
+#[test]
+fn deepseek_chat_sends_thinking_switch_and_effort() {
+    // DeepSeek V4 Chat: the thinking object toggles the mode and
+    // reasoning_effort (low/high/max) sets the strength. The unspecified
+    // state falls back to the catalog default (thinking on, high); disabled
+    // sends the explicit disabled form without an effort value.
+    for (catalog_id, model_id) in [
+        ("ds-flash", "deepseek-flash"),
+        ("ds-v4-pro", "deepseek-v4-pro"),
+    ] {
+        let cfg = deepseek_config(catalog_id, model_id);
+        let body = build_model_request_with_reasoning(&cfg, &[], StructuredOutputHint::None, false);
+        assert_eq!(body["thinking"], json!({"type": "enabled"}));
+        assert_eq!(body["reasoning_effort"], json!("high"));
+        crate::model_catalog::validate_request(&cfg, &body).unwrap();
+
+        let mut low = deepseek_config(catalog_id, model_id);
+        low.openai_compatible.reasoning_effort = Some("low".into());
+        let body = build_model_request_with_reasoning(&low, &[], StructuredOutputHint::None, false);
+        assert_eq!(body["thinking"], json!({"type": "enabled"}));
+        assert_eq!(body["reasoning_effort"], json!("low"));
+        crate::model_catalog::validate_request(&low, &body).unwrap();
+
+        let mut off = deepseek_config(catalog_id, model_id);
+        off.openai_compatible.enable_thinking = Some(false);
+        let body = build_model_request_with_reasoning(&off, &[], StructuredOutputHint::None, false);
+        assert_eq!(body["thinking"], json!({"type": "disabled"}));
+        assert!(body.get("reasoning_effort").is_none());
+        crate::model_catalog::validate_request(&off, &body).unwrap();
+    }
 }

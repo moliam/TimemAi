@@ -263,6 +263,83 @@ fn temporary_retention_prunes_only_selected_old_events() {
 }
 
 #[test]
+fn command_delivery_rows_parse_and_expire_as_temporary_events() {
+    let root = tmp_dir("temporary_retention_command_delivery");
+    let store = SessionStore::new(&root);
+    let path = store.history_path_for_session("session_a");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    // Historic writer bug: the trailing duplicated `kind` key won during
+    // deserialization, so those rows must decode into CommandDelivery.
+    let legacy_row = r#"{"type":"event","role":"system","turn_id":"t1","created_at_ms":1,"kind":"runtime_notice","content":"Core accepted command.","command_id":"c1","delivery_state":"core_accepted","kind":"command_delivery"}"#;
+    let structured = ChatHistoryRecord::Event {
+        role: ChatHistoryRole::System,
+        turn_id: "t2".to_string(),
+        created_at_ms: 2,
+        kind: ChatHistoryEventKind::CommandDelivery,
+        content: "Core accepted command.".to_string(),
+        extra: BTreeMap::new(),
+    };
+    let encoded = serde_json::to_string(&structured).unwrap();
+    assert!(
+        encoded.contains(r#""kind":"command_delivery""#),
+        "{encoded}"
+    );
+    assert_eq!(encoded.matches("\"kind\"").count(), 1, "no duplicated kind");
+
+    store
+        .append_history_record("session_a", &structured)
+        .unwrap();
+    store
+        .append_history_record(
+            "session_a",
+            &ChatHistoryRecord::Message {
+                role: ChatHistoryRole::User,
+                turn_id: "m1".to_string(),
+                created_at_ms: 1,
+                kind: None,
+                command_id: None,
+                delivery_state: None,
+                content: "durable user message".to_string(),
+            },
+        )
+        .unwrap();
+    {
+        use std::io::Write as _;
+        writeln!(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap(),
+            "{legacy_row}"
+        )
+        .unwrap();
+    }
+
+    let loaded = read_all_history_records(&path).unwrap();
+    assert!(
+        loaded.iter().any(|record| matches!(
+            record,
+            ChatHistoryRecord::Event {
+                kind: ChatHistoryEventKind::CommandDelivery,
+                ..
+            }
+        )),
+        "the legacy duplicated-kind row decodes into CommandDelivery"
+    );
+
+    let removed = store
+        .prune_temporary_history_events_before("session_a", 100)
+        .unwrap();
+    assert_eq!(
+        removed, 2,
+        "legacy duplicated-kind row and structured row both expire"
+    );
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("durable user message"));
+    assert!(!text.contains("command_delivery"));
+}
+
+#[test]
 fn temporary_retention_serializes_with_concurrent_appends_without_losing_messages() {
     let root = tmp_dir("temporary_retention_concurrent_append");
     let store = SessionStore::new(&root);
@@ -1196,6 +1273,57 @@ fn conversation_capacity_prunes_complete_oldest_turns() {
 }
 
 #[test]
+fn block_ordered_pruning_reports_oldest_block_and_prunes_before_cutoff() {
+    let root = tmp_dir("conversation_block_ordered_prune");
+    let store = SessionStore::new(&root);
+    for (turn_id, created_at_ms, content) in [
+        ("turn_old", 1_000_i64, "old"),
+        ("turn_mid", 2_000_i64, "mid"),
+        ("turn_new", 3_000_i64, "new"),
+    ] {
+        store
+            .append_history_record(
+                "session_a",
+                &ChatHistoryRecord::Message {
+                    role: ChatHistoryRole::User,
+                    turn_id: turn_id.to_string(),
+                    created_at_ms,
+                    kind: None,
+                    command_id: None,
+                    delivery_state: None,
+                    content: content.to_string(),
+                },
+            )
+            .unwrap();
+    }
+
+    assert_eq!(
+        store.oldest_history_turn_ms("session_a").unwrap(),
+        Some(1_000)
+    );
+    assert!(
+        store
+            .prune_history_turns_before("session_a", 3_000)
+            .unwrap()
+            > 0
+    );
+    let retained = read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].turn_id(), "turn_new");
+    assert_eq!(
+        store.oldest_history_turn_ms("session_a").unwrap(),
+        Some(3_000)
+    );
+    assert_eq!(
+        store
+            .prune_history_turns_before("session_a", 3_000)
+            .unwrap(),
+        0,
+        "blocks at the cutoff are retained"
+    );
+}
+
+#[test]
 fn temporary_retention_summary_survives_store_restart_and_tracks_appends() {
     let root = tmp_dir("temporary_retention_persisted_summary");
     let store = SessionStore::new(&root);
@@ -1437,4 +1565,82 @@ fn action_events_split_consecutive_restart_notice_runs() {
             .collect::<Vec<_>>(),
         ["notice_1", "action_turn", "notice_3"]
     );
+}
+
+#[test]
+fn persisted_history_index_survives_store_restart_and_extends_incrementally() {
+    let root = tmp_dir("persisted_index");
+    let store = SessionStore::new(&root);
+    for index in 0..3 {
+        store
+            .append_history_record("session_a", &message(index))
+            .unwrap();
+    }
+    store.read_history_page("session_a", None, 10).unwrap();
+    let index_path = store
+        .history_path_for_session("session_a")
+        .with_file_name("raw_chat_history.index.json");
+    assert!(index_path.exists(), "reading a page must persist the index");
+
+    // Append behind the store's back, then reopen with a fresh store instance
+    // (simulates bytes written before a process restart): the rebuilt index
+    // must come from the persisted checkpoint plus only the appended tail.
+    let tail = ChatHistoryRecord::Message {
+        role: ChatHistoryRole::User,
+        turn_id: "turn_tail".to_string(),
+        created_at_ms: 99,
+        kind: None,
+        command_id: None,
+        delivery_state: None,
+        content: "appended after restart".to_string(),
+    };
+    let mut line = serde_json::to_vec(&tail).unwrap();
+    line.push(b'\n');
+    {
+        use std::io::Write as _;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(store.history_path_for_session("session_a"))
+            .unwrap();
+        file.write_all(&line).unwrap();
+    }
+
+    let reopened = SessionStore::new(&root);
+    let page = reopened.read_history_page("session_a", None, 10).unwrap();
+    let turn_ids: Vec<_> = page
+        .records
+        .iter()
+        .map(|record| record.turn_id().to_string())
+        .collect();
+    assert_eq!(turn_ids, vec!["turn_0", "turn_1", "turn_2", "turn_tail"]);
+    assert!(
+        index_path.exists(),
+        "the reopened store must re-persist the index"
+    );
+}
+
+#[test]
+fn corrupt_persisted_history_index_falls_back_to_full_rebuild() {
+    let root = tmp_dir("persisted_index_corrupt");
+    let store = SessionStore::new(&root);
+    for index in 0..2 {
+        store
+            .append_history_record("session_a", &message(index))
+            .unwrap();
+    }
+    store.read_history_page("session_a", None, 10).unwrap();
+    let index_path = store
+        .history_path_for_session("session_a")
+        .with_file_name("raw_chat_history.index.json");
+    assert!(index_path.exists());
+    fs::write(&index_path, b"{not json").unwrap();
+
+    let reopened = SessionStore::new(&root);
+    let page = reopened.read_history_page("session_a", None, 10).unwrap();
+    let turn_ids: Vec<_> = page
+        .records
+        .iter()
+        .map(|record| record.turn_id().to_string())
+        .collect();
+    assert_eq!(turn_ids, vec!["turn_0", "turn_1"]);
 }

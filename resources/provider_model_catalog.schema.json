@@ -407,6 +407,9 @@
             "unknown"
           ]
         },
+        "required_tool_choice": {
+          "type": "boolean"
+        },
         "source_refs": {
           "type": "array",
           "items": {
@@ -432,13 +435,17 @@
               "handler": {
                 "enum": [
                   "enum_body_field",
-                  "zhipu_chat_reasoning"
+                  "zhipu_chat_reasoning",
+                  "kimi_chat_reasoning",
+                  "kimi_k2_thinking",
+                  "deepseek_chat_thinking"
                 ]
               },
               "path": {
                 "enum": [
                   "/reasoning/effort",
-                  "/reasoning_effort"
+                  "/reasoning_effort",
+                  "/thinking"
                 ]
               }
             },

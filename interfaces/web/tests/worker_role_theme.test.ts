@@ -58,6 +58,11 @@ describe("worker role action theme", () => {
     expect(lightHover).toContain("background: #cce6df");
     expect(light).not.toMatch(/background:\s*#(?:171717|202020|222)/i);
   });
+  it("keeps desktop sidebar positioning out of the mobile drawer breakpoints", () => {
+    expect(styles).toContain("@media (min-width: 1051px) {\n  .sidebar,\n  .worker-role-panel,\n  .toolrepo-side-panel { position: relative; }");
+    expect(styles).not.toContain("\n.sidebar,\n.worker-role-panel,\n.toolrepo-side-panel { position: relative; }");
+  });
+
   it("uses a compact, readable type scale inside the narrow roles panel", () => {
     const panel = rule(".worker-role-panel");
     const title = rule(".worker-role-panel > header > span");

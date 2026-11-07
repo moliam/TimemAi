@@ -17,6 +17,9 @@ description: |
   * **Curr state**: Current work status, progress, artifacts, uncommitted changes, running jobs, and temporary targets to clean.
   * **Next work**: The next concrete action.
 
+  Then, give a keyword set as the separate `keywords` argument, not inside `summary`; the runtime validates it and echoes it back as the next prompt's "Thought pieces" section.
+  `keywords` value: comma-separated words and very short phrases only, no complete sentences; harnessing the essence of all your thought sparks far more diverse than `summary`, helping you steer future work. Several hundred words, better no more than 1024 words, hard cap 1200. You can put entities, paths, ids, important names, user criticism, key numbers, settled decisions, failed approaches, etc, thought sparks in it, that will trigger recall of the work or lessons it names for you. On re-compression, merge and update this index in place instead of appending duplicates.
+
   Before calling, check that every useful fact from each non-kept delta is represented in `summary`, all ids were provided by the runtime, and `keep` and `offload` do not overlap.
   Provide a non-empty `summary` and use only runtime-provided dynamic delta ids.
   `keep` and `offload` are optional. Prefer summary-only compression; add `keep`
@@ -35,15 +38,17 @@ input_schema: |
     "properties": {
       "keep": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1, "pattern": "\\S"}, "description": "Live delta ids whose exact original content is still needed after compression."},
       "offload": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1, "pattern": "\\S"}, "description": "Important bulky delta ids that may need later retrieval from scratch."},
-      "summary": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Dense authoritative checkpoint containing all useful state needed to continue."}
+      "summary": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Dense authoritative checkpoint containing all useful state needed to continue."},
+      "keywords": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Standalone comma-separated keyword for remembering thought pieces. The runtime validates it is present and echoes it back as the next prompt Thought pieces section."}
     },
-    "required": ["summary"]
+    "required": ["summary", "keywords"]
   }
 example_json: |
   {
     "context_compress": {
       "keep": ["pd_4"],
       "offload": ["pd_2"],
-      "summary": "The active task is ... Current progress ... Next steps ..."
+      "summary": "The active task is ... Current progress ... Next steps ...",
+      "keywords": "endpoint chain, apply close reopen, session switch, Chinese responses, be abstract, strucutured output"
     }
   }

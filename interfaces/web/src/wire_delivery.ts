@@ -25,6 +25,7 @@ const DIRECT_EVENT_TYPES: ReadonlySet<WireEvent["type"]> = new Set([
   "model_endpoint_share_exported",
   "model_endpoint_share_imported",
   "session_api_key_revealed",
+  "session_resource_usage",
   "tool_repo_detail",
   "tool_repo_search_result",
 ]);

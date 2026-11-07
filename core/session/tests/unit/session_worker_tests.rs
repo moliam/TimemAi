@@ -86,6 +86,7 @@ fn manual_compact_ui(
         pending_bash_always_allow: false,
         pending_runtime_updates: Arc::new(Mutex::new(Vec::new())),
         interaction_profile: None,
+        pending_debug_reasoning: None,
     };
     (ui, mailbox, manual_flag)
 }
@@ -99,6 +100,7 @@ fn manual_compact_marker_drains_into_flag_not_prompt_text() {
         text: "user follow-up".to_string(),
         additional_context: None,
         command_id: None,
+        system_input: false,
         queued_at: Instant::now(),
         manual_context_compress: false,
     });
@@ -106,6 +108,7 @@ fn manual_compact_marker_drains_into_flag_not_prompt_text() {
         text: String::new(),
         additional_context: None,
         command_id: None,
+        system_input: false,
         queued_at: Instant::now(),
         manual_context_compress: true,
     });
@@ -127,6 +130,7 @@ fn manual_compact_marker_uses_short_dispatch_timeout() {
         text: String::new(),
         additional_context: None,
         command_id: None,
+        system_input: false,
         queued_at: Instant::now() - Duration::from_secs(11),
         manual_context_compress: true,
     });
@@ -1183,6 +1187,268 @@ fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
     worker.shutdown().unwrap();
 }
 
+/// Captures every rendered prompt and keeps the first call busy long enough
+/// for a Host supplement to land inside the same turn.
+struct SystemSupplementCaptureModel {
+    prompts: Arc<Mutex<Vec<String>>>,
+    entered_first_call: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl ModelClient for SystemSupplementCaptureModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        prompt: &str,
+        _audit_file: &std::path::Path,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        let call_no = {
+            let mut prompts = self.prompts.lock().unwrap();
+            prompts.push(prompt.to_string());
+            prompts.len()
+        };
+        if call_no == 1 {
+            self.entered_first_call
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_millis(200) {
+                if should_cancel() {
+                    return Err("cancelled_by_user".to_string());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        Ok(LlmResponse {
+            tool_calls: Vec::new(),
+            content: r#"{"status":"ALL_FINISHED","final_answer":"SYSTEM_INPUT_OK"}"#.to_string(),
+            model_name: "test-model".to_string(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        })
+    }
+}
+
+/// Closest rendered role heading before `needle`. The prompt itself describes
+/// both role words, so only the nearest preceding heading is evidence.
+fn rendered_role_before(prompt: &str, needle: &str) -> &'static str {
+    let at = prompt.find(needle).expect("needle missing from prompt");
+    let prefix = &prompt[..at];
+    match (prefix.rfind("## USER"), prefix.rfind("## RUNTIME")) {
+        (Some(user), Some(runtime)) if user > runtime => "user",
+        (Some(_), Some(_)) => "runtime",
+        (Some(_), None) => "user",
+        (None, Some(_)) => "runtime",
+        (None, None) => "none",
+    }
+}
+
+#[test]
+fn system_turn_input_is_rendered_under_the_runtime_role() {
+    let dir = tmp_dir("system_turn_runtime_role");
+    let core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "system_turn_runtime_role", 1),
+        ImmediateFinalPromptCaptureModel {
+            prompts: Arc::clone(&prompts),
+        },
+    );
+    let handle = worker.handle();
+    let _lifecycle = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker should emit lifecycle topic");
+
+    handle
+        .run_system_turn_with_command_id("[mailbox] SYSTEM_DELIVERY_SENTINEL", None, None)
+        .expect("worker should accept a runtime-triggered turn");
+
+    loop {
+        if let CoreSessionWorkerEvent::TurnFinished { .. } = worker
+            .events()
+            .recv_timeout(Duration::from_secs(5))
+            .expect("runtime-triggered turn should finish")
+        {
+            break;
+        }
+    }
+
+    let prompt = prompts
+        .lock()
+        .unwrap()
+        .first()
+        .cloned()
+        .expect("model prompt captured");
+    assert_eq!(
+        rendered_role_before(&prompt, "SYSTEM_DELIVERY_SENTINEL"),
+        "runtime",
+        "runtime-triggered input must never render as a user question"
+    );
+    assert!(!prompt.contains("[User input time"));
+
+    worker.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn system_supplement_is_rendered_under_the_runtime_role() {
+    let dir = tmp_dir("system_supplement_runtime_role");
+    let core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let entered_first_call = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "system_supplement_runtime_role", 1),
+        SystemSupplementCaptureModel {
+            prompts: Arc::clone(&prompts),
+            entered_first_call: Arc::clone(&entered_first_call),
+        },
+    );
+    let handle = worker.handle();
+    let _lifecycle = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker should emit lifecycle topic");
+
+    handle
+        .run_turn("USER_TURN_BASE_SENTINEL", None)
+        .expect("worker should accept the user turn");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !entered_first_call.load(std::sync::atomic::Ordering::SeqCst) {
+        assert!(Instant::now() < deadline, "first model call never started");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let accepted = handle
+        .try_add_system_supplement_with_context_and_command_id_after(
+            "[mailbox] MAILBOX_SUPPLEMENT_SENTINEL",
+            None,
+            None,
+            || Ok(()),
+        )
+        .expect("system supplement enqueue should not fail");
+    assert!(accepted, "system supplement should be accepted mid-turn");
+
+    loop {
+        if let CoreSessionWorkerEvent::TurnFinished { .. } = worker
+            .events()
+            .recv_timeout(Duration::from_secs(5))
+            .expect("supplemented turn should finish")
+        {
+            break;
+        }
+    }
+
+    let captured = prompts.lock().unwrap();
+    assert!(
+        captured.len() >= 2,
+        "the system supplement must reach a model request"
+    );
+    assert_eq!(
+        rendered_role_before(&captured[1], "MAILBOX_SUPPLEMENT_SENTINEL"),
+        "runtime",
+        "runtime-triggered supplement must never render as a user question"
+    );
+
+    drop(captured);
+    worker.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn mailbox_address_is_restated_once_after_context_clear() {
+    let dir = tmp_dir("mailbox_address_reminder_clear");
+    let core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "mailbox_address_reminder_clear", 1),
+        ImmediateFinalPromptCaptureModel {
+            prompts: Arc::clone(&prompts),
+        },
+    );
+    let handle = worker.handle();
+    let _lifecycle = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker should emit lifecycle topic");
+
+    handle
+        .update_mailbox_name(Some("mb-test123".to_string()))
+        .expect("worker should accept the mailbox address");
+    handle
+        .clear_dynamic_context()
+        .expect("worker should clear the dynamic context");
+    handle
+        .run_turn("after clear", None)
+        .expect("worker should accept the first turn after clear");
+    loop {
+        if let CoreSessionWorkerEvent::TurnFinished { .. } = worker
+            .events()
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first turn after clear should finish")
+        {
+            break;
+        }
+    }
+    handle
+        .run_turn("next turn", None)
+        .expect("worker should accept the following turn");
+    loop {
+        if let CoreSessionWorkerEvent::TurnFinished { .. } = worker
+            .events()
+            .recv_timeout(Duration::from_secs(5))
+            .expect("following turn should finish")
+        {
+            break;
+        }
+    }
+
+    let captured = prompts.lock().unwrap();
+    assert!(captured.len() >= 2, "both turns must reach the model");
+    let reminder = "Current session's mailbox is: mb-test123";
+    assert_eq!(
+        captured[0].matches(reminder).count(),
+        1,
+        "the first turn after a clear restates the address once"
+    );
+    assert_eq!(
+        rendered_role_before(&captured[0], reminder),
+        "runtime",
+        "the mailbox reminder belongs to the runtime role"
+    );
+    assert_eq!(
+        captured[1].matches(reminder).count(),
+        1,
+        "the reminder must not be repeated on later turns"
+    );
+
+    drop(captured);
+    worker.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 struct PromptCutStressModel {
     call_tx: std::sync::mpsc::Sender<(usize, String)>,
     release_rx: std::sync::mpsc::Receiver<()>,
@@ -2016,6 +2282,7 @@ fn toolgen_approval_topic_keeps_session_context_and_worker_scope() {
         pending_bash_always_allow: false,
         pending_runtime_updates: Arc::new(Mutex::new(Vec::new())),
         interaction_profile: None,
+        pending_debug_reasoning: None,
     };
     let waiter = std::thread::spawn(move || {
         ui.request_host_decision_topic(
@@ -6064,6 +6331,7 @@ fn manual_compact_at_finish_is_handed_off_without_waiting_for_user_input() {
                 text: String::new(),
                 additional_context: None,
                 command_id: None,
+                system_input: false,
                 queued_at: Instant::now(),
                 manual_context_compress: true,
             });
@@ -6076,4 +6344,83 @@ fn manual_compact_at_finish_is_handed_off_without_waiting_for_user_input() {
         assert!(ui.close_supplements_for_host_handoff().is_empty());
         assert!(!mailbox.lock().unwrap().accepting);
     }
+}
+
+#[test]
+fn model_response_event_carries_debug_reasoning_for_the_matching_round() {
+    use agent_core::TurnUi as _;
+
+    fn ui_with_events() -> (
+        WorkerTurnUi,
+        std::sync::mpsc::Receiver<CoreSessionWorkerEvent>,
+    ) {
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let (_reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let ui = WorkerTurnUi {
+            event_tx,
+            session_id: "session_debug_reasoning".to_string(),
+            context_id: "context_0".to_string(),
+            worker_id: "worker_0".to_string(),
+            supplement_mailbox: Arc::new(Mutex::new(SupplementMailbox {
+                accepting: true,
+                queue: Vec::new(),
+            })),
+            command_ids: Arc::new(Mutex::new(CoreCommandIdTracker::default())),
+            cancel_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            manual_compact_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reply_rx,
+            runtime: CoreSessionWorkerRuntime::new(),
+            current_turn_active: None,
+            phase: None,
+            accept_supplements: true,
+            user_supplement_model_dispatch_timeout: std::time::Duration::from_secs(120),
+            supplement_dispatch_timeout: None,
+            continue_supplements_after_final_answer: true,
+            pending_bash_always_allow: false,
+            pending_runtime_updates: Arc::new(Mutex::new(Vec::new())),
+            interaction_profile: None,
+            pending_debug_reasoning: None,
+        };
+        (ui, event_rx)
+    }
+
+    let (mut ui, event_rx) = ui_with_events();
+    let response = LlmResponse {
+        content: "answer".to_string(),
+        tool_calls: Vec::new(),
+        model_name: "test-model".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    };
+
+    ui.on_model_interaction_reasoning(3, "保留的思考", true);
+    ui.on_model_interaction_response(3, &response);
+    let CoreSessionWorkerEvent::ModelResponse {
+        reasoning,
+        reasoning_truncated,
+        ..
+    } = event_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("model response event")
+    else {
+        panic!("expected ModelResponse");
+    };
+    assert_eq!(reasoning, "保留的思考");
+    assert!(reasoning_truncated);
+
+    // A stale capture must not leak into a response from another round.
+    ui.on_model_interaction_reasoning(4, "stale", false);
+    ui.on_model_interaction_response(5, &response);
+    let CoreSessionWorkerEvent::ModelResponse {
+        reasoning,
+        reasoning_truncated,
+        ..
+    } = event_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("second model response event")
+    else {
+        panic!("expected ModelResponse");
+    };
+    assert!(reasoning.is_empty());
+    assert!(!reasoning_truncated);
 }

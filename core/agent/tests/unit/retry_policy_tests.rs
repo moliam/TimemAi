@@ -33,6 +33,11 @@ fn retryable_model_system_errors_cover_network_and_transient_http() {
         "model_http_503",
         "model_responses_stream_failed: event_type=error code=server_is_overloaded type=error message=Our servers are currently overloaded. Please try again later.",
         "model_responses_stream_failed: event_type=response.failed code=rate_limit_exceeded type=server_error message=retry later",
+        "model_response_too_large: response exceeds 16777216 bytes",
+        "model_tls_error: stage=response_headers handshake failed",
+        "model_responses_stream_missing_terminal",
+        "model_responses_stream_failed: event_type=error code=overloaded_error type=error message=Overloaded",
+        "model_responses_stream_failed: event_type=error code=api_error type=error message=Internal server error",
     ] {
         assert!(is_retryable_model_system_error(error), "{error}");
     }
@@ -56,7 +61,9 @@ fn non_retryable_model_errors_do_not_waste_rounds() {
         "model_request_too_large: request body exceeds limit",
         "model_redirect_blocked: cross-origin redirect",
         "model_responses_stream_failed: event_type=response.failed code=invalid_request_error type=invalid_request_error message=bad tools",
-        "model_responses_stream_failed",
+        // "model_responses_stream_failed" (bare) moved to the retryable set:
+        // a provider stream failure without extractable details is server-side
+        // and transient, exactly like connection resets.
         "invalid_json",
         "status_required",
         "next_actions[0].args_required",
@@ -139,6 +146,7 @@ fn input_too_large_errors_are_detected_without_matching_unrelated_failures() {
         "model_http_400: too many input tokens",
         "model_http_400: prompt is too long: 200001 tokens > 200000 maximum",
         "model_http_400: input token length exceeds the model limit",
+        "model_request_too_large: request body exceeds 16777216 bytes",
     ] {
         assert!(is_model_input_too_large_error(error), "{error}");
     }
@@ -177,5 +185,109 @@ fn retry_decision_is_structured_and_ui_neutral() {
             !debug.contains(forbidden),
             "core retry decision leaked UI text {forbidden:?}: {debug}"
         );
+    }
+}
+
+#[test]
+fn rate_limit_errors_trigger_endpoint_failover_classification() {
+    for error in [
+        "model_http_429: rate limit exceeded",
+        "model_http_429: Too Many Requests",
+        "model_responses_stream_failed: event_type=response.failed code=rate_limit_exceeded type=server_error message=retry later",
+        "model_responses_stream_failed: event_type=error code=rate_limited message=slow down",
+        "model_responses_stream_failed: event_type=response.failed code=insufficient_quota type=server_error message=quota exceeded",
+    ] {
+        assert!(is_model_rate_limited_error(error), "{error}");
+    }
+    for error in [
+        "model_http_428: precondition",
+        "model_http_4290: malformed",
+        "model_http_500: overloaded",
+        "model_http_408: timeout",
+        "cancelled_by_user",
+        "model_network_error: connection reset",
+        "model_responses_stream_failed: event_type=response.failed code=server_is_overloaded type=server_error message=overloaded",
+        "model_responses_stream_failed: event_type=response.failed code=invalid_request_error type=invalid_request_error message=bad tools",
+        "model_responses_stream_failed",
+    ] {
+        assert!(!is_model_rate_limited_error(error), "{error}");
+    }
+}
+
+#[test]
+fn failover_failure_thresholds_match_tight_rate_limit_contract() {
+    assert_eq!(
+        model_failover_failure_threshold("model_http_429: The usage limit has been reached"),
+        MODEL_ENDPOINT_FAILOVER_RATE_LIMIT_FAILURES
+    );
+    assert_eq!(MODEL_ENDPOINT_FAILOVER_RATE_LIMIT_FAILURES, 3);
+    assert_eq!(
+        model_failover_failure_threshold("model_http_500: overloaded"),
+        MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_FAILURES
+    );
+    assert_eq!(
+        model_failover_failure_threshold("model_network_error: connection reset"),
+        MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_FAILURES
+    );
+    assert_eq!(MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_FAILURES, 10);
+    // Rate-limit strikes wait nothing between attempts (hour-scale quota
+    // windows); other retryable errors probe on the short cadence.
+    assert_eq!(
+        model_failover_strike_delay("model_http_429: quota"),
+        Duration::ZERO
+    );
+    assert_eq!(
+        model_failover_strike_delay("model_timeout: slow"),
+        MODEL_ENDPOINT_FAILOVER_SYSTEM_ERROR_STRIKE_DELAY
+    );
+}
+
+#[test]
+fn missing_key_rejected_credential_and_exhausted_balance_mark_endpoint_unavailable() {
+    assert!(is_endpoint_unavailable_error(
+        "missing_api_key: set TIMEM_API_KEY or configure the Session API key"
+    ));
+    assert!(is_endpoint_unavailable_error(
+        "model_http_401: invalid credentials"
+    ));
+    // An exhausted prepaid balance (HTTP 402 Payment Required) cannot recover
+    // by waiting either: the failover chain must take over immediately.
+    assert!(is_endpoint_unavailable_error(
+        "model_http_402: Insufficient Balance (request_id: c48827d7)"
+    ));
+    assert!(!is_endpoint_unavailable_error(
+        "model_http_403: forbidden for this account"
+    ));
+    assert!(!is_endpoint_unavailable_error(
+        "model_http_429: rate limit exceeded"
+    ));
+    assert!(!is_endpoint_unavailable_error(
+        "model_network_error: connection reset"
+    ));
+}
+
+#[test]
+fn invalid_native_tool_call_payloads_are_protocol_violations() {
+    for error in [
+        "invalid_tool_call[1].arguments_json:expected `,` or `]` at line 1 column 68",
+        "invalid_tool_call[0].arguments_must_be_object",
+        "invalid_tool_call[2].input_must_be_object",
+        "invalid_tool_call[0].id_required",
+        "invalid_tool_call[0].arguments_must_be_json",
+    ] {
+        assert!(is_invalid_native_tool_call_error(error), "{error}");
+        // A malformed native payload must not be retried against the same
+        // endpoint as a transport failure; the turn loop handles it as a
+        // bounded protocol repair instead.
+        assert!(!is_retryable_model_system_error(error), "{error}");
+    }
+    for error in [
+        "invalid_json",
+        "model_http_400: invalid_tool_call[1].arguments_json",
+        "invalid_tool_call[]...",
+        "invalid_tool_call[x].arguments_json",
+        "too_many_tool_calls: received 5, limit 4",
+    ] {
+        assert!(!is_invalid_native_tool_call_error(error), "{error}");
     }
 }

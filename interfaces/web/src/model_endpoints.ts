@@ -45,6 +45,7 @@ export type ModelEndpointDraft = {
 
 type ModelEndpointProfile = {
   model_endpoint_id?: string | null;
+  model_endpoint_ids?: string[];
   model: string;
   api_protocol: string;
   response_protocol: string;
@@ -55,9 +56,61 @@ type ModelEndpointProfile = {
   api_key_configured: boolean;
 };
 
+/** Upper bound mirrors the host-side MAX_MODEL_ENDPOINT_CHAIN guard. */
+export const MAX_ENDPOINT_CHAIN_LENGTH = 20;
+
+/** Adds an endpoint at the tail of the chain, or removes it when present. */
+export function toggleEndpointInChain(
+  chain: readonly string[],
+  endpointId: string,
+): string[] {
+  return chain.includes(endpointId)
+    ? chain.filter((id) => id !== endpointId)
+    : [...chain, endpointId];
+}
+
+/** Moves a chain entry from one position to another; invalid moves no-op. */
+export function moveEndpointInChain(
+  chain: readonly string[],
+  from: number,
+  to: number,
+): string[] {
+  if (
+    from === to ||
+    from < 0 ||
+    to < 0 ||
+    from >= chain.length ||
+    to >= chain.length
+  ) {
+    return [...chain];
+  }
+  const next = [...chain];
+  const [moved] = next.splice(from, 1);
+  next.splice(to, 0, moved);
+  return next;
+}
+
 export const MODEL_CONTEXT_WINDOW_OPTIONS = [
   100_000, 200_000, 300_000, 1_000_000,
 ] as const;
+/** Maps the current total window to the unified select value.
+ *
+ * A user who explicitly chose "custom" keeps that mode even when the value
+ * happens to equal a preset or the model's documented window; otherwise the
+ * semantic option wins. This is what makes the custom number field reachable
+ * from a preset value instead of silently snapping back to the preset. */
+export function contextWindowSelectionMode(
+  total: number,
+  modelWindow: number | undefined,
+  customRequested: boolean,
+): string {
+  if (customRequested) return "custom";
+  if (modelWindow !== undefined && total === modelWindow) return "model";
+  return MODEL_CONTEXT_WINDOW_OPTIONS.some((option) => option === total)
+    ? String(total)
+    : "custom";
+}
+
 export const MODEL_OUTPUT_TOKEN_OPTIONS = [10_000, 20_000, 50_000] as const;
 
 export const REASONING_EFFORT_OPTIONS = [
@@ -104,11 +157,10 @@ export function apiProtocolShort(protocol: string): string {
   }
 }
 
-export function endpointMatchesProfile(
+export function endpointMatchesEffectiveProfile(
   endpoint: ModelEndpoint,
   profile: ModelEndpointProfile | undefined,
 ): boolean {
-  if (profile?.model_endpoint_id) return endpoint.id === profile.model_endpoint_id;
   return (
     !!profile &&
     endpoint.model === profile.model &&
@@ -120,6 +172,30 @@ export function endpointMatchesProfile(
     endpoint.stream === profile.stream &&
     endpoint.api_key_configured === profile.api_key_configured
   );
+}
+
+export function endpointMatchesProfileShape(
+  endpoint: ModelEndpoint,
+  profile: ModelEndpointProfile | undefined,
+): boolean {
+  return (
+    !!profile &&
+    endpoint.model === profile.model &&
+    endpoint.api_protocol === profile.api_protocol &&
+    endpoint.response_protocol === profile.response_protocol &&
+    endpoint.base_url === profile.base_url &&
+    endpoint.max_llm_output_tokens === profile.max_llm_output_tokens &&
+    endpoint.stream === profile.stream &&
+    endpoint.api_key_configured === profile.api_key_configured
+  );
+}
+
+export function endpointMatchesProfile(
+  endpoint: ModelEndpoint,
+  profile: ModelEndpointProfile | undefined,
+): boolean {
+  if (profile?.model_endpoint_id) return endpoint.id === profile.model_endpoint_id;
+  return endpointMatchesEffectiveProfile(endpoint, profile);
 }
 
 export function endpointNameForProfile(
@@ -220,6 +296,7 @@ export type CatalogModel = {
   input_modalities?: string[];
   protocols: { protocol: string; base_url?: string; disabled_reason: string | null;
     function_calling: "supported" | "conditional" | "unsupported" | "unknown";
+    required_tool_choice?: boolean;
     fixed_effort: string | null; fixed_reason: string | null }[];
 };
 
@@ -269,6 +346,18 @@ export function effectiveAllowedReasoning(
   daily: string | null | undefined,
 ): string[] {
   return [...new Set(allowed ?? modelEfforts ?? (daily ? [daily] : []))];
+}
+
+// The Session selector must expose only explicitly known model capabilities.
+// Unlike endpoint editing, an endpoint default is not evidence that a model
+// supports a selectable set of reasoning levels.
+export function sessionReasoningOptions(
+  endpoint: ModelEndpoint | undefined,
+  catalog: readonly CatalogModel[],
+): string[] {
+  if (!endpoint) return [];
+  const model = endpointCatalogModel(endpoint, catalog);
+  return [...new Set(endpoint.requirements?.allowed_reasoning ?? model?.efforts ?? [])];
 }
 
 const CUSTOM_REASONING_LEVEL_ORDER = ["none", ...REASONING_EFFORT_OPTIONS] as const;
@@ -328,8 +417,7 @@ export type EndpointCapabilityIssue =
   | { code: "daily_reasoning_unsupported" }
   | { code: "allowed_reasoning_unsupported" }
   | { code: "input_budget" }
-  | { code: "output_budget" }
-  | { code: "context_budget" };
+  | { code: "output_budget" };
 
 export type ProviderSpec = {
   id: string;
@@ -367,8 +455,6 @@ export function endpointCapabilityIssue(
     return { code: "input_budget" };
   if (draft.max_llm_output_tokens < model.min_output || draft.max_llm_output_tokens > model.max_output)
     return { code: "output_budget" };
-  if (draft.max_llm_input_tokens + draft.max_llm_output_tokens > model.context_window)
-    return { code: "context_budget" };
   return null;
 }
 
@@ -383,8 +469,32 @@ export function endpointCapabilityIssueMessage(issue: EndpointCapabilityIssue): 
     case "allowed_reasoning_unsupported": return t("endpoints.validationAllowedUnsupported");
     case "input_budget": return t("endpoints.validationInputBudget");
     case "output_budget": return t("endpoints.validationOutputBudget");
-    case "context_budget": return t("endpoints.validationContextBudget");
   }
+}
+
+/** Applies a unified context-window choice: the output budget stays and the
+ * input budget takes the remainder (clamped to a positive integer). */
+export function applyContextWindowChoice(
+  draft: ModelEndpointDraft,
+  windowTokens: number,
+): ModelEndpointDraft {
+  const output = Math.max(0, Math.floor(draft.max_llm_output_tokens));
+  const input = Math.max(1, Math.floor(windowTokens) - output);
+  return { ...draft, max_llm_input_tokens: input };
+}
+
+export type EndpointContextWindowWarning = { total: number; known: number };
+
+/** Warning-only mismatch between the configured window (input + output) and
+ * the model's documented context window. An oversized choice never blocks
+ * saving: the host compresses at the model's real window. */
+export function endpointContextWindowWarning(
+  budget: Pick<ModelEndpointDraft, "max_llm_input_tokens" | "max_llm_output_tokens">,
+  model: CatalogModel | undefined,
+): EndpointContextWindowWarning | null {
+  if (!model) return null;
+  const total = budget.max_llm_input_tokens + budget.max_llm_output_tokens;
+  return total > model.context_window ? { total, known: model.context_window } : null;
 }
 
 export function endpointImportIssueMessage(issue: string): string {
@@ -529,9 +639,17 @@ export function templateBaseUrl(model: CatalogModel | undefined, protocol: strin
 /** Template-suggested token budgets: capped defaults shared by apply and restore. */
 export function templateBudgetSuggestion(model: CatalogModel | undefined): { input: number; output: number } | undefined {
   if (!model) return undefined;
+  // Reserve the model's minimum input before choosing the output suggestion,
+  // then cap input by the remaining context. A displayed template must never
+  // start in a state that the Host will reject as an impossible token budget.
+  const output = Math.min(
+    20_000,
+    model.max_output,
+    model.context_window - model.min_input,
+  );
   return {
-    input: Math.min(256_000, model.max_input),
-    output: Math.min(20_000, model.max_output),
+    input: Math.min(256_000, model.max_input, model.context_window - output),
+    output,
   };
 }
 

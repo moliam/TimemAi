@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { zh } from "../src/i18n/strings.zh";
+import { en } from "../src/i18n/strings.en";
 import { applyWorkerRoleMutation, replayWorkerRoleMutations } from "../src/worker_roles_ui";
 import { WorkerRoleLibrary } from "../src/protocol";
 
@@ -82,6 +83,17 @@ describe("optimistic worker role UI", () => {
     expect(styles).toContain('.expanded-text-editor > textarea');
     expect(styles).toContain('.expanded-text-backdrop { position: fixed; z-index: 40; inset: 0; display: grid; place-items: center; padding: clamp(14px, 3vw, 34px); contain: layout style; background: #050708f2; }');
     expect(styles).not.toContain('.expanded-text-backdrop { position: fixed; z-index: 40; inset: 0; display: grid; place-items: center; padding: clamp(14px, 3vw, 34px); background: #050708b8; backdrop-filter: blur(5px); }');
+  });
+
+  it("localizes the right sidebar title as 角色 in Chinese", () => {
+    const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
+
+    expect(zh.roles.title).toBe("角色");
+    expect(en.roles.title).toBe("Roles");
+    expect(source).toContain('<BriefcaseBusiness size={16} /> {t("roles.title")}');
+    expect(source).not.toContain('<BriefcaseBusiness size={16} /> Roles');
+    expect(source).toContain('aria-label={t("roles.title")}');
+    expect(source).toContain('title={t("roles.openPanel")}');
   });
 
 });

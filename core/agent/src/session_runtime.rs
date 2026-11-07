@@ -4,14 +4,16 @@ use crate::model_stream::{
 };
 use crate::turn_state::{allocate_turn_token, TurnProjectionState};
 use crate::{
-    append_audit_event, is_model_input_too_large_error, model_input_overflow_recovery_audit_event,
-    model_retry_audit_event, model_retry_decision, normalize_user_supplements_with_context,
-    ActionRuntime, AgentCore, CoreStep, CoreTopicEvent, HostDecisionRequest, HttpModelClient,
-    LlmResponse, LongRunningCommandDecision, LongRunningCommandStatus, ModelCallOutcome,
-    ModelInteractionRequest, ModelServiceConfig, ModelSystemRetryPolicy, PromptComponentRole,
-    RoundLimitDecisionRequest, RoundLimitResolution, RuntimeProfiler, StoppedTurn, TurnActivity,
-    TurnInput, TurnOutcome, TurnProjection, TurnProjectionOutcome, TurnStopReason, TurnStopSummary,
-    TurnUi, UsageStats, UserSupplement,
+    append_audit_event, is_endpoint_unavailable_error, is_invalid_native_tool_call_error,
+    is_model_input_too_large_error, is_retryable_model_system_error,
+    model_failover_failure_threshold, model_failover_strike_delay,
+    model_input_overflow_recovery_audit_event, model_retry_audit_event, model_retry_decision,
+    normalize_user_supplements_with_context, ActionRuntime, AgentCore, CoreStep, CoreTopicEvent,
+    HostDecisionRequest, HttpModelClient, LlmResponse, LongRunningCommandDecision,
+    LongRunningCommandStatus, ModelCallOutcome, ModelInteractionRequest, ModelServiceConfig,
+    ModelSystemRetryPolicy, PromptComponentRole, RoundLimitDecisionRequest, RoundLimitResolution,
+    RuntimeProfiler, StoppedTurn, TurnActivity, TurnInput, TurnOutcome, TurnProjection,
+    TurnProjectionOutcome, TurnStopReason, TurnStopSummary, TurnUi, UsageStats, UserSupplement,
 };
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash, Hasher};
@@ -246,6 +248,31 @@ pub fn run_direct_resume_turn_with_model_client(
         model_client,
         None,
         true,
+        false,
+        &mut Vec::new(),
+    )
+}
+
+pub fn run_direct_resume_turn_with_model_client_and_failover(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    failover: &mut Vec<ModelServiceConfig>,
+    request: TurnInput<'_>,
+    ui: &mut dyn TurnUi,
+    profiler: Option<&mut RuntimeProfiler>,
+    model_client: &mut dyn ModelClient,
+) -> TurnOutcome {
+    run_session_turn_with_model_client_and_reminder_override(
+        core,
+        config,
+        request,
+        ui,
+        profiler,
+        model_client,
+        None,
+        true,
+        false,
+        failover,
     )
 }
 
@@ -266,6 +293,57 @@ pub fn run_session_turn_with_model_client(
         model_client,
         None,
         false,
+        false,
+        &mut Vec::new(),
+    )
+}
+
+pub fn run_session_turn_with_model_client_and_failover(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    failover: &mut Vec<ModelServiceConfig>,
+    request: TurnInput<'_>,
+    ui: &mut dyn TurnUi,
+    profiler: Option<&mut RuntimeProfiler>,
+    model_client: &mut dyn ModelClient,
+) -> TurnOutcome {
+    run_session_turn_with_model_client_and_reminder_override(
+        core,
+        config,
+        request,
+        ui,
+        profiler,
+        model_client,
+        None,
+        false,
+        false,
+        failover,
+    )
+}
+
+/// Runs one Turn whose input was produced by the runtime itself (mailbox
+/// delivery, timer fire, queued interruption) instead of typed by the user.
+/// The input renders as a runtime observation, never as a `USER` question.
+pub fn run_system_turn_with_model_client_and_failover(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    failover: &mut Vec<ModelServiceConfig>,
+    request: TurnInput<'_>,
+    ui: &mut dyn TurnUi,
+    profiler: Option<&mut RuntimeProfiler>,
+    model_client: &mut dyn ModelClient,
+) -> TurnOutcome {
+    run_session_turn_with_model_client_and_reminder_override(
+        core,
+        config,
+        request,
+        ui,
+        profiler,
+        model_client,
+        None,
+        false,
+        true,
+        failover,
     )
 }
 
@@ -288,6 +366,8 @@ fn run_session_turn_with_model_client_and_focus_interval(
         model_client,
         Some(focus_reminder_interval),
         false,
+        false,
+        &mut Vec::new(),
     )
 }
 
@@ -372,6 +452,8 @@ fn run_session_turn_with_model_client_and_reminder_override(
     model_client: &mut dyn ModelClient,
     focus_reminder_interval: Option<Duration>,
     direct_resume: bool,
+    system_input: bool,
+    failover: &mut Vec<ModelServiceConfig>,
 ) -> TurnOutcome {
     core.set_response_protocol(config.response_protocol);
     let turn_token = allocate_turn_token(request.session, epoch_millis());
@@ -381,6 +463,10 @@ fn run_session_turn_with_model_client_and_reminder_override(
     let mut reminders = TurnReminderSchedules::new(&turn_id, core.reminder_tips_config());
     let mut progress_reminder = TurnProgressReminder::default();
     let mut response_preview = TurnResponsePreview::default();
+    let mut last_round_for_preview: u32 = 0;
+    // Consecutive model failures on the active endpoint within this Turn;
+    // drives threshold-based failover while an ordered chain is available.
+    let mut consecutive_endpoint_failures: u32 = 0;
     if let Some(interval) = focus_reminder_interval {
         reminders.override_first_time_interval(interval);
     }
@@ -414,6 +500,8 @@ fn run_session_turn_with_model_client_and_reminder_override(
         .filter(|context| !context.is_empty());
     let mut step = if direct_resume {
         core.begin_direct_resume_turn(additional_context)
+    } else if system_input {
+        core.begin_runtime_turn(request.input, additional_context)
     } else {
         core.begin_turn(request.input, additional_context)
     };
@@ -444,7 +532,11 @@ fn run_session_turn_with_model_client_and_reminder_override(
         }
         match step {
             CoreStep::NeedModel { ref prompt, .. } => {
-                if ui.apply_pending_runtime_updates(core, config) {
+                let route_changed = ui.apply_pending_model_service_route(core, config, failover);
+                if route_changed {
+                    consecutive_endpoint_failures = 0;
+                }
+                if route_changed || ui.apply_pending_runtime_updates(core, config) {
                     core.set_response_protocol(config.response_protocol);
                     profile = negotiate_interaction_for_turn(
                         model_client,
@@ -580,6 +672,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
                 );
                 ui.on_reasoning_upgrade(reasoning_upgrade);
                 ui.on_model_api_request(rounds, &interaction_request, &api_payload);
+                last_round_for_preview = rounds;
                 let model_call = call_model_with_system_retries(
                     model_client,
                     config,
@@ -590,6 +683,9 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     request.session,
                     &turn_id,
                     &mut response_preview,
+                    !failover.is_empty(),
+                    &mut consecutive_endpoint_failures,
+                    rounds,
                 );
                 match model_call {
                     Ok(response) => {
@@ -626,6 +722,11 @@ fn run_session_turn_with_model_client_and_reminder_override(
                             }
                         }
                         latest_usage = Some(response.response.usage.clone());
+                        ui.on_model_interaction_reasoning(
+                            rounds,
+                            &response.reasoning,
+                            response.reasoning_truncated,
+                        );
                         if !core.should_suppress_model_response(&response.response) {
                             ui.on_model_interaction_response(rounds, &response.response);
                         }
@@ -703,6 +804,115 @@ fn run_session_turn_with_model_client_and_reminder_override(
                         );
                         if take_cancel_request(ui, &mut turn_projection) {
                             break cancelled_turn_parts();
+                        }
+                        // A rejected native tool-call payload is a protocol
+                        // violation, not a dead endpoint: the response never
+                        // reached action execution, so ask for corrected tool
+                        // calls instead of failing the whole turn.
+                        if is_invalid_native_tool_call_error(&err) {
+                            let mut repair_runtime = TurnActionRuntime::new(ui);
+                            if let Some(next_step) =
+                                core.request_native_tool_call_repair(&err, &mut repair_runtime)
+                            {
+                                step = next_step;
+                                continue;
+                            }
+                        }
+                        // A failing endpoint must not burn unbounded backoff
+                        // when an ordered failover chain is available: once the
+                        // consecutive-failure threshold is reached (tight for
+                        // rate-limit quota windows, looser for transient system
+                        // errors), switch and retry this round on the next
+                        // endpoint.
+                        if is_retryable_model_system_error(&err)
+                            || is_endpoint_unavailable_error(&err)
+                        {
+                            // A Host route update queued while this request
+                            // was in flight (e.g. the user reordering the
+                            // chain during rate-limit retries) must win over
+                            // the stale snapshot before the failover advances
+                            // through it.
+                            let failed_endpoint = config.interaction.model_endpoint_id.clone();
+                            let route_changed =
+                                ui.apply_pending_model_service_route(core, config, failover);
+                            if route_changed
+                                && config.interaction.model_endpoint_id.as_deref()
+                                    != failed_endpoint.as_deref()
+                            {
+                                consecutive_endpoint_failures = 0;
+                                ui.on_core_topic_events(&[
+                                    crate::host::model_endpoint_failover_topic_event(
+                                        request.session,
+                                        "switched",
+                                        config.interaction.model_endpoint_id.as_deref(),
+                                        Some(config.model.as_str()),
+                                        Some(config.base_url.as_str()),
+                                        None,
+                                    ),
+                                ]);
+                                core.set_response_protocol(config.response_protocol);
+                                core.set_max_llm_input_tokens(config.max_llm_input_tokens);
+                                profile = negotiate_interaction_for_turn(
+                                    model_client,
+                                    config,
+                                    request.audit_file,
+                                    ui,
+                                    request.session,
+                                    false,
+                                )
+                                .profile;
+                                core.set_interaction_profile(&profile);
+                                ui.on_interaction_profile(&profile);
+                                rounds = rounds.saturating_sub(1);
+                                step = CoreStep::NeedModel {
+                                    prompt: core.build_next_prompt(),
+                                    rounds_remaining: core.remaining_rounds(),
+                                };
+                                continue;
+                            }
+                            if !failover.is_empty() {
+                                ui.on_core_topic_events(&[
+                                    crate::host::model_endpoint_failover_topic_event(
+                                        request.session,
+                                        "switching",
+                                        config.interaction.model_endpoint_id.as_deref(),
+                                        Some(config.model.as_str()),
+                                        Some(config.base_url.as_str()),
+                                        Some(&err),
+                                    ),
+                                ]);
+                                *config = failover.remove(0);
+                                consecutive_endpoint_failures = 0;
+                                ui.on_core_topic_events(&[
+                                    crate::host::model_endpoint_failover_topic_event(
+                                        request.session,
+                                        "switched",
+                                        config.interaction.model_endpoint_id.as_deref(),
+                                        Some(config.model.as_str()),
+                                        Some(config.base_url.as_str()),
+                                        None,
+                                    ),
+                                ]);
+                                core.set_response_protocol(config.response_protocol);
+                                core.set_max_llm_input_tokens(config.max_llm_input_tokens);
+                                profile = negotiate_interaction_for_turn(
+                                    model_client,
+                                    config,
+                                    request.audit_file,
+                                    ui,
+                                    request.session,
+                                    false,
+                                )
+                                .profile;
+                                core.set_interaction_profile(&profile);
+                                ui.on_interaction_profile(&profile);
+                                rounds = rounds.saturating_sub(1);
+                                step = CoreStep::NeedModel {
+                                    prompt: core.build_next_prompt(),
+                                    rounds_remaining: core.remaining_rounds(),
+                                };
+                                continue;
+                            }
                         }
                         if is_model_input_too_large_error(&err) {
                             if let Some(recovery) = core.recover_from_model_input_too_large(&err) {
@@ -905,7 +1115,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
         // immediately instead of showing an empty answer area. An optimistically
         // streamed summary that already settled Final with the same text skips
         // the redundant replacement publish.
-        response_preview.begin();
+        response_preview.begin(last_round_for_preview);
         if response_preview
             .append(PublicTextTarget::Response, &outcome.text)
             .is_ok()
@@ -1049,6 +1259,10 @@ impl ActionRuntime for TurnActionRuntime<'_> {
         self.ui.on_core_topic_events(events);
     }
 
+    fn request_mail_send(&mut self, event: &CoreTopicEvent) -> Option<crate::MailSendReply> {
+        self.ui.request_mail_send(event)
+    }
+
     fn on_model_response_parsed(
         &mut self,
         tool_count: usize,
@@ -1067,6 +1281,28 @@ impl ActionRuntime for TurnActionRuntime<'_> {
     }
 }
 
+/// Debug-only reasoning capture bound. The dump is meant for developers, so
+/// keep enough text to understand the model's thinking without letting a
+/// pathological stream grow the retained entry without limit.
+const MAX_DEBUG_REASONING_BYTES: usize = 64 * 1024;
+
+fn append_debug_reasoning(buffer: &mut String, text: &str, truncated: &mut bool) {
+    if text.is_empty() || *truncated {
+        return;
+    }
+    let remaining = MAX_DEBUG_REASONING_BYTES.saturating_sub(buffer.len());
+    if text.len() <= remaining {
+        buffer.push_str(text);
+        return;
+    }
+    let mut cut = remaining;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    buffer.push_str(&text[..cut]);
+    *truncated = true;
+}
+
 #[allow(clippy::too_many_arguments)]
 fn call_model_with_system_retries(
     model_client: &mut dyn ModelClient,
@@ -1078,15 +1314,27 @@ fn call_model_with_system_retries(
     session: &str,
     turn_id: &str,
     preview: &mut TurnResponsePreview,
+    failover_available: bool,
+    consecutive_failures: &mut u32,
+    round: u32,
 ) -> Result<ModelCallOutcome<LlmResponse>, String> {
     let retry_policy = model_system_retry_policy();
     let mut total_model_wait = Duration::ZERO;
     let mut total_retry_wait = Duration::ZERO;
     let mut effective_request = request.clone();
     let mut parallel_tool_control_omitted = false;
+    // Streaming deltas arrive far faster than anyone reads; coalescing the
+    // preview publishes to ~10x/second cuts wire traffic and, more
+    // importantly, the client-side markdown re-render cost per arrival.
+    let mut last_preview_publish: Option<Instant> = None;
     for attempt in 0..=retry_policy.max_attempts {
         let model_wait_start = Instant::now();
-        preview.begin();
+        // Only the attempt that actually produces the accepted response is
+        // retained; a retried attempt's partial reasoning must not merge into
+        // the final dump entry.
+        let mut reasoning = String::new();
+        let mut reasoning_truncated = false;
+        preview.begin(round);
         let mut json = JsonPublicTextStream::default();
         let mut xml = XmlPublicTextStream::default();
         let mut finish = NativeFinishSummaryStream::default();
@@ -1101,19 +1349,16 @@ fn call_model_with_system_retries(
                 if preview_error {
                     return;
                 }
-                let mut changed = false;
+                if let Some(text) = crate::model_stream::reasoning_delta(event) {
+                    append_debug_reasoning(&mut reasoning, text, &mut reasoning_truncated);
+                }
+                let mut changed = preview.observe_stream_event(event);
                 let mut append_error = false;
                 let mut emit = |target, text: &str| match preview.append(target, text) {
                     Ok(value) => changed |= value,
                     Err(_) => append_error = true,
                 };
-                let content = event
-                    .pointer("/choices/0/delta/content")
-                    .or_else(|| {
-                        (event["type"] == "response.output_text.delta").then(|| &event["delta"])
-                    })
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("");
+                let content = crate::model_stream::public_text_delta(event).unwrap_or("");
                 let parsed = if effective_request.is_native() {
                     emit(PublicTextTarget::Response, content);
                     // Optimistic finish: stream the task_finished summary out
@@ -1138,7 +1383,24 @@ fn call_model_with_system_retries(
                     changed = true;
                 }
                 if changed {
-                    preview.publish(&mut **shared_ui.borrow_mut(), session, turn_id);
+                    // Thinking text is a tiny, bounded strip and is cheap to
+                    // paint; publish it at ~20fps so it reads as continuous.
+                    // Answer previews keep the 100ms coalescing window because
+                    // each one re-runs the markdown pipeline.
+                    let preview_interval = if preview.thinking_active() {
+                        Duration::from_millis(50)
+                    } else {
+                        Duration::from_millis(100)
+                    };
+                    let due = last_preview_publish
+                        .map(|last| last.elapsed() >= preview_interval)
+                        .unwrap_or(true);
+                    // Retraction / parse-failure states must not be swallowed
+                    // by the coalescing window: nothing else republishes them.
+                    if due || preview_error || preview.finish_pending() {
+                        last_preview_publish = Some(Instant::now());
+                        preview.publish(&mut **shared_ui.borrow_mut(), session, turn_id);
+                    }
                 }
             },
         );
@@ -1173,7 +1435,8 @@ fn call_model_with_system_retries(
         total_model_wait = total_model_wait.saturating_add(model_wait);
         match result {
             Ok(response) => {
-                ui.on_model_request_completed(model_wait);
+                *consecutive_failures = 0;
+                ui.on_model_request_completed(round, model_wait, preview.ttft());
                 if let Some(profiler) = profiler.as_deref_mut() {
                     profiler.record_model_wait(&response.model_name, &response.usage, model_wait);
                 }
@@ -1182,6 +1445,8 @@ fn call_model_with_system_retries(
                     model_wait: total_model_wait,
                     retry_wait: total_retry_wait,
                     parallel_tool_control_omitted,
+                    reasoning,
+                    reasoning_truncated,
                 });
             }
             Err(err) => {
@@ -1200,6 +1465,46 @@ fn call_model_with_system_retries(
                 }
                 if let Some(profiler) = profiler.as_deref_mut() {
                     profiler.record_model_wait(&config.model, &UsageStats::zero(), model_wait);
+                }
+                if failover_available && is_endpoint_unavailable_error(&err) {
+                    // A missing key or a rejected credential cannot recover by
+                    // waiting: hand the raw error to the caller so the ordered
+                    // failover chain takes over immediately instead of burning
+                    // threshold strikes on the same endpoint.
+                    return Err(err);
+                }
+                if failover_available && is_retryable_model_system_error(&err) {
+                    // Threshold failover: rate-limit errors switch after a few
+                    // consecutive strikes (hour-scale quota windows); other
+                    // retryable system errors after a longer run. Between
+                    // strikes the endpoint waits only the short strike cadence,
+                    // and a single-endpoint chain keeps the full retry policy.
+                    *consecutive_failures = consecutive_failures.saturating_add(1);
+                    let threshold = model_failover_failure_threshold(&err);
+                    if *consecutive_failures >= threshold {
+                        // Hand the raw error to the caller so the ordered
+                        // endpoint failover chain can take over.
+                        return Err(err);
+                    }
+                    let strike_delay = model_failover_strike_delay(&err);
+                    ui.on_model_retry(*consecutive_failures, threshold, strike_delay, &err);
+                    let _ = append_audit_event(
+                        audit_file,
+                        &model_retry_audit_event(
+                            session,
+                            turn_id,
+                            *consecutive_failures,
+                            threshold,
+                            strike_delay,
+                            &err,
+                        ),
+                    );
+                    let waited = wait_retry_delay(ui, strike_delay);
+                    total_retry_wait = total_retry_wait.saturating_add(waited);
+                    if ui.is_cancel_requested() {
+                        return Err("cancelled_by_user".to_string());
+                    }
+                    continue;
                 }
                 let Some(decision) =
                     model_retry_decision(&err, attempt, retry_policy, ui.is_cancel_requested())

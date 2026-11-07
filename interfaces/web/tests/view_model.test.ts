@@ -10,9 +10,11 @@ import {
   VersionedTurnProjection,
   WebTurn,
   WebTurnEvent,
+  UsageStats,
 } from "../src/protocol";
 import {
   activeModelRetryStatus,
+  activitiesFromTopic,
   activityFromTopic,
   completionStopReasonText,
   repairIssueText,
@@ -20,6 +22,7 @@ import {
   applyTurnProjection,
   appendActivityToCurrentTurn,
   appendTurnEvent,
+  sessionRuntimeUsage,
   applyChatMessageDeleted,
   applyCoreTopicToSession,
   attachTurnCompletion,
@@ -27,7 +30,9 @@ import {
   clearDecisionsForSession,
   clearDecisionsForWorker,
   coalesceActionLifecycle,
+  completedModelEventsByRound,
   compareTurnTimelineItems,
+  parseMailboxEntryText,
   parseTimerEntryText,
   compareTurnStreamItems,
   composerPrimaryAction,
@@ -43,6 +48,11 @@ import {
   hasOnlyFreeTalkActivity,
   manualToolGenCommand,
   MAX_CLIENT_TURNS,
+  timelineEventsSignature,
+  timelineOutlineShapeKey,
+  turnNeedsFullEventFetch,
+  turnHistoryHydrationOrder,
+  streamProcessOutlineSections,
   messagesFromHistoryRecords,
   MAX_RENDERED_MESSAGES,
   normalizeCopiedUserMessageText,
@@ -59,6 +69,9 @@ import {
   runtimeConnectionLabel,
   sessionCacheHitPercent,
   sessionCacheTokenTotals,
+  sessionModelPulse,
+  sessionModelTelemetry,
+  turnLatestModelTelemetry,
   sessionContextUsage,
   sessionContextCompressPending,
   sessionCreateDecision,
@@ -432,7 +445,7 @@ describe("web topic view model", () => {
     expect(hasOnlyFreeTalkActivity(freeTalk ? [freeTalk] : [], 1)).toBe(false);
   });
 
-  it("omits completion control actions from live and restored activity", () => {
+  it("omits task_finished and legacy turn_finished tool rows from live and restored activity", () => {
     for (const action of ["task_finished", "turn_finished"]) {
       for (const event of ["start", "execution_start", "finish"]) {
         expect(
@@ -440,7 +453,7 @@ describe("web topic view model", () => {
             topic("core.action", {
               action,
               event,
-              status: event === "finish" ? "completed" : "running",
+              status: event === "finish" ? "failed" : "running",
               input: { summary: "Final answer" },
             }),
           ),
@@ -458,7 +471,7 @@ describe("web topic view model", () => {
     const finish = actionEvent(
       "2000",
       "finish",
-      "completed",
+      "failed",
       { summary: "Final answer" },
       "finish-control",
     );
@@ -509,6 +522,49 @@ describe("web topic view model", () => {
       title: "memo stops finish",
       detail: "目标 B",
     });
+    const blockedFinish = topic("core.memo", {
+      op: "stops_finish",
+      active: true,
+      text: "目标 B",
+      summary: "被拦截也要显示的普通 thought",
+    });
+    expect(activityFromTopic(blockedFinish)).toMatchObject({
+      tone: "notice",
+      kind: "memo_notice",
+      title: "memo stops finish",
+      detail: "目标 B",
+    });
+    expect(activitiesFromTopic(blockedFinish)).toMatchObject([
+      {
+        tone: "thinking",
+        kind: "free_talk",
+        title: "",
+        detail: "被拦截也要显示的普通 thought",
+      },
+      {
+        tone: "notice",
+        kind: "memo_notice",
+        title: "memo stops finish",
+        detail: "目标 B",
+      },
+    ]);
+    expect(
+      activitiesFromTopic(
+        topic("core.memo", {
+          op: "stops_finish",
+          active: true,
+          text: "目标 B",
+          summary: "   ",
+        }),
+      ),
+    ).toMatchObject([
+      {
+        tone: "notice",
+        kind: "memo_notice",
+        title: "memo stops finish",
+        detail: "目标 B",
+      },
+    ]);
     const forceDeleted = activityFromTopic(
       topic("core.memo", { op: "force_deleted", active: false, text: null }),
     );
@@ -618,6 +674,21 @@ describe("web topic view model", () => {
         user_entries: [],
       }),
     ).toBe(false);
+    // The idle manual-compaction resume turn carries an empty
+    // "resume_directly" entry and must render so the "compacting" notice
+    // has a timeline anchor.
+    expect(
+      turnShouldRenderInTimeline({
+        ...pending,
+        user_entries: [
+          {
+            kind: "resume_directly",
+            text: "",
+            created_at_ms: 3,
+          },
+        ],
+      }),
+    ).toBe(true);
     expect(turnShouldRenderInTimeline({ ...pending, state: "working" })).toBe(
       true,
     );
@@ -1504,10 +1575,10 @@ describe("web topic view model", () => {
   });
 
   it("keeps the complete workspace directory name in compact session labels", () => {
-    expect(workspacePathLabel("/Users/limo3/my_code/timem_shell")).toBe(
+    expect(workspacePathLabel("/Users/dev/my_code/timem_shell")).toBe(
       "…/timem_shell",
     );
-    expect(workspacePathLabel("/Users/limo3/my_code/timem_shell/")).toBe(
+    expect(workspacePathLabel("/Users/dev/my_code/timem_shell/")).toBe(
       "…/timem_shell",
     );
     expect(workspacePathLabel("timem_shell")).toBe("timem_shell");
@@ -3018,10 +3089,11 @@ describe("web topic view model", () => {
     restarted.turns.push(resumed);
 
     expect(sessionCacheHitPercent(restarted)).toBeCloseTo(90, 8);
-    // Cold-start exclusion affects only the percentage. Token totals still
-    // include every request in the live runtime instance.
+    // Cold-start exclusion affects only the percentage. Token totals follow
+    // the whole-history readout so they stay consistent with the telemetry
+    // (speed & TTFT) across runtime restarts.
     expect(sessionCacheTokenTotals(restarted)).toEqual({
-      prompt_tokens: 35_000,
+      prompt_tokens: 45_000,
       completion_tokens: 0,
     });
   });
@@ -4251,6 +4323,42 @@ describe("web topic view model", () => {
     expect(sessionTwo.state).toBe("ready");
   });
 
+  it("updates only the previewed turn and ignores stale revisions", () => {
+    const current = session("session_1");
+    const first = turn("turn_1", "finished");
+    const second = turn("turn_2", "working");
+    current.turns = [first, second];
+    current.active_turn_id = "turn_2";
+    const preview = (revision: number, text: string): CoreTopicEvent =>
+      topic("core.model.preview", {
+        turn_id: "turn_2",
+        revision,
+        response: { attempt: 1, revision, text, status: "streaming" },
+      });
+
+    const updated = applyCoreTopicToSession(
+      current,
+      preview(2, "hello"),
+      assistantMessage,
+    );
+    // Untouched turns keep their identity so memoized turn views can skip.
+    expect(updated.turns[0]).toBe(first);
+    expect(updated.turns[1]).not.toBe(second);
+    expect(updated.turns[1].preview?.revision).toBe(2);
+    expect(updated.turns[1].preview?.response?.text).toBe("hello");
+    expect(updated.turns[0].preview ?? null).toBeNull();
+    expect(
+      applyCoreTopicToSession(updated, preview(1, "stale"), assistantMessage),
+    ).toBe(updated);
+    expect(
+      applyCoreTopicToSession(
+        updated,
+        topic("core.model.preview", { turn_id: "turn_missing", revision: 3 }),
+        assistantMessage,
+      ),
+    ).toBe(updated);
+  });
+
   it("does not append a core topic event to another session with the same turn id", () => {
     const sharedTurnId = "turn_shared";
     const event: WebTurnEvent = {
@@ -4561,6 +4669,50 @@ describe("web topic view model", () => {
     const replayed = appendTurnEvent(once, "turn_1", event);
     expect(replayed.turns[0].events).toEqual([event]);
     expect(replayed).toBe(once);
+  });
+
+  it("lets a restored terminal turn gain a late work-stream notice", () => {
+    const restored: WebTurn = {
+      ...turn("turn_restored", "completed"),
+      completion: { stop_reason: "Completed" },
+      final_answer: "done",
+    };
+    const started = upsertTurn(session("session_1"), restored);
+    const notice: WebTurnEvent = {
+      event_id: "work_file_notice_1",
+      source: "ui_activity",
+      payload: { kind: "work_file_notice", tone: "notice", title: "" },
+      created_at_ms: 3,
+    };
+
+    const updated = upsertTurn(started, { ...restored, events: [notice] });
+
+    // Terminal state is kept, but the Host projection still lands: restored
+    // "completed" turns must be able to show Timem.md update notices.
+    expect(updated.turns[0]?.events).toEqual([notice]);
+    expect(updated.turns[0]?.state).toBe("completed");
+    expect(updated.turns[0]?.final_answer).toBe("done");
+  });
+
+  it("does not let a late working projection reopen a restored completed turn", () => {
+    const restored: WebTurn = {
+      ...turn("turn_restored_working", "completed"),
+      completion: { stop_reason: "Completed" },
+      final_answer: "done",
+    };
+    const completed = upsertTurn(session("session_1"), restored);
+    const lateWorking = {
+      ...turn("turn_restored_working", "working"),
+      completion: null,
+      final_answer: null,
+    };
+
+    const updated = upsertTurn(completed, lateWorking);
+
+    expect(updated.turns[0]?.state).toBe("completed");
+    expect(updated.turns[0]?.final_answer).toBe("done");
+    expect(updated.state).not.toBe("working");
+    expect(updated.active_turn_id).not.toBe("turn_restored_working");
   });
 
   it("builds a source-turn-bound manual ToolGen command without inventing user text", () => {
@@ -4941,5 +5093,393 @@ describe("parseTimerEntryText", () => {
   it("does not strip a prefix that is not at the start", () => {
     const text = "正文 [timer:late] 不是前缀";
     expect(parseTimerEntryText(text)).toEqual({ name: null, prompt: text });
+  });
+});
+
+
+describe("parseMailboxEntryText", () => {
+  it("splits the runtime header from the mail body", () => {
+    expect(parseMailboxEntryText("mb-keepo0 发来 mail:\n你好，请查看附件")).toEqual({
+      sender: "mb-keepo0",
+      body: "你好，请查看附件",
+    });
+  });
+
+  it("strips the legacy [mailbox] prefix and keeps multi-line bodies", () => {
+    expect(parseMailboxEntryText("[mailbox] mb-abc 发来 mail:\n第一行\n第二行")).toEqual({
+      sender: "mb-abc",
+      body: "第一行\n第二行",
+    });
+  });
+
+  it("returns null for receipt and status notices", () => {
+    expect(parseMailboxEntryText("邮件 m-1 已被 mb-x 读取")).toBeNull();
+    expect(parseMailboxEntryText("[mailbox] 邮件 m-1 被 mb-x 丢弃（未读取）")).toBeNull();
+  });
+
+  it("allows an empty body after the header", () => {
+    expect(parseMailboxEntryText("mb-x 发来 mail:\n")).toEqual({
+      sender: "mb-x",
+      body: "",
+    });
+  });
+});
+
+
+describe("turnNeedsFullEventFetch", () => {
+  const slimmed = { state: "completed", events_slimmed: true } as unknown as WebTurn;
+  const full = { state: "completed", events_slimmed: false } as unknown as WebTurn;
+  const unflagged = { state: "completed" } as unknown as WebTurn;
+  const working = { state: "working", events_slimmed: true } as unknown as WebTurn;
+
+  it("hydrates slimmed restored turns in stream UI without archive", () => {
+    expect(turnNeedsFullEventFetch(slimmed, { streamUiMode: true, streamArchive: false, timelineActive: true })).toBe(true);
+  });
+
+  it("keeps classic folded mode and archived stream on slim previews", () => {
+    expect(turnNeedsFullEventFetch(slimmed, { streamUiMode: false, streamArchive: false, timelineActive: true })).toBe(false);
+    expect(turnNeedsFullEventFetch(slimmed, { streamUiMode: true, streamArchive: true, timelineActive: true })).toBe(false);
+  });
+
+  it("skips working turns, hidden panes, and turns without the host flag", () => {
+    expect(turnNeedsFullEventFetch(working, { streamUiMode: true, streamArchive: false, timelineActive: true })).toBe(false);
+    expect(turnNeedsFullEventFetch(slimmed, { streamUiMode: true, streamArchive: false, timelineActive: false })).toBe(false);
+    expect(turnNeedsFullEventFetch(full, { streamUiMode: true, streamArchive: false, timelineActive: true })).toBe(false);
+    expect(turnNeedsFullEventFetch(unflagged, { streamUiMode: true, streamArchive: false, timelineActive: true })).toBe(false);
+  });
+});
+
+describe("turnHistoryHydrationOrder", () => {
+  const options = { streamUiMode: true, streamArchive: false, timelineActive: true };
+  const slimmedTurn = (turnId: string) => ({ turn_id: turnId, state: "completed", events_slimmed: true } as unknown as WebTurn);
+  const hydratedTurn = (turnId: string) => ({ turn_id: turnId, state: "completed", events_slimmed: false } as unknown as WebTurn);
+
+  it("hydrates the newest slimmed turn first so the landing directory appears first", () => {
+    const ordered = turnHistoryHydrationOrder(
+      [slimmedTurn("old"), hydratedTurn("middle"), slimmedTurn("new")],
+      options,
+    );
+    expect(ordered.map((turn) => turn.turn_id)).toEqual(["new", "old"]);
+  });
+
+  it("returns an empty order in classic folded or archived stream mode", () => {
+    const turns = [slimmedTurn("old"), slimmedTurn("new")];
+    expect(turnHistoryHydrationOrder(turns, { ...options, streamUiMode: false })).toEqual([]);
+    expect(turnHistoryHydrationOrder(turns, { ...options, streamArchive: true })).toEqual([]);
+  });
+});
+describe("timelineEventsSignature", () => {
+  it("changes when a restored turn hydrates slimmed events without a count change", () => {
+    const slimmed = turn("t1", "completed");
+    slimmed.events_slimmed = true;
+    const hydrated = { ...slimmed, events_slimmed: false };
+    // Same event count: a length-only version would stay identical.
+    expect(hydrated.events.length).toBe(slimmed.events.length);
+    expect(timelineEventsSignature([slimmed])).not.toBe(timelineEventsSignature([hydrated]));
+  });
+
+  it("stays stable for identical turn sets and reacts to count/answer changes", () => {
+    const base = turn("t1", "completed");
+    const a = timelineEventsSignature([base, turn("t2", "completed")]);
+    const b = timelineEventsSignature([base, turn("t2", "completed")]);
+    expect(a).toBe(b);
+    const grown = { ...turn("t2", "completed"), events: [{ event_id: "e1", source: "history", payload: { kind: "x" }, created_at_ms: 1 }] };
+    expect(timelineEventsSignature([base, grown])).not.toBe(a);
+    const answered = { ...turn("t2", "completed"), final_answer: "done" };
+    expect(timelineEventsSignature([base, answered])).not.toBe(a);
+  });
+});
+
+describe("timelineOutlineShapeKey", () => {
+  it("changes exactly when a completed turn hydrates or changes event volume", () => {
+    const slimmed = turn("t1", "completed");
+    slimmed.events_slimmed = true;
+    const hydrated = { ...slimmed, events_slimmed: false };
+    expect(timelineOutlineShapeKey([slimmed])).not.toBe(timelineOutlineShapeKey([hydrated]));
+    const grown = { ...hydrated, events: [{ event_id: "e1", source: "history", payload: { kind: "x" }, created_at_ms: 1 }] };
+    expect(timelineOutlineShapeKey([hydrated])).not.toBe(timelineOutlineShapeKey([grown]));
+  });
+
+  it("ignores live-streaming growth so a working turn never invalidates outlines", () => {
+    const working = { ...turn("t1", "working"), events: [{ event_id: "e1", source: "worker_activity", payload: { kind: "model_request" }, created_at_ms: 1 }] };
+    const workingMore = { ...turn("t1", "working"), events: [...working.events, { event_id: "e2", source: "worker_activity", payload: { kind: "model_response" }, created_at_ms: 2 }] };
+    expect(timelineOutlineShapeKey([working])).toBe(timelineOutlineShapeKey([workingMore]));
+  });
+
+  it("sees a history prepend as a shape change and stays stable otherwise", () => {
+    const earlier = { ...turn("t0", "completed"), events_slimmed: true };
+    const base = timelineOutlineShapeKey([turn("t1", "completed")]);
+    expect(timelineOutlineShapeKey([earlier, turn("t1", "completed")])).not.toBe(base);
+    expect(timelineOutlineShapeKey([turn("t1", "completed")])).toBe(base);
+  });
+});
+
+describe("streamProcessOutlineSections", () => {
+  it("titles chapters from the first markdown heading with its own level", () => {
+    const sections = streamProcessOutlineSections([
+      "## 排查结果\n\n证据……",
+      "先修复依赖再验证\n\n正文",
+      "# 总结\n\n正文",
+    ]);
+    expect(sections).toHaveLength(2);
+    expect(sections[0].title).toBe("排查结果");
+    expect(sections[0].level).toBe(2);
+    expect(sections[0].sourceIndex).toBe(0);
+    expect(sections[1].title).toBe("总结");
+    expect(sections[1].level).toBe(1);
+    expect(sections[1].sourceIndex).toBe(2);
+  });
+
+  it("keeps plain narrative blocks chapter-free", () => {
+    // One chapter per model turn would flood the outline with N interactions;
+    // only model-written headings describe chapters.
+    const sections = streamProcessOutlineSections([
+      "先修复依赖再验证\n\n正文",
+      "继续推进，已完成第二步。",
+    ]);
+    expect(sections).toEqual([]);
+  });
+
+  it("deduplicates consecutive same-title thought snapshots and skips empty blocks", () => {
+    const sections = streamProcessOutlineSections([
+      "## 现状",
+      "## 现状\n\n更新后的现状",
+      "",
+      "## 结论",
+    ]);
+    expect(sections.map((section) => section.title)).toEqual(["现状", "结论"]);
+    expect(sections[1].sourceIndex).toBe(2);
+  });
+
+  it("never invents a chapter from code-fence-only blocks", () => {
+    expect(streamProcessOutlineSections(["```bash\nls\n```"])).toEqual([]);
+  });
+});
+
+describe("model response telemetry", () => {
+  const modelTurn = (): WebTurn => ({
+    ...turn("turn-model-telemetry"),
+    events: [
+      { event_id: "complete-2", source: "worker_activity", created_at_ms: 20, payload: { kind: "model_request_completed", round: 2, latency_ms: 4_000, ttft_ms: 1_000 } },
+      { event_id: "response-1", source: "worker_activity", created_at_ms: 10, payload: { kind: "model_response", round: 1, usage: { completion_tokens: 100, reasoning_tokens: 30, prompt_tokens: 1_000, cached_tokens: 250 } } },
+      { event_id: "complete-1", source: "worker_activity", created_at_ms: 9, payload: { kind: "model_request_completed", round: 1, latency_ms: 2_000, ttft_ms: 0 } },
+      { event_id: "response-2", source: "worker_activity", created_at_ms: 21, payload: { kind: "model_response", round: 2, usage: { completion_tokens: 200, reasoning_tokens: 70, prompt_tokens: 2_000, cached_tokens: 1_000 } } },
+    ],
+  });
+
+  it("pairs usage and timing by explicit round rather than arrival order", () => {
+    const value = modelTurn();
+    expect(turnLatestModelTelemetry(value, 1)).toEqual({ reasoningTokens: 30, latencyMs: 2_000, ttftMs: 0 });
+    expect(turnLatestModelTelemetry(value, 2)).toEqual({ reasoningTokens: 70, latencyMs: 4_000, ttftMs: 1_000 });
+  });
+
+  it("uses only model latency for speed and Welford population deviation for TTFT", () => {
+    const value = session("telemetry-session");
+    value.turns = [modelTurn()];
+    // Include an incomplete third response: it cannot contaminate the aggregates.
+    value.turns[0].events.push({ event_id: "response-3", source: "worker_activity", created_at_ms: 30, payload: { kind: "model_response", round: 3, usage: { completion_tokens: 999 } } });
+    expect(sessionModelTelemetry(value)).toEqual({ tokensPerSecond: 50, ttftMeanSeconds: 0.5, ttftStdDevSeconds: 0.5, samples: 2 });
+  });
+
+  it("exposes a bounded chronological speed and TTFT series", () => {
+    const value = session("telemetry-pulse");
+    value.turns = [modelTurn()];
+    value.turns[0].events.push({ event_id: "response-3", source: "worker_activity", created_at_ms: 30, payload: { kind: "model_response", round: 3, usage: { completion_tokens: 999 } } });
+    const pulse = sessionModelPulse(value);
+    expect(pulse.tokensPerSecond).toEqual([50, 50]);
+    expect(pulse.ttftSeconds).toEqual([0, 1]);
+    expect(pulse.cacheHitPercent).toEqual([25, 50]);
+    // Exact percentiles over the whole history would require an O(n) sample
+    // buffer; the dashboard uses the O(1) Welford mean/spread instead.
+    expect("ttftP50Seconds" in pulse).toBe(false);
+    expect("ttftP95Seconds" in pulse).toBe(false);
+
+    value.telemetry_reset_at_ms = 15;
+    const reset = sessionModelPulse(value);
+    expect(reset.tokensPerSecond).toEqual([50]);
+    expect(reset.ttftSeconds).toEqual([1]);
+    expect(reset.cacheHitPercent).toEqual([50]);
+  });
+
+  it("keeps only the newest fifteen pulse samples", () => {
+    const value = session("telemetry-pulse-window");
+    const events: WebTurnEvent[] = [];
+    for (let round = 1; round <= 20; round += 1) {
+      events.push({
+        event_id: `response-${round}`,
+        source: "worker_activity",
+        created_at_ms: round * 10,
+        payload: {
+          kind: "model_response",
+          round,
+          usage: {
+            completion_tokens: round * 10,
+            prompt_tokens: 1_000,
+            cached_tokens: round * 50,
+          },
+        },
+      });
+      events.push({
+        event_id: `complete-${round}`,
+        source: "worker_activity",
+        created_at_ms: round * 10 + 1,
+        payload: {
+          kind: "model_request_completed",
+          round,
+          latency_ms: 1_000,
+          ttft_ms: round,
+        },
+      });
+    }
+    value.turns = [{ ...turn("turn-pulse-window"), events }];
+    const pulse = sessionModelPulse(value);
+    expect(pulse.tokensPerSecond).toHaveLength(15);
+    expect(pulse.ttftSeconds).toHaveLength(15);
+    expect(pulse.cacheHitPercent).toHaveLength(15);
+    // Rounds 6..20 survive; the first five have been evicted.
+    expect(pulse.ttftSeconds[0]).toBeCloseTo(0.006, 8);
+    expect(pulse.ttftSeconds[14]).toBeCloseTo(0.02, 8);
+    expect(pulse.cacheHitPercent[0]).toBeCloseTo(30, 8);
+    expect(pulse.cacheHitPercent[14]).toBeCloseTo(100, 8);
+
+    // Averages/spread stay whole-history: the window alone would be 0.011
+    // mean and a different deviation. Welford keeps O(1) state while covering
+    // all 20 requests, and the 15-sample curve is a separate bounded buffer.
+    const telemetry = sessionModelTelemetry(value);
+    expect(telemetry.samples).toBe(20);
+    expect(telemetry.ttftMeanSeconds).toBeCloseTo(0.0105, 8);
+    expect(telemetry.ttftStdDevSeconds).toBeCloseTo(0.0057662813, 8);
+    expect(telemetry.tokensPerSecond).toBeCloseTo(105, 8);
+  });
+
+  it("indexes completed requests once per round and keeps first-match semantics", () => {
+    const value = modelTurn();
+    // Duplicated and out-of-order completions must not change the pairing:
+    // the old `find` picked the first matching event in the array.
+    value.events.push({
+      event_id: "complete-2-duplicate",
+      source: "worker_activity",
+      created_at_ms: 25,
+      payload: { kind: "model_request_completed", round: 2, latency_ms: 9_000, ttft_ms: 9_000 },
+    });
+    value.events.push({
+      event_id: "complete-1-late",
+      source: "worker_activity",
+      created_at_ms: 30,
+      payload: { kind: "model_request_completed", round: 1, latency_ms: 9_000, ttft_ms: 9_000 },
+    });
+    const byRound = completedModelEventsByRound(value);
+    expect(byRound.get(1)?.event_id).toBe("complete-1");
+    expect(byRound.get(2)?.event_id).toBe("complete-2");
+    expect(byRound.has(3)).toBe(false);
+
+    const sessionValue = session("telemetry-duplicate-round");
+    sessionValue.turns = [value];
+    expect(sessionModelTelemetry(sessionValue)).toEqual({
+      tokensPerSecond: 50,
+      ttftMeanSeconds: 0.5,
+      ttftStdDevSeconds: 0.5,
+      samples: 2,
+    });
+    expect(sessionModelPulse(sessionValue).ttftSeconds).toEqual([0, 1]);
+  });
+
+  it("degrades safely when provider usage or timing is absent", () => {
+    const value = modelTurn();
+    value.events = value.events.filter(event => event.event_id !== "complete-1" && event.event_id !== "complete-2");
+    expect(turnLatestModelTelemetry(value, 1)).toEqual({ reasoningTokens: 30, latencyMs: undefined, ttftMs: undefined });
+    const current = session("missing-telemetry");
+    current.turns = [value];
+    expect(sessionModelTelemetry(current)).toEqual({ samples: 0 });
+  });
+});
+
+
+describe("sessionRuntimeUsage", () => {
+  const modelResponseUsageEvent = (
+    id: string,
+    usage: Record<string, number>,
+  ): WebTurnEvent => ({
+    event_id: id,
+    source: "worker_activity",
+    payload: { kind: "model_response", usage },
+    created_at_ms: 1,
+  });
+
+  it("counts tool_calls from authoritative completed-turn stats, not live model usage", () => {
+    const finished: WebTurn = {
+      ...turn("t1", "finished"),
+      events: [
+        modelResponseUsageEvent("u1", {
+          llm_calls: 1,
+          tool_calls: 0,
+          prompt_tokens: 10,
+          completion_tokens: 5,
+        }),
+      ],
+      completion: {
+        stats: { llm_calls: 1, tool_calls: 3, prompt_tokens: 10, completion_tokens: 5 },
+      },
+    };
+    const usage = sessionRuntimeUsage({ ...session("session_1"), turns: [finished] });
+    expect(usage?.tool_calls).toBe(3);
+    expect(usage?.llm_calls).toBe(1);
+  });
+
+  it("keeps live aggregation for working turns", () => {
+    const working: WebTurn = {
+      ...turn("t1", "working"),
+      events: [modelResponseUsageEvent("u1", { llm_calls: 2, tool_calls: 0 })],
+    };
+    const usage = sessionRuntimeUsage({ ...session("session_1"), turns: [working] });
+    expect(usage?.llm_calls).toBe(2);
+    expect(usage?.tool_calls ?? 0).toBe(0);
+  });
+
+  it("falls back to live usage when a finished turn lacks completion stats", () => {
+    const finished: WebTurn = {
+      ...turn("t1", "finished"),
+      events: [modelResponseUsageEvent("u1", { llm_calls: 1, tool_calls: 0 })],
+    };
+    const usage = sessionRuntimeUsage({ ...session("session_1"), turns: [finished] });
+    expect(usage?.llm_calls).toBe(1);
+  });
+
+  it("aggregates authoritative finished stats together with live working usage", () => {
+    const finished: WebTurn = {
+      ...turn("t1", "finished"),
+      completion: {
+        stats: { llm_calls: 1, tool_calls: 3, prompt_tokens: 100, completion_tokens: 50 },
+      },
+    };
+    const working: WebTurn = {
+      ...turn("t2", "working"),
+      events: [modelResponseUsageEvent("u2", { llm_calls: 2, tool_calls: 0, prompt_tokens: 10, completion_tokens: 5 })],
+    };
+    const usage = sessionRuntimeUsage({ ...session("session_1"), turns: [finished, working] });
+    expect(usage).toEqual({ llm_calls: 3, tool_calls: 3, prompt_tokens: 110, completion_tokens: 55 });
+  });
+
+  it("skips turns created before telemetry_reset_at_ms but keeps the boundary turn", () => {
+    const before: WebTurn = {
+      ...turn("t-before", "finished"),
+      created_at_ms: 1,
+      completion: { stats: { llm_calls: 1, tool_calls: 1 } },
+    };
+    const boundary: WebTurn = {
+      ...turn("t-boundary", "finished"),
+      created_at_ms: 5,
+      completion: { stats: { llm_calls: 2, tool_calls: 0 } },
+    };
+    const usage = sessionRuntimeUsage({
+      ...session("session_1"),
+      telemetry_reset_at_ms: 5,
+      turns: [before, boundary],
+    });
+    expect(usage).toEqual({ llm_calls: 2, tool_calls: 0 });
+  });
+
+  it("returns undefined when no turn contributes usage", () => {
+    expect(sessionRuntimeUsage(session("session_1"))).toBeUndefined();
   });
 });

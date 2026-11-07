@@ -1,15 +1,19 @@
-import { MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation, TimerInvocation, TimerToolIcon } from "./tool_invocation";
+import { useThrottledValue } from "./use_throttled_value";
+import { compactThinkingTail } from "./thinking_preview";
+import { MailboxIcon, MailboxInvocation, MemoryIcon, MemorySearchIcon, MemorySearchInvocation, ReadFileIcon, ReadFileInvocation, RunBashEditIcon, RunBashEditInvocation, SelfToolIcon, SelfToolInvocation, TimerInvocation, TimerToolIcon } from "./tool_invocation";
 import { EndpointSharePanel, type ShareTransport, type ShareResult } from "./endpoint_share";
-import { initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
+import { applyContextWindowChoice, contextWindowSelectionMode, initialEndpointRequirements, applyEndpointTemplate, capabilityModelForDraft, editEndpoint, endpointCatalogModel, catalogAcceptsImages, isImageFileName, editEndpointRequirements, changeEndpointProtocol, restoreEndpointTemplateUrl, restoreEndpointTemplateReasoning, canRestoreEndpointTemplateUrl, restoreEndpointTemplateBudget, templateBudgetSuggestion, effectiveAllowedReasoning, sessionReasoningOptions, endpointCapabilityIssue, endpointCapabilityIssueMessage, endpointContextWindowWarning, endpointDraftChanged, endpointImportCommandErrorMessage, endpointImportIssueMessage, endpointProtocolOptions, endpointSaveErrorMessage, toggleAllowedReasoning, type ProviderSpec } from "./model_endpoints";
 import { persistComposerDraftTexts, readComposerDraftTexts } from "./composer_drafts";
 import { createComposerWriteThrough, type ComposerWriteThrough } from "./composer_input";
 import type { CatalogModel } from "./model_endpoints";
 import { applyBetaDebugDefault } from "./beta_preferences";
-import { StreamUiModeSetting, useStreamUiMode, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
+import { StreamUiModeSetting, useStreamArchive, useStreamUiMode, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
 import { SelfUpgradeSetting } from "./self_upgrade";
 import { StreamText } from "./stream_reveal";
 import { FlippingTime } from "./flipping_time";
 import { UserText } from "./user_text";
+import { CollapsibleSystemEntryText } from "./collapsible_system_entry";
+import { formatUserEntryTime } from "./user_entry_time";
 import {
   AssistantRuntimeProvider,
   ThreadMessageLike,
@@ -44,6 +48,7 @@ import {
   ArrowLeftRight,
   BriefcaseBusiness,
   BookText,
+  Bot,
   Check,
   CheckCheck,
   ChevronDown,
@@ -53,9 +58,11 @@ import {
   CircleStop,
   CircleX,
   ClipboardCheck,
+  ClockAlert,
   Clock3,
   Clock8,
   Copy,
+  CornerDownRight,
   CornerUpLeft,
   Cpu,
   Database,
@@ -71,6 +78,8 @@ import {
   LoaderCircle,
   Maximize2,
   Menu,
+  MessageSquareText,
+  MessagesSquare,
   Minimize2,
   Palette,
   FolderInput,
@@ -80,10 +89,10 @@ import {
   Plus,
   Minus,
   RefreshCw,
+  RotateCcw,
   Search,
   Send,
   Share2,
-  Hand,
   Settings,
   Sparkles,
   Star,
@@ -95,6 +104,8 @@ import {
   Wrench,
   X,
   AlarmClock,
+  NotebookPen,
+  Mail,
   Pause,
   Play,
 } from "lucide-react";
@@ -114,12 +125,21 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   useId,
 } from "react";
 import { createPortal } from "react-dom";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { getLocale, setLocale, t, useT } from "./i18n";
+import {
+  createTurnHistoryHydrationQueue,
+  enqueueTurnHistoryHydration,
+  finishTurnHistoryHydrationChain,
+  markTurnHistoryMissing,
+  pumpTurnHistoryHydration,
+} from "./turn_history_hydration";
 import { RestartCwdGate } from "./restart_cwd_gate";
+import { MailboxBody } from "./mailbox_body";
 import {
   MemSwitchCandidate,
   MemSwitchConfirmDialog,
@@ -141,6 +161,7 @@ import {
   McpServerReport,
   McpTransport,
   MemTemporaryItem,
+  MemStorageUsage,
   ModelToolResultBytes,
   ModelEndpoint,
   ModelEndpointImportCandidate,
@@ -165,12 +186,15 @@ import {
 } from "./worker_roles_ui";
 import {
   adjacentUserMessageIndex,
+  anchorScrollDelta,
   canScrollInDirection,
   isNearScrollBottom,
+  pickViewportTurnAnchor,
   preservePrependScrollTop,
   restoreSessionScrollTop,
   scrollEdgeFades,
   ScrollMetrics,
+  ViewportTurnAnchor,
   SessionScrollPosition,
   UserMessageNavigationDirection,
   wheelDeltaPixels,
@@ -179,6 +203,7 @@ import {
   type ActiveModelRetryStatus,
   applyTurnProjection,
   activeModelRetryStatus,
+  activitiesFromTopic,
   activityFromTopic,
   applySessionRuntimeProfile,
   appendActivityToCurrentTurn,
@@ -205,6 +230,7 @@ import {
   finishTurn,
   groupDecisionsBySessionTurn,
   manualToolGenCommand,
+  parseMailboxEntryText,
   parseTimerEntryText,
   prependHistoryRecords,
   pruneSessionDrafts,
@@ -217,7 +243,8 @@ import {
   resolveActiveSessionId,
   runtimeConnectionLabel,
   sessionCacheHitPercent,
-  sessionCacheTokenTotals,
+  sessionRuntimeUsage,
+  sessionModelTelemetry,
   sessionCancellationApplies,
   shouldRenderTurnWorkFrame,
   sessionContextUsage,
@@ -229,12 +256,17 @@ import {
   sessionVisuallyWorking,
   sessionWorkerTreeRows,
   setSessionDraft,
+  streamProcessOutlineSections,
+  StreamProcessOutlineSection,
   tailPath,
   toolActivityDisplayName,
   toolDisplayName,
   turnElapsedMs,
+  turnHistoryHydrationOrder,
   turnWorkPhaseBoundary,
   turnLiveUsage,
+  timelineEventsSignature,
+  timelineOutlineShapeKey,
   turnShouldRenderInTimeline,
   turnTimelinePlacement,
   updateSessionWorkerState,
@@ -244,15 +276,16 @@ import {
 } from "./view_model";
 import {
   extractMarkdownOutline,
-  finalAnswerNeedsOutline,
   markdownHeadingId,
   markdownFloatingNavigationLayout,
   markdownOutlineActiveId,
   markdownOutlineAnimationPosition,
+  markdownOutlineDeliveryScope,
+  markdownOutlineFallbackActiveId,
   markdownOutlineRailScrollTop,
   MARKDOWN_OUTLINE_START_ID,
+  MARKDOWN_OUTLINE_SUMMARY_ID,
   markdownOutlineTargetScrollTop,
-  MarkdownOutlineItem,
 } from "./markdown_outline";
 import {
   createMcpTransportDrafts,
@@ -260,12 +293,18 @@ import {
   mergeMcpSecrets,
 } from "./mcp";
 import {
+  RESOURCE_CAP_PERCENT_OPTIONS,
+  parseResourceCapPercent,
   reconcileRuntimeDrafts,
+  resourceCapability,
+  resourceCapabilityIsInert,
+  resourceCapHintKind,
   runtimeOptionLabel,
   sessionRuntimeOptions,
   shouldAutoRevealSessionApiKey,
   updateRevealedSessionApiKeys,
 } from "./runtime_settings";
+import { SessionInsights, type SessionResourcePulseSample } from "./session_insights";
 import {
   commandSessionId,
   isModelSubmissionCommand,
@@ -279,30 +318,42 @@ import {
   REASONING_EFFORT_DISABLED,
   REASONING_EFFORT_OPTIONS,
   endpointMatchesProfile,
+  endpointMatchesProfileShape,
   endpointLabelForProfile,
   apiProtocolShort,
   formatContextWindowTokens,
   MODEL_CONTEXT_WINDOW_OPTIONS,
   MODEL_OUTPUT_TOKEN_OPTIONS,
+  MAX_ENDPOINT_CHAIN_LENGTH,
   ModelEndpointDraft,
+  moveEndpointInChain,
+  toggleEndpointInChain,
 } from "./model_endpoints";
 import { createFrameEventQueue } from "./frame_event_queue";
-import { formatTokens, formatTokensCoarse } from "./token_format";
+import {
+  formatOutputWithThink,
+  formatTokens,
+  formatTokensCoarse,
+} from "./token_format";
 import {
   computeStreamRetention,
+  dedupeFreeTalkItems,
   streamToolHandoffIds,
   summarizeConsecutiveToolActivities,
   ToolActivitySummary,
 } from "./activity_groups";
 import {
-  COLLAPSED_QUEUE_LIMIT,
   QueuedMessage,
   reorderQueuedMessages,
   reservedQueuedAttachmentIds,
 } from "./queued_messages";
 
 import { commandNeedsReliableDelivery } from "./command_outbox";
-import type { TimerInfo } from "./protocol";
+import type {
+  MailboxSnapshotInfo,
+  ResourceCapsProjection,
+  TimerInfo,
+} from "./protocol";
 import { classifyEventSequence, snapshotEventBaseline } from "./event_cursor";
 import {
   enablesSemanticDelivery,
@@ -324,10 +375,8 @@ import { reconcileSessionTimelineCache } from "./session_timeline_cache";
 import { requestTimelineNavigationWork } from "./timeline_navigation_work";
 import { selectedUserMessageText, useTimedClipboardCopy } from "./clipboard_copy";
 import "./styles.css";
-import "highlight.js/styles/github-dark.css";
-import "katex/dist/katex.min.css";
 
-const STORED_HISTORY_PAGE_SIZE = 200;
+const STORED_HISTORY_PAGE_SIZE = 50;
 const MAX_MOUNTED_SESSION_TIMELINES = 2;
 const TOKEN_STORAGE_KEY = "timem-web-access-token";
 const EMPTY_CHAT_MESSAGES: ChatMessage[] = [];
@@ -466,6 +515,51 @@ function makeMessage(
 }
 
 const SIDEBAR_LAYOUT_STORAGE_KEY = "timem.sidebar-layout.v1";
+const THINKING_CHAIN_STORAGE_KEY = "timem.thinking-chain.v1";
+const THINKING_CHAIN_CHANGE_EVENT = "timem:thinking-chain-change";
+
+// Instance-wide display preference: whether the inline thinking window is
+// rendered while a model round streams. Pure UI preference persisted in the
+// browser like the sidebar layout; every session in this web UI follows it.
+function thinkingChainVisible(): boolean {
+  try {
+    return window.localStorage.getItem(THINKING_CHAIN_STORAGE_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+function setThinkingChainVisible(visible: boolean): void {
+  try {
+    window.localStorage.setItem(THINKING_CHAIN_STORAGE_KEY, visible ? "1" : "0");
+  } catch {
+    // Storage may be unavailable (private mode); the change event below still
+    // updates this page instance.
+  }
+  window.dispatchEvent(new Event(THINKING_CHAIN_CHANGE_EVENT));
+}
+
+const thinkingChainStore = {
+  subscribe(listener: () => void): () => void {
+    window.addEventListener(THINKING_CHAIN_CHANGE_EVENT, listener);
+    window.addEventListener("storage", listener);
+    return () => {
+      window.removeEventListener(THINKING_CHAIN_CHANGE_EVENT, listener);
+      window.removeEventListener("storage", listener);
+    };
+  },
+  getSnapshot(): boolean {
+    return thinkingChainVisible();
+  },
+};
+
+function useShowThinkingChain(): boolean {
+  return useSyncExternalStore(
+    thinkingChainStore.subscribe,
+    thinkingChainStore.getSnapshot,
+  );
+}
+
 const LEFT_SIDEBAR_MIN_WIDTH = 180;
 const LEFT_SIDEBAR_MAX_WIDTH = 380;
 const RIGHT_SIDEBAR_MIN_WIDTH = 180;
@@ -570,6 +664,16 @@ function TimemApp() {
   >(null);
   const [showToolRepo, setShowToolRepo] = useState(false);
   const [showTimers, setShowTimers] = useState(false);
+  const [showMailbox, setShowMailbox] = useState(false);
+  const [timersPanelAnchorRight, setTimersPanelAnchorRight] = useState<
+    number | null
+  >(null);
+  const [mailboxPanelAnchorRight, setMailboxPanelAnchorRight] = useState<
+    number | null
+  >(null);
+  const [mailboxBySession, setMailboxBySession] = useState<
+    Record<string, MailboxSnapshotInfo>
+  >({});
   const [chatLibraryMode, setChatLibraryMode] = useState<
     "search" | "favorites" | null
   >(null);
@@ -586,6 +690,12 @@ function TimemApp() {
   const [pendingFavoriteSourceKeys, setPendingFavoriteSourceKeys] = useState<
     Set<string>
   >(() => new Set());
+  // Stable identity matters: SessionTimelinePane is memoized, and a fresh Map
+  // on every streamed event would re-render every mounted session timeline.
+  const favoriteBySource = useMemo(
+    () => new Map(favorites.map((favorite) => [favorite.source_key, favorite])),
+    [favorites],
+  );
   const [favoriteCapacity, setFavoriteCapacity] = useState<ChatLibraryCapacity>(
     { used_bytes: 0, limit_bytes: 256 * 1024 * 1024, used_percent: 0 },
   );
@@ -644,6 +754,7 @@ function TimemApp() {
   const [showAppearance, setShowAppearance] = useState(false);
   const [settingsSection, setSettingsSection] =
     useState<SettingsSection>("appearance");
+  const [resourceCapsPulse, setResourceCapsPulse] = useState(0);
   const [memTemporaryItems, setMemTemporaryItems] = useState<
     MemTemporaryItem[]
   >([]);
@@ -652,7 +763,16 @@ function TimemApp() {
   const [memTemporaryItemsDeleting, setMemTemporaryItemsDeleting] =
     useState(false);
   const [memTemporaryItemsError, setMemTemporaryItemsError] = useState("");
+  const [memStorageUsage, setMemStorageUsage] =
+    useState<MemStorageUsage | null>(null);
+  const [resourcePulseBySession, setResourcePulseBySession] = useState<
+    Record<string, SessionResourcePulseSample[]>
+  >({});
+  const memorySettingsOpenRef = useRef(false);
+  memorySettingsOpenRef.current =
+    showAppearance && settingsSection === "memory";
   const [showMcp, setShowMcp] = useState(false);
+  const [mcpPanelAnchorRight, setMcpPanelAnchorRight] = useState<number | null>(null);
   const [newSessionTarget, setNewSessionTarget] = useState<{
     groupId: string | null;
     groupName: string;
@@ -732,12 +852,15 @@ function TimemApp() {
   const [pendingMemRetention, setPendingMemRetention] = useState(false);
   const [pendingMemConversationCapacity, setPendingMemConversationCapacity] =
     useState(false);
+  const [pendingMemMailboxCapacity, setPendingMemMailboxCapacity] =
+    useState(false);
   const [pendingClaudeCodexToolDiscovery, setPendingClaudeCodexToolDiscovery] =
     useState(false);
   const [pendingModelToolResultBytes, setPendingModelToolResultBytes] =
     useState(false);
   const [pendingContextCompressThreshold, setPendingContextCompressThreshold] =
     useState(false);
+  const [pendingResourceCaps, setPendingResourceCaps] = useState(false);
   const [pendingRestorePromptContext, setPendingRestorePromptContext] =
     useState(false);
   const [rejectedSubmitCommandIds, setRejectedSubmitCommandIds] = useState<
@@ -775,6 +898,8 @@ function TimemApp() {
   const pendingEndpointDeleteIdsRef = useRef<Set<string>>(new Set());
   const pendingEndpointDeleteCommandRef = useRef("");
   const turnHistoryPagesRef = useRef(new Map<string, { records: ChatHistoryRecord[]; offset: number }>());
+  const turnHydrationQueueRef = useRef(createTurnHistoryHydrationQueue());
+  const turnHydrationMissingRef = useRef(new Set<string>());
   const pendingHistorySessionIdsRef = useRef<Set<string>>(new Set());
   const pendingUploadSessionIdsRef = useRef<Set<string>>(new Set());
   const pendingToolgenRequestsRef = useRef<Set<string>>(new Set());
@@ -791,6 +916,8 @@ function TimemApp() {
   const toolRepoPanelRef = useRef<HTMLElement | null>(null);
   const timersButtonRef = useRef<HTMLButtonElement | null>(null);
   const timersPanelRef = useRef<HTMLElement | null>(null);
+  const mailboxButtonRef = useRef<HTMLButtonElement | null>(null);
+  const mailboxPanelRef = useRef<HTMLElement | null>(null);
   const chatLibraryPanelRef = useRef<HTMLElement | null>(null);
   const chatLibraryTriggerRef = useRef<HTMLButtonElement | null>(null);
   const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -847,9 +974,13 @@ function TimemApp() {
     setShowToolRepo(false);
     toolRepoButtonRef.current?.focus({ preventScroll: true });
   }, []);
-  const closeTimersPanel = useCallback(() => {
+  const closeTimersPanel = useCallback((restoreFocus = true) => {
     setShowTimers(false);
-    timersButtonRef.current?.focus({ preventScroll: true });
+    if (restoreFocus) timersButtonRef.current?.focus({ preventScroll: true });
+  }, []);
+  const closeMailboxPanel = useCallback((restoreFocus = true) => {
+    setShowMailbox(false);
+    if (restoreFocus) mailboxButtonRef.current?.focus({ preventScroll: true });
   }, []);
   const closeRuntimePanel = useCallback((restoreFocus = true) => {
     setShowRuntime(false);
@@ -870,6 +1001,69 @@ function TimemApp() {
     setRevealedMcpSecrets({});
     if (restoreFocus) mcpButtonRef.current?.focus({ preventScroll: true });
   }, []);
+  // Open the MCP panel next to its trigger instead of at a fixed left inset.
+  // The panel's containing block is the chat shell, so measure the trigger's
+  // right edge against that same boundary and clamp away from the edge.
+  useLayoutEffect(() => {
+    if (!showMcp) return;
+    const anchor = () => {
+      const button = mcpButtonRef.current;
+      if (!button) return;
+      const boundary =
+        (button.offsetParent as HTMLElement | null)?.getBoundingClientRect()
+          .right ?? window.innerWidth;
+      const rect = button.getBoundingClientRect();
+      setMcpPanelAnchorRight(
+        Math.max(12, Math.min(Math.round(boundary - rect.right), window.innerWidth - 48)),
+      );
+    };
+    anchor();
+    window.addEventListener("resize", anchor);
+    return () => window.removeEventListener("resize", anchor);
+  }, [showMcp]);
+  useLayoutEffect(() => {
+    if (!showTimers) return;
+    const anchor = () => {
+      const button = timersButtonRef.current;
+      if (!button) return;
+      // The timer card lives under the app shell, not inside the chat shell;
+      // measure against the card's own containing block when it is mounted.
+      const boundary =
+        (timersPanelRef.current?.offsetParent as HTMLElement | null)?.getBoundingClientRect()
+          .right ??
+        (button.offsetParent as HTMLElement | null)?.getBoundingClientRect()
+          .right ??
+        window.innerWidth;
+      const rect = button.getBoundingClientRect();
+      setTimersPanelAnchorRight(
+        Math.max(12, Math.min(Math.round(boundary - rect.right), window.innerWidth - 48)),
+      );
+    };
+    anchor();
+    window.addEventListener("resize", anchor);
+    return () => window.removeEventListener("resize", anchor);
+  }, [showTimers]);
+  useLayoutEffect(() => {
+    if (!showMailbox) return;
+    const anchor = () => {
+      const button = mailboxButtonRef.current;
+      if (!button) return;
+      // See the timer card: anchor against the card's own containing block.
+      const boundary =
+        (mailboxPanelRef.current?.offsetParent as HTMLElement | null)?.getBoundingClientRect()
+          .right ??
+        (button.offsetParent as HTMLElement | null)?.getBoundingClientRect()
+          .right ??
+        window.innerWidth;
+      const rect = button.getBoundingClientRect();
+      setMailboxPanelAnchorRight(
+        Math.max(12, Math.min(Math.round(boundary - rect.right), window.innerWidth - 48)),
+      );
+    };
+    anchor();
+    window.addEventListener("resize", anchor);
+    return () => window.removeEventListener("resize", anchor);
+  }, [showMailbox]);
   const closeMobileSidebar = useCallback((restoreFocus = true) => {
     setShowMobileSessions(false);
     if (restoreFocus)
@@ -913,7 +1107,7 @@ function TimemApp() {
 
   const startSidebarResize = useCallback(
     (side: "left" | "right", event: React.PointerEvent<HTMLButtonElement>) => {
-      if (window.matchMedia("(max-width: 1050px)").matches) return;
+      if (window.matchMedia("(width < 1051px)").matches) return;
       event.preventDefault();
       const startX = event.clientX;
       const startWidth =
@@ -986,12 +1180,49 @@ function TimemApp() {
   useEffect(() => {
     if (!showTimers) return;
     timersPanelRef.current?.focus({ preventScroll: true });
+    const dismissOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (
+        timersButtonRef.current?.contains(target) ||
+        timersPanelRef.current?.contains(target)
+      )
+        return;
+      closeTimersPanel(false);
+    };
     const dismissOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") closeTimersPanel();
     };
+    document.addEventListener("pointerdown", dismissOnOutsidePointer);
     document.addEventListener("keydown", dismissOnEscape);
-    return () => document.removeEventListener("keydown", dismissOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", dismissOnOutsidePointer);
+      document.removeEventListener("keydown", dismissOnEscape);
+    };
   }, [closeTimersPanel, showTimers]);
+  useEffect(() => {
+    if (!showMailbox) return;
+    mailboxPanelRef.current?.focus({ preventScroll: true });
+    const dismissOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (
+        mailboxButtonRef.current?.contains(target) ||
+        mailboxPanelRef.current?.contains(target)
+      )
+        return;
+      closeMailboxPanel(false);
+    };
+    const dismissOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeMailboxPanel();
+    };
+    document.addEventListener("pointerdown", dismissOnOutsidePointer);
+    document.addEventListener("keydown", dismissOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", dismissOnOutsidePointer);
+      document.removeEventListener("keydown", dismissOnEscape);
+    };
+  }, [closeMailboxPanel, showMailbox]);
 
   useEffect(() => {
     if (!showMobileSessions) return;
@@ -1067,6 +1298,10 @@ function TimemApp() {
     (command: ClientCommand, requestedCommandId?: string) => {
       if (socket.current?.readyState !== WebSocket.OPEN || !snapshotReady)
         return false;
+      // The socket is shared by every session; a burst of high-frequency
+      // commands must fail fast instead of buffering unbounded payloads.
+      if (socket.current.bufferedAmount > MAX_SOCKET_BUFFERED_BYTES)
+        return false;
       const commandId =
         requestedCommandId ??
         (commandNeedsReliableDelivery(command)
@@ -1091,10 +1326,31 @@ function TimemApp() {
   const sendCommandRef = useRef(sendCommand);
   sendCommandRef.current = sendCommand;
 
+  // Fetch the active session's mailbox snapshot on first sight; later updates
+  // arrive through mailbox_updated pushes.
+  useEffect(() => {
+    const sessionId = activeSession?.session_id;
+    if (!sessionId || mailboxBySession[sessionId] !== undefined) return;
+    sendCommandRef.current({ type: "mailbox_get", session_id: sessionId });
+  }, [activeSession?.session_id, mailboxBySession]);
+
+  // One turn_history_page chain = one scheduler slot. The bounded queue keeps
+  // restored-timeline hydration from flooding the Host command channel.
+  const startTurnHistoryChain = useCallback((sessionId: string, turnId: string) => {
+    const key = sessionTurnKey(sessionId, turnId);
+    turnHistoryPagesRef.current.set(key, { records: [], offset: 0 });
+    if (!sendCommandRef.current({ type: "turn_history_page", session_id: sessionId, turn_id: turnId, offset: 0 })) {
+      turnHistoryPagesRef.current.delete(key);
+      return false;
+    }
+    return true;
+  }, []);
+
   const closeSettingsCenter = useCallback(() => {
     if (
       !pendingMemRetention &&
       !pendingMemConversationCapacity &&
+      !pendingMemMailboxCapacity &&
       !pendingClaudeCodexToolDiscovery &&
       !pendingModelToolResultBytes &&
       !pendingContextCompressThreshold &&
@@ -1112,10 +1368,17 @@ function TimemApp() {
     pendingContextCompressThreshold,
     pendingModelToolResultBytes,
     pendingMemConversationCapacity,
+    pendingMemMailboxCapacity,
     pendingMemRetention,
     pendingMemSwitch,
     pendingRestorePromptContext,
   ]);
+  const openResourceCapsSettings = useCallback(() => {
+    setChatLibraryMode(null);
+    setSettingsSection("system");
+    setShowAppearance(true);
+    setResourceCapsPulse((current) => current + 1);
+  }, []);
   const refreshMemTemporaryItems = useCallback(() => {
     setMemTemporaryItemsLoading(true);
     setMemTemporaryItemsError("");
@@ -1283,6 +1546,25 @@ function TimemApp() {
     },
     [reportUiError, sendCommand],
   );
+  const saveMemMailboxCapacity = useCallback(
+    (maxBytes: number | null) => {
+      setPendingMemMailboxCapacity(true);
+      if (
+        !sendCommand({
+          type: "mem_mailbox_capacity_update",
+          max_bytes: maxBytes,
+        })
+      ) {
+        setPendingMemMailboxCapacity(false);
+        reportUiError(
+          "Mem settings failed",
+          "Reconnect to Timem Web before updating Mailbox capacity.",
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand],
+  );
   const saveModelToolResultBytes = useCallback(
     (maxBytes: ModelToolResultBytes) => {
       setPendingModelToolResultBytes(true);
@@ -1315,6 +1597,62 @@ function TimemApp() {
         reportUiError(
           "System setting failed",
           "Reconnect to Timem Web before changing the context compression threshold.",
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand],
+  );
+  const saveResourceCaps = useCallback(
+    (
+      cpu_enabled: boolean,
+      cpu_percent: number,
+      mem_enabled: boolean,
+      mem_percent: number,
+    ) => {
+      setPendingResourceCaps(true);
+      if (
+        !sendCommand({
+          type: "system_resource_caps_update",
+          cpu_enabled,
+          cpu_percent,
+          mem_enabled,
+          mem_percent,
+        })
+      ) {
+        setPendingResourceCaps(false);
+        reportUiError(
+          "System resource caps failed",
+          "Reconnect to Timem Web before changing the system resource caps.",
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand],
+  );
+  const escalateResourceCaps = useCallback(
+    (
+      cpu_enabled: boolean,
+      cpu_percent: number,
+      mem_enabled: boolean,
+      mem_percent: number,
+      password: string,
+    ) => {
+      setPendingResourceCaps(true);
+      if (
+        !sendCommand({
+          type: "system_resource_caps_escalate",
+          cpu_enabled,
+          cpu_percent,
+          mem_enabled,
+          mem_percent,
+          password,
+        })
+      ) {
+        setPendingResourceCaps(false);
+        reportUiError(
+          "System resource caps failed",
+          "Reconnect to Timem Web before authorizing the system resource caps repair.",
           "system",
         );
       }
@@ -1726,6 +2064,7 @@ function TimemApp() {
       if (!fromSemantic) {
         if (event.type === "hello") {
           turnHistoryPagesRef.current.clear();
+          turnHydrationQueueRef.current = createTurnHistoryHydrationQueue();
           // A reconnect may intentionally target an older Host, so Hello resets
           // rather than only ever enabling this connection-level capability.
           semanticDeliveryRef.current = enablesSemanticDelivery(event);
@@ -1812,6 +2151,16 @@ function TimemApp() {
               next.add(event.command_id);
               return next;
             });
+            if (event.error === "message_queue_full") {
+              pushActivity({
+                id: clientId(),
+                sessionId: commandSessionId(completed) ?? activeSessionIdRef.current ?? "system",
+                tone: "notice",
+                title: t("composer.queueFullTitle"),
+                detail: t("composer.queueFullNotice"),
+                createdAt: Date.now(),
+              });
+            }
           }
           if (pendingWorkerRoleMutationsRef.current.delete(event.command_id)) {
             const visibleLibrary = replayWorkerRoleMutations(
@@ -1851,6 +2200,8 @@ function TimemApp() {
             setPendingMemRetention(false);
           if (completed?.type === "mem_conversation_capacity_update")
             setPendingMemConversationCapacity(false);
+          if (completed?.type === "mem_mailbox_capacity_update")
+            setPendingMemMailboxCapacity(false);
           if (completed?.type === "beta_claude_codex_tool_discovery_update")
             setPendingClaudeCodexToolDiscovery(false);
           if (completed?.type === "system_model_tool_result_bytes_update")
@@ -1859,6 +2210,8 @@ function TimemApp() {
             setPendingContextCompressThreshold(false);
           if (completed?.type === "system_restore_prompt_context_on_startup_update")
             setPendingRestorePromptContext(false);
+          if (completed?.type === "system_resource_caps_update")
+            setPendingResourceCaps(false);
           const memSwitchNeedsConfirmation =
             completed?.type === "mem_switch" &&
             !completed.stop_running &&
@@ -1968,10 +2321,12 @@ function TimemApp() {
       if (event.type === "mem_settings_updated") {
         setPendingMemRetention(false);
         setPendingMemConversationCapacity(false);
+        setPendingMemMailboxCapacity(false);
         setPendingClaudeCodexToolDiscovery(false);
         setPendingModelToolResultBytes(false);
         setPendingContextCompressThreshold(false);
         setPendingRestorePromptContext(false);
+        setPendingResourceCaps(false);
         setServer((current) =>
           current
             ? {
@@ -1982,6 +2337,7 @@ function TimemApp() {
                   temporary_capacity_bytes: event.temporary_capacity_bytes,
                   conversation_capacity_bytes:
                     event.conversation_capacity_bytes,
+                  mailbox_capacity_bytes: event.mailbox_capacity_bytes,
                   claude_codex_tool_discovery:
                     event.claude_codex_tool_discovery,
                   model_tool_result_bytes: event.model_tool_result_bytes,
@@ -1989,14 +2345,31 @@ function TimemApp() {
                     event.context_compress_threshold_percent,
                   restore_prompt_context_on_startup:
                     event.restore_prompt_context_on_startup,
+                  system_cpu_cap_percent: event.system_cpu_cap_percent,
+                  system_mem_cap_percent: event.system_mem_cap_percent,
+                  system_cpu_cap_enabled: event.system_cpu_cap_enabled,
+                  system_mem_cap_enabled: event.system_mem_cap_enabled,
+                  resource_caps: event.resource_caps,
                 },
               }
             : current,
         );
+        sendCommandRef.current({ type: "mem_storage_usage_query" });
+        return;
+      }
+      if (event.type === "mem_storage_usage") {
+        setMemStorageUsage({
+          temporary_bytes: event.temporary_bytes,
+          conversation_bytes: event.conversation_bytes,
+          mailbox_bytes: event.mailbox_bytes,
+          mailbox_files: event.mailbox_files,
+          favorite_bytes: event.favorite_bytes,
+        });
         return;
       }
       if (event.type === "mem_temporary_items") {
         setMemTemporaryItems(event.items);
+        sendCommandRef.current({ type: "mem_storage_usage_query" });
         setMemTemporaryItemsError(event.error ?? "");
         setMemTemporaryItemsLoading(false);
         setMemTemporaryItemsDeleting(false);
@@ -2004,6 +2377,7 @@ function TimemApp() {
       }
       if (event.type === "hello") {
         turnHistoryPagesRef.current.clear();
+        turnHydrationQueueRef.current = createTurnHistoryHydrationQueue();
         // Hello carries the complete authoritative baseline. Adopt its exact
         // sequence before any later semantic event is reduced; reconnecting to
         // a Host that has already emitted events must not look like a gap from
@@ -2086,6 +2460,44 @@ function TimemApp() {
         );
         return;
       }
+      if (event.type === "session_usage_reset") {
+        setSessions((current) =>
+          current.map((session) =>
+            session.session_id === event.session_id
+              ? { ...session, telemetry_reset_at_ms: event.reset_at_ms }
+              : session,
+          ),
+        );
+        return;
+      }
+      if (event.type === "session_resource_usage") {
+        setResourcePulseBySession((current) => {
+          const previous = current[event.session_id] ?? [];
+          const sample: SessionResourcePulseSample = {
+            at: event.sampled_at_ms,
+            cpuUsageUsec: event.usage?.cpu_usage_usec,
+            quotaCores: event.usage?.cpu_quota_cores,
+            memBytes: event.usage?.memory_current_bytes,
+            anonBytes: event.usage?.memory_anon_bytes,
+            fileBytes: event.usage?.memory_file_bytes,
+            fileMappedBytes: event.usage?.memory_file_mapped_bytes,
+            swapBytes: event.usage?.swap_current_bytes,
+            memHighBytes: event.usage?.memory_high_bytes,
+            memMaxBytes: event.usage?.memory_max_bytes,
+            systemCpuBusyTicks: event.system?.cpu_busy_ticks,
+            systemCpuTotalTicks: event.system?.cpu_total_ticks,
+            systemMemTotalBytes: event.system?.memory_total_bytes,
+            systemMemAvailableBytes: event.system?.memory_available_bytes,
+          };
+          // 2s cadence: a bounded 12-slot ring keeps the visible 20s window
+          // even when a sample arrives late or early.
+          return {
+            ...current,
+            [event.session_id]: [...previous, sample].slice(-12),
+          };
+        });
+        return;
+      }
       if (event.type === "session_memo_updated") {
         setSessions((current) =>
           current.map((session) =>
@@ -2104,6 +2516,15 @@ function TimemApp() {
               : session,
           ),
         );
+        return;
+      }
+      if (event.type === "mailbox_updated") {
+        setMailboxBySession((current) => ({
+          ...current,
+          [event.session_id]: event.mailbox,
+        }));
+        if (memorySettingsOpenRef.current)
+          sendCommandRef.current({ type: "mem_storage_usage_query" });
         return;
       }
       if (event.type === "session_deleted") {
@@ -2433,6 +2854,7 @@ function TimemApp() {
       }
       if (event.type === "host_error") {
         turnHistoryPagesRef.current.clear();
+        turnHydrationQueueRef.current = createTurnHistoryHydrationQueue();
         clearAllPendingCommands();
         pushActivity({
           id: clientId(),
@@ -2631,14 +3053,34 @@ function TimemApp() {
         if (event.next_offset !== null) {
           pending.offset = event.next_offset;
           if (!sendCommandRef.current({ type: "turn_history_page", session_id: event.session_id,
-            turn_id: event.turn_id, offset: event.next_offset })) turnHistoryPagesRef.current.delete(key);
+            turn_id: event.turn_id, offset: event.next_offset })) {
+            turnHistoryPagesRef.current.delete(key);
+            finishTurnHistoryHydrationChain(turnHydrationQueueRef.current, key, startTurnHistoryChain);
+          }
         } else {
           const restored = turnsFromHistoryRecords(pending.records).find((turn) => turn.turn_id === event.turn_id);
+          // Hydration grows restored turns (sometimes by thousands of pixels)
+          // while the reader may be anywhere in the timeline. The chat viewport
+          // disables native scroll anchoring, so ask the timeline viewport to
+          // capture the topmost visible turn before this commit; its layout
+          // effect pins the anchor back afterwards.
+          if (restored && event.session_id === activeSessionIdRef.current) {
+            window.dispatchEvent(new CustomEvent(HYDRATION_ANCHOR_CAPTURE_EVENT, {
+              detail: { sessionId: event.session_id },
+            }));
+          }
           turnHistoryPagesRef.current.delete(key);
           if (restored) setSessions((current) => current.map((session) => session.session_id !== event.session_id ? session : {
             ...session, turns: session.turns.map((turn) => turn.turn_id === event.turn_id && turn.state !== "working"
-              ? { ...turn, events: restored.events, user_entries: turn.user_entries.map((entry) => ({ ...entry, timeline_seq: undefined })) } : turn),
+              ? { ...turn, events: restored.events, events_slimmed: false, user_entries: turn.user_entries.map((entry) => ({ ...entry, timeline_seq: undefined })) } : turn),
           }));
+          else {
+            // No stored records survived retention rotation for this turn; it
+            // can never hydrate. Cache the miss so the timeline effect stops
+            // re-requesting it forever.
+            markTurnHistoryMissing(turnHydrationMissingRef.current, key);
+          }
+          finishTurnHistoryHydrationChain(turnHydrationQueueRef.current, key, startTurnHistoryChain);
         }
         return;
       }
@@ -3018,6 +3460,9 @@ function TimemApp() {
         setReconnectAttempt(0);
         setRuntimeEverConnected(true);
         setSnapshotReady(false);
+        // Server state may have drifted while disconnected; drop per-session
+        // mailbox caches so the active session refetches after the snapshot.
+        setMailboxBySession({});
       };
       ws.onclose = () => {
         if (socket.current === ws) socket.current = null;
@@ -3485,14 +3930,67 @@ function TimemApp() {
       : t("nav.settingsOpen");
   const modelEndpointsUnavailable =
     !!server && server.model_endpoints.length === 0;
+  const activeEndpointId = activeSession?.runtime_profile?.active_model_endpoint_id
+    ?? activeSession?.runtime_profile?.model_endpoint_id;
+  const modelEndpoints = server?.model_endpoints ?? [];
+  const headerModelEndpointById = activeEndpointId
+    ? modelEndpoints.find((endpoint) => endpoint.id === activeEndpointId)
+    : undefined;
+  const headerModelEndpointByProfile = activeEndpointId
+    ? undefined
+    : modelEndpoints.find((endpoint) =>
+        endpointMatchesProfile(endpoint, activeSession?.runtime_profile),
+      );
+  // A session-level context-window adjustment changes the effective input cap
+  // without rebinding the endpoint. Only use the relaxed shape match when it
+  // identifies exactly one endpoint; ambiguity must not guess a model.
+  const headerModelEndpointByShape = activeEndpointId
+    ? []
+    : modelEndpoints.filter((endpoint) =>
+        endpointMatchesProfileShape(endpoint, activeSession?.runtime_profile),
+      );
+  const headerModelEndpoint =
+    headerModelEndpointById ??
+    headerModelEndpointByProfile ??
+    (headerModelEndpointByShape.length === 1 ? headerModelEndpointByShape[0] : undefined);
   const headerModelLabel =
-    endpointLabelForProfile(
-      server?.model_endpoints ?? [],
-      activeSession?.runtime_profile,
-    );
-  const headerModelEndpoint = (server?.model_endpoints ?? []).find(
-    (endpoint) => endpointMatchesProfile(endpoint, activeSession?.runtime_profile),
+    headerModelEndpoint?.name ??
+    (activeEndpointId
+      ? t("modelService.endpointDeleted")
+      : endpointLabelForProfile(
+          server?.model_endpoints ?? [],
+          activeSession?.runtime_profile,
+        ));
+  const headerReasoningOptions = sessionReasoningOptions(
+    headerModelEndpoint,
+    server?.model_catalog ?? [],
   );
+  const headerReasoningValue = activeSession?.runtime_profile?.reasoning_effort ?? "";
+  const headerDefaultEffort =
+    endpointCatalogModel(headerModelEndpoint, server?.model_catalog ?? [])
+      ?.default_effort ?? "";
+  const headerContextUsage = activeSession
+    ? sessionContextUsage(activeSession)
+    : undefined;
+  const headerContextUsed = headerContextUsage?.prompt_tokens ?? 0;
+  const headerContextLimit = activeSession?.max_llm_input_tokens || undefined;
+  const headerContextBound =
+    !!headerModelEndpoint &&
+    (activeSession?.runtime_profile?.model_endpoint_ids ?? []).includes(
+      headerModelEndpoint.id,
+    );
+  const headerReasoningBound =
+    !!activeSession?.runtime_profile?.active_model_endpoint_id ||
+    !!activeSession?.runtime_profile?.model_endpoint_id;
+  const headerContextOverride =
+    !!headerModelEndpoint &&
+    Object.hasOwn(
+      activeSession?.runtime_profile?.endpoint_max_input_tokens ?? {},
+      headerModelEndpoint.id,
+    );
+  const headerContextCompressPending = activeSession
+    ? sessionContextCompressPending(activeSession)
+    : false;
   // Documented catalog facts decide the image warning; custom endpoints
   // (unknown modalities) stay permissive to avoid false alarms.
   const activeImageUnsupportedEndpoint =
@@ -3604,10 +4102,30 @@ function TimemApp() {
   const toolRepoLabel = showToolRepo
     ? "Close ToolRepo"
     : `Open ToolRepo · ${activeToolCount} reusable tools`;
-  const activeTimerCount = activeSession?.timers?.length ?? 0;
+  const totalTimerCount = activeSession?.timers?.length ?? 0;
+  const workingTimerCount =
+    activeSession?.timers?.filter(
+      (timer) => timer.enabled && !timer.parked_reason,
+    ).length ?? 0;
+  const timerCountLabel =
+    totalTimerCount > 0
+      ? `${workingTimerCount}/${totalTimerCount}`
+      : "0";
   const timersLabel = showTimers
     ? t("timer.ariaLabel")
-    : `${t("timer.ariaLabel")} · ${activeTimerCount}`;
+    : `${t("timer.ariaLabel")} · ${timerCountLabel}`;
+  const activeMailbox = activeSession
+    ? mailboxBySession[activeSession.session_id]
+    : undefined;
+  const mailboxUnread = activeMailbox?.unread ?? 0;
+  const mailboxPeerUnread = (activeMailbox?.sent ?? []).filter(
+    (entry) => entry.status === "sent",
+  ).length;
+  const mailboxAttention = mailboxUnread > 0 || mailboxPeerUnread > 0;
+  const mailboxCountLabel = mailboxUnread > 99 ? "99+" : String(mailboxUnread);
+  const mailboxLabel = showMailbox
+    ? t("mailbox.ariaLabel")
+    : `${t("mailbox.ariaLabel")} · ${mailboxCountLabel}`;
   const mobileSessionsLabel = showMobileSessions
     ? "Close session navigation"
     : "Open session navigation";
@@ -3775,6 +4293,8 @@ function TimemApp() {
       return;
     if (memTemporaryItemsLoadedForRef.current === memPath) return;
     memTemporaryItemsLoadedForRef.current = memPath;
+    setMemStorageUsage(null);
+    sendCommand({ type: "mem_storage_usage_query" });
     setMemTemporaryItemsLoading(true);
     setMemTemporaryItemsError("");
     if (!sendCommand({ type: "mem_temporary_items_list" })) {
@@ -3796,19 +4316,33 @@ function TimemApp() {
     document.body.classList.toggle("workspace-modal-open", workspaceModalOpen);
     return () => document.body.classList.remove("workspace-modal-open");
   }, [workspaceModalOpen]);
+  // Stable context identity: SessionTimelinePane consumes this context, so a
+  // fresh closure on every render would re-render every mounted timeline even
+  // when its props are unchanged (memo cannot block context propagation).
+  const requestTurnHistory = useCallback(
+    (sessionId: string, turnId: string, priority = false) => {
+      const queue = turnHydrationQueueRef.current;
+      enqueueTurnHistoryHydration(
+        queue,
+        {
+          alreadyRequested: (key) => turnHistoryPagesRef.current.has(key),
+          knownMissing: (key) => turnHydrationMissingRef.current.has(key),
+        },
+        sessionId,
+        turnId,
+        priority,
+      );
+      pumpTurnHistoryHydration(queue, startTurnHistoryChain);
+    },
+    [startTurnHistoryChain],
+  );
   return (
-    <TurnHistoryRequestContext.Provider value={(sessionId, turnId) => {
-      const key = sessionTurnKey(sessionId, turnId);
-      if (turnHistoryPagesRef.current.has(key)) return;
-      turnHistoryPagesRef.current.set(key, { records: [], offset: 0 });
-      if (!sendCommand({ type: "turn_history_page", session_id: sessionId, turn_id: turnId, offset: 0 }))
-        turnHistoryPagesRef.current.delete(key);
-    }}>
+    <TurnHistoryRequestContext.Provider value={requestTurnHistory}>
     <AssistantRuntimeProvider runtime={runtime}>
       <div
         inert={workspaceModalOpen}
         aria-hidden={workspaceModalOpen || undefined}
-        className={`app-shell ${leftSidebarCollapsed ? "left-sidebar-collapsed" : ""} ${!showToolRepo && !showTimers && rightSidebarCollapsed ? "right-sidebar-collapsed" : ""}`}
+        className={`app-shell ${leftSidebarCollapsed ? "left-sidebar-collapsed" : ""} ${!showToolRepo && rightSidebarCollapsed ? "right-sidebar-collapsed" : ""}`}
         style={
           {
             "--left-sidebar-width": `${sidebarLayout.leftWidth}px`,
@@ -4264,11 +4798,17 @@ function TimemApp() {
                                         );
                                       const visuallyWorking =
                                         sessionVisuallyWorking(session);
-                                      const sessionEndpointName =
-                                        endpointLabelForProfile(
-                                          server?.model_endpoints ?? [],
-                                          session.runtime_profile,
-                                        );
+                                      const sessionActiveEndpointId = session.state === "working"
+                                        ? session.runtime_profile?.active_model_endpoint_id
+                                        : session.runtime_profile?.model_endpoint_id;
+                                      const sessionEndpointName = sessionActiveEndpointId
+                                        ? (server?.model_endpoints ?? []).find(
+                                            (endpoint) => endpoint.id === sessionActiveEndpointId,
+                                          )?.name ?? t("modelService.endpointDeleted")
+                                        : endpointLabelForProfile(
+                                            server?.model_endpoints ?? [],
+                                            session.runtime_profile,
+                                          );
                                       return (
                                         <Fragment key={session.session_id}>
                                           <SortableSessionRow
@@ -4705,33 +5245,207 @@ function TimemApp() {
         <main className="chat-shell">
           <header className="chat-header">
             <div className="header-context-actions">
-              <HeaderContextUsage
+              <SessionInsights
                 session={activeSession}
-                onClear={
-                  activeSession && !sessionBusy
-                    ? () => {
-                        if (
-                          window.confirm(
-                            t("context.clearConfirm"),
-                          )
-                        )
-                          sendCommand({
-                            type: "session_clear_context",
-                            session_id: activeSession.session_id,
-                          });
-                      }
-                    : null
+                resourceCaps={server?.mem.resource_caps}
+                onOpenResourceSettings={openResourceCapsSettings}
+                resourceSamples={
+                  activeSession
+                    ? resourcePulseBySession[activeSession.session_id]
+                    : undefined
                 }
-                onCompact={
+                onReset={
                   activeSession
                     ? () =>
                         sendCommand({
-                          type: "session_request_context_compress",
+                          type: "session_usage_reset",
+                          session_id: activeSession.session_id,
+                        })
+                    : null
+                }
+                onSample={
+                  activeSession
+                    ? () =>
+                        sendCommand({
+                          type: "session_resource_usage_query",
                           session_id: activeSession.session_id,
                         })
                     : null
                 }
               />
+            </div>
+            <div className="header-session-cluster">
+              <div className="header-session-model-row">
+                <div className="header-model-guide-anchor">
+                  <HeaderModelControl
+                    session={activeSession}
+                    endpoint={headerModelEndpoint}
+                    endpointLabel={headerModelLabel}
+                    reasoningOptions={headerReasoningOptions}
+                    reasoningValue={headerReasoningValue}
+                    defaultEffort={headerDefaultEffort}
+                    reasoningLocked={runtimeLocked}
+                    contextUsed={headerContextUsed}
+                    contextLimit={headerContextLimit}
+                    contextOverride={headerContextOverride && headerContextBound}
+                    compressPending={headerContextCompressPending}
+                    buttonRef={runtimeButtonRef}
+                    onReasoningChange={(effort) => {
+                      if (!activeSession) return;
+                      const accepted = headerReasoningBound
+                        ? sendCommand({
+                            type: "session_reasoning_effort_update",
+                            session_id: activeSession.session_id,
+                            reasoning_effort: effort,
+                          })
+                        : sendCommand({
+                            type: "session_runtime_update",
+                            session_id: activeSession.session_id,
+                            key: "TIMEM_REASONING_EFFORT",
+                            value: effort,
+                          });
+                      if (!accepted) {
+                        reportUiError(
+                          "Reasoning update failed",
+                          t("errors.checkConnection"),
+                          activeSession.session_id,
+                        );
+                      }
+                    }}
+                    onContextLimitChange={(tokens) => {
+                      if (!activeSession || !headerModelEndpoint) return;
+                      const accepted = headerContextBound
+                        ? sendCommand({
+                            type: "session_endpoint_max_input_tokens_update",
+                            session_id: activeSession.session_id,
+                            endpoint_id: headerModelEndpoint.id,
+                            max_input_tokens: tokens,
+                          })
+                        : sendCommand({
+                            type: "session_runtime_update",
+                            session_id: activeSession.session_id,
+                            key: "TIMEM_MAX_LLM_INPUT",
+                            value: String(
+                              tokens ?? headerModelEndpoint.max_llm_input_tokens,
+                            ),
+                          });
+                      if (!accepted) {
+                        reportUiError(
+                          "Context window update failed",
+                          t("errors.checkConnection"),
+                          activeSession.session_id,
+                        );
+                      }
+                    }}
+                    onCompact={
+                      activeSession
+                        ? () => {
+                            const accepted = sendCommand({
+                              type: "session_request_context_compress",
+                              session_id: activeSession.session_id,
+                            });
+                            if (!accepted) {
+                              reportUiError(
+                                "Context compression failed",
+                                t("errors.checkConnection"),
+                                activeSession.session_id,
+                              );
+                            }
+                            return accepted;
+                          }
+                        : null
+                    }
+                    onClear={
+                      activeSession && !sessionBusy
+                        ? () => {
+                            if (!window.confirm(t("context.clearConfirm"))) return;
+                            const accepted = sendCommand({
+                              type: "session_clear_context",
+                              session_id: activeSession.session_id,
+                            });
+                            if (!accepted) {
+                              reportUiError(
+                                "Context clear failed",
+                                t("errors.checkConnection"),
+                                activeSession.session_id,
+                              );
+                            }
+                          }
+                        : null
+                    }
+                    onOpenModelPanel={() => {
+                      setShowAppearance(false);
+                      setShowMcp(false);
+                      setShowToolRepo(false);
+                      setShowRuntime(true);
+                    }}
+                  />
+                  {modelEndpointsUnavailable && !showRuntime && (
+                    <div className="endpoint-guide-bubble" role="status">
+                      <span className="endpoint-guide-icon" aria-hidden="true">
+                        <Sparkles size={14} />
+                      </span>
+                      <div className="endpoint-guide-copy">
+                        <strong>{t("modelService.unconfiguredTitle")}</strong>
+                        <span>{t("modelService.unconfiguredDetail")}</span>
+                      </div>
+                      <button type="button" onClick={openEndpointCreator}>
+                        <Plus size={13} />
+                        <span>{t("modelService.configureNow")}</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="header-actions">
+              <button
+                type="button"
+                ref={mobileSessionButtonRef}
+                title={mobileSessionsLabel}
+                aria-label={mobileSessionsLabel}
+                className="icon-button mobile-session-button"
+                aria-expanded={showMobileSessions}
+                aria-controls="session-navigation"
+                onClick={() => setShowMobileSessions(true)}
+              >
+                <Menu size={18} />
+              </button>
+              <button
+                type="button"
+                title={t("roles.openPanel")}
+                aria-label={t("roles.openPanel")}
+                className="icon-button mobile-role-button"
+                aria-expanded={showRoles}
+                aria-controls="worker-role-panel"
+                onClick={() => setShowRoles(true)}
+              >
+                <BriefcaseBusiness size={17} />
+              </button>
+              {toolGenEnabled && (
+                <button
+                  type="button"
+                  ref={toolRepoButtonRef}
+                  title={toolRepoLabel}
+                  aria-label={toolRepoLabel}
+                  className={`icon-button toolrepo-header-button ${showToolRepo ? "selected" : ""} ${toolCountPulseSessionId === activeSession?.session_id ? "count-pulse" : ""}`}
+                  aria-expanded={showToolRepo}
+                  aria-controls="toolrepo-panel"
+                  onClick={() => {
+                    setShowAppearance(false);
+                    setShowRuntime(false);
+                    setShowMcp(false);
+                    if (showTimers) closeTimersPanel();
+                    if (showToolRepo) closeToolRepoPanel();
+                    else setShowToolRepo(true);
+                  }}
+                >
+                  <Wrench size={17} />
+                  <span className="toolrepo-header-count" aria-hidden="true">
+                    {activeToolCount}
+                  </span>
+                </button>
+              )}
               <button
                 type="button"
                 ref={mcpButtonRef}
@@ -4766,122 +5480,12 @@ function TimemApp() {
                   </span>
                 )}
               </button>
-            </div>
-            <div className="header-session-cluster">
-              <div className="header-session-model-row">
-              <div className="header-model-guide-anchor">
-                <button
-                  type="button"
-                  ref={runtimeButtonRef}
-                  className={`header-model ${showRuntime ? "selected" : ""}`}
-                  title={runtimeLabel}
-                  aria-label={`${runtimeLabel}: ${headerModelLabel}`}
-                  aria-expanded={showRuntime}
-                  aria-controls="runtime-panel"
-                  onClick={() => {
-                    setShowAppearance(false);
-                    setShowMcp(false);
-                    setShowToolRepo(false);
-                    if (showRuntime) closeRuntimePanel();
-                    else setShowRuntime(true);
-                  }}
-                >
-                  <Sparkles size={10} aria-hidden="true" />
-                  <span title={headerModelLabel}>{headerModelLabel}</span>
-                  <ChevronDown size={11} aria-hidden="true" />
-                </button>
-                {modelEndpointsUnavailable && !showRuntime && (
-                  <div className="endpoint-guide-bubble" role="status">
-                    <span className="endpoint-guide-icon" aria-hidden="true">
-                      <Sparkles size={14} />
-                    </span>
-                    <div className="endpoint-guide-copy">
-                      <strong>{t("modelService.unconfiguredTitle")}</strong>
-                      <span>{t("modelService.unconfiguredDetail")}</span>
-                    </div>
-                    <button type="button" onClick={openEndpointCreator}>
-                      <Plus size={13} />
-                      <span>{t("modelService.configureNow")}</span>
-                    </button>
-                  </div>
-                )}
-              </div>
-              {headerModelEndpoint && (
-                <div className="header-model-meta">
-                  <span
-                    className="header-model-meta-model"
-                    title={headerModelEndpoint.model}
-                  >
-                    {headerModelEndpoint.model}
-                  </span>
-                  <div className="header-model-meta-row">
-                    <span className="endpoint-chip endpoint-chip-protocol">
-                      {apiProtocolShort(headerModelEndpoint.api_protocol)}
-                    </span>
-                    {headerModelEndpoint.reasoning_effort && (
-                      <span className="endpoint-chip endpoint-chip-effort">
-                        {headerModelEndpoint.reasoning_effort}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              )}
-              </div>
-            </div>
-            <div className="header-actions">
-              <button
-                type="button"
-                ref={mobileSessionButtonRef}
-                title={mobileSessionsLabel}
-                aria-label={mobileSessionsLabel}
-                className="icon-button mobile-session-button"
-                aria-expanded={showMobileSessions}
-                aria-controls="session-navigation"
-                onClick={() => setShowMobileSessions(true)}
-              >
-                <Menu size={18} />
-              </button>
-              <button
-                type="button"
-                title="Open worker roles"
-                aria-label="Open worker roles"
-                className="icon-button mobile-role-button"
-                aria-expanded={showRoles}
-                aria-controls="worker-role-panel"
-                onClick={() => setShowRoles(true)}
-              >
-                <BriefcaseBusiness size={17} />
-              </button>
-              {toolGenEnabled && (
-                <button
-                  type="button"
-                  ref={toolRepoButtonRef}
-                  title={toolRepoLabel}
-                  aria-label={toolRepoLabel}
-                  className={`icon-button toolrepo-header-button ${showToolRepo ? "selected" : ""} ${toolCountPulseSessionId === activeSession?.session_id ? "count-pulse" : ""}`}
-                  aria-expanded={showToolRepo}
-                  aria-controls="toolrepo-panel"
-                  onClick={() => {
-                    setShowAppearance(false);
-                    setShowRuntime(false);
-                    setShowMcp(false);
-                    if (showTimers) closeTimersPanel();
-                    if (showToolRepo) closeToolRepoPanel();
-                    else setShowToolRepo(true);
-                  }}
-                >
-                  <Wrench size={17} />
-                  <span className="toolrepo-header-count" aria-hidden="true">
-                    {activeToolCount}
-                  </span>
-                </button>
-              )}
               <button
                 type="button"
                 ref={timersButtonRef}
                 title={t("timer.title")}
                 aria-label={timersLabel}
-                className={`icon-button timer-header-button ${showTimers ? "selected" : ""} ${activeTimerCount > 0 ? "has-timers" : ""}`}
+                className={`icon-button timer-header-button ${showTimers ? "selected" : ""} ${totalTimerCount > 0 ? "has-timers" : ""}`}
                 aria-expanded={showTimers}
                 aria-controls="timer-panel"
                 onClick={() => {
@@ -4889,14 +5493,40 @@ function TimemApp() {
                   setShowRuntime(false);
                   setShowMcp(false);
                   setShowToolRepo(false);
+                  if (showMailbox) closeMailboxPanel();
                   if (showTimers) closeTimersPanel();
                   else setShowTimers(true);
                 }}
               >
                 <AlarmClock size={17} />
-                {activeTimerCount > 0 && (
+                {totalTimerCount > 0 && (
                   <span className="timer-header-count" aria-hidden="true">
-                    {activeTimerCount}
+                    {timerCountLabel}
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
+                ref={mailboxButtonRef}
+                title={t("mailbox.headerHint")}
+                aria-label={mailboxLabel}
+                className={`icon-button mailbox-header-button ${showMailbox ? "selected" : ""} ${mailboxAttention ? "has-unread" : ""}`}
+                aria-expanded={showMailbox}
+                aria-controls="mailbox-panel"
+                onClick={() => {
+                  setShowAppearance(false);
+                  setShowRuntime(false);
+                  setShowMcp(false);
+                  setShowToolRepo(false);
+                  if (showTimers) closeTimersPanel();
+                  if (showMailbox) closeMailboxPanel();
+                  else setShowMailbox(true);
+                }}
+              >
+                <MessagesSquare size={17} />
+                {mailboxUnread > 0 && (
+                  <span className="mailbox-header-count" aria-hidden="true">
+                    {mailboxCountLabel}
                   </span>
                 )}
               </button>
@@ -4922,6 +5552,23 @@ function TimemApp() {
               }
               contextCompressThresholdPending={pendingContextCompressThreshold}
               onContextCompressThresholdChange={saveContextCompressThreshold}
+              systemCpuCapPercent={
+                server?.mem?.system_cpu_cap_percent ?? 85
+              }
+              systemMemCapPercent={
+                server?.mem?.system_mem_cap_percent ?? 85
+              }
+              systemCpuCapEnabled={
+                server?.mem?.system_cpu_cap_enabled ?? true
+              }
+              systemMemCapEnabled={
+                server?.mem?.system_mem_cap_enabled ?? true
+              }
+              resourceCaps={server?.mem?.resource_caps}
+              resourceCapsPulse={resourceCapsPulse}
+              resourceCapsPending={pendingResourceCaps}
+              onResourceCapsChange={saveResourceCaps}
+              onResourceCapsEscalate={escalateResourceCaps}
               restorePromptContextOnStartup={
                 server?.mem?.restore_prompt_context_on_startup ?? false
               }
@@ -4942,9 +5589,14 @@ function TimemApp() {
               conversationCapacityBytes={
                 server?.mem.conversation_capacity_bytes ?? null
               }
+              mailboxCapacityBytes={
+                server?.mem.mailbox_capacity_bytes ?? null
+              }
+              memStorageUsage={memStorageUsage}
               favoriteCapacity={favoriteCapacity}
               retentionPending={pendingMemRetention}
               conversationCapacityPending={pendingMemConversationCapacity}
+              mailboxCapacityPending={pendingMemMailboxCapacity}
               favoriteCapacityPending={favoriteCapacityUpdating}
               switchPending={pendingMemSwitch}
               temporaryItems={memTemporaryItems}
@@ -4974,6 +5626,7 @@ function TimemApp() {
               onSaveEndpoint={saveModelEndpoint}
               onSaveTemporaryPolicy={saveMemTemporaryPolicy}
               onSaveConversationCapacity={saveMemConversationCapacity}
+              onSaveMailboxCapacity={saveMemMailboxCapacity}
               onSaveFavoriteCapacity={saveMemFavoriteCapacity}
               onSwitchMemory={switchMemWorkspace}
             />
@@ -4982,6 +5635,7 @@ function TimemApp() {
             <McpPanel
               key={activeSession?.session_id ?? "no-session"}
               panelRef={mcpPanelRef}
+              anchorRight={mcpPanelAnchorRight}
               servers={server?.mcp_servers ?? []}
               session={activeSession}
               pendingKeys={pendingMcpKeys}
@@ -5010,14 +5664,36 @@ function TimemApp() {
               server={server}
               session={activeSession}
               onEdit={openEndpointSettings}
-              onApply={(endpointId) => {
-                if (!activeSession) return;
-                sendCommand({
-                  type: "model_endpoint_apply",
+              onApply={(endpointIds) => {
+                if (!activeSession) return false;
+                return sendCommand({
+                  type: "model_endpoint_chain_apply",
                   session_id: activeSession.session_id,
-                  endpoint_id: endpointId,
+                  endpoint_ids: endpointIds,
                 });
               }}
+              onEndpointReasoning={(endpointId, effort) => {
+                if (!activeSession) return;
+                sendCommand({
+                  type: "session_endpoint_reasoning_effort_update",
+                  session_id: activeSession.session_id,
+                  endpoint_id: endpointId,
+                  reasoning_effort: effort,
+                });
+              }}
+              onEndpointMaxInput={(endpointId, tokens) => {
+                if (!activeSession) return;
+                sendCommand({
+                  type: "session_endpoint_max_input_tokens_update",
+                  session_id: activeSession.session_id,
+                  endpoint_id: endpointId,
+                  max_input_tokens: tokens,
+                });
+              }}
+              onRefreshAvailability={() => {
+                sendCommand({ type: "model_endpoint_availability_refresh" });
+              }}
+              onClose={() => closeRuntimePanel()}
             />
           )}
           <TimemThread
@@ -5087,11 +5763,7 @@ function TimemApp() {
                 ? requestActiveToolGen
                 : undefined
             }
-            favoriteBySource={
-              new Map(
-                favorites.map((favorite) => [favorite.source_key, favorite]),
-              )
-            }
+            favoriteBySource={favoriteBySource}
             pendingFavoriteSourceKeys={pendingFavoriteSourceKeys}
             onToggleFavorite={toggleFavorite}
             onRequestMessageDelete={setDeleteMessageCandidate}
@@ -5135,7 +5807,7 @@ function TimemApp() {
             onDecisionReply={replyToDecision}
           />
         </main>
-        {!showToolRepo && !showTimers && showRoles && (
+        {!showToolRepo && showRoles && (
           <button
             type="button"
             className="role-panel-backdrop"
@@ -5143,7 +5815,7 @@ function TimemApp() {
             onClick={() => setShowRoles(false)}
           />
         )}
-        {!showToolRepo && !showTimers && (
+        {!showToolRepo && (
           <WorkerRolePanel
             key={activeSession?.session_id ?? "no-session"}
             session={activeSession}
@@ -5296,20 +5968,23 @@ function TimemApp() {
           />
         )}
         {showTimers && (
-          <button
-            type="button"
-            className="side-panel-backdrop"
-            aria-label={t("common.close")}
-            onClick={closeTimersPanel}
-          />
-        )}
-        {showTimers && (
           <TimerPanel
             key={activeSession?.session_id ?? "no-session"}
             panelRef={timersPanelRef}
-            onResizeStart={(event) => startSidebarResize("right", event)}
+            anchorRight={timersPanelAnchorRight}
             onClose={closeTimersPanel}
             session={activeSession}
+            sendCommand={sendCommandRef}
+          />
+        )}
+        {showMailbox && (
+          <MailboxPanel
+            key={activeSession?.session_id ?? "no-session"}
+            panelRef={mailboxPanelRef}
+            anchorRight={mailboxPanelAnchorRight}
+            onClose={closeMailboxPanel}
+            session={activeSession}
+            mailbox={activeMailbox}
             sendCommand={sendCommandRef}
           />
         )}
@@ -5891,6 +6566,13 @@ function ExpandedTextEditor({
       if (liveCommitTimerRef.current !== null) {
         window.clearTimeout(liveCommitTimerRef.current);
         liveCommitTimerRef.current = null;
+        // Teardown with unsaved typing (e.g. a transient session-projection
+        // swap unmounted the panel): commit synchronously instead of
+        // dropping the expanded-editor text.
+        const current = liveStateRef.current;
+        if (current.onLiveCommit && current.draft !== current.value) {
+          current.onLiveCommit(current.draft);
+        }
       }
     },
     [],
@@ -6317,14 +6999,14 @@ function WorkerRolePanel({
     <aside
       id="worker-role-panel"
       className={`worker-role-panel ${collapsed ? "collapsed" : ""} ${mobileOpen ? "mobile-open" : ""}`}
-      aria-label="Worker roles"
+      aria-label={t("roles.title")}
     >
       {collapsed ? (
         <button
           type="button"
           className="worker-role-restore"
-          title="Show worker roles"
-          aria-label="Show worker roles"
+          title={t("roles.showPanel")}
+          aria-label={t("roles.showPanel")}
           onClick={onRestore}
         >
           <ChevronLeft size={15} />
@@ -6334,20 +7016,20 @@ function WorkerRolePanel({
           <button
             type="button"
             className="sidebar-resize-handle right"
-            title="Resize worker roles"
-            aria-label="Resize worker roles"
+            title={t("roles.resizePanel")}
+            aria-label={t("roles.resizePanel")}
             onPointerDown={onResizeStart}
           />
           <header>
             <span>
-              <BriefcaseBusiness size={16} /> Roles
+              <BriefcaseBusiness size={16} /> {t("roles.title")}
             </span>
             <div>
               <button
                 type="button"
                 className="desktop-sidebar-toggle worker-role-collapse"
-                title="Hide worker roles"
-                aria-label="Hide worker roles"
+                title={t("roles.hidePanel")}
+                aria-label={t("roles.hidePanel")}
                 onClick={onCollapse}
               >
                 <ChevronRight size={15} />
@@ -7324,6 +8006,36 @@ function formatChatLibraryDate(value: number) {
   });
 }
 
+/// Mailbox stamps: today shows the clock time only, earlier mail adds the
+/// date, and mail from previous years keeps the year.
+function formatMailboxStamp(value: number) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const now = new Date();
+  if (date.toDateString() === now.toDateString()) {
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  const sameYear = date.getFullYear() === now.getFullYear();
+  return date.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    ...(sameYear ? {} : { year: "numeric" }),
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+const STREAM_MARKDOWN_INTERVAL_MS = 200;
+
+const StreamMarkdown = memo(function StreamMarkdown({ text }: { text: string }) {
+  // Streaming text changes at delta frequency; throttle the expensive
+  // markdown pipeline to ~5 renders/sec. The throttled value keeps
+  // converging to the latest text, so the final content still lands right
+  // after the stream settles.
+  const throttled = useThrottledValue(text, STREAM_MARKDOWN_INTERVAL_MS);
+  return <MarkdownContent text={throttled} />;
+});
+
 function timerRelativeTime(targetMs: number): string {
   const delta = targetMs - Date.now();
   const formatter = new Intl.RelativeTimeFormat(undefined, {
@@ -7339,15 +8051,300 @@ function timerRelativeTime(targetMs: number): string {
   return formatter.format(Math.round(delta / 86_400_000), "day");
 }
 
+type TimerEditForm = {
+  prompt: string;
+  name: string;
+  mode: "once" | "repeat";
+  trigger: "delay" | "at";
+  delayMinutes: string;
+  atValue: string;
+  intervalMinutes: string;
+  queueTimeoutMinutes: string;
+};
+
+function timerAtToLocalInput(at: string | null | undefined): string {
+  if (!at) return "";
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) return "";
+  // datetime-local expects the local wall clock without a timezone suffix.
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000)
+    .toISOString()
+    .slice(0, 16);
+}
+
+function timerToEditForm(timer: TimerInfo): TimerEditForm {
+  return {
+    prompt: timer.prompt,
+    name: timer.name,
+    mode: timer.mode === "repeat" ? "repeat" : "once",
+    trigger: timer.after_ms != null ? "delay" : "at",
+    delayMinutes:
+      timer.after_ms != null
+        ? String(Math.max(1, Math.round(timer.after_ms / 60_000)))
+        : "",
+    atValue: timerAtToLocalInput(timer.at),
+    intervalMinutes:
+      timer.interval_ms != null
+        ? String(Math.max(1, Math.round(timer.interval_ms / 60_000)))
+        : "",
+    queueTimeoutMinutes: timer.queue_timeout_minutes
+      ? String(timer.queue_timeout_minutes)
+      : "",
+  };
+}
+
+function queueTimeoutMinutesFromInput(text: string): number {
+  const parsed = Number.parseInt(text.trim(), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function fallbackCopyText(text: string, done: () => void) {
+  try {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    document.execCommand("copy");
+    area.remove();
+    done();
+  } catch {
+    // Clipboard unavailable; the button silently keeps its previous state.
+  }
+}
+
+const MAILBOX_PREVIEW_COUNT = 8;
+
+function MailboxPanel({
+  panelRef,
+  anchorRight,
+  onClose,
+  session,
+  mailbox,
+  sendCommand,
+}: {
+  panelRef: MutableRefObject<HTMLElement | null>;
+  anchorRight: number | null;
+  onClose: () => void;
+  session: Session | undefined;
+  mailbox: MailboxSnapshotInfo | undefined;
+  sendCommand: MutableRefObject<
+    (command: ClientCommand, requestedCommandId?: string) => boolean
+  >;
+}) {
+  useT();
+  const sessionId = session?.session_id;
+  const [copied, setCopied] = useState(false);
+  const mails = mailbox?.mails ?? [];
+  const sent = mailbox?.sent ?? [];
+  // The host snapshot lists mailbox entries in arrival order; display the
+  // newest first so the panel reads like a mail client instead of hiding
+  // every read mail inside the archive fold.
+  const inboxMails = [...mails].reverse();
+  const recentMails = inboxMails.slice(0, MAILBOX_PREVIEW_COUNT);
+  const olderMails = inboxMails.slice(MAILBOX_PREVIEW_COUNT);
+  const sentMails = [...sent].reverse();
+  const recentSent = sentMails.slice(0, MAILBOX_PREVIEW_COUNT);
+  const olderSent = sentMails.slice(MAILBOX_PREVIEW_COUNT);
+  const sessionIdLabel = sessionId
+    ? /^[a-z0-9]{6}$/.test(sessionId)
+      ? `id_${sessionId}`
+      : sessionId
+    : "";
+  const renderMailLine = (mail: (typeof mails)[number]) => (
+    <details
+      key={mail.id}
+      className={`mailbox-item-line${mail.read ? " read" : ""}${mail.kind === "receipt" ? " receipt" : ""}`}
+    >
+      <summary>
+        <b title={mail.from}>{mail.from}</b>
+        <span className="mailbox-item-preview" title={mail.msg}>
+          {mail.msg}
+        </span>
+        <span className="mailbox-item-time">
+          {formatMailboxStamp(mail.created_at_ms)}
+        </span>
+        {mail.kind === "receipt" && (
+          <span className="mailbox-item-badge">
+            {t("mailbox.receiptBadge")}
+          </span>
+        )}
+        <span className="mailbox-item-state">
+          {mail.read
+            ? t("mailbox.read")
+            : mail.delivered
+              ? t("mailbox.delivered")
+              : t("mailbox.queued")}
+        </span>
+      </summary>
+      <MailboxBody text={mail.msg} />
+    </details>
+  );
+  const renderSentLine = (entry: (typeof sent)[number]) => (
+    <details
+      key={entry.id}
+      className={`mailbox-item-line sent ${entry.status === "read" ? "status-read" : entry.status === "failed" || entry.status === "timeout" || entry.status === "discarded" ? "status-failed" : ""}`}
+    >
+      <summary>
+        <b title={entry.to}>{entry.to}</b>
+        <span className="mailbox-item-preview" title={entry.msg}>
+          {entry.msg}
+        </span>
+        <span className="mailbox-item-time">
+          {formatMailboxStamp(entry.created_at_ms)}
+        </span>
+        <span
+          className={`mailbox-item-state${entry.status === "read" ? " status-read" : entry.status === "failed" || entry.status === "timeout" || entry.status === "discarded" ? " status-failed" : ""}`}
+        >
+          {entry.status === "read"
+            ? t("mailbox.statusRead")
+            : entry.status === "timeout"
+              ? t("mailbox.statusTimeout")
+              : entry.status === "discarded"
+                ? t("mailbox.statusDiscarded")
+                : entry.status === "failed"
+                  ? t("mailbox.statusFailed")
+                  : t("mailbox.statusSent")}
+        </span>
+      </summary>
+      <MailboxBody text={entry.msg} />
+    </details>
+  );
+  return (
+    <aside
+      id="mailbox-panel"
+      ref={panelRef}
+      className="mailbox-panel session-popover"
+      style={
+        anchorRight === null
+          ? undefined
+          : ({ "--session-popover-right": `${anchorRight}px` } as CSSProperties)
+      }
+      role="dialog"
+      aria-modal="false"
+      aria-label={t("mailbox.title")}
+      tabIndex={-1}
+    >
+      <header className="side-panel-header">
+        <div className="side-panel-title">
+          <MessagesSquare size={15} />
+          <strong>{t("mailbox.title")}</strong>
+        </div>
+        <button
+          type="button"
+          className="icon-button"
+          title={t("common.close")}
+          aria-label={t("common.close")}
+          onClick={onClose}
+        >
+          <X size={16} />
+        </button>
+      </header>
+      <div className="mailbox-list">
+        {sessionId && (
+          <div className="mailbox-address-block mailbox-session-id">
+            <div className="mailbox-address-label">
+              {t("mailbox.sessionIdLabel")}
+            </div>
+            <div className="mailbox-address">
+              <code>{sessionIdLabel}</code>
+              <button
+                type="button"
+                className="icon-button"
+                title={copied ? t("mailbox.copied") : t("mailbox.copyAddress")}
+                aria-label={copied ? t("mailbox.copied") : t("mailbox.copyAddress")}
+                onClick={() => {
+                  const done = () => {
+                    setCopied(true);
+                    window.setTimeout(() => setCopied(false), 1500);
+                  };
+                  if (navigator.clipboard?.writeText) {
+                    navigator.clipboard
+                      .writeText(sessionIdLabel)
+                      .then(done)
+                      .catch(() => fallbackCopyText(sessionIdLabel, done));
+                  } else {
+                    // Plain-http LAN contexts expose no navigator.clipboard;
+                    // the deprecated execCommand path is the only fallback.
+                    fallbackCopyText(sessionIdLabel, done);
+                  }
+                }}
+              >
+                {copied ? <Check size={14} /> : <Copy size={14} />}
+              </button>
+            </div>
+          </div>
+        )}
+        <div className="mailbox-section-title">{t("mailbox.inboxTitle")}</div>
+        {mails.length === 0 ? (
+          <div className="activity-empty">
+            <strong>{t("mailbox.inboxEmpty")}</strong>
+          </div>
+        ) : (
+          <>
+            {recentMails.map(renderMailLine)}
+            {olderMails.length > 0 && (
+              <details className="mailbox-more">
+                <summary>
+                  <span>{t("mailbox.more")}</span>
+                  <span className="mailbox-archive-count">
+                    {olderMails.length}
+                  </span>
+                </summary>
+                {olderMails.map(renderMailLine)}
+              </details>
+            )}
+          </>
+        )}
+        <div className="mailbox-section-title">{t("mailbox.sentTitle")}</div>
+        {sent.length === 0 ? (
+          <div className="activity-empty">
+            <strong>{t("mailbox.sentEmpty")}</strong>
+          </div>
+        ) : (
+          <>
+            {recentSent.map(renderSentLine)}
+            {olderSent.length > 0 && (
+              <details className="mailbox-more">
+                <summary>
+                  <span>{t("mailbox.more")}</span>
+                  <span className="mailbox-archive-count">
+                    {olderSent.length}
+                  </span>
+                </summary>
+                {olderSent.map(renderSentLine)}
+              </details>
+            )}
+          </>
+        )}
+        {sessionId && (mails.length > 0 || sent.length > 0) && (
+          <button
+            type="button"
+            className="mailbox-clear"
+            onClick={() => {
+              if (!sessionId) return;
+              sendCommand.current({ type: "mailbox_clear", session_id: sessionId });
+            }}
+          >
+            {t("mailbox.clear")}
+          </button>
+        )}
+      </div>
+    </aside>
+  );
+}
+
 function TimerPanel({
   panelRef,
-  onResizeStart,
+  anchorRight,
   onClose,
   session,
   sendCommand,
 }: {
   panelRef: MutableRefObject<HTMLElement | null>;
-  onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  anchorRight: number | null;
   onClose: () => void;
   session: Session | undefined;
   sendCommand: MutableRefObject<
@@ -7357,7 +8354,7 @@ function TimerPanel({
   useT();
   const timers = session?.timers ?? [];
   const [editingTimerId, setEditingTimerId] = useState<string | null>(null);
-  const [editDraft, setEditDraft] = useState("");
+  const [editForm, setEditForm] = useState<TimerEditForm | null>(null);
   const [expandedPrompts, setExpandedPrompts] = useState<ReadonlySet<string>>(
     new Set(),
   );
@@ -7372,6 +8369,7 @@ function TimerPanel({
   const [delayMinutes, setDelayMinutes] = useState("");
   const [atValue, setAtValue] = useState("");
   const [intervalMinutes, setIntervalMinutes] = useState("");
+  const [queueTimeoutMinutes, setQueueTimeoutMinutes] = useState("");
   useEffect(() => {
     setCreateOpen(false);
     setPrompt("");
@@ -7381,8 +8379,9 @@ function TimerPanel({
     setDelayMinutes("");
     setAtValue("");
     setIntervalMinutes("");
+    setQueueTimeoutMinutes("");
     setEditingTimerId(null);
-    setEditDraft("");
+    setEditForm(null);
     setExpandedPrompts(new Set());
   }, [session?.session_id]);
   // Disclosure focus contract: expanding moves focus into the first field;
@@ -7403,6 +8402,48 @@ function TimerPanel({
   const intervalValid = mode === "once" || Number(intervalMinutes) > 0;
   const canCreate =
     !!session && !!prompt.trim() && triggerValid && intervalValid;
+  const editTriggerValid =
+    editForm == null
+      ? false
+      : editForm.trigger === "delay"
+        ? Number(editForm.delayMinutes) > 0
+        : !!editForm.atValue &&
+          !Number.isNaN(new Date(editForm.atValue).getTime());
+  const editIntervalValid =
+    editForm == null ||
+    editForm.mode === "once" ||
+    Number(editForm.intervalMinutes) > 0;
+  const canEditSave =
+    editForm != null &&
+    !!editForm.prompt.trim() &&
+    editTriggerValid &&
+    editIntervalValid;
+  const submitEdit = () => {
+    if (!canEditSave || !session || !editForm || !editingTimerId) return;
+    // Full-form edit: schedule members are always sent so a switched trigger
+    // clears the other side, and once-mode clears the repeat interval.
+    const command: ClientCommand = {
+      type: "timer_update",
+      session_id: session.session_id,
+      timer_id: editingTimerId,
+      prompt: editForm.prompt.trim(),
+      name: editForm.name.trim(),
+      mode: editForm.mode,
+      ...(editForm.trigger === "delay"
+        ? {
+            after_ms: Math.round(Number(editForm.delayMinutes) * 60_000),
+            at: null,
+          }
+        : { after_ms: null, at: new Date(editForm.atValue).toISOString() }),
+      ...(editForm.mode === "repeat"
+        ? { interval_ms: Math.round(Number(editForm.intervalMinutes) * 60_000) }
+        : { interval_ms: null }),
+      queue_timeout_minutes: queueTimeoutMinutesFromInput(editForm.queueTimeoutMinutes),
+    };
+    if (!sendCommand.current(command)) return;
+    setEditingTimerId(null);
+    setEditForm(null);
+  };
   const showInvalidHint =
     !canCreate &&
     (prompt.trim().length > 0 ||
@@ -7415,6 +8456,7 @@ function TimerPanel({
     setDelayMinutes("");
     setAtValue("");
     setIntervalMinutes("");
+    setQueueTimeoutMinutes("");
   };
   const submitCreate = (event: React.FormEvent) => {
     event.preventDefault();
@@ -7431,6 +8473,7 @@ function TimerPanel({
       ...(mode === "repeat"
         ? { interval_ms: Math.round(Number(intervalMinutes) * 60_000) }
         : {}),
+      queue_timeout_minutes: queueTimeoutMinutesFromInput(queueTimeoutMinutes),
     };
     if (!sendCommand.current(command)) return;
     setCreateOpen(false);
@@ -7440,17 +8483,17 @@ function TimerPanel({
     <aside
       id="timer-panel"
       ref={panelRef}
-      className="timer-panel toolrepo-side-panel session-side-panel"
+      className="timer-panel session-popover"
+      style={
+        anchorRight === null
+          ? undefined
+          : ({ "--session-popover-right": `${anchorRight}px` } as CSSProperties)
+      }
+      role="dialog"
+      aria-modal="false"
       aria-label={t("timer.title")}
       tabIndex={-1}
     >
-      <button
-        type="button"
-        className="sidebar-resize-handle right"
-        title="Resize timers"
-        aria-label="Resize timers"
-        onPointerDown={onResizeStart}
-      />
       <header className="side-panel-header">
         <div className="side-panel-title">
           <AlarmClock size={15} />
@@ -7488,32 +8531,146 @@ function TimerPanel({
                     ? t("timer.modeRepeat")
                     : t("timer.modeOnce")}
                 </span>
+                {(timer.queue_timeout_minutes ?? 0) > 0 && (
+                  <span className="timer-item-origin queued" title={t("timer.queueHint")}>
+                    {t("timer.queued")}
+                  </span>
+                )}
               </div>
-              {editingTimerId === timer.timer_id ? (
-                <div className="timer-item-edit">
-                  <textarea
-                    rows={4}
-                    value={editDraft}
-                    placeholder={t("timer.editPlaceholder")}
-                    aria-label={t("timer.editTimer")}
-                    onChange={(event) => setEditDraft(event.target.value)}
-                  />
+              {editingTimerId === timer.timer_id && editForm ? (
+                <div className="timer-item-edit timer-edit-form">
+                  <label>
+                    {t("timer.workLabel")}
+                    <textarea
+                      rows={3}
+                      value={editForm.prompt}
+                      placeholder={t("timer.editPlaceholder")}
+                      aria-label={t("timer.editTimer")}
+                      onChange={(event) =>
+                        setEditForm({ ...editForm, prompt: event.target.value })
+                      }
+                    />
+                  </label>
+                  <label>
+                    {t("timer.nameLabel")}
+                    <input
+                      value={editForm.name}
+                      placeholder={t("timer.namePlaceholder")}
+                      onChange={(event) =>
+                        setEditForm({ ...editForm, name: event.target.value })
+                      }
+                    />
+                  </label>
+                  <div className="timer-create-row">
+                    <label>
+                      {t("timer.modeLabel")}
+                      <select
+                        value={editForm.mode}
+                        onChange={(event) =>
+                          setEditForm({
+                            ...editForm,
+                            mode: event.target.value as "once" | "repeat",
+                          })
+                        }
+                      >
+                        <option value="once">{t("timer.modeOnce")}</option>
+                        <option value="repeat">{t("timer.modeRepeat")}</option>
+                      </select>
+                    </label>
+                    <label>
+                      {t("timer.triggerLabel")}
+                      <select
+                        value={editForm.trigger}
+                        onChange={(event) =>
+                          setEditForm({
+                            ...editForm,
+                            trigger: event.target.value as "delay" | "at",
+                          })
+                        }
+                      >
+                        <option value="delay">{t("timer.triggerDelay")}</option>
+                        <option value="at">{t("timer.triggerAt")}</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="timer-create-row">
+                    {editForm.trigger === "delay" ? (
+                      <label>
+                        {t("timer.triggerDelay")}
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={editForm.delayMinutes}
+                          onChange={(event) =>
+                            setEditForm({
+                              ...editForm,
+                              delayMinutes: event.target.value,
+                            })
+                          }
+                        />
+                      </label>
+                    ) : (
+                      <label>
+                        {t("timer.triggerAt")}
+                        <input
+                          type="datetime-local"
+                          value={editForm.atValue}
+                          onChange={(event) =>
+                            setEditForm({
+                              ...editForm,
+                              atValue: event.target.value,
+                            })
+                          }
+                        />
+                      </label>
+                    )}
+                    {editForm.mode === "repeat" && (
+                      <label>
+                        {t("timer.intervalLabel")}
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          value={editForm.intervalMinutes}
+                          onChange={(event) =>
+                            setEditForm({
+                              ...editForm,
+                              intervalMinutes: event.target.value,
+                            })
+                          }
+                        />
+                      </label>
+                    )}
+                  </div>
+                  <label className="timer-queue-field">
+                    <input
+                      type="number"
+                      min={0}
+                      step={1}
+                      value={editForm.queueTimeoutMinutes}
+                      title={t("timer.queueHint")}
+                      onChange={(event) =>
+                        setEditForm({
+                          ...editForm,
+                          queueTimeoutMinutes: event.target.value,
+                        })
+                      }
+                    />
+                    <span>{t("timer.queueLabel")}</span>
+                  </label>
+                  {!canEditSave && (
+                    <div className="timer-form-hint error">
+                      {t("timer.invalidInput")}
+                    </div>
+                  )}
                   <div className="timer-edit-buttons">
                     <button
                       type="button"
                       className="timer-edit-save"
-                      disabled={!editDraft.trim()}
+                      disabled={!canEditSave}
                       title={t("timer.editSave")}
-                      onClick={() => {
-                        if (!session || !editDraft.trim()) return;
-                        sendCommand.current({
-                          type: "timer_update",
-                          session_id: session.session_id,
-                          timer_id: timer.timer_id,
-                          prompt: editDraft.trim(),
-                        });
-                        setEditingTimerId(null);
-                      }}
+                      onClick={submitEdit}
                     >
                       {t("timer.editSave")}
                     </button>
@@ -7521,7 +8678,10 @@ function TimerPanel({
                       type="button"
                       className="timer-edit-cancel"
                       title={t("timer.editCancel")}
-                      onClick={() => setEditingTimerId(null)}
+                      onClick={() => {
+                        setEditingTimerId(null);
+                        setEditForm(null);
+                      }}
                     >
                       {t("timer.editCancel")}
                     </button>
@@ -7612,7 +8772,7 @@ function TimerPanel({
                     aria-label={t("timer.editTimer")}
                     onClick={() => {
                       setEditingTimerId(timer.timer_id);
-                      setEditDraft(timer.prompt);
+                      setEditForm(timerToEditForm(timer));
                     }}
                   >
                     <Pencil size={13} />
@@ -7741,6 +8901,17 @@ function TimerPanel({
             </label>
           )}
         </div>
+        <label className="timer-queue-field">
+          <input
+            type="number"
+            min={0}
+            step={1}
+            value={queueTimeoutMinutes}
+            title={t("timer.queueHint")}
+            onChange={(event) => setQueueTimeoutMinutes(event.target.value)}
+          />
+          <span>{t("timer.queueLabel")}</span>
+        </label>
         {showInvalidHint && (
           <div className="timer-form-hint error">
             {t("timer.invalidInput")}
@@ -8260,8 +9431,66 @@ function ToolRepoPanel({
 }
 
 const EMPTY_DECISIONS: Decision[] = [];
-const TurnHistoryRequestContext = createContext<(sessionId: string, turnId: string) => void>(() => {});
+const TurnHistoryRequestContext = createContext<(sessionId: string, turnId: string, priority?: boolean) => void>(() => {});
 const SessionTimelineActiveContext = createContext(false);
+
+/**
+ * Captures the topmost visible turn as a hydration scroll anchor. Turn
+ * articles stack in DOM order, so a binary search over their rects finds the
+ * first one reaching the viewport without measuring every element.
+ */
+const HYDRATION_ANCHOR_CAPTURE_EVENT = "timem-hydration-anchor-capture";
+
+function captureViewportTurnAnchor(viewport: HTMLElement): ViewportTurnAnchor | null {
+  const viewportTop = viewport.getBoundingClientRect().top;
+  const turns = Array.from(
+    viewport.querySelectorAll<HTMLElement>(
+      '[data-session-timeline-active="true"] article[data-turn-id]',
+    ),
+  );
+  if (turns.length === 0) return null;
+  let low = 0;
+  let high = turns.length - 1;
+  let found = -1;
+  while (low <= high) {
+    const mid = (low + high) >> 1;
+    const rect = turns[mid]!.getBoundingClientRect();
+    if (rect.bottom > viewportTop) {
+      found = mid;
+      high = mid - 1;
+    } else {
+      low = mid + 1;
+    }
+  }
+  if (found < 0) return null;
+  const rect = turns[found]!.getBoundingClientRect();
+  return pickViewportTurnAnchor(
+    [{ turnId: turns[found]!.dataset.turnId ?? "", top: rect.top, bottom: rect.bottom }],
+    viewportTop,
+  );
+}
+
+const MemoCopyButton = memo(function MemoCopyButton({ text }: { text: string }) {
+  const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(text, {
+    idle: t("messageNav.memoCopy"),
+    copied: t("messageNav.memoCopied"),
+    failed: t("messageNav.memoCopyFailed"),
+  });
+  return (
+    <button
+      type="button"
+      className={`thread-memo-copy ${copyClass}`}
+      title={copyLabel}
+      aria-label={copyLabel}
+      onClick={(event) => {
+        event.stopPropagation();
+        void copy();
+      }}
+    >
+      {copyState === "copied" ? <CheckCheck size={12} /> : <Copy size={12} />}
+    </button>
+  );
+});
 
 /**
  * Working-indicator memo tooltip rendered through a portal with
@@ -8275,10 +9504,16 @@ const WorkingMemoTooltip = memo(function WorkingMemoTooltip({
   anchor,
   caption,
   text,
+  visible,
+  onPointerEnter,
+  onPointerLeave,
 }: {
   anchor: HTMLElement;
   caption: string;
   text: string;
+  visible: boolean;
+  onPointerEnter: () => void;
+  onPointerLeave: () => void;
 }) {
   const [placement, setPlacement] = useState<{ left: number; top: number } | null>(
     null,
@@ -8318,13 +9553,18 @@ const WorkingMemoTooltip = memo(function WorkingMemoTooltip({
     <span
       className="thread-working-memo-tooltip is-portal"
       role="tooltip"
+      onPointerEnter={onPointerEnter}
+      onPointerLeave={onPointerLeave}
       style={
-        placement
+        placement && visible
           ? { left: `${placement.left}px`, top: `${placement.top}px`, visibility: "visible" }
           : { visibility: "hidden" }
       }
     >
-      <span className="thread-memo-caption">{caption}</span>
+      <span className="thread-memo-caption-row">
+        <span className="thread-memo-caption">{caption}</span>
+        <MemoCopyButton text={text} />
+      </span>
       <span className="thread-memo-text">{text}</span>
     </span>,
     document.body,
@@ -8479,6 +9719,26 @@ const SessionTimelinePane = memo(function SessionTimelinePane({
     () => renderedSession.turns.filter(turnShouldRenderInTimeline),
     [renderedSession.turns],
   );
+  // Stream UI keeps completed turns' inline stream process visible instead of
+  // the folded frame. Slimmed restored previews (…[truncated]) must hydrate
+  // from turn_history_page so the visible stream never shows previews; hidden
+  // panes wait until they become the active timeline.
+  const streamUiMode = useStreamUiMode();
+  const streamArchive = useStreamArchive();
+  const requestTurnHistory = useContext(TurnHistoryRequestContext);
+  const requestTurnHistoryRef = useRef(requestTurnHistory);
+  requestTurnHistoryRef.current = requestTurnHistory;
+  const sessionId = renderedSession.session_id;
+  useEffect(() => {
+    if (!streamUiMode || streamArchive || !active) return;
+    // Hydrate newest turn first: the landing view and its reading outline
+    // belong to the newest turn, and each request chains further pages on
+    // the Host; oldest-first order made the directory the user is looking
+    // at wait behind every older turn's chained history pages.
+    for (const turn of turnHistoryHydrationOrder(visibleTurns, { streamUiMode, streamArchive, timelineActive: true })) {
+      requestTurnHistoryRef.current(sessionId, turn.turn_id);
+    }
+  }, [streamUiMode, streamArchive, active, visibleTurns, sessionId]);
   const restartMarkers = useMemo(
     () =>
       visibleRuntimeRestartMarkers(
@@ -8714,21 +9974,58 @@ function TimemThread({
   );
   const renderedSessionIdRef = useRef<string | undefined>(undefined);
   const restoredSessionIdRef = useRef<string | undefined>(undefined);
+  // Set by the history-prepend restore effect; the timeline-signature follow
+  // effect consumes it so a prepend commit keeps its restored scroll position.
+  const preservedPrependFrameRef = useRef(false);
+  const hydrationAnchorRef = useRef<{ sessionId: string; anchor: ViewportTurnAnchor } | null>(null);
   const followThreadLatest = useRef(true);
   const [threadAwayFromBottom, setThreadAwayFromBottom] = useState(false);
   const workingAwayButtonRef = useRef<HTMLButtonElement | null>(null);
+  const workingMemoHideTimerRef = useRef<number | null>(null);
+  const workingMemoPointerInsideRef = useRef(false);
+  const [workingMemoPinned, setWorkingMemoPinned] = useState(false);
   const [workingMemoVisible, setWorkingMemoVisible] = useState(false);
-  const showWorkingMemoTooltip = () => setWorkingMemoVisible(true);
-  const hideWorkingMemoTooltip = () => setWorkingMemoVisible(false);
+  const showWorkingMemoTooltip = () => {
+    if (workingMemoHideTimerRef.current !== null) {
+      window.clearTimeout(workingMemoHideTimerRef.current);
+      workingMemoHideTimerRef.current = null;
+    }
+    setWorkingMemoPinned(true);
+    setWorkingMemoVisible(true);
+  };
+  // Grace period instead of an instant hide, and the tooltip stays mounted
+  // while pinned: unmounting it would kill its own pointerenter, so the
+  // pointer could never re-enter across the gap. The timer dismisses only
+  // when the pointer never entered (or has already left) the tooltip.
+  const hideWorkingMemoTooltip = () => {
+    if (workingMemoHideTimerRef.current !== null) window.clearTimeout(workingMemoHideTimerRef.current);
+    workingMemoHideTimerRef.current = window.setTimeout(() => {
+      workingMemoHideTimerRef.current = null;
+      if (!workingMemoPointerInsideRef.current) {
+        setWorkingMemoVisible(false);
+        setWorkingMemoPinned(false);
+      }
+    }, 200);
+  };
+  const handleWorkingMemoTooltipEnter = () => {
+    workingMemoPointerInsideRef.current = true;
+    showWorkingMemoTooltip();
+  };
+  const handleWorkingMemoTooltipLeave = () => {
+    workingMemoPointerInsideRef.current = false;
+    hideWorkingMemoTooltip();
+  };
+  useEffect(() => () => {
+    if (workingMemoHideTimerRef.current !== null) window.clearTimeout(workingMemoHideTimerRef.current);
+  }, []);
   const [draftsBySession, setDraftsBySession] = useState<
     Record<string, string>
   >(() => readComposerDraftTexts());
   const [composerExpanded, setComposerExpanded] = useState(false);
-  const [expandedQueueSessionIds, setExpandedQueueSessionIds] = useState<
-    Set<string>
-  >(() => new Set());
   const [collapsedQueuePanelSessionIds, setCollapsedQueuePanelSessionIds] =
     useState<Set<string>>(() => new Set());
+  const queuedItemsRef = useRef<HTMLDivElement | null>(null);
+  const prevQueuedCountRef = useRef(0);
   const [draggedQueueMessageId, setDraggedQueueMessageId] = useState<string>();
   const [queuedMessageOverId, setQueuedMessageOverId] = useState<string>();
   const queueDragSensors = useSensors(
@@ -8791,12 +10088,17 @@ function TimemThread({
     composerWriteThroughRef.current?.onInput(text);
   }, []);
   useEffect(() => {
+    // While the expanded editor is open it owns the composer text (its
+    // commits are authoritative); adopting external draft updates here would
+    // overwrite the very text the panel was seeded from, so a stale draft
+    // racing the expand click can no longer blank it.
+    if (composerExpanded) return;
     // Adopt authoritative draft changes (restore, rejection refill, submit
     // clear) into the live-text ref, but skip our own write-through echo: the
     // local field may already hold newer keystrokes than the committed copy.
     if (draft !== composerWriteThroughTextRef.current)
       composerLiveTextRef.current = draft;
-  }, [draft]);
+  }, [draft, composerExpanded]);
   useEffect(() => {
     // A pending write-through belongs to the session it was typed in; it must
     // never leak into the next session's draft after a switch.
@@ -8835,20 +10137,11 @@ function TimemThread({
       roleIds: item.payload.worker_roles.map((role) => role.id),
     })) ?? [];
   const displayQueuedMessages = queuedMessages;
-  const queueExpanded =
-    !!activeSessionId && expandedQueueSessionIds.has(activeSessionId);
   const queuePanelCollapsed =
     !!activeSessionId && collapsedQueuePanelSessionIds.has(activeSessionId);
   const firstQueuedMessage = displayQueuedMessages[0];
-  const visibleQueuedMessages = queueExpanded
-    ? displayQueuedMessages
-    : displayQueuedMessages.slice(0, COLLAPSED_QUEUE_LIMIT);
-  const hiddenQueuedMessageCount = Math.max(
-    0,
-    displayQueuedMessages.length - COLLAPSED_QUEUE_LIMIT,
-  );
   const draggedQueuedMessage = draggedQueueMessageId
-    ? visibleQueuedMessages.find(
+    ? displayQueuedMessages.find(
         (message) => message.id === draggedQueueMessageId,
       )
     : undefined;
@@ -8939,7 +10232,10 @@ function TimemThread({
       ? "Loading earlier history…"
       : `Load ${STORED_HISTORY_PAGE_SIZE} older stored tasks`;
   const latestTurn = turns.at(-1);
-  const latestTurnVersion = `${latestTurn?.turn_id ?? ""}:${latestTurn?.events.length ?? 0}:${latestTurn?.user_entries.length ?? 0}:${latestTurn?.final_answer?.length ?? 0}:${latestTurn?.completion ? 1 : 0}:${latestTurn?.preview?.revision ?? 0}`;
+  // The version must see restored-turn hydration (events_slimmed -> full
+  // events): count-stable growth otherwise strands the bottom follower
+  // mid-history after a restart.
+  const latestTurnVersion = `${latestTurn?.turn_id ?? ""}:${timelineEventsSignature(turns)}`;
   const liveSessionKey = sessionIds.join("\u0000");
   const liveSessionIds = useMemo(() => new Set(sessionIds), [liveSessionKey]);
   const [recentTimelineSessionIds, setRecentTimelineSessionIds] = useState<
@@ -9443,14 +10739,6 @@ function TimemThread({
         everLiveSessionIdsRef.current,
       ),
     );
-    setExpandedQueueSessionIds(
-      (current) =>
-        new Set(
-          Array.from(current).filter((sessionId) =>
-            liveSessionIds.has(sessionId),
-          ),
-        ),
-    );
     setCollapsedQueuePanelSessionIds(
       (current) =>
         new Set(
@@ -9565,6 +10853,9 @@ function TimemThread({
       viewport.scrollHeight,
     );
     previousScrollMetrics.current = null;
+    // The same commit also changes the timeline signature; the bottom
+    // follower must not override this restored position one effect later.
+    preservedPrependFrameRef.current = true;
   }, [turns.length]);
 
   useLayoutEffect(() => {
@@ -9585,6 +10876,10 @@ function TimemThread({
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
+    if (preservedPrependFrameRef.current) {
+      preservedPrependFrameRef.current = false;
+      return;
+    }
     if (
       !viewport ||
       !followThreadLatest.current ||
@@ -9593,6 +10888,72 @@ function TimemThread({
       return;
     viewport.scrollTop = viewport.scrollHeight;
   }, [latestTurnVersion]);
+
+  // Pin the captured hydration anchor back to its viewport offset. Growth
+  // above the anchor is cancelled by an equal scrollTop correction; growth at
+  // or below it leaves the delta at zero. A bottom follower is already pinned
+  // by the effect above and never fights this correction.
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    const captured = hydrationAnchorRef.current;
+    hydrationAnchorRef.current = null;
+    if (!viewport || !captured) return;
+    if (
+      captured.sessionId !== activeSessionId
+      || followThreadLatest.current
+      || previousScrollMetrics.current
+    )
+      return;
+    const element = viewport.querySelector<HTMLElement>(
+      `[data-session-timeline-active="true"] article[data-turn-id="${globalThis.CSS.escape(captured.anchor.turnId)}"]`,
+    );
+    if (!element) return;
+    const delta = anchorScrollDelta(
+      captured.anchor,
+      element.getBoundingClientRect().top - viewport.getBoundingClientRect().top,
+    );
+    if (delta === 0) return;
+    const previousBehavior = viewport.style.scrollBehavior;
+    viewport.style.scrollBehavior = "auto";
+    viewport.scrollTop += delta;
+    viewport.style.scrollBehavior = previousBehavior;
+  }, [latestTurnVersion, activeSessionId]);
+
+  // The hydration event handler lives in the App shell and commits through
+  // session state; the viewport captures its anchor synchronously on request
+  // so the correction effect above sees pre-commit geometry.
+  useEffect(() => {
+    const capture = (event: Event) => {
+      const detail = (event as CustomEvent<{ sessionId?: string }>).detail;
+      const sessionId = activeSessionId;
+      if (!detail || !sessionId || detail.sessionId !== sessionId || followThreadLatest.current) {
+        hydrationAnchorRef.current = null;
+        return;
+      }
+      const viewport = viewportRef.current;
+      if (!viewport) {
+        hydrationAnchorRef.current = null;
+        return;
+      }
+      const anchor = captureViewportTurnAnchor(viewport);
+      hydrationAnchorRef.current = anchor
+        ? { sessionId, anchor }
+        : null;
+    };
+    window.addEventListener(HYDRATION_ANCHOR_CAPTURE_EVENT, capture);
+    return () => window.removeEventListener(HYDRATION_ANCHOR_CAPTURE_EVENT, capture);
+  }, [activeSessionId]);
+
+  // Completed-turn hydration (events_slimmed -> full events) and history
+  // prepends move every turn below the changed one. Nothing inside those
+  // outline owners resizes on such a commit, so portaled outlines keep stale
+  // absolute tops until the user happens to scroll. The shape key changes
+  // exactly on those commits; broadcasting the existing layout-change event
+  // orders every outline to re-measure before paint.
+  const timelineOutlineShape = timelineOutlineShapeKey(turns);
+  useLayoutEffect(() => {
+    window.dispatchEvent(new Event("markdown-outline-layout-change"));
+  }, [timelineOutlineShape]);
 
   const loadEarlierTurns = () => {
     if (sessionInteractionLocked) return;
@@ -9699,15 +11060,17 @@ function TimemThread({
     setDraftsBySession(nextDrafts);
   };
 
-  const toggleQueuedMessages = () => {
-    if (!activeSessionId) return;
-    setExpandedQueueSessionIds((current) => {
-      const next = new Set(current);
-      if (next.has(activeSessionId)) next.delete(activeSessionId);
-      else next.add(activeSessionId);
-      return next;
-    });
-  };
+  // Newly enqueued messages land at the bottom of the queued-message list;
+  // once the list scrolls (beyond its max-height), keep the latest item
+  // visible so the user sees their submission arrived.
+  useLayoutEffect(() => {
+    const node = queuedItemsRef.current;
+    const count = queuedMessages.length;
+    const grew = count > prevQueuedCountRef.current;
+    prevQueuedCountRef.current = count;
+    if (!node || !grew) return;
+    node.scrollTop = node.scrollHeight;
+  }, [queuedMessages.length]);
 
   const toggleQueuedMessagePanel = () => {
     if (!activeSessionId) return;
@@ -9848,7 +11211,7 @@ function TimemThread({
       <div className="composer-wrap aui-thread-footer">
           {!!activeSession && displayQueuedMessages.length > 0 && (
             <section
-              className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPaused ? "paused" : ""}`}
+              className={`queued-message-list ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPaused ? "paused" : ""}`}
               aria-label={`${displayQueuedMessages.length} queued message${displayQueuedMessages.length === 1 ? "" : "s"}`}
               aria-live="polite"
             >
@@ -9905,30 +11268,6 @@ function TimemThread({
                       <span className="queued-auto-send-thumb" />
                     </button>
                   </label>
-                  {!queuePanelCollapsed && hiddenQueuedMessageCount > 0 && (
-                    <button
-                      type="button"
-                      className="queued-message-toggle"
-                      aria-expanded={queueExpanded}
-                      title={
-                        queueExpanded
-                          ? t("composer.collapseQueue")
-                          : t("composer.expandAllQueue", { count: displayQueuedMessages.length })
-                      }
-                      onClick={toggleQueuedMessages}
-                    >
-                      {queueExpanded ? (
-                        <ChevronDown size={13} />
-                      ) : (
-                        <ChevronUp size={13} />
-                      )}
-                      <span>
-                        {queueExpanded
-                          ? t("composer.collapseOne")
-                          : t("composer.expandCount", { count: hiddenQueuedMessageCount })}
-                      </span>
-                    </button>
-                  )}
                   <button
                     type="button"
                     className="queued-message-panel-toggle"
@@ -9966,14 +11305,15 @@ function TimemThread({
                   onDragEnd={finishQueuedMessageDrag}
                 >
                   <SortableContext
-                    items={visibleQueuedMessages.map(({ id }) => id)}
+                    items={displayQueuedMessages.map(({ id }) => id)}
                     strategy={verticalListSortingStrategy}
                   >
                     <div
                       id={`queued-message-items-${activeSession.session_id}`}
                       className="queued-message-items"
+                      ref={queuedItemsRef}
                     >
-                      {visibleQueuedMessages.map((message) => {
+                      {displayQueuedMessages.map((message) => {
                         const index = queuedMessages.findIndex(
                           (candidate) => candidate.id === message.id,
                         );
@@ -10149,12 +11489,6 @@ function TimemThread({
                                             id: message.id,
                                             text: message.text,
                                           });
-                                          setExpandedQueueSessionIds(
-                                            (current) =>
-                                              new Set(current).add(
-                                                activeSession.session_id,
-                                              ),
-                                          );
                                         }}
                                       >
                                         <Pencil size={12} />
@@ -10382,6 +11716,10 @@ function TimemThread({
                 onEnter={submitDraft}
                 onCtrlEnter={submitDraftAsSupplement}
                 onExpand={() => {
+                  // Expand is authoritative: land pending throttled typing
+                  // first so the expanded editor and the session draft start
+                  // from the exact same text.
+                  composerWriteThroughRef.current?.flush();
                   composerExpandedBaseRef.current = composerLiveTextRef.current;
                   setComposerExpanded(true);
                 }}
@@ -10652,8 +11990,11 @@ function TimemThread({
               <MemoIcon size={13} />
             </span>
             <span className="thread-memo-tooltip" role="tooltip">
-              <span className="thread-memo-caption">
-                {t("messageNav.memoIndicator")}
+              <span className="thread-memo-caption-row">
+                <span className="thread-memo-caption">
+                  {t("messageNav.memoIndicator")}
+                </span>
+                <MemoCopyButton text={activeSession.active_memo} />
               </span>
               <span className="thread-memo-text">{activeSession.active_memo}</span>
             </span>
@@ -10661,18 +12002,25 @@ function TimemThread({
         )}
         {activeSession?.state === "working" &&
           activeSession.active_memo &&
-          workingMemoVisible &&
+          workingMemoPinned &&
           workingAwayButtonRef.current && (
             <WorkingMemoTooltip
               anchor={workingAwayButtonRef.current}
               caption={t("messageNav.memoIndicator")}
               text={activeSession.active_memo}
+              visible={workingMemoVisible}
+              onPointerEnter={handleWorkingMemoTooltipEnter}
+              onPointerLeave={handleWorkingMemoTooltipLeave}
             />
           )}
       </nav>
     </ThreadPrimitive.Root>
   );
 }
+
+// Shared by every session's commands; bursts must fail fast instead of
+// buffering unbounded payloads on the socket.
+const MAX_SOCKET_BUFFERED_BYTES = 1_048_576;
 
 function countTurnModelRequests(turn: WebTurn): number {
   return turn.events.reduce(
@@ -10802,17 +12150,19 @@ const TurnInteraction = memo(function TurnInteraction({
   );
   const lifecycleItems = useMemo(
     () =>
-      lifecycleEvents.map((event) => ({
-        type: "event" as const,
-        key: event.presentation_id ?? event.event_id,
-        createdAt: event.presentation_created_at_ms ?? event.created_at_ms,
-        timelineSeq: event.timeline_seq,
-        event,
-        activity: (() => {
-          const activity = activityFromTurnEvent({ ...event, event_id: event.presentation_id ?? event.event_id }, sessionId);
-          return activity ? { ...activity, timelineSeq: event.timeline_seq, execution_order: event.execution_order, settled_order: event.settled_order } : activity;
-        })(),
-      })),
+      lifecycleEvents.flatMap((event) =>
+        activitiesFromTurnEvent(
+          { ...event, event_id: event.presentation_id ?? event.event_id },
+          sessionId,
+        ).map((activity) => ({
+          type: "event" as const,
+          key: activity?.id ?? (event.presentation_id ?? event.event_id),
+          createdAt: event.presentation_created_at_ms ?? event.created_at_ms,
+          timelineSeq: event.timeline_seq,
+          event,
+          activity: activity ? { ...activity, timelineSeq: event.timeline_seq, execution_order: event.execution_order, settled_order: event.settled_order } : activity,
+        })),
+      ),
     [lifecycleEvents, sessionId],
   );
   const supplementItems = useMemo(
@@ -10892,18 +12242,32 @@ const TurnInteraction = memo(function TurnInteraction({
   }, [visibleItems, turn.completion]);
   const scrollItems = useMemo(
     () =>
-      visibleItems.filter((item) => !persistentToolGenItemKeys.has(item.key) && !compactSupersededKeys.has(item.key)),
+      dedupeFreeTalkItems(
+        visibleItems.filter((item) => !persistentToolGenItemKeys.has(item.key) && !compactSupersededKeys.has(item.key)),
+      ),
     [persistentToolGenItemKeys, compactSupersededKeys, visibleItems],
   );
   const isWorking = turn.state === "working" && !isCancelling;
   const streamUiMode = useStreamUiMode();
+  // 「任务完成后收起中间对话」：默认不收起。关闭时终态后的过程内容保持
+  // 在流式区可见；开启时保持既有归档动画，把过程收进折叠的 Thought/Action 帧。
+  const streamArchive = useStreamArchive();
   // 整段归档与单项折叠是两件事：容器在 Turn 结束才归档，但 StreamToolRun
   // 必须在新逻辑时序进入时逐项收起旧工具。不可把单项折叠也绑定到 streamArchived，
   // 否则重新出现工具平铺积高、最终一次性大幅收起的问题。
   // Archive only after the authoritative working state ends, never at a round boundary.
-  const [streamArchived, setStreamArchived] = useState(turn.state !== "working");
+  const [streamArchived, setStreamArchived] = useState(turn.state !== "working" && streamArchive);
   const archiveStream = useCallback(() => setStreamArchived(true), []);
   useEffect(() => { if (turn.state === "working") setStreamArchived(false); }, [turn.state]);
+  // 偏好切换必须双向生效且与重载一致：重新打开时由 StreamProcess 的
+  // closing 动画完成收起；关闭时立即恢复展开。只在偏好真正变化时同步，
+  // 不能在 working→终态转换时触发。
+  const previousStreamArchiveRef = useRef(streamArchive);
+  useEffect(() => {
+    if (previousStreamArchiveRef.current === streamArchive) return;
+    previousStreamArchiveRef.current = streamArchive;
+    if (!streamArchive) setStreamArchived(false);
+  }, [streamArchive]);
   const streamRetentionActive = streamUiMode && !streamArchived;
   const latestThoughtTime = lifecycleItems.reduce((time, item) => item.activity?.kind === "free_talk" ? Math.max(time, item.createdAt) : time, -1);
   const streamRetention = useMemo(
@@ -11055,6 +12419,21 @@ const TurnInteraction = memo(function TurnInteraction({
     setPendingUpdates(0);
   };
 
+  const visibleUserEntries = turn.user_entries.filter(
+    (entry) => entry.kind !== "approval" && entry.kind !== "resume_directly",
+  );
+  // Machine-injected entries share the system notice treatment: mailbox
+  // delivery/status (structured kind) and legacy [mailbox] history, plus timers.
+  const isSystemTriggeredEntry = (entry: (typeof turn.user_entries)[number]) =>
+    entry.kind === "mailbox" ||
+    entry.kind === "mailbox_status" ||
+    entry.kind === "timer" ||
+    entry.kind === "resource_observation" ||
+    entry.text.startsWith("[mailbox] ");
+  const systemOnlyFrame =
+    visibleUserEntries.length > 0 &&
+    visibleUserEntries.every(isSystemTriggeredEntry);
+
   return (
     <article
       className={`turn-interaction ${isWorking ? "active" : "completed"}`}
@@ -11064,7 +12443,7 @@ const TurnInteraction = memo(function TurnInteraction({
         (entry) => entry.kind !== "approval" && entry.kind !== "resume_directly",
       ).length && (
         <section className="turn-user-frame" data-user-message-anchor>
-          <div className="turn-user-content">
+          <div className={`turn-user-content${systemOnlyFrame ? " system-only" : ""}`}>
             {turn.user_entries
               .map((entry, roleIndex) => ({ entry, roleIndex }))
               .filter(
@@ -11074,9 +12453,25 @@ const TurnInteraction = memo(function TurnInteraction({
               .map(({ entry, roleIndex }) => {
                 const timerParts =
                   entry.kind === "timer" ? parseTimerEntryText(entry.text) : null;
+                // "mailbox" carries delivered mail, "mailbox_status" carries
+                // read/timeout/discarded/failed notices; legacy history only
+                // has the [mailbox] prefix, so keep it as a fallback.
+                const isMailboxEntry =
+                  entry.kind === "mailbox" ||
+                  entry.kind === "mailbox_status" ||
+                  entry.text.startsWith("[mailbox] ");
+                const isSystemTriggered = isSystemTriggeredEntry(entry);
+                const mailboxText = isMailboxEntry
+                  ? entry.text.replace(/^\[mailbox\]\s*/, "")
+                  : null;
+                // Delivered mail splits into "<sender> 发来 mail:" meta and the
+                // bare body; receipt/status notices keep the whole line as meta.
+                const mailboxParts = isMailboxEntry
+                  ? parseMailboxEntryText(entry.text)
+                  : null;
                 return (
                 <div
-                  className={`turn-user-entry ${entry.kind}`}
+                  className={`turn-user-entry ${isMailboxEntry ? "mailbox" : entry.kind}${isSystemTriggered ? " system-triggered" : ""}`}
                   key={`${entry.created_at_ms}-${roleIndex}`}
                 >
                   <button
@@ -11097,17 +12492,46 @@ const TurnInteraction = memo(function TurnInteraction({
                   >
                     <Trash2 size={13} />
                   </button>
-                  {entry.kind === "supplement" && <span>{t("composer.supplementTag")}</span>}
+                  {entry.kind === "supplement" && !isMailboxEntry && (
+                    <span>{t("composer.supplementTag")}</span>
+                  )}
                   {timerParts && (
                     <div className="timer-entry-head">
-                      <span>{t("timer.timerTag")}</span>
                       <span className="timer-entry-badge" aria-hidden="true">
                         <AlarmClock size={11} />
                       </span>
+                      <span>
+                        {timerParts.name ? t("timer.headPrefix") : t("timer.timerTag")}
+                      </span>
                       {timerParts.name && <b className="timer-entry-name">{timerParts.name}</b>}
+                      <span>{t("timer.triggerTag")}</span>
                     </div>
                   )}
-                  <UserText text={timerParts ? timerParts.prompt : entry.text} />
+                  {isMailboxEntry && (
+                    <div className="mailbox-entry-head">
+                      <span className="mailbox-entry-badge" aria-hidden="true">
+                        <Mail size={11} />
+                      </span>
+                      {mailboxParts ? (
+                        <span>{t("mailbox.mailFrom", { sender: mailboxParts.sender })}</span>
+                      ) : (
+                        <span>{mailboxText}</span>
+                      )}
+                    </div>
+                  )}
+                  {isSystemTriggered ? (
+                    mailboxParts ? (
+                      mailboxParts.body.length > 0 && (
+                        <CollapsibleSystemEntryText text={mailboxParts.body} />
+                      )
+                    ) : timerParts && timerParts.prompt.length > 0 ? (
+                      <CollapsibleSystemEntryText text={timerParts.prompt} />
+                    ) : null
+                  ) : (
+                    <UserText
+                      text={timerParts ? timerParts.prompt : (mailboxText ?? entry.text)}
+                    />
+                  )}
                   {(
                     entry.worker_roles ??
                     (entry.worker_role ? [entry.worker_role] : [])
@@ -11140,13 +12564,19 @@ const TurnInteraction = memo(function TurnInteraction({
                       ))}
                     </div>
                   )}
+                  <time
+                    className="turn-entry-time"
+                    dateTime={new Date(entry.created_at_ms).toISOString()}
+                    data-time={formatUserEntryTime(entry.created_at_ms)}
+                    aria-label={formatUserEntryTime(entry.created_at_ms)}
+                  />
                 </div>
                 );
               })}
           </div>
         </section>
       )}
-      {showWorkFrame && (!streamRetentionActive || turn.state !== "working" || decisions.length > 0) && (
+      {showWorkFrame && (!streamRetentionActive || (turn.state !== "working" && streamArchive) || decisions.length > 0) && (
         <section
           className={`turn-assistant-frame ${isWorking ? "working" : interrupted ? "interrupted" : turn.state} ${workStreamVisible ? "" : "collapsed-work"}`}
         >
@@ -11163,7 +12593,7 @@ const TurnInteraction = memo(function TurnInteraction({
                 }
                 aria-expanded={showWorkStream}
                 onClick={() => {
-                  if (!showWorkStream && !isWorking) requestTurnHistory(sessionId, turn.turn_id);
+                  if (!showWorkStream && !isWorking) requestTurnHistory(sessionId, turn.turn_id, true);
                   setShowWorkStream((visible) => !visible);
                 }}
               >
@@ -11421,8 +12851,8 @@ function subscribeStreamInteraction(update: () => void) {
 }
 
 /** Height collapse keeps the live nodes mounted until the final handoff finishes. */
-function StreamProcess({ closing, onArchived, children }: {
-  closing: boolean; onArchived: () => void; children: ReactNode;
+function StreamProcess({ closing, onArchived, hostId, children }: {
+  closing: boolean; onArchived: () => void; hostId?: string; children: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -11459,7 +12889,7 @@ function StreamProcess({ closing, onArchived, children }: {
     animation.onfinish = () => { cancelAnimationFrame(frame); onArchived(); };
     return () => { cancelAnimationFrame(frame); animation.cancel(); viewport?.removeEventListener("wheel", stopFollowing); viewport?.removeEventListener("touchstart", stopFollowing); viewport?.removeEventListener("keydown", stopOnKey); };
   }, [closing, onArchived]);
-  return <div ref={ref} className={`stream-continuous-process${closing ? " archiving" : ""}`}>{children}</div>;
+  return <div ref={ref} id={hostId} className={`stream-continuous-process${closing ? " archiving" : ""}`}>{children}</div>;
 }
 
 function ModelRetryStatusPill({ status }: { status: ActiveModelRetryStatus }) {
@@ -11504,13 +12934,26 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
       activity: null,
       thoughtText,
     }] : []),
-  ].map(entry => ({ ...entry, createdAt: entry.time })).sort(compareTurnStreamItems);
+  ].map(entry => ({ ...entry, createdAt: entry.time }));
+  // One text, one home: drop a duplicate free-talk activity or a trailing
+  // preview that repeats commentary already present in this process stream.
+  const seenThoughtTexts = new Set<string>();
+  const uniqueEntries = entries.filter(entry => {
+    const text = entry.activity?.kind === "free_talk"
+      ? (entry.activity.detail ?? "").trim()
+      : entry.thoughtText.trim();
+    if (!text) return true;
+    if (seenThoughtTexts.has(text)) return false;
+    seenThoughtTexts.add(text);
+    return true;
+  });
+  uniqueEntries.sort(compareTurnStreamItems);
   const groups: (typeof entries)[] = [];
   // Timer lifecycle rows are standalone system-status lines in stream mode
   // too: they never merge into the foldable tool runs.
   const foldable = (entry: { activity?: { tone?: string; timer?: unknown } | null } | undefined) =>
     entry?.activity?.tone === "action" && !entry.activity.timer;
-  for (const entry of entries) {
+  for (const entry of uniqueEntries) {
     const previous = groups.at(-1);
     if (previous && foldable(entry) && foldable(previous[0])) previous.push(entry);
     else groups.push([entry]);
@@ -11524,6 +12967,9 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
     }
   }
   const handoffIds = streamToolHandoffIds(activities);
+  // Process chapters are index-anchored: the outline counts only free_talk
+  // blocks that carry text, so the index here matches streamProcessOutlineSections.
+  let streamChapterIndex = 0;
   return <section className="turn-stream-tools" aria-label="Live model activity">
     {groups.map((group, index) => {
       const { key, activity } = group[0];
@@ -11543,8 +12989,10 @@ function StreamActivityPresentation({ thoughtText, thoughtTimelineSeq, activitie
       const previewText = group[0].thoughtText;
       if (previewText)
         return <div key={key} className="stream-thought-text" aria-label="Model thought preview"><StreamText text={previewText} /></div>;
+      const isProcessChapter = activity?.kind === "free_talk" && !!(activity.detail ?? "").trim();
+      const chapterIndex = isProcessChapter ? streamChapterIndex++ : -1;
       return activity?.kind === "free_talk"
-          ? <div key={key} className="stream-thought-text"><MarkdownContent text={activity.detail ?? ""} /></div>
+          ? <div key={key} className="stream-thought-text" {...(chapterIndex >= 0 ? { "data-stream-chapter": chapterIndex } : {})}><StreamMarkdown text={activity.detail ?? ""} /></div>
           : activity ? <ActivityView key={key} activity={activity} /> : null;
     })}
   </section>;
@@ -11632,10 +13080,12 @@ function ToolActivityIcon({
     );
   if (activity.run_bash_edit) return <RunBashEditIcon />;
   if (activity.timer) return <TimerToolIcon />;
+  if (activity.mailbox) return <MailboxIcon />;
   if (activity.readfile) return <ReadFileIcon />;
   if (activity.memory_search) return <MemorySearchIcon />;
   if (activity.self_tool) return <SelfToolIcon />;
   if (activity.tool_name === "memmgr") return <MemoryIcon />;
+  if (activity.tool_name === "mailbox") return <MailboxIcon />;
   if ((activity.tool_name || activity.title) === "run_bash")
     return (
       <span className="bash-tool-icon" title={toolName}>
@@ -11654,7 +13104,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
     activity.tool_name || activity.title,
     activity.tool_mode,
   );
-  const structuredInvocation = !!activity.run_bash_edit || !!activity.readfile || !!activity.memory_search || !!activity.self_tool;
+  const structuredInvocation = !!activity.run_bash_edit || !!activity.readfile || !!activity.memory_search || !!activity.self_tool || !!activity.mailbox;
   const code = activity.code?.trim();
   const invocationPreview = !structuredInvocation ? toolInvocationPreview(activity) : undefined;
   const detail = activity.detail?.trim();
@@ -11708,7 +13158,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
         )}
         <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
         {status === "background_running" && <span className="stream-tool-background">(bg)</span>}
-        {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && <span className="stream-tool-command-preview tool-invocation-preview" title={invocationPreview}>{invocationPreview.replace(/\s+/g, " ")}</span>}
+        {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.mailbox ? <MailboxInvocation mailbox={activity.mailbox} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && <span className="stream-tool-command-preview tool-invocation-preview" title={invocationPreview}>{invocationPreview.replace(/\s+/g, " ")}</span>}
         {((running
           ? liveElapsedMs
           : activity.elapsed_ms) !== undefined ||
@@ -11761,6 +13211,26 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
     JSON.stringify(a.run_bash_edit) === JSON.stringify(b.run_bash_edit);
 });
 
+function modelPhaseForStream(waitingModel: boolean, status?: string): boolean {
+  return waitingModel || status === "streaming";
+}
+
+const ThinkingPreviewWindow = memo(function ThinkingPreviewWindow({
+  text,
+}: {
+  text: string;
+}) {
+  const compact = useMemo(() => compactThinkingTail(text), [text]);
+  // Whitespace-only reasoning compacts to nothing; rendering the fixed-width
+  // shell would leave a visible 36ch gap in the trailer.
+  if (!compact) return null;
+  return (
+    <span className="stream-thinking-window">
+      <span className="stream-thinking-window-text">{compact}</span>
+    </span>
+  );
+});
+
 function TurnAnswerDelivery({
   streamRetained,
   workExpanded,
@@ -11798,6 +13268,7 @@ function TurnAnswerDelivery({
 }) {
   useT();
   const streamUiMode = useStreamUiMode();
+  const streamArchive = useStreamArchive();
   const preview = streamUiMode ? turn.preview : undefined;
   const retainedThought = [...streamTools].reverse().find((activity) => activity.kind === "free_talk");
   const intermediate = preview?.response?.status === "intermediate";
@@ -11807,7 +13278,22 @@ function TurnAnswerDelivery({
     (streamWorking && intermediate ? preview?.response?.text ?? "" : "");
   const hasPreview = !!previewText;
   const hasFinal = !!turn.final_answer;
-  const modelPhase = waitingModel || preview?.response?.status === "streaming";
+  // The live preview text changes at delta frequency; throttle the expensive
+  // markdown pipeline to ~5 renders/sec (the throttled value converges to
+  // the authoritative final answer within one tick).
+  const deliveredText = useThrottledValue(turn.final_answer || previewText, 200);
+  // Reasoning deltas arrive far faster than reading speed; refresh the word
+  // count once per second instead of on every delta.
+  const thinkingWordsShown = useThrottledValue(
+    preview?.thinking_words ?? 0,
+    1000,
+  );
+  const thinkingTailShown = preview?.thinking_tail ?? "";
+  const showThinkingChain = useShowThinkingChain();
+  const isThinking = modelPhaseForStream(waitingModel, preview?.response?.status) &&
+    preview?.stream_phase === "thinking";
+  const isWaiting = !!modelRetryStatus && waitingModel && !preview?.stream_phase;
+  const modelPhase = modelPhaseForStream(waitingModel, preview?.response?.status);
   const phase = modelPhase ? "model" : "local";
   const phaseBoundary = turnWorkPhaseBoundary(turn, phase);
   const phaseStartedAt = useMemo(
@@ -11815,9 +13301,25 @@ function TurnAnswerDelivery({
     [phaseBoundary.id, phaseBoundary.startedAtMs],
   );
   const phaseTimerKey = `${phase}:${phaseBoundary.id}`;
+  // Stream retention keeps the process area expanded next to the answer, so
+  // the reading outline covers the whole delivery: start anchor at the process
+  // top, one chapter per retained free_talk block, summary anchor at the final
+  // answer top, then the answer's own markdown headings.
+  const outlineScopeId = useId().replaceAll(":", "");
+  const processHostId = `stream-process-${outlineScopeId}`;
+  const processSections = useMemo(
+    () => streamRetained
+      ? streamProcessOutlineSections(
+          streamTools
+            .filter((activity) => activity.kind === "free_talk")
+            .map((activity) => activity.detail ?? ""),
+        )
+      : [],
+    [streamRetained, streamTools],
+  );
   return (
     <section className="turn-answer-delivery">
-      {streamRetained && <StreamProcess closing={turn.state !== "working"} onArchived={onStreamArchived}>
+      {streamRetained && <StreamProcess closing={turn.state !== "working" && streamArchive} onArchived={onStreamArchived} hostId={processHostId}>
         <StreamActivityPresentation
           thoughtText={intermediate && !retainedThought ? thoughtText : ""}
           thoughtTimelineSeq={preview?.timeline_seq}
@@ -11828,8 +13330,10 @@ function TurnAnswerDelivery({
       {hasPreview && preview?.interruption && <div className="response-preview-interruption" role="status">{preview.interruption === "cancelled" ? t("interim.previewStopped") : preview.interruption === "network_error" ? t("interim.previewNetworkError") : t("interim.previewModelError")}</div>}
       {(hasFinal || !!previewText) && (
         <FinalAnswerDelivery
-          text={turn.final_answer || previewText}
+          text={deliveredText}
           layoutKey={`${streamRetained}:${workExpanded}`}
+          processSections={processSections}
+          processHostId={streamRetained ? processHostId : undefined}
           provisional={!hasFinal}
           streaming={!hasFinal && preview?.response?.status === "streaming"}
           completion={turn.completion}
@@ -11849,22 +13353,50 @@ function TurnAnswerDelivery({
         <div
           className={`stream-working-trailer${modelPhase ? " model-waiting" : " tool-active"}`}
           role="status"
-          title={modelPhase ? t("tools.waitingModel") : t("tools.localWorking")}
-          aria-label={modelPhase ? t("tools.waitingModel") : t("tools.localWorking")}
+          title={isWaiting ? t("tools.waitingNetwork") : isThinking ? t("tools.thinkingModel") : modelPhase ? t("tools.waitingModel") : t("tools.localWorking")}
+          aria-label={isWaiting ? t("tools.waitingNetwork") : isThinking ? t("tools.thinkingModel") : modelPhase ? t("tools.waitingModel") : t("tools.localWorking")}
         >
-          <span className="stream-working-current">
+          <span className={`stream-working-current${isWaiting ? " is-waiting" : isThinking ? " is-thinking" : ""}`}>
             {modelPhase ? (
               <span className="stream-working-star" aria-hidden="true">✦</span>
             ) : (
               <Wrench className="stream-working-wrench" size={13} strokeWidth={1.65} aria-hidden="true" />
             )}
-            <WorkingElapsed
-              key={phaseTimerKey}
-              createdAtMs={phaseStartedAt}
-              hideBeforeMs={1_000}
-              liveFormat
-              className="stream-working-phase-elapsed"
-            />
+            {isWaiting ? (
+              <span className="stream-working-detail">
+                <span>waiting</span>
+                <WorkingElapsed
+                  key={`waiting:${modelRetryStatus?.startedAtMs ?? phaseStartedAt}`}
+                  createdAtMs={modelRetryStatus?.startedAtMs ?? phaseStartedAt}
+                  hideBeforeMs={0}
+                  liveFormat
+                  className="stream-working-phase-elapsed"
+                />
+              </span>
+            ) : isThinking ? (
+              <span className="stream-working-detail">
+                <span>thinking</span>
+                {showThinkingChain &&
+                  thinkingTailShown && (
+                  <ThinkingPreviewWindow text={thinkingTailShown} />
+                )}
+                <strong>{t("tools.thinkingWords", { count: thinkingWordsShown })}</strong>
+                <WorkingElapsed
+                  createdAtMs={Date.now() - (preview?.thinking_elapsed_ms ?? 0)}
+                  hideBeforeMs={0}
+                  liveFormat
+                  className="stream-working-phase-elapsed"
+                />
+              </span>
+            ) : (
+              <WorkingElapsed
+                key={phaseTimerKey}
+                createdAtMs={phaseStartedAt}
+                hideBeforeMs={1_000}
+                liveFormat
+                className="stream-working-phase-elapsed"
+              />
+            )}
           </span>
           <span className="stream-working-total" aria-hidden="true">
             <Clock8 size={12} />
@@ -11880,6 +13412,8 @@ function TurnAnswerDelivery({
 function FinalAnswerDelivery({
   text,
   layoutKey,
+  processSections = [],
+  processHostId,
   provisional = false,
   streaming = false,
   completion,
@@ -11893,6 +13427,8 @@ function FinalAnswerDelivery({
 }: {
   text: string;
   layoutKey: string;
+  processSections?: StreamProcessOutlineSection[];
+  processHostId?: string;
   provisional?: boolean;
   streaming?: boolean;
   completion: WebTurn["completion"];
@@ -11964,7 +13500,7 @@ function FinalAnswerDelivery({
   );
   return (
     <section className={provisional ? `response-preview${streaming ? " streaming" : ""}` : "turn-final-delivery"}>
-      <FinalAnswerContent text={text} provisional={provisional} layoutKey={layoutKey} />
+      <FinalAnswerContent text={text} provisional={provisional} layoutKey={layoutKey} processSections={processSections} processHostId={processHostId} />
       {provisional ? null : completion ? (
         <CompletionCard
           completion={completion}
@@ -11989,7 +13525,15 @@ const FINAL_ANSWER_OUTLINE_EDGE_GUARD = 12;
 const FINAL_ANSWER_OUTLINE_VIEWPORT_RATIO = 0.15;
 const FINAL_ANSWER_OUTLINE_TOGGLE_HEIGHT = 52;
 
-function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: string; provisional?: boolean; layoutKey: string }) {
+type OutlineNavItem = {
+  id: string;
+  title: string;
+  level: number;
+  kind: "process" | "summary" | "heading";
+  sourceIndex?: number;
+};
+
+function FinalAnswerContent({ text, provisional = false, layoutKey, processSections, processHostId }: { text: string; provisional?: boolean; layoutKey: string; processSections?: StreamProcessOutlineSection[]; processHostId?: string }) {
   const timelineActive = useContext(SessionTimelineActiveContext);
   const outline = useMemo(() => {
     try {
@@ -11998,6 +13542,36 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
       return [];
     }
   }, [text]);
+  const outlineScope = markdownOutlineDeliveryScope(
+    outline.length,
+    !!processHostId && !!processSections,
+    processSections?.length ?? 0,
+  );
+  const hasProcess = outlineScope.hasProcessChapters;
+  const showSummaryAnchor = outlineScope.showsSummary;
+  const outlineSectionCount = outlineScope.sectionCount;
+  // Reading outline over the whole turn delivery: process chapters (start
+  // anchored at the stream process top), the summary anchor at the final
+  // answer top, then the answer's own markdown headings.
+  const outlineNavItems = useMemo<OutlineNavItem[]>(() => {
+    const items: OutlineNavItem[] = [];
+    if (hasProcess)
+      for (const section of processSections!)
+        items.push({
+          id: `stream-${section.sourceIndex}`,
+          title: section.title,
+          level: 1,
+          kind: "process",
+          sourceIndex: section.sourceIndex,
+        });
+    if (showSummaryAnchor)
+      items.push({ id: MARKDOWN_OUTLINE_SUMMARY_ID, title: "", level: 1, kind: "summary" });
+    for (const item of outline)
+      items.push({ id: item.id, title: item.title, level: item.level, kind: "heading" });
+    return items;
+  }, [hasProcess, processSections, showSummaryAnchor, outline]);
+  const outlineItemLabel = (item: OutlineNavItem) =>
+    item.kind === "summary" ? t("outline.summary") : item.title;
   const reactId = useId();
   const stableId = reactId.replaceAll(":", "");
   const headingPrefix = `final-heading-${stableId}`;
@@ -12033,7 +13607,11 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
     setShowOutline(false);
   }, [timelineActive]);
 
-  useEffect(() => setActiveId(MARKDOWN_OUTLINE_START_ID), [outline]);
+  // Hydration rebuilds the outline items on every commit while chapter ids
+  // stay stable; only a real disappearance may drop the highlight to Start.
+  useEffect(() => {
+    setActiveId((current) => markdownOutlineFallbackActiveId(current, outlineNavItems));
+  }, [outlineNavItems]);
 
   useLayoutEffect(() => {
     if (outlineCollapsed || !showOutline) return;
@@ -12071,13 +13649,19 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
       !content ||
       !viewport ||
       !chatShell ||
-      outline.length < FINAL_ANSWER_OUTLINE_MIN_SECTIONS
+      outlineSectionCount < FINAL_ANSWER_OUTLINE_MIN_SECTIONS
     ) {
       setShowOutline(false);
       return;
     }
     const update = () => {
       const contentRect = content.getBoundingClientRect();
+      const processRectNow = outlineScope.spansProcess
+        ? document.getElementById(processHostId!)?.getBoundingClientRect()
+        : undefined;
+      const scopeRect = processRectNow && processRectNow.top < contentRect.top && processRectNow.height > 0
+        ? { top: processRectNow.top, height: contentRect.bottom - processRectNow.top }
+        : contentRect;
       const viewportRect = viewport.getBoundingClientRect();
       const bodyInset = Math.max(0, contentRect.left - viewportRect.left);
       const configuredWidth = Number.parseFloat(
@@ -12087,8 +13671,8 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
         Number.isFinite(configuredWidth) && configuredWidth > 0
           ? configuredWidth
           : 0;
-      const nextTop = contentRect.top - viewportRect.top + viewport.scrollTop;
-      const nextHeight = contentRect.height;
+      const nextTop = scopeRect.top - viewportRect.top + viewport.scrollTop;
+      const nextHeight = scopeRect.height;
       const targetWindowTop =
         window.innerHeight * FINAL_ANSWER_OUTLINE_VIEWPORT_RATIO;
       const targetViewportTop = targetWindowTop - viewportRect.top;
@@ -12111,19 +13695,34 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
           : "overlay",
       );
       setShowOutline(
-        finalAnswerNeedsOutline(
-          content.offsetHeight,
-          viewport.clientHeight,
-          outline.length,
-        ),
+        outlineSectionCount >= FINAL_ANSWER_OUTLINE_MIN_SECTIONS &&
+        scopeRect.height > viewport.clientHeight,
       );
     };
     // A stale portaled top can itself extend scrollHeight after sibling work
     // collapses. Repair geometry even when the display stops delivering rAF.
     const layoutTask = createFrameTask({ run: update, fallbackMs: 100 });
-    const scheduleUpdate = () => layoutTask.request();
+    const scheduleUpdate = () => {
+      layoutTask.request();
+      // Process chapters live outside the answer content node; a turn resize
+      // must also refresh anchor offsets, or active tracking lags one change.
+      outlineGeometryTaskRef.current?.request();
+    };
     update();
     window.addEventListener("resize", scheduleUpdate);
+    // Sibling turns hydrating or being prepended move this outline's anchor
+    // without resizing any observed node here; the timeline broadcasts the
+    // shared layout-change event on exactly those commits. That broadcast is
+    // emitted from layout effects, before the committing paint: re-measure
+    // synchronously so this portaled outline is already correct in that same
+    // paint. A rAF-deferred correction paints one stale top per commit, and
+    // the connect-time hydration storm (one broadcast per restored turn)
+    // makes that backlog visible as outline flicker.
+    const handleSharedLayoutChange = () => {
+      update();
+      outlineGeometryTaskRef.current?.request();
+    };
+    window.addEventListener("markdown-outline-layout-change", handleSharedLayoutChange);
     const observer =
       typeof ResizeObserver === "undefined"
         ? undefined
@@ -12139,10 +13738,11 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
     if (turnContainer) observer?.observe(turnContainer);
     return () => {
       window.removeEventListener("resize", scheduleUpdate);
+      window.removeEventListener("markdown-outline-layout-change", handleSharedLayoutChange);
       observer?.disconnect();
       layoutTask.dispose();
     };
-  }, [outline, outlineCollapsed, text, timelineActive, provisional, layoutKey]);
+  }, [outline, outlineSectionCount, outlineScope.spansProcess, hasProcess, processHostId, outlineCollapsed, text, timelineActive, provisional, layoutKey]);
 
   useEffect(() => {
     setOutlineCollapsed(outlinePlacement === "overlay");
@@ -12160,12 +13760,12 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
       return;
     const threshold = viewport.scrollTop + FINAL_ANSWER_OUTLINE_SCROLL_OFFSET;
     const next = markdownOutlineActiveId(
-      outline,
+      outlineNavItems,
       outlineHeadingOffsetsRef.current,
       threshold,
     );
     setActiveId((current) => (current === next ? current : next));
-  }, [outline]);
+  }, [outlineNavItems]);
 
   const refreshOutlineGeometry = useCallback(() => {
     const root = rootRef.current;
@@ -12176,6 +13776,24 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
     const viewportTop = viewport.getBoundingClientRect().top;
     const scrollTop = viewport.scrollTop;
     const offsets = new Map<string, number>();
+    if (hasProcess && processHostId) {
+      const host = document.getElementById(processHostId);
+      for (const section of processSections!) {
+        const anchor = host?.querySelector<HTMLElement>(
+          `[data-stream-chapter="${section.sourceIndex}"]`,
+        );
+        if (anchor)
+          offsets.set(
+            `stream-${section.sourceIndex}`,
+            scrollTop + anchor.getBoundingClientRect().top - viewportTop,
+          );
+      }
+    }
+    if (showSummaryAnchor && root)
+      offsets.set(
+        MARKDOWN_OUTLINE_SUMMARY_ID,
+        scrollTop + root.getBoundingClientRect().top - viewportTop,
+      );
     for (const item of outline) {
       const heading = document.getElementById(`${headingPrefix}-${item.id}`);
       if (heading && root.contains(heading))
@@ -12186,7 +13804,7 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
     }
     outlineHeadingOffsetsRef.current = offsets;
     updateOutlineActive();
-  }, [headingPrefix, outline, updateOutlineActive]);
+  }, [headingPrefix, outline, outlineNavItems, updateOutlineActive, hasProcess, processHostId, processSections, showSummaryAnchor]);
 
   useLayoutEffect(() => {
     const activeTask = createFrameTask({ run: updateOutlineActive });
@@ -12315,25 +13933,41 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
     const root = rootRef.current;
     const viewport = root?.closest<HTMLElement>(".chat-scroll");
     if (!root || !viewport) return;
+    const startTarget =
+      (outlineScope.spansProcess && processHostId
+        ? document.getElementById(processHostId)
+        : null) ?? root;
     const viewportTop = viewport.getBoundingClientRect().top;
     const targetTop = markdownOutlineTargetScrollTop(
       viewport.scrollTop,
-      root.getBoundingClientRect().top,
+      startTarget.getBoundingClientRect().top,
       viewportTop,
       FINAL_ANSWER_OUTLINE_SCROLL_OFFSET,
     );
     animateOutlineNavigation(viewport, targetTop, MARKDOWN_OUTLINE_START_ID);
   };
 
-  const navigate = (item: MarkdownOutlineItem) => {
+  const navigate = (item: OutlineNavItem) => {
     const root = rootRef.current;
     const viewport = root?.closest<HTMLElement>(".chat-scroll");
-    const heading = document.getElementById(`${headingPrefix}-${item.id}`);
-    if (!root || !viewport || !heading || !root.contains(heading)) return;
+    const processHost =
+      item.kind === "process" && processHostId
+        ? document.getElementById(processHostId)
+        : null;
+    const target =
+      item.kind === "process"
+        ? processHost?.querySelector<HTMLElement>(
+            `[data-stream-chapter="${item.sourceIndex}"]`,
+          ) ?? null
+        : item.kind === "summary"
+          ? root
+          : document.getElementById(`${headingPrefix}-${item.id}`);
+    if (!root || !viewport || !target) return;
+    if (item.kind === "heading" && !root.contains(target)) return;
     const viewportTop = viewport.getBoundingClientRect().top;
     const targetTop = markdownOutlineTargetScrollTop(
       viewport.scrollTop,
-      heading.getBoundingClientRect().top,
+      target.getBoundingClientRect().top,
       viewportTop,
       FINAL_ANSWER_OUTLINE_SCROLL_OFFSET,
     );
@@ -12414,18 +14048,21 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
                       <CornerUpLeft size={11} aria-hidden="true" />
                       <span>{t("outline.start")}</span>
                     </button>
-                    {outline.map((item) => (
+                    {outlineNavItems.map((item) => (
                       <button
                         type="button"
                         key={item.id}
-                        className={`${activeId === item.id ? "active " : ""}level-${item.level}`}
+                        className={`${activeId === item.id ? "active " : ""}level-${item.level} outline-${item.kind}`}
                         aria-current={
                           activeId === item.id ? "location" : undefined
                         }
-                        title={item.title}
+                        title={item.kind === "summary" ? t("outline.goToSummary") : outlineItemLabel(item)}
                         onClick={() => navigate(item)}
                       >
-                        {item.title}
+                        {item.kind === "summary" && (
+                          <CornerDownRight size={11} aria-hidden="true" />
+                        )}
+                        {outlineItemLabel(item)}
                       </button>
                     ))}
                   </nav>
@@ -12453,7 +14090,7 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
         <MarkdownContent
           text={text}
           headingIdPrefix={
-            outline.length >= FINAL_ANSWER_OUTLINE_MIN_SECTIONS
+            outlineSectionCount >= FINAL_ANSWER_OUTLINE_MIN_SECTIONS
               ? headingPrefix
               : undefined
           }
@@ -12463,24 +14100,186 @@ function FinalAnswerContent({ text, provisional = false, layoutKey }: { text: st
   );
 }
 
-function HeaderContextUsage({
+function ContextDonut({
+  ratio,
+  size = 16,
+}: {
+  ratio: number;
+  size?: number;
+}) {
+  const clamped = Math.max(0, Math.min(100, ratio));
+  const stroke = size >= 20 ? 2.8 : 2;
+  const radius = (size - stroke) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const level = clamped >= 90 ? "critical" : clamped >= 75 ? "warning" : "normal";
+  return (
+    <svg
+      className={`context-donut ${level}`}
+      width={size}
+      height={size}
+      viewBox={`0 0 ${size} ${size}`}
+      aria-hidden="true"
+    >
+      <circle
+        className="context-donut-track"
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        fill="none"
+        strokeWidth={stroke}
+      />
+      <circle
+        className="context-donut-value"
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        fill="none"
+        strokeWidth={stroke}
+        strokeDasharray={`${(clamped / 100) * circumference} ${circumference}`}
+        strokeLinecap="round"
+        transform={`rotate(-90 ${size / 2} ${size / 2})`}
+      />
+    </svg>
+  );
+}
+
+function HeaderModelControl({
   session,
-  onClear,
+  endpoint,
+  endpointLabel,
+  reasoningOptions,
+  reasoningValue,
+  defaultEffort,
+  reasoningLocked,
+  contextUsed,
+  contextLimit,
+  contextOverride,
+  compressPending,
+  buttonRef,
+  onReasoningChange,
+  onContextLimitChange,
   onCompact,
+  onClear,
+  onOpenModelPanel,
 }: {
   session: Session | undefined;
+  endpoint: ModelEndpoint | undefined;
+  endpointLabel: string;
+  reasoningOptions: string[];
+  reasoningValue: string;
+  defaultEffort: string;
+  reasoningLocked: boolean;
+  contextUsed: number;
+  contextLimit: number | undefined;
+  contextOverride: boolean;
+  compressPending: boolean;
+  buttonRef: MutableRefObject<HTMLButtonElement | null>;
+  onReasoningChange: (effort: string) => void;
+  onContextLimitChange: (tokens: number | null) => void;
+  onCompact: (() => boolean) | null;
   onClear: (() => void) | null;
-  onCompact: (() => void) | null;
+  onOpenModelPanel: () => void;
 }) {
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuRef = useRef<HTMLSpanElement | null>(null);
+  useT();
+  const [open, setOpen] = useState(false);
+  const [lengthDraft, setLengthDraft] = useState(
+    contextLimit ? String(contextLimit) : "",
+  );
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const [compactRequested, setCompactRequested] = useState(false);
+  const compactRequestedRef = useRef(false);
+  const compactTimerRef = useRef<number | null>(null);
+  const sessionIdRef = useRef(session?.session_id);
+  const clearCompactTimer = () => {
+    if (compactTimerRef.current === null) return;
+    window.clearTimeout(compactTimerRef.current);
+    compactTimerRef.current = null;
+  };
+  useEffect(() => clearCompactTimer, []);
+  // The Host's requested notice is authoritative; once it arrives the local
+  // bridge is no longer needed.
   useEffect(() => {
-    if (!menuOpen) return;
+    if (!compressPending) return;
+    compactRequestedRef.current = false;
+    setCompactRequested(false);
+    clearCompactTimer();
+  }, [compressPending]);
+  useEffect(() => {
+    if (sessionIdRef.current === session?.session_id) return;
+    sessionIdRef.current = session?.session_id;
+    compactRequestedRef.current = false;
+    setCompactRequested(false);
+    clearCompactTimer();
+  }, [session?.session_id]);
+  const requestCompact = () => {
+    // The ref guards a same-tick double click before React commits state.
+    if (!onCompact || compressPending || compactRequestedRef.current) return;
+    compactRequestedRef.current = true;
+    setCompactRequested(true);
+    clearCompactTimer();
+    compactTimerRef.current = window.setTimeout(() => {
+      compactTimerRef.current = null;
+      compactRequestedRef.current = false;
+      setCompactRequested(false);
+    }, 10000);
+    if (!onCompact()) {
+      compactRequestedRef.current = false;
+      setCompactRequested(false);
+      clearCompactTimer();
+    }
+  };
+  const compressing = compressPending || compactRequested;
+  const savedLimitRef = useRef<number | undefined>(contextLimit);
+  // Guards against duplicate submissions while one apply is in flight; the
+  // Host projection (or a rejected command) clears it via the effect below.
+  const appliedContextValueRef = useRef<number | undefined>(undefined);
+  const draftValue = Number(lengthDraft.trim());
+  const draftValid =
+    Number.isInteger(draftValue) &&
+    draftValue > 0 &&
+    draftValue <= MAX_LLM_INPUT_TOKENS_CEILING;
+  const draftDirty =
+    draftValid &&
+    draftValue !== contextLimit &&
+    draftValue !== appliedContextValueRef.current;
+  const resetDraft = () => setLengthDraft(contextLimit ? String(contextLimit) : "");
+  const closePopover = () => {
+    setOpen(false);
+    resetDraft();
+  };
+  useEffect(() => {
+    const previousLimit = savedLimitRef.current;
+    savedLimitRef.current = contextLimit;
+    if (!open) {
+      setLengthDraft(contextLimit ? String(contextLimit) : "");
+      return;
+    }
+    // Follow the Host projection when the draft still mirrors the value that
+    // just changed (apply/reset); keep a genuinely unsaved edit untouched.
+    setLengthDraft((draft) =>
+      Number(draft.trim()) === previousLimit
+        ? contextLimit
+          ? String(contextLimit)
+          : ""
+        : draft,
+    );
+  }, [contextLimit, open]);
+  useEffect(() => {
+    // The Host projection settled (or the popover reopened); allow applying
+    // the current draft again.
+    appliedContextValueRef.current = undefined;
+  }, [contextLimit, open]);
+  useEffect(() => {
+    if (!open) return;
     const onDocDown = (event: MouseEvent) => {
-      if (!menuRef.current?.contains(event.target as Node)) setMenuOpen(false);
+      if (rootRef.current?.contains(event.target as Node)) return;
+      setOpen(false);
+      setLengthDraft(contextLimit ? String(contextLimit) : "");
     };
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMenuOpen(false);
+      if (event.key !== "Escape") return;
+      setOpen(false);
+      setLengthDraft(contextLimit ? String(contextLimit) : "");
     };
     document.addEventListener("mousedown", onDocDown);
     document.addEventListener("keydown", onKey);
@@ -12488,101 +14287,183 @@ function HeaderContextUsage({
       document.removeEventListener("mousedown", onDocDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [menuOpen]);
-  const usage = session ? sessionContextUsage(session) : undefined;
-  const cacheHitPercent = session ? sessionCacheHitPercent(session) : undefined;
-  const cacheTotals = session ? sessionCacheTokenTotals(session) : undefined;
-  const limit = session?.max_llm_input_tokens || undefined;
-  const ratio = limit
-    ? Math.min(100, Math.ceil(((usage?.prompt_tokens ?? 0) * 100) / limit))
+  }, [open, contextLimit]);
+  const ratio = contextLimit
+    ? Math.min(100, Math.ceil((contextUsed * 100) / contextLimit))
     : 0;
-  const level = ratio >= 90 ? "critical" : ratio >= 75 ? "warning" : "normal";
-  const cachePercentLabel =
-    cacheHitPercent === undefined ? "cache: —" : `cache: ${cacheHitPercent.toFixed(1)}%`;
-  const cacheInputLabel = formatTokensCoarse(cacheTotals?.prompt_tokens ?? 0) ?? "0";
-  const cacheOutputLabel = formatTokensCoarse(cacheTotals?.completion_tokens ?? 0) ?? "0";
-  const cacheLabel = cacheHitPercent === undefined
-    ? cachePercentLabel
-    : `${cachePercentLabel}, input: ${cacheInputLabel}, output: ${cacheOutputLabel}`;
-  const cacheRateBasis =
-    "Cache rate excludes the first model request after a detected runtime restart; input/output totals still include it.";
-  const contextUsageLabel = limit
-    ? `Context usage ${ratio}% · ${formatTokens(usage?.prompt_tokens ?? 0)} / ${formatTokens(limit)} input tokens · ${cacheLabel}. ${cacheRateBasis}`
-    : `Context usage waiting for runtime usage · ${cacheLabel}. ${cacheRateBasis}`;
+  const selectedReasoning =
+    reasoningValue && reasoningOptions.includes(reasoningValue)
+      ? reasoningValue
+      : reasoningOptions.includes(defaultEffort)
+        ? defaultEffort
+        : (reasoningOptions[0] ?? "");
+  const contextTitle = contextLimit
+    ? `Context usage ${ratio}% · ${formatTokens(contextUsed) ?? "0"}/${formatTokens(contextLimit) ?? "0"} input tokens`
+    : "Context usage waiting for runtime usage";
+  const modelName = endpoint?.model ?? session?.runtime_profile?.model ?? "";
+  const collapsedName = modelName || endpointLabel;
+  const endpointName = endpointLabel.trim();
+  const controlTitle = [
+    endpointName && endpointName !== collapsedName ? endpointName : "",
+    collapsedName,
+    contextTitle,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const applyContextLength = () => {
+    if (!draftValid || !draftDirty) return;
+    appliedContextValueRef.current = draftValue;
+    onContextLimitChange(draftValue);
+  };
   return (
-    <span
-      className={`header-context ${level}`}
-      title={contextUsageLabel}
-      aria-label={contextUsageLabel}
-    >
-      <span className="header-context-main">
-        <span aria-hidden="true">· ctx</span>
-        <span className="header-context-meter" aria-hidden="true">
-          <span style={{ width: `${ratio}%` }} />
+    <span className="header-model-control-anchor" ref={rootRef}>
+      <button
+        ref={buttonRef}
+        type="button"
+        className={`header-model header-model-control${open ? " selected" : ""}`}
+        title={controlTitle}
+        aria-expanded={open}
+        aria-controls="header-model-popover"
+        aria-label={controlTitle}
+        onClick={() => {
+          if (open) {
+            closePopover();
+            return;
+          }
+          resetDraft();
+          setOpen(true);
+        }}
+      >
+        <span className="header-model-control-name" title={endpointLabel}>
+          {collapsedName}
         </span>
-        <span>{limit ? `${ratio}%/${formatTokens(limit)}` : "—"}</span>
-        {(onClear || onCompact) && (
-          <span className="context-actions-menu" ref={menuRef}>
+        {selectedReasoning && (
+          <span className="header-model-control-reasoning">{selectedReasoning}</span>
+        )}
+        <ContextDonut ratio={ratio} size={15} />
+        <ChevronDown className="header-model-control-chevron" size={11} aria-hidden="true" />
+      </button>
+      {open && (
+        <div
+          id="header-model-popover"
+          className="header-model-popover"
+          role="dialog"
+          aria-label={t("headerModel.title")}
+        >
+          <div className="header-model-popover-heading">
+            <strong>{t("headerModel.title")}</strong>
+          </div>
+          <div className="header-model-popover-row">
+            <span className="header-model-popover-label">{t("headerModel.model")}</span>
+            <span className="header-model-popover-model">
+              <strong title={endpointLabel}>{endpointLabel}</strong>
+              {modelName && <small title={modelName}>{modelName}</small>}
+            </span>
             <button
               type="button"
-              className="context-clear-inline"
-              title={t("context.actionsTitle")}
-              aria-label={t("context.actionsTitle")}
-              aria-expanded={menuOpen}
-              aria-haspopup="menu"
-              onClick={() => setMenuOpen(value => !value)}
+              className="header-model-popover-action"
+              onClick={() => {
+                closePopover();
+                onOpenModelPanel();
+              }}
             >
-              <Hand size={12} aria-hidden="true" />
+              {t("headerModel.switchModel")}
             </button>
-            {menuOpen && (
-              <span className="context-actions-dropdown" role="menu">
-                {onCompact && (
-                  <button
-                    type="button"
-                    role="menuitem"
-                    disabled={session ? sessionContextCompressPending(session) : false}
-                    onClick={() => {
-                      setMenuOpen(false);
-                      onCompact();
-                    }}
-                  >
-                    {session && sessionContextCompressPending(session)
-                      ? t("context.compressingAction")
-                      : t("context.compressAction")}
-                  </button>
-                )}
-                {onClear && (
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      setMenuOpen(false);
-                      if (window.confirm(t("context.clearConfirm"))) onClear();
-                    }}
-                  >
-                    {t("context.clearAction")}
-                  </button>
-                )}
-              </span>
+          </div>
+          <div className="header-model-popover-row">
+            <span className="header-model-popover-label">{t("modelService.reasoningLabel")}</span>
+            {reasoningOptions.length > 0 ? (
+              <select
+                className="header-model-popover-select"
+                aria-label={t("modelService.reasoningLabel")}
+                value={selectedReasoning}
+                disabled={reasoningLocked || !session}
+                onChange={(event) => onReasoningChange(event.target.value)}
+              >
+                {reasoningOptions.map((effort) => (
+                  <option key={effort} value={effort}>
+                    {effort}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span className="header-model-popover-muted">{t("modelService.reasoningUnavailable")}</span>
             )}
-          </span>
-        )}
-      </span>
-      <span className="header-cache-rate" aria-hidden="true">
-        <span>· {cachePercentLabel}</span>
-        {cacheHitPercent !== undefined && (
-          <>
-            <span className="header-cache-token header-cache-input">
-              <ArrowBigUp size={12} strokeWidth={1.8} />
-              {cacheInputLabel}
+            <span />
+          </div>
+          <div className="header-model-popover-row">
+            <span className="header-model-popover-label">{t("headerModel.contextLength")}</span>
+            <span className="header-model-popover-length">
+              <input
+                type="number"
+                inputMode="numeric"
+                min={1}
+                max={MAX_LLM_INPUT_TOKENS_CEILING}
+                step={1}
+                value={lengthDraft}
+                disabled={!endpoint}
+                aria-label={t("headerModel.contextLength")}
+                onChange={(event) => setLengthDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    applyContextLength();
+                  }
+                }}
+              />
+              <span>tokens</span>
             </span>
-            <span className="header-cache-token header-cache-output">
-              <ArrowBigDown size={12} strokeWidth={1.8} />
-              {cacheOutputLabel}
+            <span className="header-model-popover-length-actions">
+              <button
+                type="button"
+                className="header-model-popover-action"
+                disabled={!endpoint || !draftDirty}
+                onClick={applyContextLength}
+              >
+                {t("headerModel.apply")}
+              </button>
+              <button
+                type="button"
+                className="header-model-popover-action"
+                disabled={!endpoint || !contextOverride}
+                title={contextOverride ? undefined : t("headerModel.resetHint")}
+                onClick={() => onContextLimitChange(null)}
+              >
+                {t("headerModel.reset")}
+              </button>
             </span>
-          </>
-        )}
-      </span>
+          </div>
+          <div className="header-model-popover-row header-model-popover-context-row">
+            <span className="header-model-popover-label">{t("headerModel.contextManagement")}</span>
+            <span className="header-model-popover-context" title={contextTitle}>
+              <ContextDonut ratio={ratio} size={22} />
+              <span>{contextLimit ? `${formatTokens(contextUsed) ?? "0"}/${formatTokens(contextLimit) ?? "0"}` : t("insights.unavailable")}</span>
+            </span>
+            <span className="header-model-popover-context-actions" aria-busy={compressing}>
+              {onCompact && (
+                <button
+                  type="button"
+                  className="header-model-popover-action"
+                  disabled={compressing}
+                  onClick={requestCompact}
+                >
+                  {compressing ? t("context.compressingAction") : t("context.compressAction")}
+                </button>
+              )}
+              {onClear && (
+                <button
+                  type="button"
+                  className="header-model-popover-action"
+                  disabled={compressing}
+                  onClick={onClear}
+                >
+                  {t("context.clearAction")}
+                </button>
+              )}
+            </span>
+          </div>
+        </div>
+      )}
     </span>
   );
 }
@@ -12619,6 +14500,8 @@ function ActivityView({ activity, enterPulse = false }: { activity: Activity; en
     return <ContextCompressNotice activity={activity} />;
   if (activity.kind === "toolgen") return <ToolGenNotice activity={activity} />;
   if (activity.kind === "memo_notice") return <MemoNotice activity={activity} />;
+  if (activity.kind === "work_file_notice")
+    return <WorkFileNotice activity={activity} />;
   if (activity.kind === "model_service_issue")
     return <ModelServiceIssueNotice activity={activity} />;
   if (activity.kind === "user_supplement")
@@ -12862,7 +14745,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
     const timer = window.setInterval(updateElapsed, 1_000);
     return () => window.clearInterval(timer);
   }, [activity.createdAt, pollingActivity, running, waitBudgetMs]);
-  const structuredInvocation = !!activity.run_bash_edit || !!activity.readfile || !!activity.memory_search || !!activity.self_tool;
+  const structuredInvocation = !!activity.run_bash_edit || !!activity.readfile || !!activity.memory_search || !!activity.self_tool || !!activity.mailbox;
   const invocationPreview = activity.tool_name === "sub_answer" || structuredInvocation ? undefined : toolInvocationPreview(activity);
   const detail = activity.detail?.trim();
   const code = activity.code?.trim();
@@ -12888,7 +14771,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
         </span>
       )}
       <b><ToolActivityIcon activity={activity} toolName={toolName} failed={isToolActivityFailed(status)} /></b>
-      {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && (
+      {activity.run_bash_edit ? <RunBashEditInvocation edit={activity.run_bash_edit} /> : activity.timer ? <TimerInvocation timer={activity.timer} /> : activity.mailbox ? <MailboxInvocation mailbox={activity.mailbox} /> : activity.readfile ? <ReadFileInvocation file={activity.readfile} /> : activity.memory_search ? <MemorySearchInvocation search={activity.memory_search} /> : activity.self_tool ? <SelfToolInvocation operation={activity.self_tool} /> : !open && invocationPreview && (
         <code className="tool-activity-command tool-invocation-preview" title={invocationPreview}>
           {invocationPreview}
         </code>
@@ -13020,10 +14903,46 @@ function MemoNotice({ activity }: { activity: Activity }) {
   );
 }
 
+function WorkFileNotice(_: { activity: Activity }) {
+  // Same notice shell as memo and context compression: a small Lucide mark in
+  // the system-notice lane, never a user bubble.
+  return (
+    <div className="turn-work-item notice system-notice work-file-notice">
+      <span className="activity-mark" aria-hidden="true">
+        <NotebookPen size={13} />
+      </span>
+      <div className="system-notice-line">
+        <strong className="system-notice-title">{t("turn.workNotesUpdated")}</strong>
+      </div>
+    </div>
+  );
+}
+
 function toolInvocationPreview(activity: Activity) {
   const code = activity.code?.split("\n", 1)[0]?.trim();
   if (code) return code;
   return activity.detail?.split("\n", 1)[0]?.trim();
+}
+
+function activitiesFromTurnEvent(
+  event: WebTurnEvent,
+  sessionId: string,
+): (Activity | null)[] {
+  if (event.source !== "core_topic")
+    return [activityFromTurnEvent(event, sessionId)];
+  const activities = activitiesFromTopic(
+    event.payload as unknown as import("./protocol").CoreTopicEvent,
+  );
+  if (activities.length === 0) return [null];
+  return activities.map((activity, index) => ({
+    ...activity,
+    id:
+      index === activities.length - 1
+        ? event.event_id
+        : `${event.event_id}:activity:${index}`,
+    sessionId,
+    createdAt: event.created_at_ms,
+  }));
 }
 
 function activityFromTurnEvent(
@@ -13061,6 +14980,7 @@ function activityFromTurnEvent(
   if (
     kind === "model_request" ||
     kind === "model_response" ||
+    kind === "model_request_completed" ||
     kind === "model_retry"
   )
     return null;
@@ -13166,6 +15086,7 @@ function prefersReducedMotion() {
 
 function McpPanel({
   panelRef,
+  anchorRight,
   servers,
   session,
   pendingKeys,
@@ -13174,6 +15095,7 @@ function McpPanel({
   onCommand,
 }: {
   panelRef: MutableRefObject<HTMLElement | null>;
+  anchorRight: number | null;
   servers: McpServerReport[];
   session: Session | undefined;
   pendingKeys: Set<string>;
@@ -13227,6 +15149,11 @@ function McpPanel({
       id="mcp-panel"
       ref={panelRef}
       className="mcp-panel"
+      style={
+        anchorRight === null
+          ? undefined
+          : ({ "--mcp-anchor-right": `${anchorRight}px` } as CSSProperties)
+      }
       role="dialog"
       aria-modal="false"
       aria-label="MCP servers"
@@ -14003,6 +15930,26 @@ type SettingsCenterProps = {
   onContextCompressThresholdChange: (
     percent: ContextCompressThresholdPercent,
   ) => void;
+  systemCpuCapPercent: number;
+  systemMemCapPercent: number;
+  systemCpuCapEnabled: boolean;
+  systemMemCapEnabled: boolean;
+  resourceCaps: ResourceCapsProjection | undefined;
+  resourceCapsPulse: number;
+  resourceCapsPending: boolean;
+  onResourceCapsChange: (
+    cpuEnabled: boolean,
+    cpuPercent: number,
+    memEnabled: boolean,
+    memPercent: number,
+  ) => void;
+  onResourceCapsEscalate: (
+    cpuEnabled: boolean,
+    cpuPercent: number,
+    memEnabled: boolean,
+    memPercent: number,
+    password: string,
+  ) => void;
   restorePromptContextOnStartup: boolean;
   restorePromptContextPending: boolean;
   onRestorePromptContextChange: (enabled: boolean) => void;
@@ -14015,9 +15962,12 @@ type SettingsCenterProps = {
   retentionDays: 1 | 5 | 10 | null;
   temporaryCapacityBytes: number | null;
   conversationCapacityBytes: number | null;
+  mailboxCapacityBytes: number | null;
+  memStorageUsage: MemStorageUsage | null;
   favoriteCapacity: ChatLibraryCapacity;
   retentionPending: boolean;
   conversationCapacityPending: boolean;
+  mailboxCapacityPending: boolean;
   favoriteCapacityPending: boolean;
   switchPending: boolean;
   temporaryItems: MemTemporaryItem[];
@@ -14043,6 +15993,7 @@ type SettingsCenterProps = {
     maxBytes: number | null,
   ) => void;
   onSaveConversationCapacity: (maxBytes: number | null) => void;
+  onSaveMailboxCapacity: (maxBytes: number | null) => void;
   onSaveFavoriteCapacity: (maxBytes: number | null) => void;
   onSwitchMemory: (path: string) => void;
   onRefreshTemporaryItems: () => void;
@@ -14058,6 +16009,7 @@ const SettingsCenter = memo(function SettingsCenter(
   props: SettingsCenterProps,
 ) {
   useT();
+  const showThinkingChain = useShowThinkingChain();
   const {
     panelRef,
     section,
@@ -14073,6 +16025,15 @@ const SettingsCenter = memo(function SettingsCenter(
     contextCompressThresholdPercent,
     contextCompressThresholdPending,
     onContextCompressThresholdChange,
+    systemCpuCapPercent,
+    systemMemCapPercent,
+    systemCpuCapEnabled,
+    systemMemCapEnabled,
+    resourceCaps,
+    resourceCapsPulse,
+    resourceCapsPending,
+    onResourceCapsEscalate,
+    onResourceCapsChange,
     restorePromptContextOnStartup,
     restorePromptContextPending,
     onRestorePromptContextChange,
@@ -14085,9 +16046,12 @@ const SettingsCenter = memo(function SettingsCenter(
     retentionDays,
     temporaryCapacityBytes,
     conversationCapacityBytes,
+    mailboxCapacityBytes,
+    memStorageUsage,
     favoriteCapacity,
     retentionPending,
     conversationCapacityPending,
+    mailboxCapacityPending,
     favoriteCapacityPending,
     switchPending,
     temporaryItems,
@@ -14110,6 +16074,7 @@ const SettingsCenter = memo(function SettingsCenter(
     onClose,
     onSaveTemporaryPolicy,
     onSaveConversationCapacity,
+    onSaveMailboxCapacity,
     onSaveFavoriteCapacity,
     onSwitchMemory,
     onRefreshTemporaryItems,
@@ -14127,9 +16092,153 @@ const SettingsCenter = memo(function SettingsCenter(
   const [conversationCapacity, setConversationCapacity] = useState<
     number | null
   >(conversationCapacityBytes);
+  const [mailboxCapacity, setMailboxCapacity] = useState<number | null>(
+    mailboxCapacityBytes,
+  );
   const [favoriteCapacityLimit, setFavoriteCapacityLimit] = useState<
     number | null
   >(favoriteCapacity.limit_bytes ?? null);
+  const [resourceCpuDraft, setResourceCpuDraft] = useState(() =>
+    String(systemCpuCapPercent),
+  );
+  const [resourceMemDraft, setResourceMemDraft] = useState(() =>
+    String(systemMemCapPercent),
+  );
+  const resourceCpuCapability = resourceCapability(resourceCaps?.cpu);
+  const resourceMemCapability = resourceCapability(resourceCaps?.mem);
+  const resourceCapHint = (
+    dimension: "cpu" | "mem",
+    capability: ReturnType<typeof resourceCapability>,
+  ): string => {
+    const kind = resourceCapHintKind(
+      dimension === "cpu" ? resourceCaps?.cpu : resourceCaps?.mem,
+    );
+    if (kind === null || capability === "manageable" || capability === "needs-permission") {
+      return "";
+    }
+    if (kind === "shared-instance-root") {
+      // The shared-root blocker is memory-specific: CPU stays enforceable in
+      // the kernel's threaded subtree.
+      return dimension === "mem" ? t("system.resourceMemSharedRootHint") : "";
+    }
+    if (kind === "unsupported") {
+      return dimension === "cpu"
+        ? t("system.resourceCpuUnsupportedHint")
+        : t("system.resourceMemUnsupportedHint");
+    }
+    return dimension === "cpu"
+      ? t("system.resourceCpuUnavailableHint")
+      : t("system.resourceMemUnavailableHint");
+  };
+  const resourceCpuHint = resourceCapHint("cpu", resourceCpuCapability);
+  const resourceMemHint = resourceCapHint("mem", resourceMemCapability);
+  // The switch reflects enforcement, not the saved desire: a dimension the
+  // kernel cannot manage right now renders OFF even when the stored flag says
+  // on. "needs-permission" stays interactive and asks for a one-shot password
+  // when switched on; "unsupported" offers no operation at all.
+  const effectiveSystemCpuCapEnabled =
+    resourceCpuCapability === "manageable" ? systemCpuCapEnabled : false;
+  const effectiveSystemMemCapEnabled =
+    resourceMemCapability === "manageable" ? systemMemCapEnabled : false;
+  const [resourceCpuEnabledDraft, setResourceCpuEnabledDraft] = useState(
+    () => effectiveSystemCpuCapEnabled,
+  );
+  const [resourceMemEnabledDraft, setResourceMemEnabledDraft] = useState(
+    () => effectiveSystemMemCapEnabled,
+  );
+  const [resourceCapsEscalateOpen, setResourceCapsEscalateOpen] =
+    useState(false);
+  const [resourceCapsEscalateTarget, setResourceCapsEscalateTarget] =
+    useState<"cpu" | "mem" | null>(null);
+  const [resourceCapsPassword, setResourceCapsPassword] = useState("");
+  const resourceCapsPasswordInputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (!resourceCapsEscalateOpen) return;
+    // Tab containment already comes from the app-level dialog focus trap
+    // (role="dialog" aria-modal="true" below). This effect owns two things the
+    // password field alone cannot: focus lands in the dialog on open, and
+    // Escape dismisses it from any control, not only while the input is
+    // focused.
+    resourceCapsPasswordInputRef.current?.focus({ preventScroll: true });
+    const dismissOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      // The Settings center also listens for Escape on the document (bubble
+      // phase) and would close the whole panel behind this modal. Consume the
+      // key in the capture phase so the modal is the only thing that closes.
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setResourceCapsEscalateOpen(false);
+      setResourceCapsEscalateTarget(null);
+      setResourceCapsPassword("");
+    };
+    document.addEventListener("keydown", dismissOnEscape, true);
+    return () => document.removeEventListener("keydown", dismissOnEscape, true);
+  }, [resourceCapsEscalateOpen]);
+  useEffect(() => {
+    setResourceCpuDraft(String(systemCpuCapPercent));
+  }, [systemCpuCapPercent]);
+  useEffect(() => {
+    setResourceMemDraft(String(systemMemCapPercent));
+  }, [systemMemCapPercent]);
+  useEffect(() => {
+    setResourceCpuEnabledDraft(effectiveSystemCpuCapEnabled);
+  }, [effectiveSystemCpuCapEnabled]);
+  useEffect(() => {
+    setResourceMemEnabledDraft(effectiveSystemMemCapEnabled);
+  }, [effectiveSystemMemCapEnabled]);
+  const resourceCpuValid = parseResourceCapPercent(resourceCpuDraft) !== null;
+  const resourceMemValid = parseResourceCapPercent(resourceMemDraft) !== null;
+  const resourceCapsDirty =
+    resourceCpuEnabledDraft !== effectiveSystemCpuCapEnabled ||
+    parseResourceCapPercent(resourceCpuDraft) !== systemCpuCapPercent ||
+    resourceMemEnabledDraft !== effectiveSystemMemCapEnabled ||
+    parseResourceCapPercent(resourceMemDraft) !== systemMemCapPercent;
+  const toggleResourceCap = (dimension: "cpu" | "mem", enabled: boolean) => {
+    const capability =
+      dimension === "cpu" ? resourceCpuCapability : resourceMemCapability;
+    if (resourceCapabilityIsInert(capability)) return;
+    if (enabled && capability === "needs-permission") {
+      setResourceCapsEscalateTarget(dimension);
+      setResourceCapsPassword("");
+      setResourceCapsEscalateOpen(true);
+      return;
+    }
+    if (dimension === "cpu") setResourceCpuEnabledDraft(enabled);
+    else setResourceMemEnabledDraft(enabled);
+  };
+  const closeResourceCapsEscalation = () => {
+    setResourceCapsEscalateOpen(false);
+    setResourceCapsEscalateTarget(null);
+    setResourceCapsPassword("");
+  };
+  const submitResourceCaps = () => {
+    const cpuPercent = parseResourceCapPercent(resourceCpuDraft);
+    const memPercent = parseResourceCapPercent(resourceMemDraft);
+    if (cpuPercent === null || memPercent === null) return;
+    onResourceCapsChange(
+      resourceCpuEnabledDraft,
+      cpuPercent,
+      resourceMemEnabledDraft,
+      memPercent,
+    );
+  };
+  const submitResourceCapsEscalation = () => {
+    const cpuPercent = parseResourceCapPercent(resourceCpuDraft);
+    const memPercent = parseResourceCapPercent(resourceMemDraft);
+    if (cpuPercent === null || memPercent === null) return;
+    if (!resourceCapsPassword || resourceCapsEscalateTarget === null) return;
+    const target = resourceCapsEscalateTarget;
+    setResourceCapsEscalateOpen(false);
+    setResourceCapsEscalateTarget(null);
+    onResourceCapsEscalate(
+      target === "cpu" ? true : resourceCpuEnabledDraft,
+      cpuPercent,
+      target === "mem" ? true : resourceMemEnabledDraft,
+      memPercent,
+      resourceCapsPassword,
+    );
+    setResourceCapsPassword("");
+  };
   const [path, setPath] = useState(memPath);
   const [memoryPage, setMemoryPage] = useState<"overview" | "switch">(
     "overview",
@@ -14141,8 +16250,10 @@ const SettingsCenter = memo(function SettingsCenter(
   const busy =
     retentionPending ||
     conversationCapacityPending ||
+    mailboxCapacityPending ||
     modelToolResultBytesPending ||
     contextCompressThresholdPending ||
+    resourceCapsPending ||
     restorePromptContextPending ||
     claudeCodexToolDiscoveryPending ||
     favoriteCapacityPending ||
@@ -14175,6 +16286,10 @@ const SettingsCenter = memo(function SettingsCenter(
     [conversationCapacityBytes],
   );
   useEffect(
+    () => setMailboxCapacity(mailboxCapacityBytes),
+    [mailboxCapacityBytes],
+  );
+  useEffect(
     () => setFavoriteCapacityLimit(favoriteCapacity.limit_bytes ?? null),
     [favoriteCapacity.limit_bytes],
   );
@@ -14182,6 +16297,15 @@ const SettingsCenter = memo(function SettingsCenter(
     setPath(memPath);
     setMemoryPage("overview");
   }, [memPath]);
+  useEffect(() => {
+    if (section !== "system" || resourceCapsPulse === 0) return;
+    const frame = requestAnimationFrame(() => {
+      panelRef.current
+        ?.querySelector(".system-resource-caps")
+        ?.scrollIntoView({ block: "start", behavior: "smooth" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [panelRef, resourceCapsPulse, section]);
   useEffect(() => {
     const availableIds = new Set(
       deletableTemporaryItems.map((item) => item.id),
@@ -14588,6 +16712,220 @@ const SettingsCenter = memo(function SettingsCenter(
                     </label>
                   </div>
                 </section>
+                <section className="settings-group system-thinking-chain">
+                  <div className="settings-group-heading">
+                    <div>
+                      <strong>{t("system.thinkingChainTitle")}</strong>
+                      <p>{t("system.thinkingChainDesc")}</p>
+                    </div>
+                  </div>
+                  <label className="resource-cap-switch thinking-chain-switch">
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      checked={showThinkingChain}
+                      aria-label={t("system.thinkingChainAria")}
+                      onChange={(event) =>
+                        setThinkingChainVisible(event.target.checked)
+                      }
+                    />
+                    <span className="resource-cap-slider" aria-hidden="true" />
+                    <span className="resource-cap-name">
+                      {t("system.thinkingChainToggle")}
+                    </span>
+                  </label>
+                </section>
+                <section className="settings-group system-resource-caps">
+                  <div className="settings-group-heading">
+                    <div>
+                      <strong>{t("system.resourceCapsTitle")}</strong>
+                      <p>{t("system.resourceCapsDesc")}</p>
+                    </div>
+                  </div>
+                  <div className="resource-cap-rows">
+                    {[
+                      {
+                        key: "cpu" as const,
+                        title: t("system.resourceCpuCapTitle"),
+                        aria: t("system.resourceCpuCapAria"),
+                        desc: t("system.resourceCpuCapDesc"),
+                        hint: resourceCpuHint,
+                        capability: resourceCpuCapability,
+                        enabled: resourceCpuEnabledDraft,
+                        setEnabled: (enabled: boolean) =>
+                          toggleResourceCap("cpu", enabled),
+                        draft: resourceCpuDraft,
+                        setDraft: setResourceCpuDraft,
+                      },
+                      {
+                        key: "mem" as const,
+                        title: t("system.resourceMemCapTitle"),
+                        aria: t("system.resourceMemCapAria"),
+                        desc: t("system.resourceMemCapDesc"),
+                        hint: resourceMemHint,
+                        capability: resourceMemCapability,
+                        enabled: resourceMemEnabledDraft,
+                        setEnabled: (enabled: boolean) =>
+                          toggleResourceCap("mem", enabled),
+                        draft: resourceMemDraft,
+                        setDraft: setResourceMemDraft,
+                      },
+                    ].map((row) => (
+                      <div
+                        className={`resource-cap-row${
+                          resourceCapabilityIsInert(row.capability)
+                            ? " is-inert"
+                            : ""
+                        }`}
+                        data-capability={row.capability}
+                        data-dimension={row.key}
+                        key={row.key}
+                      >
+                        <label className="resource-cap-switch">
+                          <input
+                            type="checkbox"
+                            role="switch"
+                            checked={row.enabled}
+                            aria-label={row.aria}
+                            disabled={
+                              resourceCapsPending ||
+                              !connected ||
+                              resourceCapabilityIsInert(row.capability)
+                            }
+                            onChange={(event) =>
+                              row.setEnabled(event.target.checked)
+                            }
+                          />
+                          <span
+                            className="resource-cap-slider"
+                            aria-hidden="true"
+                          />
+                          <span className="resource-cap-name">{row.title}</span>
+                        </label>
+                        <select
+                          className="resource-cap-select"
+                          value={row.draft}
+                          aria-label={row.aria}
+                          disabled={
+                            resourceCapsPending ||
+                            !connected ||
+                            resourceCapabilityIsInert(row.capability) ||
+                            !row.enabled
+                          }
+                          onChange={(event) => row.setDraft(event.target.value)}
+                        >
+                          {RESOURCE_CAP_PERCENT_OPTIONS.map((option) => (
+                            <option key={option} value={String(option)}>
+                              {option}%
+                            </option>
+                          ))}
+                        </select>
+                        {resourceCapabilityIsInert(row.capability) && (
+                          <span
+                            className="resource-cap-warning"
+                            role="img"
+                            tabIndex={0}
+                            aria-label={row.hint}
+                            title={row.hint}
+                          >
+                            <TriangleAlert size={13} aria-hidden="true" />
+                          </span>
+                        )}
+                        <span className="system-select-desc resource-cap-desc">
+                          {row.desc}
+                        </span>
+                        {row.hint && resourceCapabilityIsInert(row.capability) && (
+                          <small className="resource-cap-hint">{row.hint}</small>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="resource-caps-actions">
+                    <div className="resource-caps-action-status">
+                      {resourceCapsPending && (
+                        <small
+                          className="system-setting-status"
+                          role="status"
+                          aria-live="polite"
+                        >
+                          {t("system.saving")}
+                        </small>
+                      )}
+                      {(!resourceCpuValid || !resourceMemValid) && (
+                        <small
+                          className="system-setting-status resource-caps-error"
+                          role="alert"
+                        >
+                          {t("system.resourceCapsInvalid")}
+                        </small>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      className={`primary compact ${resourceCapsPending ? "sending" : ""}`}
+                      disabled={
+                        resourceCapsPending ||
+                        !connected ||
+                        !resourceCpuValid ||
+                        !resourceMemValid ||
+                        !resourceCapsDirty
+                      }
+                      onClick={submitResourceCaps}
+                    >
+                      {resourceCapsPending && <LoaderCircle size={14} />}
+                      <span>{t("system.resourceCapsSave")}</span>
+                    </button>
+                  </div>
+                  {resourceCapsEscalateOpen && (
+                    <div
+                      className="resource-caps-modal"
+                      role="dialog"
+                      aria-modal="true"
+                      aria-label={t("system.resourceCapsEscalateTitle")}
+                      onClick={closeResourceCapsEscalation}
+                    >
+                      <div
+                        className="resource-caps-modal-card"
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        <strong>{t("system.resourceCapsEscalateTitle")}</strong>
+                        <p>{t("system.resourceCapsEscalateDesc")}</p>
+                        <input
+                          ref={resourceCapsPasswordInputRef}
+                          type="password"
+                          autoComplete="off"
+                          placeholder={t("system.resourceCapsEscalatePassword")}
+                          aria-label={t("system.resourceCapsEscalatePassword")}
+                          value={resourceCapsPassword}
+                          onChange={(event) =>
+                            setResourceCapsPassword(event.target.value)
+                          }
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              submitResourceCapsEscalation();
+                            }
+                          }}
+                        />
+                        <div className="resource-caps-modal-actions">
+                          <button
+                            type="button"
+                            onClick={closeResourceCapsEscalation}
+                          >
+                            {t("system.resourceCapsEscalateCancel")}
+                          </button>
+                          <button
+                            type="button"
+                            className="primary"
+                            disabled={!resourceCapsPassword}
+                            onClick={submitResourceCapsEscalation}
+                          >
+                            {t("system.resourceCapsEscalateConfirm")}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </section>
                 <section className="settings-group system-restore-prompt-context">
                   <div className="settings-group-heading">
                     <div>
@@ -14783,6 +17121,15 @@ const SettingsCenter = memo(function SettingsCenter(
                         <option value={5 * 1024 * 1024 * 1024}>5 GB</option>
                         <option value="unlimited">Unlimited</option>
                       </select>
+                      <small data-testid="temporary-storage-usage">
+                        Currently using{" "}
+                        {memStorageUsage
+                          ? formatFavoriteCapacityUsed(
+                              memStorageUsage.temporary_bytes,
+                            )
+                          : "…"}
+                        .
+                      </small>
                     </label>
                   </div>
                   <div className="settings-group-actions">
@@ -14852,6 +17199,22 @@ const SettingsCenter = memo(function SettingsCenter(
                       <option value={20 * 1024 * 1024 * 1024}>20 GB</option>
                       <option value="unlimited">Unlimited</option>
                     </select>
+                    <small data-testid="conversation-storage-usage">
+                      Conversations currently use{" "}
+                      {memStorageUsage
+                        ? formatFavoriteCapacityUsed(
+                            memStorageUsage.conversation_bytes,
+                          )
+                        : "…"}
+                      ; conversations and Mailbox together use{" "}
+                      {memStorageUsage
+                        ? formatFavoriteCapacityUsed(
+                            memStorageUsage.conversation_bytes +
+                              memStorageUsage.mailbox_bytes,
+                          )
+                        : "…"}
+                      .
+                    </small>
                   </label>
                   <div className="settings-group-actions">
                     <span
@@ -14880,6 +17243,79 @@ const SettingsCenter = memo(function SettingsCenter(
                       {conversationCapacityPending
                         ? "Saving…"
                         : "Save capacity"}
+                    </button>
+                  </div>
+                </section>
+                <div className="memory-overview-label">
+                  <span>Mailbox</span>
+                  <small>Independent limit, shared Conversation capacity</small>
+                </div>
+                <section className="settings-group settings-capacity-card mailbox-capacity-card">
+                  <div className="settings-group-heading">
+                    <div>
+                      <strong>Mailbox capacity</strong>
+                      <p>
+                        Mailbox bodies and indexes have their own limit. Their
+                        actual storage also counts toward Conversation capacity;
+                        the remaining shared space is available to conversation
+                        history. Pending deliveries and receipts stay protected.
+                      </p>
+                    </div>
+                  </div>
+                  <label className="settings-field">
+                    <span>Maximum capacity</span>
+                    <select
+                      aria-label="Mailbox maximum capacity"
+                      value={
+                        mailboxCapacity === null
+                          ? "unlimited"
+                          : String(mailboxCapacity)
+                      }
+                      disabled={mailboxCapacityPending || switchPending}
+                      onChange={(event) =>
+                        setMailboxCapacity(
+                          event.target.value === "unlimited"
+                            ? null
+                            : Number(event.target.value),
+                        )
+                      }
+                    >
+                      <option value={32 * 1024 * 1024}>32 MB</option>
+                      <option value={64 * 1024 * 1024}>64 MB</option>
+                      <option value={128 * 1024 * 1024}>128 MB</option>
+                      <option value={256 * 1024 * 1024}>256 MB</option>
+                      <option value={512 * 1024 * 1024}>512 MB</option>
+                      <option value={1024 * 1024 * 1024}>1 GB</option>
+                      <option value="unlimited">Unlimited</option>
+                    </select>
+                    <small data-testid="mailbox-storage-usage">
+                      Currently using{" "}
+                      {memStorageUsage
+                        ? `${formatFavoriteCapacityUsed(memStorageUsage.mailbox_bytes)} across ${memStorageUsage.mailbox_files} body files`
+                        : "…"}
+                      .
+                    </small>
+                  </label>
+                  <div className="settings-group-actions">
+                    <span
+                      className="settings-status"
+                      role="status"
+                      aria-live="polite"
+                    >
+                      {mailboxCapacityPending
+                        ? "Saving Mailbox capacity…"
+                        : ""}
+                    </span>
+                    <button
+                      type="button"
+                      className={`primary compact ${mailboxCapacityPending ? "sending" : ""}`}
+                      disabled={
+                        busy || mailboxCapacity === mailboxCapacityBytes
+                      }
+                      onClick={() => onSaveMailboxCapacity(mailboxCapacity)}
+                    >
+                      {mailboxCapacityPending && <LoaderCircle size={14} />}{" "}
+                      {mailboxCapacityPending ? "Saving…" : "Save capacity"}
                     </button>
                   </div>
                 </section>
@@ -15571,10 +18007,22 @@ function EndpointSettingsPane({
         ) : (
           endpoints.map((endpoint) => {
             const selectedForDelete = selectedEndpointIds.has(endpoint.id);
+            const windowWarning = endpointContextWindowWarning(endpoint, endpointCatalogModel(endpoint, catalog));
             const endpointDetails = (
               <>
                 <span>
-                  <strong>{endpoint.name}</strong>
+                  <strong>
+                    {endpoint.name}
+                    <EndpointChainRateFlag endpoint={endpoint} />
+                    {windowWarning && (
+                      <span
+                        className="endpoint-window-badge"
+                        title={t("endpoints.contextWindowOverLimit", { known: windowWarning.known.toLocaleString() })}
+                      >
+                        <TriangleAlert size={11} strokeWidth={2.2} aria-hidden="true" />
+                      </span>
+                    )}
+                  </strong>
                 </span>
                 <small>
                   {endpoint.model} · {apiProtocolShort(endpoint.api_protocol)}
@@ -15702,12 +18150,7 @@ function CompletionCard({
       cancelled ? "Cancelled" : "Completed",
       formatDuration(completion.elapsed_ms),
     ],
-    ["LLM", stats.llm_calls],
-    ["Input", formatOptionalTokens(stats.prompt_tokens)],
-    ["Output", formatOptionalTokens(stats.completion_tokens)],
-    ["KVC read", formatOptionalTokens(stats.cached_tokens)],
     ["KVC created", formatOptionalTokens(stats.cache_created_tokens)],
-    ["Tools", stats.tool_calls],
     ["Repair", stats.repair_calls],
     ["Memory", formatMemoryOps(stats.mem_reads, stats.mem_writes)],
     ["Compress", formatOptionalTokens(stats.shrunk_tokens)],
@@ -15719,6 +18162,38 @@ function CompletionCard({
   ) as Array<[string, string | number | undefined]>;
   return (
     <div className="completion-card" aria-label="Turn completion statistics">
+      {!!stats.llm_calls && (
+        <span className="completion-icon-fact" title={t("completion.llmCallsTitle")}>
+          <Sparkles size={12} strokeWidth={1.8} aria-hidden="true" />
+          {stats.llm_calls}
+        </span>
+      )}
+      {!!stats.prompt_tokens && (
+        <span className="completion-icon-fact" title={t("completion.inputTokensTitle")}>
+          <ArrowBigUp size={12} strokeWidth={1.8} aria-hidden="true" />
+          {formatOptionalTokens(stats.prompt_tokens)}
+          {!!stats.cached_tokens && (
+            <span className="completion-fact-detail">
+              {" "}(cache {formatTokens(stats.cached_tokens)}
+              {!!stats.prompt_tokens &&
+                `, ${Math.min(100, (stats.cached_tokens * 100) / stats.prompt_tokens).toFixed(1)}%`}
+              )
+            </span>
+          )}
+        </span>
+      )}
+      {!!stats.completion_tokens && (
+        <span className="completion-icon-fact" title={t("completion.outputTokensTitle")}>
+          <ArrowBigDown size={12} strokeWidth={1.8} aria-hidden="true" />
+          {formatOutputWithThink(stats.completion_tokens, stats.reasoning_tokens)}
+        </span>
+      )}
+      {!!stats.tool_calls && (
+        <span className="completion-icon-fact" title={t("completion.toolCallsTitle")}>
+          <Wrench size={12} strokeWidth={1.8} aria-hidden="true" />
+          {stats.tool_calls}
+        </span>
+      )}
       {facts.map(([label, value]) => (
         <span
           key={label}
@@ -15776,18 +18251,6 @@ function completionFactTitle(
     return completion.elapsed_ms === undefined
       ? undefined
       : `${completion.elapsed_ms} ms`;
-  if (label === "Input")
-    return stats.prompt_tokens === undefined
-      ? undefined
-      : `${stats.prompt_tokens} input tokens`;
-  if (label === "Output")
-    return stats.completion_tokens === undefined
-      ? undefined
-      : `${stats.completion_tokens} output tokens`;
-  if (label === "KVC read")
-    return stats.cached_tokens === undefined
-      ? undefined
-      : `${stats.cached_tokens} cached input tokens`;
   if (label === "KVC created")
     return stats.cache_created_tokens === undefined
       ? undefined
@@ -15857,23 +18320,248 @@ function formatResultBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
+function EndpointChainRateFlag({ endpoint }: { endpoint: ModelEndpoint }) {
+  useT();
+  if (endpoint.probing) {
+    return (
+      <span
+        className="endpoint-chain-probing-flag"
+        title={t("endpoints.probing")}
+      >
+        <LoaderCircle size={12} aria-hidden="true" />
+      </span>
+    );
+  }
+  if (endpoint.rate_limited_since_ms) {
+    return (
+      <span className="endpoint-rate-flag" title={t("endpoints.rateLimited")}>
+        <ClockAlert size={12} aria-hidden="true" />
+      </span>
+    );
+  }
+  return null;
+}
+
+function SortableEndpointChainRow({
+  endpoint,
+  index,
+  current,
+  onRemove,
+  reasoningValue,
+  reasoningOptions,
+  maxInputValue,
+  onReasoningChange,
+  onMaxInputCommit,
+}: {
+  endpoint: ModelEndpoint;
+  index: number;
+  current: boolean;
+  onRemove: (endpointId: string) => void;
+  reasoningValue: string;
+  reasoningOptions: string[];
+  maxInputValue: string;
+  onReasoningChange: (endpointId: string, effort: string) => void;
+  onMaxInputCommit: (endpointId: string, tokens: number | null) => void;
+}) {
+  useT();
+  const sortable = useSortable({ id: endpoint.id });
+  return (
+    <div
+      ref={sortable.setNodeRef}
+      {...sortable.attributes}
+      {...sortable.listeners}
+      role="group"
+      className={`endpoint-chain-row in-chain ${current ? "current" : ""} ${sortable.isDragging ? "dragging" : ""}`}
+      style={{
+        transform: CSS.Transform.toString(sortable.transform),
+        transition: sortable.transition,
+        zIndex: sortable.isDragging ? 5 : undefined,
+      }}
+    >
+      <span className="endpoint-chain-index" aria-hidden="true">
+        {index}
+      </span>
+      <span className="endpoint-chain-grip" aria-hidden="true">
+        <GripVertical size={13} aria-hidden="true" />
+      </span>
+      <span className="endpoint-chain-pick">
+        <strong>
+          <span>{endpoint.name}</span>
+          <EndpointChainRateFlag endpoint={endpoint} />
+        </strong>
+        <small>
+          {endpoint.model} · {apiProtocolShort(endpoint.api_protocol)}
+        </small>
+        <span className="endpoint-chain-tuning">
+          <select
+            className="endpoint-chain-effort"
+            onPointerDown={(event) => event.stopPropagation()}
+            aria-label={t("endpoints.chainEffortLabel")}
+            title={t("endpoints.chainEffortLabel")}
+            value={
+              reasoningOptions.includes(reasoningValue)
+                ? reasoningValue
+                : (reasoningOptions[0] ?? "")
+            }
+            onChange={(event) =>
+              onReasoningChange(endpoint.id, event.target.value)
+            }
+          >
+            {reasoningOptions.map((option) => (
+              <option key={option} value={option}>
+                {option}
+                {option === endpoint.reasoning_effort
+                  ? t("endpoints.defaultSuffix")
+                  : ""}
+              </option>
+            ))}
+          </select>
+          <input
+            type="number"
+            className="endpoint-chain-maxinput"
+            onPointerDown={(event) => event.stopPropagation()}
+            aria-label={t("endpoints.chainMaxInputLabel")}
+            title={t("endpoints.chainMaxInputLabel")}
+            min={1}
+            step={1}
+            defaultValue={maxInputValue}
+            key={`${endpoint.id}:${maxInputValue}`}
+            onBlur={(event) => {
+              const raw = event.target.value.trim();
+              if (raw === "") {
+                onMaxInputCommit(endpoint.id, null);
+                return;
+              }
+              const parsed = Number(raw);
+              if (Number.isInteger(parsed) && parsed >= 1) {
+                onMaxInputCommit(endpoint.id, parsed);
+              } else {
+                event.target.value = maxInputValue;
+              }
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") event.currentTarget.blur();
+            }}
+          />
+        </span>
+      </span>
+      <button
+        type="button"
+        className="endpoint-chain-remove"
+        aria-label={t("endpoints.chainRemove")}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={() => onRemove(endpoint.id)}
+      >
+        <X size={12} />
+      </button>
+    </div>
+  );
+}
+
 function ModelEndpointPanel({
   panelRef,
   server,
   session,
   onEdit,
   onApply,
+  onRefreshAvailability,
+  onEndpointReasoning,
+  onEndpointMaxInput,
+  onClose,
 }: {
   panelRef: MutableRefObject<HTMLElement | null>;
   server: Snapshot["server"] | null;
   session: Session | undefined;
   onEdit: () => void;
-  onApply: (endpointId: string) => void;
+  onApply: (endpointIds: string[]) => boolean;
+  onRefreshAvailability: () => void;
+  onEndpointReasoning: (endpointId: string, effort: string) => void;
+  onEndpointMaxInput: (endpointId: string, tokens: number | null) => void;
+  onClose: () => void;
 }) {
+  useT();
   const endpoints = server?.model_endpoints ?? [];
-  const selected = endpoints.find((endpoint) =>
-    endpointMatchesProfile(endpoint, session?.runtime_profile),
+  const boundChain = session?.runtime_profile?.model_endpoint_ids ?? [];
+  const endpointReasoningEfforts =
+    session?.runtime_profile?.endpoint_reasoning_efforts ?? {};
+  const endpointMaxInputTokens =
+    session?.runtime_profile?.endpoint_max_input_tokens ?? {};
+  const [chain, setChain] = useState<string[]>(boundChain);
+  const boundChainKey = boundChain.join(",");
+  useEffect(() => {
+    setChain(boundChainKey ? boundChainKey.split(",") : []);
+  }, [boundChainKey]);
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
   );
+  const currentEndpointId =
+    session?.runtime_profile?.active_model_endpoint_id ??
+    session?.runtime_profile?.model_endpoint_id ??
+    null;
+  const anyProbing = endpoints.some((endpoint) => endpoint.probing);
+  const dirty = chain.join(",") !== boundChainKey;
+  const boundChainRef = useRef(boundChain);
+  boundChainRef.current = boundChain;
+  const revertTimerRef = useRef<number | null>(null);
+  const clearRevertTimer = () => {
+    if (revertTimerRef.current === null) return;
+    window.clearTimeout(revertTimerRef.current);
+    revertTimerRef.current = null;
+  };
+  useEffect(() => clearRevertTimer, []);
+  // A committed chain arrives through the Host projection; clear the pending
+  // marker as soon as it does.
+  useEffect(() => clearRevertTimer, [boundChainKey]);
+  // Selection is commit-on-click: every toggle, reorder, or removal applies
+  // immediately. Keep the local order as a pending draft, revert it when the
+  // command cannot even be delivered, and stop showing it as applied if the
+  // Host never confirms.
+  const applyImmediately = (next: string[]) => {
+    if (!session || next.join(",") === boundChainKey) return;
+    const accepted = onApply(next);
+    if (!accepted) {
+      setChain(boundChain);
+      return;
+    }
+    clearRevertTimer();
+    const expected = next.join(",");
+    revertTimerRef.current = window.setTimeout(() => {
+      revertTimerRef.current = null;
+      setChain((current) =>
+        current.join(",") === expected ? boundChainRef.current : current,
+      );
+    }, 10000);
+  };
+  const toggleChainMember = (endpointId: string) => {
+    if (
+      !chain.includes(endpointId) &&
+      chain.length >= MAX_ENDPOINT_CHAIN_LENGTH
+    ) {
+      return;
+    }
+    const next = toggleEndpointInChain(chain, endpointId);
+    setChain(next);
+    applyImmediately(next);
+  };
+  const handleChainDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const next = moveEndpointInChain(
+      chain,
+      chain.indexOf(String(active.id)),
+      chain.indexOf(String(over.id)),
+    );
+    setChain(next);
+    applyImmediately(next);
+  };
+  const chainEndpoints = chain
+    .map((endpointId) =>
+      endpoints.find((endpoint) => endpoint.id === endpointId),
+    )
+    .filter((endpoint): endpoint is ModelEndpoint => !!endpoint);
   return (
     <section
       id="runtime-panel"
@@ -15888,79 +18576,171 @@ function ModelEndpointPanel({
             {session ? t("sessions.applyForSession", { name: session.display_name }) : t("sessions.applyNeedSession")}
           </strong>
         </div>
-        <button type="button" className="endpoint-menu-edit" onClick={onEdit}>
-          <Pencil size={13} />
-          <span>{t("common.edit")}</span>
-        </button>
+        <div>
+          <button
+            type="button"
+            className={`endpoint-menu-edit endpoint-menu-refresh ${anyProbing ? "probing" : ""}`}
+            disabled={anyProbing}
+            onClick={onRefreshAvailability}
+          >
+            <RefreshCw size={13} />
+            <span>{t("endpoints.refreshAvailability")}</span>
+          </button>
+          <button
+            type="button"
+            className="endpoint-menu-edit endpoint-menu-edit-icon"
+            onClick={onEdit}
+            aria-label={t("endpoints.editEndpoint")}
+            title={t("endpoints.editEndpoint")}
+          >
+            <Settings size={13} />
+          </button>
+          <button
+            type="button"
+            className="endpoint-menu-close"
+            onClick={onClose}
+            aria-label={t("common.close")}
+            title={t("common.close")}
+          >
+            <X size={14} />
+          </button>
+        </div>
       </div>
-      <div className="endpoint-list">
-        {endpoints.length === 0 ? (
-          <div className="endpoint-empty">
-            {t("endpoints.empty")}
-          </div>
-        ) : (
-          endpoints.map((endpoint) => {
-            const active = selected?.id === endpoint.id;
-            return (
-              <div
-                className={`endpoint-row ${active ? "active" : ""}`}
-                key={endpoint.id}
-              >
-                <button
-                  type="button"
-                  className="endpoint-select"
-                  aria-pressed={active}
-                  disabled={!session}
-                  onClick={() => onApply(endpoint.id)}
-                >
-                  <span className="endpoint-copy">
-                    <span className="endpoint-name-line">
-                      <strong>{endpoint.name}</strong>
-                      <span className="endpoint-chip endpoint-chip-protocol">
-                        {apiProtocolShort(endpoint.api_protocol)}
-                      </span>
-                      {endpoint.reasoning_effort && (
-                        <span className="endpoint-chip endpoint-chip-effort">
-                          {endpoint.reasoning_effort}
-                        </span>
-                      )}
-                    </span>
-                    <small className="endpoint-model-summary">
-                      <Sparkles
-                        size={11}
-                        className="session-model-icon"
-                        aria-hidden="true"
-                      />
-                      <span>{endpoint.model}</span>
-                      <span className="endpoint-meta-sep" aria-hidden="true">
-                        ·
-                      </span>
-                      <span>
-                        {formatContextWindowTokens(
-                          endpoint.max_llm_input_tokens,
-                        )}{" "}
-                        / {endpoint.max_llm_output_tokens / 1_000}K
-                      </span>
-                    </small>
-                    <small title={endpoint.base_url}>{endpoint.base_url}</small>
-                  </span>
-                  <span
-                    className={`endpoint-choice-box ${active ? "selected" : ""}`}
-                    aria-hidden="true"
-                  >
-                    {active && <Check size={11} strokeWidth={2.25} />}
-                  </span>
-                </button>
+      <div className={`endpoint-chain-actions ${dirty ? "has-changes" : ""}`} aria-live="polite">
+        <div className="endpoint-chain-action-copy">
+          <strong>
+            {t("endpoints.selectedCount", { count: chain.length })}
+          </strong>
+          {dirty && (
+            <small className="endpoint-chain-pending">
+              {t("endpoints.chainApplying")}
+            </small>
+          )}
+        </div>
+      </div>
+      <div className="endpoint-chain">
+        <div className="endpoint-chain-col available">
+          <span className="endpoint-chain-title">
+            {t("endpoints.chainAvailable")}
+          </span>
+          <div className="endpoint-chain-list" role="list">
+            {endpoints.length === 0 ? (
+              <div className="endpoint-chain-empty">
+                {t("endpoints.empty")}
               </div>
-            );
-          })
-        )}
+            ) : (
+              endpoints.map((endpoint) => {
+                const inChain = chain.includes(endpoint.id);
+                return (
+                  <button
+                    type="button"
+                    key={endpoint.id}
+                    role="listitem"
+                    aria-pressed={inChain}
+                    disabled={!session}
+                    className={`endpoint-chain-row ${inChain ? "in-chain" : ""}`}
+                    onClick={() => toggleChainMember(endpoint.id)}
+                  >
+                    <span
+                      className={`endpoint-chain-checkbox ${inChain ? "selected" : ""}`}
+                      aria-hidden="true"
+                    >
+                      {inChain && <Check size={12} strokeWidth={2.5} />}
+                    </span>
+                    <span className="endpoint-chain-pick">
+                      <strong>
+                        <span>{endpoint.name}</span>
+                        <EndpointChainRateFlag endpoint={endpoint} />
+                      </strong>
+                      <small>
+                        {endpoint.model} ·{" "}
+                        <span
+                          className="endpoint-chain-protocol"
+                          title={t(
+                            endpoint.api_protocol === "openai-responses"
+                              ? "endpoints.protocolResponsesHint"
+                              : "endpoints.protocolChatHint",
+                          )}
+                        >
+                          {endpoint.api_protocol === "openai-responses" ? (
+                            <Bot size={11} aria-hidden="true" />
+                          ) : (
+                            <MessageSquareText size={11} aria-hidden="true" />
+                          )}
+                        </span>
+                        {" · "}
+                        <span
+                          className="endpoint-chain-token-cap"
+                          title={t("endpoints.tokenCapHint", {
+                            input:
+                              formatTokens(endpoint.max_llm_input_tokens) ?? "?",
+                            output:
+                              formatTokens(endpoint.max_llm_output_tokens) ?? "?",
+                          })}
+                        >
+                          {formatTokens(endpoint.max_llm_input_tokens) ?? "?"}/
+                          {formatTokens(endpoint.max_llm_output_tokens) ?? "?"}
+                        </span>
+                      </small>
+                    </span>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+        <div className="endpoint-chain-col selected">
+          <span className="endpoint-chain-title">
+            {t("endpoints.chainSelected")}
+          </span>
+          <span className="endpoint-chain-sub">
+            {t("endpoints.chainSelectedHint")}
+          </span>
+          {chainEndpoints.length === 0 ? (
+            <div className="endpoint-chain-empty">
+              {t("endpoints.chainEmptyHint")}
+            </div>
+          ) : (
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              onDragEnd={handleChainDragEnd}
+            >
+              <SortableContext
+                items={chain}
+                strategy={verticalListSortingStrategy}
+              >
+                <div className="endpoint-chain-list" role="list">
+                  {chainEndpoints.map((endpoint, index) => (
+                    <SortableEndpointChainRow
+                      key={endpoint.id}
+                      endpoint={endpoint}
+                      index={index + 1}
+                      current={endpoint.id === currentEndpointId}
+                      onRemove={toggleChainMember}
+                      reasoningValue={
+                        endpointReasoningEfforts[endpoint.id] ??
+                        endpoint.reasoning_effort ??
+                        ""
+                      }
+                      reasoningOptions={sessionReasoningOptions(
+                        endpoint,
+                        server?.model_catalog ?? [],
+                      )}
+                      maxInputValue={String(
+                        endpointMaxInputTokens[endpoint.id] ??
+                          endpoint.max_llm_input_tokens,
+                      )}
+                      onReasoningChange={onEndpointReasoning}
+                      onMaxInputCommit={onEndpointMaxInput}
+                    />
+                  ))}
+                </div>
+              </SortableContext>
+            </DndContext>
+          )}
+        </div>
       </div>
-      {session?.state === "working" && (
-        <p className="endpoint-note">
-          {t("endpoints.workingNote")}
-        </p>
-      )}
     </section>
   );
 }
@@ -16007,6 +18787,9 @@ function ModelEndpointEditor({
     private_ca_pem: revealedPrivateCaPem,
     reasoning_effort: endpoint?.reasoning_effort ?? null,
   }));
+  const [contextWindowCustomMode, setContextWindowCustomMode] = useState(false);
+  const [contextWindowCustomDraft, setContextWindowCustomDraft] = useState("");
+  const contextWindowCustomInputRef = useRef<HTMLInputElement | null>(null);
   const [headerRows, setHeaderRows] = useState<StructuredRow[]>(() =>
     structuredRows(revealedHeaders ?? endpoint?.http_headers ?? {}),
   );
@@ -16060,7 +18843,10 @@ function ModelEndpointEditor({
   const selectedTemplate = catalog.find((model) => model.id === draft.catalog_id);
   const selectedModel = capabilityModelForDraft(draft, catalog);
   const selectedProtocol = selectedModel?.protocols.find((p) => p.protocol === draft.api_protocol);
-  const selectModel = (id: string) => setDraft(current => applyEndpointTemplate(current, catalog.find(m => m.id === id)));
+  const selectModel = (id: string) => {
+    setContextWindowCustomMode(false);
+    setDraft(current => applyEndpointTemplate(current, catalog.find(m => m.id === id)));
+  };
   const edit = (patch: Partial<ModelEndpointDraft>) => setDraft(current => editEndpoint(current, patch));
   const editRequirements = (patch: Parameters<typeof editEndpointRequirements>[1]) => setDraft(current => editEndpointRequirements(current, patch));
   const allowed = draft.requirements?.allowed_reasoning;
@@ -16089,12 +18875,40 @@ function ModelEndpointEditor({
     }
     return updated;
   });
-  const providerLabels: Record<string, string> = { openai: "OpenAI", zhipu: t("endpoints.zhipu") };
+  const providerLabels: Record<string, string> = { openai: "OpenAI", zhipu: t("endpoints.zhipu"), kimi: t("endpoints.kimi"), kimi_code: t("endpoints.kimiCode") };
   const capabilityIssue = endpointCapabilityIssue(draft, selectedModel, providers);
   const templateBudget = templateBudgetSuggestion(selectedModel);
-  const inputBudgetInvalid = !!selectedModel && (capabilityIssue?.code === "input_budget" || capabilityIssue?.code === "context_budget");
-  const outputBudgetInvalid = !!selectedModel && (capabilityIssue?.code === "output_budget" || capabilityIssue?.code === "context_budget");
+  const inputBudgetInvalid = !!selectedModel && (capabilityIssue?.code === "input_budget");
+  const outputBudgetInvalid = !!selectedModel && (capabilityIssue?.code === "output_budget");
   const catalogInvalid = capabilityIssue !== null;
+  const contextWindowTotal = draft.max_llm_input_tokens + draft.max_llm_output_tokens;
+  const contextWindowWarning = endpointContextWindowWarning(draft, selectedModel);
+  const contextWindowMode = contextWindowSelectionMode(
+    contextWindowTotal,
+    selectedModel?.context_window,
+    contextWindowCustomMode,
+  );
+  useEffect(() => {
+    if (contextWindowMode !== "custom") return;
+    // Seed the editable draft when the mode is entered or the underlying
+    // window changes from outside. While the user is typing, the field owns
+    // the raw text so a partial value is not normalized on every keystroke.
+    if (document.activeElement === contextWindowCustomInputRef.current) return;
+    setContextWindowCustomDraft(String(contextWindowTotal));
+  }, [contextWindowMode, contextWindowTotal]);
+  const applyContextWindowTotal = (raw: string) => {
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed < 1) {
+      setContextWindowCustomDraft(String(contextWindowTotal));
+      return;
+    }
+    const tokens = Math.floor(parsed);
+    const output = Math.max(0, Math.floor(draft.max_llm_output_tokens));
+    setDraft((current) => applyContextWindowChoice(current, tokens));
+    // The helper clamps input to at least one token, so the effective total
+    // can be larger than a typed value smaller than the output budget.
+    setContextWindowCustomDraft(String(Math.max(tokens, output + 1)));
+  };
   const dailyReasoningOptions = allowed != null
     ? displayedAllowed
     : selectedModel?.efforts ?? REASONING_EFFORT_OPTIONS;
@@ -16295,6 +19109,83 @@ function ModelEndpointEditor({
           </select>
         </label>
 
+        <div className="wide endpoint-context-window">
+          <div className="endpoint-context-window-head">
+            <span>{t("endpoints.contextWindow")}</span>
+            {contextWindowWarning && (
+              <span
+                className="endpoint-context-window-warning"
+                tabIndex={0}
+                title={t("endpoints.contextWindowOverLimit", { known: contextWindowWarning.known.toLocaleString() })}
+              >
+                <TriangleAlert size={13} strokeWidth={2} aria-hidden="true" />
+                <small>{t("endpoints.contextWindowOverLimitHint")}</small>
+              </span>
+            )}
+          </div>
+          <div className="endpoint-context-window-control">
+            <select
+              aria-label={t("endpoints.contextWindow")}
+              value={contextWindowMode}
+              onChange={(event) => {
+                const choice = event.target.value;
+                if (choice === "custom") {
+                  setContextWindowCustomMode(true);
+                  return;
+                }
+                setContextWindowCustomMode(false);
+                const tokens = choice === "model" && selectedModel
+                  ? selectedModel.context_window
+                  : Number(choice);
+                if (Number.isFinite(tokens) && tokens >= 1)
+                  setDraft((current) => applyContextWindowChoice(current, tokens));
+              }}
+            >
+              {selectedModel && (
+                <option value="model">
+                  {t("endpoints.contextWindowModel", { value: formatContextWindowTokens(selectedModel.context_window) })}
+                </option>
+              )}
+              {MODEL_CONTEXT_WINDOW_OPTIONS.map((option) => (
+                <option key={option} value={String(option)}>{formatContextWindowTokens(option)}</option>
+              ))}
+              <option value="custom">{t("endpoints.contextWindowCustom")}</option>
+            </select>
+            {contextWindowMode === "custom" && (
+              <input
+                ref={contextWindowCustomInputRef}
+                className="endpoint-token-budget"
+                type="number"
+                inputMode="numeric"
+                min={1}
+                step={1}
+                value={contextWindowCustomDraft}
+                onChange={(event) =>
+                  setContextWindowCustomDraft(
+                    event.target.value.replace(/[^\d]/g, ""),
+                  )
+                }
+                onBlur={() => applyContextWindowTotal(contextWindowCustomDraft)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    applyContextWindowTotal(contextWindowCustomDraft);
+                  }
+                  if (event.key === "ArrowUp" || event.key === "ArrowDown")
+                    event.preventDefault();
+                }}
+              />
+            )}
+            <small className="endpoint-context-window-sum">
+              {t("endpoints.contextWindowSum", {
+                input: draft.max_llm_input_tokens.toLocaleString(),
+                output: draft.max_llm_output_tokens.toLocaleString(),
+              })}
+            </small>
+          </div>
+          <small>{t("endpoints.contextWindowHint")}</small>
+        </div>
+
         <label>
           {t("endpoints.inputBudget")}
           <input className="endpoint-token-budget" type="number" inputMode="numeric" onKeyDown={(event) => { if (event.key === "ArrowUp" || event.key === "ArrowDown") event.preventDefault(); }} min={selectedModel?.min_input ?? 3000} max={selectedModel ? Math.min(selectedModel.max_input, selectedModel.context_window - draft.max_llm_output_tokens) : MAX_LLM_INPUT_TOKENS_CEILING} step={1}
@@ -16357,16 +19248,21 @@ function ModelEndpointEditor({
             <label className="endpoint-reasoning-daily">
               <span>{t("endpoints.dailyReasoningLevel")}</span>
               <select
-                value={draft.reasoning_effort ?? ""}
+                value={draft.reasoning_effort ?? selectedModel?.default_effort ?? dailyReasoningOptions[0] ?? ""}
                 disabled={
                   (draft.api_protocol !== "openai-compatible" &&
                   draft.api_protocol !== "openai-responses")
                 }
                 onChange={(event) =>
-                  edit({ reasoning_effort: event.target.value || null })
+                  edit({
+                    reasoning_effort:
+                      selectedModel != null &&
+                      event.target.value === selectedModel.default_effort
+                        ? null
+                        : event.target.value || null,
+                  })
                 }
               >
-                {<option value="">{t("endpoints.reasoningEffortDefault")}</option>}
                 {dailyReasoningOptions.map((effort) => (
                   <option key={effort} value={effort}>{effort}{selectedModel?.default_effort === effort && !selectedProtocol?.fixed_effort ? t("endpoints.defaultSuffix") : ""}</option>
                 ))}
@@ -17898,8 +20794,175 @@ function InlineDecision({
   );
 }
 
+/* Instant global tooltip for every native `title` attribute in the app.
+   Browsers delay native title bubbles by roughly one second, which hides the
+   hints from users; GlobalTitleTip captures hover/focus on any element that
+   carries a `title`, temporarily removes the attribute so the native bubble
+   can never appear, and renders the same text immediately through a portal.
+   The attribute is restored whenever the tip hides. */
+const GLOBAL_TITLE_TIP_MARGIN = 8;
+const GLOBAL_TITLE_TIP_GAP = 8;
+
+function GlobalTitleTip() {
+  const [tip, setTip] = useState<{ text: string; rect: DOMRect } | null>(null);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const activeRef = useRef<{ el: Element; title: string } | null>(null);
+  const tipRef = useRef<HTMLDivElement | null>(null);
+
+  const deactivate = useCallback(() => {
+    const active = activeRef.current;
+    if (!active) return;
+    activeRef.current = null;
+    setTip(null);
+    setPos(null);
+    if (active.el.isConnected) active.el.setAttribute("title", active.title);
+  }, []);
+
+  const activate = useCallback((el: Element) => {
+    const active = activeRef.current;
+    if (active?.el === el) return;
+    if (active?.el.isConnected) active.el.setAttribute("title", active.title);
+    const title = el.getAttribute("title") ?? "";
+    if (!title.trim()) {
+      activeRef.current = null;
+      setTip(null);
+      setPos(null);
+      return;
+    }
+    el.removeAttribute("title");
+    activeRef.current = { el, title };
+    setTip({ text: title, rect: el.getBoundingClientRect() });
+  }, []);
+
+  useEffect(() => {
+    const titleHolder = (node: EventTarget | null): Element | null =>
+      node instanceof Element ? node.closest("[title]") : null;
+
+    const onPointerOver = (event: PointerEvent) => {
+      const active = activeRef.current;
+      if (
+        active &&
+        event.target instanceof Node &&
+        (event.target === active.el || active.el.contains(event.target))
+      ) {
+        // Still inside the active element: keep the current tip.
+        return;
+      }
+      const el = titleHolder(event.target);
+      if (el) activate(el);
+    };
+    const onPointerOut = (event: PointerEvent) => {
+      const active = activeRef.current;
+      if (!active) return;
+      const left = event.target;
+      if (left !== active.el && !(left instanceof Node && active.el.contains(left))) return;
+      const next = event.relatedTarget;
+      if (next instanceof Node && active.el.contains(next)) return;
+      deactivate();
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      const active = activeRef.current;
+      if (!active) return;
+      if (!active.el.isConnected) {
+        deactivate();
+        return;
+      }
+      const r = active.el.getBoundingClientRect();
+      if (
+        event.clientX < r.left - 1 ||
+        event.clientX > r.right + 1 ||
+        event.clientY < r.top - 1 ||
+        event.clientY > r.bottom + 1
+      ) {
+        deactivate();
+        return;
+      }
+      // React re-renders may rewrite `title` while hovering; keep it removed
+      // so the delayed native bubble can never fight the instant one.
+      if (active.el.hasAttribute("title")) active.el.removeAttribute("title");
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      const el = titleHolder(event.target);
+      if (el) activate(el);
+    };
+    const onFocusOut = (event: FocusEvent) => {
+      const active = activeRef.current;
+      if (!active) return;
+      if (
+        event.target !== active.el &&
+        !(event.target instanceof Node && active.el.contains(event.target))
+      ) {
+        return;
+      }
+      if (event.relatedTarget instanceof Node && active.el.contains(event.relatedTarget)) return;
+      deactivate();
+    };
+    const hideForViewportChange = () => {
+      if (activeRef.current) deactivate();
+    };
+
+    document.addEventListener("pointerover", onPointerOver, true);
+    document.addEventListener("pointerout", onPointerOut, true);
+    document.addEventListener("pointermove", onPointerMove, true);
+    document.addEventListener("focusin", onFocusIn, true);
+    document.addEventListener("focusout", onFocusOut, true);
+    document.addEventListener("scroll", hideForViewportChange, true);
+    window.addEventListener("resize", hideForViewportChange);
+    window.addEventListener("blur", hideForViewportChange);
+    return () => {
+      deactivate();
+      document.removeEventListener("pointerover", onPointerOver, true);
+      document.removeEventListener("pointerout", onPointerOut, true);
+      document.removeEventListener("pointermove", onPointerMove, true);
+      document.removeEventListener("focusin", onFocusIn, true);
+      document.removeEventListener("focusout", onFocusOut, true);
+      document.removeEventListener("scroll", hideForViewportChange, true);
+      window.removeEventListener("resize", hideForViewportChange);
+      window.removeEventListener("blur", hideForViewportChange);
+    };
+  }, [activate, deactivate]);
+
+  useLayoutEffect(() => {
+    if (!tip) return;
+    const node = tipRef.current;
+    if (!node) return;
+    const m = GLOBAL_TITLE_TIP_MARGIN;
+    const gap = GLOBAL_TITLE_TIP_GAP;
+    const tw = node.offsetWidth;
+    const th = node.offsetHeight;
+    let left = tip.rect.left + tip.rect.width / 2 - tw / 2;
+    left = Math.min(Math.max(left, m), Math.max(m, window.innerWidth - m - tw));
+    let top = tip.rect.top - gap - th;
+    if (top < m) top = tip.rect.bottom + gap;
+    if (top + th > window.innerHeight - m) top = Math.max(m, window.innerHeight - m - th);
+    setPos({ left, top });
+  }, [tip]);
+
+  if (!tip) return null;
+  return createPortal(
+    <div
+      ref={tipRef}
+      className="global-title-tip"
+      role="tooltip"
+      style={
+        pos
+          ? { left: pos.left, top: pos.top, visibility: "visible" }
+          : { left: -10000, top: -10000, visibility: "hidden" }
+      }
+    >
+      {tip.text}
+    </div>,
+    document.body,
+  );
+}
+
 export default function Root() {
-  return <TimemApp />;
+  return (
+    <>
+      <GlobalTitleTip />
+      <TimemApp />
+    </>
+  );
 }
 
 import { createRoot } from "react-dom/client";

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { Activity } from "../src/protocol";
 import {
   coalesceFreeTalkItems,
+  dedupeFreeTalkItems,
   streamToolHandoffIds,
   computeStreamRetention,
   isRunningToolActivity,
@@ -210,6 +211,20 @@ describe("stream retention split", () => {
   const tool = (id: string, tool_status: string): Activity => ({
     ...activity(id, tool_status),
     id,
+  });
+
+  it("drops a repeated free-talk snapshot across a tool boundary", () => {
+    const items = [
+      { activity: thought("t1") },
+      { activity: tool("a1", "completed") },
+      { activity: { ...thought("t1-copy"), detail: "t1" } },
+      { activity: thought("t2") },
+    ];
+    expect(dedupeFreeTalkItems(items).map((item) => item.activity?.id)).toEqual([
+      "t1",
+      "a1",
+      "t2",
+    ]);
   });
 
   it("retains all thought rounds and tools in their original order", () => {

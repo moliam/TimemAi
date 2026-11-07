@@ -3,6 +3,89 @@ use serde_json::Value;
 
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
 const MAX_SSE_EVENT_BYTES: usize = 4 * 1024 * 1024;
+/// Latest-reasoning window carried by preview frames. The full chain stays
+/// transient; only this bounded tail crosses the UI boundary, so preview
+/// payloads and DOM work stay flat while thinking grows.
+const MAX_THINKING_TAIL_CHARS: usize = 4096;
+
+/// Provider-neutral reasoning delta extraction. Unknown/custom event shapes
+/// intentionally return `None` so telemetry can degrade without affecting the
+/// accepted model response.
+pub fn reasoning_delta(event: &Value) -> Option<&str> {
+    event
+        .pointer("/choices/0/delta/reasoning_content")
+        .or_else(|| event.pointer("/choices/0/delta/reasoning"))
+        .or_else(|| event.pointer("/choices/0/delta/thinking"))
+        .or_else(|| {
+            matches!(
+                event.get("type").and_then(Value::as_str),
+                Some(
+                    "response.reasoning_summary_text.delta"
+                        | "response.reasoning_text.delta"
+                        | "response.reasoning.delta"
+                )
+            )
+            .then(|| event.get("delta"))
+            .flatten()
+        })
+        .or_else(|| {
+            (event.get("type").and_then(Value::as_str) == Some("content_block_delta"))
+                .then(|| {
+                    event
+                        .pointer("/delta/thinking")
+                        .or_else(|| event.pointer("/delta/reasoning"))
+                        .or_else(|| {
+                            matches!(
+                                event.pointer("/delta/type").and_then(Value::as_str),
+                                Some("thinking_delta" | "reasoning_delta")
+                            )
+                            .then(|| event.pointer("/delta/text"))
+                            .flatten()
+                        })
+                })
+                .flatten()
+        })
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+}
+
+pub fn reasoning_token_count(event: &Value) -> Option<u64> {
+    [
+        "/usage/completion_tokens_details/reasoning_tokens",
+        "/usage/output_tokens_details/reasoning_tokens",
+        "/usage/reasoning_tokens",
+        "/response/usage/output_tokens_details/reasoning_tokens",
+        "/response/usage/reasoning_tokens",
+        "/message/usage/reasoning_tokens",
+        "/usage/thinking_tokens",
+    ]
+    .into_iter()
+    .find_map(|path| event.pointer(path).and_then(Value::as_u64))
+}
+
+pub fn public_text_delta(event: &Value) -> Option<&str> {
+    event
+        .pointer("/choices/0/delta/content")
+        .or_else(|| {
+            (event.get("type").and_then(Value::as_str) == Some("response.output_text.delta"))
+                .then(|| event.get("delta"))
+                .flatten()
+        })
+        .or_else(|| {
+            (event.get("type").and_then(Value::as_str) == Some("content_block_delta"))
+                .then(|| {
+                    matches!(
+                        event.pointer("/delta/type").and_then(Value::as_str),
+                        Some("text_delta")
+                    )
+                    .then(|| event.pointer("/delta/text"))
+                    .flatten()
+                })
+                .flatten()
+        })
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty())
+}
 
 /// Decodes public choice-zero content, never reasoning or tool arguments.
 #[derive(Default)]
@@ -776,18 +859,126 @@ impl SummaryArgumentParser {
 pub struct TurnResponsePreview {
     response: ResponsePreviewState,
     attempt: u64,
+    round: u32,
     revision: u64,
     failed: bool,
     interruption: Option<String>,
     awaiting_first_text: bool,
     finish_candidate: bool,
+    request_started_at: Option<std::time::Instant>,
+    first_output_at: Option<std::time::Duration>,
+    thinking_started_at: Option<std::time::Instant>,
+    thinking_words: u64,
+    thinking_tail: String,
+    thinking_tail_chars: usize,
+    thinking_truncated: bool,
+    reasoning_in_word: bool,
+    reasoning_tokens: Option<u64>,
+    stream_phase: Option<&'static str>,
 }
 impl TurnResponsePreview {
-    pub fn begin(&mut self) {
+    pub fn begin(&mut self, round: u32) {
         self.attempt = self.response.begin();
+        self.round = round;
         self.awaiting_first_text = true;
         self.failed = false;
         self.finish_candidate = false;
+        self.request_started_at = Some(std::time::Instant::now());
+        self.first_output_at = None;
+        self.thinking_started_at = None;
+        self.thinking_words = 0;
+        self.thinking_tail.clear();
+        self.thinking_tail_chars = 0;
+        self.thinking_truncated = false;
+        self.reasoning_in_word = false;
+        self.reasoning_tokens = None;
+        self.stream_phase = None;
+    }
+    pub fn observe_stream_event(&mut self, event: &Value) -> bool {
+        let now = std::time::Instant::now();
+        let mut changed = false;
+        if let Some(tokens) = reasoning_token_count(event) {
+            if self.reasoning_tokens != Some(tokens) {
+                self.reasoning_tokens = Some(tokens);
+                changed = true;
+            }
+        }
+        if let Some(text) = reasoning_delta(event) {
+            if self.first_output_at.is_none() {
+                self.first_output_at = self.request_started_at.map(|started| started.elapsed());
+            }
+            if self.thinking_started_at.is_none() {
+                self.thinking_started_at = Some(now);
+                changed = true;
+            }
+            if self.stream_phase != Some("thinking") {
+                self.stream_phase = Some("thinking");
+                changed = true;
+            }
+            for ch in text.chars() {
+                let cjk = matches!(ch as u32,
+                    0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF |
+                    0x3040..=0x30FF | 0xAC00..=0xD7AF);
+                if cjk {
+                    self.reasoning_in_word = false;
+                    self.thinking_words = self.thinking_words.saturating_add(1);
+                    changed = true;
+                } else if ch.is_alphanumeric() || ch == '_' {
+                    if !self.reasoning_in_word {
+                        self.reasoning_in_word = true;
+                        self.thinking_words = self.thinking_words.saturating_add(1);
+                        changed = true;
+                    }
+                } else {
+                    self.reasoning_in_word = false;
+                }
+            }
+            self.append_thinking_tail(text);
+        }
+        if public_text_delta(event).is_some() {
+            if self.first_output_at.is_none() {
+                self.first_output_at = self.request_started_at.map(|started| started.elapsed());
+            }
+            if self.stream_phase != Some("responding") {
+                self.stream_phase = Some("responding");
+                changed = true;
+            }
+            // The inline thinking window is only live during reasoning. Once
+            // the answer starts, stop carrying its tail on every preview frame.
+            self.clear_inline_thinking();
+        }
+        changed
+    }
+    fn clear_inline_thinking(&mut self) {
+        self.thinking_tail.clear();
+        self.thinking_tail_chars = 0;
+        self.thinking_truncated = false;
+    }
+
+    fn append_thinking_tail(&mut self, text: &str) {
+        self.thinking_tail.push_str(text);
+        self.thinking_tail_chars = self
+            .thinking_tail_chars
+            .saturating_add(text.chars().count());
+        if self.thinking_tail_chars > MAX_THINKING_TAIL_CHARS {
+            let excess = self.thinking_tail_chars - MAX_THINKING_TAIL_CHARS;
+            if let Some((cut, _)) = self.thinking_tail.char_indices().nth(excess) {
+                self.thinking_tail.drain(..cut);
+            }
+            self.thinking_tail_chars = MAX_THINKING_TAIL_CHARS;
+            self.thinking_truncated = true;
+        }
+    }
+
+    pub fn thinking_active(&self) -> bool {
+        self.stream_phase == Some("thinking")
+    }
+
+    pub fn ttft(&self) -> Option<std::time::Duration> {
+        self.first_output_at
+    }
+    pub fn thinking_elapsed(&self) -> Option<std::time::Duration> {
+        self.thinking_started_at.map(|started| started.elapsed())
     }
     pub fn append(&mut self, target: PublicTextTarget, text: &str) -> Result<bool, String> {
         if self.failed {
@@ -803,6 +994,14 @@ impl TurnResponsePreview {
             self.awaiting_first_text = false;
             self.response.replace_prior(self.attempt);
             self.interruption = None;
+        }
+        if !text.is_empty() {
+            self.stream_phase = Some("responding");
+            // `append` is the single public-text entry point, including the
+            // native finish-summary stream which has no public text delta
+            // event. Clear here so a completed reasoning attempt never leaks
+            // its tail into an answer preview.
+            self.clear_inline_thinking();
         }
         let result = self.response.append(self.attempt, text);
         if result.is_err() {
@@ -853,10 +1052,18 @@ impl TurnResponsePreview {
     pub fn interrupt(&mut self, reason: &str) {
         self.failed = true;
         self.interruption = Some(reason.to_string());
+        self.clear_inline_thinking();
+        if self.stream_phase == Some("thinking") {
+            self.stream_phase = None;
+        }
     }
     pub fn retract(&mut self) {
         self.failed = true;
         self.interruption = None;
+        self.clear_inline_thinking();
+        if self.stream_phase == Some("thinking") {
+            self.stream_phase = None;
+        }
         self.response.retract(self.attempt);
     }
     pub fn publish(&mut self, ui: &mut dyn crate::TurnUi, session: &str, turn_id: &str) {
@@ -865,8 +1072,15 @@ impl TurnResponsePreview {
             session,
             crate::host::CoreTopic::new("core.model.preview", serde_json::json!({})),
             crate::host::CoreSessionState::WaitingModel,
-            serde_json::json!({"turn_id": turn_id, "attempt": self.attempt,
-                "revision": self.revision, "interruption": self.interruption, "response": self.response.visible() }),
+            serde_json::json!({"turn_id": turn_id, "attempt": self.attempt, "round": self.round,
+                "revision": self.revision, "interruption": self.interruption, "response": self.response.visible(),
+                "thinking_words": self.thinking_words,
+                "thinking_tail": self.thinking_tail.as_str(),
+                "thinking_truncated": self.thinking_truncated,
+                "thinking_elapsed_ms": self.thinking_elapsed().map(|value| value.as_millis()),
+                "ttft_ms": self.ttft().map(|value| value.as_millis()),
+                "reasoning_tokens": self.reasoning_tokens,
+                "stream_phase": self.stream_phase }),
         )]);
     }
 }

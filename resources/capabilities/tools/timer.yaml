@@ -4,13 +4,20 @@ binding_type: builtin
 binding_name: timer
 summary: Let the runtime schedule timed prompts that arrive as new turns when due, surviving compression and restart.
 description: |
-  Use this tool to create or delete scheduled timers for the current session. Each timer carries a
+  Use this tool to create or delete scheduled timers. Each timer carries a
   prompt; when due, the runtime delivers the prompt as new user-visible input (a new turn when idle,
   or the next interaction batch when a turn is active). Timers survive context compression and
   session restart because the firing authority lives in the runtime host, not the model context.
+  IMPORTANT: For very complex tasks and multi-agent cooperation, a repeated timer whose prompt carries the core direction, key objectives, and genuine user needs plays a critical role, helping keep the business on the right track. It can also continue work in case of a careless task finish because it can actively wake.
 
   ops:
   - new: create a timer. `prompt` is required. `mode` is "once" (default) or "repeat".
+    `queue_timeout` (integer, minutes, default 0) controls delivery timing. 0 never queues:
+    the fired prompt is delivered immediately; an active turn receives it as an immediate
+    supplement and an otherwise idle session starts a new turn directly, even ahead of
+    queued messages. With a positive value, a busy session queues the fired prompt behind
+    pending messages and waits at most that many minutes; on timeout it is delivered
+    directly, out of queue order.
     For "once", exactly one of `after_ms` (relative delay from creation) or `at` (absolute
     ISO-RFC3339 UTC instant) is required. For "repeat", one of `after_ms`/`at` plus `interval_ms`
     is required; the prompt refires every interval_ms. `name` is optional and auto-generated as
@@ -36,7 +43,8 @@ input_schema: |
       "mode": {"type":"string","enum":["once","repeat"],"description":"once fires a single time (default); repeat refires every interval_ms."},
       "after_ms": {"type":"integer","description":"Relative delay from creation in milliseconds for the first fire."},
       "at": {"type":"string","description":"Absolute first-fire instant as ISO-RFC3339 UTC, e.g. 2026-01-01T09:00:00Z."},
-      "interval_ms": {"type":"integer","description":"Refire period in milliseconds. Required for repeat; invalid for once."}
+      "interval_ms": {"type":"integer","description":"Refire period in milliseconds. Required for repeat; invalid for once."},
+      "queue_timeout": {"type":"integer","description":"Optional, minutes, default 0. 0 never queues: the fired prompt is delivered immediately (an active turn receives it as an immediate supplement, an idle session starts a new turn directly). With a positive value a busy session queues the fired prompt and waits at most this many minutes; on timeout it is delivered directly."}
     },
     "required": ["op"]
   }

@@ -2,9 +2,34 @@
 import { spawn } from "node:child_process";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
 const URL = process.env.TIMEM_CATALOG_TEST_URL;
 if (!URL) throw new Error("TIMEM_CATALOG_TEST_URL must identify an isolated test host");
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const waitForExit = (child, timeout) => new Promise((resolve) => {
+  if (!child || child.exitCode !== null || child.signalCode !== null) {
+    resolve(true);
+    return;
+  }
+  const onExit = () => {
+    clearTimeout(timer);
+    resolve(true);
+  };
+  const timer = setTimeout(() => {
+    child.off("exit", onExit);
+    resolve(false);
+  }, timeout);
+  child.once("exit", onExit);
+});
+const terminateChrome = async (child) => {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const gracefulExit = waitForExit(child, 3000);
+  child.kill("SIGTERM");
+  if (await gracefulExit) return;
+  const forcedExit = waitForExit(child, 3000);
+  child.kill("SIGKILL");
+  if (!await forcedExit) throw new Error("chrome did not exit after SIGKILL");
+};
 const fixtureRoot = await mkdtemp(tmpdir() + "/timem-catalog-e2e-");
 const runId = Date.now().toString(36);
 const assert = (c, m) => { if (!c) throw new Error(m); };
@@ -21,7 +46,18 @@ const chromeProfile = await mkdtemp(tmpdir() + "/timem-e2e-chrome-");
 let chrome;
 let ws;
 try {
-chrome = spawn("/usr/bin/google-chrome", [
+const chromeCandidates = [
+  process.env.CHROME_BIN,
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "/usr/bin/google-chrome",
+  "/usr/bin/google-chrome-stable",
+  "/usr/bin/chromium",
+].filter(Boolean);
+const chromePath = chromeCandidates.find((candidate) => existsSync(candidate));
+if (!chromePath) {
+  throw new Error(`Chrome/Chromium not found; checked: ${chromeCandidates.join(", ")}`);
+}
+chrome = spawn(chromePath, [
   "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
   "--remote-debugging-port=0", "--user-data-dir=" + chromeProfile,
   URL,
@@ -42,38 +78,64 @@ await new Promise((resolve, reject) => {
 });
 
 ws = new WebSocket(devtoolsUrl);
-await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
+await new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error("chrome devtools websocket open timeout")), 10000);
+  ws.onopen = () => { clearTimeout(timer); resolve(); };
+  ws.onerror = (error) => { clearTimeout(timer); reject(error); };
+});
 let msgId = 0;
 const pending = new Map();
 ws.onmessage = (event) => {
   const msg = JSON.parse(event.data);
-  if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id); }
+  if (!msg.id) return;
+  const settle = pending.get(msg.id);
+  if (!settle) return;
+  pending.delete(msg.id);
+  settle(msg);
 };
-const send = (method, params = {}) => new Promise((resolve, reject) => {
+const cdpRequest = (method, params = {}, sessionId, unwrapResult = false) => new Promise((resolve, reject) => {
   const id = ++msgId;
-  pending.set(id, resolve);
-  ws.send(JSON.stringify({ id, method, params }));
-  setTimeout(() => reject(new Error("cdp timeout: " + method)), 15000);
+  const timer = setTimeout(() => {
+    if (!pending.delete(id)) return;
+    reject(new Error("cdp timeout: " + method));
+  }, 15000);
+  pending.set(id, (msg) => {
+    clearTimeout(timer);
+    if (msg.error) {
+      reject(new Error(method + ": " + JSON.stringify(msg.error)));
+      return;
+    }
+    resolve(unwrapResult ? msg.result : msg);
+  });
+  try {
+    ws.send(JSON.stringify(sessionId === undefined
+      ? { id, method, params }
+      : { id, method, params, sessionId }));
+  } catch (error) {
+    clearTimeout(timer);
+    pending.delete(id);
+    reject(error);
+  }
 });
-const raw = (method, params = {}) => new Promise((resolve, reject) => {
-  const id = ++msgId; pending.set(id, resolve);
-  ws.send(JSON.stringify({ id, method, params }));
-  setTimeout(() => reject(new Error("cdp timeout: " + method)), 15000);
-});
+const raw = (method, params = {}) => cdpRequest(method, params);
 const targets = (await raw("Target.getTargets")).result.targetInfos;
-const page = targets.find((t) => t.type === "page");
+const page = targets.find((target) => target.type === "page" && target.url === URL)
+  ?? targets.find((target) => target.type === "page");
+assert(page, "chrome page target not found");
 const sessionId = (await raw("Target.attachToTarget", { targetId: page.targetId, flatten: true })).result.sessionId;
-const call = (method, params = {}) => new Promise((resolve, reject) => {
-  const id = ++msgId;
-  pending.set(id, (msg) => msg.error ? reject(new Error(method + ": " + JSON.stringify(msg.error))) : resolve(msg.result));
-  ws.send(JSON.stringify({ id, method, params, sessionId }));
-});
+const call = (method, params = {}) => cdpRequest(method, params, sessionId, true);
 
 const evaluate = async (expression) => {
   const r = await call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
   if (r.exceptionDetails) throw new Error("eval failed: " + JSON.stringify(r.exceptionDetails));
   return r.result.value;
 };
+await call("Page.enable");
+await call("Runtime.enable");
+await waitFor(
+  () => evaluate(`location.href === ${JSON.stringify(URL)}`),
+  "isolated catalog test page navigation",
+);
 const hitTest = async (selector, label) => {
   const hit = await evaluate(`(() => {
     const expected = ${selector};
@@ -130,7 +192,7 @@ await evaluate(`document.querySelector('.endpoint-settings-toolbar button.primar
 await waitFor(() => evaluate("!!document.querySelector('.endpoint-catalog-picker select')"), "catalog editor");
 const choose = async (id) => {await evaluate(`(() => {const e=document.querySelector('.endpoint-catalog-picker select');e.value=${JSON.stringify(id)};e.dispatchEvent(new Event('change',{bubbles:true}));})()`);await sleep(150);};
 await choose('openai/gpt-6-astra');
-assert(await evaluate(`(() => {const options=[...document.querySelector('.endpoint-catalog-picker select').options];return options.filter(o=>o.value).every(o=>o.textContent.includes(': ')) && options.find(o=>o.value==='openai/gpt-6-astra').textContent==='OpenAI: GPT-6 Astra' && options.find(o=>o.value==='z-glm5.3').textContent==='智谱: z-glm5.3' && options[0].textContent==='无';})()`),'template labels include provider and preserve none');
+assert(await evaluate(`(() => {const options=[...document.querySelector('.endpoint-catalog-picker select').options];return options.filter(o=>o.value).every(o=>o.textContent.includes(': ')) && options.find(o=>o.value==='openai/gpt-6-astra').textContent==='OpenAI: GPT-6 Astra' && options.find(o=>o.value==='z-glm5.3').textContent==='智谱: z-glm5.3' && options.find(o=>o.value==='kimicode_k3.1-pro').textContent==='Kimi Code: k3.1-pro' && options[0].textContent==='无';})()`),'template labels include provider and preserve none');
 
 assert(await evaluate("document.querySelector('.endpoint-catalog-picker select').value === 'openai/gpt-6-astra'"), 'Astra selected');
 console.log(await evaluate("document.querySelector('.endpoint-editor').innerText"));
@@ -182,6 +244,27 @@ const fresh = async () => {
 };
 await fresh();
 const baseUrl = '.endpoint-editor-grid input[placeholder="https://api.example.com/v1"]';
+
+// Regression for the real Kimi Code failure: the catalog option must survive
+// the complete browser -> WebSocket -> Host validation -> persistence path with
+// the same versioned requirements emitted by the editor.
+await choose('kimicode_k3.1-pro');
+assert(await evaluate(`document.querySelector('.endpoint-catalog-picker select').value==='kimicode_k3.1-pro'`),'Kimi Code k3.1-pro listed');
+assert(await evaluate(`document.querySelector(${JSON.stringify(protocol)}).value==='openai-responses'`),'Kimi Code suggests Responses');
+assert(await evaluate(`document.querySelector('input[placeholder="my-model-id"]').value==='k3.1-pro'`),'Kimi Code model id populated');
+await setField('.endpoint-editor-grid input', 'Kimi Code E2E '+runId);
+await setField('.endpoint-api-key input', 'kimi-e2e-placeholder');
+assert(await evaluate(`!document.querySelector('.endpoint-editor button.primary').disabled`),'Kimi Code template is saveable after API key entry');
+await evaluate(`document.querySelector('.endpoint-editor-topbar').scrollIntoView({block:'start'})`);
+const kimiSave = await hitTest("document.querySelector('.endpoint-editor-buttons button.primary')",'Kimi Code save');
+await realMouseClick(kimiSave.x,kimiSave.y);
+await waitFor(()=>evaluate(`!document.querySelector('.endpoint-editor')`),'Kimi Code endpoint saved');
+assert(await evaluate(`document.querySelector('.endpoint-settings-pane').textContent.includes('Kimi Code E2E '+${JSON.stringify(runId)})`),'Kimi Code endpoint appears in authoritative list');
+await evaluate(`([...document.querySelectorAll('.endpoint-settings-edit')].find(b=>b.closest('.endpoint-settings-row')?.textContent.includes('Kimi Code E2E '+${JSON.stringify(runId)}))).click()`);
+await waitFor(()=>evaluate(`!!document.querySelector('.endpoint-catalog-picker')`),'Kimi Code endpoint reopened');
+assert(await evaluate(`document.querySelector('.endpoint-catalog-picker select').value==='kimicode_k3.1-pro' && document.querySelector('input[placeholder="my-model-id"]').value==='k3.1-pro' && document.querySelector(${JSON.stringify(protocol)}).value==='openai-responses'`),'Kimi Code template, model and protocol persisted');
+console.log('PASS Kimi Code k3.1-pro API-key save and reopen through real Host');
+await fresh();
 if (process.env.TIMEM_CATALOG_TEST_PROTOCOL_TEMPLATE) {
   await choose(process.env.TIMEM_CATALOG_TEST_PROTOCOL_TEMPLATE);
   const url = () => evaluate(`document.querySelector(${JSON.stringify(baseUrl)}).value`);
@@ -322,11 +405,12 @@ await choose('openai/gpt-5.5-pro');
 assert(await evaluate(`document.querySelector(${JSON.stringify(protocol)}).value==='openai-responses'`),'Pro suggests Responses');
 await setField(baseUrl, 'https://open.bigmodel.cn/api/coding/paas/v4');
 await choose('z-glm5.3');
-assert(await evaluate(`document.querySelector(${JSON.stringify(baseUrl)}).value === 'https://open.bigmodel.cn/api/paas/v4'`), 'template switch adopts the official address over a legacy custom one');
+assert(await evaluate(`document.querySelector(${JSON.stringify(baseUrl)}).value === 'https://open.bigmodel.cn/api/coding/paas/v4'`), 'template switch preserves the user-owned base URL (applyEndpointTemplate keeps user-tuned inputs)');
 for (const id of ['z-glm5.2', 'z-glm5.3', 'z-glm5.3-flash']) {
   await choose(id);
   assert(await evaluate(`document.querySelector('.endpoint-catalog-picker select').value === ${JSON.stringify(id)}`), id + ' listed');
-  assert(await evaluate(`document.querySelector(${JSON.stringify(effort)}).options.length === 4`), id + ' three effort levels plus default');
+  const effortState = await evaluate(`(() => { const s = document.querySelector(${JSON.stringify(effort)}); return { n: s.options.length, marked: [...s.options].filter((o) => /\(default\)/.test(o.textContent) || o.textContent.includes('（默认）')).map((o) => o.value) }; })()`);
+  assert(effortState.n === 3 && effortState.marked.length === 1, id + ' three effort levels with exactly one official default: ' + JSON.stringify(effortState));
   await evaluate(`document.querySelector('.endpoint-reasoning-config').open = true`);
   assert(await evaluate(`(() => {
     const states = Object.fromEntries([...document.querySelectorAll('.endpoint-reasoning-chip')]
@@ -341,7 +425,7 @@ for (const id of ['z-glm5.2', 'z-glm5.3', 'z-glm5.3-flash']) {
     assert(protocolOptions.length === 2 && protocolOptions.includes('openai-responses'), 'GLM-5.3 offers Chat and Responses');
     await setField(protocol, 'openai-responses');
     await waitFor(() => evaluate(`document.querySelector(${JSON.stringify(baseUrl)}).value === 'https://open.bigmodel.cn/api/v1'`), 'Responses switches to the official api/v1 entry');
-    assert(await evaluate(`document.querySelector(${JSON.stringify(effort)}).options.length === 4`), 'GLM-5.3 keeps three effort levels plus default under Responses');
+    assert(await evaluate(`document.querySelector(${JSON.stringify(effort)}).options.length === 3`), 'GLM-5.3 keeps three effort levels under Responses');
     assert(await evaluate(`document.querySelector(${JSON.stringify(effort)}).value === 'max'`), 'GLM-5.3 daily effort stays max under Responses');
     await setField(protocol, 'openai-compatible');
     await waitFor(() => evaluate(`document.querySelector(${JSON.stringify(baseUrl)}).value === 'https://open.bigmodel.cn/api/paas/v4'`), 'switching back to Chat restores the paas/v4 entry');
@@ -369,7 +453,8 @@ for (const id of ['z-glm5.2', 'z-glm5.3', 'z-glm5.3-flash']) {
   if (id !== 'z-glm5.3') {
     assert(await evaluate(`document.querySelector('.endpoint-api-protocol select').options.length===1`),id+' only offers Chat');
   }
-  assert(await evaluate(`document.querySelector('.endpoint-editor-grid input[value="https://open.bigmodel.cn/api/paas/v4"]') !== null`), id + ' provider default URL');
+  await evaluate(`(() => { const b = document.querySelector('.endpoint-base-reset button'); if (b) b.click(); })()`);
+  await waitFor(() => evaluate(`document.querySelector(${JSON.stringify(baseUrl)}).value === 'https://open.bigmodel.cn/api/paas/v4'`), id + ' provider default URL after restore');
 }
 assert(await evaluate(`!document.querySelector('.endpoint-base-reset')`),'Zhipu default has no restore hint');
 await setField(baseUrl,'https://proxy.example.test/v1');
@@ -395,16 +480,16 @@ await call('Input.dispatchKeyEvent', {type:'keyDown',key:'a',code:'KeyA',modifie
 await call('Input.dispatchKeyEvent', {type:'keyUp',key:'a',code:'KeyA',modifiers:2,windowsVirtualKeyCode:65});
 await call('Input.insertText', {text:'250000'});
 assert(await evaluate(`document.querySelector('.endpoint-token-budget').value === '250000'`), 'budget directly editable');
-await setField('.endpoint-editor input[type="number"]','2999');
+await setField('.endpoint-editor input.endpoint-token-budget:not(.endpoint-context-window *)','0');
 assert(await evaluate(`document.querySelector('.endpoint-editor button.primary').disabled`),'invalid budget blocked');
-await setField('.endpoint-editor input[type="number"]','120000');
+await setField('.endpoint-editor input.endpoint-token-budget:not(.endpoint-context-window *)','120000');
 await setField('.endpoint-editor-grid input', 'Catalog UI '+runId);
 await evaluate(`document.querySelector('.endpoint-editor button.primary').click()`);
 await waitFor(()=>evaluate(`!document.querySelector('.endpoint-editor')`),'saved without key');
 console.log(await evaluate(`document.querySelector('.endpoint-settings-list, .endpoint-settings-pane, .endpoint-settings')?.innerText || document.body.innerText`));
 await evaluate(`([...document.querySelectorAll('.endpoint-settings-edit')].find(b=>b.closest('.endpoint-settings-row')?.textContent.includes('Catalog UI '+${JSON.stringify(runId)})) || [...document.querySelectorAll('.endpoint-settings-edit')].at(-1)).click()`);
 await waitFor(()=>evaluate(`!!document.querySelector('.endpoint-catalog-picker')`),'edit restored');
-assert(await evaluate(`document.querySelector('.endpoint-catalog-picker select').value==='openai/gpt-6-astra' && document.querySelector('.endpoint-editor input[type="number"]').value==='120000'`),'catalog and budget restored');
+assert(await evaluate(`document.querySelector('.endpoint-catalog-picker select').value==='openai/gpt-6-astra' && document.querySelector('.endpoint-editor input.endpoint-token-budget:not(.endpoint-context-window *)').value==='120000'`),'catalog and budget restored');
 await call('Emulation.setDeviceMetricsOverride',{width:390,height:844,deviceScaleFactor:1,mobile:true});
 await sleep(200);
 assert(await evaluate(`document.documentElement.scrollWidth <= 390`),'no narrow viewport page overflow');
@@ -439,12 +524,10 @@ console.log('PASS catalog constraints, save, edit, custom, narrow viewport');
 console.log('PASS three Zhipu templates, direct budget typing, no spinner/arrow stepping');
 } finally {
   ws?.close();
-  if (chrome && chrome.exitCode === null) {
-    const exited = new Promise(resolve => chrome.once('exit',resolve));
-    chrome.kill();
-    await exited;
-  }
-  await rm(fixtureRoot,{recursive:true,force:true});
-  await rm(chromeProfile,{recursive:true,force:true});
+  await terminateChrome(chrome);
+  // Chrome may still be flushing its profile asynchronously after being
+  // killed; never let cleanup errors mask the real assertion failure.
+  await rm(fixtureRoot,{recursive:true,force:true}).catch(() => {});
+  await rm(chromeProfile,{recursive:true,force:true}).catch(() => {});
 }
 process.exit(0);

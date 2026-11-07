@@ -251,6 +251,20 @@ it("uses one typography contract for system-level notices", () => {
   expect(styles).not.toContain('.compact-notice .compact-notice-line');
 });
 
+it("renders a blocked task_finished summary as the same free-talk activity class before Continue memo", () => {
+  const activityView = source.slice(source.indexOf("function ActivityView("), source.indexOf("function ToolGenNotice("));
+  const eventAdapter = source.slice(source.indexOf("function activitiesFromTurnEvent("), source.indexOf("function activityFromTurnEvent("));
+  const lifecycleItems = source.slice(source.indexOf("const lifecycleItems = useMemo("), source.indexOf("const supplementItems = useMemo("));
+  expect(activityView).toContain('activity.kind === "free_talk" ? " free-talk" : ""');
+  expect(eventAdapter).toContain("const activities = activitiesFromTopic(");
+  expect(eventAdapter).toContain("return activities.map((activity, index) => ({");
+  expect(lifecycleItems).toContain("lifecycleEvents.flatMap((event) =>");
+  expect(lifecycleItems).toContain("activitiesFromTurnEvent(");
+  expect(source).not.toContain("finish_summary");
+  expect(source).not.toContain("memo-finish-summary");
+  expect(styles).not.toContain("memo-finish-summary");
+});
+
 it("narrows tool rendering from the right edge while preserving mobile width", () => {
   expect(styles).toContain("width: 90%;\n  max-width: 90%;\n  margin-right: auto;");
   expect(styles).toMatch(/@media \(max-width: 720px\) \{[\s\S]*\.stream-tool-run,[\s\S]*width: 100%; max-width: 100%;/);

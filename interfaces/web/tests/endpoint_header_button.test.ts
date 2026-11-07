@@ -4,31 +4,101 @@ import { zh as zhCatalog } from "../src/i18n/strings.zh";
 import { en as enCatalog } from "../src/i18n/strings.en";
 
 const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
+const insightsSource = readFileSync(
+  new URL("../src/session_insights.tsx", import.meta.url),
+  "utf8",
+);
 const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 
 describe("header endpoint selector", () => {
-  it("renders the endpoint name and folding control inside one button", () => {
-    expect(source).toMatch(
-      /className={`header-model[\s\S]*<span title={headerModelLabel}>{headerModelLabel}<\/span>[\s\S]*<ChevronDown/,
-    );
-    expect(source).toMatch(/headerModelEndpoint[\s\S]*apiProtocolShort\(headerModelEndpoint\.api_protocol\)/);
-    expect(source).toMatch(/headerModelEndpoint\.reasoning_effort &&/);
-    expect(source).toMatch(/className="header-model-meta"/);
-    expect(source).toContain("aria-expanded={showRuntime}");
+  it("keeps the host-confirmed failover endpoint after the turn settles", () => {
+    expect(source).toMatch(/activeSession\?\.runtime_profile\?\.active_model_endpoint_id\s+\?\? activeSession\?\.runtime_profile\?\.model_endpoint_id/);
+    expect(source).not.toMatch(/activeSession\?\.state === "working"\s+\? activeSession\.runtime_profile\?\.active_model_endpoint_id/);
   });
 
-  it("uses Lucide direction icons instead of in/out text in the cache readout", () => {
-    expect(source).toContain('<ArrowBigUp size={12} strokeWidth={1.8} />');
-    expect(source).toContain('<ArrowBigDown size={12} strokeWidth={1.8} />');
-    expect(source).toContain('className="header-cache-token header-cache-input"');
-    expect(source).toContain('className="header-cache-token header-cache-output"');
-    expect(source).not.toContain('`cache: ${cacheHitPercent.toFixed(1)}%, in:');
-    expect(source).toContain('`${cachePercentLabel}, input: ${cacheInputLabel}, output: ${cacheOutputLabel}`');
-    expect(styles).toContain('.header-cache-rate { justify-self: start; display: inline-flex; align-items: center; gap: 5px;');
+  it("replaces the context meter with Session Insights and puts MCP beside Timer", () => {
+    expect(source).not.toContain('className="header-context-meter"');
+    expect(source).toContain("<SessionInsights");
+    expect(source).toContain("session_resource_usage_query");
+    expect(insightsSource).toContain('className={`session-insights-chip${open ? " open" : ""}`}');
+    expect(insightsSource).toContain('className="session-insights-panel"');
+    expect(insightsSource).toContain('className="session-insights-head"');
+    const actions = source.slice(source.indexOf('<div className="header-actions">'), source.indexOf('</header>'));
+    expect(actions.indexOf('ref={mcpButtonRef}')).toBeGreaterThan(0);
+    expect(actions.indexOf('ref={mcpButtonRef}')).toBeLessThan(actions.indexOf('ref={timersButtonRef}'));
+  });
+
+  it("renders model, context donut, and reasoning in one collapsible control", () => {
+    expect(source).toContain(
+      'className={`header-model header-model-control${open ? " selected" : ""}`}',
+    );
+    expect(source).toContain('className="header-model-control-name"');
+    expect(source).toContain("<ContextDonut ratio={ratio} size={15} />");
+    expect(source).toContain('className="header-model-control-reasoning"');
+    expect(source).toContain('className="header-model-popover"');
+    expect(source).toContain('className="header-model-popover-context"');
+    expect(source).toContain('type: "session_reasoning_effort_update"');
+    expect(source).toContain('key: "TIMEM_REASONING_EFFORT"');
+    expect(source).toContain('type: "session_endpoint_max_input_tokens_update"');
+    expect(source).toContain('key: "TIMEM_MAX_LLM_INPUT"');
+    expect(source).toContain('t("modelService.reasoningUnavailable")');
+    expect(source).toContain("aria-expanded={open}");
+    // A compression click must lock both actions immediately, not only after
+    // the Host's requested notice arrives.
+    expect(source).toContain("const compressing = compressPending || compactRequested;");
+    expect(source).toContain("disabled={compressing}");
+    expect(source).toContain("setCompactRequested(true)");
+    expect(source).toContain('aria-busy={compressing}');
+  });
+
+  it("guards context apply against duplicate in-flight submissions", () => {
+    expect(source).toContain("appliedContextValueRef");
+    expect(source).toContain("draftValue !== appliedContextValueRef.current");
+  });
+
+  it("applies socket backpressure before sending commands", () => {
+    expect(source).toContain("MAX_SOCKET_BUFFERED_BYTES");
+    expect(source).toContain("bufferedAmount > MAX_SOCKET_BUFFERED_BYTES");
+  });
+
+  it("reports a failed context clear instead of silently dropping it", () => {
+    expect(source).toContain('"Context clear failed"');
+    expect(source).toContain('const accepted = sendCommand({');
+    expect(source).toContain('type: "session_clear_context"');
+  });
+
+  it("samples resources less often while Session Insights is collapsed", () => {
+    expect(insightsSource).toContain("const RESOURCE_SAMPLE_IDLE_INTERVAL_MS = 10000;");
+    expect(insightsSource).toContain("open || pinned");
+    expect(insightsSource).toContain("RESOURCE_SAMPLE_INTERVAL_MS");
+    expect(insightsSource).toContain("RESOURCE_SAMPLE_IDLE_INTERVAL_MS");
+    expect(insightsSource).toContain('document.visibilityState !== "hidden"');
+  });
+
+  it("shows the current endpoint name in the collapsed control tooltip", () => {
+    expect(source).toContain("const endpointName = endpointLabel.trim();");
+    expect(source).toContain('endpointName !== collapsedName ? endpointName : ""');
+    expect(source).toContain("title={controlTitle}");
+    expect(source).toContain("aria-label={controlTitle}");
+  });
+
+  it("moves the ctx readout into the model control instead of header actions", () => {
+    expect(source).not.toContain("<HeaderContextControl");
+    expect(source).toContain("header-model-popover-context");
+    expect(source).toContain("ContextDonut");
+  });
+
+  it("shows numbers beside every token-flow bar in Session Insights", () => {
+    expect(insightsSource).toContain('className="session-insight-flow-number"');
+    expect(insightsSource).toContain("formatTokensCoarse(value)");
+    expect(insightsSource).toContain("session-insight-flow-bar ${tone}");
+    expect(insightsSource).not.toContain('`cache: ${cacheHitPercent.toFixed(1)}%, in:');
+    expect(source).toContain("Context usage ${ratio}%");
+    expect(styles).not.toContain(".header-cache-rate {");
     expect(styles).toContain('.header-cache-token { display: inline-flex; align-items: center; gap: 1px; }');
   });
 
-  it("uses a deep borderless surface with the same height as the ctx/cache readout", () => {
+  it("uses a compact tinted surface coordinated with the donut and reasoning pill", () => {
     expect(styles).toContain(
       ".header-context-actions { align-self: center; border-left: 1px solid #2a3944; padding-left: 12px; margin-left: 2px; height: 34px; }",
     );
@@ -37,14 +107,13 @@ describe("header endpoint selector", () => {
     );
     expect(styles).toContain(".header-context { min-height: 34px; }");
     expect(styles).toMatch(
-      /\.header-session-cluster \.header-model \{[\s\S]*font-size: 13px;/,
+      /\.header-session-cluster \.header-model \{[\s\S]*height: 30px;[\s\S]*border: 1px solid #2a4742;[\s\S]*border-radius: 7px;[\s\S]*background: linear-gradient\(180deg, #1a312d 0%, #142725 100%\);[\s\S]*color: #d3e4de;[\s\S]*font-size: 11px;/,
     );
     expect(styles).toMatch(
-      /\.header-session-cluster \.header-model \{[\s\S]*height: 34px;[\s\S]*border: 0;[\s\S]*background: #244a40;[\s\S]*color: #fff;[\s\S]*box-shadow: none;/,
+      /:root\[data-theme="light"\] \.header-session-cluster \.header-model \{[\s\S]*border: 1px solid #b9d2c9;[\s\S]*background: linear-gradient\(180deg, #f4fbf8 0%, #e9f5f0 100%\);[\s\S]*color: #295247;/,
     );
-    expect(styles).toMatch(
-      /:root\[data-theme="light"\] \.header-session-cluster \.header-model \{[\s\S]*border: 0;[\s\S]*background: #315f52;[\s\S]*color: #fff;[\s\S]*box-shadow: none;/,
-    );
+    expect(styles).toContain(".header-model-control-chevron { opacity: .6;");
+    expect(styles).toContain(".context-donut-value { stroke: #7cd8c2;");
   });
   it("moves the current session name out of the header and into the collapsed sidebar", () => {
     expect(source).not.toContain(
@@ -65,7 +134,7 @@ describe("header endpoint selector", () => {
     );
     expect(styles).not.toContain("writing-mode: vertical-rl");
     expect(styles).toMatch(
-      /@media \(max-width: 1050px\) \{[\s\S]*\.collapsed-brand,[\s\S]*\.collapsed-session-card,[\s\S]*display: none;/,
+      /@media \(width < 1051px\) \{[\s\S]*\.collapsed-brand,[\s\S]*\.collapsed-session-card,[\s\S]*display: none;/,
     );
   });
 
@@ -247,12 +316,13 @@ it("allows endpoint selection while a request is working and explains the reques
   const panelStart = source.indexOf("function ModelEndpointPanel");
   const panelEnd = source.indexOf("function ModelEndpointEditor", panelStart);
   const panel = source.slice(panelStart, panelEnd);
-  const applyStart = source.indexOf("onApply={(endpointId) => {");
+  const applyStart = source.indexOf("onApply={(endpointIds) => {");
   const applyEnd = source.indexOf("}}", applyStart);
   const apply = source.slice(applyStart, applyEnd);
   expect(panel).toContain("disabled={!session}");
   expect(panel).not.toContain('disabled={!session || session.state === "working"}');
-  expect(apply).toContain("if (!activeSession) return;");
+  expect(apply).toContain("if (!activeSession) return false;");
+  expect(apply).toContain('type: "model_endpoint_chain_apply"');
   expect(apply).not.toContain('activeSession.state === "working"');
   expect(zhCatalog.endpoints.workingNote).toContain("下一次请求生效");
   expect(enCatalog.endpoints.workingNote).toContain("next request");

@@ -13,6 +13,27 @@ use std::time::{Duration, Instant};
 
 const TEST_PORT: u16 = 12345;
 
+fn remote_client() -> ConnectInfo<SocketAddr> {
+    ConnectInfo(SocketAddr::from(([192, 168, 0, 10], 41000)))
+}
+
+fn loopback_client() -> ConnectInfo<SocketAddr> {
+    ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 41000)))
+}
+
+fn loopback_host_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:12345"));
+    headers
+}
+
+fn rebound_host_headers() -> HeaderMap {
+    // DNS rebinding: a public domain resolving to 127.0.0.1 keeps a non-loopback Host.
+    let mut headers = HeaderMap::new();
+    headers.insert(header::HOST, HeaderValue::from_static("evil.example:12345"));
+    headers
+}
+
 fn confirmed_xml_response(body: &str) -> String {
     format!(
         "<ASSISTANT><finish_confirm>{} verified</finish_confirm>{body}</ASSISTANT>",
@@ -791,6 +812,11 @@ fn corrupt_session_index_record_is_backed_up_while_valid_sessions_remain_usable(
     std::fs::create_dir_all(store.sessions_dir()).unwrap();
     let valid = StoredSession {
         model_endpoint_id: None,
+        model_endpoint_ids: Vec::new(),
+        reasoning_effort_override: None,
+        endpoint_reasoning_efforts: BTreeMap::new(),
+        endpoint_max_input_tokens: BTreeMap::new(),
+        telemetry_reset_at_ms: None,
         session_id: "session-valid".to_string(),
         display_name: "Recovered".to_string(),
         created_at_ms: 1,
@@ -1536,6 +1562,7 @@ fn restored_interrupted_session_marks_every_unfinished_turn() {
             events: Vec::new(),
             final_answer: None,
             completion: None,
+            events_slimmed: false,
         },
         WebTurn {
             preview: None,
@@ -1547,6 +1574,7 @@ fn restored_interrupted_session_marks_every_unfinished_turn() {
             events: Vec::new(),
             final_answer: None,
             completion: None,
+            events_slimmed: false,
         },
     ];
 
@@ -1573,6 +1601,7 @@ fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn(
         events: Vec::new(),
         final_answer: None,
         completion: Some(json!({"stop_reason": "model_error"})),
+        events_slimmed: false,
     };
     let unfinished = WebTurn {
         preview: None,
@@ -1584,6 +1613,7 @@ fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn(
         events: Vec::new(),
         final_answer: None,
         completion: None,
+        events_slimmed: false,
     };
     let mut turns = vec![unfinished, terminal];
 
@@ -1602,6 +1632,7 @@ fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn(
         events: Vec::new(),
         final_answer: None,
         completion: None,
+        events_slimmed: false,
     }];
     mark_restored_interrupted_turn(
         &mut ready_turns,
@@ -1676,6 +1707,7 @@ fn interrupted_session_persists_without_an_active_or_pending_turn() {
         events: Vec::new(),
         final_answer: None,
         completion: None,
+        events_slimmed: false,
     });
 
     let stored = stored_session_from_web_session(&state, &session);
@@ -1706,6 +1738,7 @@ fn stale_turn_started_without_command_id_cannot_revive_an_interrupted_session() 
             events: Vec::new(),
             final_answer: None,
             completion: None,
+            events_slimmed: false,
         });
     }
 
@@ -1746,6 +1779,7 @@ fn stale_started_event_is_isolated_to_its_session() {
 
 #[test]
 fn stale_turn_started_cannot_revive_an_interrupted_turn_but_new_pending_turn_can_start() {
+    let _home_sandbox = home_sandbox_guard();
     let state = routing_test_state();
     let session_id = "session_a";
     let worker_id = state.sessions.lock().unwrap()[session_id]
@@ -1775,6 +1809,7 @@ fn stale_turn_started_cannot_revive_an_interrupted_turn_but_new_pending_turn_can
             events: Vec::new(),
             final_answer: None,
             completion: None,
+            events_slimmed: false,
         });
     }
 
@@ -2132,6 +2167,7 @@ async fn upgrade_endpoints_report_idle_status_and_gate_restart_on_pending() {
         State((state.clone(), TEST_PORT)),
         Query(AuthQuery { token: None }),
         headers.clone(),
+        loopback_client(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -2150,6 +2186,7 @@ async fn upgrade_endpoints_report_idle_status_and_gate_restart_on_pending() {
         State((state.clone(), TEST_PORT)),
         Query(AuthQuery { token: None }),
         headers.clone(),
+        loopback_client(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::CONFLICT);
@@ -2166,6 +2203,7 @@ async fn upgrade_endpoints_report_idle_status_and_gate_restart_on_pending() {
         State((state.clone(), TEST_PORT)),
         Query(AuthQuery { token: None }),
         headers,
+        loopback_client(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
@@ -2182,6 +2220,7 @@ async fn public_mode_upgrade_endpoints_require_the_access_token() {
         State((state.clone(), TEST_PORT)),
         Query(AuthQuery { token: None }),
         headers.clone(),
+        remote_client(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -2190,6 +2229,7 @@ async fn public_mode_upgrade_endpoints_require_the_access_token() {
         State((state.clone(), TEST_PORT)),
         Query(AuthQuery { token: None }),
         headers.clone(),
+        remote_client(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -2198,6 +2238,7 @@ async fn public_mode_upgrade_endpoints_require_the_access_token() {
         State((state.clone(), TEST_PORT)),
         Query(AuthQuery { token: None }),
         headers.clone(),
+        remote_client(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -2206,6 +2247,7 @@ async fn public_mode_upgrade_endpoints_require_the_access_token() {
         State((state.clone(), TEST_PORT)),
         Query(AuthQuery { token: None }),
         headers,
+        remote_client(),
     )
     .await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -2693,6 +2735,116 @@ fn launch_parent_monitor_detects_shell_exit_and_ignores_a_live_parent() {
 }
 
 #[test]
+fn public_mode_trusts_loopback_callers_like_local_mode() {
+    let mut state = routing_test_state();
+    state.public_access = true;
+
+    // Remote callers keep the strict token/cookie semantics.
+    assert!(!authorized(
+        &state,
+        &AuthQuery { token: None },
+        &HeaderMap::new()
+    ));
+
+    // Loopback callers are trusted exactly like the default loopback bind.
+    assert!(authorized_token_or_cookie(
+        &state,
+        None,
+        &loopback_host_headers(),
+        SocketAddr::from(([127, 0, 0, 1], 41000))
+    ));
+    // IPv6 loopback is equally local.
+    assert!(authorized_token_or_cookie(
+        &state,
+        None,
+        &loopback_host_headers(),
+        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 41000))
+    ));
+    // The exemption fails closed without an inspectable Host header.
+    assert!(!authorized_token_or_cookie(
+        &state,
+        None,
+        &HeaderMap::new(),
+        SocketAddr::from(([127, 0, 0, 1], 41000))
+    ));
+    // Same-machine non-loopback addresses stay remote for auth purposes.
+    assert!(!authorized_token_or_cookie(
+        &state,
+        None,
+        &HeaderMap::new(),
+        SocketAddr::from(([192, 168, 0, 104], 41000))
+    ));
+    // A stale token left in local browser storage after a runtime restart
+    // must not lock the loopback UI out: loopback trust ignores tokens.
+    assert!(authorized_token_or_cookie(
+        &state,
+        Some("rotated-away-old-token"),
+        &loopback_host_headers(),
+        SocketAddr::from(([127, 0, 0, 1], 41000))
+    ));
+    // Remote callers presenting the same stale token stay rejected.
+    assert!(!authorized_token_or_cookie(
+        &state,
+        Some("rotated-away-old-token"),
+        &HeaderMap::new(),
+        SocketAddr::from(([192, 168, 0, 104], 41000))
+    ));
+}
+
+#[tokio::test]
+async fn public_mode_loopback_requests_skip_the_token_but_keep_origin_guard() {
+    let mut state = routing_test_state();
+    state.public_access = true;
+
+    // Loopback static entry serves without any token, like local mode.
+    let response = static_asset(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery { token: None }),
+        loopback_host_headers(),
+        loopback_client(),
+        Uri::from_static("/"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = health(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery { token: None }),
+        loopback_host_headers(),
+        loopback_client(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // DNS rebinding: a loopback-sourced request whose Host names a public
+    // domain must not ride the tokenless loopback exemption.
+    let response = health(
+        State((state.clone(), TEST_PORT)),
+        Query(AuthQuery { token: None }),
+        rebound_host_headers(),
+        loopback_client(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // The loopback exemption must not bypass the cross-origin guard.
+    let mut cross_origin = HeaderMap::new();
+    cross_origin.insert(header::HOST, HeaderValue::from_static("127.0.0.1:12345"));
+    cross_origin.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("http://evil.example"),
+    );
+    let response = health(
+        State((state, TEST_PORT)),
+        Query(AuthQuery { token: None }),
+        cross_origin,
+        loopback_client(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[test]
 fn public_web_launch_keeps_token_auth_and_reports_bind_mode() {
     let mut state = routing_test_state();
     assert!(!state.public_access);
@@ -2786,6 +2938,7 @@ async fn local_static_web_entry_needs_no_token_and_public_entry_sets_auth_cookie
         State((local_state, TEST_PORT)),
         Query(AuthQuery { token: None }),
         HeaderMap::new(),
+        remote_client(),
         Uri::from_static("/"),
     )
     .await;
@@ -2798,6 +2951,7 @@ async fn local_static_web_entry_needs_no_token_and_public_entry_sets_auth_cookie
         State((state.clone(), TEST_PORT)),
         Query(AuthQuery { token: None }),
         HeaderMap::new(),
+        remote_client(),
         Uri::from_static("/"),
     )
     .await;
@@ -2809,6 +2963,7 @@ async fn local_static_web_entry_needs_no_token_and_public_entry_sets_auth_cookie
             token: Some("test".to_string()),
         }),
         HeaderMap::new(),
+        remote_client(),
         Uri::from_static("/"),
     )
     .await;
@@ -2831,6 +2986,7 @@ async fn local_static_web_entry_needs_no_token_and_public_entry_sets_auth_cookie
         State((state, TEST_PORT)),
         Query(AuthQuery { token: None }),
         headers,
+        remote_client(),
         Uri::from_static("/assets/index-Dt1y9Jrn.js"),
     )
     .await;
@@ -2847,6 +3003,7 @@ async fn reuses_the_same_authenticated_url_after_closing_and_reopening_a_page() 
                 token: Some("test".to_string()),
             }),
             HeaderMap::new(),
+            loopback_client(),
             Uri::from_static("/"),
         )
         .await;
@@ -2879,6 +3036,7 @@ async fn explicit_partial_public_static_token_does_not_fallback_to_cookie() {
             token: Some("te".to_string()),
         }),
         headers,
+        remote_client(),
         Uri::from_static("/"),
     )
     .await;
@@ -2929,6 +3087,7 @@ async fn api_routes_reject_cross_origin_even_with_valid_token() {
             token: Some("test".to_string()),
         }),
         headers,
+        remote_client(),
     )
     .await;
 
@@ -3729,6 +3888,13 @@ fn embedded_frontend_assets_receive_browser_safe_content_types() {
         "application/javascript; charset=utf-8"
     );
     assert_eq!(mime_for_path("/timem_logo.png"), "image/png");
+    assert_eq!(
+        mime_for_path("/fonts/SpaceGrotesk-Latin-600.woff2"),
+        "font/woff2"
+    );
+    assert_eq!(mime_for_path("/fonts/legacy.woff"), "font/woff");
+    assert_eq!(mime_for_path("/fonts/legacy.ttf"), "font/ttf");
+    assert_eq!(mime_for_path("/fonts/legacy.otf"), "font/otf");
     assert!(embedded_web_asset("/timem_logo.png").is_some());
 }
 
@@ -4287,6 +4453,7 @@ fn session_runtime_update_is_allowed_during_an_active_turn() {
             events: Vec::new(),
             final_answer: None,
             completion: None,
+            events_slimmed: false,
         });
     }
 
@@ -4351,6 +4518,7 @@ fn session_api_key_update_is_rejected_during_an_active_turn() {
         events: Vec::new(),
         final_answer: None,
         completion: None,
+        events_slimmed: false,
     });
     drop(sessions);
     let error = update_session_api_key(&state, "session_a", "new-secret".to_string()).unwrap_err();
@@ -4549,7 +4717,8 @@ fn session_create_command_returns_session_with_runtime_overrides_applied() {
 }
 
 #[test]
-fn missing_workspace_session_uses_locked_fallback_without_losing_metadata_or_history() {
+fn missing_workspace_session_restores_with_silent_fallback_without_losing_metadata_or_history() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("missing_workspace_restore"));
     let data_dir = root.join("data");
@@ -4590,6 +4759,11 @@ fn missing_workspace_session_uses_locked_fallback_without_losing_metadata_or_his
     store
         .upsert_session(&StoredSession {
             model_endpoint_id: None,
+            model_endpoint_ids: Vec::new(),
+            reasoning_effort_override: None,
+            endpoint_reasoning_efforts: BTreeMap::new(),
+            endpoint_max_input_tokens: BTreeMap::new(),
+            telemetry_reset_at_ms: None,
             session_id: session_id.to_string(),
             display_name: original_display_name.to_string(),
             created_at_ms: 1,
@@ -4633,28 +4807,13 @@ fn missing_workspace_session_uses_locked_fallback_without_losing_metadata_or_his
             std::fs::canonicalize(&restored.current_dir).unwrap(),
             std::fs::canonicalize(&runtime_workspace).unwrap()
         );
-        let pending = restored.restart_cwd_decision.as_ref().unwrap();
-        assert!(!pending.session_cwd_available);
-        assert_eq!(pending.session_cwd, missing_workspace.display().to_string());
+        // A missing stored workspace restores silently into the runtime
+        // directory: no pending cwd decision and no user-facing gate.
+        assert!(restored.restart_cwd_decision.is_none());
     }
-    assert_eq!(
-        start_web_turn(&state, session_id, "must remain locked").unwrap_err(),
-        "session_restart_cwd_decision_required"
-    );
-    assert_eq!(
-        resolve_restart_cwd_decision(&state, session_id, "keep_session").unwrap_err(),
-        "session_restart_cwd_unavailable"
-    );
 
-    resolve_restart_cwd_decision(&state, session_id, "use_runtime").unwrap();
-    let repaired = store.load_session(session_id).unwrap().unwrap();
-    assert_eq!(repaired.display_name, original_display_name);
-    assert_eq!(
-        std::fs::canonicalize(&repaired.current_dir).unwrap(),
-        std::fs::canonicalize(&runtime_workspace).unwrap()
-    );
-
-    // Confirmation persists the fallback, so a later restart restores normally.
+    // The silent fallback re-applies on every restart, so a later restart
+    // restores normally without any confirmation step.
     state.sessions.lock().unwrap().clear();
     assert_eq!(
         restore_stored_sessions_after_runtime_restart(&state).unwrap(),
@@ -4669,6 +4828,7 @@ fn missing_workspace_session_uses_locked_fallback_without_losing_metadata_or_his
 
 #[test]
 fn legacy_session_roles_migrate_into_the_mem_scoped_global_library() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_role_migration"));
     std::fs::create_dir_all(&root).unwrap();
@@ -4773,7 +4933,105 @@ fn legacy_session_roles_migrate_into_the_mem_scoped_global_library() {
 }
 
 #[test]
-fn runtime_restart_requires_each_restored_session_to_resolve_cwd_before_work() {
+fn restart_cwd_paths_hide_windows_verbatim_prefixes_from_users() {
+    assert_eq!(
+        windows_verbatim_path_for_user_display(r"\\?\D:\TimemAi\target\release"),
+        r"D:\TimemAi\target\release"
+    );
+    assert_eq!(
+        windows_verbatim_path_for_user_display(r"\\?\UNC\server\share\TimemAi"),
+        r"\\server\share\TimemAi"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_canonical_restart_cwd_path_keeps_identity_but_hides_verbatim_prefix() {
+    let root = std::env::temp_dir().join(unique_web_id("restart_cwd_windows_display"));
+    std::fs::create_dir_all(&root).unwrap();
+
+    let canonical = std::fs::canonicalize(&root).unwrap();
+    let canonical_text = canonical.to_string_lossy();
+    assert!(
+        canonical_text.starts_with(r"\\?\"),
+        "Windows canonicalize should exercise a verbatim path, got {canonical_text}"
+    );
+
+    let displayed = path_for_user_display(&canonical);
+    assert!(!displayed.starts_with(r"\\?\"), "{displayed}");
+    assert_eq!(std::fs::canonicalize(&displayed).unwrap(), canonical);
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn browser_cwd_projections_hide_verbatim_paths_without_mutating_host_state() {
+    let internal = r"\\?\D:\TimemAi\target\release".to_string();
+    let context = WebContext {
+        context_id: "context_1".to_string(),
+        current_dir: internal.clone(),
+        worker_ids: vec!["worker_1".to_string()],
+    };
+    let attach = AttachSessionSummary {
+        session_id: "session_1".to_string(),
+        display_name: "Session".to_string(),
+        ordinal: 1,
+        state: "ready".to_string(),
+        working: false,
+        active_turn_id: None,
+        current_dir: internal.clone(),
+        restart_cwd_decision: None,
+        worker_count: 1,
+    };
+
+    assert_eq!(
+        serde_json::to_value(&context).unwrap()["current_dir"],
+        r"D:\TimemAi\target\release"
+    );
+    assert_eq!(
+        serde_json::to_value(&attach).unwrap()["current_dir"],
+        r"D:\TimemAi\target\release"
+    );
+    assert_eq!(context.current_dir, internal);
+    assert_eq!(attach.current_dir, internal);
+}
+
+#[test]
+fn restart_cwd_decision_serializes_only_browser_facing_paths() {
+    let decision = RestartCwdDecision {
+        runtime_cwd: r"D:\TimemAi\target\release".to_string(),
+        session_cwd: r"D:\TimemAi".to_string(),
+        session_cwd_available: true,
+        runtime_cwd_path: PathBuf::from(r"\\?\D:\TimemAi\target\release"),
+    };
+
+    assert_eq!(
+        serde_json::to_value(decision).unwrap(),
+        json!({
+            "runtime_cwd": r"D:\TimemAi\target\release",
+            "session_cwd": r"D:\TimemAi",
+            "session_cwd_available": true,
+        })
+    );
+}
+
+#[test]
+fn restart_cwd_path_display_preserves_non_verbatim_and_special_namespace_paths() {
+    for path in [
+        r"D:\TimemAi",
+        r"\\server\share\TimemAi",
+        "/home/user/TimemAi",
+        r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\TimemAi",
+        r"\\?\UNC\",
+        r"\\?\relative",
+    ] {
+        assert_eq!(windows_verbatim_path_for_user_display(path), path);
+    }
+}
+
+#[test]
+fn runtime_restart_keeps_restored_sessions_on_their_stored_cwd_without_a_gate() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_restart_cwd"));
     let previous_cwd = root.join("previous");
@@ -4817,65 +5075,28 @@ fn runtime_restart_requires_each_restored_session_to_resolve_cwd_before_work() {
     );
 
     {
+        // Every restored session silently keeps its stored working directory:
+        // no pending decision, no gate, and no switch to the runtime cwd.
         let sessions = restarted.sessions.lock().unwrap();
         for session_id in [&keep_id, &switch_id] {
-            let pending = sessions
-                .get(session_id)
-                .unwrap()
-                .restart_cwd_decision
-                .as_ref()
-                .expect("every unvisited restored session must retain its decision");
-            assert_eq!(
-                std::fs::canonicalize(&pending.runtime_cwd).unwrap(),
-                std::fs::canonicalize(&runtime_cwd).unwrap()
+            let restored = sessions.get(session_id).unwrap();
+            assert!(
+                restored.restart_cwd_decision.is_none(),
+                "a real restart must keep the session on its stored cwd without a gate"
             );
             assert_eq!(
-                std::fs::canonicalize(&pending.session_cwd).unwrap(),
+                std::fs::canonicalize(&restored.current_dir).unwrap(),
                 std::fs::canonicalize(&previous_cwd).unwrap()
             );
-            assert!(pending.session_cwd_available);
         }
     }
-
-    assert_eq!(
-        start_web_turn(&restarted, &switch_id, "must not start").unwrap_err(),
-        "session_restart_cwd_decision_required"
-    );
-
-    resolve_restart_cwd_decision(&restarted, &keep_id, "keep_session").unwrap();
-    {
-        let sessions = restarted.sessions.lock().unwrap();
-        let kept = sessions.get(&keep_id).unwrap();
-        assert!(kept.restart_cwd_decision.is_none());
-        assert_eq!(
-            std::fs::canonicalize(&kept.current_dir).unwrap(),
-            std::fs::canonicalize(&previous_cwd).unwrap()
-        );
-        assert!(sessions
-            .get(&switch_id)
-            .unwrap()
-            .restart_cwd_decision
-            .is_some());
-    }
-
-    resolve_restart_cwd_decision(&restarted, &switch_id, "use_runtime").unwrap();
-    let sessions = restarted.sessions.lock().unwrap();
-    let switched = sessions.get(&switch_id).unwrap();
-    assert!(switched.restart_cwd_decision.is_none());
-    assert_eq!(
-        std::fs::canonicalize(&switched.current_dir).unwrap(),
-        std::fs::canonicalize(&runtime_cwd).unwrap()
-    );
-    assert!(switched.contexts.iter().all(|context| {
-        std::fs::canonicalize(&context.current_dir).unwrap()
-            == std::fs::canonicalize(&runtime_cwd).unwrap()
-    }));
 
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
 fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_session"));
     std::fs::create_dir_all(&root).unwrap();
@@ -4988,6 +5209,7 @@ fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
 
 #[test]
 fn web_host_startup_restore_appends_a_visible_raw_chat_restart_marker() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_restart_marker"));
     std::fs::create_dir_all(&root).unwrap();
@@ -5072,6 +5294,7 @@ fn web_host_startup_restore_appends_a_visible_raw_chat_restart_marker() {
 
 #[test]
 fn restore_keeps_multiple_legacy_sessions_when_retired_provider_cache_is_present() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_legacy_sessions"));
     std::fs::create_dir_all(&root).unwrap();
@@ -5129,6 +5352,7 @@ fn restore_keeps_multiple_legacy_sessions_when_retired_provider_cache_is_present
 #[cfg(unix)]
 #[test]
 fn session_create_and_restore_defer_unavailable_mcp_discovery_until_send() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_deferred_mcp_restore"));
     std::fs::create_dir_all(&root).unwrap();
@@ -5268,6 +5492,7 @@ fn session_create_and_restore_defer_unavailable_mcp_discovery_until_send() {
 
 #[test]
 fn restored_web_session_keeps_original_task_with_supplement_in_an_oversized_turn() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_long_turn"));
     std::fs::create_dir_all(&root).unwrap();
@@ -5360,6 +5585,7 @@ fn restored_web_session_keeps_original_task_with_supplement_in_an_oversized_turn
 
 #[test]
 fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_overrides"));
     std::fs::create_dir_all(&root).unwrap();
@@ -5698,6 +5924,15 @@ fn restored_web_turns_preserve_user_entry_kinds() {
             delivery_state: Some(ChatCommandDeliveryState::Recorded),
             content: "queued input never dispatched".to_string(),
         },
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_1".to_string(),
+            created_at_ms: 15,
+            kind: Some("mailbox".to_string()),
+            command_id: None,
+            delivery_state: None,
+            content: "[mailbox] notice".to_string(),
+        },
     ];
 
     let turns = restored_turns_from_history_records(&records);
@@ -5713,12 +5948,14 @@ fn restored_web_turns_preserve_user_entry_kinds() {
             ("approval", "approved request"),
             ("task", "legacy text"),
             ("queued_interrupted", "queued input never dispatched"),
+            ("mailbox", "[mailbox] notice"),
         ]
     );
 }
 
 #[test]
 fn runtime_restart_preserves_never_dispatched_queue_items_in_message_queue() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("restart_queued_interrupted"));
     std::fs::create_dir_all(&root).unwrap();
@@ -6699,6 +6936,7 @@ fn restore_prompt_context_on_startup_covers_off_on_off_toggle_cycle() {
 
 #[test]
 fn corrupt_snapshot_degrades_to_history_only_restore_without_blocking_session() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("corrupt_snapshot_restore"));
     let data_dir = root.join("data");
@@ -6743,6 +6981,11 @@ fn corrupt_snapshot_degrades_to_history_only_restore_without_blocking_session() 
     store
         .upsert_session(&StoredSession {
             model_endpoint_id: None,
+            model_endpoint_ids: Vec::new(),
+            reasoning_effort_override: None,
+            endpoint_reasoning_efforts: BTreeMap::new(),
+            endpoint_max_input_tokens: BTreeMap::new(),
+            telemetry_reset_at_ms: None,
             session_id: session_id.to_string(),
             display_name: "Corrupt snapshot session".to_string(),
             created_at_ms: 1,
@@ -7555,6 +7798,7 @@ fn mem_temporary_retention_rejects_invalid_values() {
 
 #[test]
 fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let data_dir_raw = std::env::temp_dir().join(unique_web_id("timem_web_mem_switch"));
     std::fs::create_dir_all(&data_dir_raw).unwrap();
@@ -8084,6 +8328,7 @@ fn routing_test_state() -> AppState {
         )),
         template: Arc::new(template),
         model_endpoint_imports: Arc::new(Mutex::new(Vec::new())),
+        model_endpoint_health: Arc::new(Mutex::new(BTreeMap::new())),
         events: events.clone(),
         sessions: Arc::new(Mutex::new(sessions)),
         command_dedup: Arc::new(Mutex::new(CommandDedupCache::default())),
@@ -8106,6 +8351,10 @@ fn routing_test_state() -> AppState {
         restart_notify: Arc::new(tokio::sync::Notify::new()),
         restart_args: Arc::new(Vec::new()),
         restart_public_token: None,
+        mem_mail_runtime: Arc::new(MemMailRuntime::default()),
+        mailbox_state_cache: Arc::new(Mutex::new(HashMap::new())),
+        mailbox_send_receipt_watch: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
+        mailbox_send_lane_locks: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
@@ -8207,6 +8456,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         current_dir: "/work".to_string(),
         restart_cwd_decision: None,
         debug_dir: None,
+        preview_throttle: Default::default(),
         max_llm_input_tokens: 10_000,
         tools: Vec::new(),
         mcp_server_ids: Vec::new(),
@@ -8243,6 +8493,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         active_memo: None,
         timers: Vec::new(),
         context_cleared_at_ms: None,
+        telemetry_reset_at_ms: None,
         previous_memo_for_notice: None,
         message_queue: SessionMessageQueue::new(MAX_NEXT_TURN_INTENTS),
         pending_completion_message_id: None,
@@ -8254,6 +8505,11 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         pending_work_instruction_turn: None,
         runtime: WebSessionRuntime {
             model_endpoint_id: None,
+            active_model_endpoint_id: None,
+            model_endpoint_ids: Vec::new(),
+            reasoning_effort_override: None,
+            endpoint_reasoning_efforts: BTreeMap::new(),
+            endpoint_max_input_tokens: BTreeMap::new(),
             settings,
             env: BTreeMap::new(),
             env_overrides: BTreeMap::new(),
@@ -8296,6 +8552,11 @@ fn test_runtime_settings() -> RuntimeSettings {
 fn test_runtime_profile() -> WebSessionRuntimeProfile {
     WebSessionRuntimeProfile {
         model_endpoint_id: None,
+        active_model_endpoint_id: None,
+        model_endpoint_ids: Vec::new(),
+        endpoint_reasoning_efforts: BTreeMap::new(),
+        endpoint_max_input_tokens: BTreeMap::new(),
+        reasoning_effort: None,
         model: "model".to_string(),
         api_protocol: "openai-compatible".to_string(),
         response_protocol: "xml".to_string(),
@@ -9029,6 +9290,7 @@ fn failed_unconsumed_handoff_preserves_final_answer_and_pending_supplement() {
         CoreSessionWorkerEvent::UnconsumedSupplements {
             supplements: vec![timem_session::UnconsumedSupplement {
                 manual_context_compress: false,
+                system_input: false,
                 text: "Q2".to_string(),
                 additional_context: None,
                 command_id: None,
@@ -9119,6 +9381,7 @@ fn task_finished_handoff_failure_keeps_unconsumed_supplement_in_memory() {
         CoreSessionWorkerEvent::UnconsumedSupplements {
             supplements: vec![timem_session::UnconsumedSupplement {
                 manual_context_compress: false,
+                system_input: false,
                 text: "late follow-up".to_string(),
                 additional_context: None,
                 command_id: None,
@@ -9202,6 +9465,7 @@ fn normal_completion_hands_unconsumed_supplement_off_before_ordinary_queue() {
                     text: "Q ordinary".to_string(),
                     attachments: Vec::new(),
                     worker_roles: Vec::new(),
+                    dispatch_deadline_ms: None,
                 },
             )
             .unwrap();
@@ -9215,6 +9479,7 @@ fn normal_completion_hands_unconsumed_supplement_off_before_ordinary_queue() {
         CoreSessionWorkerEvent::UnconsumedSupplements {
             supplements: vec![timem_session::UnconsumedSupplement {
                 manual_context_compress: false,
+                system_input: false,
                 text: "S priority".to_string(),
                 additional_context: Some("RETURNED_CONTEXT_MARKER".to_string()),
                 command_id: Some("supplement-command".to_string()),
@@ -9297,12 +9562,14 @@ fn stopped_primary_turn_preserves_unconsumed_supplements_without_resubmitting() 
     let supplements = vec![
         timem_session::UnconsumedSupplement {
             manual_context_compress: false,
+            system_input: false,
             text: "follow-up one".to_string(),
             additional_context: None,
             command_id: None,
         },
         timem_session::UnconsumedSupplement {
             manual_context_compress: false,
+            system_input: false,
             text: "follow-up two".to_string(),
             additional_context: None,
             command_id: None,
@@ -9324,6 +9591,7 @@ fn stopped_primary_turn_preserves_unconsumed_supplements_without_resubmitting() 
                     text: "ordinary queued question".to_string(),
                     attachments: Vec::new(),
                     worker_roles: Vec::new(),
+                    dispatch_deadline_ms: None,
                 },
             )
             .unwrap();
@@ -10841,9 +11109,24 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
         &state,
         session_id,
         CoreSessionWorkerEvent::ModelRequestCompleted {
+            round: 1,
             latency: Duration::from_millis(425),
+            ttft: Some(Duration::from_millis(180)),
         },
     );
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[session_id];
+        let event = session
+            .turns
+            .last()
+            .and_then(|turn| turn.events.last())
+            .expect("model completion telemetry should be appended to the turn");
+        assert_eq!(event.payload["kind"], "model_request_completed");
+        assert_eq!(event.payload["round"], 1);
+        assert_eq!(event.payload["latency_ms"], 425);
+        assert_eq!(event.payload["ttft_ms"], 180);
+    }
     handle_worker_event(
         &state,
         session_id,
@@ -10856,6 +11139,8 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
             round: 1,
             usage: UsageStats::zero(),
             content: "I will inspect the workspace.".to_string(),
+            reasoning: String::new(),
+            reasoning_truncated: false,
             tool_calls: vec![agent_core::NativeToolCall {
                 assistant_continuation: None,
                 id: "call_current".to_string(),
@@ -10961,6 +11246,14 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
     assert!(statistics.contains("badge-native"), "{statistics}");
     assert!(statistics.contains("Action on-CPU time"), "{statistics}");
     assert!(statistics.contains("LLM API latency"), "{statistics}");
+    assert!(
+        statistics.contains("<span>TTFT Mean</span><strong>180 ms</strong>"),
+        "{statistics}"
+    );
+    assert!(
+        statistics.contains("<span>TTFT Samples</span><strong>1</strong>"),
+        "{statistics}"
+    );
     assert!(statistics.contains("Finish reason: length"), "{statistics}");
     assert!(
         statistics.contains("<span>Count</span><strong>1</strong>"),
@@ -11253,6 +11546,8 @@ fn live_model_usage_is_retained_in_the_active_turn_and_correct_session() {
         CoreSessionWorkerEvent::ModelResponse {
             round: 2,
             content: String::new(),
+            reasoning: String::new(),
+            reasoning_truncated: false,
             tool_calls: Vec::new(),
             truncated: false,
             runtime_phase: None,
@@ -11270,6 +11565,8 @@ fn live_model_usage_is_retained_in_the_active_turn_and_correct_session() {
         CoreSessionWorkerEvent::ModelResponse {
             round: 3,
             content: String::new(),
+            reasoning: String::new(),
+            reasoning_truncated: false,
             tool_calls: Vec::new(),
             truncated: false,
             runtime_phase: Some("toolgen".to_string()),
@@ -12019,6 +12316,7 @@ fn repeated_user_sends_during_an_active_turn_are_ordered_supplements() {
 
 #[test]
 fn runtime_restart_preserves_persisted_message_queue_without_dispatch_grant() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("restart_restores_queue"));
     std::fs::create_dir_all(&root).unwrap();
@@ -12368,6 +12666,55 @@ fn queue_continuation_is_driven_by_authoritative_projection_outcome() {
 }
 
 #[test]
+fn legacy_queue_file_with_smaller_capacity_still_loads_after_capacity_raise() {
+    // A persisted legacy Bridge FIFO recorded the historical capacity (8).
+    // Raising MAX_NEXT_TURN_INTENTS must not orphan or corrupt those files:
+    // the queue loads with the new capacity and keeps its items.
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("legacy_queue_capacity"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let space = "legacy_queue_capacity_mem";
+    set_test_mem(&state, data_dir.clone(), space);
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template);
+    let session_id = create_session(
+        &state,
+        Some("Legacy queue".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let mut legacy = NextTurnIntentQueue::new(8);
+    legacy.enqueue(
+        "legacy-command".to_string(),
+        WebNextTurnPayload {
+            send_after_cancel: false,
+            turn_id: unique_web_id("web_turn"),
+            created_at_ms: 1,
+            text: "legacy intent survives".to_string(),
+            attachments: Vec::new(),
+            worker_roles: Vec::new(),
+            dispatch_deadline_ms: None,
+        },
+    );
+    let path = next_turn_intents_path(&state, &session_id).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+    let queue = load_message_queue(&state, &session_id).unwrap();
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.capacity(), MAX_NEXT_TURN_INTENTS);
+    assert_eq!(
+        queue.projection().items[0].payload.text,
+        "legacy intent survives"
+    );
+}
+
+#[test]
 fn full_message_queue_rejects_without_consuming_attachment_or_creating_turn() {
     let state = routing_test_state();
     let session_id = "session_a";
@@ -12615,6 +12962,7 @@ fn background_exit_event_is_appended_to_its_original_turn() {
             events: Vec::new(),
             final_answer: None,
             completion: None,
+            events_slimmed: false,
         });
         session.active_turn_id = Some("turn_newer".to_string());
     }
@@ -13552,6 +13900,7 @@ fn direct_resume_bypasses_a_failed_continuation_without_dropping_the_queue() {
                     attachments: Vec::new(),
                     worker_roles: Vec::new(),
                     send_after_cancel: false,
+                    dispatch_deadline_ms: None,
                 },
             )
             .unwrap();
@@ -15837,6 +16186,8 @@ struct EndpointRequestBoundaryModel {
     entered: std::sync::mpsc::Sender<usize>,
     release: std::sync::mpsc::Receiver<()>,
     calls: usize,
+    protocol_repair_calls: usize,
+    rate_limited_models: Vec<String>,
 }
 
 impl ModelClient for EndpointRequestBoundaryModel {
@@ -15855,9 +16206,17 @@ impl ModelClient for EndpointRequestBoundaryModel {
         self.release
             .recv_timeout(Duration::from_secs(5))
             .map_err(|error| format!("endpoint_boundary_release_failed:{error}"))?;
+        if self.rate_limited_models.contains(&config.model) {
+            return Err("model_http_429: endpoint boundary rate limited".to_string());
+        }
+        let content = if self.calls <= self.protocol_repair_calls {
+            "not protocol compliant".to_string()
+        } else {
+            confirmed_xml_response("<final_answer>request complete</final_answer>")
+        };
         Ok(LlmResponse {
             tool_calls: Vec::new(),
-            content: confirmed_xml_response("<final_answer>request complete</final_answer>"),
+            content,
             model_name: config.model.clone(),
             usage: UsageStats::zero(),
             truncated: false,
@@ -15964,6 +16323,8 @@ fn register_endpoint_boundary_worker(
                 entered,
                 release,
                 calls: 0,
+                protocol_repair_calls: 2,
+                rate_limited_models: Vec::new(),
             },
         )
         .unwrap();
@@ -16016,7 +16377,7 @@ fn drive_endpoint_boundary_turn_until_ready(state: &AppState, session_id: &str) 
 }
 
 #[test]
-fn endpoint_edits_and_switches_apply_at_the_next_new_request_boundary() {
+fn endpoint_edits_and_switches_apply_at_the_next_api_request_boundary() {
     let state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_boundary"));
     set_test_mem(&state, root.clone(), ".test_mem");
@@ -16055,7 +16416,14 @@ fn endpoint_edits_and_switches_apply_at_the_next_new_request_boundary() {
     )
     .unwrap();
 
-    submit_turn(&state, &session_id, "first request".to_string()).unwrap();
+    // One Turn deliberately makes three protocol-repair requests. Changes made
+    // while request N is in flight must affect request N+1, never request N.
+    submit_turn(
+        &state,
+        &session_id,
+        "three requests in one Turn".to_string(),
+    )
+    .unwrap();
     assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
     {
         let calls = captured.lock().unwrap();
@@ -16066,8 +16434,6 @@ fn endpoint_edits_and_switches_apply_at_the_next_new_request_boundary() {
         );
     }
 
-    // Editing only the daily effort used to be missed by endpoint equality.
-    // The in-flight request keeps medium; the following new Turn must use high.
     handle_command(
         &state,
         TEST_PORT,
@@ -16076,23 +16442,6 @@ fn endpoint_edits_and_switches_apply_at_the_next_new_request_boundary() {
         },
     )
     .unwrap();
-    {
-        let session = &state.sessions.lock().unwrap()[&session_id];
-        assert_eq!(
-            session
-                .runtime
-                .settings
-                .config
-                .openai_compatible
-                .reasoning_effort
-                .as_deref(),
-            Some("medium")
-        );
-        assert_eq!(
-            session.runtime.model_endpoint_id.as_deref(),
-            Some("endpoint-boundary-a")
-        );
-    }
     assert_eq!(
         captured.lock().unwrap()[0]
             .openai_compatible
@@ -16101,27 +16450,25 @@ fn endpoint_edits_and_switches_apply_at_the_next_new_request_boundary() {
         Some("medium")
     );
     release_tx.send(()).unwrap();
-    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
 
-    submit_turn(&state, &session_id, "second request".to_string()).unwrap();
     assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
     {
         let calls = captured.lock().unwrap();
-        assert_eq!(calls[1].model, "boundary-model-a");
-        assert_eq!(calls[1].base_url, "https://boundary-a.example.test/v1");
-        assert_eq!(calls[1].api_key, "boundary-secret-a");
+        let config = &calls[1];
+        assert_eq!(config.model, "boundary-model-a");
+        assert_eq!(config.base_url, "https://boundary-a.example.test/v1");
+        assert_eq!(config.api_key, "boundary-secret-a");
         assert_eq!(
-            calls[1].http_headers.get("X-Boundary").map(String::as_str),
+            config.http_headers.get("X-Boundary").map(String::as_str),
             Some("a")
         );
-        assert_eq!(calls[1].request_fields.get("route"), Some(&json!("a")));
+        assert_eq!(config.request_fields.get("route"), Some(&json!("a")));
         assert_eq!(
-            calls[1].openai_compatible.reasoning_effort.as_deref(),
+            config.openai_compatible.reasoning_effort.as_deref(),
             Some("high")
         );
     }
 
-    // Switching while this request is active changes only the durable binding.
     handle_command(
         &state,
         TEST_PORT,
@@ -16131,29 +16478,9 @@ fn endpoint_edits_and_switches_apply_at_the_next_new_request_boundary() {
         },
     )
     .unwrap();
-    {
-        let session = &state.sessions.lock().unwrap()[&session_id];
-        assert_eq!(
-            session.runtime.model_endpoint_id.as_deref(),
-            Some("endpoint-boundary-b")
-        );
-        assert_eq!(session.runtime.settings.config.model, "boundary-model-a");
-        assert_eq!(
-            session
-                .runtime
-                .settings
-                .config
-                .openai_compatible
-                .reasoning_effort
-                .as_deref(),
-            Some("high")
-        );
-    }
     assert_eq!(captured.lock().unwrap()[1].model, "boundary-model-a");
     release_tx.send(()).unwrap();
-    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
 
-    submit_turn(&state, &session_id, "third request".to_string()).unwrap();
     assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 3);
     {
         let calls = captured.lock().unwrap();
@@ -16184,6 +16511,620 @@ fn endpoint_edits_and_switches_apply_at_the_next_new_request_boundary() {
             Some(["low".to_string(), "high".to_string()].as_slice())
         );
     }
+    release_tx.send(()).unwrap();
+    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn session_reasoning_effort_applies_at_the_next_api_request_without_mutating_endpoints() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_reasoning_boundary"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let worker_dir = root.join("worker");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let session_id = register_endpoint_boundary_worker(
+        &state,
+        Arc::clone(&captured),
+        entered_tx,
+        release_rx,
+        &worker_dir,
+    );
+
+    for endpoint in [
+        endpoint_boundary_input("endpoint-boundary-a", "medium"),
+        endpoint_boundary_input("endpoint-boundary-b", "low"),
+    ] {
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::ModelEndpointUpsert {
+                endpoint: Box::new(endpoint),
+            },
+        )
+        .unwrap();
+    }
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointApply {
+            session_id: session_id.clone(),
+            endpoint_id: "endpoint-boundary-a".to_string(),
+        },
+    )
+    .unwrap();
+
+    submit_turn(
+        &state,
+        &session_id,
+        "change Session reasoning during one Turn".to_string(),
+    )
+    .unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+    assert_eq!(
+        captured.lock().unwrap()[0]
+            .openai_compatible
+            .reasoning_effort
+            .as_deref(),
+        Some("medium")
+    );
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionReasoningEffortUpdate {
+            session_id: session_id.clone(),
+            reasoning_effort: "high".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        captured.lock().unwrap()[0]
+            .openai_compatible
+            .reasoning_effort
+            .as_deref(),
+        Some("medium"),
+        "the in-flight request must retain its original config"
+    );
+    {
+        let mem = state.mem.lock().unwrap();
+        assert_eq!(
+            mem.model_endpoints
+                .iter()
+                .find(|endpoint| endpoint.id == "endpoint-boundary-a")
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some("medium"),
+            "Session selection must not rewrite endpoint A"
+        );
+    }
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::SessionReasoningEffortUpdate {
+                session_id: session_id.clone(),
+                reasoning_effort: "low".to_string(),
+            },
+        )
+        .unwrap_err(),
+        "session_reasoning_effort_unsupported"
+    );
+    release_tx.send(()).unwrap();
+
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+    assert_eq!(
+        captured.lock().unwrap()[1]
+            .openai_compatible
+            .reasoning_effort
+            .as_deref(),
+        Some("high"),
+        "the next API request must use the Session selection"
+    );
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointApply {
+            session_id: session_id.clone(),
+            endpoint_id: "endpoint-boundary-b".to_string(),
+        },
+    )
+    .unwrap();
+    release_tx.send(()).unwrap();
+
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 3);
+    {
+        let calls = captured.lock().unwrap();
+        assert_eq!(calls[2].model, "boundary-model-b");
+        assert_eq!(
+            calls[2].openai_compatible.reasoning_effort.as_deref(),
+            Some("high"),
+            "the Session selection must survive an endpoint switch when supported"
+        );
+    }
+    {
+        let mem = state.mem.lock().unwrap();
+        assert_eq!(
+            mem.model_endpoints
+                .iter()
+                .find(|endpoint| endpoint.id == "endpoint-boundary-b")
+                .unwrap()
+                .reasoning_effort
+                .as_deref(),
+            Some("low"),
+            "Session selection must not rewrite endpoint B"
+        );
+    }
+    let stored = current_session_store(&state)
+        .unwrap()
+        .load_session(&session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.reasoning_effort_override.as_deref(), Some("high"));
+    assert_eq!(
+        state.sessions.lock().unwrap()[&session_id]
+            .runtime_profile
+            .reasoning_effort
+            .as_deref(),
+        Some("high")
+    );
+
+    release_tx.send(()).unwrap();
+    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn chain_standby_edits_and_cooldown_apply_at_the_next_api_request_boundary() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_chain_boundary"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let worker_dir = root.join("worker");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let session_id = register_endpoint_boundary_worker(
+        &state,
+        Arc::clone(&captured),
+        entered_tx,
+        release_rx,
+        &worker_dir,
+    );
+    upsert_model_endpoint(
+        &state,
+        endpoint_boundary_input("endpoint-boundary-a", "medium"),
+    )
+    .unwrap();
+    upsert_model_endpoint(
+        &state,
+        endpoint_boundary_input("endpoint-boundary-b", "low"),
+    )
+    .unwrap();
+    apply_model_endpoint(&state, &session_id, "endpoint-boundary-a").unwrap();
+
+    submit_turn(
+        &state,
+        &session_id,
+        "change route during one Turn".to_string(),
+    )
+    .unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+    state.model_endpoint_health.lock().unwrap().insert(
+        "endpoint-boundary-a".to_string(),
+        ModelEndpointHealthState {
+            rate_limited_since_ms: Some(now_ms()),
+            ..Default::default()
+        },
+    );
+    apply_model_endpoint_chain(
+        &state,
+        &session_id,
+        &[
+            "endpoint-boundary-a".to_string(),
+            "endpoint-boundary-b".to_string(),
+        ],
+    )
+    .unwrap();
+    let mut latest_b = endpoint_boundary_input("endpoint-boundary-b", "high");
+    latest_b.base_url = "https://latest-b.example.test/v1".to_string();
+    latest_b.max_llm_input_tokens = 91_000;
+    latest_b.max_llm_output_tokens = 9_000;
+    latest_b.api_key = Some("latest-secret-b".to_string());
+    latest_b
+        .http_headers
+        .insert("X-Boundary".to_string(), "latest-b".to_string());
+    latest_b
+        .request_fields
+        .insert("route".to_string(), json!("latest-b"));
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointUpsert {
+            endpoint: Box::new(latest_b),
+        },
+    )
+    .unwrap();
+    assert_eq!(captured.lock().unwrap()[0].model, "boundary-model-a");
+    release_tx.send(()).unwrap();
+
+    // Both queued snapshots are coalesced; the immediately following API
+    // request gets the latest complete B config rather than an intermediate one.
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+    {
+        let calls = captured.lock().unwrap();
+        let config = &calls[1];
+        assert_eq!(config.model, "boundary-model-b");
+        assert_eq!(config.base_url, "https://latest-b.example.test/v1");
+        assert_eq!(config.api_key, "latest-secret-b");
+        assert_eq!(config.max_llm_input_tokens, 91_000);
+        assert_eq!(config.max_llm_output_tokens, 9_000);
+        assert_eq!(
+            config.http_headers.get("X-Boundary").map(String::as_str),
+            Some("latest-b")
+        );
+        assert_eq!(config.request_fields.get("route"), Some(&json!("latest-b")));
+        assert_eq!(
+            config.openai_compatible.reasoning_effort.as_deref(),
+            Some("high")
+        );
+    }
+    release_tx.send(()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 3);
+    release_tx.send(()).unwrap();
+    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn clearing_chain_during_a_turn_restores_unbound_config_on_the_next_api_request() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_unbind_boundary"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let worker_dir = root.join("worker");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let session_id = register_endpoint_boundary_worker(
+        &state,
+        Arc::clone(&captured),
+        entered_tx,
+        release_rx,
+        &worker_dir,
+    );
+    let unbound_config = state
+        .template
+        .session_settings(&BTreeMap::new())
+        .unwrap()
+        .config;
+    upsert_model_endpoint(
+        &state,
+        endpoint_boundary_input("endpoint-boundary-a", "medium"),
+    )
+    .unwrap();
+    apply_model_endpoint(&state, &session_id, "endpoint-boundary-a").unwrap();
+
+    submit_turn(&state, &session_id, "unbind during one Turn".to_string()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+    apply_model_endpoint_chain(&state, &session_id, &[]).unwrap();
+    assert_eq!(captured.lock().unwrap()[0].model, "boundary-model-a");
+    release_tx.send(()).unwrap();
+
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+    assert_eq!(captured.lock().unwrap()[1], unbound_config);
+    release_tx.send(()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 3);
+    assert_eq!(captured.lock().unwrap()[2], unbound_config);
+    release_tx.send(()).unwrap();
+    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert!(session.runtime.active_model_endpoint_id.is_none());
+        assert!(session.runtime_profile.active_model_endpoint_id.is_none());
+        assert_eq!(session.runtime.settings.config, unbound_config);
+    }
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn rate_limit_failover_projects_the_committed_current_endpoint() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_failover_projection"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let worker_dir = root.join("worker");
+    std::fs::create_dir_all(&worker_dir).unwrap();
+    let session_id = unique_web_id("endpoint_failover_session");
+    let context_id = test_context_id(&session_id);
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &worker_dir,
+    );
+    let worker_id = state
+        .manager
+        .lock()
+        .unwrap()
+        .spawn_worker_in_session_with_model_client(
+            core,
+            state.template.settings.lock().unwrap().config.clone(),
+            CoreSessionWorkerWorkspace::new(
+                &worker_dir,
+                worker_dir.join("audit.json"),
+                "test-web",
+                "local",
+            ),
+            session_id.clone(),
+            context_id.clone(),
+            Some("Endpoint failover".to_string()),
+            None,
+            EndpointRequestBoundaryModel {
+                captured: Arc::clone(&captured),
+                entered: entered_tx,
+                release: release_rx,
+                calls: 0,
+                protocol_repair_calls: 0,
+                rate_limited_models: vec!["boundary-model-a".to_string()],
+            },
+        )
+        .unwrap();
+    let mut session = test_web_session(&session_id, 0, "Endpoint failover".to_string());
+    session.current_dir = worker_dir.display().to_string();
+    session.contexts[0] = WebContext {
+        context_id: context_id.clone(),
+        current_dir: worker_dir.display().to_string(),
+        worker_ids: vec![worker_id.clone()],
+    };
+    session.workers[0].worker_id = worker_id.clone();
+    session.workers[0].context_id = context_id.clone();
+    session.active_context_id = context_id;
+    session.primary_worker_id = worker_id;
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session);
+    persist_web_session(&state, &session_id).unwrap();
+    upsert_model_endpoint(
+        &state,
+        endpoint_boundary_input("endpoint-boundary-a", "medium"),
+    )
+    .unwrap();
+    upsert_model_endpoint(
+        &state,
+        endpoint_boundary_input("endpoint-boundary-b", "low"),
+    )
+    .unwrap();
+    apply_model_endpoint_chain(
+        &state,
+        &session_id,
+        &[
+            "endpoint-boundary-a".to_string(),
+            "endpoint-boundary-b".to_string(),
+        ],
+    )
+    .unwrap();
+
+    submit_turn(&state, &session_id, "fail over A".to_string()).unwrap();
+    // Three consecutive rate-limit strikes on the primary, then the ordered
+    // chain hands control to the standby for the same formal round.
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+    release_tx.send(()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+    release_tx.send(()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 3);
+    release_tx.send(()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 4);
+    release_tx.send(()).unwrap();
+    drive_endpoint_boundary_turn_until_ready(&state, &session_id);
+
+    let calls = captured.lock().unwrap();
+    assert_eq!(
+        calls
+            .iter()
+            .map(|config| config.model.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "boundary-model-a",
+            "boundary-model-a",
+            "boundary-model-a",
+            "boundary-model-b"
+        ]
+    );
+    drop(calls);
+    let session = &state.sessions.lock().unwrap()[&session_id];
+    assert_eq!(
+        session.runtime.model_endpoint_id.as_deref(),
+        Some("endpoint-boundary-a")
+    );
+    assert_eq!(
+        session.runtime_profile.model_endpoint_id.as_deref(),
+        Some("endpoint-boundary-a")
+    );
+    assert_eq!(
+        session.runtime_profile.active_model_endpoint_id.as_deref(),
+        Some("endpoint-boundary-b")
+    );
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn endpoint_auto_probe_waits_for_the_bounded_retry_interval() {
+    let now = 1_800_000_000_000u128;
+    let threshold = MODEL_ENDPOINT_AUTO_PROBE_AFTER.as_millis();
+    let mut entry = ModelEndpointHealthState {
+        rate_limited_since_ms: Some(now.saturating_sub(threshold + 1)),
+        ..Default::default()
+    };
+    assert!(endpoint_due_for_auto_probe(&entry, now));
+
+    // A probe that ended in a transport error minutes ago must not be retried
+    // on every scan tick.
+    entry.last_probe_ms = Some(now - 60_000);
+    assert!(!endpoint_due_for_auto_probe(&entry, now));
+    entry.last_probe_ms = Some(now.saturating_sub(threshold + 1));
+    assert!(endpoint_due_for_auto_probe(&entry, now));
+
+    entry.probing = true;
+    assert!(!endpoint_due_for_auto_probe(&entry, now));
+
+    let healthy = ModelEndpointHealthState::default();
+    assert!(!endpoint_due_for_auto_probe(&healthy, now));
+}
+
+#[test]
+fn probe_transport_error_keeps_cooldown_and_stamps_the_retry_anchor() {
+    let state = routing_test_state();
+    state.model_endpoint_health.lock().unwrap().insert(
+        "endpoint-probe-error".to_string(),
+        ModelEndpointHealthState {
+            rate_limited_since_ms: Some(1234),
+            probing: true,
+            last_probe_ms: None,
+        },
+    );
+    apply_model_endpoint_probe_result(
+        &state,
+        "endpoint-probe-error",
+        Err("probe_network_error".to_string()),
+    );
+    let health = state.model_endpoint_health.lock().unwrap();
+    let entry = &health["endpoint-probe-error"];
+    assert_eq!(entry.rate_limited_since_ms, Some(1234));
+    assert!(!entry.probing);
+    assert!(entry.last_probe_ms.is_some());
+}
+
+#[test]
+fn availability_refresh_switches_back_to_recovered_primary_endpoint() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_switch_back"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let worker_dir = root.join("worker");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let session_id = register_endpoint_boundary_worker(
+        &state,
+        Arc::clone(&captured),
+        entered_tx,
+        release_rx,
+        &worker_dir,
+    );
+    for endpoint in [
+        endpoint_boundary_input("endpoint-boundary-a", "medium"),
+        endpoint_boundary_input("endpoint-boundary-b", "low"),
+    ] {
+        upsert_model_endpoint(&state, endpoint).unwrap();
+    }
+    let chain = [
+        "endpoint-boundary-a".to_string(),
+        "endpoint-boundary-b".to_string(),
+    ];
+    apply_model_endpoint_chain(&state, &session_id, &chain).unwrap();
+    assert_eq!(
+        state.sessions.lock().unwrap()[&session_id]
+            .runtime_profile
+            .active_model_endpoint_id
+            .as_deref(),
+        Some("endpoint-boundary-a")
+    );
+
+    // The primary rate-limits: the availability pass moves the Session to the
+    // Standby but must keep the full preference chain for the switch back.
+    state.model_endpoint_health.lock().unwrap().insert(
+        "endpoint-boundary-a".to_string(),
+        ModelEndpointHealthState {
+            rate_limited_since_ms: Some(now_ms()),
+            ..Default::default()
+        },
+    );
+    refresh_sessions_bound_to_endpoints(&state, &chain);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(
+            session.runtime_profile.active_model_endpoint_id.as_deref(),
+            Some("endpoint-boundary-b")
+        );
+        assert_eq!(
+            session.runtime.model_endpoint_ids,
+            chain.to_vec(),
+            "degrading to the Standby must keep the preference chain"
+        );
+    }
+
+    // Still cooling: committing the probe keeps the Standby.
+    commit_model_endpoint_probe_result(&state, "endpoint-boundary-a", Ok(false));
+    assert_eq!(
+        state.sessions.lock().unwrap()[&session_id]
+            .runtime_profile
+            .active_model_endpoint_id
+            .as_deref(),
+        Some("endpoint-boundary-b")
+    );
+
+    // Recovered: committing the probe alone switches back to the primary,
+    // without waiting for the remaining probes of the same refresh pass.
+    commit_model_endpoint_probe_result(&state, "endpoint-boundary-a", Ok(true));
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(
+            session.runtime_profile.active_model_endpoint_id.as_deref(),
+            Some("endpoint-boundary-a")
+        );
+        assert_eq!(
+            session.runtime.model_endpoint_id.as_deref(),
+            Some("endpoint-boundary-a")
+        );
+        assert_eq!(session.runtime.model_endpoint_ids, chain.to_vec());
+    }
+
+    // The next API request must actually leave on the primary again.
+    submit_turn(&state, &session_id, "back on the primary".to_string()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
+    assert_eq!(captured.lock().unwrap()[0].model, "boundary-model-a");
+    release_tx.send(()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+    release_tx.send(()).unwrap();
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 3);
     release_tx.send(()).unwrap();
     drive_endpoint_boundary_turn_until_ready(&state, &session_id);
 
@@ -16314,6 +17255,14 @@ fn model_endpoint_apply_persistence_failure_rolls_back_worker_memory_and_disk() 
         assert_eq!(calls[0].request_fields.get("route"), Some(&json!("a")));
     }
     release_tx.send(()).unwrap();
+    for expected_call in 2..=3 {
+        assert_eq!(
+            entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            expected_call
+        );
+        assert_eq!(captured.lock().unwrap()[expected_call - 1], before_config);
+        release_tx.send(()).unwrap();
+    }
     drive_endpoint_boundary_turn_until_ready(&state, &session_id);
 
     apply_model_endpoint(&state, &session_id, "endpoint-boundary-b").unwrap();
@@ -16323,10 +17272,10 @@ fn model_endpoint_apply_persistence_failure_rolls_back_worker_memory_and_disk() 
         "request after successful retry".to_string(),
     )
     .unwrap();
-    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+    assert_eq!(entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 4);
     {
         let calls = captured.lock().unwrap();
-        let config = &calls[1];
+        let config = &calls[3];
         assert_eq!(config.model, "boundary-model-b");
         assert_eq!(config.api_protocol.label(), "openai-responses");
         assert_eq!(config.base_url, "https://boundary-b.example.test/v1");
@@ -16708,8 +17657,9 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     assert!(!restored[0].stream);
     assert_eq!(restored[0].api_key, "secret-endpoint-key");
 
-    // Editing during an active Turn must retain the old complete route until
-    // the following new-Turn boundary, then apply secrets and headers as well.
+    // Editing during an active Turn commits the newest complete route snapshot.
+    // A request already in flight retains its immutable copy; the Worker polls
+    // this snapshot immediately before its next model API request.
     let previous = model_endpoint_config(&state, "endpoint-one").unwrap();
     {
         let mut sessions = state.sessions.lock().unwrap();
@@ -16725,6 +17675,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
             final_answer: None,
             preview: None,
             completion: None,
+            events_slimmed: false,
         });
     }
     let mut updated = previous.clone();
@@ -16741,7 +17692,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     {
         let mut sessions = state.sessions.lock().unwrap();
         let session = sessions.get_mut(&session_id).unwrap();
-        assert!(session_uses_model_endpoint(session, &previous));
+        assert!(session_uses_model_endpoint(session, &updated));
         session.active_turn_id = None;
     }
     refresh_bound_model_endpoint(&state, &session_id).unwrap();
@@ -16778,10 +17729,16 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     assert!(load_model_endpoints_resilient(&memory_dir)
         .unwrap()
         .is_empty());
-    assert_eq!(
-        refresh_bound_model_endpoint(&state, &session_id).unwrap_err(),
-        "model_endpoint_not_found"
-    );
+    // Deleting the endpoint prunes every bound Session chain immediately; the
+    // Session falls back to the template default instead of keeping a
+    // dangling endpoint reference.
+    refresh_bound_model_endpoint(&state, &session_id).unwrap();
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert!(session.runtime.model_endpoint_id.is_none());
+        assert!(session.runtime.model_endpoint_ids.is_empty());
+    }
     let manager = {
         let mut guard = state.manager.lock().unwrap();
         std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
@@ -16878,6 +17835,7 @@ async fn performance_trace_endpoint_authenticates_validates_and_records_browser_
         State((state.clone(), 13764)),
         Query(AuthQuery { token: None }),
         HeaderMap::new(),
+        remote_client(),
         Json(ClientPerformanceTrace {
             stage: "browser_turn_updated".to_string(),
             session_id: "session_a".to_string(),
@@ -16897,6 +17855,7 @@ async fn performance_trace_endpoint_authenticates_validates_and_records_browser_
             token: Some("test".to_string()),
         }),
         HeaderMap::new(),
+        remote_client(),
         Json(ClientPerformanceTrace {
             stage: "browser_turn_updated".to_string(),
             session_id: "session_a".to_string(),
@@ -16920,6 +17879,7 @@ async fn performance_trace_endpoint_authenticates_validates_and_records_browser_
             token: Some("test".to_string()),
         }),
         HeaderMap::new(),
+        remote_client(),
         Json(ClientPerformanceTrace {
             stage: "server_forgery".to_string(),
             session_id: "session_a".to_string(),
@@ -17065,6 +18025,7 @@ fn task_finished_outcome_persists_assistant_history_and_turn_final_answer() {
 
 #[test]
 fn queued_message_turn_uses_consume_time_not_enqueue_time_for_chat_order() {
+    let _home_sandbox = home_sandbox_guard();
     let state = routing_test_state();
     let session_id = "session_a";
     let worker_id = state.sessions.lock().unwrap()[session_id]
@@ -17087,6 +18048,7 @@ fn queued_message_turn_uses_consume_time_not_enqueue_time_for_chat_order() {
                     text: "typed early, consumed later".to_string(),
                     attachments: Vec::new(),
                     worker_roles: Vec::new(),
+                    dispatch_deadline_ms: None,
                 },
             )
             .unwrap();
@@ -17137,6 +18099,7 @@ async fn static_assets_cache_by_path_class_and_negotiate_gzip() {
             token: Some("test".to_string()),
         }),
         HeaderMap::new(),
+        loopback_client(),
         Uri::try_from(hashed_path.as_str()).unwrap(),
     )
     .await;
@@ -17158,6 +18121,7 @@ async fn static_assets_cache_by_path_class_and_negotiate_gzip() {
             token: Some("test".to_string()),
         }),
         HeaderMap::new(),
+        loopback_client(),
         Uri::from_static("/"),
     )
     .await;
@@ -17179,6 +18143,7 @@ async fn static_assets_cache_by_path_class_and_negotiate_gzip() {
             token: Some("test".to_string()),
         }),
         gzip_headers,
+        loopback_client(),
         Uri::try_from(hashed_path.as_str()).unwrap(),
     )
     .await;
@@ -17292,6 +18257,7 @@ fn task_finished_hands_manual_compact_off_to_direct_resume() {
         CoreSessionWorkerEvent::UnconsumedSupplements {
             supplements: vec![timem_session::UnconsumedSupplement {
                 manual_context_compress: true,
+                system_input: false,
                 text: String::new(),
                 additional_context: None,
                 command_id: None,
@@ -17336,6 +18302,68 @@ fn task_finished_hands_manual_compact_off_to_direct_resume() {
         );
         assert!(session.pending_unconsumed_supplements.is_empty());
     }
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+}
+
+#[test]
+fn idle_manual_compact_broadcasts_requested_event_inside_turn_snapshot() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "compact-idle-snapshot");
+    let mut receiver = state.events.subscribe();
+    request_session_context_compress(&state, &session_id).unwrap();
+    let mut saw_requested_topic = false;
+    let mut snapshot_turn_kind = None;
+    let mut snapshot_carries_event = false;
+    while let Ok(event) = receiver.try_recv() {
+        let WireEvent::SemanticEvent { event, .. } = event else {
+            continue;
+        };
+        match *event {
+            WireEvent::CoreTopic { turn_id, event, .. } => {
+                if event["topic"]["name"] == CORE_TOPIC_CONTEXT_COMPRESS
+                    && event["payload"]["phase"] == "requested"
+                {
+                    saw_requested_topic = true;
+                    assert!(
+                        turn_id.is_some(),
+                        "the requested notice must anchor to its host turn"
+                    );
+                }
+            }
+            WireEvent::TurnUpdated { turn, .. }
+                if turn
+                    .user_entries
+                    .iter()
+                    .any(|entry| entry.kind == "resume_directly") =>
+            {
+                snapshot_turn_kind = Some("resume_directly".to_string());
+                snapshot_carries_event = turn.events.iter().any(|turn_event| {
+                    turn_event.source == "core_topic"
+                        && turn_event.payload["topic"]["name"] == CORE_TOPIC_CONTEXT_COMPRESS
+                        && turn_event.payload["payload"]["phase"] == "requested"
+                });
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        saw_requested_topic,
+        "the idle manual compaction must publish the requested notice"
+    );
+    assert_eq!(
+        snapshot_turn_kind.as_deref(),
+        Some("resume_directly"),
+        "the idle resume turn must be broadcast"
+    );
+    assert!(
+        snapshot_carries_event,
+        "the broadcast turn snapshot must already carry the requested event; a \
+         stale pre-append snapshot is filtered out by the web timeline"
+    );
     let manager = {
         let mut guard = state.manager.lock().unwrap();
         std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
@@ -17423,8 +18451,13 @@ fn bounded_turn_history_pages_recover_all_events_beyond_snapshot_tail() {
             > 600
     );
     let sessions = state.sessions.lock().unwrap();
-    let slim = slim_restored_turn_for_snapshot(sessions[id].turns.last().unwrap());
+    let live = sessions[id].turns.last().unwrap();
+    assert!(!live.events_slimmed);
+    let slim = slim_restored_turn_for_snapshot(live);
     assert_eq!(slim.events.len(), 40);
+    // Both the 256-byte string cap and the snapshot tail cap slim this turn;
+    // the projection must tell clients the events are previews.
+    assert!(slim.events_slimmed);
     assert_eq!(
         store
             .read_turn_history_page(id, "missing-turn", 0)
@@ -17432,6 +18465,59 @@ fn bounded_turn_history_pages_recover_all_events_beyond_snapshot_tail() {
             .0
             .len(),
         0
+    );
+}
+
+#[test]
+fn restored_history_events_mark_events_slimmed_only_when_slimmed() {
+    let state = routing_test_state();
+    let long_turn = start_web_turn(&state, "session_a", "long events").unwrap();
+    // A second session avoids the active-turn guard on the first session.
+    let short_turn = start_web_turn(&state, "session_b", "short events").unwrap();
+    append_turn_event(
+        &state,
+        "session_a",
+        Some(&long_turn.turn_id),
+        "core_topic",
+        json!({
+            "topic": {"name":"core.model.response"},
+            "payload": {"free_talk": "你说得对——".to_string() + &"很长的过程文本".repeat(80)}
+        }),
+    )
+    .unwrap();
+    append_turn_event(
+        &state,
+        "session_b",
+        Some(&short_turn.turn_id),
+        "core_topic",
+        json!({
+            "topic": {"name":"core.model.response"},
+            "payload": {"free_talk": "fits"}
+        }),
+    )
+    .unwrap();
+    let store = current_session_store(&state).unwrap();
+    let mut restored = restored_turns_from_history_records(
+        &read_all_history_records(&store.history_path_for_session("session_a")).unwrap(),
+    );
+    restored.extend(restored_turns_from_history_records(
+        &read_all_history_records(&store.history_path_for_session("session_b")).unwrap(),
+    ));
+    let long = restored
+        .iter()
+        .find(|turn| turn.turn_id == long_turn.turn_id)
+        .unwrap();
+    let short = restored
+        .iter()
+        .find(|turn| turn.turn_id == short_turn.turn_id)
+        .unwrap();
+    assert!(
+        long.events_slimmed,
+        "oversized restored event must be flagged"
+    );
+    assert!(
+        !short.events_slimmed,
+        "turns whose restored events fit the preview budget must stay unflagged"
     );
 }
 
@@ -17692,7 +18778,7 @@ fn context_handoff_real_compaction_survives_graceful_restart() {
         probe_latency_ms: None,
         observed_tool_calls: 1,
     });
-    let arguments = json!({"summary": "ONLY_COMPACTED_STATE"});
+    let arguments = json!({"summary": "ONLY_COMPACTED_STATE", "keywords": "checkpoint keywords"});
     let step = core.apply_model_response(LlmResponse {
         content: String::new(),
         tool_calls: vec![agent_core::NativeToolCall {
@@ -17807,6 +18893,7 @@ fn catalog_legacy_session_restore_accepts_missing_empty_and_explicit_binding() {
 
 #[test]
 fn catalog_persisted_sessions_restore_missing_and_empty_bindings_with_history() {
+    let _home_sandbox = home_sandbox_guard();
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_legacy_sessions"));
     std::fs::create_dir_all(&root).unwrap();
@@ -18013,6 +19100,182 @@ fn zhipu_catalog_endpoints_roundtrip_and_reject_forbidden_efforts() {
         } else {
             assert!(normalize_model_endpoint_input(None, switched).is_err());
         }
+        endpoints.push(endpoint);
+    }
+    save_model_endpoints(&root, &endpoints).unwrap();
+    let restored = load_model_endpoints_resilient(&root).unwrap();
+    assert_eq!(
+        serde_json::to_value(&restored).unwrap(),
+        serde_json::to_value(&endpoints).unwrap()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn every_catalog_template_default_is_saveable_with_versioned_requirements() {
+    for model in agent_core::model_catalog::models() {
+        let protocol = model
+            .protocols
+            .iter()
+            .find(|protocol| protocol.disabled_reason.is_none())
+            .expect("catalog parser requires an enabled protocol");
+        // Mirror Web templateBudgetSuggestion. This end-to-end contract catches
+        // both catalog/provider drift and defaults that the Host would reject.
+        let output_budget = 20_000u32
+            .min(model.max_output)
+            .min(model.context_window - model.min_input);
+        let input_budget = 256_000u32
+            .min(model.max_input)
+            .min(model.context_window - output_budget);
+        let effort = protocol
+            .fixed_effort
+            .as_deref()
+            .unwrap_or(&model.default_effort);
+        let input: ModelEndpointInput = serde_json::from_value(json!({
+            "name": model.label,
+            "catalog_id": model.id,
+            "model": model.model,
+            "api_protocol": protocol.protocol,
+            "response_protocol": "xml",
+            "base_url": protocol.base_url,
+            "max_llm_input_tokens": input_budget,
+            "max_llm_output_tokens": output_budget,
+            "reasoning_effort": effort,
+            "stream": true,
+            "function_calling": protocol.protocol == "openai-responses"
+                || protocol.function_calling
+                    != agent_core::model_catalog::FunctionCallingSupport::Unsupported,
+            "requirements": {
+                "version": 1,
+                "provider": model.provider,
+                "allowed_reasoning": model.efforts,
+                "adaptive_reasoning": model.default_effort != "none",
+                "field_sources": {
+                    "name": "template",
+                    "model": "template",
+                    "provider": "template",
+                    "api_protocol": "template",
+                    "base_url": "template",
+                    "function_calling": "template",
+                    "stream": "template",
+                    "reasoning_effort": "template",
+                    "allowed_reasoning": "template",
+                    "adaptive_reasoning": "template",
+                    "max_llm_input_tokens": "template",
+                    "max_llm_output_tokens": "template"
+                }
+            }
+        }))
+        .unwrap();
+        normalize_model_endpoint_input(None, input).unwrap_or_else(|error| {
+            panic!(
+                "catalog template {} ({}) must be saveable: {error}",
+                model.id, model.provider
+            )
+        });
+    }
+}
+
+#[test]
+fn kimi_catalog_endpoints_roundtrip_and_reject_forbidden_efforts() {
+    let root = std::env::temp_dir().join(unique_web_id("kimi_catalog"));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut endpoints = Vec::new();
+    for (catalog_id, model_id, effort, input_budget) in [
+        ("k-k3.1-pro", "kimi-k3.1-pro", "max", 200000u32),
+        (
+            "k-k3.1-pro-highspeed",
+            "kimi-k3.1-pro-highspeed",
+            "max",
+            200000,
+        ),
+        ("k-k3", "kimi-k3", "max", 200000),
+        // K2 context window is 256k: input+output must fit.
+        ("k-k2.6", "kimi-k2.6", "high", 120000),
+        ("k-k2.7-code", "kimi-k2.7-code", "high", 120000),
+    ] {
+        let value = json!({"name":catalog_id,"catalog_id":catalog_id,
+            "model":model_id,"api_protocol":"openai-compatible","response_protocol":"xml",
+            "base_url":"https://api.moonshot.cn/v1","max_llm_input_tokens":input_budget,
+            "max_llm_output_tokens":131072,"reasoning_effort":effort,"stream":true});
+        let input: ModelEndpointInput = serde_json::from_value(value).unwrap();
+        let endpoint = normalize_model_endpoint_input(None, input.clone()).unwrap();
+        assert_eq!(endpoint.catalog_id.as_deref(), Some(catalog_id));
+        assert_eq!(endpoint.reasoning_effort.as_deref(), Some(effort));
+        let mut wrong = input.clone();
+        wrong.reasoning_effort = Some("none".into());
+        assert_eq!(
+            normalize_model_endpoint_input(None, wrong).is_err(),
+            catalog_id != "k-k2.6"
+        );
+        let mut switched = input.clone();
+        switched.api_protocol = "openai-responses".into();
+        // K2 templates are Chat-only: the Responses protocol is not admitted.
+        assert_eq!(
+            normalize_model_endpoint_input(None, switched.clone()).is_err(),
+            catalog_id.starts_with("k-k2")
+        );
+        if catalog_id.starts_with("k-k3") {
+            let admitted = normalize_model_endpoint_input(None, switched.clone()).unwrap();
+            assert_eq!(admitted.api_protocol, "openai-responses");
+            switched.reasoning_effort = Some("medium".into());
+            assert!(normalize_model_endpoint_input(None, switched).is_err());
+        }
+        let mut forbidden = input.clone();
+        forbidden.reasoning_effort = Some("medium".into());
+        assert!(normalize_model_endpoint_input(None, forbidden).is_err());
+        endpoints.push(endpoint);
+    }
+    save_model_endpoints(&root, &endpoints).unwrap();
+    let restored = load_model_endpoints_resilient(&root).unwrap();
+    assert_eq!(
+        serde_json::to_value(&restored).unwrap(),
+        serde_json::to_value(&endpoints).unwrap()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn kimi_code_catalog_endpoints_roundtrip_and_protocol_defaults() {
+    let root = std::env::temp_dir().join(unique_web_id("kimi_code_catalog"));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut endpoints = Vec::new();
+    for (catalog_id, model_id, effort, input_budget) in [
+        ("kimicode_k3.1-pro", "k3.1-pro", "high", 200000u32),
+        (
+            "kimicode_k3.1-pro-highspeed",
+            "k3.1-pro-highspeed",
+            "high",
+            200000,
+        ),
+        ("kimicode_k3", "k3", "high", 200000),
+        ("kimicode_k3-256k", "k3-256k", "high", 120000),
+        ("kimicode_kimi-for-coding", "kimi-for-coding", "max", 200000),
+    ] {
+        // Match the browser template submission: versioned requirements name
+        // kimi_code explicitly instead of relying on the legacy catalog_id path.
+        let value = json!({"name":catalog_id,"catalog_id":catalog_id,
+            "model":model_id,"api_protocol":"openai-responses","response_protocol":"xml",
+            "base_url":"https://api.kimi.com/coding/v1","max_llm_input_tokens":input_budget,
+            "max_llm_output_tokens":131072,"reasoning_effort":effort,"stream":true,
+            "requirements":{"version":1,"provider":"kimi_code",
+                "allowed_reasoning":["low","high","max"],"adaptive_reasoning":true,
+                "field_sources":{"provider":"template","model":"template",
+                    "api_protocol":"template","base_url":"template",
+                    "reasoning_effort":"template","allowed_reasoning":"template",
+                    "adaptive_reasoning":"template","max_llm_input_tokens":"template",
+                    "max_llm_output_tokens":"template"}}});
+        let input: ModelEndpointInput = serde_json::from_value(value).unwrap();
+        let endpoint = normalize_model_endpoint_input(None, input.clone()).unwrap();
+        assert_eq!(endpoint.catalog_id.as_deref(), Some(catalog_id));
+        assert_eq!(endpoint.reasoning_effort.as_deref(), Some(effort));
+        let mut wrong = input.clone();
+        wrong.reasoning_effort = Some("none".into());
+        assert!(normalize_model_endpoint_input(None, wrong).is_err());
+        let mut chat = input.clone();
+        chat.api_protocol = "openai-compatible".into();
+        let admitted = normalize_model_endpoint_input(None, chat).unwrap();
+        assert_eq!(admitted.api_protocol, "openai-compatible");
         endpoints.push(endpoint);
     }
     save_model_endpoints(&root, &endpoints).unwrap();
@@ -18673,6 +19936,7 @@ fn interrupted_queued_message_id_follows_the_shared_history_formula() {
             text: "queued text".to_string(),
             attachments: Vec::new(),
             worker_roles: Vec::new(),
+            dispatch_deadline_ms: None,
         },
     };
     let (message, turn) = interrupted_turn_from_queued_message(&item, 5000);
@@ -18701,6 +19965,7 @@ fn web_timer_fixture(name: &str, mode: &str, next_fire_ms: u64) -> WebTimer {
             after_ms: Some(1000),
             at: None,
             interval_ms: if mode == "repeat" { Some(60_000) } else { None },
+            queue_timeout_minutes: u64::MAX,
             created_by: "user".to_string(),
         },
         created_at_ms: now_ms(),
@@ -18721,6 +19986,7 @@ fn web_timer_compute_next_fire_ms_parses_at_and_rejects_invalid() {
         after_ms: Some(1500),
         at: None,
         interval_ms: None,
+        queue_timeout_minutes: 0,
         created_by: "user".into(),
     };
     assert_eq!(compute_next_fire_ms(&spec, 10_000).unwrap(), 11_500);
@@ -18786,7 +20052,8 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
         None,
         Some(1000),
         None,
-        None
+        None,
+        0
     )
     .unwrap_err()
     .contains("prompt_required"));
@@ -18800,6 +20067,7 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
         Some(1000),
         None,
         None,
+        u64::MAX,
     )
     .unwrap();
     create_session_timer(
@@ -18811,6 +20079,7 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
         None,
         Some("2030-01-01T00:00:00Z".to_string()),
         None,
+        u64::MAX,
     )
     .unwrap();
     {
@@ -18831,7 +20100,8 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
         None,
         Some(1000),
         None,
-        None
+        None,
+        0
     )
     .unwrap_err()
     .contains("name_exists"));
@@ -18840,6 +20110,132 @@ fn web_timer_create_auto_names_rejects_duplicates_and_persists() {
     assert_eq!(persisted.len(), 2);
     assert!(persisted[0].next_fire_ms > 0);
     assert!(persisted[1].next_fire_ms > now_ms() as u64);
+}
+
+#[test]
+fn web_timer_update_edits_prompt_schedule_name_and_delivery() {
+    let state = routing_test_state();
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("alpha".into()),
+        "work".into(),
+        Some("once".into()),
+        Some(60_000),
+        None,
+        None,
+        u64::MAX,
+    )
+    .unwrap();
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("beta".into()),
+        "other".into(),
+        None,
+        Some(1000),
+        None,
+        None,
+        u64::MAX,
+    )
+    .unwrap();
+    let timer_id = state.sessions.lock().unwrap()["session_a"].timers[0]
+        .spec
+        .timer_id
+        .clone();
+    let next_fire_before = state.sessions.lock().unwrap()["session_a"].timers[0].next_fire_ms;
+
+    // Prompt-only edits keep the calendar untouched.
+    update_session_timer(
+        &state,
+        "session_a",
+        &timer_id,
+        "work2",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let timer = &sessions["session_a"].timers[0];
+        assert_eq!(timer.spec.prompt, "work2");
+        assert_eq!(timer.next_fire_ms, next_fire_before);
+        assert_eq!(timer.spec.queue_timeout_minutes, u64::MAX);
+    }
+
+    // Renaming onto a sibling is rejected.
+    assert!(update_session_timer(
+        &state,
+        "session_a",
+        &timer_id,
+        "work2",
+        Some("beta".into()),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap_err()
+    .contains("name_exists"));
+
+    // Full schedule replacement validates, clears omitted members, renames,
+    // flips delivery, and recomputes the next fire from now.
+    let update_started = now_ms() as u64;
+    update_session_timer(
+        &state,
+        "session_a",
+        &timer_id,
+        "work2",
+        Some("gamma".into()),
+        Some("repeat".into()),
+        Some(30_000),
+        None,
+        Some(120_000),
+        Some(5),
+    )
+    .unwrap();
+    let update_finished = now_ms() as u64;
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let timer = &sessions["session_a"].timers[0];
+        assert_eq!(timer.spec.name, "gamma");
+        assert_eq!(timer.spec.mode, "repeat");
+        assert_eq!(timer.spec.after_ms, Some(30_000));
+        assert_eq!(timer.spec.at, None);
+        assert_eq!(timer.spec.interval_ms, Some(120_000));
+        assert_eq!(timer.spec.queue_timeout_minutes, 5);
+        assert!(timer.next_fire_ms >= update_started + 30_000);
+        assert!(timer.next_fire_ms <= update_finished + 30_000);
+    }
+
+    // A rejected edit leaves no partial mutation behind. once without any
+    // first-fire anchor is schedule_invalid (an interval alone would be
+    // interval_requires_repeat).
+    assert!(update_session_timer(
+        &state,
+        "session_a",
+        &timer_id,
+        "work3",
+        None,
+        Some("once".into()),
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap_err()
+    .contains("schedule_invalid"));
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let timer = &sessions["session_a"].timers[0];
+        assert_eq!(timer.spec.prompt, "work2");
+        assert_eq!(timer.spec.mode, "repeat");
+    }
 }
 
 #[test]
@@ -18854,6 +20250,7 @@ fn web_timer_toggle_and_delete() {
         Some(1000),
         None,
         None,
+        u64::MAX,
     )
     .unwrap();
     let timer_id = state.sessions.lock().unwrap()["session_a"].timers[0]
@@ -18895,9 +20292,11 @@ fn web_timer_merge_from_core_preserves_host_metadata() {
         let mut sessions = state.sessions.lock().unwrap();
         sessions.get_mut("session_a").unwrap().timers = vec![seeded];
     }
-    // Core reports the existing timer (prompt changed) plus a new model timer.
-    let mut updated = existing_spec.clone();
-    updated.prompt = "changed by model".into();
+    // Core reports the existing timer with a differing spec. Core never
+    // mutates a known spec (its tool only creates and deletes), so a differing
+    // spec is a stale projection: the host keeps its own spec content.
+    let mut stale = existing_spec.clone();
+    stale.prompt = "stale core mirror".into();
     let model_timer = TimerSpec {
         timer_id: "timer_model_1".into(),
         name: "timer0".into(),
@@ -18906,16 +20305,20 @@ fn web_timer_merge_from_core_preserves_host_metadata() {
         after_ms: Some(2000),
         at: None,
         interval_ms: None,
+        queue_timeout_minutes: u64::MAX,
         created_by: "model".into(),
     };
-    merge_session_timers_from_core(&state, "session_a", &[updated, model_timer]).unwrap();
+    merge_session_timers_from_core(&state, "session_a", &[stale, model_timer]).unwrap();
     let timers = state.sessions.lock().unwrap()["session_a"].timers.clone();
     assert_eq!(timers.len(), 2);
     let kept = timers
         .iter()
         .find(|t| t.spec.timer_id == existing_id)
         .unwrap();
-    assert_eq!(kept.spec.prompt, "changed by model");
+    assert_eq!(
+        kept.spec.prompt, existing_spec.prompt,
+        "a stale Core mirror must never overwrite the host spec"
+    );
     assert_eq!(kept.created_at_ms, 42);
     assert!(!kept.enabled);
     assert_eq!(kept.last_fired_ms, Some(7));
@@ -18931,6 +20334,75 @@ fn web_timer_merge_from_core_preserves_host_metadata() {
 }
 
 #[test]
+fn web_timer_merge_from_core_never_reverts_user_edited_prompt() {
+    // Regression: a user edit is applied on the Host and persisted, but the
+    // worker's TimerSync queues behind a running turn. If the model then calls
+    // the timer tool, Core reports its stale full set and the merge must not
+    // roll the edit back (in memory or in timers.json).
+    let state = routing_test_state();
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("userjob".into()),
+        "original prompt".into(),
+        Some("once".into()),
+        Some(60_000),
+        None,
+        None,
+        u64::MAX,
+    )
+    .unwrap();
+    let timer_id = state.sessions.lock().unwrap()["session_a"].timers[0]
+        .spec
+        .timer_id
+        .clone();
+    update_session_timer(
+        &state,
+        "session_a",
+        &timer_id,
+        "edited prompt",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let stale = {
+        let sessions = state.sessions.lock().unwrap();
+        let mut spec = sessions["session_a"].timers[0].spec.clone();
+        spec.prompt = "original prompt".into();
+        spec
+    };
+    let model_timer = TimerSpec {
+        timer_id: "timer_model_1".into(),
+        name: "timer0".into(),
+        prompt: "model job".into(),
+        mode: "once".into(),
+        after_ms: Some(2000),
+        at: None,
+        interval_ms: None,
+        queue_timeout_minutes: u64::MAX,
+        created_by: "model".into(),
+    };
+    merge_session_timers_from_core(&state, "session_a", &[stale, model_timer]).unwrap();
+
+    let timers = state.sessions.lock().unwrap()["session_a"].timers.clone();
+    let kept = timers.iter().find(|t| t.spec.timer_id == timer_id).unwrap();
+    assert_eq!(kept.spec.prompt, "edited prompt");
+    assert!(timers.iter().any(|t| t.spec.timer_id == "timer_model_1"));
+    let persisted = std::fs::read(timers_path(&state, "session_a").unwrap()).unwrap();
+    let persisted = String::from_utf8_lossy(&persisted);
+    assert!(
+        persisted.contains("edited prompt"),
+        "the stale merge must not repersist the pre-edit prompt"
+    );
+    assert!(!persisted.contains("original prompt"));
+}
+
+#[test]
 fn web_timer_fire_due_enqueues_into_active_turn() {
     let state = routing_test_state();
     create_session_timer(
@@ -18942,6 +20414,7 @@ fn web_timer_fire_due_enqueues_into_active_turn() {
         Some(1000),
         None,
         None,
+        u64::MAX,
     )
     .unwrap();
     // Simulate a turn in flight: pending_turn_id alone satisfies the
@@ -18974,6 +20447,7 @@ fn web_timer_fire_due_enqueues_into_active_turn() {
         Some(1000),
         None,
         Some(60_000),
+        u64::MAX,
     )
     .unwrap();
     {
@@ -19004,6 +20478,7 @@ fn web_timer_fire_due_idle_session_starts_new_timer_turn() {
         Some(1000),
         None,
         None,
+        u64::MAX,
     )
     .unwrap();
     {
@@ -19212,6 +20687,7 @@ fn real_worker_timer_fire_delivers_prompt_and_completes_turn() {
         Some(1000),
         None,
         None,
+        u64::MAX,
     )
     .unwrap();
     // Force the timer due on the next scheduler tick.
@@ -19377,6 +20853,7 @@ fn web_timer_update_prompt_preserves_schedule_and_persists() {
         Some(1000),
         None,
         None,
+        u64::MAX,
     )
     .unwrap();
     let (timer_id, next_fire, enabled) = {
@@ -19389,24 +20866,69 @@ fn web_timer_update_prompt_preserves_schedule_and_persists() {
         )
     };
     // Empty and whitespace-only prompts are rejected.
-    assert!(update_session_timer(&state, "session_a", &timer_id, "  ")
-        .unwrap_err()
-        .contains("prompt_required"));
+    assert!(update_session_timer(
+        &state,
+        "session_a",
+        &timer_id,
+        "  ",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None
+    )
+    .unwrap_err()
+    .contains("prompt_required"));
     // Oversized prompts are rejected.
-    assert!(
-        update_session_timer(&state, "session_a", &timer_id, &"x".repeat(8001))
-            .unwrap_err()
-            .contains("timer_prompt_too_long")
-    );
+    assert!(update_session_timer(
+        &state,
+        "session_a",
+        &timer_id,
+        &"x".repeat(8001),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None
+    )
+    .unwrap_err()
+    .contains("timer_prompt_too_long"));
     // Unknown timer/session ids fail closed.
-    assert!(update_session_timer(&state, "session_a", "missing", "p")
-        .unwrap_err()
-        .contains("timer_not_found"));
-    assert!(update_session_timer(&state, "missing", &timer_id, "p")
-        .unwrap_err()
-        .contains("session_not_found"));
+    assert!(update_session_timer(
+        &state,
+        "session_a",
+        "missing",
+        "p",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None
+    )
+    .unwrap_err()
+    .contains("timer_not_found"));
+    assert!(update_session_timer(
+        &state, "missing", &timer_id, "p", None, None, None, None, None, None
+    )
+    .unwrap_err()
+    .contains("session_not_found"));
     // Valid edit trims, persists, and keeps schedule state untouched.
-    update_session_timer(&state, "session_a", &timer_id, "  revised prompt  ").unwrap();
+    update_session_timer(
+        &state,
+        "session_a",
+        &timer_id,
+        "  revised prompt  ",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     {
         let sessions = state.sessions.lock().unwrap();
         let timer = &sessions["session_a"].timers[0];
@@ -19415,8 +20937,3495 @@ fn web_timer_update_prompt_preserves_schedule_and_persists() {
         assert_eq!(timer.enabled, enabled);
     }
     // Identical prompt is a no-op success (no churn).
-    update_session_timer(&state, "session_a", &timer_id, "revised prompt").unwrap();
+    update_session_timer(
+        &state,
+        "session_a",
+        &timer_id,
+        "revised prompt",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     // persisted projection carries the new prompt.
     let persisted = load_session_timers(&state, "session_a");
     assert_eq!(persisted[0].spec.prompt, "revised prompt");
+}
+
+#[test]
+fn web_timer_fire_immediate_contrasts_with_queue_delivery() {
+    // Same scenario for both modes: idle session, one message already queued.
+    // Without a live worker the submit dispatch falls back to the queue
+    // (environment detail, not pinned); the product difference pinned here is
+    // the turn: immediate mode puts the prompt into the conversation right
+    // away instead of waiting behind queued messages.
+    let state = routing_test_state();
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("urgent".into()),
+        "urgent job".into(),
+        None,
+        Some(1000),
+        None,
+        None,
+        0,
+    )
+    .unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session
+            .message_queue
+            .enqueue(
+                "queued_1",
+                WebNextTurnPayload {
+                    send_after_cancel: false,
+                    turn_id: "web_turn_q1".into(),
+                    created_at_ms: now_ms(),
+                    text: "queued work".into(),
+                    attachments: Vec::new(),
+                    worker_roles: Vec::new(),
+                    dispatch_deadline_ms: None,
+                },
+            )
+            .unwrap();
+        session.timers[0].next_fire_ms = 0;
+    }
+    fire_due_timers(&state);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions["session_a"];
+        assert!(session.timers.is_empty(), "once timer consumed");
+        let urgent_turn = session.turns.iter().any(|turn| {
+            turn.user_entries
+                .iter()
+                .any(|entry| entry.kind == "timer" && entry.text == "[timer:urgent] urgent job")
+        });
+        assert!(urgent_turn, "immediate timer must enter the conversation");
+    }
+
+    // Default mode under the same conditions only enqueues behind the queue.
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("patient".into()),
+        "patient job".into(),
+        None,
+        Some(1000),
+        None,
+        None,
+        u64::MAX,
+    )
+    .unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.timers[0].next_fire_ms = 0;
+    }
+    fire_due_timers(&state);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions["session_a"];
+        assert!(session.timers.is_empty(), "once timer consumed");
+        let patient_turn = session.turns.iter().any(|turn| {
+            turn.user_entries
+                .iter()
+                .any(|entry| entry.text == "[timer:patient] patient job")
+        });
+        assert!(
+            !patient_turn,
+            "queued delivery must not create a turn behind the queue"
+        );
+        let texts: Vec<&str> = session
+            .message_queue
+            .projection()
+            .items
+            .iter()
+            .map(|item| item.payload.text.as_str())
+            .collect();
+        assert!(texts.contains(&"[timer:patient] patient job"), "{texts:?}");
+    }
+}
+
+fn mailbox_test_entry(id: &str, dir: &str, peer: &str, state: &str) -> MailboxEntry {
+    MailboxEntry {
+        id: id.to_string(),
+        dir: dir.to_string(),
+        peer: peer.to_string(),
+        created_at_ms: 0,
+        state: state.to_string(),
+        notified: state != "sent",
+        receipt_sent: dir == "out" || state == "read",
+        resp_timeout_secs: 300,
+    }
+}
+
+fn mailbox_test_body(state: &AppState, id: &str, from: &str, to: &str, msg: &str) {
+    store_mem_mail(
+        state,
+        &MemMail {
+            id: id.to_string(),
+            from: from.to_string(),
+            to: to.to_string(),
+            msg: msg.to_string(),
+            created_at_ms: 0,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn mailbox_prune_caps_indexes_and_preserves_pending_evidence() {
+    let mut entries = vec![
+        mailbox_test_entry("m1", "in", "mb-from", "read"),
+        mailbox_test_entry("m2", "in", "mb-from", "queued"),
+        {
+            let mut entry = mailbox_test_entry("m3", "in", "mb-from", "read");
+            entry.receipt_sent = false;
+            entry
+        },
+    ];
+    entries
+        .extend((0..200).map(|i| mailbox_test_entry(&format!("old{i}"), "in", "mb-from", "read")));
+    entries.extend((0..205).map(|i| {
+        let mut entry = mailbox_test_entry(
+            &format!("s{i}"),
+            "out",
+            "mb-to",
+            if i == 0 { "sent" } else { "read" },
+        );
+        entry.created_at_ms = i as u128;
+        entry.notified = i != 0;
+        entry
+    }));
+
+    assert!(prune_mailbox_entries(&mut entries));
+    assert_eq!(
+        entries.iter().filter(|entry| entry.dir == "in").count(),
+        200,
+        "the cap is reached while the two protected evidence entries survive"
+    );
+    assert_eq!(
+        entries.iter().filter(|entry| entry.dir == "out").count(),
+        200
+    );
+    assert!(!entries.iter().any(|entry| entry.id == "m1"));
+    assert!(entries.iter().any(|entry| entry.id == "m2"));
+    assert!(entries.iter().any(|entry| entry.id == "m3"));
+    assert!(entries.iter().any(|entry| entry.id == "s0"));
+    assert!(entries.iter().any(|entry| entry.id == "s204"));
+    assert!(!prune_mailbox_entries(&mut entries));
+}
+
+#[test]
+fn mailbox_snapshot_assembles_bodies_and_counts_unread() {
+    let (_guard, app, _session_id) = mailbox_e2e_setup("mailbox_e2e_snapshot");
+    for (id, from, to, msg) in [
+        ("m1", "mb-from", "mb-abcd", "first body"),
+        ("m2", "mb-from", "mb-abcd", "second body"),
+        ("s1", "mb-abcd", "mb-peer", "outgoing body"),
+    ] {
+        mailbox_test_body(&app, id, from, to, msg);
+    }
+    let mailbox = MailboxState {
+        mailbox_name: "mb-abcd".to_string(),
+        entries: vec![
+            mailbox_test_entry("m1", "in", "mb-from", "queued"),
+            mailbox_test_entry("m2", "in", "mb-from", "read"),
+            mailbox_test_entry("s1", "out", "mb-peer", "sent"),
+        ],
+    };
+    let snapshot = mailbox_snapshot(&app, &mailbox);
+    assert_eq!(snapshot.unread, 1);
+    assert_eq!(snapshot.mailbox_name, "mb-abcd");
+    assert_eq!(snapshot.mails.len(), 2);
+    assert_eq!(snapshot.mails[0].msg, "first body");
+    assert!(!snapshot.mails[0].delivered && !snapshot.mails[0].read);
+    assert!(snapshot.mails[1].delivered && snapshot.mails[1].read);
+    assert_eq!(snapshot.sent.len(), 1);
+    assert_eq!(snapshot.sent[0].msg, "outgoing body");
+    let raw = serde_json::to_string(&mailbox).unwrap();
+    assert!(!raw.contains("first body") && !raw.contains("outgoing body"));
+}
+
+#[test]
+fn mailbox_commands_lane_to_their_session() {
+    let clear: BrowserCommand = serde_json::from_value(json!({
+        "type": "mailbox_clear",
+        "session_id": "session_b"
+    }))
+    .unwrap();
+    assert_eq!(
+        clear.command.mutation_lane().as_deref(),
+        Some("session:session_b")
+    );
+    let get: BrowserCommand = serde_json::from_value(json!({
+        "type": "mailbox_get",
+        "session_id": "session_c"
+    }))
+    .unwrap();
+    assert_eq!(
+        get.command.mutation_lane().as_deref(),
+        Some("session:session_c")
+    );
+}
+
+#[test]
+fn mailbox_receipt_application_is_idempotent_and_reconciles_timeouts() {
+    let mut timed_out = mailbox_test_entry("t1", "out", "mb-b", "timeout");
+    timed_out.notified = true;
+    let mut waiting = mailbox_test_entry("w1", "out", "mb-c", "sent");
+    waiting.notified = false;
+    let mut mailbox = MailboxState {
+        mailbox_name: "mb-a".to_string(),
+        entries: vec![timed_out, waiting],
+    };
+    let receipt = |id: &str, status: &str| crate::mailbox::MailboxMail {
+        id: format!("r-{id}"),
+        from: "mb-a".to_string(),
+        to: "mb-b".to_string(),
+        msg: String::new(),
+        created_at_ms: 0,
+        queue_timeout_secs: 0,
+        resp_timeout_secs: -1,
+        kind: "receipt".to_string(),
+        receipt_for: Some(id.to_string()),
+        receipt_status: Some(status.to_string()),
+    };
+    assert!(apply_mailbox_receipt(&mut mailbox, &receipt("t1", "read")));
+    assert_eq!(mailbox.entries[0].state, "read");
+    assert!(!mailbox.entries[0].notified);
+    assert!(!apply_mailbox_receipt(&mut mailbox, &receipt("t1", "read")));
+    assert!(apply_mailbox_receipt(
+        &mut mailbox,
+        &receipt("w1", "timeout")
+    ));
+    assert_eq!(mailbox.entries[1].state, "timeout");
+    assert!(!apply_mailbox_receipt(
+        &mut mailbox,
+        &receipt("w1", "failed")
+    ));
+    assert!(!apply_mailbox_receipt(
+        &mut mailbox,
+        &receipt("ghost", "read")
+    ));
+}
+
+#[test]
+fn mailbox_terminal_notices_surface_once() {
+    let sent = |status: &str, notified: bool| {
+        let mut entry = mailbox_test_entry("m1", "out", "mb-b", status);
+        entry.notified = notified;
+        entry
+    };
+    assert!(mailbox_terminal_notice(&sent("sent", false)).is_none());
+    for status in ["read", "timeout", "discarded", "failed"] {
+        let notice = mailbox_terminal_notice(&sent(status, false)).expect(status);
+        assert!(notice.starts_with("[mailbox]"), "{notice}");
+        assert!(notice.contains("m1"), "{notice}");
+    }
+    assert!(mailbox_terminal_notice(&sent("timeout", true)).is_none());
+}
+
+#[test]
+fn mailbox_deadline_reached_honors_zero_negative_and_boundary() {
+    assert!(mailbox_deadline_reached(0, 0, 0));
+    assert!(!mailbox_deadline_reached(1_000, 1, 1_999));
+    assert!(mailbox_deadline_reached(1_000, 1, 2_000));
+    assert!(!mailbox_deadline_reached(0, -1, u128::MAX));
+}
+
+// ===== Mailbox end-to-end delivery, receipt and notice guards =====
+// These tests run against a fake HOME and never touch the developer's spool.
+static MAILBOX_E2E_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Any test that directly or indirectly triggers `restore_stored_sessions`
+/// (whose one-time spool sweep reads the HOME-derived mailbox root) must hold
+/// this guard, so it cannot interleave with the mailbox-e2e tests that
+/// repoint the process-global HOME at a per-test fake home. Without the
+/// mutual exclusion a foreign sweep can claim another test's acquired
+/// `mb-` directory first and strand its envelopes before the identity pass.
+fn home_sandbox_guard() -> std::sync::MutexGuard<'static, ()> {
+    MAILBOX_E2E_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+struct MailboxE2eGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    original_home: Option<PathBuf>,
+    original_max_bytes: Option<String>,
+    original_max_files: Option<String>,
+    original_orphan_grace: Option<String>,
+}
+
+impl Drop for MailboxE2eGuard {
+    fn drop(&mut self) {
+        match self.original_home.take() {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        match self.original_max_bytes.take() {
+            Some(value) => std::env::set_var("TIMEM_MAILBOX_MAX_BYTES", value),
+            None => std::env::remove_var("TIMEM_MAILBOX_MAX_BYTES"),
+        }
+        match self.original_max_files.take() {
+            Some(value) => std::env::set_var("TIMEM_MAILBOX_MAX_FILES", value),
+            None => std::env::remove_var("TIMEM_MAILBOX_MAX_FILES"),
+        }
+        match self.original_orphan_grace.take() {
+            Some(value) => std::env::set_var("TIMEM_MAILBOX_ORPHAN_GRACE_SECS", value),
+            None => std::env::remove_var("TIMEM_MAILBOX_ORPHAN_GRACE_SECS"),
+        }
+    }
+}
+
+fn mailbox_e2e_setup(worker_label: &'static str) -> (MailboxE2eGuard, AppState, String) {
+    let lock = home_sandbox_guard();
+    let original_home = std::env::var("HOME").ok().map(PathBuf::from);
+    let fake_home = std::env::temp_dir().join(unique_web_id("mailbox_e2e_home"));
+    std::fs::create_dir_all(&fake_home).unwrap();
+    std::env::set_var("HOME", &fake_home);
+    let guard = MailboxE2eGuard {
+        _lock: lock,
+        original_home,
+        original_max_bytes: std::env::var("TIMEM_MAILBOX_MAX_BYTES").ok(),
+        original_max_files: std::env::var("TIMEM_MAILBOX_MAX_FILES").ok(),
+        original_orphan_grace: std::env::var("TIMEM_MAILBOX_ORPHAN_GRACE_SECS").ok(),
+    };
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, worker_label);
+    (guard, state, session_id)
+}
+
+fn e2e_spool() -> PathBuf {
+    crate::mailbox::mailbox_spool_root()
+}
+
+fn e2e_mail(
+    id: &str,
+    from: &str,
+    to: &str,
+    queue_timeout_secs: i64,
+    resp_timeout_secs: i64,
+) -> crate::mailbox::MailboxMail {
+    crate::mailbox::MailboxMail {
+        id: id.to_string(),
+        from: from.to_string(),
+        to: to.to_string(),
+        msg: format!("msg-{id}"),
+        created_at_ms: 0,
+        queue_timeout_secs,
+        resp_timeout_secs,
+        kind: "mail".to_string(),
+        receipt_for: None,
+        receipt_status: None,
+    }
+}
+
+fn e2e_receipt(id: &str, from: &str, to: &str, for_id: &str) -> crate::mailbox::MailboxMail {
+    crate::mailbox::MailboxMail {
+        id: id.to_string(),
+        from: from.to_string(),
+        to: to.to_string(),
+        msg: format!("mail {for_id}: read"),
+        created_at_ms: 0,
+        queue_timeout_secs: 0,
+        resp_timeout_secs: -1,
+        kind: "receipt".to_string(),
+        receipt_for: Some(for_id.to_string()),
+        receipt_status: Some("read".to_string()),
+    }
+}
+
+fn e2e_inbox(name: &str) -> PathBuf {
+    crate::mailbox::mailbox_spool_dir(&e2e_spool(), name)
+}
+
+#[test]
+fn mailbox_tick_intake_is_idempotent_and_acknowledges_read_mail() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_intake");
+    let self_name = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .mailbox_name;
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("mail_a", "mb-peer1", &self_name, -1, -1),
+    )
+    .unwrap();
+    mailbox_tick(&state);
+
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.entries.len(), 1);
+    let entry = &mailbox.entries[0];
+    assert_eq!(entry.id, "mail_a");
+    assert_eq!(entry.dir, "in");
+    assert_eq!(entry.state, "read");
+    assert!(entry.receipt_sent);
+    assert_eq!(load_mem_mail(&state, "mail_a").unwrap().msg, "msg-mail_a");
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(&self_name)).is_empty());
+    let back = crate::mailbox::scan_mails(&e2e_inbox("mb-peer1"));
+    assert_eq!(back.len(), 1);
+    assert_eq!(back[0].1.kind, "receipt");
+    assert_eq!(back[0].1.receipt_for.as_deref(), Some("mail_a"));
+    assert!(state.sessions.lock().unwrap()[&session_id]
+        .turns
+        .iter()
+        .any(|turn| turn.user_entries.iter().any(|entry| {
+            entry.text.contains("[mailbox] mb-peer1 发来 mail") && entry.text.contains("msg-mail_a")
+        })));
+
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("mail_a", "mb-peer1", &self_name, -1, -1),
+    )
+    .unwrap();
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.entries.len(), 1);
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(&self_name)).is_empty());
+}
+
+#[test]
+fn mailbox_send_receipt_wait_folds_fast_reads_and_falls_back() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_send_receipt_wait");
+    let self_name = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .mailbox_name;
+
+    // Case 1: a synchronous local receiver folds the read receipt into the
+    // send action result; the tick must never re-deliver it as a notice.
+    std::env::set_var("TIMEM_MAILBOX_RECEIPT_WAIT_MS", "2000");
+    let (mail_id, initially_read) = handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &json!({"to": self_name, "msg": "consume me"}),
+    )
+    .expect("send should succeed");
+    assert!(initially_read, "local delivery is synchronous: {mail_id}");
+    {
+        let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+        let entry = mailbox
+            .entries
+            .iter()
+            .find(|entry| entry.dir == "out" && entry.id == mail_id)
+            .expect("out entry recorded");
+        assert_eq!(entry.state, "read");
+        assert!(
+            entry.notified,
+            "notice folded into the action result, tick must not re-deliver"
+        );
+    }
+    mailbox_tick(&state);
+    let status_notices = state.sessions.lock().unwrap()[&session_id]
+        .turns
+        .iter()
+        .flat_map(|turn| turn.user_entries.iter())
+        .filter(|entry| entry.kind == "mailbox_status")
+        .count();
+    assert_eq!(
+        status_notices, 0,
+        "the consumed receipt must not re-appear as a notice"
+    );
+
+    // Case 2: no receipt inside the window keeps the fallback path intact.
+    std::env::set_var("TIMEM_MAILBOX_RECEIPT_WAIT_MS", "0");
+    // The peer inbox must exist or the send fails outright. A non-compact
+    // legacy address is kept verbatim, so the spool location is unchanged.
+    std::fs::create_dir_all(e2e_inbox("mb-faraway")).unwrap();
+    let (mail_id2, initially_read2) = handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &json!({"to": "mb-faraway", "msg": "slow receiver"}),
+    )
+    .expect("send should succeed");
+    assert!(!initially_read2);
+    {
+        let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+        let entry = mailbox
+            .entries
+            .iter()
+            .find(|entry| entry.dir == "out" && entry.id == mail_id2)
+            .expect("out entry recorded");
+        assert_eq!(entry.state, "sent");
+        assert!(
+            !entry.notified,
+            "the notice stays deliverable after the window"
+        );
+    }
+    std::env::remove_var("TIMEM_MAILBOX_RECEIPT_WAIT_MS");
+}
+
+#[test]
+fn mailbox_send_dispatch_off_bridge_folds_local_reads_and_serializes() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_dispatch");
+    let self_name = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .mailbox_name;
+    // Synchronous test context: no tokio runtime, so the dispatch must fall
+    // back to the inline path. The local receiver consumes synchronously, so
+    // the fast-read window still folds the receipt into the handshake reply.
+    std::env::set_var("TIMEM_MAILBOX_RECEIPT_WAIT_MS", "2000");
+    // The topic scope must match the bridge parameters or the Topics loop
+    // skips the event as a scope mismatch before the mailbox branch runs.
+    let event = CoreSessionWorkerEvent::Topics(vec![agent_core::host::mailbox_send_topic_event(
+        &session_id,
+        &self_name,
+        "dispatch me",
+        300,
+        600,
+        "dispatch_req_1",
+    )
+    .with_worker_scope("ctx", "worker")]);
+    dispatch_mailbox_send_event(&state, &session_id, "ctx", "worker", event);
+    {
+        let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+        let entry = mailbox
+            .entries
+            .iter()
+            .find(|entry| entry.dir == "out")
+            .expect("out entry recorded");
+        assert_eq!(entry.state, "read");
+        assert!(
+            entry.notified,
+            "local fast read folded on the dispatch path"
+        );
+    }
+    // Same-session lane: the second send appends its own entry; both survive
+    // on the shared mailbox state file.
+    let event2 = CoreSessionWorkerEvent::Topics(vec![agent_core::host::mailbox_send_topic_event(
+        &session_id,
+        &self_name,
+        "dispatch me again",
+        300,
+        600,
+        "dispatch_req_2",
+    )
+    .with_worker_scope("ctx", "worker")]);
+    dispatch_mailbox_send_event(&state, &session_id, "ctx", "worker", event2);
+    let outs = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .entries
+        .iter()
+        .filter(|entry| entry.dir == "out")
+        .count();
+    assert_eq!(outs, 2, "both dispatched sends persist their entries");
+    std::env::remove_var("TIMEM_MAILBOX_RECEIPT_WAIT_MS");
+}
+
+#[test]
+fn unconsumed_supplement_handoff_keeps_runtime_origin() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_handoff_system");
+    // An all-system batch (mailbox delivery supplements handed over by a
+    // finishing turn) must replay through the system turn channel and record
+    // the mailbox origin kind, not degrade into a user task entry (## USER
+    // plus a user timestamp).
+    let system_batch = vec![timem_session::UnconsumedSupplement {
+        manual_context_compress: false,
+        system_input: true,
+        text: "[mailbox] mb-x 发来 mail:\nhello".to_string(),
+        additional_context: None,
+        command_id: None,
+    }];
+    let turn = submit_unconsumed_supplement_handoff(&state, &session_id, &system_batch)
+        .expect("system handoff submits");
+    assert_eq!(turn.user_entries.len(), 1);
+    assert_eq!(
+        turn.user_entries[0].kind, "mailbox",
+        "runtime-originated handoff keeps the mailbox kind"
+    );
+}
+
+#[test]
+fn unconsumed_supplement_handoff_mixed_batch_keeps_user_origin() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_handoff_mixed");
+    // A batch mixed with real user input stays on the user channel: the
+    // entries keep the task/supplement origin kinds. One setup per test: the
+    // e2e lock is not re-entrant.
+    let mixed_batch = vec![
+        timem_session::UnconsumedSupplement {
+            manual_context_compress: false,
+            system_input: true,
+            text: "[mailbox] mb-x 发来 mail:\nhello".to_string(),
+            additional_context: None,
+            command_id: None,
+        },
+        timem_session::UnconsumedSupplement {
+            manual_context_compress: false,
+            system_input: false,
+            text: "用户手动补充".to_string(),
+            additional_context: None,
+            command_id: None,
+        },
+    ];
+    let turn = submit_unconsumed_supplement_handoff(&state, &session_id, &mixed_batch)
+        .expect("mixed handoff submits");
+    assert_eq!(turn.user_entries[0].kind, "task");
+    assert_eq!(turn.user_entries[1].kind, "supplement");
+}
+
+#[test]
+fn mailbox_tick_delivers_all_mail_immediately() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_queue");
+    let self_name = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .mailbox_name;
+    for id in ["mail_due", "mail_wait"] {
+        crate::mailbox::write_mail(&e2e_spool(), &e2e_mail(id, "mb-peer2", &self_name, 0, -1))
+            .unwrap();
+    }
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.entries.len(), 2);
+    assert!(mailbox
+        .entries
+        .iter()
+        .all(|entry| { entry.dir == "in" && entry.state == "read" && entry.receipt_sent }));
+    let delivered = state.sessions.lock().unwrap()[&session_id]
+        .turns
+        .iter()
+        .map(|turn| {
+            turn.user_entries
+                .iter()
+                .filter(|entry| {
+                    entry.text.contains("[mailbox] ") && entry.text.contains("发来 mail")
+                })
+                .count()
+        })
+        .sum::<usize>();
+    assert_eq!(delivered, 2);
+}
+
+#[test]
+fn mailbox_resp_timeout_notifies_once_and_clear_preserves_pending_evidence() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_notice");
+    let mut mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    let mut outgoing = mailbox_test_entry("s1", "out", "mb-peer3", "sent");
+    outgoing.resp_timeout_secs = 0;
+    outgoing.notified = false;
+    mailbox_test_body(&state, "s1", &mailbox.mailbox_name, "mb-peer3", "hello");
+    mailbox.entries.push(outgoing);
+    save_mailbox_state(&state, &session_id, &mailbox).unwrap();
+    mailbox_tick(&state);
+
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    let s1 = &mailbox.entries[0];
+    assert_eq!(s1.state, "timeout");
+    assert!(s1.notified);
+    assert!(state.sessions.lock().unwrap()[&session_id]
+        .turns
+        .iter()
+        .any(|turn| turn
+            .user_entries
+            .iter()
+            .any(|entry| { entry.text.contains("[mailbox] 邮件 s1") })));
+    let after_first = (s1.state.clone(), s1.notified);
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(
+        (
+            mailbox.entries[0].state.clone(),
+            mailbox.entries[0].notified
+        ),
+        after_first
+    );
+
+    let mut mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    mailbox.entries.clear();
+    for (id, dir, state_name, receipt_sent, notified) in [
+        ("m_pending", "in", "read", false, true),
+        ("m_done", "in", "read", true, true),
+        ("m_new", "in", "queued", false, true),
+        ("s_sent", "out", "sent", true, false),
+        ("s_old", "out", "read", true, true),
+        ("s_late", "out", "timeout", true, false),
+    ] {
+        let mut entry = mailbox_test_entry(id, dir, "mb-peer3", state_name);
+        entry.receipt_sent = receipt_sent;
+        entry.notified = notified;
+        mailbox.entries.push(entry);
+    }
+    save_mailbox_state(&state, &session_id, &mailbox).unwrap();
+    handle_command_with_id(
+        &state,
+        TEST_PORT,
+        None,
+        ClientCommand::MailboxClear {
+            session_id: session_id.clone(),
+        },
+    )
+    .unwrap();
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    let ids: Vec<&str> = mailbox
+        .entries
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect();
+    assert_eq!(ids, vec!["m_pending", "s_sent", "s_late"]);
+    assert!(crate::mailbox::scan_mails(&e2e_inbox("mb-peer3"))
+        .iter()
+        .any(|(_, mail)| {
+            mail.receipt_status.as_deref() == Some("discarded")
+                && mail.receipt_for.as_deref() == Some("m_new")
+        }));
+}
+
+#[test]
+fn mailbox_send_topic_adopts_the_tool_supplied_mail_id() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_send_id");
+    let peer = "mb-e2e-peer-id";
+    std::fs::create_dir_all(e2e_inbox(peer)).unwrap();
+    handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &json!({
+            "to": peer,
+            "msg": "same id please",
+            "mail_id": "mail_00ff00ff00ff",
+        }),
+    );
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(
+        mailbox.entries.last().unwrap().id,
+        "mail_00ff00ff00ff",
+        "the Host must persist the id the tool already returned to the model"
+    );
+    assert!(mem_mail_exists(&state, "mail_00ff00ff00ff"));
+}
+
+#[test]
+fn mailbox_send_topic_returns_the_runtime_generated_mail_id() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_send_runtime_id");
+    let peer = "mb-e2e-peer-runtime-id";
+    std::fs::create_dir_all(e2e_inbox(peer)).unwrap();
+    let (mail_id, _initially_read) = handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &json!({
+            "to": peer,
+            "msg": "runtime id please",
+            "request_id": "mailbox_send_test",
+        }),
+    )
+    .expect("the Host must answer the send with the id it assigned");
+    assert_eq!(mail_id.len(), 11, "mail_ plus 6 base36 chars");
+    assert!(mail_id.starts_with("mail_"), "{mail_id}");
+    assert!(
+        mail_id[5..]
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+        "{mail_id}"
+    );
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(
+        mailbox.entries.last().unwrap().id,
+        mail_id,
+        "the Host must persist the id it returned to the tool"
+    );
+}
+
+#[test]
+fn mailbox_send_topic_resolves_timeout_args_and_failed_peers() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_send");
+    let peer = "mb-e2e-peer4";
+    std::fs::create_dir_all(e2e_inbox(peer)).unwrap();
+    handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &json!({"to": peer, "msg": "explicit", "queue_timeout_secs": 5, "resp_timeout_secs": 60}),
+    );
+    handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &json!({"to": peer, "msg": "legacy alias", "max_wait_secs": 7}),
+    );
+    handle_mailbox_send_topic(&state, &session_id, &json!({"to": peer, "msg": "defaults"}));
+    handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &json!({"to": "mb-missing-peer", "msg": "nobody home"}),
+    );
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    let snapshot = mailbox_snapshot(&state, &mailbox);
+    let find = |msg: &str| snapshot.sent.iter().find(|sent| sent.msg == msg).unwrap();
+    assert_eq!(find("explicit").status, "sent");
+    assert_eq!(find("explicit").resp_timeout_secs, 60);
+    assert_eq!(find("legacy alias").status, "sent");
+    assert_eq!(find("defaults").status, "sent");
+    assert_eq!(find("nobody home").status, "failed");
+    assert_eq!(mailbox.entries.len(), 4);
+    assert!(mailbox.entries.iter().all(|entry| entry.dir == "out"));
+
+    let envelopes = crate::mailbox::scan_mails(&e2e_inbox(peer));
+    assert_eq!(envelopes.len(), 3);
+    let queue_of = |msg: &str| {
+        envelopes
+            .iter()
+            .find(|(_, mail)| mail.msg == msg)
+            .unwrap()
+            .1
+            .queue_timeout_secs
+    };
+    assert_eq!(queue_of("explicit"), 5);
+    assert_eq!(queue_of("legacy alias"), 7);
+    assert_eq!(
+        queue_of("defaults"),
+        agent_core::host::MAILBOX_DEFAULT_QUEUE_TIMEOUT_SECS
+    );
+    for sent in &snapshot.sent {
+        assert_eq!(load_mem_mail(&state, &sent.id).unwrap().msg, sent.msg);
+    }
+}
+
+#[test]
+fn mailbox_stress_burst_receipts_timeouts_and_delivery() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_stress");
+    let self_name = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .mailbox_name;
+    let total = 200usize;
+    let started = Instant::now();
+    for i in 0..total {
+        crate::mailbox::write_mail(
+            &e2e_spool(),
+            &e2e_mail(&format!("burst{i}"), "mb-peer5", &self_name, 0, -1),
+        )
+        .unwrap();
+    }
+    mailbox_tick(&state);
+    let burst_elapsed = started.elapsed();
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.entries.len(), total);
+    assert!(mailbox
+        .entries
+        .iter()
+        .all(|entry| { entry.dir == "in" && entry.state == "read" && entry.receipt_sent }));
+    assert_eq!(
+        crate::mailbox::scan_mails(&e2e_inbox("mb-peer5")).len(),
+        total
+    );
+    assert!(burst_elapsed < Duration::from_secs(30));
+
+    for i in 0..total {
+        crate::mailbox::write_mail(
+            &e2e_spool(),
+            &e2e_mail(&format!("burst{i}"), "mb-peer5", &self_name, 0, -1),
+        )
+        .unwrap();
+    }
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.entries.len(), total);
+    assert_eq!(
+        crate::mailbox::scan_mails(&e2e_inbox("mb-peer5")).len(),
+        total
+    );
+
+    let mut mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    mailbox.entries.retain(|entry| entry.dir == "in");
+    mailbox.entries.extend((0..500).map(|i| {
+        let mut entry = mailbox_test_entry(&format!("s{i}"), "out", "mb-peer5", "sent");
+        entry.resp_timeout_secs = -1;
+        entry.notified = false;
+        entry
+    }));
+    save_mailbox_state(&state, &session_id, &mailbox).unwrap();
+    for i in 0..500 {
+        crate::mailbox::write_mail(
+            &e2e_spool(),
+            &e2e_receipt(&format!("rb{i}"), "mb-peer5", &self_name, &format!("s{i}")),
+        )
+        .unwrap();
+    }
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert!(mailbox
+        .entries
+        .iter()
+        .filter(|entry| entry.dir == "out")
+        .all(|entry| { entry.state == "read" && entry.notified }));
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(&self_name)).is_empty());
+
+    let mut mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    mailbox.entries.retain(|entry| entry.dir == "in");
+    mailbox.entries.extend((0..500).map(|i| {
+        let mut entry = mailbox_test_entry(&format!("w{i}"), "out", "mb-peer5", "sent");
+        entry.resp_timeout_secs = 0;
+        entry.notified = true;
+        entry
+    }));
+    save_mailbox_state(&state, &session_id, &mailbox).unwrap();
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert!(mailbox
+        .entries
+        .iter()
+        .filter(|entry| entry.dir == "out")
+        .all(|entry| { entry.state == "timeout" && entry.notified }));
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(
+        mailbox
+            .entries
+            .iter()
+            .filter(|entry| entry.dir == "out")
+            .count(),
+        200
+    );
+}
+
+#[test]
+fn session_upgraded_from_mailboxless_version_mints_short_address() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_upgrade");
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.mailbox_name.len(), 9);
+    assert!(mailbox.entries.is_empty());
+}
+
+#[test]
+fn compact_session_id_derives_mailbox_name() {
+    let (_guard, state, _session_id) = mailbox_e2e_setup("mailbox_e2e_derived");
+    let compact = generate_session_id(&state).unwrap();
+    assert!(is_compact_session_id(&compact));
+    let path = mailbox_state_path(&state, &compact).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mailbox = load_mailbox_state(&state, &compact).unwrap();
+    assert_eq!(mailbox.mailbox_name, format!("id_{compact}"));
+}
+
+#[test]
+fn corrupt_mailbox_state_is_backed_up_not_silently_discarded() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_corrupt");
+    let path = mailbox_state_path(&state, &session_id).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"{not json").unwrap();
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert!(mailbox.entries.is_empty());
+    assert_eq!(
+        std::fs::read(path.with_extension("json.corrupt")).unwrap(),
+        b"{not json"
+    );
+    assert!(serde_json::from_slice::<MailboxState>(&std::fs::read(&path).unwrap()).is_ok());
+}
+
+#[test]
+fn local_recipient_delivery_never_touches_the_spool() {
+    let (_guard, state, sender_sid) = mailbox_e2e_setup("mailbox_e2e_local");
+    let recipient_sid = register_real_worker(&state, "mailbox_e2e_local_peer");
+    let sender_name = load_mailbox_state(&state, &sender_sid)
+        .unwrap()
+        .mailbox_name;
+    let recipient_name = load_mailbox_state(&state, &recipient_sid)
+        .unwrap()
+        .mailbox_name;
+    handle_mailbox_send_topic(
+        &state,
+        &sender_sid,
+        &json!({"to": recipient_name, "msg": "local hand-off"}),
+    );
+
+    let sender = load_mailbox_state(&state, &sender_sid).unwrap();
+    let recipient = load_mailbox_state(&state, &recipient_sid).unwrap();
+    assert_eq!(sender.entries.len(), 1);
+    assert_eq!(recipient.entries.len(), 1);
+    assert_eq!(sender.entries[0].id, recipient.entries[0].id);
+    assert_eq!(sender.entries[0].state, "read");
+    assert_eq!(recipient.entries[0].state, "read");
+    assert!(recipient.entries[0].receipt_sent);
+    let mail = load_mem_mail(&state, &sender.entries[0].id).unwrap();
+    assert_eq!(mail.from, sender_name);
+    assert_eq!(mail.to, recipient_name);
+    assert_eq!(mail.msg, "local hand-off");
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(&mail.from)).is_empty());
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(&mail.to)).is_empty());
+    let raw = std::fs::read_to_string(mailbox_state_path(&state, &recipient_sid).unwrap()).unwrap();
+    assert!(!raw.contains("local hand-off"));
+
+    let remote = "mb-e2e-remote";
+    std::fs::create_dir_all(e2e_inbox(remote)).unwrap();
+    handle_mailbox_send_topic(
+        &state,
+        &sender_sid,
+        &json!({"to": remote, "msg": "cross instance"}),
+    );
+    assert_eq!(crate::mailbox::scan_mails(&e2e_inbox(remote)).len(), 1);
+    let sender = load_mailbox_state(&state, &sender_sid).unwrap();
+    assert_eq!(sender.entries[1].state, "sent");
+}
+
+#[test]
+fn mailbox_send_refuses_oversized_bodies_without_touching_the_spool() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_oversize");
+    let peer = "mb-e2e-peer6";
+    std::fs::create_dir_all(e2e_inbox(peer)).unwrap();
+    handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &json!({"to": peer, "msg": "x".repeat(64 * 1024 + 1)}),
+    );
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.entries.len(), 1);
+    assert_eq!(mailbox.entries[0].state, "failed");
+    assert!(load_mem_mail(&state, &mailbox.entries[0].id)
+        .unwrap()
+        .msg
+        .starts_with("[refused oversized body:"));
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(peer)).is_empty());
+}
+
+#[test]
+fn mailbox_spool_directory_is_self_healing_after_out_of_band_removal() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_selfheal");
+    let name = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .mailbox_name;
+    std::fs::remove_dir_all(e2e_inbox(&name)).unwrap();
+    load_mailbox_state(&state, &session_id).unwrap();
+    assert!(crate::mailbox::mailbox_exists(&e2e_spool(), &name));
+    crate::mailbox::write_mail(&e2e_spool(), &e2e_mail("heal", "mb-peer7", &name, -1, -1)).unwrap();
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert!(mailbox
+        .entries
+        .iter()
+        .any(|entry| entry.id == "heal" && entry.state == "read"));
+}
+
+#[test]
+fn legacy_mailbox_load_extracts_bodies_drops_receipts_and_is_idempotent() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_legacy_load");
+    let path = mailbox_state_path(&state, &session_id).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "mailbox_name": "mb-legacy",
+            "mails": [
+                {"id":"m1","from":"mb-peer","msg":"incoming body","created_at_ms":1,"read":false,"delivered":false,"receipt_sent":false},
+                {"id":"r1","from":"mb-peer","msg":"receipt body","created_at_ms":2,"kind":"receipt","receipt_for":"s1","read":true,"delivered":true,"receipt_sent":true}
+            ],
+            "sent": [{"id":"s1","to":"mb-peer","msg":"outgoing body","created_at_ms":3,"status":"read","notified":true}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.entries.len(), 2);
+    assert_eq!(mailbox.entries[0].state, "queued");
+    assert_eq!(mailbox.entries[1].state, "read");
+    assert_eq!(load_mem_mail(&state, "m1").unwrap().msg, "incoming body");
+    assert_eq!(load_mem_mail(&state, "s1").unwrap().msg, "outgoing body");
+    assert!(!mem_mail_exists(&state, "r1"));
+    let first = std::fs::read(&path).unwrap();
+    let again = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(again.entries.len(), 2);
+    assert_eq!(std::fs::read(&path).unwrap(), first);
+}
+
+#[test]
+fn first_start_migrates_sessions_mailboxes_peers_history_and_spool() {
+    let (_guard, state, _session_id) = mailbox_e2e_setup("mailbox_e2e_first_start");
+    let store = current_session_store(&state).unwrap();
+    let old_a = "session_1700000000000_0";
+    let old_b = "session_1700000000001_1";
+    let mut stored = Vec::new();
+    for (id, name) in [(old_a, "A"), (old_b, "B")] {
+        let session = agent_core::session_store::new_stored_session(
+            id,
+            name,
+            "/work",
+            StoredSessionProfile::default(),
+            store.history_path_for_session(id),
+        );
+        store.upsert_session(&session).unwrap();
+        std::fs::write(store.history_path_for_session(id), b"").unwrap();
+        stored.push(session);
+    }
+    let path_a = store
+        .metadata_path_for_session(old_a)
+        .with_file_name("mailbox.json");
+    let path_b = store
+        .metadata_path_for_session(old_b)
+        .with_file_name("mailbox.json");
+    std::fs::write(
+        &path_a,
+        serde_json::to_vec(&json!({
+            "mailbox_name":"mb-old-a", "mails":[],
+            "sent":[{"id":"shared","to":"mb-old-b","msg":"same body","created_at_ms":7,"status":"read","notified":true}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &path_b,
+        serde_json::to_vec(&json!({
+            "mailbox_name":"mb-old-b",
+            "mails":[{"id":"shared","from":"mb-old-a","msg":"same body","created_at_ms":7,"read":true,"delivered":true,"receipt_sent":true}],
+            "sent":[]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("pending", "mb-old-a", "mb-old-b", -1, -1),
+    )
+    .unwrap();
+
+    // Reverse the normal A-then-B order so the recipient index is converted
+    // first; the shared body's direction must remain A -> B either way.
+    stored.reverse();
+    migrate_legacy_session_ids(&state, &store, &mut stored).unwrap();
+    assert!(stored
+        .iter()
+        .all(|session| is_compact_session_id(&session.session_id)));
+    let new_a = stored
+        .iter()
+        .find(|session| session.display_name == "A")
+        .unwrap();
+    let new_b = stored
+        .iter()
+        .find(|session| session.display_name == "B")
+        .unwrap();
+    assert_ne!(new_a.session_id, new_b.session_id);
+    assert!(!store.metadata_path_for_session(old_a).exists());
+    assert!(!store.metadata_path_for_session(old_b).exists());
+    assert_eq!(
+        new_a.raw_chat_history_path,
+        store
+            .history_path_for_session(&new_a.session_id)
+            .display()
+            .to_string()
+    );
+    assert!(Path::new(&new_a.raw_chat_history_path).is_file());
+    assert!(Path::new(&new_b.raw_chat_history_path).is_file());
+
+    let mailbox_a = load_mailbox_state(&state, &new_a.session_id).unwrap();
+    let mailbox_b = load_mailbox_state(&state, &new_b.session_id).unwrap();
+    assert_eq!(mailbox_a.mailbox_name, format!("id_{}", new_a.session_id));
+    assert_eq!(mailbox_b.mailbox_name, format!("id_{}", new_b.session_id));
+    assert_eq!(mailbox_a.entries[0].peer, mailbox_b.mailbox_name);
+    assert_eq!(mailbox_b.entries[0].peer, mailbox_a.mailbox_name);
+    assert_eq!(mailbox_a.entries[0].id, mailbox_b.entries[0].id);
+    let mail = load_mem_mail(&state, "shared").unwrap();
+    assert_eq!(mail.from, mailbox_a.mailbox_name);
+    assert_eq!(mail.to, mailbox_b.mailbox_name);
+    assert_eq!(mail.msg, "same body");
+    assert_eq!(
+        mailbox_snapshot(&state, &mailbox_a).sent[0].msg,
+        "same body"
+    );
+    assert_eq!(
+        mailbox_snapshot(&state, &mailbox_b).mails[0].msg,
+        "same body"
+    );
+    assert!(!e2e_inbox("mb-old-b").exists());
+    let pending = crate::mailbox::scan_mails(&e2e_inbox(&mailbox_b.mailbox_name));
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].1.from, mailbox_a.mailbox_name);
+    assert_eq!(pending[0].1.to, mailbox_b.mailbox_name);
+
+    // A second startup is a no-op and must not rename or duplicate anything.
+    let before_a = std::fs::read(mailbox_state_path(&state, &new_a.session_id).unwrap()).unwrap();
+    let before_b = std::fs::read(mailbox_state_path(&state, &new_b.session_id).unwrap()).unwrap();
+    let mut again = store.list_sessions().unwrap();
+    migrate_legacy_session_ids(&state, &store, &mut again).unwrap();
+    assert_eq!(
+        std::fs::read(mailbox_state_path(&state, &new_a.session_id).unwrap()).unwrap(),
+        before_a
+    );
+    assert_eq!(
+        std::fs::read(mailbox_state_path(&state, &new_b.session_id).unwrap()).unwrap(),
+        before_b
+    );
+}
+
+#[test]
+fn restore_migrates_legacy_identities_before_the_global_prefix_sweep() {
+    let (_guard, state, _session_id) = mailbox_e2e_setup("mailbox_e2e_sweep_order");
+    let store = current_session_store(&state).unwrap();
+
+    // 1) A pre-id legacy session (long machine-minted id) whose mailbox
+    //    address is an acquired random name: mb- plus 6 base36 chars, exactly
+    //    the shape the global prefix sweep matches. The sweep must not claim
+    //    this directory before the identity migration renames it itself.
+    let old_legacy = "session_1700000000002_2";
+    let acquired = "mb-x7k2p9";
+    let legacy_session = agent_core::session_store::new_stored_session(
+        old_legacy,
+        "L",
+        "/work",
+        StoredSessionProfile::default(),
+        store.history_path_for_session(old_legacy),
+    );
+    store.upsert_session(&legacy_session).unwrap();
+    std::fs::write(store.history_path_for_session(old_legacy), b"").unwrap();
+    let legacy_mailbox_path = store
+        .metadata_path_for_session(old_legacy)
+        .with_file_name("mailbox.json");
+    std::fs::write(
+        &legacy_mailbox_path,
+        serde_json::to_vec(&json!({
+            "mailbox_name": acquired,
+            "entries": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("legacy_pending", "mb-sender", acquired, -1, -1),
+    )
+    .unwrap();
+
+    // 2) The previous generation's compact session: canonical session id,
+    //    mailbox address still mb-{sid}.
+    let compact_old = "c0ffee";
+    let compact_session = agent_core::session_store::new_stored_session(
+        compact_old,
+        "C",
+        "/work",
+        StoredSessionProfile::default(),
+        store.history_path_for_session(compact_old),
+    );
+    store.upsert_session(&compact_session).unwrap();
+    std::fs::write(store.history_path_for_session(compact_old), b"").unwrap();
+    let compact_mailbox_path = store
+        .metadata_path_for_session(compact_old)
+        .with_file_name("mailbox.json");
+    std::fs::create_dir_all(compact_mailbox_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &compact_mailbox_path,
+        serde_json::to_vec(&json!({
+            "mailbox_name": "mb-c0ffee",
+            "entries": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("compact_pending", "mb-sender", "mb-c0ffee", -1, -1),
+    )
+    .unwrap();
+
+    // 3) An unclaimed agent mailbox: no session will ever rename it, so only
+    //    the final sweep moves it.
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("agent_pending", "mb-sender", "mb-d4e5f6", -1, -1),
+    )
+    .unwrap();
+
+    restore_stored_sessions(&state).unwrap();
+
+    // The legacy session redraws onto a compact id with the canonical
+    // address, and its acquired directory was moved by the identity pass.
+    let migrated = current_session_store(&state)
+        .unwrap()
+        .list_sessions()
+        .unwrap()
+        .into_iter()
+        .find(|session| session.display_name == "L")
+        .unwrap();
+    assert!(is_compact_session_id(&migrated.session_id));
+    assert_ne!(migrated.session_id, old_legacy);
+    let legacy_mailbox = load_mailbox_state(&state, &migrated.session_id).unwrap();
+    assert_eq!(
+        legacy_mailbox.mailbox_name,
+        format!("id_{}", migrated.session_id)
+    );
+    assert!(!e2e_inbox(acquired).exists());
+    // Regression probe for the sweep order: a premature prefix sweep would
+    // strand the envelopes under this renamed orphan directory.
+    assert!(!e2e_inbox("id-x7k2p9").exists());
+    let legacy_pending = crate::mailbox::scan_mails(&e2e_inbox(&legacy_mailbox.mailbox_name));
+    assert_eq!(legacy_pending.len(), 1);
+    assert_eq!(legacy_pending[0].1.id, "legacy_pending");
+    assert_eq!(legacy_pending[0].1.to, legacy_mailbox.mailbox_name);
+
+    // The compact session upgrades in place onto the canonical address.
+    let compact_mailbox = load_mailbox_state(&state, compact_old).unwrap();
+    assert_eq!(compact_mailbox.mailbox_name, "id_c0ffee");
+    assert_eq!(crate::mailbox::scan_mails(&e2e_inbox("id_c0ffee")).len(), 1);
+    assert!(!e2e_inbox("mb-c0ffee").exists());
+
+    // The unclaimed agent mailbox is moved by the sweep with its mail intact.
+    assert!(e2e_inbox("id_d4e5f6").is_dir());
+    assert_eq!(crate::mailbox::scan_mails(&e2e_inbox("id_d4e5f6")).len(), 1);
+    assert!(!e2e_inbox("mb-d4e5f6").exists());
+
+    // After the one-time migration no mb- directory remains in the spool.
+    let leftovers: Vec<String> = std::fs::read_dir(e2e_spool())
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with("mb-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
+fn legacy_mail_id_collision_redraws_without_overwriting_body() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_id_collision");
+    store_mem_mail(
+        &state,
+        &MemMail {
+            id: "taken".to_string(),
+            from: "mb-other".to_string(),
+            to: "mb-other2".to_string(),
+            msg: "unrelated existing body".to_string(),
+            created_at_ms: 99,
+        },
+    )
+    .unwrap();
+    let path = mailbox_state_path(&state, &session_id).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "mailbox_name":"mb-legacy", "mails":[],
+            "sent":[{"id":"taken","to":"mb-peer","msg":"legacy body","created_at_ms":7,"status":"sent","notified":false}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_ne!(mailbox.entries[0].id, "taken");
+    assert_eq!(
+        load_mem_mail(&state, "taken").unwrap().msg,
+        "unrelated existing body"
+    );
+    assert_eq!(
+        load_mem_mail(&state, &mailbox.entries[0].id).unwrap().msg,
+        "legacy body"
+    );
+}
+
+#[test]
+fn mailbox_burst_index_io_is_bounded_and_idle_ticks_hit_cache() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_io_budget");
+    let self_name = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .mailbox_name;
+    for i in 0..200 {
+        crate::mailbox::write_mail(
+            &e2e_spool(),
+            &e2e_mail(&format!("io{i}"), "mb-io-peer", &self_name, 0, -1),
+        )
+        .unwrap();
+    }
+    state
+        .mem_mail_runtime
+        .index_loads
+        .store(0, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .index_saves
+        .store(0, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .body_writes
+        .store(0, Ordering::Relaxed);
+
+    mailbox_tick(&state);
+
+    assert_eq!(
+        state.mem_mail_runtime.index_loads.load(Ordering::Relaxed),
+        0,
+        "the pre-warmed cache serves the whole burst without a disk reload"
+    );
+    assert_eq!(
+        state.mem_mail_runtime.index_saves.load(Ordering::Relaxed),
+        3,
+        "intake, read evidence, and receipt/notice evidence are three batch commits"
+    );
+    assert_eq!(
+        state.mem_mail_runtime.body_writes.load(Ordering::Relaxed),
+        200
+    );
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.entries.len(), 200);
+    assert!(mailbox
+        .entries
+        .iter()
+        .all(|entry| { entry.dir == "in" && entry.state == "read" && entry.receipt_sent }));
+    assert_eq!(
+        state.mem_mail_runtime.index_loads.load(Ordering::Relaxed),
+        0,
+        "the post-tick read hits the metadata cache"
+    );
+
+    mailbox_tick(&state);
+    assert_eq!(
+        state.mem_mail_runtime.index_loads.load(Ordering::Relaxed),
+        0,
+        "an unchanged idle tick does not reload and parse mailbox.json"
+    );
+    assert_eq!(
+        state.mem_mail_runtime.index_saves.load(Ordering::Relaxed),
+        3,
+        "an unchanged idle tick performs no index write"
+    );
+}
+
+#[test]
+fn mem_mail_capacity_backpressure_keeps_spool_for_retry() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_capacity_retry");
+    std::env::set_var("TIMEM_MAILBOX_MAX_BYTES", "32");
+    let self_name = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .mailbox_name;
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("capacity", "mb-capacity-peer", &self_name, -1, -1),
+    )
+    .unwrap();
+
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert!(mailbox.entries.is_empty());
+    assert_eq!(
+        crate::mailbox::scan_mails(&e2e_inbox(&self_name)).len(),
+        1,
+        "capacity rejection must not unlink the transient envelope"
+    );
+    assert!(!mem_mail_exists(&state, "capacity"));
+    assert!(
+        state
+            .mem_mail_runtime
+            .capacity_rejections
+            .load(Ordering::Relaxed)
+            >= 1
+    );
+
+    std::env::set_var("TIMEM_MAILBOX_MAX_BYTES", "65536");
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.entries.len(), 1);
+    assert_eq!(mailbox.entries[0].state, "read");
+    assert!(mailbox.entries[0].receipt_sent);
+    assert_eq!(
+        load_mem_mail(&state, "capacity").unwrap().msg,
+        "msg-capacity"
+    );
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(&self_name)).is_empty());
+}
+
+#[test]
+fn mem_mail_maintenance_reclaims_only_expired_unreferenced_bodies() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_orphan_gc");
+    let mut mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    mailbox
+        .entries
+        .push(mailbox_test_entry("referenced", "in", "mb-peer", "queued"));
+    save_mailbox_state(&state, &session_id, &mailbox).unwrap();
+    for (id, msg) in [("referenced", "keep"), ("orphan", "collect later")] {
+        store_mem_mail(
+            &state,
+            &MemMail {
+                id: id.to_string(),
+                from: "mb-peer".to_string(),
+                to: mailbox.mailbox_name.clone(),
+                msg: msg.to_string(),
+                created_at_ms: 1,
+            },
+        )
+        .unwrap();
+    }
+    let dir = mem_mail_dir(&state).unwrap();
+    let now = now_ms();
+
+    let first = maintain_mem_mail_locked(&state, &dir, now).unwrap();
+    assert_eq!(first.referenced_files, 1);
+    assert_eq!(first.orphan_files, 1);
+    assert_eq!(first.reclaimed_files, 0);
+    assert!(mem_mail_exists(&state, "orphan"));
+    assert_eq!(first.usage_files, 2);
+
+    let later = now.saturating_add(mem_mail_orphan_grace_ms() + 1);
+    let second = maintain_mem_mail_locked(&state, &dir, later).unwrap();
+    assert_eq!(second.reclaimed_files, 1);
+    assert!(second.reclaimed_bytes > 0);
+    assert!(!mem_mail_exists(&state, "orphan"));
+    assert_eq!(load_mem_mail(&state, "referenced").unwrap().msg, "keep");
+    assert_eq!(second.usage_files, 1);
+    assert_eq!(
+        state
+            .mem_mail_runtime
+            .reclaimed_files
+            .load(Ordering::Relaxed),
+        1
+    );
+}
+
+#[test]
+fn mem_mail_maintenance_fails_closed_on_corrupt_index() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_gc_fail_closed");
+    store_mem_mail(
+        &state,
+        &MemMail {
+            id: "orphan".to_string(),
+            from: "mb-a".to_string(),
+            to: "mb-b".to_string(),
+            msg: "must survive uncertain references".to_string(),
+            created_at_ms: 1,
+        },
+    )
+    .unwrap();
+    let path = mailbox_state_path(&state, &session_id).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"{not-json").unwrap();
+    let error = maintain_mem_mail_locked(
+        &state,
+        &mem_mail_dir(&state).unwrap(),
+        now_ms().saturating_add(10 * 24 * 60 * 60 * 1000),
+    )
+    .unwrap_err();
+    assert_eq!(error, "mem_mail_reference_parse_failed");
+    assert!(mem_mail_exists(&state, "orphan"));
+}
+
+#[test]
+fn mailbox_capacity_failure_is_terminal_without_body_or_spool() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_send_capacity");
+    std::env::set_var("TIMEM_MAILBOX_MAX_BYTES", "32");
+    let peer = "mb-capacity-send";
+    std::fs::create_dir_all(e2e_inbox(peer)).unwrap();
+    handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &json!({"to": peer, "msg": "this body exceeds the tiny test budget"}),
+    );
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.entries.len(), 1);
+    assert_eq!(mailbox.entries[0].dir, "out");
+    assert_eq!(mailbox.entries[0].state, "failed");
+    assert!(!mailbox.entries[0].notified);
+    assert!(!mem_mail_exists(&state, &mailbox.entries[0].id));
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(peer)).is_empty());
+
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert!(mailbox.entries[0].notified);
+    let notice_kind = state.sessions.lock().unwrap()[&session_id]
+        .turns
+        .iter()
+        .flat_map(|turn| turn.user_entries.iter())
+        .find(|entry| entry.text.contains("[mailbox] 邮件") && entry.text.contains("失败"))
+        .map(|entry| entry.kind.clone());
+    assert_eq!(
+        notice_kind.as_deref(),
+        Some("mailbox_status"),
+        "machine-generated delivery notices must carry a structured kind"
+    );
+}
+
+#[test]
+fn mem_mail_file_budget_rolls_oldest_block_into_new_mail() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_file_budget");
+    std::env::set_var("TIMEM_MAILBOX_MAX_FILES", "1");
+    let self_name = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .mailbox_name;
+
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("file-budget-old", "mb-file-budget-peer", &self_name, -1, -1),
+    )
+    .unwrap();
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.entries.len(), 1);
+    assert_eq!(mailbox.entries[0].id, "file-budget-old");
+
+    // The archive is at its block limit; the new mail must evict the oldest
+    // block instead of being left in the spool.
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("file-budget-new", "mb-file-budget-peer", &self_name, -1, -1),
+    )
+    .unwrap();
+    mailbox_tick(&state);
+
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.entries.len(), 1);
+    assert_eq!(mailbox.entries[0].id, "file-budget-new");
+    assert!(
+        !mem_mail_exists(&state, "file-budget-old"),
+        "the oldest block must be deleted to admit the new one"
+    );
+    assert!(mem_mail_exists(&state, "file-budget-new"));
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(&self_name)).is_empty());
+    assert_eq!(
+        state.mem_mail_runtime.usage_files.load(Ordering::Relaxed),
+        1
+    );
+}
+
+#[test]
+fn mem_mail_maintenance_fails_closed_on_invalid_index_schema() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_schema_fail_closed");
+    store_mem_mail(
+        &state,
+        &MemMail {
+            id: "orphan".to_string(),
+            from: "mb-a".to_string(),
+            to: "mb-b".to_string(),
+            msg: "must survive incomplete references".to_string(),
+            created_at_ms: 1,
+        },
+    )
+    .unwrap();
+    let path = mailbox_state_path(&state, &session_id).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let invalid_indexes = [
+        json!({"mailbox_name": "mb-b", "entries": {}}),
+        json!({"mailbox_name": "mb-b", "entries": [{"dir": "in"}]}),
+        json!({"mailbox_name": "mb-b", "entries": [{
+            "id": "referenced", "dir": "sideways", "peer": "mb-a",
+            "created_at_ms": 1, "state": "queued", "notified": false,
+            "receipt_sent": false, "resp_timeout_secs": 120
+        }]}),
+        json!({"mailbox_name": "mb-b", "mails": {}, "sent": []}),
+        json!({"mailbox_name": "mb-b", "mails": [{"from": "mb-a"}], "sent": []}),
+    ];
+    for value in invalid_indexes {
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let error = maintain_mem_mail_locked(
+            &state,
+            &mem_mail_dir(&state).unwrap(),
+            now_ms().saturating_add(10 * 24 * 60 * 60 * 1000),
+        )
+        .unwrap_err();
+        assert_eq!(error, "mem_mail_reference_parse_failed", "{value}");
+        assert!(mem_mail_exists(&state, "orphan"), "{value}");
+    }
+}
+
+#[test]
+fn mem_mail_maintenance_fails_closed_on_nonregular_body_entry() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_body_scan_fail_closed");
+    load_mailbox_state(&state, &session_id).unwrap();
+    store_mem_mail(
+        &state,
+        &MemMail {
+            id: "orphan".to_string(),
+            from: "mb-a".to_string(),
+            to: "mb-b".to_string(),
+            msg: "must survive an incomplete body scan".to_string(),
+            created_at_ms: 1,
+        },
+    )
+    .unwrap();
+    std::fs::create_dir(mem_mail_path(&state, "not-a-file").unwrap()).unwrap();
+    let error = maintain_mem_mail_locked(
+        &state,
+        &mem_mail_dir(&state).unwrap(),
+        now_ms().saturating_add(10 * 24 * 60 * 60 * 1000),
+    )
+    .unwrap_err();
+    assert_eq!(error, "mem_mail_usage_read_failed");
+    assert!(mem_mail_exists(&state, "orphan"));
+}
+
+#[test]
+fn mailbox_state_cache_is_bounded_and_session_delete_evicts_entry() {
+    let (_guard, mut state, session_id) = mailbox_e2e_setup("mailbox_e2e_cache_lifecycle");
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    let root = std::env::temp_dir().join(unique_web_id("mailbox_cache_entries"));
+    std::fs::create_dir_all(&root).unwrap();
+    for index in 0..(MAILBOX_STATE_CACHE_LIMIT + 8) {
+        let path = root.join(format!("mailbox-{index}.json"));
+        save_mailbox_state_at(&path, &mailbox).unwrap();
+        cache_mailbox_state(&state, &path, &mailbox);
+    }
+    assert_eq!(
+        state.mailbox_state_cache.lock().unwrap().len(),
+        MAILBOX_STATE_CACHE_LIMIT
+    );
+
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    state.template = Arc::new(template);
+    let session_id = create_session(&state, None, None, BTreeMap::new()).unwrap();
+    load_mailbox_state(&state, &session_id).unwrap();
+    let path = mailbox_state_path(&state, &session_id).unwrap();
+    assert!(state
+        .mailbox_state_cache
+        .lock()
+        .unwrap()
+        .contains_key(&path));
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionDelete {
+            session_id: session_id.clone(),
+        },
+    )
+    .unwrap();
+    assert!(!state
+        .mailbox_state_cache
+        .lock()
+        .unwrap()
+        .contains_key(&path));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn mem_switch_reset_clears_mailbox_cache_usage_and_maintenance_schedule() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_mem_reset");
+    load_mailbox_state(&state, &session_id).unwrap();
+    store_mem_mail(
+        &state,
+        &MemMail {
+            id: "usage".to_string(),
+            from: "mb-a".to_string(),
+            to: "mb-b".to_string(),
+            msg: "body".to_string(),
+            created_at_ms: 1,
+        },
+    )
+    .unwrap();
+    state
+        .mem_mail_runtime
+        .next_maintenance_ms
+        .store(123, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .next_capacity_maintenance_ms
+        .store(456, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .index_loads
+        .store(7, Ordering::Relaxed);
+
+    reset_mem_mail_runtime(&state).unwrap();
+
+    assert!(state.mailbox_state_cache.lock().unwrap().is_empty());
+    assert!(!state
+        .mem_mail_runtime
+        .usage_initialized
+        .load(Ordering::Relaxed));
+    assert!(state.mem_mail_runtime.usage_root.lock().unwrap().is_none());
+    assert_eq!(
+        state.mem_mail_runtime.usage_bytes.load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        state.mem_mail_runtime.usage_files.load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        state
+            .mem_mail_runtime
+            .next_maintenance_ms
+            .load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        state
+            .mem_mail_runtime
+            .next_capacity_maintenance_ms
+            .load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        state.mem_mail_runtime.index_loads.load(Ordering::Relaxed),
+        7,
+        "cumulative operational counters remain useful across MEM switches"
+    );
+}
+
+#[test]
+fn routine_mailbox_maintenance_stays_quiet_without_expert_verbose_flag() {
+    // Orphan reclamation is routine at every 15-minute maintenance tick, so
+    // the default must stay silent regardless of the reclaim counts: the
+    // debug UI must not flood with per-run statistics. Genuine anomalies keep
+    // dedicated warning logs, and operators can still request the full
+    // per-run summary via TIMEM_MAILBOX_MAINTENANCE_LOG=1.
+    assert!(!mailbox_maintenance_should_log(false));
+    assert!(mailbox_maintenance_should_log(true));
+}
+
+// ===== Mailbox capacity settings, usage accounting and shared quota =====
+
+#[test]
+fn mailbox_capacity_settings_are_legacy_compatible_validated_and_persistent() {
+    let root = std::env::temp_dir().join(unique_web_id("mem_mailbox_capacity_settings"));
+    std::fs::create_dir_all(&root).unwrap();
+
+    // A settings file written before Mailbox capacity existed keeps every
+    // legacy field and adopts the independent 128 MB default.
+    std::fs::write(
+        web_mem_settings_path(&root),
+        br#"{"temporary_retention_days":10,"conversation_capacity_bytes":536870912}"#,
+    )
+    .unwrap();
+    let legacy = load_web_mem_settings(&root, false).unwrap();
+    assert_eq!(legacy.mailbox_capacity_bytes, Some(MEM_CAPACITY_128_MB));
+    assert_eq!(
+        legacy.conversation_capacity_bytes,
+        Some(MEM_CAPACITY_512_MB)
+    );
+    assert_eq!(legacy.temporary_retention_days, Some(10));
+
+    for bytes in [
+        None,
+        Some(MEM_CAPACITY_32_MB),
+        Some(MEM_CAPACITY_64_MB),
+        Some(MEM_CAPACITY_128_MB),
+        Some(MEM_CAPACITY_256_MB),
+        Some(MEM_CAPACITY_512_MB),
+        Some(MEM_CAPACITY_1_GB),
+    ] {
+        validate_mem_mailbox_capacity_bytes(bytes).unwrap();
+    }
+    for bytes in [
+        Some(0),
+        Some(1),
+        Some(MEM_CAPACITY_32_MB - 1),
+        Some(MEM_CAPACITY_1_GB + 1),
+    ] {
+        assert_eq!(
+            validate_mem_mailbox_capacity_bytes(bytes).unwrap_err(),
+            "mem_mailbox_capacity_bytes_invalid"
+        );
+    }
+
+    let mut settings = legacy;
+    settings.mailbox_capacity_bytes = Some(MEM_CAPACITY_64_MB);
+    save_web_mem_settings(&root, &settings).unwrap();
+    assert_eq!(
+        load_web_mem_settings(&root, false)
+            .unwrap()
+            .mailbox_capacity_bytes,
+        Some(MEM_CAPACITY_64_MB)
+    );
+
+    // A later writer that predates the field still reloads as the default.
+    std::fs::write(
+        web_mem_settings_path(&root),
+        br#"{"temporary_retention_days":5}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        load_web_mem_settings(&root, false)
+            .unwrap()
+            .mailbox_capacity_bytes,
+        Some(MEM_CAPACITY_128_MB)
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn mailbox_capacity_update_is_authoritative_persistent_and_rejects_below_usage() {
+    let (_guard, state, _session_id) = mailbox_e2e_setup("mailbox_e2e_capacity_cmd");
+    let memory_dir = current_mem_state(&state).unwrap().layout.memory_dir();
+    assert_eq!(
+        snapshot_for(&state, TEST_PORT)
+            .server
+            .mem
+            .mailbox_capacity_bytes,
+        Some(MEM_CAPACITY_128_MB)
+    );
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::MemMailboxCapacityUpdate {
+            max_bytes: Some(MEM_CAPACITY_64_MB),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::MemSettingsUpdated {
+        mailbox_capacity_bytes,
+        ..
+    } = event
+    else {
+        panic!("expected MEM settings event")
+    };
+    assert_eq!(mailbox_capacity_bytes, Some(MEM_CAPACITY_64_MB));
+    assert_eq!(
+        current_mem_state(&state)
+            .unwrap()
+            .settings
+            .mailbox_capacity_bytes,
+        Some(MEM_CAPACITY_64_MB)
+    );
+    assert_eq!(
+        load_web_mem_settings(&memory_dir, false)
+            .unwrap()
+            .mailbox_capacity_bytes,
+        Some(MEM_CAPACITY_64_MB)
+    );
+    assert_eq!(
+        snapshot_for(&state, TEST_PORT)
+            .server
+            .mem
+            .mailbox_capacity_bytes,
+        Some(MEM_CAPACITY_64_MB)
+    );
+
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::MemMailboxCapacityUpdate { max_bytes: Some(1) },
+        )
+        .unwrap_err(),
+        "mem_mailbox_capacity_bytes_invalid"
+    );
+
+    // A sparse body makes the footprint exceed the smallest tier without
+    // writing 32 MB of real data; the update is refused and not persisted.
+    let dir = mem_mail_dir(&state).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    let sparse = dir.join("mail_sparse_capacity.json");
+    std::fs::File::create(&sparse)
+        .unwrap()
+        .set_len(MEM_CAPACITY_32_MB + 1)
+        .unwrap();
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::MemMailboxCapacityUpdate {
+                max_bytes: Some(MEM_CAPACITY_32_MB),
+            },
+        )
+        .unwrap_err(),
+        "mem_mailbox_capacity_below_usage"
+    );
+    assert_eq!(
+        current_mem_state(&state)
+            .unwrap()
+            .settings
+            .mailbox_capacity_bytes,
+        Some(MEM_CAPACITY_64_MB)
+    );
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::MemMailboxCapacityUpdate { max_bytes: None },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::MemSettingsUpdated {
+        mailbox_capacity_bytes,
+        ..
+    } = event
+    else {
+        panic!("expected MEM settings event")
+    };
+    assert_eq!(mailbox_capacity_bytes, None);
+    std::fs::remove_file(&sparse).unwrap();
+}
+
+#[test]
+fn conversation_capacity_rejects_shrinking_below_mailbox_footprint() {
+    let (_guard, state, _session_id) = mailbox_e2e_setup("mailbox_e2e_conversation_floor");
+    let dir = mem_mail_dir(&state).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    let sparse = dir.join("mail_sparse_conversation.json");
+    // 125 MB still fits the independent Mailbox limit but exceeds the 124 MB
+    // stable Conversation budget of the smallest tier.
+    std::fs::File::create(&sparse)
+        .unwrap()
+        .set_len(125 * 1024 * 1024)
+        .unwrap();
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::MemConversationCapacityUpdate {
+                max_bytes: Some(MEM_CAPACITY_128_MB),
+            },
+        )
+        .unwrap_err(),
+        "mem_conversation_capacity_below_mailbox_usage"
+    );
+    assert_eq!(
+        current_mem_state(&state)
+            .unwrap()
+            .settings
+            .conversation_capacity_bytes,
+        Some(MEM_CAPACITY_128_MB),
+        "a rejected update must not be persisted"
+    );
+    std::fs::remove_file(&sparse).unwrap();
+}
+
+#[test]
+fn storage_usage_query_reports_temporary_conversation_mailbox_and_favorite() {
+    let (_guard, state, _session_id) = mailbox_e2e_setup("mailbox_e2e_storage_usage");
+    let memory_dir = current_mem_state(&state).unwrap().layout.memory_dir();
+    std::fs::create_dir_all(&memory_dir).unwrap();
+
+    let temporary = memory_dir.join("tmp-storage-usage.tmp");
+    std::fs::write(&temporary, vec![b't'; 4096]).unwrap();
+
+    let store = current_session_store(&state).unwrap();
+    // In-memory workers are not persisted sessions; usage accounting walks the
+    // stored index, so persist one session with a sparse history file.
+    let stored = agent_core::session_store::new_stored_session(
+        "usage_history_session",
+        "usage",
+        "/work",
+        StoredSessionProfile::default(),
+        store.history_path_for_session("usage_history_session"),
+    );
+    store.upsert_session(&stored).unwrap();
+    let history = store.history_path_for_session("usage_history_session");
+    std::fs::create_dir_all(history.parent().unwrap()).unwrap();
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&history)
+        .unwrap()
+        .set_len(3 * 1024 * 1024)
+        .unwrap();
+
+    store_mem_mail(
+        &state,
+        &MemMail {
+            id: "usage_mail".to_string(),
+            from: "mb-usage-a".to_string(),
+            to: "mb-usage-b".to_string(),
+            msg: "usage body".to_string(),
+            created_at_ms: 1,
+        },
+    )
+    .unwrap();
+    let body_path = mem_mail_dir(&state).unwrap().join("mail_usage_mail.json");
+    let expected_mailbox =
+        std::fs::metadata(&body_path).unwrap().len() + mem_mail_index_usage(&state).unwrap();
+    let expected_favorite = ChatLibrary::new(&memory_dir).capacity().unwrap().used_bytes;
+
+    let event = handle_command(&state, TEST_PORT, ClientCommand::MemStorageUsageQuery)
+        .unwrap()
+        .unwrap();
+    let WireEvent::MemStorageUsage {
+        temporary_bytes,
+        conversation_bytes,
+        mailbox_bytes,
+        mailbox_files,
+        favorite_bytes,
+    } = event
+    else {
+        panic!("expected storage usage event")
+    };
+    assert_eq!(temporary_bytes, 4096);
+    assert_eq!(conversation_bytes, 3 * 1024 * 1024);
+    assert_eq!(mailbox_bytes, expected_mailbox);
+    assert_eq!(mailbox_files, 1);
+    assert_eq!(favorite_bytes, expected_favorite);
+}
+
+#[test]
+fn session_resource_usage_query_returns_a_direct_well_formed_sample() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("session_resource_usage_query_direct");
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionResourceUsageQuery {
+            session_id: session_id.clone(),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::SessionResourceUsage {
+        session_id: answered,
+        sampled_at_ms,
+        ..
+    } = event
+    else {
+        panic!("expected a session resource usage event")
+    };
+    assert_eq!(answered, session_id);
+    assert!(sampled_at_ms > 0);
+    // A test Host has no managed job cgroup: the platform answers "no
+    // accounting" instead of fabricating zeros, and the event stays
+    // connection-local so polls never enter the replay stream.
+    let command = ClientCommand::SessionResourceUsageQuery {
+        session_id: session_id.clone(),
+    };
+    assert!(command.result_is_direct());
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionResourceUsageQuery {
+            session_id: "missing_session".to_string(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error, "session_not_found");
+}
+
+#[test]
+fn mailbox_body_is_admitted_when_conversation_history_budget_is_exhausted() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_shared_quota");
+    let store = current_session_store(&state).unwrap();
+    let stored = agent_core::session_store::new_stored_session(
+        "quota_history_session",
+        "quota",
+        "/work",
+        StoredSessionProfile::default(),
+        store.history_path_for_session("quota_history_session"),
+    );
+    store.upsert_session(&stored).unwrap();
+    let history = store.history_path_for_session("quota_history_session");
+    std::fs::create_dir_all(history.parent().unwrap()).unwrap();
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&history)
+        .unwrap()
+        .set_len(0)
+        .unwrap();
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::MemConversationCapacityUpdate {
+            max_bytes: Some(MEM_CAPACITY_128_MB),
+        },
+    )
+    .unwrap();
+    let stable = RollingCapacity::from_total_bytes(MEM_CAPACITY_128_MB)
+        .unwrap()
+        .stable_bytes;
+    assert_eq!(stable, 124 * 1024 * 1024);
+    // Sparse history over the stable budget: the conversation archive is full,
+    // but mail storage rolls on its own block budget.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&history)
+        .unwrap()
+        .set_len(stable)
+        .unwrap();
+
+    let self_name = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .mailbox_name;
+    let before = state
+        .mem_mail_runtime
+        .capacity_rejections
+        .load(Ordering::Relaxed);
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_mail("shared-quota", "mb-shared-peer", &self_name, -1, -1),
+    )
+    .unwrap();
+    mailbox_tick(&state);
+
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(
+        mailbox.entries.len(),
+        1,
+        "conversation history pressure must not block a mailbox body"
+    );
+    assert_eq!(mailbox.entries[0].id, "shared-quota");
+    assert_eq!(mailbox.entries[0].state, "read");
+    assert!(mem_mail_exists(&state, "shared-quota"));
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(&self_name)).is_empty());
+    assert_eq!(
+        state
+            .mem_mail_runtime
+            .capacity_rejections
+            .load(Ordering::Relaxed),
+        before
+    );
+}
+
+#[test]
+fn conversation_rolling_eviction_deletes_oldest_blocks_first() {
+    let (_guard, state, _session_id) = mailbox_e2e_setup("mailbox_e2e_rolling_history");
+    let store = current_session_store(&state).unwrap();
+    // The settings command only accepts preset capacities, so the rolling
+    // primitive is exercised directly with a small block budget.
+    let budget = 8 * 1024 * 1024;
+    let stable = RollingCapacity::from_total_bytes(budget)
+        .unwrap()
+        .stable_bytes;
+    assert_eq!(stable, 4 * 1024 * 1024);
+
+    for (session_id, turns) in [
+        ("roll_old", [("old-1", 1_000_i64), ("old-2", 1_100_i64)]),
+        ("roll_mid", [("mid-1", 2_000_i64), ("mid-2", 2_100_i64)]),
+        ("roll_new", [("new-1", 3_000_i64), ("new-2", 3_100_i64)]),
+    ] {
+        let stored = agent_core::session_store::new_stored_session(
+            session_id,
+            session_id,
+            "/work",
+            StoredSessionProfile::default(),
+            store.history_path_for_session(session_id),
+        );
+        store.upsert_session(&stored).unwrap();
+        for (turn_id, created_at_ms) in turns {
+            store
+                .append_history_record(
+                    session_id,
+                    &ChatHistoryRecord::Message {
+                        role: ChatHistoryRole::User,
+                        turn_id: turn_id.to_string(),
+                        created_at_ms,
+                        kind: None,
+                        command_id: None,
+                        delivery_state: None,
+                        content: "x".repeat(1024 * 1024),
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    assert!(mem_maintenance::conversation_history_usage(&store).unwrap() > stable);
+    let reclaimed =
+        mem_maintenance::apply_conversation_rolling_eviction(&state, &store, Some(budget)).unwrap();
+    assert!(reclaimed > 0);
+    assert!(
+        read_all_history_records(&store.history_path_for_session("roll_old"))
+            .unwrap()
+            .is_empty(),
+        "the archive holding the globally oldest block must be drained first"
+    );
+    assert!(
+        read_all_history_records(&store.history_path_for_session("roll_mid"))
+            .unwrap()
+            .is_empty(),
+        "the middle archive follows once the oldest one is exhausted"
+    );
+    let newest = read_all_history_records(&store.history_path_for_session("roll_new")).unwrap();
+    assert_eq!(newest.len(), 2, "the newest blocks must survive");
+    assert!(newest
+        .iter()
+        .all(|record| record.turn_id().starts_with("new-")));
+    assert!(mem_maintenance::conversation_history_usage(&store).unwrap() <= stable);
+}
+
+#[test]
+fn mailbox_local_delivery_is_bidirectional_between_two_sessions() {
+    let (_guard, state, session_a) = mailbox_e2e_setup("mailbox_e2e_bidir_a");
+    let session_b = register_real_worker(&state, "mailbox_e2e_bidir_b");
+    let name_a = load_mailbox_state(&state, &session_a).unwrap().mailbox_name;
+    let name_b = load_mailbox_state(&state, &session_b).unwrap().mailbox_name;
+
+    handle_mailbox_send_topic(&state, &session_a, &json!({"to": name_b, "msg": "a to b"}));
+    handle_mailbox_send_topic(&state, &session_b, &json!({"to": name_a, "msg": "b to a"}));
+
+    let mailbox_a = load_mailbox_state(&state, &session_a).unwrap();
+    let mailbox_b = load_mailbox_state(&state, &session_b).unwrap();
+    assert_eq!(mailbox_a.entries.len(), 2);
+    assert_eq!(mailbox_b.entries.len(), 2);
+    let find = |mailbox: &MailboxState, dir: &str, msg: &str| -> MailboxEntry {
+        mailbox
+            .entries
+            .iter()
+            .find(|entry| entry.dir == dir && load_mem_mail(&state, &entry.id).unwrap().msg == msg)
+            .cloned()
+            .unwrap()
+    };
+    let a_out = find(&mailbox_a, "out", "a to b");
+    let b_in = find(&mailbox_b, "in", "a to b");
+    let b_out = find(&mailbox_b, "out", "b to a");
+    let a_in = find(&mailbox_a, "in", "b to a");
+    assert_eq!(a_out.state, "read");
+    assert_eq!(b_in.state, "read");
+    assert_eq!(b_out.state, "read");
+    assert_eq!(a_in.state, "read");
+    assert_eq!(b_in.peer, name_a);
+    assert_eq!(a_in.peer, name_b);
+    assert_eq!(a_out.peer, name_b);
+    assert_eq!(b_out.peer, name_a);
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(&name_a)).is_empty());
+    assert!(crate::mailbox::scan_mails(&e2e_inbox(&name_b)).is_empty());
+}
+
+#[test]
+fn local_mailbox_handoff_failure_falls_back_to_spool() {
+    let (_guard, state, sender) = mailbox_e2e_setup("mailbox_e2e_local_fallback");
+    let recipient = register_real_worker(&state, "mailbox_e2e_local_fallback_peer");
+    let to = load_mailbox_state(&state, &recipient).unwrap().mailbox_name;
+    // The recipient already has a turn but its worker is gone, so the
+    // in-process hand-off cannot accept a supplement or start another turn.
+    start_web_turn(&state, &recipient, "busy").unwrap();
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut(&recipient)
+        .unwrap()
+        .workers
+        .clear();
+
+    handle_mailbox_send_topic(
+        &state,
+        &sender,
+        &json!({"to": to, "msg": "retry through the spool"}),
+    );
+
+    let mailbox = load_mailbox_state(&state, &sender).unwrap();
+    let entry = mailbox
+        .entries
+        .iter()
+        .find(|entry| entry.peer == to)
+        .unwrap();
+    assert_eq!(
+        entry.state, "sent",
+        "a transient same-instance hand-off failure must stay retryable"
+    );
+    assert!(mem_mail_exists(&state, &entry.id));
+    assert_eq!(
+        crate::mailbox::scan_mails(&e2e_inbox(&to)).len(),
+        1,
+        "the envelope must wait in the recipient spool for the next tick"
+    );
+}
+
+#[test]
+fn local_mailbox_handoff_pending_restart_cwd_decision_is_spooled() {
+    let (_guard, state, sender) = mailbox_e2e_setup("mailbox_e2e_restart_cwd");
+    let recipient = register_real_worker(&state, "mailbox_e2e_restart_cwd_peer");
+    let to = load_mailbox_state(&state, &recipient).unwrap().mailbox_name;
+    // A session restored from a different working directory cannot start a
+    // host-initiated turn until the browser answers the cwd prompt.
+    let decision = RestartCwdDecision {
+        runtime_cwd: "/runtime/workspace".to_string(),
+        session_cwd: "/restored/workspace".to_string(),
+        session_cwd_available: true,
+        runtime_cwd_path: std::path::PathBuf::from("/runtime/workspace"),
+    };
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&recipient).unwrap();
+        session.restart_cwd_decision = Some(decision);
+        session.workers.clear();
+    }
+
+    handle_mailbox_send_topic(
+        &state,
+        &sender,
+        &json!({"to": to, "msg": "wait for the cwd decision"}),
+    );
+
+    let mailbox = load_mailbox_state(&state, &sender).unwrap();
+    let entry = mailbox
+        .entries
+        .iter()
+        .find(|entry| entry.peer == to)
+        .unwrap();
+    assert_eq!(
+        entry.state, "sent",
+        "a pending restart cwd decision must not become a terminal delivery failure"
+    );
+    assert!(mem_mail_exists(&state, &entry.id));
+    assert_eq!(
+        crate::mailbox::scan_mails(&e2e_inbox(&to)).len(),
+        1,
+        "the mail waits in the spool until the recipient opens and resolves its cwd"
+    );
+}
+
+#[test]
+fn mailbox_cross_instance_receipt_updates_out_and_notifies_once() {
+    let (_guard, state, session_id) = mailbox_e2e_setup("mailbox_e2e_receipt_notice");
+    let self_name = load_mailbox_state(&state, &session_id)
+        .unwrap()
+        .mailbox_name;
+    let peer = "mb-e2e-receipt-peer";
+    std::fs::create_dir_all(e2e_inbox(peer)).unwrap();
+    handle_mailbox_send_topic(
+        &state,
+        &session_id,
+        &json!({"to": peer, "msg": "cross receipt"}),
+    );
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    let out_id = mailbox.entries[0].id.clone();
+    assert_eq!(mailbox.entries[0].dir, "out");
+    assert_eq!(mailbox.entries[0].state, "sent");
+    let envelopes = crate::mailbox::scan_mails(&e2e_inbox(peer));
+    assert_eq!(envelopes.len(), 1);
+    assert_eq!(envelopes[0].1.from, self_name);
+    assert_eq!(envelopes[0].1.to, peer);
+
+    crate::mailbox::write_mail(
+        &e2e_spool(),
+        &e2e_receipt("receipt-1", peer, &self_name, &out_id),
+    )
+    .unwrap();
+    mailbox_tick(&state);
+    let mailbox = load_mailbox_state(&state, &session_id).unwrap();
+    assert_eq!(mailbox.entries[0].state, "read");
+    assert!(mailbox.entries[0].notified);
+    let notices = |state: &AppState| {
+        state.sessions.lock().unwrap()[&session_id]
+            .turns
+            .iter()
+            .flat_map(|turn| turn.user_entries.iter())
+            .filter(|entry| {
+                entry.text.contains("[mailbox] 邮件")
+                    && entry.text.contains(&out_id)
+                    && entry.text.contains("读取")
+            })
+            .count()
+    };
+    assert_eq!(notices(&state), 1);
+    mailbox_tick(&state);
+    assert_eq!(notices(&state), 1, "the read notice surfaces exactly once");
+}
+
+#[test]
+fn streaming_preview_broadcasts_are_throttled_and_terminal_answer_drops_pending() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let web_turn = start_web_turn(&state, session_id, "throttle the preview stream").unwrap();
+    let worker_id = test_worker_id(session_id);
+    let core_turn_id = "core_turn_throttle";
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Active(
+            agent_core::ActiveTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.to_string(),
+                    turn_id: core_turn_id.to_string(),
+                    epoch: 1,
+                },
+                stop_requested: false,
+                input_admission: agent_core::TurnInputAdmission::Open,
+                activity: agent_core::TurnActivity::Running,
+            },
+        )),
+    );
+    let mut receiver = state.events.subscribe();
+    let preview = |attempt: u64, revision: u64, text: &str| {
+        CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new("core.model.preview", json!({})),
+            CoreSessionState::WaitingModel,
+            json!({
+                "turn_id": core_turn_id,
+                "attempt": attempt,
+                "revision": revision,
+                "interruption": null,
+                "response": {
+                    "attempt": attempt,
+                    "revision": revision,
+                    "text": text,
+                    "status": "intermediate"
+                }
+            }),
+        )
+        .with_worker_scope(test_context_id(session_id), worker_id.clone())
+    };
+
+    // The first frame of a turn is outside any window and broadcasts at once.
+    response_preview::publish(&state, session_id, &worker_id, &preview(1, 1, "first"));
+    assert_eq!(drain_wire_events(&mut receiver).len(), 1);
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_none());
+
+    // Frames inside the window are withheld from the wire while the
+    // server-side projection keeps tracking the newest revision.
+    response_preview::publish(&state, session_id, &worker_id, &preview(1, 2, "second"));
+    response_preview::publish(&state, session_id, &worker_id, &preview(1, 3, "third"));
+    assert_eq!(drain_wire_events(&mut receiver).len(), 0);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[session_id];
+        let turn = session
+            .turns
+            .iter()
+            .find(|turn| turn.turn_id == web_turn.turn_id)
+            .unwrap();
+        assert_eq!(turn.preview.as_ref().unwrap()["revision"], 3);
+        assert!(session.preview_throttle.pending.is_some());
+    }
+
+    // Once the window elapses the drain releases the newest withheld frame
+    // exactly once.
+    std::thread::sleep(std::time::Duration::from_millis(160));
+    response_preview::flush_pending(&state, session_id);
+    let drained = drain_wire_events(&mut receiver);
+    assert_eq!(drained.len(), 1);
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_none());
+
+    // A withheld frame of a finished turn is dropped, never broadcast late on
+    // top of the terminal answer.
+    response_preview::publish(&state, session_id, &worker_id, &preview(1, 4, "stale"));
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_some());
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Finished(
+            agent_core::FinishedTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.to_string(),
+                    turn_id: core_turn_id.to_string(),
+                    epoch: 1,
+                },
+                outcome: agent_core::TurnProjectionOutcome::Completed,
+            },
+        )),
+    );
+    response_preview::flush_pending(&state, session_id);
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_none());
+    // The Finished projection itself is broadcast, but the withheld stale
+    // preview frame must never leak on top of the terminal answer.
+    let drained = drain_wire_events(&mut receiver);
+    assert!(
+        drained.iter().all(|event| match event {
+            WireEvent::CoreTopic { event, .. } => {
+                event["topic"]["name"] != json!("core.model.preview")
+            }
+            _ => true,
+        }),
+        "a finished turn must not leak its withheld preview frame"
+    );
+}
+
+#[test]
+fn streaming_preview_interruption_frame_survives_terminal_flush() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let _web_turn =
+        start_web_turn(&state, session_id, "stop keeps the interruption banner").unwrap();
+    let worker_id = test_worker_id(session_id);
+    let core_turn_id = "core_turn_stop";
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Active(
+            agent_core::ActiveTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.to_string(),
+                    turn_id: core_turn_id.to_string(),
+                    epoch: 1,
+                },
+                stop_requested: false,
+                input_admission: agent_core::TurnInputAdmission::Open,
+                activity: agent_core::TurnActivity::Running,
+            },
+        )),
+    );
+    let mut receiver = state.events.subscribe();
+    let preview = |attempt: u64, revision: u64, interruption: &str| {
+        CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new("core.model.preview", json!({})),
+            CoreSessionState::WaitingModel,
+            json!({
+                "turn_id": core_turn_id,
+                "attempt": attempt,
+                "revision": revision,
+                "interruption": if interruption.is_empty() {
+                    json!(null)
+                } else {
+                    json!(interruption)
+                },
+                "response": {
+                    "attempt": attempt,
+                    "revision": revision,
+                    "text": "HTTP early response",
+                    "status": "intermediate"
+                }
+            }),
+        )
+        .with_worker_scope(test_context_id(session_id), worker_id.clone())
+    };
+
+    // The last streaming chunk broadcasts immediately; the Stop frame that
+    // follows lands inside the same throttle window and is withheld.
+    response_preview::publish(&state, session_id, &worker_id, &preview(1, 1, ""));
+    assert_eq!(drain_wire_events(&mut receiver).len(), 1);
+    response_preview::publish(&state, session_id, &worker_id, &preview(1, 2, "cancelled"));
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_some());
+
+    // The turn reaches its terminal cancelled projection before the window
+    // elapses. Ordinary stale stream frames are dropped on terminal flush,
+    // but the interruption frame is the only carrier of the Stopped banner
+    // and must be broadcast instead.
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Finished(
+            agent_core::FinishedTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.to_string(),
+                    turn_id: core_turn_id.to_string(),
+                    epoch: 1,
+                },
+                outcome: agent_core::TurnProjectionOutcome::Cancelled,
+            },
+        )),
+    );
+    // The terminal projection itself reaches the wire; drain it before the
+    // flush so the remaining assertions only see the interruption frame.
+    drain_wire_events(&mut receiver);
+    response_preview::flush_pending(&state, session_id);
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_none());
+    let drained = drain_wire_events(&mut receiver);
+    assert_eq!(
+        drained.len(),
+        1,
+        "the interruption frame must be broadcast, not dropped as stale"
+    );
+    assert!(drained.iter().any(|event| match event {
+        WireEvent::CoreTopic { event, .. } => {
+            event["payload"]["interruption"] == json!("cancelled")
+        }
+        _ => false,
+    }));
+}
+
+#[test]
+fn thinking_preview_frames_bypass_answer_throttle() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let _web_turn = start_web_turn(&state, session_id, "keep thinking fluid").unwrap();
+    let worker_id = test_worker_id(session_id);
+    let core_turn_id = "core_turn_thinking_live";
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Active(
+            agent_core::ActiveTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.to_string(),
+                    turn_id: core_turn_id.to_string(),
+                    epoch: 1,
+                },
+                stop_requested: false,
+                input_admission: agent_core::TurnInputAdmission::Open,
+                activity: agent_core::TurnActivity::Running,
+            },
+        )),
+    );
+    let mut receiver = state.events.subscribe();
+    let thinking = |revision: u64, tail: &str| {
+        CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new("core.model.preview", json!({})),
+            CoreSessionState::WaitingModel,
+            json!({
+                "turn_id": core_turn_id,
+                "attempt": 1,
+                "revision": revision,
+                "interruption": null,
+                "response": null,
+                "stream_phase": "thinking",
+                "thinking_words": 12,
+                "thinking_tail": tail,
+                "thinking_elapsed_ms": 500
+            }),
+        )
+        .with_worker_scope(test_context_id(session_id), worker_id.clone())
+    };
+
+    // Thinking frames are cheap and must not wait behind the answer-preview
+    // throttle: each new tail should reach the wire immediately.
+    for revision in 1..=3 {
+        response_preview::publish(
+            &state,
+            session_id,
+            &worker_id,
+            &thinking(revision, &format!("tail-{revision}")),
+        );
+        assert_eq!(
+            drain_wire_events(&mut receiver).len(),
+            1,
+            "thinking frame {revision} was withheld"
+        );
+        assert!(
+            state.sessions.lock().unwrap()[session_id]
+                .preview_throttle
+                .pending
+                .is_none(),
+            "thinking frame {revision} left a pending preview"
+        );
+    }
+
+    // The answer-preview path keeps the original throttle.
+    let answer = CoreTopicEvent::new(
+        session_id,
+        CoreTopic::new("core.model.preview", json!({})),
+        CoreSessionState::WaitingModel,
+        json!({
+            "turn_id": core_turn_id,
+            "attempt": 1,
+            "revision": 4,
+            "interruption": null,
+            "response": {"attempt": 1, "revision": 4, "text": "answer", "status": "streaming"},
+            "stream_phase": "responding",
+            "thinking_tail": ""
+        }),
+    )
+    .with_worker_scope(test_context_id(session_id), worker_id.clone());
+    response_preview::publish(&state, session_id, &worker_id, &answer);
+    assert_eq!(drain_wire_events(&mut receiver).len(), 0);
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_some());
+}
+
+#[test]
+fn settled_final_preview_bypasses_broadcast_throttle_and_keeps_wire_order() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let _web_turn = start_web_turn(&state, session_id, "publish the final preview").unwrap();
+    let worker_id = test_worker_id(session_id);
+    let core_turn_id = "core_turn_final_preview";
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Active(
+            agent_core::ActiveTurnProjection {
+                token: agent_core::TurnToken {
+                    session_id: session_id.to_string(),
+                    turn_id: core_turn_id.to_string(),
+                    epoch: 1,
+                },
+                stop_requested: false,
+                input_admission: agent_core::TurnInputAdmission::Open,
+                activity: agent_core::TurnActivity::Running,
+            },
+        )),
+    );
+    let mut receiver = state.events.subscribe();
+    let preview = |attempt: u64, revision: u64, text: &str, status: &str| {
+        CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new("core.model.preview", json!({})),
+            CoreSessionState::WaitingModel,
+            json!({
+                "turn_id": core_turn_id,
+                "attempt": attempt,
+                "revision": revision,
+                "interruption": null,
+                "response": {
+                    "attempt": attempt,
+                    "revision": revision,
+                    "text": text,
+                    "status": status
+                }
+            }),
+        )
+        .with_worker_scope(test_context_id(session_id), worker_id.clone())
+    };
+
+    // First frame broadcasts at once; the next streaming frame falls inside
+    // the throttle window and is withheld.
+    response_preview::publish(
+        &state,
+        session_id,
+        &worker_id,
+        &preview(1, 1, "partial answer", "streaming"),
+    );
+    response_preview::publish(
+        &state,
+        session_id,
+        &worker_id,
+        &preview(1, 2, "final answer", "streaming"),
+    );
+    assert_eq!(drain_wire_events(&mut receiver).len(), 1);
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_some());
+
+    // The settled Final frame is the answer itself. It must flush the withheld
+    // streaming frame and broadcast immediately; otherwise the following
+    // terminal turn event drops it as a stale pending preview and the UI never
+    // receives a Final model preview.
+    response_preview::publish(
+        &state,
+        session_id,
+        &worker_id,
+        &preview(1, 3, "final answer", "final"),
+    );
+    let drained = drain_wire_events(&mut receiver);
+    assert_eq!(
+        drained.len(),
+        2,
+        "final frame must flush pending and broadcast: {drained:?}"
+    );
+    let statuses = drained
+        .iter()
+        .map(|event| match event {
+            WireEvent::CoreTopic { event, .. } => event["payload"]["response"]["status"].clone(),
+            _ => json!(null),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(statuses, vec![json!("streaming"), json!("final")]);
+    assert!(state.sessions.lock().unwrap()[session_id]
+        .preview_throttle
+        .pending
+        .is_none());
+}
+
+mod session_resource_observation_tests {
+    use crate::server::session_resource_monitor::{
+        dominant_memory_session, dominant_share_suffix, render_observation, ResourceObservation,
+        SessionObservationState,
+    };
+    use agent_core::resource_caps::{JobResourceUsage, SessionResourceUsage};
+
+    fn usage(
+        cpu_usage_usec: u64,
+        memory_current_bytes: Option<u64>,
+        memory_high_bytes: Option<u64>,
+        oom_kill_count: u64,
+    ) -> SessionResourceUsage {
+        SessionResourceUsage {
+            cpu_usage_usec: Some(cpu_usage_usec),
+            cpu_quota_cores: Some(2.8),
+            memory_current_bytes,
+            memory_anon_bytes: None,
+            memory_file_bytes: None,
+            memory_file_mapped_bytes: None,
+            memory_peak_bytes: None,
+            swap_current_bytes: None,
+            memory_high_bytes,
+            memory_max_bytes: None,
+            oom_kill_count,
+            jobs: Vec::new(),
+        }
+    }
+
+    fn usage_with_jobs(
+        memory_current_bytes: Option<u64>,
+        memory_high_bytes: Option<u64>,
+        jobs: Vec<JobResourceUsage>,
+    ) -> SessionResourceUsage {
+        SessionResourceUsage {
+            cpu_usage_usec: Some(0),
+            cpu_quota_cores: Some(2.8),
+            memory_current_bytes,
+            memory_anon_bytes: None,
+            memory_file_bytes: None,
+            memory_file_mapped_bytes: None,
+            memory_peak_bytes: None,
+            swap_current_bytes: None,
+            memory_high_bytes,
+            memory_max_bytes: None,
+            oom_kill_count: jobs.iter().map(|job| job.oom_kill_count).sum(),
+            jobs,
+        }
+    }
+
+    fn job(scope_name: &str, oom_kill_count: u64) -> JobResourceUsage {
+        JobResourceUsage {
+            scope_name: scope_name.to_string(),
+            oom_kill_count,
+            memory_current_bytes: Some(1024),
+        }
+    }
+
+    #[test]
+    fn cpu_alert_requires_forty_seconds_of_sustained_load() {
+        let mut state = SessionObservationState::default();
+        let step = std::time::Duration::from_secs(2);
+        let mut usage_usec = 1_000_000u64;
+        // First sample only establishes the baseline.
+        assert!(state
+            .observe(&usage(usage_usec, None, None, 0), step, Some(28))
+            .is_empty());
+        for sample in 1..=19 {
+            usage_usec += 5_600_000; // 2.8 cores over two seconds
+            assert!(
+                state
+                    .observe(&usage(usage_usec, None, None, 0), step, Some(28))
+                    .is_empty(),
+                "must stay quiet at {}s",
+                sample * 2
+            );
+        }
+        usage_usec += 5_600_000;
+        let observations = state.observe(&usage(usage_usec, None, None, 0), step, Some(28));
+        assert_eq!(observations.len(), 1);
+        assert!(matches!(
+            observations[0],
+            ResourceObservation::CpuHigh { .. }
+        ));
+    }
+
+    #[test]
+    fn cpu_alert_resets_after_a_low_load_window() {
+        let mut state = SessionObservationState::default();
+        let step = std::time::Duration::from_secs(2);
+        let mut usage_usec = 1_000_000u64;
+        state.observe(&usage(usage_usec, None, None, 0), step, Some(28));
+        for _ in 0..20 {
+            usage_usec += 5_600_000;
+            state.observe(&usage(usage_usec, None, None, 0), step, Some(28));
+        }
+        for _ in 0..3 {
+            state.observe(&usage(usage_usec, None, None, 0), step, Some(28));
+        }
+        for _ in 0..19 {
+            usage_usec += 5_600_000;
+            assert!(state
+                .observe(&usage(usage_usec, None, None, 0), step, Some(28))
+                .is_empty());
+        }
+        usage_usec += 5_600_000;
+        assert_eq!(
+            state
+                .observe(&usage(usage_usec, None, None, 0), step, Some(28))
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn oom_counter_increment_names_the_killed_job_once_per_kill() {
+        let mut state = SessionObservationState::default();
+        let step = std::time::Duration::from_secs(2);
+        assert!(state
+            .observe(
+                &usage_with_jobs(Some(1024), None, vec![job("job-1-1", 0)]),
+                step,
+                Some(28)
+            )
+            .is_empty());
+        let killed = state.observe(
+            &usage_with_jobs(Some(2048), None, vec![job("job-1-1", 1)]),
+            step,
+            Some(28),
+        );
+        assert_eq!(killed.len(), 1);
+        assert!(matches!(
+            &killed[0],
+            ResourceObservation::OomKilled {
+                killed_jobs,
+                killed_job_total: 1,
+                peak_bytes: Some(1024),
+                ..
+            } if killed_jobs == &vec!["job-1-1".to_string()]
+        ));
+        assert!(state
+            .observe(
+                &usage_with_jobs(Some(2048), None, vec![job("job-1-1", 1)]),
+                step,
+                Some(28)
+            )
+            .is_empty());
+        let second = state.observe(
+            &usage_with_jobs(Some(2048), None, vec![job("job-1-1", 2)]),
+            step,
+            Some(28),
+        );
+        assert_eq!(second.len(), 1);
+        assert!(matches!(
+            &second[0],
+            ResourceObservation::OomKilled {
+                killed_jobs,
+                killed_job_total: 1,
+                ..
+            } if killed_jobs == &vec!["job-1-1".to_string()]
+        ));
+    }
+
+    #[test]
+    fn historical_oom_counts_are_baselined_and_never_replayed() {
+        let mut state = SessionObservationState::default();
+        let step = std::time::Duration::from_secs(2);
+        let historical = vec![job("job-a", 3), job("job-b", 2)];
+        // First sample: counters already nonzero, but they predate this
+        // monitor and must not produce a prompt.
+        assert!(state
+            .observe(
+                &usage_with_jobs(Some(1024), None, historical.clone()),
+                step,
+                Some(28)
+            )
+            .is_empty());
+        // Unchanged counters stay silent.
+        assert!(state
+            .observe(
+                &usage_with_jobs(Some(1024), None, historical),
+                step,
+                Some(28)
+            )
+            .is_empty());
+        // Only job-b moved in this window; job-a's history is not mentioned.
+        let killed = state.observe(
+            &usage_with_jobs(Some(1536), None, vec![job("job-a", 3), job("job-b", 3)]),
+            step,
+            Some(28),
+        );
+        assert_eq!(killed.len(), 1);
+        assert!(matches!(
+            &killed[0],
+            ResourceObservation::OomKilled {
+                killed_jobs,
+                killed_job_total: 1,
+                peak_bytes: Some(1024),
+                ..
+            } if killed_jobs == &vec!["job-b".to_string()]
+        ));
+    }
+
+    #[test]
+    fn oom_without_a_job_leaf_still_reports_the_session() {
+        let mut state = SessionObservationState::default();
+        let step = std::time::Duration::from_secs(2);
+        state.observe(&usage(0, Some(1024), None, 0), step, Some(28));
+        let killed = state.observe(&usage(0, Some(2048), None, 1), step, Some(28));
+        assert_eq!(killed.len(), 1);
+        assert!(matches!(
+            &killed[0],
+            ResourceObservation::OomKilled {
+                killed_jobs,
+                killed_job_total: 0,
+                peak_bytes: Some(1024),
+                ..
+            } if killed_jobs.is_empty()
+        ));
+    }
+
+    #[test]
+    fn dominant_share_picks_the_largest_current_session() {
+        let samples = vec![
+            ("session-a".to_string(), Some(3 * 1024 * 1024 * 1024)),
+            ("session-b".to_string(), Some(1024 * 1024 * 1024)),
+            ("session-c".to_string(), None),
+        ];
+        assert_eq!(
+            dominant_memory_session(&samples),
+            Some((
+                "session-a".to_string(),
+                3 * 1024 * 1024 * 1024,
+                4 * 1024 * 1024 * 1024
+            ))
+        );
+        assert_eq!(
+            dominant_memory_session(&[("empty".to_string(), Some(0))]),
+            None
+        );
+    }
+
+    #[test]
+    fn observations_render_the_requested_runtime_wording() {
+        let cpu = render_observation(
+            &ResourceObservation::CpuHigh {
+                cores: 2.8,
+                quota_cores: Some(2.8),
+                memory_current_bytes: Some(3 * 1024 * 1024 * 1024),
+            },
+            Some(32 * 1024 * 1024 * 1024),
+        );
+        assert!(cpu.starts_with(
+            "Runtime observation: task CPU load in this session has stayed high for more than 40s"
+        ));
+        assert!(cpu.contains("3.0G"));
+        assert!(cpu.contains("9% of total memory"));
+
+        let oom = render_observation(
+            &ResourceObservation::OomKilled {
+                killed_jobs: vec!["job-1-1".to_string()],
+                killed_job_total: 1,
+                peak_bytes: Some(2 * 1024 * 1024 * 1024),
+                high_bytes: Some(1_600_000_000),
+            },
+            Some(32 * 1024 * 1024 * 1024),
+        );
+        assert!(oom.starts_with(
+            "Runtime observation: job-1-1 in this session was OOM-killed; total task memory usage 2.0G (6% of total memory)"
+        ));
+        assert!(oom.ends_with("above the quota threshold."));
+
+        let oom_without_quota = render_observation(
+            &ResourceObservation::OomKilled {
+                killed_jobs: vec!["job-1-1".to_string(), "job-1-2".to_string()],
+                killed_job_total: 3,
+                peak_bytes: Some(2 * 1024 * 1024 * 1024),
+                high_bytes: Some(3 * 1024 * 1024 * 1024),
+            },
+            None,
+        );
+        assert!(oom_without_quota.starts_with(
+            "Runtime observation: job-1-1, job-1-2 and 1 more job in this session were OOM-killed"
+        ));
+        assert!(oom_without_quota.contains("total task memory usage 2.0G."));
+        assert!(!oom_without_quota.contains("quota threshold"));
+
+        let oom_unattributed = render_observation(
+            &ResourceObservation::OomKilled {
+                killed_jobs: Vec::new(),
+                killed_job_total: 0,
+                peak_bytes: None,
+                high_bytes: None,
+            },
+            None,
+        );
+        assert!(oom_unattributed.starts_with(
+            "Runtime observation: Tasks in this session were OOM-killed; total task memory usage memory stats unavailable."
+        ));
+
+        let dominant = render_observation(
+            &ResourceObservation::OomDominantShare {
+                top_bytes: 3 * 1024 * 1024 * 1024,
+                total_bytes: 4 * 1024 * 1024 * 1024,
+            },
+            Some(32 * 1024 * 1024 * 1024),
+        );
+        assert!(dominant.contains("an OOM kill just happened"));
+        assert!(dominant.contains("largest memory usage of all sessions"));
+        assert!(dominant.contains("3.0G, 75% of the total across sessions"));
+
+        let suffix = dominant_share_suffix(75.4);
+        assert_eq!(
+            suffix,
+            " This session now has the largest memory usage of all sessions (75% of the total across sessions)."
+        );
+    }
+}
+
+mod session_work_file_update_tests {
+    use crate::server::session_work_file_monitor::{WorkFileStamp, WorkFileWatchState};
+    use std::collections::HashSet;
+    use std::time::{Duration, Instant, SystemTime};
+
+    fn stamp(seconds: u64, len: u64) -> WorkFileStamp {
+        WorkFileStamp {
+            modified: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)),
+            len,
+        }
+    }
+
+    #[test]
+    fn existing_file_is_only_a_baseline() {
+        let mut state = WorkFileWatchState::default();
+        let start = Instant::now();
+        assert!(!state.observe("s1", Some(stamp(1, 10)), start));
+        assert!(!state.observe("s1", Some(stamp(1, 10)), start + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_changed_stamp_notifies_once() {
+        let mut state = WorkFileWatchState::default();
+        let start = Instant::now();
+        assert!(!state.observe("s1", Some(stamp(1, 10)), start));
+        assert!(state.observe("s1", Some(stamp(2, 11)), start + Duration::from_secs(2)));
+        assert!(!state.observe("s1", Some(stamp(2, 11)), start + Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn burst_writes_coalesce_inside_the_cooldown_window() {
+        let mut state = WorkFileWatchState::default();
+        let start = Instant::now();
+        assert!(!state.observe("s1", Some(stamp(1, 10)), start));
+        assert!(state.observe("s1", Some(stamp(2, 11)), start + Duration::from_secs(1)));
+        assert!(!state.observe("s1", Some(stamp(3, 12)), start + Duration::from_secs(2)));
+        assert!(state.observe("s1", Some(stamp(4, 13)), start + Duration::from_secs(4)));
+    }
+
+    #[test]
+    fn creating_a_missing_file_is_a_change_but_deletion_is_quiet() {
+        let mut state = WorkFileWatchState::default();
+        let start = Instant::now();
+        assert!(!state.observe("s1", None, start));
+        assert!(state.observe("s1", Some(stamp(1, 10)), start + Duration::from_secs(2)));
+        assert!(!state.observe("s1", None, start + Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn removed_sessions_lose_their_baseline() {
+        let mut state = WorkFileWatchState::default();
+        let start = Instant::now();
+        assert!(!state.observe("s1", Some(stamp(1, 10)), start));
+        state.retain_sessions(&HashSet::new());
+        assert!(!state.observe("s1", Some(stamp(2, 11)), start + Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn legacy_work_file_update_is_no_longer_a_user_entry_kind() {
+        assert_eq!(
+            crate::server::history_user_entry_kind(Some("work_file_update")),
+            "task"
+        );
+    }
+}
+
+mod session_work_file_update_persistence_tests {
+    use super::*;
+
+    #[test]
+    fn update_notice_is_appended_to_the_latest_turn_and_persisted() {
+        let state = routing_test_state();
+        let created_at_ms = now_ms();
+        {
+            let mut sessions = state.sessions.lock().unwrap();
+            let session = sessions.get_mut("session_a").expect("test session");
+            session.turns.push(WebTurn {
+                preview: None,
+                turn_id: "turn-work-file".to_string(),
+                state: "finished".to_string(),
+                created_at_ms,
+                interrupted_at_ms: None,
+                user_entries: vec![WebTurnUserEntry {
+                    kind: "task".to_string(),
+                    text: "do the work".to_string(),
+                    attachments: Vec::new(),
+                    created_at_ms,
+                    timeline_seq: Some(0),
+                    command_id: None,
+                    delivery_state: None,
+                    worker_roles: Vec::new(),
+                }],
+                events: Vec::new(),
+                final_answer: Some("done".to_string()),
+                completion: Some(serde_json::json!({ "stop_reason": "Completed" })),
+                events_slimmed: false,
+            });
+        }
+
+        let turn = crate::server::session_work_file_monitor::append_work_file_update_notice(
+            &state,
+            "session_a",
+        )
+        .unwrap()
+        .expect("a session with a turn can host the notice");
+        assert_eq!(turn.turn_id, "turn-work-file");
+        // The notice rides the work-stream event chain; it never becomes a
+        // user entry or model input.
+        let event = turn.events.last().expect("notice event");
+        assert_eq!(event.source, "ui_activity");
+        assert_eq!(event.payload["kind"], "work_file_notice");
+        assert!(event.timeline_seq.is_some());
+        assert_eq!(turn.user_entries.len(), 1);
+        assert_eq!(turn.user_entries[0].kind, "task");
+
+        let store = current_session_store(&state).unwrap();
+        let records = read_all_history_records(&store.history_path_for_session("session_a"))
+            .expect("history records");
+        assert!(records.iter().any(|record| matches!(
+            record,
+            agent_core::session_store::ChatHistoryRecord::Event {
+                kind: agent_core::session_store::ChatHistoryEventKind::RuntimeNotice,
+                turn_id,
+                extra,
+                ..
+            } if turn_id == "turn-work-file"
+                && extra.get("source").and_then(serde_json::Value::as_str) == Some("ui_activity")
+                && extra
+                    .get("payload")
+                    .and_then(|payload| payload.get("kind"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("work_file_notice")
+        )));
+
+        // The persisted shape must round-trip through restore as a work-stream
+        // notice, not as user input.
+        let restored = crate::server::restored_turns_from_history_records(&records);
+        let restored_turn = restored
+            .iter()
+            .find(|turn| turn.turn_id == "turn-work-file")
+            .expect("restored turn");
+        // Only the notice event was persisted, so restore must not invent a
+        // user entry for it.
+        assert!(restored_turn.user_entries.is_empty());
+        assert!(restored_turn.events.iter().any(|event| {
+            event.source == "ui_activity" && event.payload["kind"] == "work_file_notice"
+        }));
+    }
+
+    #[test]
+    fn update_notice_has_no_position_without_a_turn() {
+        let state = routing_test_state();
+        let appended = crate::server::session_work_file_monitor::append_work_file_update_notice(
+            &state,
+            "session_a",
+        )
+        .unwrap();
+        assert!(appended.is_none());
+    }
+
+    #[test]
+    fn restore_migrates_a_legacy_notice_into_the_work_stream() {
+        let records = vec![agent_core::session_store::ChatHistoryRecord::Message {
+            role: agent_core::session_store::ChatHistoryRole::User,
+            turn_id: "turn-legacy".to_string(),
+            created_at_ms: 10,
+            kind: Some("work_file_update".to_string()),
+            command_id: None,
+            delivery_state: None,
+            content: "Session work notes updated.".to_string(),
+        }];
+
+        let turns = crate::server::restored_turns_from_history_records(&records);
+
+        assert_eq!(turns.len(), 1);
+        let turn = &turns[0];
+        assert_eq!(turn.turn_id, "turn-legacy");
+        // Legacy rows were user entries; restoring must move them onto the
+        // notice event chain instead of replaying them as user input.
+        assert!(turn.user_entries.is_empty());
+        let event = turn.events.last().expect("restored notice event");
+        assert_eq!(event.source, "ui_activity");
+        assert_eq!(event.payload["kind"], "work_file_notice");
+    }
+}
+
+#[test]
+fn resource_caps_startup_summary_reports_both_dimensions() {
+    let caps = WireResourceCaps {
+        cpu: WireResourceCapDimension {
+            enabled: true,
+            percent: 85.0,
+            kernel: "applied".to_string(),
+            limit: Some("2380000 100000".to_string()),
+            reason: None,
+            blocker: None,
+            escalation_required: false,
+        },
+        mem: WireResourceCapDimension {
+            enabled: true,
+            percent: 85.0,
+            kernel: "unavailable".to_string(),
+            limit: None,
+            reason: Some("shared cgroup root is not owned by this instance".to_string()),
+            blocker: None,
+            escalation_required: false,
+        },
+        scope: "/sys/fs/cgroup/test.scope".to_string(),
+    };
+    let lines = resource_caps_summary_lines(&caps);
+    assert_eq!(lines.len(), 2);
+    assert_eq!(
+        lines[0],
+        "[resource_caps] CPU limit: 85% applied (23.8 cores)"
+    );
+    assert_eq!(
+        lines[1],
+        "[resource_caps] MEM limit: 85% unavailable (shared cgroup root is not owned by this instance)"
+    );
+}
+
+#[test]
+fn resource_caps_startup_summary_marks_disabled_dimensions() {
+    let caps = WireResourceCaps {
+        cpu: WireResourceCapDimension {
+            enabled: false,
+            percent: 85.0,
+            kernel: "disabled".to_string(),
+            limit: None,
+            reason: None,
+            blocker: None,
+            escalation_required: false,
+        },
+        mem: WireResourceCapDimension {
+            enabled: true,
+            percent: 50.0,
+            kernel: "applied".to_string(),
+            limit: Some("123456".to_string()),
+            reason: None,
+            blocker: None,
+            escalation_required: false,
+        },
+        scope: String::new(),
+    };
+    let lines = resource_caps_summary_lines(&caps);
+    assert_eq!(lines[0], "[resource_caps] CPU limit: off disabled");
+    assert_eq!(
+        lines[1],
+        "[resource_caps] MEM limit: 50% applied (123456 B)"
+    );
+}
+
+#[test]
+fn wire_cap_dimension_prefers_structural_readiness_reason_and_marks_shared_root() {
+    let applied = agent_core::resource_caps::ResourceCapStatus::Unavailable {
+        reason: "clearing the existing bound failed: EACCES".to_string(),
+    };
+    let readiness = agent_core::resource_caps::ResourceCapReadiness::Unavailable {
+        reason: agent_core::resource_caps::SHARED_INSTANCE_ROOT_REASON.to_string(),
+    };
+    let dimension = wire_cap_dimension(true, 85.0, Some(&applied), &readiness);
+    assert_eq!(dimension.kernel, "unavailable");
+    assert_eq!(
+        dimension.reason.as_deref(),
+        Some(agent_core::resource_caps::SHARED_INSTANCE_ROOT_REASON)
+    );
+    assert_eq!(dimension.blocker.as_deref(), Some("shared-instance-root"));
+    assert!(!dimension.escalation_required);
+}
+
+#[test]
+fn wire_cap_dimension_keeps_apply_error_when_readiness_is_ready() {
+    let applied = agent_core::resource_caps::ResourceCapStatus::Unavailable {
+        reason: "write failed: EACCES".to_string(),
+    };
+    let readiness = agent_core::resource_caps::ResourceCapReadiness::Ready;
+    let dimension = wire_cap_dimension(true, 85.0, Some(&applied), &readiness);
+    assert_eq!(dimension.reason.as_deref(), Some("write failed: EACCES"));
+    assert!(dimension.blocker.is_none());
+    assert!(!dimension.escalation_required);
+}
+
+#[test]
+fn resource_caps_startup_summary_humanizes_applied_limits() {
+    let caps = WireResourceCaps {
+        cpu: WireResourceCapDimension {
+            enabled: true,
+            percent: 85.0,
+            kernel: "applied".to_string(),
+            limit: Some("2380000 100000".to_string()),
+            reason: None,
+            blocker: None,
+            escalation_required: false,
+        },
+        mem: WireResourceCapDimension {
+            enabled: true,
+            percent: 85.0,
+            kernel: "applied".to_string(),
+            limit: Some("high=24063819806; max=28310376243".to_string()),
+            reason: None,
+            blocker: None,
+            escalation_required: false,
+        },
+        scope: String::new(),
+    };
+    let lines = resource_caps_summary_lines(&caps);
+    assert_eq!(
+        lines[0],
+        "[resource_caps] CPU limit: 85% applied (23.8 cores)"
+    );
+    assert_eq!(
+        lines[1],
+        "[resource_caps] MEM limit: 85% applied (high 22.41 GB, max 26.37 GB)"
+    );
+    assert_eq!(format_memory_limit("524288000"), "500 MB");
+    assert_eq!(format_memory_limit("28310351872"), "26.37 GB");
+    assert_eq!(format_cpu_cores("100000 100000").as_deref(), Some("1 core"));
 }

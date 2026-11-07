@@ -204,13 +204,13 @@ pub fn format_work_instruction_context(files: &[WorkInstructionFile]) -> Option<
     );
     for file in files {
         out.push_str(&format!(
-            "\n[BEGIN WORK_DIRECTORY_INSTRUCTION file=\"{}\" directory=\"{}\"]\n",
+            "\n[BEGIN PROJECT INSTRUCTION file=\"{}\" directory=\"{}\"]\n",
             file.filename,
             file.directory.display()
         ));
         out.push_str(file.content.trim());
         out.push_str(&format!(
-            "\n[END WORK_DIRECTORY_INSTRUCTION file=\"{}\"]\n",
+            "\n[END PROJECT INSTRUCTION file=\"{}\"]\n",
             file.filename
         ));
     }

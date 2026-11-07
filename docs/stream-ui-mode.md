@@ -2,9 +2,74 @@
 
 Settings → System → **Show answers as they arrive** is a standard presentation setting. It is disabled by default and stored only in the browser. Existing choices continue to use the `timem-web-stream-ui-mode-v1` key so upgrading does not reset the preference.
 
+While the parent setting is enabled, its card shows a nested sub-setting
+**Collapse interim conversation after the task finishes** (`timem-web-stream-archive-v1`).
+It defaults to off: after the authoritative turn state ends, the stream area
+stays expanded next to the final answer, including after reload. Turning it on
+restores the classic archive behavior — the terminal animation folds the whole
+process area into the collapsed Thought/Action frame. The sub-setting is
+browser-local presentation only, is never forced on by Host debug defaults, and
+toggling it live applies in both directions without waiting for the next task.
+
 Core emits a provisional `core.model.preview` snapshot scoped to the current response attempt. The Host validates the active Core Turn and primary Worker, maps it to the existing Web turn, and retains only the latest preview. Preview chunks do not become chat history events. Browser reload restores the Host snapshot; a Host restart is not a resumable model request.
 
 Public response text (`free_talk` / `final_answer`) streams into a provisional response preview. Tool arguments and reasoning are not display content. Provisional display never permits tool execution. Complete protocol validation remains the execution gate. Invalid responses retract their provisional preview; network interruption and Stop retain partial text with an interruption notice.
+
+## Reading outline over the whole delivery
+
+While Stream UI Mode keeps the process area expanded (archive sub-setting off),
+the reading outline covers the whole turn delivery instead of only the final
+answer: the start anchor jumps to the process top, process chapters come only
+from free-talk blocks that carry a model-written markdown heading (titled and
+leveled by that heading; plain narrative blocks create none, so N model
+interactions never imply N chapters; consecutive same-title snapshots collapse
+into the run start), a `Summary` anchor marks the final-answer top, and the
+answer's own markdown headings follow. Chapter anchors are positional (`data-stream-chapter`
+indices over non-empty free-talk blocks), the outline geometry spans process +
+answer, and process-area growth also refreshes anchor offsets. The delivery
+scope is decoupled from chapters (`markdownOutlineDeliveryScope` in
+`interfaces/web/tests/markdown_outline.test.ts`): while the process area is
+retained, Start, geometry, and the Summary anchor cover the whole delivery even
+when no free-talk block carries a heading, so Start always returns to the
+beginning of this turn's reply (collapsed or not) instead of jumping to the
+answer top. Classic folded mode keeps the answer-only outline unchanged.
+
+## Restored history hydration
+
+Reload/reconnect restores past turns as slimmed previews: the Host caps restored
+event strings at 256 bytes (`…[truncated]`), reduces `core.action` events to
+skeletons, and keeps only the last 40 events per terminal turn in the snapshot,
+so a large session cannot turn the hello frame into megabytes. The projection
+marks such turns with `events_slimmed: true`; the full text always stays in raw
+chat history on disk. While Stream UI Mode is on and the archive sub-setting is
+off, the browser auto-hydrates every slimmed terminal turn of the active
+timeline through the existing bounded `turn_history_page` channel (64 records /
+2 MiB per page) and clears the flag once full events replace the previews, so
+the expanded stream never shows `…[truncated]`. Hydration requests are ordered
+newest turn first (`turnHistoryHydrationOrder`): the landing view shows the
+newest turn, and its reading outline needs hydrated free-talk detail, so an
+oldest-first order made the most visible directory wait behind every older
+turn's chained pages. Classic folded mode keeps slim
+previews and hydrates on expand as before; hidden timeline panes wait until
+they become active.
+
+Sibling hydration and history prepends move portaled outlines without resizing
+their owners, so the timeline broadcasts `markdown-outline-layout-change` from
+layout effects (before the committing paint, keyed by `timelineOutlineShapeKey`).
+Each outline re-measures synchronously on that event: the broadcast precedes the
+paint, and a rAF-deferred correction would paint one stale outline top per
+commit — during the connect-time hydration storm (one broadcast per restored
+turn) that backlog is visible as outline flicker. Window resizes keep the
+frame-coalesced path.
+
+Hydration swaps event arrays while event counts stay equal, so the bottom
+follower's change key is a content-weight signature over the rendered timeline
+(`timelineEventsSignature`: id, event count, slimmed flag, answer length,
+entries, completion, preview revision), not a bare `events.length` — otherwise
+the grown DOM would strand the viewport mid-history after a restart. The
+reading outline also keeps its active highlight across hydration rebuilds:
+chapter and heading ids are stable, so the highlight only falls back to Start
+when the current id really disappeared (`markdownOutlineFallbackActiveId`).
 
 ## Running tools and typography
 
@@ -19,6 +84,8 @@ Provisional response and Chat text is replayed at a frame-independent, backlog-a
 - `cargo test -p agent_core --test model_stream_tests --locked`: incremental filters, protocol paths, bounds, rollback, retries and preview state.
 - `pnpm --dir interfaces/web test:ui:stream`: runs the complete stream browser suite serially. Also included in `test:browser` / CI.
 - `node interfaces/web/tests/browser/stream-preview-acceptance.mjs`: browser presentation using a simulated Host, including default-off and midstream toggling.
+- `cargo test -p timem --lib restored_history_events_mark --locked`: restored events flag `events_slimmed` only when the slim pass actually changed content.
+- `pnpm --dir interfaces/web test`: `turnNeedsFullEventFetch` gates auto-hydration to stream retention on the active timeline; `streamProcessOutlineSections` covers process-chapter titles, snapshot dedup, and code-fence rejection.
 - `node interfaces/web/tests/browser/stream-preview-product.mjs`: actual product Host, temporary MEM, delayed local HTTP SSE model, and Chrome.
 - `scripts/turn_concurrency_stress.sh`: separate Core/Worker PromptCut and terminal ownership stress coverage.
 
@@ -52,7 +119,9 @@ keeps its existing Chat behavior. This is browser presentation, not a delivery o
 Turn lifecycle change.
 
 Regression: Chrome `stream-preview-acceptance.mjs` checks next-reply folding,
-manual reopen/collapse, completed-history reload and provisional streaming.
+manual reopen/collapse, completed-history reload and provisional streaming, and
+the archive sub-setting scenario (default expanded, nested settings switch, live
+toggle, reload consistency).
 
 Execution dots are shown only for `running` and `background_running`, never for
 completed, failed, timed-out or cancelled tools. This applies to all stream tool

@@ -548,7 +548,7 @@ fn context_compress_resets_readfile_first_touch_tracking() {
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"context_compress":{"summary":"reset first touch tracking"}}"#),
+        content: scored(r#"{"context_compress":{"summary":"reset first touch tracking","keywords":"checkpoint keywords"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -749,7 +749,7 @@ fn manual_context_compress_request_carries_manual_trailer_and_clears_after_compa
     let after = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(
-            r#"{"status":"working","free_talk":"压缩完成。","context_compress":{"summary":"保留目标"}}"#,
+            r#"{"status":"working","free_talk":"压缩完成。","context_compress":{"summary":"保留目标","keywords":"checkpoint keywords"}}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -826,7 +826,7 @@ fn manual_compact_succeeds_on_any_successful_compaction() {
     let after = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"status":"working","free_talk":"压缩完成。","context_compress":{{"keep":{retained},"summary":"保留任务状态"}}}}"#
+            r#"{{"status":"working","free_talk":"压缩完成。","context_compress":{{"keep":{retained},"summary":"保留任务状态","keywords":"checkpoint keywords"}}}}"#
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -943,7 +943,7 @@ fn mcp_action_runs_through_protocol_registry_and_executor() {
 }
 
 #[test]
-fn native_mode_puts_builtin_descriptions_in_static_and_mcp_descriptions_in_api_field() {
+fn native_mode_lists_builtin_names_in_static_and_mcp_descriptions_in_api_field() {
     let memory_dir = tmp_dir("native_mcp_not_static");
     let mut core = test_core(
         "STATIC\n{{TOOL_CATALOG}}\n{{RESPONSE_PROTOCOL_SECTION}}",
@@ -1007,11 +1007,16 @@ fn native_mode_puts_builtin_descriptions_in_static_and_mcp_descriptions_in_api_f
     assert!(prompt.starts_with("[BEGIN SYSTEM PROMPT]\n"), "{prompt}");
     assert!(!prompt.contains("<Timem System Prompt>"));
     let static_end = prompt.find("[END SYSTEM PROMPT]").unwrap();
-    assert!(prompt.contains("### `run_bash`"), "{prompt}");
-    assert!(prompt.contains("### `self_tool`"), "{prompt}");
     assert!(
-        prompt.contains("`run_bash` runs a shell command"),
+        prompt.contains("The runtime exposes the following tools:"),
         "{prompt}"
+    );
+    assert!(prompt.contains("`run_bash`"), "{prompt}");
+    assert!(prompt.contains("`self_tool`"), "{prompt}");
+    assert!(!prompt.contains("### `run_bash`"), "{prompt}");
+    assert!(
+        !prompt.contains("`run_bash` runs a shell command"),
+        "native mode must not duplicate tool descriptions in the static prompt: {prompt}"
     );
     assert!(!prompt.contains("\"input_schema\""), "{prompt}");
     assert!(!prompt.contains("mcp_demo_mcp__echo"), "{prompt}");
@@ -2156,9 +2161,10 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.ends_with(
-        "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
-    ));
+    assert!(prompt.contains("[Context WARN] Context near limit"));
+    assert!(prompt.contains("prone to data loss and directional drift"));
+    assert!(prompt.find("[Context WARN]").unwrap() < prompt.find("prone to data loss").unwrap());
+    assert!(prompt.ends_with("Your tool calls must start with context_compress:"));
     let (_, threshold, quality_target) = core
         .take_pending_compact_request_notice()
         .expect("threshold crossing notice");
@@ -2227,9 +2233,10 @@ fn runtime_host_configuration_sync_is_core_owned() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.ends_with(
-        "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
-    ));
+    assert!(prompt.contains("[Context WARN] Context near limit"));
+    assert!(prompt.contains("prone to data loss and directional drift"));
+    assert!(prompt.find("[Context WARN]").unwrap() < prompt.find("prone to data loss").unwrap());
+    assert!(prompt.ends_with("Your tool calls must start with context_compress:"));
     assert!(!prompt.contains("Long-context maintenance:"));
     let (estimated, threshold, quality_target) = core
         .take_pending_compact_request_notice()
@@ -2238,8 +2245,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
     assert!(estimated >= threshold);
     assert_eq!(threshold, 2_700);
 
-    let compact_response =
-        r#"{"context_compress":{"summary":"retain runtime configuration test state"}}"#;
+    let compact_response = r#"{"context_compress":{"summary":"retain runtime configuration test state","keywords":"checkpoint keywords"}}"#;
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(compact_response),
@@ -2453,7 +2459,7 @@ fn worker_role_is_expanded_again_after_its_delta_is_removed_by_compression() {
 
     let compacted = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"context_compress":{"summary":"role description was removed"}}"#),
+        content: scored(r#"{"context_compress":{"summary":"role description was removed","keywords":"checkpoint keywords"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2696,6 +2702,520 @@ fn user_supplement_context_is_a_system_delta_before_the_user_text() {
     assert!(prompt[..user].contains("## RUNTIME"));
 }
 
+/// Which rendered role heading owns the text just before `needle`: the prompt
+/// carries both role words in its own structure description, so only the
+/// closest preceding heading is evidence.
+fn rendered_role_of(prompt: &str, needle: &str) -> &'static str {
+    let at = prompt.find(needle).expect("needle missing from prompt");
+    let prefix = &prompt[..at];
+    match (prefix.rfind("## USER"), prefix.rfind("## RUNTIME")) {
+        (Some(user), Some(runtime)) if user > runtime => "user",
+        (Some(_), Some(_)) => "runtime",
+        (Some(_), None) => "user",
+        (None, Some(_)) => "runtime",
+        (None, None) => "none",
+    }
+}
+
+#[test]
+fn runtime_triggered_turn_renders_as_runtime_observation() {
+    let dir = tmp_dir("runtime_triggered_turn_rendering");
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
+
+    let prompt = match core.begin_runtime_turn("MAILBOX_DELIVERY_SENTINEL", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    assert_eq!(
+        rendered_role_of(&prompt, "MAILBOX_DELIVERY_SENTINEL"),
+        "runtime"
+    );
+    assert!(!prompt.contains("[User input time"));
+}
+
+#[test]
+fn user_turn_still_renders_as_user_question() {
+    let dir = tmp_dir("user_turn_rendering");
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
+
+    let prompt = match core.begin_turn("USER_QUESTION_SENTINEL", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    assert_eq!(rendered_role_of(&prompt, "USER_QUESTION_SENTINEL"), "user");
+    assert!(prompt.contains("[User input time"));
+}
+
+#[test]
+fn runtime_supplement_renders_as_runtime_observation() {
+    let dir = tmp_dir("runtime_supplement_rendering");
+    let audit_file = dir.join("audit/action_audit.json");
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
+    let _ = core.begin_turn("initial task", None);
+
+    let prompt = match core
+        .append_user_supplements_with_context_and_audit(
+            vec![UserSupplement::runtime("TIMER_FIRE_SENTINEL", None)],
+            &audit_file,
+            "session_1",
+            "turn_1",
+        )
+        .expect("runtime supplement should produce prompt")
+    {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    assert_eq!(rendered_role_of(&prompt, "TIMER_FIRE_SENTINEL"), "runtime");
+}
+
+#[test]
+fn user_supplement_still_renders_as_user_supplement() {
+    let dir = tmp_dir("user_supplement_rendering");
+    let audit_file = dir.join("audit/action_audit.json");
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
+    let _ = core.begin_turn("initial task", None);
+
+    let prompt = match core
+        .append_user_supplements_with_context_and_audit(
+            vec![UserSupplement::new("USER_SUPPLEMENT_SENTINEL", None)],
+            &audit_file,
+            "session_1",
+            "turn_1",
+        )
+        .expect("supplement should produce prompt")
+    {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    assert_eq!(
+        rendered_role_of(&prompt, "USER_SUPPLEMENT_SENTINEL"),
+        "user"
+    );
+    assert!(prompt.contains("[User input time"));
+}
+
+#[test]
+fn mailbox_address_appears_once_per_context_lifetime() {
+    let dir = tmp_dir("mailbox_address_reminder");
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
+    core.update_session_mailbox_name(Some("mb-test123".to_string()));
+    let reminder = "Current session's mailbox is: mb-test123";
+
+    // The invariant: the address appears at least once in every context
+    // lifetime. A fresh context does not carry it, so the first request
+    // states it exactly once.
+    let first = match core.begin_turn("first task", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(first.matches(reminder).count(), 1, "{first}");
+
+    let second = match core.begin_turn("second task", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        second.matches(reminder).count(),
+        1,
+        "the address must not be restated on later turns: {second}"
+    );
+
+    // Compaction drops the old deltas; the confirmation restates the
+    // address so the compacted context still knows it.
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"context_compress":{"summary":"mailbox reminder test","keywords":"checkpoint keywords"}}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    assert_eq!(
+        prompt.matches(reminder).count(),
+        1,
+        "the compaction confirmation restates the address once: {prompt}"
+    );
+
+    core.clear_dynamic_context();
+    let after_clear = match core.begin_turn("after clear", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        after_clear.matches(reminder).count(),
+        1,
+        "a cleared context restates the address once: {after_clear}"
+    );
+    let later = match core.begin_turn("later turn", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        later.matches(reminder).count(),
+        1,
+        "the one-shot reminder must not repeat: {later}"
+    );
+}
+
+#[test]
+fn restored_context_gets_the_mailbox_address_once() {
+    let dir = tmp_dir("mailbox_address_restore");
+    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
+    let _ = core.begin_turn("old work", None);
+
+    // Restart: a fresh worker imports the persisted snapshot, then the Host
+    // syncs the mailbox address at the first turn submission. The restored
+    // deltas do not carry the address, so it must be restated once.
+    let snapshot = core.export_dynamic_context();
+    let mut restored = test_core("STATIC", profile("qwen-plus"), &dir);
+    restored.import_dynamic_context(snapshot);
+    restored.update_session_mailbox_name(Some("mb-restore1".to_string()));
+    let reminder = "Current session's mailbox is: mb-restore1";
+
+    let first = match restored.begin_turn("continue work", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(first.matches(reminder).count(), 1, "{first}");
+
+    let second = match restored.begin_turn("more work", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        second.matches(reminder).count(),
+        1,
+        "the address must not be restated again: {second}"
+    );
+
+    // A snapshot that already carries the address must stay silent: the
+    // invariant is already satisfied inside the restored context.
+    let mut carrying = test_core("STATIC", profile("qwen-plus"), &dir);
+    let _ = carrying.begin_turn("seed", None);
+    carrying.submit_prompt_component(
+        agent_core::PromptComponentRole::system(),
+        "runtime_note",
+        reminder,
+        "runtime",
+    );
+    let snapshot_with_line = carrying.export_dynamic_context();
+    let mut restored2 = test_core("STATIC", profile("qwen-plus"), &dir);
+    restored2.import_dynamic_context(snapshot_with_line);
+    restored2.update_session_mailbox_name(Some("mb-restore1".to_string()));
+    let quiet = match restored2.begin_turn("continue", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        quiet.matches(reminder).count(),
+        1,
+        "restored context already carries the address; no second injection: {quiet}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn clear_context_restates_runtime_known_state_once() {
+    let dir = tmp_dir("clear_runtime_state_snapshot");
+    let mut core = test_core("STATIC", profile("qwen-plus"), dir.clone());
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let audit = dir.join("audit/action_audit.json");
+    core.update_session_mailbox_name(Some("mb-snap123".to_string()));
+    core.replace_timers(vec![agent_core::TimerSpec {
+        timer_id: "t1".to_string(),
+        name: "timer0".to_string(),
+        prompt: "SNAP_TIMER_PROMPT".to_string(),
+        mode: "once".to_string(),
+        after_ms: Some(3_600_000),
+        at: None,
+        interval_ms: None,
+        queue_timeout_minutes: u64::MAX,
+        created_by: "user".to_string(),
+    }]);
+    core.record_turn_start_audit(&audit, "session_snap", "turn_0", "seed");
+    let _ = core.begin_turn("seed task", None);
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"free_talk":"set memo","working_still_action":[{"memo":{"op":"create","text":"SNAP_MEMO_TEXT"}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(
+        matches!(step, CoreStep::NeedModel { .. }),
+        "memo create should continue the turn"
+    );
+    assert_eq!(core.active_memo(), Some("SNAP_MEMO_TEXT"));
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"working_still_action":[{"run_bash":{"cmd":"sleep 5; printf done","background":true}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+    assert!(
+        !core
+            .query_running_shell_jobs_for_session("session_snap")
+            .is_empty(),
+        "the background job should be alive at clear time"
+    );
+
+    core.clear_dynamic_context();
+    core.record_turn_start_audit(&audit, "session_snap", "turn_1", "after clear");
+    let prompt = match core.begin_turn("after clear", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        prompt
+            .matches("Current session's mailbox is: mb-snap123")
+            .count(),
+        1,
+        "{prompt}"
+    );
+    assert!(prompt.contains("SNAP_TIMER_PROMPT"), "{prompt}");
+    assert_eq!(
+        prompt.matches("memo active: SNAP_MEMO_TEXT").count(),
+        1,
+        "{prompt}"
+    );
+    assert!(prompt.contains("running shell jobs"), "{prompt}");
+    assert!(prompt.contains("[!!!NOTE] cwd now set to:"), "{prompt}");
+
+    core.record_turn_start_audit(&audit, "session_snap", "turn_2", "next");
+    let next = match core.begin_turn("next turn", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        next.matches("Current session's mailbox is: mb-snap123")
+            .count(),
+        1,
+        "the snapshot must not be restated on later turns: {next}"
+    );
+    assert_eq!(
+        next.matches("memo active: SNAP_MEMO_TEXT").count(),
+        1,
+        "{next}"
+    );
+    assert_eq!(next.matches("running shell jobs").count(), 1, "{next}");
+}
+
+#[cfg(unix)]
+#[test]
+fn compaction_confirmation_restates_running_jobs() {
+    let dir = tmp_dir("compact_running_jobs");
+    let mut core = test_core("STATIC", profile("qwen-plus"), dir.clone());
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let audit = dir.join("audit/action_audit.json");
+    core.record_turn_start_audit(&audit, "session_jobs", "turn_1", "work");
+    let _ = core.begin_turn("long task", None);
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"working_still_action":[{"run_bash":{"cmd":"sleep 5; printf done","background":true}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"context_compress":{"summary":"retain running job awareness","keywords":"checkpoint keywords"}}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    assert!(
+        prompt.contains("context compressed successfully."),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("running shell jobs"),
+        "the compaction confirmation must restate live jobs: {prompt}"
+    );
+}
+
+#[test]
+fn compaction_reopens_the_work_instruction_block() {
+    let block = "work_directory_instructions:\n[BEGIN PROJECT INSTRUCTION v1]\nSNAP_WORK_RULE keep tests deterministic\n[END PROJECT INSTRUCTION v1]";
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("compact_work_instructions"),
+    );
+
+    let prompt = match core.begin_turn("first", Some(block)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("SNAP_WORK_RULE"), "{prompt}");
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"context_compress":{"summary":"drop the stale deltas","keywords":"checkpoint keywords"}}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+
+    let next = match core.begin_turn("second", Some(block)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(
+        next.contains("SNAP_WORK_RULE"),
+        "after compaction the same work instruction must be re-injected, not filtered as a duplicate: {next}"
+    );
+}
+
+#[test]
+fn compaction_restates_the_restart_notice() {
+    let notice = "Runtime restarted at 2026-10-30 09:00:00 (local time). Previous runtime/job state may be stale. Inspect recent history when recovering prior work.";
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("compact_restart_notice"),
+    );
+    let _ = core.begin_turn("first", Some(notice));
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"context_compress":{"summary":"retain task state","keywords":"checkpoint keywords"}}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    assert!(
+        prompt.contains("Runtime restarted at 2026-10-30 09:00:00 (local time)."),
+        "the restart fact must survive compaction: {prompt}"
+    );
+    // Post-compaction restatement stays a bare fact: the summary already
+    // carries the working state, so no cold-start recovery guidance returns.
+    assert_eq!(
+        prompt
+            .matches("This context continues across that restart.")
+            .count(),
+        1,
+        "{prompt}"
+    );
+    assert!(!prompt.contains("Re-verify the current cwd"), "{prompt}");
+    assert!(
+        !prompt.contains("Previous runtime/job state may be stale"),
+        "{prompt}"
+    );
+}
+
+#[test]
+fn compaction_reinjects_the_work_instruction_block() {
+    let notice = "work_directory_instructions:\nThese instructions were loaded from files in the current working directory.\n\n[BEGIN PROJECT INSTRUCTION file=\"AGENTS.md\" directory=\"/work\"]\nKeep changes scoped.\n[END PROJECT INSTRUCTION file=\"AGENTS.md\"]";
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("compact_work_instruction"),
+    );
+    let _ = core.begin_turn("first", Some(notice));
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"context_compress":{"summary":"retain task state","keywords":"checkpoint keywords"}}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    // The block returns right after compaction, within the same turn: a new
+    // supporting context only arrives with the next turn.
+    assert!(
+        prompt.contains("[BEGIN PROJECT INSTRUCTION file=\"AGENTS.md\""),
+        "the work-instruction block must return immediately after compaction: {prompt}"
+    );
+
+    // The next supporting context carries the same block; the re-registered
+    // fingerprint keeps it filtered so the guidance never duplicates.
+    let _ = core.begin_turn("second", Some(notice));
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: "acknowledged".to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    assert_eq!(
+        prompt.matches("work_directory_instructions").count(),
+        1,
+        "the re-injected block must not duplicate: {prompt}"
+    );
+}
+
+#[test]
+fn compaction_confirmation_carries_the_session_work_file() {
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("compact_work_file"));
+    core.update_session_work_file(Some("/mem/sessions/6lal8v/Timem.md".to_string()));
+    let _ = core.begin_turn("first", None);
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"context_compress":{"summary":"retain task state","keywords":"checkpoint keywords"}}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    assert!(
+        prompt.contains("session work file: /mem/sessions/6lal8v/Timem.md"),
+        "the compaction confirmation must carry the session work file: {prompt}"
+    );
+}
+
 #[test]
 fn missing_durable_score_does_not_block_valid_actions() {
     let dir = tmp_dir("durable_ctx_score_not_required");
@@ -2748,7 +3268,7 @@ fn context_compress_summary_only_removes_all_existing_deltas() {
     }
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"context_compress":{"summary":"remove stale test delta"}}"#),
+        content: scored(r#"{"context_compress":{"summary":"remove stale test delta","keywords":"checkpoint keywords"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2808,7 +3328,7 @@ fn extracted_replay_keeps_compact_summary_once_as_assistant_before_system_result
     }
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"context_compress":{"summary":"retain extracted compact state"}}"#),
+        content: scored(r#"{"context_compress":{"summary":"retain extracted compact state","keywords":"checkpoint keywords"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2859,7 +3379,7 @@ fn prompt_delta_ids_are_simple_global_sequence_and_not_reused_after_compression(
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"context_compress":{"keep":["pd_2"],"summary":"drop first delta"}}"#),
+        content: scored(r#"{"context_compress":{"keep":["pd_2"],"summary":"drop first delta","keywords":"checkpoint keywords"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2919,7 +3439,7 @@ fn response_context_compress_hides_refs_and_appends_summary_slice() {
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"free_talk":"整理旧上下文。","context_compress":{"summary":"旧任务已经完成，只保留 compact 后的测试摘要。"}}"#),
+        content: scored(r#"{"free_talk":"整理旧上下文。","context_compress":{"summary":"旧任务已经完成，只保留 compact 后的测试摘要。","keywords":"checkpoint keywords"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2977,7 +3497,7 @@ fn response_context_compress_does_not_append_redundant_mcp_summary() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(
-            r#"{"free_talk":"整理旧上下文。","context_compress":{"summary":"保留当前任务状态。"}}"#,
+            r#"{"free_talk":"整理旧上下文。","context_compress":{"summary":"保留当前任务状态。","keywords":"checkpoint keywords"}}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -3010,7 +3530,7 @@ fn context_compress_summary_only_removes_visible_delta() {
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"context_compress":{"summary":"remove visible test delta"}}"#),
+        content: scored(r#"{"context_compress":{"summary":"remove visible test delta","keywords":"checkpoint keywords"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -3184,9 +3704,10 @@ fn long_context_uses_observed_model_prompt_tokens_plus_new_delta_estimate() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.ends_with(
-        "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
-    ));
+    assert!(prompt.contains("[Context WARN] Context near limit"));
+    assert!(prompt.contains("prone to data loss and directional drift"));
+    assert!(prompt.find("[Context WARN]").unwrap() < prompt.find("prone to data loss").unwrap());
+    assert!(prompt.ends_with("Your tool calls must start with context_compress:"));
     assert!(!prompt.contains("Long-context maintenance:"));
     let (estimated, threshold, quality_target) = core
         .take_pending_compact_request_notice()
@@ -3214,9 +3735,10 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.ends_with(
-        "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"
-    ));
+    assert!(prompt.contains("[Context WARN] Context near limit"));
+    assert!(prompt.contains("prone to data loss and directional drift"));
+    assert!(prompt.find("[Context WARN]").unwrap() < prompt.find("prone to data loss").unwrap());
+    assert!(prompt.ends_with("Your tool calls must start with context_compress:"));
     for redundant in [
         "Long-context maintenance:",
         "mode=force_shrink_required",
@@ -3263,7 +3785,7 @@ fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
     delta_ids.dedup();
     assert!(!delta_ids.is_empty());
 
-    let shrink_response = r#"{"context_compress":{"summary":"compact old prompt context and keep current task state"}}"#;
+    let shrink_response = r#"{"context_compress":{"summary":"compact old prompt context and keep current task state","keywords":"checkpoint keywords"}}"#;
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(shrink_response),
@@ -3763,7 +4285,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     assert!(compact_ids.len() >= 2);
     let compact_keep = serde_json::to_string(&compact_ids[2..]).unwrap();
     let compact_response = scored(format!(
-        r#"{{"status":"working","free_talk":"将测试 delta ids 移出活跃上下文。","context_compress":{{"keep":{compact_keep},"offload":[{}],"summary":"保留测试状态摘要"}}}}"#,
+        r#"{{"status":"working","free_talk":"将测试 delta ids 移出活跃上下文。","context_compress":{{"keep":{compact_keep},"offload":[{}],"summary":"保留测试状态摘要","keywords":"checkpoint keywords"}}}}"#,
         serde_json::to_string(&compact_ids[1]).unwrap(),
     ));
     let prompt = match core.apply_model_response(LlmResponse {
@@ -3929,13 +4451,19 @@ fn memmgr_raw_chat_search_reads_persisted_chat_records() {
     let root = tmp_dir("memmgr_raw_chat");
     let dir = root.join("memory");
     fs::create_dir_all(&dir).unwrap();
-    write_audit_doc(
-        &root.join("audit").join("api_audit.json"),
-        vec![
-            json!({"type":"turn_start","session":"shell_old","turn_id":"turn_1781760000000","user_input":"我昨天提到了测试物品 BLUE-17"}),
-            json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781760000000","assistant_output":"我记下了测试物品 BLUE-17这个说法。"}),
-        ],
-    );
+    let session_dir = root.join("sessions").join("shell_old");
+    fs::create_dir_all(&session_dir).unwrap();
+    // Keep the persisted shape: internally tagged enums always serialize
+    // `"type"` as the first key of the line.
+    let lines = [
+        r#"{"type":"message","role":"user","turn_id":"turn_1781760000000","created_at_ms":1781760000000,"kind":"task","content":"我昨天提到了测试物品 BLUE-17"}"#,
+        r#"{"type":"message","role":"assistant","turn_id":"turn_1781760000000","created_at_ms":1781760001000,"content":"我记下了测试物品 BLUE-17这个说法。"}"#,
+    ];
+    fs::write(
+        session_dir.join("raw_chat_history.jsonl"),
+        lines.join("\n") + "\n",
+    )
+    .unwrap();
     let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("我之前说过什么物品", None);
     let step = core.apply_model_response(LlmResponse {
@@ -4025,14 +4553,14 @@ fn status_finished_uses_final_answer_as_host_final_answer() {
 
 #[test]
 fn final_turn_wire_shape_uses_semantic_final_answer_field() {
-    let step = CoreStep::Final(TurnFinal {
+    let step = CoreStep::Final(Box::new(TurnFinal {
         final_answer: "这是最终结论。".to_string(),
         toolgen_retrospect: String::new(),
         stats: UsageStats::zero(),
         profile_label: "aliyun:qwen-plus".to_string(),
         repair_issue: None,
         stop_summary: None,
-    });
+    }));
 
     let payload = serde_json::to_value(&step).unwrap();
     assert_eq!(payload["Final"]["final_answer"], "这是最终结论。");
@@ -5344,7 +5872,7 @@ fn json_context_compress_runs_before_later_action_in_same_response() {
         content: serde_json::json!({
             "free_talk": "compact first, then continue",
             "context_compress": {
-                "summary": "KEEP JSON ACTIVE STATE"
+                "summary": "KEEP JSON ACTIVE STATE","keywords":"checkpoint keywords"
                 },
             "working_still_action": {
                 "self_tool": {"type": "cwd"}
@@ -5380,7 +5908,7 @@ fn json_failed_context_compress_blocks_later_action() {
         content: serde_json::json!({
             "context_compress": {
                 "keep": ["prompt_0"],
-                "summary": "INVALID JSON COMPACT"
+                "summary": "INVALID JSON COMPACT","keywords":"checkpoint keywords"
             },
             "working_still_action": {
                 "self_tool": {"type": "cwd"}
@@ -5429,7 +5957,7 @@ fn context_compress_offload_stores_runtime_prompt_delta_by_id() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compress":{{"offload":["{}"],"summary":"large investigation context is offloaded; keep the current task active"}}}}"#,
+            r#"{{"context_compress":{{"offload":["{}"],"summary":"large investigation context is offloaded; keep the current task active","keywords":"checkpoint keywords"}}}}"#,
             delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -5501,7 +6029,7 @@ fn context_compress_offload_rejects_invalid_prompt_refs_without_writing() {
     let _ = core.begin_turn("seed context", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"free_talk":"checking compact refs","context_compress":{"offload":["prompt_0"],"summary":"bad refs should not write scratch"}}"#),
+        content: scored(r#"{"free_talk":"checking compact refs","context_compress":{"offload":["prompt_0"],"summary":"bad refs should not write scratch","keywords":"checkpoint keywords"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5550,7 +6078,7 @@ fn context_compress_summary_only_replaces_all_live_deltas() {
     let _ = core.begin_turn("seed context", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"context_compress":{"summary":"summary-only replacement"}}"#),
+        content: scored(r#"{"context_compress":{"summary":"summary-only replacement","keywords":"checkpoint keywords"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -6065,14 +6593,20 @@ fn chat_history_query_reads_persisted_chat_records() {
     let root = tmp_dir("chat_history_persisted");
     let dir = root.join("memory");
     fs::create_dir_all(&dir).unwrap();
-    let audit_file = root.join("audit").join("api_audit.json");
-    write_audit_doc(
-        &audit_file,
-        vec![
-            json!({"type":"turn_start","session":"shell_old","turn_id":"turn_1781760000000","user_input":"我昨天提到了测试物品 BLUE-17"}),
-            json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781760000000","assistant_output":"我记下了测试物品 BLUE-17这个说法。"}),
-        ],
-    );
+    // Persisted chat lives in the session history file; the search reads it
+    // directly, so the fixture mirrors the real JSONL record shape.
+    let session_dir = root.join("sessions").join("shell_old");
+    fs::create_dir_all(&session_dir).unwrap();
+    fs::write(
+        session_dir.join("raw_chat_history.jsonl"),
+        concat!(
+            r#"{"type":"message","role":"user","turn_id":"turn_1781760000000","created_at_ms":1781760000000,"kind":"task","content":"我昨天提到了测试物品 BLUE-17"}"#,
+            "\n",
+            r#"{"type":"message","role":"assistant","turn_id":"turn_1781760000000","created_at_ms":1781760001000,"content":"我记下了测试物品 BLUE-17这个说法。"}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
     let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("我之前说过什么物品", None);
     let step = core.apply_model_response(LlmResponse {
@@ -6092,38 +6626,6 @@ fn chat_history_query_reads_persisted_chat_records() {
     assert!(prompt.contains("shell_old"));
     assert!(prompt.contains("测试物品 BLUE-17"));
     assert!(prompt.contains("我记下了测试物品 BLUE-17这个说法"));
-}
-
-#[test]
-fn chat_history_query_reads_legacy_jsonl_audit_records() {
-    let root = tmp_dir("chat_history_legacy_jsonl");
-    let dir = root.join("memory");
-    fs::create_dir_all(&dir).unwrap();
-    let audit_file = root.join("api_audit.jsonl");
-    fs::write(
-        &audit_file,
-        r#"{"type":"turn_start","session":"legacy_shell","turn_id":"turn_1781760000000","user_input":"旧格式提到了测试物品 GREEN-29"}
-{"type":"turn_final","session":"legacy_shell","turn_id":"turn_1781760000000","assistant_output":"我记下了测试物品 GREEN-29。"}
-"#,
-    )
-    .unwrap();
-    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
-    let _ = core.begin_turn("旧格式里说过什么", None);
-    let step = core.apply_model_response(LlmResponse {
-        tool_calls: Vec::new(),
-        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","scope":"global","search_text":"测试物品 GREEN-29","limit":5}}]}"#),
-        model_name: "qwen-plus".to_string(),
-        usage: usage(),
-        truncated: false,
-    });
-    let prompt = match step {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert!(!action_results(&prompt).is_empty());
-    assert!(prompt.contains("source=chat_history"));
-    assert!(prompt.contains("legacy_shell"));
-    assert!(prompt.contains("测试物品 GREEN-29"));
 }
 
 #[test]
@@ -6160,16 +6662,22 @@ fn chat_history_search_empty_text_lists_recent_records() {
     let root = tmp_dir("chat_history_recent_empty");
     let dir = root.join("memory");
     fs::create_dir_all(&dir).unwrap();
-    let audit_file = root.join("audit").join("api_audit.json");
-    write_audit_doc(
-        &audit_file,
-        vec![
-            json!({"type":"turn_start","session":"shell_old","turn_id":"turn_1781760000000","user_input":"第一条历史"}),
-            json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781760000000","assistant_output":"第一条回复"}),
-            json!({"type":"turn_start","session":"shell_old","turn_id":"turn_1781846400000","user_input":"第二条历史"}),
-            json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781846400000","assistant_output":"第二条回复"}),
-        ],
-    );
+    let session_dir = root.join("sessions").join("shell_old");
+    fs::create_dir_all(&session_dir).unwrap();
+    fs::write(
+        session_dir.join("raw_chat_history.jsonl"),
+        concat!(
+            r#"{"type":"message","role":"user","turn_id":"turn_1781760000000","created_at_ms":1781760000000,"kind":"task","content":"第一条历史"}"#,
+            "\n",
+            r#"{"type":"message","role":"assistant","turn_id":"turn_1781760000000","created_at_ms":1781760001000,"content":"第一条回复"}"#,
+            "\n",
+            r#"{"type":"message","role":"user","turn_id":"turn_1781846400000","created_at_ms":1781846400000,"kind":"task","content":"第二条历史"}"#,
+            "\n",
+            r#"{"type":"message","role":"assistant","turn_id":"turn_1781846400000","created_at_ms":1781846401000,"content":"第二条回复"}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
     let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("列最近聊天", None);
     let step = core.apply_model_response(LlmResponse {
@@ -6318,20 +6826,31 @@ fn memory_sql_query_rejects_chat_history_delete_sql() {
 }
 
 #[test]
-fn chat_history_delete_removes_matching_turn_from_audit_log() {
+fn chat_history_delete_removes_matching_turn_from_session_history() {
     let root = tmp_dir("chat_delete_action");
     let dir = root.join("memory");
     fs::create_dir_all(&dir).unwrap();
-    let audit_file = root.join("audit").join("api_audit.json");
-    write_audit_doc(
-        &audit_file,
-        vec![
-            json!({"type":"turn_start","session":"shell_old","turn_id":"turn_1781760000000","user_input":"删除目标聊天"}),
-            json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781760000000","assistant_output":"删除目标回复"}),
-            json!({"type":"turn_start","session":"shell_old","turn_id":"turn_1781846400000","user_input":"保留聊天"}),
-            json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781846400000","assistant_output":"保留回复"}),
-        ],
-    );
+    let session_dir = root.join("sessions").join("shell_old");
+    fs::create_dir_all(&session_dir).unwrap();
+    let history_file = session_dir.join("raw_chat_history.jsonl");
+    fs::write(
+        &history_file,
+        concat!(
+            r#"{"type":"message","role":"user","turn_id":"turn_1781760000000","created_at_ms":1781760000000,"kind":"task","content":"删除目标聊天"}"#,
+            "\n",
+            r#"{"type":"message","role":"assistant","turn_id":"turn_1781760000000","created_at_ms":1781760001000,"content":"删除目标回复"}"#,
+            "\n",
+            r#"{"type":"message","role":"user","turn_id":"turn_1781846400000","created_at_ms":1781846400000,"kind":"task","content":"保留聊天"}"#,
+            "\n",
+            r#"{"type":"message","role":"assistant","turn_id":"turn_1781846400000","created_at_ms":1781846401000,"content":"保留回复"}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    // A stale persisted index must be invalidated by the delete so the next
+    // reader rebuilds offsets instead of trusting stale entries.
+    let index_file = session_dir.join("raw_chat_history.index.json");
+    fs::write(&index_file, r#"{"indexed_len":0,"entries":[]}"#).unwrap();
     let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
     let _ = core.begin_turn("删除包含目标的聊天记录", None);
     let step = core.apply_model_response(LlmResponse {
@@ -6347,7 +6866,8 @@ fn chat_history_delete_removes_matching_turn_from_audit_log() {
     };
     assert!(!action_results(&prompt).is_empty());
     assert!(prompt.contains("deleted_count: 1"));
-    let stored = fs::read_to_string(&audit_file).unwrap();
+    assert!(!index_file.exists(), "stale index must be invalidated");
+    let stored = fs::read_to_string(&history_file).unwrap();
     assert!(!stored.contains("删除目标"));
     assert!(stored.contains("保留聊天"));
     assert!(stored.contains("保留回复"));
@@ -7020,7 +7540,7 @@ fn still_running_table_survives_removal_of_the_original_action_delta() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compress":{{"keep":["{}"],"summary":"hide running job delta but keep job status"}}}}"#,
+            r#"{{"context_compress":{{"keep":["{}"],"summary":"hide running job delta but keep job status","keywords":"checkpoint keywords"}}}}"#,
             user_delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -7104,7 +7624,7 @@ fn still_running_table_is_universal_when_only_the_action_delta_is_kept() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compress":{{"keep":["{}"],"summary":"hide unrelated user delta only"}}}}"#,
+            r#"{{"context_compress":{{"keep":["{}"],"summary":"hide unrelated user delta only","keywords":"checkpoint keywords"}}}}"#,
             running_delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -7173,7 +7693,7 @@ fn still_running_table_survives_offload_of_the_original_action_delta() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"context_compress":{{"offload":["{}"],"summary":"running job context is offloaded and its status must remain visible"}}}}"#,
+            r#"{{"context_compress":{{"offload":["{}"],"summary":"running job context is offloaded and its status must remain visible","keywords":"checkpoint keywords"}}}}"#,
             running_delta_id
         )),
         model_name: "qwen-plus".to_string(),
@@ -7245,7 +7765,7 @@ fn still_running_table_survives_summary_only_compaction_of_the_original_action_d
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"free_talk":"压缩旧上下文。","context_compress":{"summary":"后台任务仍在运行，需要保留运行状态。"}}"#),
+        content: scored(r#"{"free_talk":"压缩旧上下文。","context_compress":{"summary":"后台任务仍在运行，需要保留运行状态。","keywords":"checkpoint keywords"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -8044,15 +8564,18 @@ fn scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering() {
 "#,
     )
     .unwrap();
-    let audit_dir = dir.join("audit");
-    fs::create_dir_all(&audit_dir).unwrap();
-    write_audit_doc(
-        &audit_dir.join("api_audit.json"),
-        vec![
-            json!({"type":"turn_start","session":"scenario_memory","turn_id":"turn_1780000010000_1","created_at":1780000010000u64,"user_input":"测试时段我们聊了 测试发布检查"}),
-            json!({"type":"turn_final","session":"scenario_memory","turn_id":"turn_1780000010000_1","created_at":1780000015000u64,"assistant_output":"我建议先跑完整 CI 和真实 TTY smoke。"}),
-        ],
-    );
+    let session_dir = dir.join("sessions").join("scenario_memory");
+    fs::create_dir_all(&session_dir).unwrap();
+    fs::write(
+        session_dir.join("raw_chat_history.jsonl"),
+        concat!(
+            r#"{"type":"message","role":"user","turn_id":"turn_1780000010000_1","created_at_ms":1780000010000,"kind":"task","content":"测试时段我们聊了 测试发布检查"}"#,
+            "\n",
+            r#"{"type":"message","role":"assistant","turn_id":"turn_1780000010000_1","created_at_ms":1780000015000,"content":"我建议先跑完整 CI 和真实 TTY smoke。"}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
 
     let mut core = test_core("STATIC", profile("qwen-plus"), &memory_dir);
     core.set_capability_registry(test_registry());
@@ -8353,9 +8876,9 @@ fn work_directory_instructions_are_loaded_once_even_if_host_repeats_context() {
     let supporting_context = r#"work_directory_instructions:
 These instructions were loaded from files in the current working directory. Follow them while working in that directory.
 
-[BEGIN WORK_DIRECTORY_INSTRUCTION file="AGENTS.md" directory="/tmp/project"]
+[BEGIN PROJECT INSTRUCTION file="AGENTS.md" directory="/tmp/project"]
 unique_agents_rule_do_not_repeat_7f9a
-[END WORK_DIRECTORY_INSTRUCTION file="AGENTS.md"]
+[END PROJECT INSTRUCTION file="AGENTS.md"]
 
 workspace_reference:
 unique_workspace_reference_should_remain_visible
@@ -8419,7 +8942,9 @@ fn rendered_static_prompt_preserves_source_rule_order() {
     };
 
     let role_pos = prompt.find("## Role").expect("role section should render");
-    let style_pos = prompt.find("## Soul").expect("soul section should render");
+    let style_pos = prompt
+        .find("## Guide")
+        .expect("guide section should render");
     let memory_pos = prompt
         .find("## Memory")
         .expect("memory section should render");
@@ -8427,6 +8952,37 @@ fn rendered_static_prompt_preserves_source_rule_order() {
     assert!(
         role_pos < style_pos && style_pos < memory_pos,
         "static prompt should keep source section order"
+    );
+}
+
+#[test]
+fn admission_runtime_notes_precede_the_user_entry_that_closes_the_delta() {
+    let dir = tmp_dir("user_entry_closes_delta");
+    let mut core = test_core("STATIC", profile("qwen-plus"), dir.clone());
+    core.change_prompt_cwd(dir.to_str().unwrap()).unwrap();
+    core.notify_runtime_config_changed();
+    let prompt = match core.begin_turn("USER_SENTINEL_QUESTION", Some("SUPPORT_SENTINEL_CONTEXT")) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let user_heading = prompt
+        .rfind("\n## USER\n")
+        .expect("the user entry should render as a role block");
+    let support = prompt.find("SUPPORT_SENTINEL_CONTEXT").unwrap();
+    let cwd = prompt.find("[!!!NOTE] cwd now set to:").unwrap();
+    let config = prompt.find("User changes some runtime config").unwrap();
+    assert!(support < cwd, "{prompt}");
+    assert!(
+        cwd < user_heading,
+        "the cwd note is admission-time state, so it must precede the user entry: {prompt}"
+    );
+    assert!(
+        config < user_heading,
+        "the config-change notice is admission-time state, so it must precede the user entry: {prompt}"
+    );
+    assert!(
+        !prompt[user_heading..].contains("\n## RUNTIME\n"),
+        "the user entry must close its delta: {prompt}"
     );
 }
 
@@ -10593,4 +11149,56 @@ fn performance_guard_topic_generation_for_many_actions_is_bounded() {
         started,
         Duration::from_millis(500),
     );
+}
+
+#[test]
+fn serial_tool_action_counts_toward_turn_stats_tool_calls() {
+    let cwd = tmp_dir("tool_stats_cwd");
+    fs::write(cwd.join("notes.txt"), "hello world").unwrap();
+    let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("tool_stats_mem"));
+    core.change_prompt_cwd(cwd.to_string_lossy()).unwrap();
+
+    // Baseline turn without any tool action. Other counters (e.g. the
+    // runtime memory precheck) may legitimately contribute their own
+    // tool_calls on every turn.
+    let _ = core.begin_turn("just answer", None);
+    let baseline = match core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"ok"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::Final(final_turn) => final_turn.stats.tool_calls,
+        other => panic!("expected final step, got {other:?}"),
+    };
+
+    // Tool turn: one serial readfile action executes through the generic
+    // execute_action path and must land exactly once in the whole-turn
+    // stats; this guards the serial accounting against regressions.
+    let _ = core.begin_turn("read the notes", None);
+    let _ = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"status":"working","free_talk":"reading.","working_still_action":[{"readfile":{"path":"notes.txt"}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let final_step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"done"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    match final_step {
+        CoreStep::Final(final_turn) => assert!(
+            final_turn.stats.tool_calls > baseline,
+            "the serial readfile action must add tool_calls beyond the no-tool baseline (baseline={baseline}, got={})",
+            final_turn.stats.tool_calls
+        ),
+        other => panic!("expected final step, got {other:?}"),
+    }
 }

@@ -30,6 +30,10 @@ The product Web host is split by internal responsibility under `src/server/`:
   performed incrementally. New code should enter the narrowest existing submodule rather than
   rebuilding these responsibilities in the parent.
 
+- `src/scope_isolation.rs` owns the startup-only decision to re-exec the current process into a
+  private systemd user scope before any process-wide state is initialized. It never manages other
+  processes, and a failed relocation falls back to the current scope with a visible warning.
+
 - Product HTTP lifecycle, local port selection, explicit public-bind policy, per-process access
   tokens, authenticated product handlers, snapshot construction, and mapping decoded browser
   commands to Session/Core operations. Fixed HTTP/WebSocket paths and method placement, request

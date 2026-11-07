@@ -17,8 +17,53 @@ const LLM_LATENCY_BOUNDARIES_MS: [u64; 8] =
 const LLM_LATENCY_LABELS: [&str; 9] = [
     "500 ms", "1 s", "3 s", "5 s", "10 s", "15 s", "20 s", "30 s", "30 s+",
 ];
-const MAX_LLM_RESPONSE_DUMP_ENTRIES: usize = 10;
-const STATISTICS_REFRESH_MS: u64 = 2_000;
+/// TTFT is the time to first token; its scale is far below the end-to-end
+/// request latency, so it uses its own finer histogram boundaries.
+const LLM_TTFT_BOUNDARIES_MS: [u64; 7] = [50, 100, 200, 400, 800, 1600, 3200];
+const LLM_TTFT_LABELS: [&str; 8] = [
+    "50 ms", "100 ms", "200 ms", "400 ms", "800 ms", "1.6 s", "3.2 s", "3.2 s+",
+];
+/// Newest-first response retention. Fifty entries keep a full debugging
+/// session available in one file while still bounding the dump size.
+const MAX_LLM_RESPONSE_DUMP_ENTRIES: usize = 50;
+const STATISTICS_REFRESH_MS: u64 = 5_000;
+
+/// Refresh script for the debug statistics page. Kept as a standalone
+/// template so the hidden-tab pause, unchanged-DOM check, and rescheduling
+/// behavior can be unit-tested without rendering a full page.
+const STATISTICS_REFRESH_JS: &str = r#"
+window.__timemStatsSchedule=()=>{
+  clearTimeout(window.__timemStatsRefresh);
+  if(document.hidden)return;
+  window.__timemStatsRefresh=setTimeout(refresh,__REFRESH_MS__);
+};
+async function refresh(){
+  if(document.hidden){window.__timemStatsSchedule();return;}
+  try{
+    const res=await fetch(location.href,{cache:'no-store'});
+    if(res.ok){
+      const doc=new DOMParser().parseFromString(await res.text(),'text/html');
+      document.title=doc.title;
+      const fresh=doc.querySelector('main.shell');
+      const current=document.querySelector('main.shell');
+      if(fresh&&current&&fresh.innerHTML!==current.innerHTML){
+        current.replaceWith(fresh);
+        window.wireStatisticsPage();
+      }
+    }
+  }catch(e){}
+  window.__timemStatsSchedule();
+}
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){clearTimeout(window.__timemStatsRefresh);}
+  else{refresh();}
+});
+window.__timemStatsSchedule();
+"#;
+
+fn statistics_refresh_script() -> String {
+    STATISTICS_REFRESH_JS.replace("__REFRESH_MS__", &STATISTICS_REFRESH_MS.to_string())
+}
 static NEXT_DEBUG_STORE_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
@@ -36,6 +81,7 @@ struct PersistedEndpoint {
     action_cpu_ns: Vec<u64>,
     action_cpu_unavailable: u64,
     llm_latency_ms: Vec<u64>,
+    llm_ttft_ms: Vec<u64>,
     length_finish_response_bytes: Vec<u64>,
     tools_per_response: Vec<u64>,
     repairs: BTreeMap<String, u64>,
@@ -78,6 +124,8 @@ struct LlmResponseDumpEntry {
     round: u32,
     received_at_ms: u128,
     content: String,
+    reasoning: String,
+    reasoning_truncated: bool,
     tool_calls: Vec<agent_core::NativeToolCall>,
 }
 
@@ -85,6 +133,8 @@ struct LlmResponseDumpEntry {
 pub(crate) struct DebugLlmResponse<'a> {
     pub(crate) usage: &'a agent_core::UsageStats,
     pub(crate) content: &'a str,
+    pub(crate) reasoning: &'a str,
+    pub(crate) reasoning_truncated: bool,
     pub(crate) tool_calls: &'a [agent_core::NativeToolCall],
     pub(crate) truncated: bool,
 }
@@ -132,6 +182,7 @@ struct EndpointDebug {
     action_cpu_ns: VecDeque<u64>,
     action_cpu_unavailable: u64,
     llm_latency_ms: VecDeque<u64>,
+    llm_ttft_ms: VecDeque<u64>,
     length_finish_response_bytes: VecDeque<u64>,
     tools_per_response: [u64; 11],
     repairs: BTreeMap<String, u64>,
@@ -288,6 +339,7 @@ impl DebugStore {
                                             action_cpu_ns: endpoint.action_cpu_ns.into(),
                                             action_cpu_unavailable: endpoint.action_cpu_unavailable,
                                             llm_latency_ms: endpoint.llm_latency_ms.into(),
+                                            llm_ttft_ms: endpoint.llm_ttft_ms.into(),
                                             length_finish_response_bytes: endpoint
                                                 .length_finish_response_bytes
                                                 .into(),
@@ -348,6 +400,11 @@ impl DebugStore {
                                             action_cpu_unavailable: endpoint.action_cpu_unavailable,
                                             llm_latency_ms: endpoint
                                                 .llm_latency_ms
+                                                .iter()
+                                                .copied()
+                                                .collect(),
+                                            llm_ttft_ms: endpoint
+                                                .llm_ttft_ms
                                                 .iter()
                                                 .copied()
                                                 .collect(),
@@ -533,6 +590,8 @@ impl DebugStore {
         let DebugLlmResponse {
             usage,
             content,
+            reasoning,
+            reasoning_truncated,
             tool_calls,
             truncated,
         } = response;
@@ -566,6 +625,8 @@ impl DebugStore {
                 round,
                 received_at_ms,
                 content: content.to_string(),
+                reasoning: reasoning.to_string(),
+                reasoning_truncated,
                 tool_calls: tool_calls.to_vec(),
             });
             stats.responses.truncate(MAX_LLM_RESPONSE_DUMP_ENTRIES);
@@ -599,6 +660,7 @@ impl DebugStore {
         session_id: &str,
         worker_id: &str,
         latency: Duration,
+        ttft: Option<Duration>,
     ) -> Result<(), String> {
         self.update(session_id, |stats| {
             if let Some(endpoint_key) = take_in_flight_endpoint(stats, worker_id) {
@@ -608,6 +670,12 @@ impl DebugStore {
                     .llm_latency_ms
                     .push_back(latency.as_millis().min(u64::MAX as u128) as u64);
                 endpoint.llm_latency_ms.truncate(MAX_METRIC_SAMPLES);
+                if let Some(ttft) = ttft {
+                    endpoint
+                        .llm_ttft_ms
+                        .push_back(ttft.as_millis().min(u64::MAX as u128) as u64);
+                    endpoint.llm_ttft_ms.truncate(MAX_METRIC_SAMPLES);
+                }
             }
         })
     }
@@ -1013,8 +1081,31 @@ fn render_llm_response_dump(
             format_timestamp_ms(response.received_at_ms)
         ));
         out.push_str(&format!("content_bytes: {}\n", response.content.len()));
+        out.push_str(&format!("thinking_bytes: {}\n", response.reasoning.len()));
+        out.push_str(&format!(
+            "thinking_chars: {}\n",
+            response.reasoning.chars().count()
+        ));
+        out.push_str(&format!(
+            "thinking_truncated: {}\n",
+            response.reasoning_truncated
+        ));
         out.push_str(&format!("tool_call_count: {}\n", response.tool_calls.len()));
         out.push_str("------------------------------------------------------------\n");
+        out.push_str("----------------- THINKING (reasoning_content) --------------\n");
+        if response.reasoning.is_empty() {
+            out.push_str("(empty or unavailable)\n");
+        } else {
+            out.push_str(&response.reasoning);
+            if !response.reasoning.ends_with('\n') {
+                out.push('\n');
+            }
+            if response.reasoning_truncated {
+                out.push_str("(reasoning capture truncated)\n");
+            }
+        }
+        out.push_str("-------------------- END THINKING --------------------------\n");
+        out.push_str("------------------- ASSISTANT CONTENT ----------------------\n");
         if response.content.is_empty() {
             out.push_str("(empty assistant text)\n");
         } else {
@@ -1023,6 +1114,7 @@ fn render_llm_response_dump(
                 out.push('\n');
             }
         }
+        out.push_str("----------------- END ASSISTANT CONTENT --------------------\n");
         if !response.tool_calls.is_empty() {
             out.push_str("-------------------- NATIVE TOOL CALLS ---------------------\n");
             out.push_str(
@@ -1156,9 +1248,7 @@ fn render_statistics_html(session_id: &str, stats: &SessionDebug) -> String {
     }
     out.push_str("<footer>Request counts cover logical model-turn requests; retry attempts are folded into their final outcome. Capability-probe traffic is reported in endpoint negotiation details.</footer></main><script>");
     out.push_str(STATISTICS_JS);
-    out.push_str(&format!(
-        "window.__timemStatsRefresh=setTimeout(refresh,{STATISTICS_REFRESH_MS});async function refresh(){{try{{const res=await fetch(location.href,{{cache:'no-store'}});if(!res.ok)return;const doc=new DOMParser().parseFromString(await res.text(),'text/html');document.title=doc.title;const fresh=doc.querySelector('main.shell');const current=document.querySelector('main.shell');if(fresh&&current){{current.replaceWith(fresh);window.wireStatisticsPage();}}}}catch(e){{}}window.__timemStatsRefresh=setTimeout(refresh,{STATISTICS_REFRESH_MS});}}"
-    ));
+    out.push_str(&statistics_refresh_script());
     out.push_str("</script></body></html>");
     out
 }
@@ -1331,6 +1421,30 @@ fn render_endpoint_panel(
     render_horizontal_histogram(out, &latency_counts, |bucket| {
         LLM_LATENCY_LABELS[bucket].to_string()
     });
+    let ttft_values: Vec<u64> = endpoint.llm_ttft_ms.iter().copied().collect();
+    let ttft_total_ms: u64 = ttft_values.iter().copied().sum();
+    let ttft_counts = ttft_histogram(&ttft_values);
+    out.push_str("<div class=\"mini-kpis\">");
+    mini_kpi(
+        out,
+        "TTFT Mean",
+        &format_mean_ms(ttft_total_ms, ttft_values.len()),
+    );
+    mini_kpi(
+        out,
+        "TTFT Max",
+        &ttft_values
+            .iter()
+            .copied()
+            .max()
+            .map(format_duration_ms)
+            .unwrap_or_else(|| "n/a".to_string()),
+    );
+    mini_kpi(out, "TTFT Samples", &ttft_values.len().to_string());
+    out.push_str("</div>");
+    render_horizontal_histogram(out, &ttft_counts, |bucket| {
+        LLM_TTFT_LABELS[bucket].to_string()
+    });
     out.push_str("</article></div><div class=\"metric-pair lower\"><article class=\"panel metric-panel\"><div class=\"section-head compact\"><div><p class=\"eyebrow\">PROTOCOL QUALITY</p><h3>Repair error categories</h3></div></div>");
     render_named_bars(out, &endpoint.repairs);
     if endpoint.runtime_root_repair_help > 0 {
@@ -1402,6 +1516,15 @@ fn latency_histogram(values: &[u64]) -> Vec<u64> {
     let mut counts = vec![0_u64; LLM_LATENCY_LABELS.len()];
     for value in values {
         let index = LLM_LATENCY_BOUNDARIES_MS.partition_point(|boundary| value > boundary);
+        counts[index] = counts[index].saturating_add(1);
+    }
+    counts
+}
+
+fn ttft_histogram(values: &[u64]) -> Vec<u64> {
+    let mut counts = vec![0_u64; LLM_TTFT_LABELS.len()];
+    for value in values {
+        let index = LLM_TTFT_BOUNDARIES_MS.partition_point(|boundary| value > boundary);
         counts[index] = counts[index].saturating_add(1);
     }
     counts
@@ -1740,13 +1863,22 @@ const STATISTICS_CSS: &str = r#"
 "#;
 
 const STATISTICS_JS: &str = r#"
-window.wireStatisticsPage=()=>{const key=`timem-statistics-tab:${location.pathname}`;const buttons=[...document.querySelectorAll('[data-endpoint-tab]')];const panels=[...document.querySelectorAll('.endpoint-panel')];const load=()=>{try{return sessionStorage.getItem(key)}catch{return null}};const save=id=>{try{sessionStorage.setItem(key,id)}catch{return}};function select(id){if(!panels.some(p=>p.id===id))id=panels[0]?.id;buttons.forEach(b=>b.setAttribute('aria-selected',String(b.dataset.endpointTab===id)));panels.forEach(p=>p.classList.toggle('active',p.id===id));if(id)save(id)}buttons.forEach(b=>b.addEventListener('click',()=>select(b.dataset.endpointTab)));select(load()||panels[0]?.id);document.getElementById('reset-stats')?.addEventListener('click',async(ev)=>{ev.preventDefault();clearTimeout(window.__timemStatsRefresh);if(!confirm('Reset cumulative statistics for this session?')){window.__timemStatsRefresh=setTimeout(refresh,2000);return;}ev.target.disabled=true;const params=new URLSearchParams(location.search);params.delete('path');params.delete('download');try{await fetch('/api/debug/reset?'+params.toString(),{method:'POST'});}catch(e){alert('Reset request failed: '+e);return;}refresh();});};
+window.wireStatisticsPage=()=>{const key=`timem-statistics-tab:${location.pathname}`;const buttons=[...document.querySelectorAll('[data-endpoint-tab]')];const panels=[...document.querySelectorAll('.endpoint-panel')];const load=()=>{try{return sessionStorage.getItem(key)}catch{return null}};const save=id=>{try{sessionStorage.setItem(key,id)}catch{return}};function select(id){if(!panels.some(p=>p.id===id))id=panels[0]?.id;buttons.forEach(b=>b.setAttribute('aria-selected',String(b.dataset.endpointTab===id)));panels.forEach(p=>p.classList.toggle('active',p.id===id));if(id)save(id)}buttons.forEach(b=>b.addEventListener('click',()=>select(b.dataset.endpointTab)));select(load()||panels[0]?.id);document.getElementById('reset-stats')?.addEventListener('click',async(ev)=>{ev.preventDefault();clearTimeout(window.__timemStatsRefresh);if(!confirm('Reset cumulative statistics for this session?')){window.__timemStatsSchedule?.();return;}ev.target.disabled=true;const params=new URLSearchParams(location.search);params.delete('path');params.delete('download');try{await fetch('/api/debug/reset?'+params.toString(),{method:'POST'});}catch(e){alert('Reset request failed: '+e);return;}refresh();});};
 window.wireStatisticsPage();
 "#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn statistics_refresh_script_pauses_hidden_tabs_and_skips_unchanged_dom() {
+        let script = statistics_refresh_script();
+        assert!(script.contains("document.hidden"));
+        assert!(script.contains("fresh.innerHTML!==current.innerHTML"));
+        assert!(script.contains("__timemStatsSchedule"));
+        assert!(script.contains(&format!("setTimeout(refresh,{STATISTICS_REFRESH_MS})")));
+    }
 
     static DEBUG_STORE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1935,7 +2067,12 @@ mod tests {
             .record_prompt(session, "worker_0", 1, "successful", None, None)
             .unwrap();
         store
-            .record_llm_latency(session, "worker_0", Duration::from_millis(450))
+            .record_llm_latency(
+                session,
+                "worker_0",
+                Duration::from_millis(450),
+                Some(Duration::from_millis(120)),
+            )
             .unwrap();
         store
             .record_llm_response(
@@ -1950,6 +2087,8 @@ mod tests {
                         ..agent_core::UsageStats::zero()
                     },
                     content: "ok",
+                    reasoning: "",
+                    reasoning_truncated: false,
                     tool_calls: &[],
                     truncated: false,
                 },
@@ -1976,7 +2115,7 @@ mod tests {
             .unwrap();
         store.record_model_failure(session, "worker_0").unwrap();
         store
-            .record_llm_latency(session, "worker_0", Duration::from_millis(999))
+            .record_llm_latency(session, "worker_0", Duration::from_millis(999), None)
             .unwrap();
         store.record_model_failure(session, "worker_0").unwrap();
 
@@ -1989,6 +2128,7 @@ mod tests {
                 (2, 1, 1)
             );
             assert_eq!(endpoint.llm_latency_ms, vec![450]);
+            assert_eq!(endpoint.llm_ttft_ms, vec![120]);
             assert_eq!(endpoint.action_cpu_ns, vec![30_000_000]);
             assert_eq!(endpoint.action_cpu_unavailable, 1);
             assert_eq!(endpoint.tools_per_response[2], 1);
@@ -2009,6 +2149,8 @@ mod tests {
             "KVC create",
             "Action on-CPU time",
             "LLM API latency",
+            "TTFT Mean",
+            "<span>TTFT Samples</span><strong>1</strong>",
             "<span>Unavailable</span><strong>1</strong>",
             "missing_or_invalid_response_root",
             "unknown_protocol_error",
@@ -2080,6 +2222,8 @@ mod tests {
                     DebugLlmResponse {
                         usage: &agent_core::UsageStats::zero(),
                         content,
+                        reasoning: "",
+                        reasoning_truncated: false,
                         tool_calls: &[],
                         truncated: true,
                     },
@@ -2146,6 +2290,8 @@ mod tests {
                     DebugLlmResponse {
                         usage: &agent_core::UsageStats::zero(),
                         content,
+                        reasoning: "",
+                        reasoning_truncated: false,
                         tool_calls: &[],
                         truncated,
                     },
@@ -2207,6 +2353,7 @@ mod tests {
                                 session,
                                 &worker_id,
                                 Duration::from_millis(u64::from(round)),
+                                None,
                             )
                             .unwrap();
                         store
@@ -2217,6 +2364,8 @@ mod tests {
                                 DebugLlmResponse {
                                     usage: &agent_core::UsageStats::zero(),
                                     content: "ok",
+                                    reasoning: "",
+                                    reasoning_truncated: false,
                                     tool_calls: &[],
                                     truncated: false,
                                 },
@@ -2238,7 +2387,7 @@ mod tests {
         assert!(html.contains("<strong>12</strong>"));
         assert!(prompt.ends_with("</html>"));
         assert_eq!(prompt.matches("class=\"message\"").count(), 0);
-        assert!(response.contains("retained_responses: 10"));
+        assert!(response.contains("retained_responses: 12"));
         let artifact_names = fs::read_dir(&session_dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
@@ -2331,7 +2480,7 @@ mod tests {
             .record_prompt(session, "worker_0", 1, "prompt", None, None)
             .unwrap();
         store
-            .record_llm_latency(session, "worker_0", Duration::from_millis(125))
+            .record_llm_latency(session, "worker_0", Duration::from_millis(125), None)
             .unwrap();
         store
             .record_interaction_profile(
@@ -2648,12 +2797,12 @@ mod tests {
     }
 
     #[test]
-    fn llm_response_dump_keeps_newest_ten_in_reverse_chronological_order() {
+    fn llm_response_dump_keeps_newest_fifty_in_reverse_chronological_order() {
         let _guard = debug_store_test_guard();
         let store = DebugStore::create().unwrap();
         let session_dir = store.session_dir("session_responses").unwrap();
-        for index in 1..=12 {
-            let tool_calls = if index == 12 {
+        for index in 1..=52 {
+            let tool_calls = if index == 52 {
                 vec![agent_core::NativeToolCall {
                     assistant_continuation: None,
                     id: "call_latest".to_string(),
@@ -2672,6 +2821,8 @@ mod tests {
                     DebugLlmResponse {
                         usage: &agent_core::UsageStats::zero(),
                         content: &format!("response-{index}"),
+                        reasoning: "",
+                        reasoning_truncated: false,
                         tool_calls: &tool_calls,
                         truncated: false,
                     },
@@ -2679,14 +2830,79 @@ mod tests {
                 .unwrap();
         }
         let dump = fs::read_to_string(session_dir.join("llm_response.dump")).unwrap();
-        assert!(dump.contains("retained_responses: 10"));
-        assert!(dump.find("response-12").unwrap() < dump.find("response-11").unwrap());
+        assert!(dump.contains("retained_responses: 50"));
+        assert!(dump.find("response-52").unwrap() < dump.find("response-51").unwrap());
         assert!(!dump.contains("response-1\n"));
         assert!(!dump.contains("response-2\n"));
+        assert!(dump.contains("response-3\n"));
         assert!(dump.contains("tool_call_count: 1"));
         assert!(dump.contains("NATIVE TOOL CALLS"));
         assert!(dump.contains("call_latest"));
         assert!(dump.contains("raw_arguments"));
+        store.cleanup().unwrap();
+    }
+
+    #[test]
+    fn llm_response_dump_renders_structured_thinking_and_content_sections() {
+        let _guard = debug_store_test_guard();
+        let store = DebugStore::create().unwrap();
+        let session_dir = store.session_dir("session_thinking_dump").unwrap();
+        store
+            .record_llm_response(
+                "session_thinking_dump",
+                "worker_0",
+                1,
+                DebugLlmResponse {
+                    usage: &agent_core::UsageStats::zero(),
+                    content: "final answer",
+                    reasoning: "step 1: inspect\nstep 2: answer",
+                    reasoning_truncated: false,
+                    tool_calls: &[],
+                    truncated: false,
+                },
+            )
+            .unwrap();
+        let dump = fs::read_to_string(session_dir.join("llm_response.dump")).unwrap();
+        assert!(dump.contains("thinking_bytes: 30"), "{dump}");
+        assert!(dump.contains("thinking_chars: 30"), "{dump}");
+        assert!(dump.contains("thinking_truncated: false"), "{dump}");
+        assert!(dump.contains("THINKING (reasoning_content)"), "{dump}");
+        assert!(dump.contains("END THINKING"), "{dump}");
+        assert!(dump.contains("ASSISTANT CONTENT"), "{dump}");
+        let thinking = dump.find("step 1: inspect").unwrap();
+        let content = dump.find("final answer").unwrap();
+        assert!(thinking < content, "{dump}");
+        store.cleanup().unwrap();
+    }
+
+    #[test]
+    fn llm_response_dump_marks_empty_and_truncated_thinking() {
+        let _guard = debug_store_test_guard();
+        let store = DebugStore::create().unwrap();
+        let session_dir = store.session_dir("session_thinking_flags").unwrap();
+        for (round, reasoning, truncated) in
+            [(1, "", false), (2, "partial reasoning that was cut", true)]
+        {
+            store
+                .record_llm_response(
+                    "session_thinking_flags",
+                    "worker_0",
+                    round,
+                    DebugLlmResponse {
+                        usage: &agent_core::UsageStats::zero(),
+                        content: "answer",
+                        reasoning,
+                        reasoning_truncated: truncated,
+                        tool_calls: &[],
+                        truncated: false,
+                    },
+                )
+                .unwrap();
+        }
+        let dump = fs::read_to_string(session_dir.join("llm_response.dump")).unwrap();
+        assert!(dump.contains("(empty or unavailable)"), "{dump}");
+        assert!(dump.contains("thinking_truncated: true"), "{dump}");
+        assert!(dump.contains("(reasoning capture truncated)"), "{dump}");
         store.cleanup().unwrap();
     }
 
@@ -2740,6 +2956,8 @@ mod tests {
         let response = DebugLlmResponse {
             usage: &agent_core::UsageStats::zero(),
             content: "thinking answer",
+            reasoning: "",
+            reasoning_truncated: false,
             tool_calls: &[],
             truncated: false,
         };

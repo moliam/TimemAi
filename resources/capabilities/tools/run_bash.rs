@@ -17,7 +17,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 static SHELL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const LONG_RUNNING_COMMAND_PROMPT_AFTER: Duration = Duration::from_secs(60);
 /// Default total polling wait budget (loop_timeout_ms) when loop_cmd is present.
-const DEFAULT_LOOP_TIMEOUT_MS: i64 = 60_000;
+pub(crate) const DEFAULT_LOOP_TIMEOUT_MS: i64 = 60_000;
 
 pub(crate) fn is_local_shell_action(action: &str) -> bool {
     matches!(action, "run_bash" | "run_powershell")
@@ -340,11 +340,16 @@ impl Drop for ShellJobManagerState {
     }
 }
 
+/// Hard ceiling on concurrently tracked shell jobs (background and timeout).
+/// A runaway burst must be rejected instead of exhausting processes.
+const MAX_SHELL_JOBS: usize = 32;
+
 #[derive(Debug, Clone)]
 pub struct ShellJobManager {
     state: Arc<ShellJobManagerState>,
     long_running_prompt_after: Duration,
     force_process_group_fallback: bool,
+    max_jobs: usize,
 }
 
 impl ShellJobManager {
@@ -358,6 +363,7 @@ impl ShellJobManager {
             }),
             long_running_prompt_after: LONG_RUNNING_COMMAND_PROMPT_AFTER,
             force_process_group_fallback: false,
+            max_jobs: MAX_SHELL_JOBS,
         }
     }
 
@@ -369,6 +375,11 @@ impl ShellJobManager {
     #[cfg(all(test, unix))]
     pub(crate) fn force_process_group_fallback_for_tests(&mut self) {
         self.force_process_group_fallback = true;
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn set_max_jobs_for_tests(&mut self, max: usize) {
+        self.max_jobs = max.max(1);
     }
 
     pub fn spawn_background(
@@ -419,8 +430,12 @@ impl ShellJobManager {
             ShellJobDelivery::Background,
         ) {
             Ok(job) => job,
-            Err(_) => {
-                let reason = "The background command could not be started by the local shell.";
+            Err(error) => {
+                let reason = if error.to_string().contains("too many background shell jobs") {
+                    "The background command was not started: too many background shell jobs are already running; wait for one to finish or cancel it first."
+                } else {
+                    "The background command could not be started by the local shell."
+                };
                 return bash_finished_error_outcome(
                     bash_action_not_executed(Some(clean), reason),
                     "SpawnFailed",
@@ -445,6 +460,14 @@ impl ShellJobManager {
             pid_kind: Some(runtime_child_pid_kind().to_string()),
             error_type: None,
         })
+    }
+
+    fn job_count(&self) -> usize {
+        self.state
+            .jobs
+            .lock()
+            .map(|jobs| jobs.len())
+            .unwrap_or(usize::MAX)
     }
 
     fn select_process_job(
@@ -478,6 +501,11 @@ impl ShellJobManager {
         tail_out: bool,
         delivery: ShellJobDelivery,
     ) -> std::io::Result<Arc<ManagedShellJob>> {
+        if self.job_count() >= self.max_jobs {
+            return Err(std::io::Error::other(
+                "too many background shell jobs; wait for one to finish or cancel it",
+            ));
+        }
         let mut command = Self::configured_shell_command(clean, cwd)?;
         let mut process_job = if self.force_process_group_fallback {
             None

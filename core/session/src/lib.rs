@@ -2,7 +2,8 @@ pub mod message_queue;
 
 use agent_core::{
     core_initialized_topic_event_with_worker, run_direct_resume_turn_with_model_client,
-    run_session_turn_with_model_client, AgentCore, CoreGlobalWorkerStatus,
+    run_direct_resume_turn_with_model_client_and_failover, run_session_turn_with_model_client,
+    run_session_turn_with_model_client_and_failover, AgentCore, CoreGlobalWorkerStatus,
     CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopicEvent, HostDecision,
     HostDecisionRequest, HttpModelClient, ModelClient, ModelServiceConfig, ResponseProtocolKind,
     RuntimeProfiler, TopicReply, TurnInput, TurnOutcome, TurnStopDetail, TurnStopSummary, TurnUi,
@@ -303,7 +304,9 @@ pub enum CoreSessionWorkerEvent {
     },
     ReasoningUpgrade(agent_core::model_requirements::ReasoningUpgrade),
     ModelRequestCompleted {
+        round: u32,
         latency: Duration,
+        ttft: Option<Duration>,
     },
     ModelResponseParsed {
         tool_count: usize,
@@ -312,6 +315,8 @@ pub enum CoreSessionWorkerEvent {
         round: u32,
         usage: UsageStats,
         content: String,
+        reasoning: String,
+        reasoning_truncated: bool,
         tool_calls: Vec<agent_core::NativeToolCall>,
         truncated: bool,
         runtime_phase: Option<String>,
@@ -341,6 +346,9 @@ enum CoreSessionWorkerCommand {
         command_id: Option<String>,
         initial_supplements: Vec<QueuedSupplement>,
         direct_resume: bool,
+        /// True when the Host produced this input itself (mailbox delivery,
+        /// timer fire, queued interruption) instead of the user typing it.
+        system_input: bool,
         cancel_generation: u64,
         turn_images: Vec<agent_core::ModelImagePart>,
     },
@@ -376,10 +384,7 @@ enum CoreSessionWorkerCommand {
     UpdateModelHttpTransport {
         options: agent_core::ModelHttpTransportOptions,
     },
-    ReplaceModelServiceConfig {
-        config: Box<ModelServiceConfig>,
-        result_tx: Sender<Result<(), String>>,
-    },
+    ModelServiceRouteUpdated,
     UpdateMcp {
         base_capabilities: agent_core::capability::CapabilityRegistry,
         runtime: agent_core::mcp::McpRuntime,
@@ -406,6 +411,16 @@ enum CoreSessionWorkerCommand {
     TimerSync {
         timers: Vec<agent_core::TimerSpec>,
     },
+    /// Projects the Host-owned mailbox address into Core. Core restates it
+    /// only after a compaction or clear, so this is not prompt noise.
+    MailboxNameUpdated {
+        name: Option<String>,
+    },
+    /// Projects the Host-owned session work file path (Timem.md) into Core.
+    /// Core restates it after a compaction or clear for the same reason.
+    SessionWorkFileUpdated {
+        path: Option<String>,
+    },
     Shutdown,
 }
 
@@ -413,6 +428,10 @@ enum CoreSessionWorkerCommand {
 pub struct UnconsumedSupplement {
     #[serde(default)]
     pub manual_context_compress: bool,
+    /// Keeps the runtime origin across a Host handoff so a replayed
+    /// supplement still renders as a runtime observation.
+    #[serde(default)]
+    pub system_input: bool,
     pub text: String,
     pub additional_context: Option<String>,
     pub command_id: Option<String>,
@@ -425,6 +444,7 @@ impl From<QueuedSupplement> for UnconsumedSupplement {
             additional_context: supplement.additional_context,
             command_id: supplement.command_id,
             manual_context_compress: supplement.manual_context_compress,
+            system_input: supplement.system_input,
         }
     }
 }
@@ -443,6 +463,9 @@ struct QueuedSupplement {
     text: String,
     additional_context: Option<String>,
     command_id: Option<String>,
+    /// Runtime-triggered message (mailbox/timer/interruption) instead of a
+    /// user-typed supplement.
+    system_input: bool,
     queued_at: Instant,
     /// Manual context-compression request normalized onto the supplement
     /// shuttle: it rides the dispatch timeout to force the next model
@@ -464,6 +487,10 @@ enum PendingRuntimeUpdate {
     ClaudeCodexToolDiscovery(bool),
     ModelToolResultBytes(usize),
     ContextCompressThresholdPercent(u8),
+    ModelServiceRoute {
+        config: Box<ModelServiceConfig>,
+        failover: Vec<ModelServiceConfig>,
+    },
 }
 
 const CORE_COMMAND_ID_CAPACITY: usize = 1_024;
@@ -558,6 +585,7 @@ impl CoreSessionWorkerHandle {
             command_id,
             Vec::new(),
             true,
+            false,
             Vec::new(),
         )
     }
@@ -595,6 +623,7 @@ impl CoreSessionWorkerHandle {
             command_id,
             Vec::new(),
             false,
+            false,
             images,
         )
     }
@@ -630,6 +659,27 @@ impl CoreSessionWorkerHandle {
             command_id,
             supplements,
             false,
+            false,
+            Vec::new(),
+        )
+    }
+
+    /// Starts a Turn whose input the Host generated itself (mailbox delivery,
+    /// timer fire, queued interruption): Core renders it as a runtime
+    /// observation instead of a user question.
+    pub fn run_system_turn_with_command_id(
+        &self,
+        input: impl Into<String>,
+        additional_context: Option<String>,
+        command_id: Option<String>,
+    ) -> Result<(), String> {
+        self.run_turn_batch_with_supplements_kind(
+            input,
+            additional_context,
+            command_id,
+            Vec::new(),
+            false,
+            true,
             Vec::new(),
         )
     }
@@ -641,6 +691,7 @@ impl CoreSessionWorkerHandle {
         command_id: Option<String>,
         supplements: Vec<(agent_core::UserSupplement, Option<String>)>,
         direct_resume: bool,
+        system_input: bool,
         turn_images: Vec<agent_core::ModelImagePart>,
     ) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
@@ -698,11 +749,13 @@ impl CoreSessionWorkerHandle {
                         text: supplement.text,
                         additional_context: supplement.additional_context,
                         command_id,
+                        system_input: supplement.system_input,
                         queued_at: Instant::now(),
                         manual_context_compress: false,
                     })
                     .collect(),
                 direct_resume,
+                system_input,
                 cancel_generation,
                 turn_images,
             })
@@ -771,6 +824,7 @@ impl CoreSessionWorkerHandle {
                     text: supplement.into(),
                     additional_context: None,
                     command_id: None,
+                    system_input: false,
                     queued_at: Instant::now(),
                     manual_context_compress: false,
                 });
@@ -802,6 +856,7 @@ impl CoreSessionWorkerHandle {
             text: supplement.into(),
             additional_context: None,
             command_id: None,
+            system_input: false,
             queued_at: Instant::now(),
             manual_context_compress: false,
         });
@@ -835,6 +890,48 @@ impl CoreSessionWorkerHandle {
     where
         F: FnOnce() -> Result<(), String>,
     {
+        self.enqueue_supplement_with_context_and_command_id_after(
+            supplement,
+            additional_context,
+            command_id,
+            false,
+            before_enqueue,
+        )
+    }
+
+    /// Runtime-triggered supplement (mailbox delivery, timer, interruption).
+    /// It rides the same shuttle as user input so ordering and command-id
+    /// dedup are unchanged, but Core renders it as a runtime observation.
+    pub fn try_add_system_supplement_with_context_and_command_id_after<F>(
+        &self,
+        supplement: impl Into<String>,
+        additional_context: Option<String>,
+        command_id: Option<String>,
+        before_enqueue: F,
+    ) -> Result<bool, String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        self.enqueue_supplement_with_context_and_command_id_after(
+            supplement,
+            additional_context,
+            command_id,
+            true,
+            before_enqueue,
+        )
+    }
+
+    fn enqueue_supplement_with_context_and_command_id_after<F>(
+        &self,
+        supplement: impl Into<String>,
+        additional_context: Option<String>,
+        command_id: Option<String>,
+        system_input: bool,
+        before_enqueue: F,
+    ) -> Result<bool, String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
         let mut mailbox = self
             .supplement_mailbox
             .lock()
@@ -863,6 +960,7 @@ impl CoreSessionWorkerHandle {
             text: supplement.into(),
             additional_context,
             command_id,
+            system_input,
             queued_at: Instant::now(),
             manual_context_compress: false,
         });
@@ -895,6 +993,7 @@ impl CoreSessionWorkerHandle {
             text: String::new(),
             additional_context: None,
             command_id: None,
+            system_input: false,
             queued_at: Instant::now(),
             manual_context_compress: true,
         });
@@ -950,6 +1049,18 @@ impl CoreSessionWorkerHandle {
     pub fn sync_timers(&self, timers: Vec<agent_core::TimerSpec>) -> Result<(), String> {
         self.command_tx
             .send(CoreSessionWorkerCommand::TimerSync { timers })
+            .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    pub fn update_mailbox_name(&self, name: Option<String>) -> Result<(), String> {
+        self.command_tx
+            .send(CoreSessionWorkerCommand::MailboxNameUpdated { name })
+            .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    pub fn update_session_work_file(&self, path: Option<String>) -> Result<(), String> {
+        self.command_tx
+            .send(CoreSessionWorkerCommand::SessionWorkFileUpdated { path })
             .map_err(|_| "core_session_worker_stopped".to_string())
     }
 
@@ -1174,19 +1285,28 @@ impl CoreSessionWorkerHandle {
     /// command. The response channel is a barrier: after this returns, every
     /// subsequently queued turn observes the new snapshot.
     pub fn replace_model_service_config(&self, config: ModelServiceConfig) -> Result<(), String> {
+        self.replace_model_service_config_with_failover(config, Vec::new())
+    }
+
+    /// Replaces the active model-service configuration together with its
+    /// ordered failover chain. A running Turn consumes the newest complete
+    /// snapshot immediately before its next model API request; an in-flight
+    /// request is never interrupted.
+    pub fn replace_model_service_config_with_failover(
+        &self,
+        config: ModelServiceConfig,
+        failover: Vec<ModelServiceConfig>,
+    ) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
         }
-        let (result_tx, result_rx) = mpsc::channel();
-        self.command_tx
-            .send(CoreSessionWorkerCommand::ReplaceModelServiceConfig {
+        self.enqueue_runtime_update(
+            PendingRuntimeUpdate::ModelServiceRoute {
                 config: Box::new(config),
-                result_tx,
-            })
-            .map_err(|_| "core_session_worker_stopped".to_string())?;
-        result_rx
-            .recv()
-            .map_err(|_| "core_session_worker_stopped".to_string())?
+                failover,
+            },
+            CoreSessionWorkerCommand::ModelServiceRouteUpdated,
+        )
     }
 
     pub fn update_mcp(
@@ -1791,6 +1911,7 @@ impl CoreSessionWorker {
                 pending_bash_always_allow: false,
                 pending_runtime_updates,
                 interaction_profile: None,
+                pending_debug_reasoning: None,
             };
 
             let context_id = identity.context_id.clone();
@@ -1806,6 +1927,9 @@ impl CoreSessionWorker {
                 let _ = exit_event_tx.send(CoreSessionWorkerEvent::Topics(vec![event]));
             });
 
+            // Ordered failover chain snapshot; replaced with each
+            // ReplaceModelServiceConfig command at a turn boundary.
+            let mut model_service_failover: Vec<ModelServiceConfig> = Vec::new();
             let mut has_running_shell_jobs = false;
             loop {
                 let command = if has_running_shell_jobs {
@@ -1843,12 +1967,14 @@ impl CoreSessionWorker {
                     | CoreSessionWorkerCommand::UpdateHttpHeaders { .. }
                     | CoreSessionWorkerCommand::UpdateRequestFields { .. }
                     | CoreSessionWorkerCommand::UpdateModelHttpTransport { .. }
-                    | CoreSessionWorkerCommand::ReplaceModelServiceConfig { .. }
+                    | CoreSessionWorkerCommand::ModelServiceRouteUpdated
                     | CoreSessionWorkerCommand::UpdateMcp { .. }
                     | CoreSessionWorkerCommand::ExportContext { .. }
                     | CoreSessionWorkerCommand::ClearContext
                     | CoreSessionWorkerCommand::ImportContext { .. }
                     | CoreSessionWorkerCommand::TimerSync { .. }
+                    | CoreSessionWorkerCommand::MailboxNameUpdated { .. }
+                    | CoreSessionWorkerCommand::SessionWorkFileUpdated { .. }
                         if shutdown_requested.load(Ordering::SeqCst) =>
                     {
                         break;
@@ -1859,6 +1985,7 @@ impl CoreSessionWorker {
                         command_id,
                         initial_supplements,
                         direct_resume,
+                        mut system_input,
                         cancel_generation: command_generation,
                         turn_images,
                     } => {
@@ -1905,27 +2032,67 @@ impl CoreSessionWorker {
                             });
                             ui.current_turn_active = Some(working.active_handle());
                             let outcome = loop {
-                                let run_turn = if direct_resume {
-                                    run_direct_resume_turn_with_model_client
+                                let mut turn_failover = model_service_failover.clone();
+                                let main_outcome = if direct_resume {
+                                    run_direct_resume_turn_with_model_client_and_failover(
+                                        &mut core,
+                                        &mut config,
+                                        &mut turn_failover,
+                                        TurnInput {
+                                            input: &input,
+                                            session: &identity.session_id,
+                                            audit_file: &workspace.audit_file,
+                                            runtime: &workspace.runtime,
+                                            run_bash_target: &workspace.run_bash_target,
+                                            additional_context: additional_context.as_deref(),
+                                            images: &turn_images,
+                                        },
+                                        &mut ui,
+                                        Some(&mut profiler),
+                                        &mut model_client,
+                                    )
+                                } else if system_input {
+                                    agent_core::run_system_turn_with_model_client_and_failover(
+                                        &mut core,
+                                        &mut config,
+                                        &mut turn_failover,
+                                        TurnInput {
+                                            input: &input,
+                                            session: &identity.session_id,
+                                            audit_file: &workspace.audit_file,
+                                            runtime: &workspace.runtime,
+                                            run_bash_target: &workspace.run_bash_target,
+                                            additional_context: additional_context.as_deref(),
+                                            images: &turn_images,
+                                        },
+                                        &mut ui,
+                                        Some(&mut profiler),
+                                        &mut model_client,
+                                    )
                                 } else {
-                                    run_session_turn_with_model_client
+                                    run_session_turn_with_model_client_and_failover(
+                                        &mut core,
+                                        &mut config,
+                                        &mut turn_failover,
+                                        TurnInput {
+                                            input: &input,
+                                            session: &identity.session_id,
+                                            audit_file: &workspace.audit_file,
+                                            runtime: &workspace.runtime,
+                                            run_bash_target: &workspace.run_bash_target,
+                                            additional_context: additional_context.as_deref(),
+                                            images: &turn_images,
+                                        },
+                                        &mut ui,
+                                        Some(&mut profiler),
+                                        &mut model_client,
+                                    )
                                 };
-                                let main_outcome = run_turn(
-                                    &mut core,
-                                    &mut config,
-                                    TurnInput {
-                                        input: &input,
-                                        session: &identity.session_id,
-                                        audit_file: &workspace.audit_file,
-                                        runtime: &workspace.runtime,
-                                        run_bash_target: &workspace.run_bash_target,
-                                        additional_context: additional_context.as_deref(),
-                                        images: &turn_images,
-                                    },
-                                    &mut ui,
-                                    Some(&mut profiler),
-                                    &mut model_client,
-                                );
+                                // The Turn may consume a Host route update or
+                                // fail over between API requests. Preserve the
+                                // resulting chain for any continuation and the
+                                // next Turn.
+                                model_service_failover = turn_failover;
                                 if main_outcome.stop_summary.is_some()
                                     || !ui.continue_supplements_after_final_answer
                                 {
@@ -1961,6 +2128,10 @@ impl CoreSessionWorker {
                                     std::iter::once(Some("These user messages arrived while the previous response was being finalized. Address them before finalizing again."))
                                         .chain(supplement_contexts.into_iter().map(Some)),
                                 );
+                                // A continuation keeps the runtime origin only when
+                                // every batched message came from the runtime.
+                                system_input =
+                                    supplements.iter().all(|supplement| supplement.system_input);
                             };
                             ui.current_turn_active = None;
                             drop(working);
@@ -2115,12 +2286,12 @@ impl CoreSessionWorker {
                         config.http_transport = options;
                         core.notify_runtime_config_changed();
                     }
-                    CoreSessionWorkerCommand::ReplaceModelServiceConfig {
-                        config: replacement,
-                        result_tx,
-                    } => {
-                        replace_worker_model_service_config(&mut core, &mut config, *replacement);
-                        let _ = result_tx.send(Ok(()));
+                    CoreSessionWorkerCommand::ModelServiceRouteUpdated => {
+                        ui.apply_pending_model_service_route(
+                            &mut core,
+                            &mut config,
+                            &mut model_service_failover,
+                        );
                     }
                     CoreSessionWorkerCommand::UpdateMcp {
                         base_capabilities,
@@ -2158,6 +2329,12 @@ impl CoreSessionWorker {
                     }
                     CoreSessionWorkerCommand::TimerSync { timers } => {
                         core.replace_timers(timers);
+                    }
+                    CoreSessionWorkerCommand::MailboxNameUpdated { name } => {
+                        core.update_session_mailbox_name(name);
+                    }
+                    CoreSessionWorkerCommand::SessionWorkFileUpdated { path } => {
+                        core.update_session_work_file(path);
                     }
                     CoreSessionWorkerCommand::ExportContext { result_tx } => {
                         let _ = result_tx.send(Ok(core.export_dynamic_context()));
@@ -2247,6 +2424,9 @@ struct WorkerTurnUi {
     pending_bash_always_allow: bool,
     pending_runtime_updates: Arc<Mutex<Vec<PendingRuntimeUpdate>>>,
     interaction_profile: Option<agent_core::InteractionProfile>,
+    /// Reasoning captured for the in-flight round; attached to the matching
+    /// ModelResponse event for the debug dump and never shown as content.
+    pending_debug_reasoning: Option<(u32, String, bool)>,
 }
 
 fn toolgen_completion_instruction(protocol: ResponseProtocolKind) -> &'static str {
@@ -2571,11 +2751,31 @@ fn apply_worker_runtime_update(
         PendingRuntimeUpdate::ContextCompressThresholdPercent(percent) => {
             let _ = core.set_context_compress_threshold_percent(percent);
         }
+        // Model routes are consumed atomically by the dedicated request-boundary
+        // hook and are never passed through this field-by-field updater.
+        PendingRuntimeUpdate::ModelServiceRoute { .. } => {}
     }
     core.notify_runtime_config_changed();
 }
 
 impl WorkerTurnUi {
+    fn take_pending_model_service_route(
+        &mut self,
+    ) -> Option<(ModelServiceConfig, Vec<ModelServiceConfig>)> {
+        let Ok(mut updates) = self.pending_runtime_updates.lock() else {
+            return None;
+        };
+        let mut newest = None;
+        updates.retain(|update| match update {
+            PendingRuntimeUpdate::ModelServiceRoute { config, failover } => {
+                newest = Some(((**config).clone(), failover.clone()));
+                false
+            }
+            _ => true,
+        });
+        newest
+    }
+
     fn take_model_tool_result_bytes_update(&mut self) -> Option<usize> {
         let Ok(mut updates) = self.pending_runtime_updates.lock() else {
             return None;
@@ -2593,6 +2793,22 @@ impl WorkerTurnUi {
 }
 
 impl TurnUi for WorkerTurnUi {
+    fn apply_pending_model_service_route(
+        &mut self,
+        core: &mut AgentCore,
+        config: &mut ModelServiceConfig,
+        failover: &mut Vec<ModelServiceConfig>,
+    ) -> bool {
+        let Some((replacement, replacement_failover)) =
+            WorkerTurnUi::take_pending_model_service_route(self)
+        else {
+            return false;
+        };
+        replace_worker_model_service_config(core, config, replacement);
+        *failover = replacement_failover;
+        true
+    }
+
     fn on_turn_projection(&mut self, projection: &agent_core::TurnProjection) {
         let _ = self
             .event_tx
@@ -2611,6 +2827,9 @@ impl TurnUi for WorkerTurnUi {
                     let (deferred, applicable) = std::mem::take(&mut *updates)
                         .into_iter()
                         .partition(|update| {
+                            // Model routes are consumed atomically by the
+                            // dedicated request-boundary hook; draining them
+                            // here would silently drop a user reorder.
                             matches!(update, PendingRuntimeUpdate::ModelToolResultBytes(_))
                         });
                     *updates = deferred;
@@ -2704,10 +2923,19 @@ impl TurnUi for WorkerTurnUi {
         }
     }
 
-    fn on_model_request_completed(&mut self, latency: Duration) {
+    fn on_model_request_completed(
+        &mut self,
+        round: u32,
+        latency: Duration,
+        ttft: Option<Duration>,
+    ) {
         let _ = self
             .event_tx
-            .send(CoreSessionWorkerEvent::ModelRequestCompleted { latency });
+            .send(CoreSessionWorkerEvent::ModelRequestCompleted {
+                round,
+                latency,
+                ttft,
+            });
     }
 
     fn on_model_response_parsed(&mut self, tool_count: usize) {
@@ -2733,11 +2961,23 @@ impl TurnUi for WorkerTurnUi {
             });
     }
 
+    fn on_model_interaction_reasoning(&mut self, round: u32, reasoning: &str, truncated: bool) {
+        self.pending_debug_reasoning = Some((round, reasoning.to_string(), truncated));
+    }
+
     fn on_model_interaction_response(&mut self, round: u32, response: &agent_core::LlmResponse) {
+        let (reasoning, reasoning_truncated) = match self.pending_debug_reasoning.take() {
+            Some((pending_round, reasoning, truncated)) if pending_round == round => {
+                (reasoning, truncated)
+            }
+            _ => (String::new(), false),
+        };
         let _ = self.event_tx.send(CoreSessionWorkerEvent::ModelResponse {
             round,
             usage: response.usage.clone(),
             content: response.content.clone(),
+            reasoning,
+            reasoning_truncated,
             tool_calls: response.tool_calls.clone(),
             truncated: response.truncated,
             runtime_phase: self.phase.clone(),
@@ -2827,6 +3067,58 @@ impl TurnUi for WorkerTurnUi {
         }
     }
 
+    /// Sends a mailbox send topic and waits for the Host-owned mailbox ledger
+    /// to answer with the mail id it assigned. Topic delivery is asynchronous,
+    /// so the action result can only name the runtime id after this handshake.
+    fn request_mail_send(&mut self, event: &CoreTopicEvent) -> Option<agent_core::MailSendReply> {
+        let mut event = event.clone();
+        event.session_id = self.session_id.clone();
+        if let Some(phase) = self.phase.as_deref() {
+            event.topic.attributes["runtime_phase"] = serde_json::json!(phase);
+            event.payload["runtime_phase"] = serde_json::json!(phase);
+        }
+        let event = event.with_worker_scope(&self.context_id, &self.worker_id);
+        if self
+            .event_tx
+            .send(CoreSessionWorkerEvent::Topics(vec![event.clone()]))
+            .is_err()
+        {
+            return None;
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if self.cancel_requested.load(Ordering::SeqCst) {
+                return None;
+            }
+            let remaining = deadline.checked_duration_since(Instant::now())?;
+            match self
+                .reply_rx
+                .recv_timeout(remaining.min(Duration::from_millis(50)))
+            {
+                Ok(reply) => {
+                    if reply.topic_name == event.topic.name
+                        && reply.request_id.as_deref() == event.request_id()
+                    {
+                        return reply
+                            .payload
+                            .get("mail_id")
+                            .and_then(|value| value.as_str())
+                            .map(|mail_id| agent_core::MailSendReply {
+                                mail_id: mail_id.to_string(),
+                                initially_read: reply
+                                    .payload
+                                    .get("initially_read")
+                                    .and_then(|value| value.as_bool())
+                                    .unwrap_or(false),
+                            });
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => return None,
+            }
+        }
+    }
+
     fn take_bash_always_allow(&mut self) -> bool {
         let flag = self.pending_bash_always_allow;
         self.pending_bash_always_allow = false;
@@ -2864,10 +3156,11 @@ impl WorkerTurnUi {
                 self.manual_compact_requested.store(true, Ordering::SeqCst);
                 continue;
             }
-            supplements.push(agent_core::UserSupplement::new(
-                queued.text,
-                queued.additional_context,
-            ));
+            supplements.push(if queued.system_input {
+                agent_core::UserSupplement::runtime(queued.text, queued.additional_context)
+            } else {
+                agent_core::UserSupplement::new(queued.text, queued.additional_context)
+            });
         }
         supplements
     }
@@ -2914,6 +3207,7 @@ impl WorkerTurnUi {
                 additional_context: None,
                 command_id: None,
                 manual_context_compress: true,
+                system_input: false,
             });
         }
         supplements

@@ -149,7 +149,7 @@ describe("splitMarkdownBlocks incremental stability", () => {
  it("uses the trailer instead of a typing caret and archives only after working ends", () => {
    const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
    expect(css).not.toContain("stream-caret-pulse");
-   expect(mainSource).toContain('<StreamProcess closing={turn.state !== "working"}');
+   expect(mainSource).toContain('<StreamProcess closing={turn.state !== "working" && streamArchive}');
    expect(mainSource).toContain('className="stream-working-wrench"');
     // Model waiting/streaming keeps the breathing star; local work uses a
     // side-to-side wrench so the phases differ by shape AND color.
@@ -159,7 +159,7 @@ describe("splitMarkdownBlocks incremental stability", () => {
     expect(mainSource).toContain('const phaseTimerKey = `${phase}:${phaseBoundary.id}`');
     expect(mainSource).toContain('key={phaseTimerKey}');
     expect(mainSource).toContain('hideBeforeMs={1_000}');
-    expect(mainSource).toContain('className="stream-working-current"');
+    expect(mainSource).toMatch(/className=\{`stream-working-current\$\{isWaiting/);
     expect(mainSource).toContain('className="stream-working-total"');
     expect(mainSource).toContain('<Clock8 size={12} />');
     expect(mainSource).toContain('createdAtMs={turn.created_at_ms} liveFormat className="stream-working-turn-elapsed"');
@@ -171,6 +171,15 @@ describe("splitMarkdownBlocks incremental stability", () => {
     expect(css).toContain(':root[data-theme="light"] .stream-working-trailer.model-waiting { color: #286a9b; }');
     expect(css).toMatch(/\.stream-working-trailer \{[^}]*justify-content: space-between/);
     expect(css).toContain('.stream-working-total { gap: 6px; margin-left: auto; color: #77857e; }');
+    expect(mainSource).toContain('const ThinkingPreviewWindow = memo(function ThinkingPreviewWindow(');
+    expect(mainSource).toContain('className="stream-thinking-window"');
+    expect(mainSource).toContain('const thinkingTailShown = preview?.thinking_tail ?? "";');
+    expect(css).toMatch(/\.stream-working-trailer \{[^}]*column-gap: 4ch/);
+    expect(css).toMatch(/\.stream-working-current \{[^}]*flex: 1 1 auto/);
+    expect(css).toContain('.stream-thinking-window {');
+    expect(css).toContain('mask-image: linear-gradient');
+    expect(css).toContain('border: 0;');
+    expect(css).not.toContain('.stream-thinking-tooltip');
     expect(css).toMatch(/\.stream-working-wrench \{[^}]*animation: stream-working-wrench-sway/);
     expect(css).toContain("@keyframes stream-working-wrench-sway");
     expect(css).toMatch(/prefers-reduced-motion: reduce[\s\S]*\.stream-working-wrench \{ animation: none/);

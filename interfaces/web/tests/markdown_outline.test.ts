@@ -1,5 +1,41 @@
 import { describe, expect, it } from "vitest";
-import { extractMarkdownOutline, finalAnswerNeedsOutline, markdownFloatingNavigationLayout, markdownHeadingSlug, markdownHeadingText, markdownOutlineActiveId, markdownOutlineAnimationPosition, markdownOutlineFitsBesideContent, markdownOutlineRailScrollTop, MARKDOWN_OUTLINE_START_ID, markdownOutlineTargetScrollTop, MAX_OUTLINE_HEADINGS, MAX_OUTLINE_HEADING_SOURCE_CHARS, MAX_OUTLINE_LINE_CHARS, MAX_OUTLINE_SOURCE_CHARS, MAX_OUTLINE_TITLE_CHARS } from "../src/markdown_outline";
+import { extractMarkdownOutline, finalAnswerNeedsOutline, markdownFloatingNavigationLayout, markdownHeadingSlug, markdownHeadingText, markdownOutlineActiveId, markdownOutlineAnimationPosition, markdownOutlineDeliveryScope, markdownOutlineFallbackActiveId, markdownOutlineFitsBesideContent, markdownOutlineRailScrollTop, MARKDOWN_OUTLINE_START_ID, MARKDOWN_OUTLINE_SUMMARY_ID, markdownOutlineTargetScrollTop, MAX_OUTLINE_HEADINGS, MAX_OUTLINE_HEADING_SOURCE_CHARS, MAX_OUTLINE_LINE_CHARS, MAX_OUTLINE_SOURCE_CHARS, MAX_OUTLINE_TITLE_CHARS } from "../src/markdown_outline";
+
+describe("markdownOutlineDeliveryScope", () => {
+  it("keeps the outline covering the whole delivery without process chapters", () => {
+    // Retained process, but no free-talk block carried a heading: Start,
+    // geometry, and Summary still cover the delivery; chapters are absent.
+    expect(markdownOutlineDeliveryScope(2, true, 0)).toEqual({
+      spansProcess: true,
+      hasProcessChapters: false,
+      showsSummary: true,
+      sectionCount: 3,
+    });
+  });
+
+  it("counts chapters and the Summary anchor while the process is retained", () => {
+    expect(markdownOutlineDeliveryScope(2, true, 3)).toEqual({
+      spansProcess: true,
+      hasProcessChapters: true,
+      showsSummary: true,
+      sectionCount: 6,
+    });
+  });
+
+  it("stays answer-only without a retained process even with chapters", () => {
+    expect(markdownOutlineDeliveryScope(3, false, 2)).toEqual({
+      spansProcess: false,
+      hasProcessChapters: false,
+      showsSummary: false,
+      sectionCount: 3,
+    });
+  });
+
+  it("fails closed on malformed counts", () => {
+    expect(markdownOutlineDeliveryScope(-5, true, -2).sectionCount).toBe(1);
+    expect(markdownOutlineDeliveryScope(2.9, false, 0).sectionCount).toBe(2);
+  });
+});
 
 describe("final answer markdown outline", () => {
   it("extracts level one through three ATX headings in document order", () => {
@@ -134,6 +170,22 @@ describe("final answer markdown outline", () => {
     expect(markdownOutlineAnimationPosition(100, 400, 250, 180)).toBe(400);
     expect(markdownOutlineAnimationPosition(100, 400, Number.NaN, 180)).toBe(400);
     expect(markdownOutlineAnimationPosition(100, Number.NaN, 20, 180)).toBe(0);
+  });
+
+
+  it("keeps the active highlight across rebuilds whose ids are unchanged and falls back only on disappearance", () => {
+    const items = [
+      { id: "stream-0", title: "A", level: 1 },
+      { id: MARKDOWN_OUTLINE_SUMMARY_ID, title: "", level: 1 },
+      { id: "h1", title: "One", level: 2 },
+    ];
+    expect(markdownOutlineFallbackActiveId("h1", items)).toBe("h1");
+    expect(markdownOutlineFallbackActiveId(MARKDOWN_OUTLINE_SUMMARY_ID, items)).toBe(MARKDOWN_OUTLINE_SUMMARY_ID);
+    // The summary id is only present when process chapters exist: rebuilding
+    // without them must drop it to Start instead of stranding a ghost.
+    expect(markdownOutlineFallbackActiveId(MARKDOWN_OUTLINE_SUMMARY_ID, items.slice(2))).toBe(MARKDOWN_OUTLINE_START_ID);
+    expect(markdownOutlineFallbackActiveId("gone", items)).toBe(MARKDOWN_OUTLINE_START_ID);
+    expect(markdownOutlineFallbackActiveId(MARKDOWN_OUTLINE_START_ID, items)).toBe(MARKDOWN_OUTLINE_START_ID);
   });
 
 });

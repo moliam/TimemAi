@@ -857,7 +857,7 @@ fn rejects_all_undeclared_context_compress_fields_uniformly() {
 
 #[test]
 fn context_compress_summary_cdata_does_not_create_fields() {
-    let raw = "<ASSISTANT><context_compress><summary><![CDATA[state mentions <throw> and <discard> as text]]></summary></context_compress></ASSISTANT>";
+    let raw = "<ASSISTANT><context_compress><summary><![CDATA[state mentions <throw> and <discard> as text]]></summary><keywords>checkpoint keywords</keywords></context_compress></ASSISTANT>";
     let parsed = parse_xml_envelope(raw, &caps());
     assert!(parsed.repair_issue.is_none(), "{:?}", parsed.repair_issue);
     assert_eq!(parsed.context_compresses.len(), 1);
@@ -1299,6 +1299,7 @@ fn parses_context_compress() {
 <keep>pd_a</keep>
 <offload>pd_b</offload>
 <summary><![CDATA[keep state]]></summary>
+<keywords>checkpoint keywords</keywords>
 </context_compress>
 </ASSISTANT>"#,
         &caps(),
@@ -1310,6 +1311,7 @@ fn parses_context_compress() {
     assert_eq!(env.context_compresses[0].keep_delta_ids, vec!["pd_a"]);
     assert_eq!(env.context_compresses[0].offload_delta_ids, vec!["pd_b"]);
     assert_eq!(env.context_compresses[0].summary, "keep state");
+    assert_eq!(env.context_compresses[0].keywords, "checkpoint keywords");
 }
 
 #[test]
@@ -1323,6 +1325,7 @@ fn context_compress_summary_raw_xml_is_opaque_text() {
 Keep this protocol example:
 <ASSISTANT><final_answer>not real</final_answer>
 </summary>
+<keywords>checkpoint keywords</keywords>
 </context_compress>
 </ASSISTANT>"#,
         &caps(),
@@ -1362,6 +1365,7 @@ fn xml_state_branch_must_choose_one() {
 <context_compress>
 <keep>pd_a</keep>
 <summary>keep state</summary>
+<keywords>checkpoint keywords</keywords>
 </context_compress>
 <actions><run_bash><cmd>pwd</cmd></run_bash></actions>
 </ASSISTANT>"#,

@@ -1,0 +1,776 @@
+{
+  "schema_version": 2,
+  "kind": "timem.provider_model_catalog",
+  "revision": 4,
+  "activation": "runtime_supported",
+  "coverage": "specified_model_pages_only",
+  "models": [
+    {
+      "id": "kimicode_k3.1-pro",
+      "revision": 2,
+      "provider_id": "kimi_code",
+      "model_id": "k3.1-pro",
+      "label": "k3.1-pro",
+      "connection": {
+        "default_base_url": "https://api.kimi.com/coding/v1",
+        "allow_base_url_override": true,
+        "auth_handler": "bearer_api_key"
+      },
+      "dimensions": [
+        {
+          "id": "api.protocol",
+          "label": "API 协议",
+          "type": "enum",
+          "ordered": false,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "openai-responses",
+              "label": "Responses (推荐)"
+            },
+            {
+              "id": "openai-compatible",
+              "label": "Chat Completions"
+            }
+          ],
+          "default_policy": {
+            "type": "explicit",
+            "value": "openai-responses",
+            "source": "product"
+          },
+          "handler": "api_protocol",
+          "ui": {
+            "group": "connection",
+            "order": 10
+          },
+          "source_refs": [
+            "models",
+            "codex"
+          ]
+        },
+        {
+          "id": "reasoning.effort",
+          "label": "推理强度",
+          "type": "enum",
+          "ordered": true,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "low",
+              "label": "low"
+            },
+            {
+              "id": "high",
+              "label": "high"
+            },
+            {
+              "id": "max",
+              "label": "max"
+            }
+          ],
+          "default_policy": {
+            "official_value": "high",
+            "fallback": {
+              "type": "middle_option",
+              "candidates": [
+                "high"
+              ],
+              "even_count": "lower"
+            }
+          },
+          "handler": "reasoning_effort",
+          "ui": {
+            "group": "reasoning",
+            "order": 20
+          },
+          "source_refs": [
+            "models",
+            "api-models"
+          ]
+        }
+      ],
+      "profiles": [
+        {
+          "protocol": "openai-responses",
+          "route": "/responses",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "required_tool_choice": false,
+          "source_refs": [
+            "models",
+            "codex"
+          ],
+          "binding_status": "api_reference_reviewed",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning/effort"
+            }
+          ]
+        },
+        {
+          "protocol": "openai-compatible",
+          "route": "/chat/completions",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "required_tool_choice": true,
+          "source_refs": [
+            "models"
+          ],
+          "binding_status": "api_reference_reviewed",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "kimi_chat_reasoning",
+              "path": "/reasoning_effort"
+            }
+          ]
+        }
+      ],
+      "documented_facts": {
+        "source_refs": [
+          "models",
+          "codex"
+        ],
+        "input_modalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "streaming": "supported",
+        "default_snapshot": "k3.1-pro"
+      },
+      "constraints": [],
+      "limits": {
+        "context_window_tokens": 1048576,
+        "max_input_tokens": null,
+        "max_output_tokens": 131072,
+        "source_refs": [
+          "models",
+          "codex"
+        ]
+      }
+    },
+    {
+      "id": "kimicode_k3.1-pro-highspeed",
+      "revision": 2,
+      "provider_id": "kimi_code",
+      "model_id": "k3.1-pro-highspeed",
+      "label": "k3.1-pro-highspeed",
+      "connection": {
+        "default_base_url": "https://api.kimi.com/coding/v1",
+        "allow_base_url_override": true,
+        "auth_handler": "bearer_api_key"
+      },
+      "dimensions": [
+        {
+          "id": "api.protocol",
+          "label": "API 协议",
+          "type": "enum",
+          "ordered": false,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "openai-responses",
+              "label": "Responses (推荐)"
+            },
+            {
+              "id": "openai-compatible",
+              "label": "Chat Completions"
+            }
+          ],
+          "default_policy": {
+            "type": "explicit",
+            "value": "openai-responses",
+            "source": "product"
+          },
+          "handler": "api_protocol",
+          "ui": {
+            "group": "connection",
+            "order": 10
+          },
+          "source_refs": [
+            "models",
+            "codex"
+          ]
+        },
+        {
+          "id": "reasoning.effort",
+          "label": "推理强度",
+          "type": "enum",
+          "ordered": true,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "low",
+              "label": "low"
+            },
+            {
+              "id": "high",
+              "label": "high"
+            },
+            {
+              "id": "max",
+              "label": "max"
+            }
+          ],
+          "default_policy": {
+            "official_value": "high",
+            "fallback": {
+              "type": "middle_option",
+              "candidates": [
+                "high"
+              ],
+              "even_count": "lower"
+            }
+          },
+          "handler": "reasoning_effort",
+          "ui": {
+            "group": "reasoning",
+            "order": 20
+          },
+          "source_refs": [
+            "models",
+            "api-models"
+          ]
+        }
+      ],
+      "profiles": [
+        {
+          "protocol": "openai-responses",
+          "route": "/responses",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "required_tool_choice": false,
+          "source_refs": [
+            "models",
+            "codex"
+          ],
+          "binding_status": "api_reference_reviewed",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning/effort"
+            }
+          ]
+        },
+        {
+          "protocol": "openai-compatible",
+          "route": "/chat/completions",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "required_tool_choice": true,
+          "source_refs": [
+            "models"
+          ],
+          "binding_status": "api_reference_reviewed",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "kimi_chat_reasoning",
+              "path": "/reasoning_effort"
+            }
+          ]
+        }
+      ],
+      "documented_facts": {
+        "source_refs": [
+          "models",
+          "codex"
+        ],
+        "input_modalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "streaming": "supported",
+        "default_snapshot": "k3.1-pro-highspeed"
+      },
+      "constraints": [],
+      "limits": {
+        "context_window_tokens": 1048576,
+        "max_input_tokens": null,
+        "max_output_tokens": 131072,
+        "source_refs": [
+          "models",
+          "codex"
+        ]
+      }
+    },
+    {
+      "id": "kimicode_k3",
+      "revision": 2,
+      "provider_id": "kimi_code",
+      "model_id": "k3",
+      "label": "k3",
+      "connection": {
+        "default_base_url": "https://api.kimi.com/coding/v1",
+        "allow_base_url_override": true,
+        "auth_handler": "bearer_api_key"
+      },
+      "dimensions": [
+        {
+          "id": "api.protocol",
+          "label": "API 协议",
+          "type": "enum",
+          "ordered": false,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "openai-responses",
+              "label": "Responses (推荐)"
+            },
+            {
+              "id": "openai-compatible",
+              "label": "Chat Completions"
+            }
+          ],
+          "default_policy": {
+            "type": "explicit",
+            "value": "openai-responses",
+            "source": "product"
+          },
+          "handler": "api_protocol",
+          "ui": {
+            "group": "connection",
+            "order": 10
+          },
+          "source_refs": [
+            "models",
+            "codex"
+          ]
+        },
+        {
+          "id": "reasoning.effort",
+          "label": "推理强度",
+          "type": "enum",
+          "ordered": true,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "low",
+              "label": "low"
+            },
+            {
+              "id": "high",
+              "label": "high"
+            },
+            {
+              "id": "max",
+              "label": "max"
+            }
+          ],
+          "default_policy": {
+            "official_value": "high",
+            "fallback": {
+              "type": "middle_option",
+              "candidates": [
+                "high"
+              ],
+              "even_count": "lower"
+            }
+          },
+          "handler": "reasoning_effort",
+          "ui": {
+            "group": "reasoning",
+            "order": 20
+          },
+          "source_refs": [
+            "models"
+          ]
+        }
+      ],
+      "profiles": [
+        {
+          "protocol": "openai-responses",
+          "route": "/responses",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "required_tool_choice": false,
+          "source_refs": [
+            "models",
+            "codex"
+          ],
+          "binding_status": "api_reference_reviewed",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning/effort"
+            }
+          ]
+        },
+        {
+          "protocol": "openai-compatible",
+          "route": "/chat/completions",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "required_tool_choice": true,
+          "source_refs": [
+            "models"
+          ],
+          "binding_status": "api_reference_reviewed",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "kimi_chat_reasoning",
+              "path": "/reasoning_effort"
+            }
+          ]
+        }
+      ],
+      "documented_facts": {
+        "source_refs": [
+          "models",
+          "codex"
+        ],
+        "input_modalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "streaming": "supported",
+        "default_snapshot": "k3"
+      },
+      "constraints": [],
+      "limits": {
+        "context_window_tokens": 1048576,
+        "max_input_tokens": null,
+        "max_output_tokens": 131072,
+        "source_refs": [
+          "models",
+          "codex"
+        ]
+      }
+    },
+    {
+      "id": "kimicode_k3-256k",
+      "revision": 2,
+      "provider_id": "kimi_code",
+      "model_id": "k3-256k",
+      "label": "k3-256k",
+      "connection": {
+        "default_base_url": "https://api.kimi.com/coding/v1",
+        "allow_base_url_override": true,
+        "auth_handler": "bearer_api_key"
+      },
+      "dimensions": [
+        {
+          "id": "api.protocol",
+          "label": "API 协议",
+          "type": "enum",
+          "ordered": false,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "openai-responses",
+              "label": "Responses (推荐)"
+            },
+            {
+              "id": "openai-compatible",
+              "label": "Chat Completions"
+            }
+          ],
+          "default_policy": {
+            "type": "explicit",
+            "value": "openai-responses",
+            "source": "product"
+          },
+          "handler": "api_protocol",
+          "ui": {
+            "group": "connection",
+            "order": 10
+          },
+          "source_refs": [
+            "models",
+            "codex"
+          ]
+        },
+        {
+          "id": "reasoning.effort",
+          "label": "推理强度",
+          "type": "enum",
+          "ordered": true,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "low",
+              "label": "low"
+            },
+            {
+              "id": "high",
+              "label": "high"
+            },
+            {
+              "id": "max",
+              "label": "max"
+            }
+          ],
+          "default_policy": {
+            "official_value": "high",
+            "fallback": {
+              "type": "middle_option",
+              "candidates": [
+                "high"
+              ],
+              "even_count": "lower"
+            }
+          },
+          "handler": "reasoning_effort",
+          "ui": {
+            "group": "reasoning",
+            "order": 20
+          },
+          "source_refs": [
+            "models"
+          ]
+        }
+      ],
+      "profiles": [
+        {
+          "protocol": "openai-responses",
+          "route": "/responses",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "required_tool_choice": false,
+          "source_refs": [
+            "models",
+            "codex"
+          ],
+          "binding_status": "api_reference_reviewed",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning/effort"
+            }
+          ]
+        },
+        {
+          "protocol": "openai-compatible",
+          "route": "/chat/completions",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "required_tool_choice": true,
+          "source_refs": [
+            "models"
+          ],
+          "binding_status": "api_reference_reviewed",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "kimi_chat_reasoning",
+              "path": "/reasoning_effort"
+            }
+          ]
+        }
+      ],
+      "documented_facts": {
+        "source_refs": [
+          "models",
+          "codex"
+        ],
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "streaming": "supported",
+        "default_snapshot": "k3-256k"
+      },
+      "constraints": [],
+      "limits": {
+        "context_window_tokens": 262144,
+        "max_input_tokens": null,
+        "max_output_tokens": 131072,
+        "source_refs": [
+          "models",
+          "codex"
+        ]
+      }
+    },
+    {
+      "id": "kimicode_kimi-for-coding",
+      "revision": 2,
+      "provider_id": "kimi_code",
+      "model_id": "kimi-for-coding",
+      "label": "kimi-for-coding",
+      "connection": {
+        "default_base_url": "https://api.kimi.com/coding/v1",
+        "allow_base_url_override": true,
+        "auth_handler": "bearer_api_key"
+      },
+      "dimensions": [
+        {
+          "id": "api.protocol",
+          "label": "API 协议",
+          "type": "enum",
+          "ordered": false,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "openai-responses",
+              "label": "Responses (推荐)"
+            },
+            {
+              "id": "openai-compatible",
+              "label": "Chat Completions"
+            }
+          ],
+          "default_policy": {
+            "type": "explicit",
+            "value": "openai-responses",
+            "source": "product"
+          },
+          "handler": "api_protocol",
+          "ui": {
+            "group": "connection",
+            "order": 10
+          },
+          "source_refs": [
+            "models",
+            "codex"
+          ]
+        },
+        {
+          "id": "reasoning.effort",
+          "label": "推理强度",
+          "type": "enum",
+          "ordered": true,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "low",
+              "label": "low"
+            },
+            {
+              "id": "high",
+              "label": "high"
+            },
+            {
+              "id": "max",
+              "label": "max"
+            }
+          ],
+          "default_policy": {
+            "official_value": "max",
+            "fallback": {
+              "type": "middle_option",
+              "candidates": [
+                "high"
+              ],
+              "even_count": "lower"
+            }
+          },
+          "handler": "reasoning_effort",
+          "ui": {
+            "group": "reasoning",
+            "order": 20
+          },
+          "source_refs": [
+            "models"
+          ]
+        }
+      ],
+      "profiles": [
+        {
+          "protocol": "openai-responses",
+          "route": "/responses",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "required_tool_choice": false,
+          "source_refs": [
+            "models",
+            "codex"
+          ],
+          "binding_status": "api_reference_reviewed",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "enum_body_field",
+              "path": "/reasoning/effort"
+            }
+          ]
+        },
+        {
+          "protocol": "openai-compatible",
+          "route": "/chat/completions",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "required_tool_choice": true,
+          "source_refs": [
+            "models"
+          ],
+          "binding_status": "api_reference_reviewed",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "kimi_chat_reasoning",
+              "path": "/reasoning_effort"
+            }
+          ]
+        }
+      ],
+      "documented_facts": {
+        "source_refs": [
+          "models",
+          "codex"
+        ],
+        "input_modalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "streaming": "supported",
+        "default_snapshot": "kimi-for-coding"
+      },
+      "constraints": [],
+      "limits": {
+        "context_window_tokens": 1048576,
+        "max_input_tokens": null,
+        "max_output_tokens": 131072,
+        "source_refs": [
+          "models",
+          "codex"
+        ]
+      }
+    }
+  ],
+  "$schema": "provider_model_catalog.schema.json"
+}

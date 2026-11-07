@@ -2,6 +2,7 @@
 import { spawn } from "node:child_process";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { existsSync } from "node:fs";
 const URL = process.env.TIMEM_SHARE_TEST_URL;
 if (!URL) throw new Error("TIMEM_SHARE_TEST_URL must identify an isolated test host");
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
@@ -21,7 +22,18 @@ const chromeProfile = await mkdtemp(tmpdir() + "/timem-e2e-chrome-");
 let chrome;
 let ws;
 try {
-chrome = spawn("/usr/bin/google-chrome", [
+const chromeCandidates = [
+  process.env.CHROME_BIN,
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "/usr/bin/google-chrome",
+  "/usr/bin/google-chrome-stable",
+  "/usr/bin/chromium",
+].filter(Boolean);
+const chromePath = chromeCandidates.find((candidate) => existsSync(candidate));
+if (!chromePath) {
+  throw new Error(`Chrome/Chromium not found; checked: ${chromeCandidates.join(", ")}`);
+}
+chrome = spawn(chromePath, [
   "--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
   "--remote-debugging-port=0", "--user-data-dir=" + chromeProfile,
   URL,

@@ -45,20 +45,6 @@ input_schema: |
       "before_ms": {"type": "integer", "description": "Exclusive upper created_at_ms bound for raw_chat."},
       "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "Result cap. SQL reads return at most 200 rows; raw_chat and scratch searches return at most 50. Default: 5."}
     },
-    "allOf": [
-      {
-        "if": {"properties": {"type": {"enum": ["durable"]}}, "required": ["type"]},
-        "then": {"properties": {"op": {"enum": ["schema", "sql", "insert", "update", "upsert", "delete"]}}}
-      },
-      {
-        "if": {"properties": {"type": {"enum": ["raw_chat"]}}, "required": ["type"]},
-        "then": {"properties": {"op": {"enum": ["search", "sql", "delete"]}}}
-      },
-      {
-        "if": {"properties": {"type": {"enum": ["scratch"]}}, "required": ["type"]},
-        "then": {"properties": {"op": {"enum": ["search", "write", "read", "delete"]}}}
-      }
-    ],
     "x-required-when": [
       {"when": {"type": "durable", "op": "sql"}, "required": ["sql"]},
       {"when": {"type": "durable", "op": ["insert", "upsert"]}, "required": ["content"]},

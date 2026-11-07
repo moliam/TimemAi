@@ -92,7 +92,7 @@ pub fn run(args: Vec<String>) {
         exit_with_process_cleanup(2);
     }
     // Exact ownership is optional; the guard keeps the process-wide fallback
-    // active and removes empty Runtime cgroup scopes on normal shutdown.
+    // active and removes empty Runtime resource-limit scopes on normal shutdown.
     let _process_safety_net = timem_in_process::agent_api::os::ensure_process_safety_net();
     let options = parse_cli_args(&args);
     if std::env::var_os("TIMEM_DATA_DIR").is_some() {
@@ -672,6 +672,11 @@ fn new_shell_session(
     let session_id = "shell_default".to_string();
     StoredSession {
         model_endpoint_id: None,
+        model_endpoint_ids: Vec::new(),
+        reasoning_effort_override: None,
+        endpoint_reasoning_efforts: BTreeMap::new(),
+        endpoint_max_input_tokens: BTreeMap::new(),
+        telemetry_reset_at_ms: None,
         session_id: session_id.clone(),
         display_name: "ShellSession".to_string(),
         group_id: None,

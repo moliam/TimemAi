@@ -3,7 +3,7 @@
 ## 1. 范围与权威文件
 
 机器格式：`resources/provider_model_catalog.schema.json`（JSON Schema Draft 2020-12）。
-首批目录：`resources/openai_model_catalog.json`、`resources/zhipu_model_catalog.json`。证据快照：同目录 `.sources.json`。
+首批目录：`resources/openai_model_catalog.json`、`resources/zhipu_model_catalog.json`、`resources/kimi_model_catalog.json`、`resources/kimi_code_model_catalog.json`。证据快照：同目录 `.sources.json`。
 `activation=runtime_supported` 表示 Core 已实现本文限定的加载、约束及映射，不代表远端 API 实测。
 profile 的 `binding_status` 独立记录官方 API 文档审核状态，不能因本地回归通过而改成已审核。
 接入点分层与来源优先级见 [模型接入点架构](model-endpoint-architecture.md)。
@@ -109,11 +109,26 @@ profiles.bindings 由严格注册处理器执行，目前仅允许：
 路径是 JSON Pointer，必须与所选协议的准许路径匹配；不能覆盖 model/messages/input/tools
 或凭据。最终请求须再次检查，用户扩展字段不得覆盖受管值。
 智谱使用 `zhipu_chat_reasoning`，仅支持 Chat：同时写入 `reasoning_effort` 和 `thinking.type`、`thinking.clear_thinking=true`；不发送 `enable_thinking`／`stream_options`。工具续轮中的不透明 `reasoning_content` 仅在相同能力身份下回传，不展示为正文。
+Kimi 使用 `kimi_chat_reasoning`，仅支持 Chat：顶层写入 `reasoning_effort`（low/high/max，默认 max），
+不发送 `thinking`／`enable_thinking`。K3 系列多轮对话与工具调用要求把上一轮 assistant message
+（含 `reasoning_content`）原样回传；该语义与智谱一致，仅在同一能力身份下回传，不展示为正文。
+`stream_options`（include_usage）按官方文档允许。Kimi Code（订阅制 Coding Plan，base `https://api.kimi.com/coding/v1`，海外 `https://api.kimi.ai/coding/v1`）单独为 provider `kimi_code`：Responses 优先、Chat 复用 `kimi_chat_reasoning`，档位 low/high/max，目录不含 none 档——关闭思考会被 K3.1 Pro 拒绝或静默路由到 K2.8 Preview 无思考版，因此 fail-closed；`kimi-for-coding-highspeed` 思考程度不可调，无法用现行绑定表达，不入目录。
+Kimi 开放平台 K2 系列（kimi-k2.6/kimi-k2.7-code）经 `kimi_k2_thinking` 适配器入目录：kimi-k2.6 的档位映射 `thinking` 对象（none→disabled、high→{enabled,keep:all}），kimi-k2.7-code 恒思考不发送该字段；两者仅 Chat 协议，不支持 `reasoning_effort` 与 `tool_choice:required`（profile 标记 `required_tool_choice:false`，发送层降级为 auto，压缩语义由文本 trailer 承载）。Coding Plan 网关 Responses 实测同样拒绝 `required`（400 invalid_request），五模板 Responses profile 一并标记 false；其 Chat 协议与开放平台 K3 系遵循官方参数表保持默认支持。
 上述映射已接入本地请求链路；文档审核状态与远端可用性仍独立。
+Provider 准入以 `model_catalog::PROVIDERS` 为唯一注册表；requirements 校验不得复制 Provider 名称白名单。CI 遍历全部注册 Provider，并把全部目录模型按 Web 默认模板结构送入 Host 校验，保证新增 Provider/模型时不会出现“模板已展示但默认配置无法保存”。模板 token 默认值还必须同时满足各字段上限与 `input + output <= context_window`；当 `max_input` 等于完整上下文窗口时，输入建议需为输出建议预留空间。
 
 Timem 原生工具（如 run_bash）对应 Function calling；网页内置 web_search、code_interpreter
 等平台工具不等于 Timem 工具。本目录不据此开放本地工具。
 function_calling=conditional 必须有对应规则；unsupported 在原生工具模式下必须有禁用规则。
+profile 级 `required_tool_choice`（布尔，官方目录必须显式声明，schema 与契约测试双重约束）
+记录该线路是否接受 `tool_choice:"required"`：只有文档或实测证据确认可接受才置 true（如 OpenAI、
+开放平台 K3 系）；缺省一律读作 false——线路事实没有“默认支持”，缺省即没有证据，绝不发放 required。
+发送层据此把 Required 降级为 auto 并依赖文本 trailer 保证压缩必调工具；`validate_request`
+fail-closed 拒绝标记 false 的线路仍携带 required 出网。未纳入目录的自定义接入点没有目录事实，
+保持标准契约（视为接受 required），不因缺少声明被降级。
+新增或修改 profile 必须同时通过接入点验收矩阵 `core/agent/tests/endpoint_acceptance_tests.rs`：
+普通聊天、流式、原生工具（auto/并行）、压缩关键请求（required + 关键推理）、工具续轮、
+逐个推理档位的字段落位，每个场景都要过 `validate_request`。
 
 ## 7. 输入输出与扩展边界
 
@@ -152,6 +167,34 @@ python3 scripts/validate_openai_model_catalog.py --self-test
 1. 依据官方资料生成 v2 JSON：供应商、精确 model_id、协议/route、推理选项与有序关系、默认值、工具约束、token 上限及证据。
 2. 选择已实现的适配器。不要只改旧模型名称而照搬其能力；未知事实不能伪装成已验证。
 3. 将描述文件放入独立目录，通过 `TIMEM_MODEL_CATALOG_DIR=/absolute/path/to/catalog` 启动新实例；目录仅放模型描述 `.json`，schema 和 `.sources.json` 不放入该加载目录。
+
+## 11. 新增厂商/模板的常规动作（缺一不可）
+
+新增 Provider、模型或 profile 是数据改动，但验收不是“能聊天”就算通过。以下动作是常规流程，
+且由测试自动看护，漏做会直接失败，而不是等到线上第一次压缩返回 400：
+
+1. **证据先于字段**：`required_tool_choice`、`function_calling`、推理档位与 `bindings` 只能来自
+   官方文档或实测；没有证据就写保守值（`required_tool_choice: false`、`function_calling: unknown`），
+   并把出处写进 `source_refs` 与 `.sources.json` 的 excerpt。
+2. **显式表态**：每个内置 profile 必须显式写 `required_tool_choice`，由
+   `model_catalog_tests::bundled_profiles_declare_required_tool_choice` 逐个核对原始 JSON。
+   schema 保持该字段可选，以免 v2 描述契约因新增必填项失效；运行时对缺省一律读作“不支持”
+   （`absent_required_tool_choice_reads_as_unsupported`），外部目录漏写只会变保守，不会带病出网。
+3. **注册表对称**：Provider 进 `PROVIDERS` 就必须有可用 profile，目录里的 `provider_id` 也必须在
+   注册表中（`catalog_providers_are_registered_and_each_ships_usable_profiles`）。
+4. **跑验收矩阵**：`cargo test -p agent_core --lib endpoint_acceptance` 会遍历目录里每个可用
+   profile，逐个场景构造真实请求并过 fail-closed 校验：
+   普通聊天 → 流式 → 原生工具 auto → 并行原生工具 → 压缩关键请求（`required` + 关键推理）
+   → 工具续轮（含 `reasoning_content` 回传策略）→ 每个推理档位的字段落位。
+   失败信息会直接指出 profile、场景与不合法的 body。
+5. **禁止单厂商豁免**：矩阵必须保持数据驱动。厂商差异只能落成目录数据或 `ReasoningAdapter`
+   分支；不得在测试里按厂商名写 if。
+6. **新增 wire 风格**：同时补 `model_payload::apply_reasoning` 分支、`model_catalog` 的形状校验
+   （如 `catalog_deepseek_reasoning_mismatch`）与矩阵里的字段断言，三者缺一都会留下静默缺口。
+
+维护这条流程的理由：`required_tool_choice` 缺省曾被读成“支持”，DeepSeek 思考模式因此在实际压缩
+请求上返回 `400 Thinking mode does not support this tool_choice`——目录少写一个字段，线上就是一次
+硬失败。
 4. 启动时合并内置与外部描述；新增模板自动投影到接入点编辑器，无需修改 Rust/TS 或重新编译。当前实例不热加载，需在合适时机重新启动以读取新快照。
 
 每文件≤1 MiB、最多128个外部文件、合计≤512模型；按文件名排序。拒绝非普通文件、重复 ID/供应商–模型身份、未知行为字段、未实现 handler、无效默认或约束。启动失败须修正文件，不能静默忽略。

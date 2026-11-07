@@ -19,6 +19,16 @@ pub use timem_ui_contract::projections::{
 };
 
 pub const DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Reply to one mailbox send request. `initially_read` is set when the Host's
+/// short post-send wait already observed the receiver consuming the mail, so
+/// the tool can fold the read receipt into its action result instead of
+/// delivering a separate `[mailbox]` notice.
+#[derive(Debug, Clone)]
+pub struct MailSendReply {
+    pub mail_id: String,
+    pub initially_read: bool,
+}
 pub const USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct TurnInput<'a> {
@@ -378,6 +388,7 @@ pub struct CoreTopicEvent {
 pub const CORE_TOPIC_MODEL_RESPONSE: &str = "core.model.response";
 pub const CORE_TOPIC_MODEL_REPAIR: &str = "core.model.repair";
 pub const CORE_TOPIC_MODEL_CAPABILITY_NEGOTIATION: &str = "core.model.capability_negotiation";
+pub const CORE_TOPIC_MODEL_ENDPOINT_FAILOVER: &str = "core.model.endpoint_failover";
 pub const CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP: &str = "core.runtime_root_repair_help";
 pub const CORE_TOPIC_ACTION: &str = "core.action";
 pub const CORE_TOPIC_CONTEXT_COMPRESS: &str = "core.context.compress";
@@ -385,6 +396,12 @@ pub const CORE_TOPIC_TOOLGEN: &str = "core.toolgen";
 pub const CORE_TOPIC_LIFECYCLE: &str = "core.lifecycle";
 pub const CORE_TOPIC_MEMO: &str = "core.memo";
 pub const CORE_TOPIC_TIMER: &str = "core.timer";
+pub const CORE_TOPIC_MAILBOX: &str = "core.mailbox";
+
+/// Defaults for the two independent mail timeouts: queueing in the
+/// recipient's inbox and awaiting a read receipt on the sender side.
+pub const MAILBOX_DEFAULT_QUEUE_TIMEOUT_SECS: i64 = 300;
+pub const MAILBOX_DEFAULT_RESP_TIMEOUT_SECS: i64 = 600;
 pub const CORE_TOPIC_USER_APPROVAL_REQUEST: &str = "core.user.approval.request";
 pub const CORE_TOPIC_ROUND_LIMIT_REQUEST: &str = "core.user.round_limit.request";
 pub const CORE_TOPIC_OUTPUT_EXPAND_REQUEST: &str = "core.user.output_expand.request";
@@ -802,6 +819,34 @@ pub fn capability_negotiation_topic_event(
     )
 }
 
+pub fn model_endpoint_failover_topic_event(
+    session_id: impl Into<String>,
+    phase: &str,
+    endpoint_id: Option<&str>,
+    model_name: Option<&str>,
+    base_url: Option<&str>,
+    error: Option<&str>,
+) -> CoreTopicEvent {
+    CoreTopicEvent::new(
+        session_id,
+        CoreTopic::new(
+            CORE_TOPIC_MODEL_ENDPOINT_FAILOVER,
+            json!({
+                "name": CORE_TOPIC_MODEL_ENDPOINT_FAILOVER,
+                "phase": phase,
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "phase": phase,
+            "endpoint_id": endpoint_id,
+            "model": model_name,
+            "base_url": base_url,
+            "error": error,
+        }),
+    )
+}
+
 pub fn model_repair_topic_event(
     session_id: impl Into<String>,
     issue: impl Into<String>,
@@ -922,7 +967,14 @@ pub fn memo_topic_event_with_op(
 
 /// Emitted when the memo-finish-guard intercepts a finish attempt because a
 /// memo is still active. Purely informational: the memo state is unchanged.
-pub fn memo_stops_finish_topic_event(session_id: impl Into<String>, memo: &str) -> CoreTopicEvent {
+/// `blocked_summary` carries the intercepted task_finished summary verbatim:
+/// the finish action is blocked, but the model's user-facing expression must
+/// stay deliverable through every interface projection.
+pub fn memo_stops_finish_topic_event(
+    session_id: impl Into<String>,
+    memo: &str,
+    blocked_summary: &str,
+) -> CoreTopicEvent {
     CoreTopicEvent::new(
         session_id,
         CoreTopic::new(
@@ -936,6 +988,7 @@ pub fn memo_stops_finish_topic_event(session_id: impl Into<String>, memo: &str) 
             "active": true,
             "text": memo,
             "op": "stops_finish",
+            "summary": blocked_summary,
         }),
     )
 }
@@ -943,6 +996,36 @@ pub fn memo_stops_finish_topic_event(session_id: impl Into<String>, memo: &str) 
 /// Authoritative timer set for a session after a lifecycle transition.
 /// `op` is "created" | "deleted". The full timers array is the state;
 /// consumers replace their view with it.
+/// One-shot mail-send intent from the `mailbox` tool. The Web Host performs
+/// the actual cross-instance delivery through the shared spool directory.
+pub fn mailbox_send_topic_event(
+    session_id: impl Into<String>,
+    to: &str,
+    msg: &str,
+    queue_timeout_secs: i64,
+    resp_timeout_secs: i64,
+    request_id: &str,
+) -> CoreTopicEvent {
+    CoreTopicEvent::new(
+        session_id,
+        CoreTopic::new(
+            CORE_TOPIC_MAILBOX,
+            json!({
+                "name": CORE_TOPIC_MAILBOX,
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "op": "send",
+            "request_id": request_id,
+            "to": to,
+            "msg": msg,
+            "queue_timeout_secs": queue_timeout_secs,
+            "resp_timeout_secs": resp_timeout_secs,
+        }),
+    )
+}
+
 pub fn timer_topic_event(
     session_id: impl Into<String>,
     op: &str,
@@ -1863,6 +1946,19 @@ pub trait TurnUi {
         true
     }
 
+    /// Takes the newest complete model-route snapshot, if the Host changed it
+    /// while this Turn was running. Core polls this immediately before each
+    /// model API dispatch so an in-flight request is left alone while the next
+    /// request best-effort uses the new active endpoint and failover chain.
+    fn apply_pending_model_service_route(
+        &mut self,
+        _core: &mut crate::AgentCore,
+        _config: &mut crate::ModelServiceConfig,
+        _failover: &mut Vec<crate::ModelServiceConfig>,
+    ) -> bool {
+        false
+    }
+
     fn apply_pending_runtime_updates(
         &mut self,
         _core: &mut crate::AgentCore,
@@ -1905,9 +2001,19 @@ pub trait TurnUi {
     ) {
     }
 
-    fn on_model_request_completed(&mut self, _latency: Duration) {}
+    fn on_model_request_completed(
+        &mut self,
+        _round: u32,
+        _latency: Duration,
+        _ttft: Option<Duration>,
+    ) {
+    }
 
     fn on_model_response(&mut self, _round: u32, _usage: &UsageStats, _content: &str) {}
+
+    /// Full provider reasoning text collected for this round. Hosts use it
+    /// only for diagnostics; it must never be surfaced as assistant content.
+    fn on_model_interaction_reasoning(&mut self, _round: u32, _reasoning: &str, _truncated: bool) {}
 
     fn on_model_interaction_response(&mut self, round: u32, response: &crate::LlmResponse) {
         self.on_model_response(round, &response.usage, &response.content);
@@ -1927,6 +2033,12 @@ pub trait TurnUi {
     }
 
     fn on_core_topic_events(&mut self, _events: &[CoreTopicEvent]) {}
+
+    /// Sends a mailbox send request and returns the mail id the Host assigned
+    /// after persisting the envelope. Hosts without a mailbox return None.
+    fn request_mail_send(&mut self, _event: &CoreTopicEvent) -> Option<MailSendReply> {
+        None
+    }
 
     fn on_model_error(&mut self, _error: &str) {}
 
@@ -2004,6 +2116,10 @@ pub trait TurnUi {
 pub struct UserSupplement {
     pub text: String,
     pub additional_context: Option<String>,
+    /// True when the runtime produced this message (mailbox delivery, timer,
+    /// queued interruption) instead of the user typing it. It then renders as
+    /// a runtime observation rather than a user supplement.
+    pub system_input: bool,
 }
 
 impl UserSupplement {
@@ -2011,7 +2127,23 @@ impl UserSupplement {
         Self {
             text: text.into(),
             additional_context,
+            system_input: false,
         }
+    }
+
+    /// Runtime-triggered supplement: same shuttle as a user supplement, but a
+    /// different rendered origin.
+    pub fn runtime(text: impl Into<String>, additional_context: Option<String>) -> Self {
+        Self {
+            text: text.into(),
+            additional_context,
+            system_input: true,
+        }
+    }
+
+    pub fn with_system_input(mut self, system_input: bool) -> Self {
+        self.system_input = system_input;
+        self
     }
 }
 

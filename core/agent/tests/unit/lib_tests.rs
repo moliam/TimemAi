@@ -122,8 +122,13 @@ fn forced_compaction_preserves_native_history_and_restricts_model_request() {
     let request_prompt = core.build_model_request_prompt(&prompt);
     assert!(!request_prompt.contains("Long-context maintenance:"));
     assert!(!request_prompt.contains("[BEGIN THRESHOLD COMPRESSION GUIDANCE]"));
-    assert!(request_prompt
-        .ends_with("[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"));
+    assert!(request_prompt.contains("[Context WARN] Context near limit"));
+    assert!(request_prompt.contains("prone to data loss and directional drift"));
+    assert!(
+        request_prompt.find("[Context WARN]").unwrap()
+            < request_prompt.find("prone to data loss").unwrap()
+    );
+    assert!(request_prompt.ends_with("Your tool calls must start with context_compress:"));
     let request = core.model_interaction_request(request_prompt);
     assert_eq!(request.tool_choice, NativeToolChoice::Required);
     assert!(request
@@ -428,7 +433,7 @@ fn forced_compaction_ignores_non_compact_output_then_unlocks_after_success() {
     let completed = core.apply_model_response(LlmResponse {
         content: serde_json::json!({
             "context_compress": {
-                "summary": "keep active task and continue"
+                "summary": "keep active task and continue","keywords":"checkpoint keywords"
             }
         })
         .to_string(),
@@ -532,7 +537,8 @@ fn successful_threshold_compression_schedules_only_one_forced_followup() {
             content: serde_json::json!({
                 "context_compress": {
                     "keep": [retained_id.clone()],
-                    "summary": format!("retain active state after {label}")
+                    "summary": format!("retain active state after {label}"),
+                    "keywords": "checkpoint keywords"
                 }
             })
             .to_string(),
@@ -570,13 +576,16 @@ fn successful_threshold_compression_schedules_only_one_forced_followup() {
 fn successful_threshold_compression_arms_provider_usage_verification() {
     let mut core = test_core("threshold_compaction_provider_verification_arm");
     core.set_interaction_profile(&native_test_profile());
-    core.set_max_llm_input_tokens(4_000);
+    // Keep the window far above the static prompt size so the post-compact
+    // shrink review cannot re-arm the request and defeat the armed check.
+    core.set_max_llm_input_tokens(16_000);
     core.append_delta(vec![(
         "user_question".to_string(),
         "discard this old context ".repeat(700),
     )]);
     let arguments = serde_json::json!({
-        "summary": "retain only the active task"
+        "summary": "retain only the active task",
+        "keywords": "checkpoint keywords"
     });
     core.context_compress_required = true;
     core.threshold_compaction_reasoning_required = true;
@@ -708,7 +717,9 @@ fn provider_usage_after_forced_followup_warns_and_does_not_loop() {
 fn new_explicit_compaction_supersedes_pending_provider_verification() {
     let mut core = test_core("new_compact_supersedes_provider_verification");
     core.set_interaction_profile(&native_test_profile());
-    core.set_max_llm_input_tokens(4_000);
+    // Same threshold-edge guard: a manual compact must clear the request, not
+    // get re-armed by the static prompt still crossing the old 4k window.
+    core.set_max_llm_input_tokens(16_000);
     core.append_delta(vec![(
         "user_question".to_string(),
         "old context".repeat(200),
@@ -716,7 +727,7 @@ fn new_explicit_compaction_supersedes_pending_provider_verification() {
     core.post_compaction_verification = Some(PostCompactionVerification::Initial);
     core.request_manual_context_compress();
     let arguments = serde_json::json!({
-        "summary": "manual replacement summary"
+        "summary": "manual replacement summary","keywords":"checkpoint keywords"
     });
 
     let step = core.apply_model_response(LlmResponse {
@@ -890,6 +901,7 @@ fn native_context_compress_persists_summary_after_replacing_all_old_deltas() {
     let summary = "NATIVE COMPACT SUMMARY MUST SURVIVE";
     let arguments = serde_json::json!({
         "summary": summary,
+        "keywords": "checkpoint keywords",
     });
 
     let step = core.apply_model_response(LlmResponse {
@@ -994,6 +1006,7 @@ fn native_context_compress_summary_does_not_depend_on_removed_owning_delta() {
     let arguments = serde_json::json!({
         "keep": [keep_delta_id],
         "summary": summary,
+        "keywords": "checkpoint keywords",
     });
 
     let step = core.apply_model_response(LlmResponse {
@@ -1017,11 +1030,14 @@ fn native_context_compress_summary_does_not_depend_on_removed_owning_delta() {
     assert!(!prompt.contains("DISCARD OWNING DELTA"));
     assert_eq!(prompt.matches(summary).count(), 1);
     assert!(prompt.contains("## TIMEM_ASSISTANT (context compression summary)"));
-    assert!(core
-        .deltas
-        .iter()
-        .any(|delta| delta.delta_id != owning_delta_id
-            && delta.slices.iter().any(|slice| slice.text == summary)));
+    // The summary slice now carries the runtime-echoed Thought pieces section
+    // after the summary text, so match by prefix instead of full equality.
+    assert!(core.deltas.iter().any(|delta| {
+        delta.delta_id != owning_delta_id
+            && delta.slices.iter().any(|slice| {
+                slice.text.starts_with(summary) && slice.text.contains("Thought pieces:")
+            })
+    }));
     assert!(core.native_exchanges.is_empty());
     let next_prompt = core.build_next_prompt();
     assert_eq!(next_prompt.matches(summary).count(), 1);
@@ -1094,7 +1110,7 @@ fn historical_wording_change_case_keep_semantics_eliminates_stale_raw_history() 
     seed_historical_case(&mut keep_contract);
     let step = keep_contract.apply_model_response(LlmResponse {
         content: serde_json::json!({
-            "context_compress": {"summary": AUTHORITATIVE_SUMMARY}
+            "context_compress": {"summary": AUTHORITATIVE_SUMMARY, "keywords": "checkpoint keywords"}
         })
         .to_string(),
         tool_calls: Vec::new(),
@@ -1439,6 +1455,7 @@ fn native_context_compress_first_then_executes_later_call_with_correct_id() {
     )]);
     let compact_arguments = serde_json::json!({
         "summary": "KEEP ACTIVE STATE",
+        "keywords": "checkpoint keywords",
     });
     let cwd_arguments = serde_json::json!({"type": "cwd"});
 
@@ -1501,11 +1518,13 @@ fn context_compress_success_hides_ref_details_and_preserves_surviving_exchanges(
             let arguments = if remove_all {
                 serde_json::json!({
                     "summary": "Retain active task state",
+                    "keywords": "checkpoint keywords",
                 })
             } else {
                 serde_json::json!({
                     "keep": ["pd_2"],
                     "summary": "Retain active task state",
+                    "keywords": "checkpoint keywords",
                 })
             };
             let step = core.apply_model_response(LlmResponse {
@@ -1600,6 +1619,7 @@ fn missing_keep_refs_fail_closed_and_block_later_calls() {
     let compact_arguments = serde_json::json!({
         "keep": ["pd_missing"],
         "summary": "MISSING KEEP MUST FAIL CLOSED",
+        "keywords": "checkpoint keywords",
     });
     let cwd_arguments = serde_json::json!({"type": "cwd"});
 
@@ -1648,6 +1668,7 @@ fn prompt_zero_compact_still_fails_closed_and_blocks_later_native_calls() {
     let compact_arguments = serde_json::json!({
         "keep": ["prompt_0"],
         "summary": "INVALID COMPACT",
+        "keywords": "checkpoint keywords",
     });
     let cwd_arguments = serde_json::json!({"type": "cwd"});
 
@@ -2992,8 +3013,8 @@ fn multiple_successful_compacts_emit_one_minimal_runtime_confirmation() {
         content: serde_json::json!({
             "free_talk": "compact both",
             "context_compress": [
-                { "summary": "first summary" },
-                { "summary": "second summary" }
+                { "summary": "first summary","keywords":"checkpoint keywords" },
+                { "summary": "second summary","keywords":"checkpoint keywords" }
             ]
         })
         .to_string(),
@@ -3091,7 +3112,7 @@ fn later_successful_compact_retires_previous_runtime_confirmation() {
         tool_calls: Vec::new(),
         content: serde_json::json!({
             "context_compress": {
-                "summary": "FIRST AUTHORITATIVE SUMMARY"
+                "summary": "FIRST AUTHORITATIVE SUMMARY","keywords":"checkpoint keywords"
             }
         })
         .to_string(),
@@ -3118,7 +3139,7 @@ fn later_successful_compact_retires_previous_runtime_confirmation() {
         content: serde_json::json!({
             "context_compress": {
                 "keep": [first_summary_id],
-                "summary": "SECOND AUTHORITATIVE SUMMARY"
+                "summary": "SECOND AUTHORITATIVE SUMMARY","keywords":"checkpoint keywords"
             }
         })
         .to_string(),
@@ -3154,7 +3175,8 @@ fn later_compact_does_not_hide_summary_that_quotes_runtime_confirmation() {
         tool_calls: Vec::new(),
         content: serde_json::json!({
             "context_compress": {
-                "summary": first_summary
+                "summary": first_summary,
+                "keywords": "checkpoint keywords"
             }
         })
         .to_string(),
@@ -3174,7 +3196,7 @@ fn later_compact_does_not_hide_summary_that_quotes_runtime_confirmation() {
         content: serde_json::json!({
             "context_compress": {
                 "keep": [first_summary_id],
-                "summary": "SECOND AUTHORITATIVE SUMMARY"
+                "summary": "SECOND AUTHORITATIVE SUMMARY","keywords":"checkpoint keywords"
             }
         })
         .to_string(),
@@ -3215,7 +3237,7 @@ fn successful_compact_removes_many_deltas_without_enumerating_ids() {
         tool_calls: Vec::new(),
         content: serde_json::json!({
             "context_compress": {
-                "summary": "Only the active compacted state remains."
+                "summary": "Only the active compacted state remains.","keywords":"checkpoint keywords"
             }
         })
         .to_string(),
@@ -4535,6 +4557,7 @@ fn aggregate_process_scope_is_one_shot_and_rearmed_after_compaction() {
     core.set_response_protocol(ResponseProtocolKind::Json);
     let arguments = serde_json::json!({
         "summary": "Keep active work",
+        "keywords": "checkpoint keywords",
     });
     let step = core.apply_model_response(LlmResponse {
         content: serde_json::json!({"context_compress": arguments}).to_string(),
@@ -4606,6 +4629,7 @@ fn compression_prompts_use_h1_only_for_threshold_triggered_requests() {
             prompt.contains("Please compress it now (see the `context_compress` tool description)")
         );
         assert!(prompt.contains("Your tool calls must start with context_compress:"));
+        assert!(prompt.contains(crate::prompt_render::CONTEXT_COMPRESS_CAUTION));
         assert!(!prompt.contains("User manually requests context compression"));
     }
 
@@ -4624,6 +4648,7 @@ fn compression_prompts_use_h1_only_for_threshold_triggered_requests() {
             prompt.contains("Please compress it now (see the `context_compress` tool description)")
         );
         assert!(prompt.contains("Your tool calls must start with context_compress:"));
+        assert!(prompt.contains(crate::prompt_render::CONTEXT_COMPRESS_CAUTION));
     }
 }
 

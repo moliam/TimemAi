@@ -43,7 +43,7 @@ run_exact timem lib "" server::tests::successful_cwd_action_updates_only_its_ses
 run_dimension "what / restart recovery and direct continuation"
 run_exact agent_core lib "" prompt_component_tests::direct_resume_prompt_follows_the_interruption_note_in_component_order
 run_exact timem lib "" server::tests::direct_resume_host_constructs_hidden_turn_and_shared_model_input
-run_exact timem lib "" server::tests::runtime_restart_requires_each_restored_session_to_resolve_cwd_before_work
+run_exact timem lib "" server::tests::runtime_restart_keeps_restored_sessions_on_their_stored_cwd_without_a_gate
 
 run_dimension "how / prompt catalog and executable capability parity"
 run_exact agent_core lib "" capability::tests::tool_catalog_is_injected_for_the_active_protocol

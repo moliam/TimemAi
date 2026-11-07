@@ -47,10 +47,14 @@ contract.
 ## Release assets
 
 Every public release carries prebuilt archives produced by
-`.github/workflows/release-assets.yml`. When the Release is published, the
+`.github/workflows/release-assets.yml`. Linux archives are built against a
+glibc 2.31 baseline (Ubuntu 20.04 LTS or newer) via cargo-zigbuild, and the
+packaged README documents the Linux requirements. When the Release is
+published, the
 workflow builds the release binary for `x86_64-pc-windows-msvc`,
-`aarch64-apple-darwin`, `x86_64-apple-darwin`, and `x86_64-unknown-linux-gnu`,
-packages it with `scripts/package_release_assets.sh`, smoke-tests `--help`,
+`aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`,
+and `aarch64-unknown-linux-gnu`, packages it with
+`scripts/package_release_assets.sh`, smoke-tests `--help`,
 and uploads `timem-vX.Y.Z-<target>.zip` plus `.tar.gz` (Windows) or
 `.tar.gz` (macOS/Linux)
 plus a `.sha256` sidecar to the Release.

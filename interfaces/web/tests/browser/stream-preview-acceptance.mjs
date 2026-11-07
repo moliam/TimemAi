@@ -390,12 +390,38 @@ async function startBrowser(url) {
   }
 }
 
+async function click(browser, point) {
+  await browser.call("Input.dispatchMouseEvent", { type: "mousePressed", x: point.x, y: point.y, button: "left", buttons: 1, clickCount: 1 });
+  await browser.call("Input.dispatchMouseEvent", { type: "mouseReleased", x: point.x, y: point.y, button: "left", buttons: 0, clickCount: 1 });
+}
+
 async function main() {
   const host = await startHost();
   const browser = await startBrowser(host.url);
   const contains = (selector, text) => browser.evaluate(`[...document.querySelectorAll(${JSON.stringify(selector)})].some(n => n.textContent.includes(${JSON.stringify(text)}))`);
   const publish = (revision, response, chat = [], interruption = null) => {
     const preview = { attempt: 1, revision, response: response ? { attempt: 1, revision, text: response, status: "streaming" } : null, chat, interruption };
+    const session = host.getSession();
+    host.setSession({ ...session, turns: session.turns.map(t => ({ ...t, preview })) });
+    host.send({ type: "core_topic", turn_id: "turn-1", turn_event_id: null, event: {
+      session_id: "session-1", context_id: "context-1", worker_id: "worker-1",
+      topic: { name: "core.model.preview", attributes: {} }, state: "waiting_model",
+      payload: { turn_id: "turn-1", ...preview },
+    }});
+  };
+  const publishThinking = (revision, tail, truncated = false) => {
+    const preview = {
+      attempt: 2,
+      revision,
+      chat: [],
+      interruption: null,
+      thinking_words: 1234,
+      thinking_tail: tail,
+      thinking_truncated: truncated,
+      thinking_elapsed_ms: 1500,
+      stream_phase: "thinking",
+      response: { attempt: 2, revision, text: "", status: "streaming" },
+    };
     const session = host.getSession();
     host.setSession({ ...session, turns: session.turns.map(t => ({ ...t, preview })) });
     host.send({ type: "core_topic", turn_id: "turn-1", turn_event_id: null, event: {
@@ -477,6 +503,9 @@ async function main() {
     await waitFor(() => contains("body", "ORDER_NEW"), "incremental thought missing");
     assert(await browser.evaluate(`(() => { const text = document.querySelector('.turn-stream-tools').textContent;
       return text.indexOf('ORDER_OLD') < text.indexOf('ORDER_SUPPLEMENT') && text.indexOf('ORDER_SUPPLEMENT') < text.indexOf('ORDER_NEW'); })()`), "incremental wire moved new thought before snapshot items");
+    // Paged archive recovery exercises the collapsed-frame path: enable the
+    // archive sub-setting so the completed turn folds into Thought/Action.
+    await browser.evaluate(`localStorage.setItem("timem-web-stream-archive-v1", "true")`);
     const completeEvents = Array.from({length: 80}, (_, i) => i % 2
       ? toolEvent(`archive-tool-${i}`, i + 1) : thoughtEvent(`archive-${i}`, `ARCHIVE_PROGRESS_${i}`, i + 1));
     const historyRecords = completeEvents.map(event => ({ type: "event", role: "system", turn_id: "turn-1",
@@ -655,6 +684,118 @@ async function main() {
     assert(!(await contains(".response-preview", "Unique thought N")), "intermediate thought duplicated in preview");
     assert(await contains(".stream-tool-row", "tool-old"), "current tool missing");
     assert(await browser.evaluate(`!!document.querySelector('.stream-working-trailer')`), "working trailer missing");
+    const thinkingNeedle = "LATEST_THINKING_WINDOW";
+    const thinkingTail = `${"older reasoning ".repeat(80)}${thinkingNeedle}`;
+    publishThinking(30, thinkingTail);
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-thinking-window')`), "thinking window missing");
+    const thinkingGeometry = await browser.evaluate(`(() => {
+      const trailer = document.querySelector('.stream-working-trailer');
+      const windowEl = document.querySelector('.stream-thinking-window');
+      const elapsed = document.querySelector('.stream-working-detail .stream-working-phase-elapsed');
+      const total = document.querySelector('.stream-working-total');
+      const probe = document.createElement('span');
+      probe.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;';
+      probe.style.font = getComputedStyle(trailer).font;
+      probe.textContent = '0000';
+      document.body.appendChild(probe);
+      const fourCh = probe.getBoundingClientRect().width;
+      probe.remove();
+      const w = windowEl.getBoundingClientRect();
+      const e = elapsed.getBoundingClientRect();
+      const t = total.getBoundingClientRect();
+      return { gap: t.left - e.right, fourCh, windowWidth: w.width, trailerWidth: trailer.getBoundingClientRect().width,
+        text: windowEl.textContent, elapsedRight: e.right, totalLeft: t.left };
+    })()`);
+    assert(thinkingGeometry.text.includes(thinkingNeedle), `thinking window must show newest reasoning: ${JSON.stringify(thinkingGeometry)}`);
+    assert(thinkingGeometry.gap >= thinkingGeometry.fourCh - 1, `thinking row keeps 4ch before the right time cluster: ${JSON.stringify(thinkingGeometry)}`);
+    assert(thinkingGeometry.windowWidth < thinkingGeometry.trailerWidth * 0.72, `thinking window stays length-limited: ${JSON.stringify(thinkingGeometry)}`);
+    await browser.evaluate(`document.documentElement.dataset.theme = 'dark'`);
+    const thinkingChrome = await browser.evaluate(`(() => {
+      const win = document.querySelector('.stream-thinking-window');
+      const text = win.querySelector('.stream-thinking-window-text');
+      const ws = getComputedStyle(win);
+      return { winBorderWidth: ws.borderTopWidth, winBackground: ws.backgroundImage, winShadow: ws.boxShadow,
+        winMask: ws.maskImage,
+        windowRect: win.getBoundingClientRect().toJSON(), textRect: text.getBoundingClientRect().toJSON() };
+    })()`);
+    assert(thinkingChrome.winBorderWidth === '0px' && thinkingChrome.winBackground === 'none' && thinkingChrome.winShadow === 'none' && thinkingChrome.winMask.includes('linear-gradient'), `inline thinking strip is frameless with a natural fade edge: ${JSON.stringify(thinkingChrome)}`);
+    assert(thinkingChrome.textRect.right >= thinkingChrome.windowRect.right - 9 && thinkingChrome.textRect.left < thinkingChrome.windowRect.left, `inline thinking strip clips to the newest text at its right edge: ${JSON.stringify(thinkingChrome)}`);
+    await browser.evaluate(`document.documentElement.dataset.theme = 'light'`);
+    const lightThinkingChrome = await browser.evaluate(`(() => {
+      const win = document.querySelector('.stream-thinking-window');
+      const ws = getComputedStyle(win);
+      return { winBackground: ws.backgroundImage, winBorderWidth: ws.borderTopWidth,
+        winColor: ws.color, winMask: ws.maskImage };
+    })()`);
+    assert(lightThinkingChrome.winBackground === 'none' && lightThinkingChrome.winBorderWidth === '0px' && lightThinkingChrome.winColor === 'rgb(47, 111, 94)' && lightThinkingChrome.winMask.includes('linear-gradient'), `light thinking strip stays frameless: ${JSON.stringify(lightThinkingChrome)}`);
+    await browser.evaluate(`document.documentElement.dataset.theme = 'dark'`);
+    const beforeTick = await browser.evaluate(`(() => {
+      const win = document.querySelector('.stream-thinking-window');
+      const elapsed = document.querySelector('.stream-working-detail .stream-working-phase-elapsed');
+      const total = document.querySelector('.stream-working-total');
+      return { windowWidth: win.getBoundingClientRect().width,
+        gap: total.getBoundingClientRect().left - elapsed.getBoundingClientRect().right,
+        text: win.textContent };
+    })()`);
+    publishThinking(32, `${thinkingTail} newest tick`);
+    await sleep(180);
+    const afterTick = await browser.evaluate(`(() => {
+      const win = document.querySelector('.stream-thinking-window');
+      const elapsed = document.querySelector('.stream-working-detail .stream-working-phase-elapsed');
+      const total = document.querySelector('.stream-working-total');
+      return { windowWidth: win.getBoundingClientRect().width,
+        gap: total.getBoundingClientRect().left - elapsed.getBoundingClientRect().right,
+        text: win.textContent };
+    })()`);
+    assert(afterTick.text.includes("newest tick"), `inline thinking strip follows newest reasoning: ${JSON.stringify(afterTick)}`);
+    assert(Math.abs(afterTick.windowWidth - beforeTick.windowWidth) < 1 && Math.abs(afterTick.gap - beforeTick.gap) < 1, `inline thinking strip updates without shifting the row: ${JSON.stringify({ beforeTick, afterTick })}`);
+    publishThinking(33, "   \n  ");
+    await sleep(160);
+    assert(
+      await browser.evaluate(`!document.querySelector('.stream-thinking-window')`),
+      "whitespace-only reasoning must not render an empty strip",
+    );
+    // The thinking chain display is an instance-wide preference in
+    // Settings -> System; toggling it must hide and restore the inline
+    // window without touching the thinking row itself.
+    publishThinking(35, thinkingTail);
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-thinking-window')`), "thinking window returns for the toggle flow");
+    const openSettings = async () => {
+      await click(browser, await browser.evaluate(`(() => { const b = document.querySelector('[aria-controls="settings-center"]'); const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`));
+      await waitFor(() => browser.evaluate(`!!document.querySelector('#settings-center')`), "settings center opens");
+    };
+    const closeSettings = async () => {
+      await click(browser, await browser.evaluate(`(() => { const b = document.querySelector('.settings-center-header .icon-button'); const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`));
+      await waitFor(() => browser.evaluate(`!document.querySelector('#settings-center')`), "settings center closes");
+    };
+    const openSystemPane = async () => {
+      const nav = await browser.evaluate(`(() => { const b = [...document.querySelectorAll('.settings-center-nav button')].find(n => n.textContent.includes('系统') || n.textContent.includes('System')); if (!b) return null; const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`);
+      assert(nav, "system settings nav found");
+      await click(browser, nav);
+      await waitFor(() => browser.evaluate(`!!document.querySelector('.system-thinking-chain .resource-cap-switch')`), "thinking chain toggle renders");
+    };
+    const toggleThinkingChain = async () => {
+      await click(browser, await browser.evaluate(`(() => { const b = document.querySelector('.system-thinking-chain .resource-cap-switch'); const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()`));
+    };
+    await openSettings();
+    await openSystemPane();
+    assert(await browser.evaluate(`document.querySelector('.system-thinking-chain input[type="checkbox"]').checked`), "thinking chain toggle defaults on");
+    await toggleThinkingChain();
+    await waitFor(() => browser.evaluate(`!document.querySelector('.system-thinking-chain input[type="checkbox"]').checked`), "thinking chain toggle switches off");
+    await closeSettings();
+    publishThinking(36, thinkingTail);
+    await sleep(160);
+    assert(await browser.evaluate(`!document.querySelector('.stream-thinking-window')`), "disabled thinking chain hides the inline window");
+    assert(await browser.evaluate(`!!document.querySelector('.stream-working-detail')`), "disabled thinking chain keeps the thinking row");
+    await openSettings();
+    await openSystemPane();
+    await toggleThinkingChain();
+    await waitFor(() => browser.evaluate(`document.querySelector('.system-thinking-chain input[type="checkbox"]').checked`), "thinking chain toggle switches back on");
+    await closeSettings();
+    publishThinking(37, thinkingTail);
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-thinking-window')`), "re-enabled thinking chain shows the window again");
+    publish(38, null, []);
+    await waitFor(() => browser.evaluate(`!document.querySelector('.stream-thinking-window')`), "thinking window must clear when reasoning ends");
     assert(await browser.evaluate(`!document.querySelector('.stream-thought-card, .stream-reading-hold')`), "extra thought frame exists");
     for (const theme of ["dark", "light"]) {
       assert(await browser.evaluate(`(() => {
@@ -670,19 +811,34 @@ async function main() {
       const style = getComputedStyle(command);
       return style.animationName === 'stream-tool-enter' && style.animationDuration === '0.16s';
     })()`), "command entrance transition missing");
-    assert(await browser.evaluate(`(() => {
+    // Clearing the response snapshot is asynchronous; wait for the local-work
+    // trailer to settle before reading CSS animation state so this check does
+    // not race a transient model-waiting render.
+    await waitFor(() => browser.evaluate(`(() => {
+      const trailer = document.querySelector('.stream-working-trailer');
+      return !!trailer && trailer.classList.contains('tool-active') &&
+        !!document.querySelector('.stream-working-wrench');
+    })()`), "local work phase with a wrench did not settle");
+    const cueState = await browser.evaluate(`(() => {
       const sessionIcon = document.querySelector('.session-working-icon');
       const sessionAnim = sessionIcon ? getComputedStyle(sessionIcon) : null;
-      const sessionDot = sessionIcon ? sessionIcon.getBoundingClientRect() : null;
-      const workerStatic = [...document.querySelectorAll('.worker-working-icon')].every(node => getComputedStyle(node).animationName === 'none');
+      const workerAnims = [...document.querySelectorAll('.worker-working-icon')].map(node => getComputedStyle(node).animationName);
       const localWrench = document.querySelector('.stream-working-wrench');
       const wrenchAnim = localWrench ? getComputedStyle(localWrench) : null;
-      return !!sessionAnim && sessionAnim.animationName === 'stream-working-grow' &&
-        parseFloat(sessionAnim.animationDuration) === 1.2 &&
-        !!sessionDot && workerStatic && !!wrenchAnim &&
-        wrenchAnim.animationName === 'stream-working-wrench-sway' &&
-        parseFloat(wrenchAnim.animationDuration) === 1;
-    })()`), "sidebar session cue must keep breathing, local work must sway a wrench, and workers must stay static");
+      return {
+        sessionAnim: sessionAnim?.animationName ?? null,
+        sessionDuration: sessionAnim?.animationDuration ?? null,
+        workerAnims,
+        wrenchAnim: wrenchAnim?.animationName ?? null,
+        wrenchDuration: wrenchAnim?.animationDuration ?? null,
+      };
+    })()`);
+    assert(cueState.sessionAnim === 'stream-working-grow' &&
+      parseFloat(cueState.sessionDuration) === 1.2 &&
+      cueState.workerAnims.every(name => name === 'none') &&
+      cueState.wrenchAnim === 'stream-working-wrench-sway' &&
+      parseFloat(cueState.wrenchDuration) === 1,
+      `sidebar session cue must keep breathing, local work must sway a wrench, and workers must stay static: ${JSON.stringify(cueState)}`);
     assert(await browser.evaluate(`['.user-message-navigation button', '.session-group-heading', '.final-answer-outline-toggle'].every(selector => [...document.querySelectorAll(selector)].every(node => getComputedStyle(node).backdropFilter === 'none'))`), "scroll overlays must not sample blurred backdrops");
     await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
     assert(await browser.evaluate(`['.stream-tool-head', '.stream-tool-command', '.stream-tool-dot', '.stream-working-wrench'].every(selector => { const node = document.querySelector(selector); return !node || getComputedStyle(node).animationName === 'none'; })`), "reduced motion must disable tool entrance");
@@ -720,7 +876,7 @@ async function main() {
     assert(await browser.evaluate(`!document.querySelector('.stream-working-trailer')`), "terminal turn retained working trailer");
     const workExpanded = () => browser.evaluate(`document.querySelector('button.work-title-chip')?.getAttribute('aria-expanded')`);
     for (const streamMode of [false, true]) {
-      await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", ${JSON.stringify(String(streamMode))});`);
+      await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", ${JSON.stringify(String(streamMode))}); localStorage.setItem("timem-web-stream-archive-v1", ${JSON.stringify(String(streamMode))});`);
       for (const terminal of ["finished", "interrupted"]) {
         const base = host.getSession();
         const workingSession = { ...base, state: "working", active_turn_id: "turn-1",
@@ -755,7 +911,7 @@ async function main() {
 
       }
     }
-    await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", "true")`);
+    await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", "true"); localStorage.setItem("timem-web-stream-archive-v1", "true")`);
     const interimSession = { ...host.getSession(), state: "working", active_turn_id: "turn-1", turns: [{
       ...turn("turn-1"), events: [thoughtEvent("prior", "Prior thought archived", 1)] ,
       preview: { attempt: 3, revision: 1, response: null },
@@ -829,6 +985,7 @@ async function main() {
     host.setSession(nextLong); host.send({type:"hello", snapshot:makeSnapshot(nextLong)});
     await waitFor(() => contains(".stream-thought-text", "Next round stays below"), "next round missing");
     assert(await browser.evaluate(`window.stableThought === document.querySelector('.stream-thought-text')`), "next round remounted old text");
+    await browser.evaluate(`localStorage.setItem("timem-web-stream-archive-v1", "true")`);
     for (const terminal of ["finished", "interrupted"]) {
       await setRound(longEvents, longThought);
       const current = host.getSession();
@@ -857,7 +1014,7 @@ async function main() {
     for (const reducedMotion of [false, true]) {
     await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: reducedMotion ? "reduce" : "no-preference" }] });
     for (const streamMode of [true, false]) {
-      await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", ${JSON.stringify(String(streamMode))})`);
+      await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", ${JSON.stringify(String(streamMode))}); localStorage.setItem("timem-web-stream-archive-v1", ${JSON.stringify(String(streamMode))})`);
       const manyTools = Array.from({length: 80}, (_, i) => toolEvent(`handoff-tool-${i}`, 3 + i));
       await setRound([thoughtEvent("handoff-thought", longThought, 1), ...manyTools], longThought);
       await browser.evaluate(`document.querySelector('.chat-scroll').scrollTop = document.querySelector('.chat-scroll').scrollHeight`);
@@ -1076,6 +1233,41 @@ async function main() {
     // stays a bare xN count under the new collapsed-state contract.
     await waitFor(() => contains(".stream-tool-run-toggle", "x2"), "result preference did not update mounted rows");
     assert(await browser.evaluate(`document.querySelectorAll('.stream-tool-status').length===0 && document.querySelectorAll('.tool-failure-icon .lucide-circle-x').length===1`), "result preference introduced a redundant row verdict");
+    // Archive sub-setting: default off keeps the interim conversation expanded.
+    {
+      await browser.evaluate(`localStorage.removeItem("timem-web-stream-archive-v1"); localStorage.setItem("timem-web-stream-ui-mode-v1", "true")`);
+      const subEvents = [thoughtEvent("archive-sub-thought", "Archive sub-setting thought", 1), toolEvent("archive-sub-tool", 2)];
+      await setRound(subEvents, "Archive sub-setting preview");
+      await waitFor(() => contains(".stream-tool-row", "archive-sub-tool"), "archive sub-setting tool row missing");
+      const currentSub = host.getSession();
+      const subDone = {...currentSub, state: "ready", active_turn_id: null, workers: [worker("ready")], turns: currentSub.turns.map(t => ({...t, state: "finished", final_answer: "Archive sub-setting final"}))};
+      host.setSession(subDone); host.send({type: "hello", snapshot: makeSnapshot(subDone)});
+      await waitFor(() => contains(".turn-final-delivery", "Archive sub-setting final"), "archive default lost final");
+      await sleep(600);
+      assert(await browser.evaluate(`!!document.querySelector('.stream-continuous-process') && !document.querySelector('.stream-continuous-process.archiving') && !document.querySelector('.turn-assistant-frame.collapsed-work')`), "default archive=off collapsed the interim conversation");
+      await browser.call("Page.reload", {ignoreCache: true});
+      await waitFor(() => contains(".stream-thought-text", "Archive sub-setting thought"), "reload with archive off lost interim content");
+      assert(await browser.evaluate(`!!document.querySelector('.stream-continuous-process') && !document.querySelector('.stream-continuous-process.archiving')`), "reload re-collapsed interim conversation despite archive off");
+      // Settings: sub-switch nests under the enabled parent and defaults off.
+      await browser.evaluate(`document.querySelector('.sidebar-settings-button').click()`);
+      await waitFor(() => browser.evaluate(`!!document.querySelector('.settings-center')`), "settings center missing");
+      await browser.evaluate(`[...document.querySelectorAll('.settings-center-nav button')].find(b => b.textContent.includes('系统')).click()`);
+      await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-archive-subsetting')`), "archive sub-setting not rendered under enabled parent");
+      const subSwitch = `document.querySelector('.stream-archive-subsetting button[role="switch"]')`;
+      assert(await browser.evaluate(`${subSwitch}.getAttribute('aria-checked') === 'false'`), "archive sub-setting default is not off");
+      // Live toggle on archives the completed turn.
+      await browser.evaluate(`${subSwitch}.click()`);
+      await waitFor(() => browser.evaluate(`!document.querySelector('.stream-continuous-process') && !!document.querySelector('.turn-assistant-frame.collapsed-work')`), "live archive-on did not collapse the completed turn");
+      // Parent off hides the sub-setting; re-enabling keeps the explicit choice.
+      await browser.evaluate(`document.querySelector('.settings-group.system-feature-card > .settings-group-heading > button[role="switch"]').click()`);
+      await waitFor(() => browser.evaluate(`!document.querySelector('.stream-archive-subsetting')`), "sub-setting still visible with parent off");
+      await browser.evaluate(`document.querySelector('.settings-group.system-feature-card > .settings-group-heading > button[role="switch"]').click()`);
+      await waitFor(() => browser.evaluate(`document.querySelector('.stream-archive-subsetting button[role="switch"]')?.getAttribute('aria-checked') === 'true'`), "sub-setting choice did not persist");
+      await browser.evaluate(`document.querySelector('button[aria-label="关闭设置"]').click()`);
+      // Restore the archive-on default for any later assertions and clean the round.
+      await browser.evaluate(`localStorage.setItem("timem-web-stream-archive-v1", "true")`);
+      console.log("PASS Chrome archive sub-setting: default expanded, nested settings switch, live toggle, reload consistency");
+    }
     console.log("PASS Chrome visual interaction: stable completed groups, selection protection, failure toggle, 390/768px overflow");
     console.log("PASS Chrome continuous stream: multi-round DOM stability, completed adjacency merge/reopen, terminal animation and interruption archive");
     console.log("PASS Chrome interim continuity: deduplicated deliveries, earlier thought/answers retained, reload and typography");

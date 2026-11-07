@@ -36,7 +36,8 @@ Examples below are format examples ONLY:
     "context_compress": {
       "keep": ["pd_4"],
       "offload": ["pd_2"],
-      "summary": "Dense authoritative checkpoint containing everything needed to continue...."
+      "summary": "Dense authoritative checkpoint containing everything needed to continue....",
+      "keywords": "task A finished, task B active, fixture port 18991, apply close reopen"
     }
   }
 }

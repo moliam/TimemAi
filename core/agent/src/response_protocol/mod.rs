@@ -252,6 +252,13 @@ impl ParsedAction {
             .unwrap_or(false)
     }
 
+    pub fn input_bool_or(&self, key: &str, default: bool) -> bool {
+        self.raw_input
+            .get(key)
+            .and_then(Value::as_bool)
+            .unwrap_or(default)
+    }
+
     pub fn input_list(&self, key: &str) -> Vec<String> {
         self.raw_input
             .get(key)
@@ -490,6 +497,11 @@ pub struct ParsedContextCompress {
     pub delta_ids: Vec<String>,
     pub slice_ids: Vec<String>,
     pub summary: String,
+    /// Standalone keyword index for the checkpoint. Provided as its own
+    /// argument, never embedded in `summary`; the runtime validates it is
+    /// present and echoes it back into the next prompt as a dedicated
+    /// "Thought pieces" section.
+    pub keywords: String,
 }
 
 /// Trait for response protocol implementations.

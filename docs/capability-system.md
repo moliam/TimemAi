@@ -75,15 +75,19 @@ The manifest is the human-maintained source for:
 - enum field constraints derived from property `enum` values
 - examples
 
-The complete standard JSON Schema document is retained for native provider
-requests, including nested and top-level `oneOf`/`allOf`, numeric and collection
-bounds, patterns, and `additionalProperties`. Timem's `x-required-*` extensions
-are removed from the provider payload and translated to standard conditional
-schema clauses. Provider generation avoids emitting an additional any-of clause
-when every branch of an existing sibling `oneOf` already requires a member of
-the same `x-required-any` group. The optimization pass is recursive, so the same
-rule applies to nested object schemas. This keeps runtime validation metadata as the
-single manifest source without sending duplicate constraints to the model.
+The standard JSON Schema document is retained for native provider
+requests, including nested property-level `oneOf`, numeric and collection
+bounds, patterns, and `additionalProperties`. Builtin manifests deliberately
+carry no root-level `oneOf`/`allOf` decoration: mode exclusivity and
+conditional requirements live in `x-required-*` execution rules, which are
+removed from the provider payload and translated into synthesized standard
+conditional schema clauses. Provider generation still avoids emitting an
+additional any-of clause when every branch of an existing sibling `oneOf`
+(dynamics such as MCP tools) already requires a member of the same
+`x-required-any` group. The optimization pass is recursive, so the same
+rule applies to nested object schemas. This keeps runtime validation metadata
+as the single manifest source without sending duplicate or unenforced
+constraints to the model.
 MCP schemas follow the same lossless path instead of being reduced to only
 top-level properties. Native builtin descriptions in the static system prompt
 include valid argument-object examples (without the inline tool-name wrapper),

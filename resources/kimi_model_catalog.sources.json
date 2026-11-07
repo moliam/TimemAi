@@ -1,0 +1,50 @@
+{
+  "retrieved_at": "2026-10-24T03:00:00+00:00",
+  "sources": {
+    "index": {
+      "url": "https://platform.kimi.com/docs/llms.md",
+      "sha256": "2a4414ba47f0a9f7f17f84d7254c6705454500b436471f3776d6de5bbadf6975",
+      "excerpt": "Kimi 开放平台文档索引：API 概述、模型列表、Chat Completions、Responses、推理强度等。"
+    },
+    "api-overview": {
+      "url": "https://platform.kimi.com/docs/api_overview.md",
+      "sha256": "9903b007fa4ee3ab23f8f9003b7f2673fb6e0f7ec774efc0ec23d8904f5e1e71",
+      "excerpt": "API 兼容三种格式：OpenAI Chat Completions 与 OpenAI Responses 的 base_url 为 https://api.moonshot.cn/v1；认证使用 Authorization: Bearer API Key。"
+    },
+    "models": {
+      "url": "https://platform.kimi.com/docs/models.md",
+      "sha256": "1e60faa6eddd8461d15769e260e6e19f2dd2562be37e54b5de5c8ffc229d2511",
+      "excerpt": "在售多模态模型：kimi-k3.1-pro、kimi-k3.1-pro-highspeed、kimi-k3、kimi-k2.7-code、kimi-k2.7-code-highspeed、kimi-k2.6；K2 系列计划 12 月底下线。"
+    },
+    "models-overview": {
+      "url": "https://platform.kimi.com/docs/api_models-overview.md",
+      "sha256": "37f2bdd3459fd40fa72f54dbe2bb07a5bd66c3ef9c21b1ebc6fbeefb60277d58",
+      "excerpt": "kimi-k3 系列上下文窗口 1M tokens；reasoning_effort 支持 low/high/max（默认 max）；temperature 固定 1.0，top_p 固定 0.95；max_completion_tokens 默认 131072，最大可设置为 1048576。"
+    },
+    "reasoning-effort": {
+      "url": "https://platform.kimi.com/docs/guide_use-reasoning-effort.md",
+      "sha256": "19979b12b61737dee17136853c91761a06dd2cafe0535d9c78bedf3fa0d77a59",
+      "excerpt": "Kimi K3.1 Pro 始终进行推理，通过请求顶层 reasoning_effort 配置推理强度，支持 low/high/max 三档，默认 max。"
+    },
+    "chat-api": {
+      "url": "https://platform.kimi.com/docs/api_chat.md",
+      "sha256": "615ad7a4a3ecebc672999c07905a781e25b14ea8928721e54fa27ae17ff0daec",
+      "excerpt": "K3 系列多轮对话和工具调用必须把 API 返回的完整 assistant message 原样回传到 messages，包括 reasoning_content 和 tool_calls。流式设置 stream=true 与 stream_options.include_usage=true，delta 中先返回 reasoning_content 再返回 content。"
+    },
+    "responses-api": {
+      "url": "https://platform.kimi.com/docs/api_responses.md",
+      "sha256": "e642a214977c62a023ef421c6bacc0766ac1cbc5e360a61d6665b5e7dd1f14ac",
+      "excerpt": "Responses API 的 reasoning.effort 枚举为 low/high/max，默认 max；max_output_tokens 默认 131072，最大可设置为 1048576。"
+    },
+    "k3-quickstart": {
+      "url": "https://platform.kimi.com/docs/guide_kimi-k3-1-pro-quickstart.md",
+      "sha256": "b98a24beee67d8dbb381a56fe55bc2f36a64b72b247523ece9232f03ed9eb4ed",
+      "excerpt": "Kimi K3.1 Pro：3 万亿参数旗舰，原生支持视觉理解，100 万 token 上下文；高速版约 2~3 倍速度。"
+    },
+    "thinking-mode": {
+      "url": "https://platform.kimi.com/docs/guide/use-thinking-models.md",
+      "sha256": "48a6fe836b6037848469a5da077552caa67141b7ba7b1f1a16b60d95efb29afa",
+      "excerpt": "kimi-k2.6 默认开启思考，thinking 参数支持 {type:enabled}/{type:disabled}/{type:enabled,keep:all}；kimi-k2.7-code 始终开启思考且保留式思考始终开启，无需也不应传入 thinking 参数，多轮对话需把历史 reasoning_content 原样保留在 messages 中。两者上下文 256k。"
+    }
+  }
+}

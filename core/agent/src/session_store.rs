@@ -18,6 +18,22 @@ pub struct StoredSession {
     pub display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_endpoint_id: Option<String>,
+    /// Ordered failover chain of model endpoint ids. The first entry is the
+    /// currently applied endpoint (mirrored into `model_endpoint_id`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_endpoint_ids: Vec<String>,
+    /// Session-only reasoning selection. It never mutates a shared endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort_override: Option<String>,
+    /// Per-endpoint session reasoning selections keyed by endpoint id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub endpoint_reasoning_efforts: BTreeMap<String, String>,
+    /// Per-endpoint session input-token window overrides keyed by endpoint id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub endpoint_max_input_tokens: BTreeMap<String, u32>,
+    /// Usage/telemetry dashboard reset boundary (ms since epoch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry_reset_at_ms: Option<i64>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub current_dir: String,
@@ -125,6 +141,10 @@ pub enum ChatHistoryEventKind {
     RuntimeNotice,
     Stats,
     Attachment,
+    /// Command delivery tracking written by the web host. Historic rows carry
+    /// a duplicated trailing `kind` key whose last value wins during
+    /// deserialization, so those rows land in this variant too.
+    CommandDelivery,
 }
 
 fn temporary_event_time(record: &ChatHistoryRecord) -> Option<i64> {
@@ -135,7 +155,9 @@ fn temporary_event_time(record: &ChatHistoryRecord) -> Option<i64> {
                 ChatHistoryEventKind::Action
                 | ChatHistoryEventKind::ActionResult
                 | ChatHistoryEventKind::ContextCompress
-                | ChatHistoryEventKind::Repair,
+                | ChatHistoryEventKind::Repair
+                | ChatHistoryEventKind::RuntimeNotice
+                | ChatHistoryEventKind::CommandDelivery,
             ..
         } => Some(*created_at_ms),
         _ => None,
@@ -263,9 +285,7 @@ impl SessionStore {
     }
 
     pub fn history_path_for_session(&self, session_id: &str) -> PathBuf {
-        self.sessions_dir()
-            .join(sanitize_session_path_component(session_id))
-            .join("raw_chat_history.jsonl")
+        history_path_in(&self.sessions_dir(), session_id)
     }
 
     /// Persisted dynamic prompt context snapshot for one session. Written by
@@ -898,6 +918,7 @@ impl SessionStore {
             .lock()
             .map_err(|_| "chat_history_index_poisoned")?
             .remove(&path);
+        invalidate_persisted_history_index(&path);
         self.temporary_event_summaries
             .lock()
             .map_err(|_| "chat_history_summary_poisoned")?
@@ -1041,6 +1062,7 @@ impl SessionStore {
                     .lock()
                     .map_err(|_| "chat_history_index_poisoned".to_string())?
                     .remove(&path);
+                invalidate_persisted_history_index(&path);
             }
             Ok(removed)
         })
@@ -1058,6 +1080,67 @@ impl SessionStore {
         if bytes_to_remove == 0 {
             return Ok(0);
         }
+        self.prune_history_turns_with(session_id, Some(bytes_to_remove), None)
+    }
+
+    /// Removes every complete Turn block archived before `before_ms`
+    /// (exclusive). This is the ordered primitive used by rolling eviction:
+    /// callers derive the cutoff from the globally oldest block still present in
+    /// another archive, so old blocks are always deleted before new ones.
+    pub fn prune_history_turns_before(
+        &self,
+        session_id: &str,
+        before_ms: i64,
+    ) -> Result<u64, String> {
+        validate_session_id(session_id)?;
+        self.prune_history_turns_with(session_id, None, Some(before_ms))
+    }
+
+    /// Archive time of the oldest complete Turn block in this session. `None`
+    /// means the file has no complete block yet (or does not exist).
+    pub fn oldest_history_turn_ms(&self, session_id: &str) -> Result<Option<i64>, String> {
+        validate_session_id(session_id)?;
+        let path = self.history_path_for_session(session_id);
+        let file = match fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err("chat_history_read_failed".to_string()),
+        };
+        let mut reader = BufReader::new(file);
+        let mut first_turn: Option<String> = None;
+        let mut archive_ms: Option<i64> = None;
+        while let Some(record) =
+            read_bounded_jsonl_record(&mut reader, 2 * 1024 * 1024, "chat_history_read_failed")?
+        {
+            if record.oversized {
+                continue;
+            }
+            let Ok(text) = std::str::from_utf8(&record.bytes) else {
+                continue;
+            };
+            let Some(parsed) = parse_chat_history_record_line(text.trim_end()) else {
+                continue;
+            };
+            match first_turn.as_deref() {
+                None => {
+                    first_turn = Some(parsed.turn_id().to_string());
+                    archive_ms = Some(parsed.created_at_ms());
+                }
+                Some(turn) if turn == parsed.turn_id() => {
+                    archive_ms = Some(archive_ms.unwrap_or(i64::MIN).max(parsed.created_at_ms()));
+                }
+                Some(_) => break,
+            }
+        }
+        Ok(archive_ms)
+    }
+
+    fn prune_history_turns_with(
+        &self,
+        session_id: &str,
+        bytes_to_remove: Option<u64>,
+        before_ms: Option<i64>,
+    ) -> Result<u64, String> {
         let path = self.history_path_for_session(session_id);
         let removed = MemGuard::for_memory_domain(
             &self.root,
@@ -1071,50 +1154,62 @@ impl SessionStore {
                 return Ok::<u64, String>(0);
             }
             let bytes = fs::read(&path).map_err(|_| "chat_history_read_failed".to_string())?;
-            let mut records: Vec<(Vec<u8>, Option<String>)> = Vec::new();
+            let mut records: Vec<(Vec<u8>, Option<String>, Option<i64>)> = Vec::new();
             let mut start = 0usize;
             for (index, byte) in bytes.iter().enumerate() {
                 if *byte != b'\n' {
                     continue;
                 }
                 let raw = bytes[start..=index].to_vec();
-                let text = std::str::from_utf8(&raw).ok().map(str::trim_end);
-                let turn = text
+                let parsed = std::str::from_utf8(&raw)
+                    .ok()
+                    .map(str::trim_end)
                     .and_then(parse_chat_history_record_line)
-                    .map(|record| record.turn_id().to_string());
-                records.push((raw, turn));
+                    .map(|record| (record.turn_id().to_string(), record.created_at_ms()));
+                records.push(match parsed {
+                    Some((turn, created_at_ms)) => (raw, Some(turn), Some(created_at_ms)),
+                    None => (raw, None, None),
+                });
                 start = index + 1;
             }
             if start < bytes.len() {
                 let raw = bytes[start..].to_vec();
-                let turn = std::str::from_utf8(&raw)
+                let parsed = std::str::from_utf8(&raw)
                     .ok()
+                    .map(str::trim_end)
                     .and_then(parse_chat_history_record_line)
-                    .map(|record| record.turn_id().to_string());
-                records.push((raw, turn));
+                    .map(|record| (record.turn_id().to_string(), record.created_at_ms()));
+                records.push(match parsed {
+                    Some((turn, created_at_ms)) => (raw, Some(turn), Some(created_at_ms)),
+                    None => (raw, None, None),
+                });
             }
-            let mut groups: Vec<(usize, usize, u64, bool)> = Vec::new();
+            let mut groups: Vec<(usize, usize, u64, bool, Option<i64>)> = Vec::new();
             let mut index = 0usize;
             while index < records.len() {
                 let group_start = index;
                 let turn = records[index].1.clone();
+                let mut archive_ms = records[index].2;
                 index += 1;
                 while index < records.len() && turn.is_some() && records[index].1 == turn {
+                    archive_ms = archive_ms.max(records[index].2);
                     index += 1;
                 }
                 let size = records[group_start..index]
                     .iter()
-                    .map(|(raw, _)| raw.len() as u64)
+                    .map(|(raw, _, _)| raw.len() as u64)
                     .sum();
-                groups.push((group_start, index, size, turn.is_some()));
+                groups.push((group_start, index, size, turn.is_some(), archive_ms));
             }
             let mut reclaimed = 0u64;
             let mut remove = BTreeSet::new();
-            for (group_start, group_end, size, removable) in groups {
-                if reclaimed >= bytes_to_remove {
-                    break;
-                }
-                if !removable {
+            for (group_start, group_end, size, removable, archive_ms) in groups {
+                let selected = match (bytes_to_remove, before_ms) {
+                    (Some(limit), _) => reclaimed < limit,
+                    (None, Some(cutoff)) => archive_ms.is_some_and(|value| value < cutoff),
+                    (None, None) => false,
+                };
+                if !selected || !removable {
                     continue;
                 }
                 reclaimed = reclaimed.saturating_add(size);
@@ -1126,7 +1221,7 @@ impl SessionStore {
             let retained = records
                 .into_iter()
                 .enumerate()
-                .filter_map(|(index, (raw, _))| (!remove.contains(&index)).then_some(raw))
+                .filter_map(|(index, (raw, _, _))| (!remove.contains(&index)).then_some(raw))
                 .collect::<Vec<_>>();
             let retained_bytes = retained.into_iter().flatten().collect::<Vec<_>>();
             atomic_write_file(&path, &retained_bytes)
@@ -1137,6 +1232,7 @@ impl SessionStore {
             .lock()
             .map_err(|_| "chat_history_index_poisoned".to_string())?
             .remove(&path);
+        invalidate_persisted_history_index(&path);
         self.temporary_event_summaries
             .lock()
             .map_err(|_| "chat_history_summary_poisoned".to_string())?
@@ -1342,14 +1438,84 @@ fn restrict_session_path_permissions(_path: &Path, _directory: bool) -> Result<(
     Ok(())
 }
 
-fn build_history_index(
-    path: &Path,
+#[derive(Serialize, Deserialize)]
+struct PersistedHistoryIndex {
+    indexed_len: u64,
+    #[serde(default)]
+    entries: Vec<PersistedHistoryIndexEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedHistoryIndexEntry {
+    o: u64,
+    l: u64,
+    t: String,
+    #[serde(default)]
+    r: bool,
+}
+
+fn persisted_history_index_path(history_path: &Path) -> PathBuf {
+    history_path.with_file_name("raw_chat_history.index.json")
+}
+
+pub(crate) fn invalidate_persisted_history_index(history_path: &Path) {
+    let _ = fs::remove_file(persisted_history_index_path(history_path));
+}
+
+/// Loads a persisted index checkpoint and validates that the covered prefix
+/// really ends on a complete line boundary of the current history file.
+fn load_persisted_history_index(
+    history_path: &Path,
     file_len: u64,
-    modified_at_ms: Option<u128>,
-) -> Result<HistoryIndex, String> {
-    let file = fs::File::open(path).map_err(|_| "chat_history_open_failed")?;
+) -> Option<(u64, Vec<HistoryIndexEntry>)> {
+    let bytes = fs::read(persisted_history_index_path(history_path)).ok()?;
+    let persisted: PersistedHistoryIndex = serde_json::from_slice(&bytes).ok()?;
+    let indexed_len = persisted.indexed_len;
+    if indexed_len > file_len {
+        return None;
+    }
+    if indexed_len == 0 {
+        return Some((0, Vec::new()));
+    }
+    let mut file = fs::File::open(history_path).ok()?;
+    file.seek(SeekFrom::Start(indexed_len - 1)).ok()?;
+    let mut boundary = [0u8; 1];
+    file.read_exact(&mut boundary).ok()?;
+    if boundary[0] != b'\n' {
+        return None;
+    }
+    let entries = persisted
+        .entries
+        .into_iter()
+        .map(|entry| HistoryIndexEntry {
+            byte_offset: entry.o,
+            byte_len: entry.l,
+            turn_id: entry.t,
+            is_restart_notice: entry.r,
+        })
+        .collect::<Vec<_>>();
+    if let Some(last) = entries.last() {
+        if last.byte_offset.saturating_add(last.byte_len) > indexed_len {
+            return None;
+        }
+    }
+    Some((indexed_len, entries))
+}
+
+/// Scans history lines from `start_offset` to EOF, returning the index
+/// entries plus the byte offset reached (the new indexed length).
+fn scan_history_lines_from(
+    history_path: &Path,
+    start_offset: u64,
+) -> Result<(Vec<HistoryIndexEntry>, u64), String> {
+    let file = fs::File::open(history_path).map_err(|_| "chat_history_open_failed")?;
     let mut reader = BufReader::new(file);
-    let mut byte_offset = 0u64;
+    if start_offset > 0 {
+        reader
+            .seek(SeekFrom::Start(start_offset))
+            .map_err(|_| "chat_history_read_failed")?;
+    }
+    let mut byte_offset = start_offset;
     let mut entries = Vec::new();
     let mut line = String::new();
     loop {
@@ -1373,11 +1539,63 @@ fn build_history_index(
         }
         byte_offset = byte_offset.saturating_add(byte_len as u64);
     }
-    Ok(HistoryIndex {
+    Ok((entries, byte_offset))
+}
+
+fn persist_history_index(history_path: &Path, indexed_len: u64, entries: &[HistoryIndexEntry]) {
+    let persisted = PersistedHistoryIndex {
+        indexed_len,
+        entries: entries
+            .iter()
+            .map(|entry| PersistedHistoryIndexEntry {
+                o: entry.byte_offset,
+                l: entry.byte_len,
+                t: entry.turn_id.clone(),
+                r: entry.is_restart_notice,
+            })
+            .collect(),
+    };
+    let bytes = match serde_json::to_vec(&persisted) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!(
+                "[chat_history_index_warning] chat_history_index_serialize_failed path={:?} reason={error}",
+                history_path
+            );
+            return;
+        }
+    };
+    if let Err(error) = atomic_write_file(&persisted_history_index_path(history_path), &bytes) {
+        eprintln!(
+            "[chat_history_index_warning] chat_history_index_persist_failed path={:?} reason={error}",
+            history_path
+        );
+    }
+}
+
+fn build_history_index(
+    path: &Path,
+    file_len: u64,
+    modified_at_ms: Option<u128>,
+) -> Result<HistoryIndex, String> {
+    // Restarting the process drops the in-memory index cache; rescanning the
+    // whole file (hundreds of MB in long-lived memories) line by line is what
+    // makes the session area load slowly on the first connect. Reuse the
+    // persisted checkpoint and only scan the appended tail.
+    let (mut indexed_len, mut entries) =
+        load_persisted_history_index(path, file_len).unwrap_or((0, Vec::new()));
+    if indexed_len < file_len {
+        let (new_entries, scanned_len) = scan_history_lines_from(path, indexed_len)?;
+        entries.extend(new_entries);
+        indexed_len = scanned_len;
+    }
+    let index = HistoryIndex {
         file_len,
         modified_at_ms,
         entries,
-    })
+    };
+    persist_history_index(path, indexed_len, &index.entries);
+    Ok(index)
 }
 
 fn read_history_page_from_index(
@@ -1492,7 +1710,16 @@ pub fn read_all_history_records(path: &Path) -> Result<Vec<ChatHistoryRecord>, S
 }
 
 fn parse_chat_history_record_line(line: &str) -> Option<ChatHistoryRecord> {
-    serde_json::from_str::<ChatHistoryRecord>(line).ok()
+    match serde_json::from_str::<ChatHistoryRecord>(line) {
+        Ok(record) => Some(record),
+        // Historic writer bugs produced duplicated JSON keys (e.g. a trailing
+        // `kind`). Strict parsing rejects duplicates while `Value` parsing
+        // keeps the last one, so route those rows through the tolerant path
+        // instead of losing them as malformed forever.
+        Err(_) => serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .and_then(|value| serde_json::from_value::<ChatHistoryRecord>(value).ok()),
+    }
 }
 
 pub fn chat_history_prompt_format_hint(path: &Path) -> String {
@@ -1531,6 +1758,11 @@ pub fn new_stored_session(
     let now = now_ms();
     StoredSession {
         model_endpoint_id: None,
+        model_endpoint_ids: Vec::new(),
+        reasoning_effort_override: None,
+        endpoint_reasoning_efforts: BTreeMap::new(),
+        endpoint_max_input_tokens: BTreeMap::new(),
+        telemetry_reset_at_ms: None,
         session_id: session_id.into(),
         display_name: display_name.into(),
         created_at_ms: now,
@@ -1559,7 +1791,13 @@ fn validate_session_id(value: &str) -> Result<(), String> {
         .ok_or_else(|| "session_id_invalid".to_string())
 }
 
-fn sanitize_session_path_component(value: &str) -> String {
+pub(crate) fn history_path_in(sessions_dir: &Path, session_id: &str) -> PathBuf {
+    sessions_dir
+        .join(sanitize_session_path_component(session_id))
+        .join("raw_chat_history.jsonl")
+}
+
+pub(crate) fn sanitize_session_path_component(value: &str) -> String {
     let sanitized = value
         .chars()
         .map(|ch| {

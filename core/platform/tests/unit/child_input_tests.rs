@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::process_lifecycle_test_lock;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,7 @@ impl Drop for Fixture {
 
 #[test]
 fn full_stdin_pipe_returns_without_waiting_for_reader() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     let mut child = Fixture::new();
     let mut input = ChildInputPipe::new(child.0.stdin.take().unwrap()).unwrap();
     let block = [b'x'; 8192];
@@ -61,6 +63,7 @@ fn full_stdin_pipe_returns_without_waiting_for_reader() {
 
 #[test]
 fn closed_stdin_pipe_reports_failure_not_success() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     let mut child = Fixture::new();
     let mut input = ChildInputPipe::new(child.0.stdin.take().unwrap()).unwrap();
     child.0.kill().unwrap();
@@ -83,6 +86,7 @@ fn reading_child_fixture() {
 
 #[test]
 fn partial_input_delivery_preserves_bytes_and_drop_delivers_eof() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     let path = std::env::temp_dir().join(format!(
         "timem_stdin_capture_{}_{}",
         std::process::id(),

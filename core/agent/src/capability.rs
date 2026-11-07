@@ -21,6 +21,7 @@ const SELF_TOOL_MANIFEST: &str =
     include_str!("../../../resources/capabilities/tools/self_tool.yaml");
 const MEMO_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/memo.yaml");
 const TIMER_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/timer.yaml");
+const MAILBOX_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/mailbox.yaml");
 const TOOLGEN_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/toolgen.yaml");
 const TURN_FINISHED_MANIFEST: &str =
     include_str!("../../../resources/capabilities/tools/task_finished.yaml");
@@ -371,6 +372,7 @@ impl CapabilityRegistry {
                 SELF_TOOL_MANIFEST,
                 MEMO_MANIFEST,
                 TIMER_MANIFEST,
+                MAILBOX_MANIFEST,
                 TOOLGEN_MANIFEST,
                 TURN_FINISHED_MANIFEST,
             ],
@@ -601,7 +603,17 @@ impl CapabilityRegistry {
         if let Some(object) = input.as_object() {
             for key in object.keys() {
                 if !input_property_declared(&manifest.input_schema.properties, key) {
-                    return Err(format!("input.{key}_unsupported"));
+                    let mut allowed: Vec<&str> = manifest
+                        .input_schema
+                        .properties
+                        .keys()
+                        .map(String::as_str)
+                        .collect();
+                    allowed.sort_unstable();
+                    return Err(format!(
+                        "input.{key}_unsupported; allowed keys: {}",
+                        allowed.join(", ")
+                    ));
                 }
             }
         }
@@ -853,12 +865,21 @@ impl CapabilityRegistry {
             .collect()
     }
 
-    pub(crate) fn render_native_builtin_tool_descriptions_markdown(&self) -> String {
-        self.native_builtin_tool_definitions()
+    /// Native tool-call mode catalog: the full tool descriptions and
+    /// parameter schemas are already delivered through the API tool
+    /// definitions, so the prompt only names the tools once and points at
+    /// the schema descriptions. Inline mode keeps the full catalog because
+    /// there the prompt is the only carrier.
+    pub(crate) fn render_native_builtin_tool_names_markdown(&self) -> String {
+        let names = self
+            .native_builtin_tool_definitions()
             .into_iter()
-            .map(|tool| format!("### `{}`\n\n{}", tool.name, tool.description.trim()))
+            .map(|tool| format!("`{}`", tool.name))
             .collect::<Vec<_>>()
-            .join("\n\n")
+            .join(", ");
+        format!(
+            "The runtime exposes the following tools: {names}. They are also provided as tool schema definitions in this request; refer to each tool's schema description for usage details."
+        )
     }
 
     pub fn render_tool_catalog_json(&self) -> String {

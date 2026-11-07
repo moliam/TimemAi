@@ -175,6 +175,49 @@ fn higher_than_h0_trailer_preserves_context_compression_protocol() {
     }
 }
 
+#[test]
+fn every_context_compression_trailer_carries_the_data_loss_caution() {
+    let caution = crate::prompt_render::CONTEXT_COMPRESS_CAUTION;
+    assert!(caution.contains("prone to data loss and directional drift"));
+    // The trailer must tell the model which state the runtime re-provides so
+    // the summary spends its budget on the model's own work state.
+    assert!(caution.contains("automatically re-provides"));
+    assert!(caution.contains("session work file"));
+    assert!(caution.contains("AGENTS.md"));
+    assert!(caution.contains("running background jobs"));
+    assert!(caution.contains("strictly avoid deviating from the primary objective"));
+    assert!(caution.contains("Synthesize historical memos—especially the ##USER inputs history"));
+    assert!(caution.contains("when executing context compression"));
+
+    for trailer in [
+        crate::prompt_render::CONTEXT_COMPRESS_REQUIRED_TRAILER,
+        crate::prompt_render::MANUAL_CONTEXT_COMPRESS_TRAILER,
+        crate::prompt_render::REASONING_UPGRADED_CONTEXT_COMPRESS_TRAILER,
+        crate::prompt_render::REASONING_UPGRADED_MANUAL_CONTEXT_COMPRESS_TRAILER,
+    ] {
+        assert!(trailer.contains(caution), "{trailer}");
+        // Natural order: the trigger instruction first, then the caution, and
+        // the mandatory-call sentence last.
+        assert!(
+            trailer.find("compress it now").unwrap() < trailer.find("prone to data loss").unwrap(),
+            "{trailer}"
+        );
+        assert!(
+            trailer.ends_with("Your tool calls must start with context_compress:"),
+            "{trailer}"
+        );
+    }
+    // The upgraded variants keep the reasoning lead-in ahead of the caution.
+    assert!(
+        crate::prompt_render::REASONING_UPGRADED_CONTEXT_COMPRESS_TRAILER
+            .starts_with("This request is using stronger reasoning")
+    );
+    assert!(
+        crate::prompt_render::REASONING_UPGRADED_MANUAL_CONTEXT_COMPRESS_TRAILER
+            .starts_with("This request is using stronger reasoning")
+    );
+}
+
 fn usage(prompt_tokens: u32, completion_tokens: u32) -> UsageStats {
     UsageStats {
         llm_calls: 1,
@@ -1944,7 +1987,7 @@ fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
             false,
         )),
         Ok(llm(
-            r#"{"context_compress":{"summary":"保留用户要求和大输出已被预算保护的信息。"}}"#,
+            r#"{"context_compress":{"summary":"保留用户要求和大输出已被预算保护的信息。","keywords":"checkpoint keywords"}}"#,
             2_800,
             false,
         )),
@@ -1975,8 +2018,13 @@ fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
     assert_eq!(outcome.text, "已根据上下文预算停止回填大输出。");
     assert_eq!(model.prompts.len(), 3);
     assert!(model.prompts[1].contains("Your action's output is too large:"));
-    assert!(model.prompts[1]
-        .ends_with("[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:"));
+    assert!(model.prompts[1].contains("[Context WARN] Context near limit"));
+    assert!(model.prompts[1].contains("prone to data loss and directional drift"));
+    assert!(
+        model.prompts[1].find("[Context WARN]").unwrap()
+            < model.prompts[1].find("prone to data loss").unwrap()
+    );
+    assert!(model.prompts[1].ends_with("Your tool calls must start with context_compress:"));
     assert!(model.prompts[2].contains("context compressed successfully."));
     assert!(model.prompts[1].contains("optimize your action or compress context"));
     assert!(!model.prompts[1].contains(&"0".repeat(1_000)));
@@ -4345,7 +4393,7 @@ impl ModelClient for ShrinkReplayModel {
                 .contains("Please compress it now (see the `context_compress` tool description)"));
             assert!(!prompt.contains("Long-context maintenance:"));
             return Ok(llm(
-                r#"{"free_talk":"","context_compress":{"summary":"discard stale context and keep current task state"}}"#,
+                r#"{"free_talk":"","context_compress":{"summary":"discard stale context and keep current task state","keywords":"checkpoint keywords"}}"#,
                 13_253,
                 false,
             ));
@@ -5615,7 +5663,7 @@ impl ModelClient for ScratchOffloadReplayModel {
             delta_ids.dedup();
             assert!(!delta_ids.is_empty());
             let content = format!(
-                r#"{{"free_talk":"","context_compress":{{"offload":{},"summary":"offload old context and keep the current task active"}}}}"#,
+                r#"{{"free_talk":"","context_compress":{{"offload":{},"summary":"offload old context and keep the current task active","keywords":"checkpoint keywords"}}}}"#,
                 serde_json::to_string(&delta_ids).unwrap()
             );
             return Ok(llm(content, 4_000, false));
@@ -5704,7 +5752,7 @@ impl ModelClient for CompactThenFinishModel {
         self.calls += 1;
         if self.calls == 1 {
             Ok(llm(
-                r#"{"free_talk":"整理旧上下文。","context_compress":{"summary":"保留当前任务目标和下一步。"}}"#,
+                r#"{"free_talk":"整理旧上下文。","context_compress":{"summary":"保留当前任务目标和下一步。","keywords":"checkpoint keywords"}}"#,
                 3_000,
                 false,
             ))
@@ -5825,7 +5873,7 @@ impl ModelClient for StoryReplayModel {
                 delta_ids.sort();
                 delta_ids.dedup();
                 let content = format!(
-                    r#"{{"context_compress":{{"offload":{},"summary":"offload the long context and retain the memory lookup task"}}}}"#,
+                    r#"{{"context_compress":{{"offload":{},"summary":"offload the long context and retain the memory lookup task","keywords":"checkpoint keywords"}}}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 Ok(llm(content, 7_500, false))
@@ -5854,7 +5902,7 @@ impl ModelClient for StoryReplayModel {
                 ));
                 assert!(!prompt.contains("Long-context maintenance:"));
                 Ok(llm(
-                    r#"{"context_compress":{"summary":"keep active task state after the memory lookup"}}"#,
+                    r#"{"context_compress":{"summary":"keep active task state after the memory lookup","keywords":"checkpoint keywords"}}"#,
                     7_650,
                     false,
                 ))
@@ -6239,10 +6287,11 @@ impl ModelClient for NativeRoundTripModel {
             && !request
                 .rendered_prompt
                 .contains("# ASSISTANT Response Protocol")
+            && request.rendered_prompt.contains("## Built-in Tools")
             && request
                 .rendered_prompt
-                .contains("## Built-in Tool Descriptions")
-            && request.rendered_prompt.contains("### `run_bash`")
+                .contains("refer to each tool's schema description for usage details")
+            && request.rendered_prompt.contains("`run_bash`")
             && !request.rendered_prompt.contains("## Actions")
             && !request
                 .rendered_prompt
@@ -6722,6 +6771,73 @@ fn restart_leaves_memo_inactive_and_finish_unguarded() {
 }
 
 #[test]
+fn memo_finish_guard_keeps_the_task_finished_summary_visible() {
+    let dir = tmp_dir("memo_guard_summary_kept");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    let mut model = ReplayModel::new(vec![
+        Ok(llm(
+            r#"{"free_talk":"记下。","working_still_action":[{"memo":{"op":"create","text":"持续任务提醒"}}]}"#,
+            1_000,
+            false,
+        )),
+        Ok(llm(
+            r#"{"free_talk":"任务完成了。","working_still_action":[{"task_finished":{"summary":"被拦截也要可见的最终总结"}}]}"#,
+            1_100,
+            false,
+        )),
+        Ok(llm(
+            r#"{"working_still_action":[{"memo":{"op":"delete"}}]}"#,
+            1_200,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"被拦截也要可见的最终总结"}"#,
+            1_300,
+            false,
+        )),
+    ]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "长任务请求",
+            session: "memo_guard_summary_kept_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    // Interception blocks only the finish action: the model's summary
+    // expression stays visible in the follow-up prompt.
+    assert!(
+        model.prompts[2].contains("被拦截也要可见的最终总结"),
+        "the intercepted summary must stay visible in prompt[2]"
+    );
+    assert!(
+        model.prompts[2].contains("still memo active"),
+        "guard reminder missing in prompt[2]"
+    );
+    // The canned success line must not contradict the block: the result is
+    // rewritten to say the finish did not take effect.
+    assert!(
+        model.prompts[2].contains("this finish did not take effect"),
+        "intercepted result wording missing in prompt[2]"
+    );
+    assert_eq!(outcome.text, "被拦截也要可见的最终总结");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn memo_finish_guard_recharges_after_working_round() {
     let dir = tmp_dir("memo_guard_recharge");
     let audit = dir.join("audit.json");
@@ -6793,6 +6909,436 @@ fn memo_finish_guard_recharges_after_working_round() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
+struct MemoGuardNativeInterceptModel {
+    business_calls: usize,
+    intercepted_prompt_has_no_narrative: bool,
+    intercepted_prompt_has_no_result_heading: bool,
+    intercepted_prompt_keeps_guard_note: bool,
+    intercepted_exchange_carries_narrative: bool,
+    intercepted_exchange_has_failed_result: bool,
+}
+
+#[cfg(unix)]
+impl ModelClient for MemoGuardNativeInterceptModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        Err("unexpected_inline_model_call".to_string())
+    }
+
+    fn call_model_interaction(
+        &mut self,
+        config: &ModelServiceConfig,
+        request: &ModelInteractionRequest,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        if request
+            .tools
+            .iter()
+            .any(|tool| tool.name == "timem_capability_probe")
+        {
+            let count = usize::from(request.parallel_tool_calls) + 1;
+            return Ok(LlmResponse {
+                tool_calls: (0..count)
+                    .map(|index| crate::NativeToolCall {
+                        assistant_continuation: None,
+                        id: format!("probe_{index}"),
+                        name: "timem_capability_probe".to_string(),
+                        arguments: serde_json::json!({"slot": index + 1}),
+                        raw_arguments: format!("{{\"slot\":{}}}", index + 1),
+                    })
+                    .collect(),
+                content: String::new(),
+                model_name: config.model.clone(),
+                usage: usage(10, 2),
+                truncated: false,
+            });
+        }
+        self.business_calls += 1;
+        const NARRATIVE: &str = "\u{6b63}\u{5728}\u{6536}\u{5c3e}\u{ff1a}\u{6240}\u{6709}\u{5de5}\u{4f5c}\u{5df2}\u{5b8c}\u{6210}\u{ff0c}\u{76f4}\u{63a5}\u{7ed3}\u{675f}\u{4efb}\u{52a1}\u{3002}";
+        if self.business_calls == 3 {
+            // The intercepted finish round. The narrative must ride the
+            // structured assistant message only; the delta text keeps just
+            // the guard note as a runtime note without the action-result
+            // heading.
+            self.intercepted_prompt_has_no_narrative = !request.rendered_prompt.contains(NARRATIVE);
+            self.intercepted_prompt_has_no_result_heading = !request
+                .rendered_prompt
+                .contains("The following are results of the actions generated in response:");
+            self.intercepted_prompt_keeps_guard_note =
+                request.rendered_prompt.contains("still memo active")
+                    && request
+                        .rendered_prompt
+                        .contains("\u{6301}\u{7eed}\u{4efb}\u{52a1}\u{63d0}\u{9192}");
+            self.intercepted_exchange_carries_narrative = request.native_exchanges.len() == 2
+                && request.native_exchanges[1].delta_id == "pd_3"
+                && request.native_exchanges[1]
+                    .assistant_text
+                    .contains(NARRATIVE)
+                && request.native_exchanges[1].calls[0].name == "task_finished";
+            self.intercepted_exchange_has_failed_result = request.native_exchanges.len() == 2
+                && request.native_exchanges[1].results.iter().any(|result| {
+                    result.is_error
+                        && result.content.contains("an active memo still exists")
+                        && result.content.contains("this finish did not take effect")
+                });
+        }
+        let (content, calls): (String, Vec<crate::NativeToolCall>) = match self.business_calls {
+            1 => (
+                "\u{597d}\u{7684}\u{ff0c}\u{5148}\u{521b}\u{5efa}\u{6f14}\u{793a} memo\u{3002}".to_string(),
+                vec![crate::NativeToolCall {
+                    assistant_continuation: None,
+                    id: "call_memo_create".to_string(),
+                    name: "memo".to_string(),
+                    arguments: serde_json::json!({"op": "create", "text": "\u{6301}\u{7eed}\u{4efb}\u{52a1}\u{63d0}\u{9192}"}),
+                    raw_arguments: "{\"op\":\"create\",\"text\":\"\u{6301}\u{7eed}\u{4efb}\u{52a1}\u{63d0}\u{9192}\"}".to_string(),
+                }],
+            ),
+            2 => (
+                NARRATIVE.to_string(),
+                vec![crate::NativeToolCall {
+                    assistant_continuation: None,
+                    id: "call_finish_intercepted".to_string(),
+                    name: "task_finished".to_string(),
+                    arguments: serde_json::json!({"summary": "\u{88ab}\u{62e6}\u{622a}\u{4e5f}\u{8981}\u{53ef}\u{89c1}\u{7684}\u{6f14}\u{793a}\u{603b}\u{7ed3}"}),
+                    raw_arguments: "{\"summary\":\"\u{88ab}\u{62e6}\u{622a}\u{4e5f}\u{8981}\u{53ef}\u{89c1}\u{7684}\u{6f14}\u{793a}\u{603b}\u{7ed3}\"}".to_string(),
+                }],
+            ),
+            3 => (
+                "\u{6f14}\u{793a}\u{786e}\u{8ba4}\u{ff0c}\u{5220}\u{9664} memo\u{3002}".to_string(),
+                vec![crate::NativeToolCall {
+                    assistant_continuation: None,
+                    id: "call_memo_delete".to_string(),
+                    name: "memo".to_string(),
+                    arguments: serde_json::json!({"op": "delete"}),
+                    raw_arguments: "{\"op\":\"delete\"}".to_string(),
+                }],
+            ),
+            _ => (
+                String::new(),
+                vec![crate::NativeToolCall {
+                    assistant_continuation: None,
+                    id: "call_finish_final".to_string(),
+                    name: "task_finished".to_string(),
+                    arguments: serde_json::json!({"summary": "\u{6700}\u{7ec8}\u{603b}\u{7ed3}\u{ff1a}\u{5168}\u{90e8}\u{5b8c}\u{6210}\u{3002}"}),
+                    raw_arguments: "{\"summary\":\"\u{6700}\u{7ec8}\u{603b}\u{7ed3}\u{ff1a}\u{5168}\u{90e8}\u{5b8c}\u{6210}\u{3002}\"}".to_string(),
+                }],
+            ),
+        };
+        Ok(LlmResponse {
+            tool_calls: calls,
+            content,
+            model_name: config.model.clone(),
+            usage: usage(120, 10),
+            truncated: false,
+        })
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn memo_finish_guard_native_keeps_narrative_in_exchange_only() {
+    let dir = tmp_dir("memo_guard_native_exchange_only");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(
+        include_str!("../../../../resources/system_prompt/system_prompt.md"),
+        test_profile(),
+        &dir,
+    );
+    let mut config = test_config();
+    config.model = "native-memo-guard-exchange-only".to_string();
+    config.interaction.tool_call_mode = crate::ToolCallMode::Auto;
+    config.interaction.parallel_tool_calls = crate::ParallelToolCalls::Auto;
+    let mut model = MemoGuardNativeInterceptModel {
+        business_calls: 0,
+        intercepted_prompt_has_no_narrative: false,
+        intercepted_prompt_has_no_result_heading: false,
+        intercepted_prompt_keeps_guard_note: false,
+        intercepted_exchange_carries_narrative: false,
+        intercepted_exchange_has_failed_result: false,
+    };
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "\u{957f}\u{4efb}\u{52a1}\u{8bf7}\u{6c42}",
+            session: "memo_guard_native_session",
+            audit_file: &audit,
+            runtime: "test",
+            run_bash_target: "test_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    assert!(
+        model.intercepted_prompt_has_no_narrative,
+        "the intercepted narrative must not be replayed into delta text in native mode"
+    );
+    assert!(
+        model.intercepted_prompt_has_no_result_heading,
+        "the guard note is runtime narration and must not carry the action-result heading"
+    );
+    assert!(
+        model.intercepted_prompt_keeps_guard_note,
+        "the guard note itself must stay visible in the follow-up prompt"
+    );
+    assert!(
+        model.intercepted_exchange_carries_narrative,
+        "the structured exchange must carry the narrative verbatim"
+    );
+    assert!(
+        model.intercepted_exchange_has_failed_result,
+        "the intercepted task_finished exchange must carry a genuine failed tool result"
+    );
+    assert_eq!(
+        outcome.text,
+        "\u{6700}\u{7ec8}\u{603b}\u{7ed3}\u{ff1a}\u{5168}\u{90e8}\u{5b8c}\u{6210}\u{3002}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn memo_finish_guard_stops_finish_event_carries_blocked_summary_native() {
+    let dir = tmp_dir("memo_guard_stops_finish_event_native");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(
+        include_str!("../../../../resources/system_prompt/system_prompt.md"),
+        test_profile(),
+        &dir,
+    );
+    let mut config = test_config();
+    config.model = "native-memo-guard-stops-finish-event".to_string();
+    config.interaction.tool_call_mode = crate::ToolCallMode::Auto;
+    config.interaction.parallel_tool_calls = crate::ParallelToolCalls::Auto;
+    let mut model = MemoGuardNativeInterceptModel {
+        business_calls: 0,
+        intercepted_prompt_has_no_narrative: false,
+        intercepted_prompt_has_no_result_heading: false,
+        intercepted_prompt_keeps_guard_note: false,
+        intercepted_exchange_carries_narrative: false,
+        intercepted_exchange_has_failed_result: false,
+    };
+    let mut ui = RetryRecordingUi::default();
+
+    let _outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "\u{957f}\u{4efb}\u{52a1}\u{8bf7}\u{6c42}",
+            session: "memo_guard_stops_finish_event_native_session",
+            audit_file: &audit,
+            runtime: "test",
+            run_bash_target: "test_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    // The interception blocks only the finish action; the blocked summary
+    // must ride the stops_finish projection so interfaces can surface it.
+    let stops_finish = ui
+        .events
+        .iter()
+        .find(|event| {
+            event.topic.name == crate::host::CORE_TOPIC_MEMO
+                && event.payload["op"] == "stops_finish"
+        })
+        .expect("the native finish interception must emit a core.memo stops_finish event");
+    assert_eq!(
+        stops_finish.payload["summary"],
+        "\u{88ab}\u{62e6}\u{622a}\u{4e5f}\u{8981}\u{53ef}\u{89c1}\u{7684}\u{6f14}\u{793a}\u{603b}\u{7ed3}",
+        "the blocked summary must ride the stops_finish projection"
+    );
+    assert_eq!(
+        stops_finish.payload["text"],
+        "\u{6301}\u{7eed}\u{4efb}\u{52a1}\u{63d0}\u{9192}"
+    );
+    assert_eq!(stops_finish.payload["active"], true);
+    let failed_finish = ui
+        .events
+        .iter()
+        .find(|event| {
+            event.topic.name == crate::host::CORE_TOPIC_ACTION
+                && event.payload["action"] == "task_finished"
+                && event.payload["event"] == "finish"
+        })
+        .expect("the intercepted task_finished must emit a terminal core.action event");
+    assert_eq!(failed_finish.payload["status"], "failed");
+    assert_eq!(
+        failed_finish.payload["input"]["summary"],
+        "\u{88ab}\u{62e6}\u{622a}\u{4e5f}\u{8981}\u{53ef}\u{89c1}\u{7684}\u{6f14}\u{793a}\u{603b}\u{7ed3}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn memo_finish_guard_stops_finish_event_carries_blocked_summary_inline() {
+    let dir = tmp_dir("memo_guard_stops_finish_event_inline");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    let mut model = ReplayModel::new(vec![
+        Ok(llm(
+            r#"{"free_talk":"记下。","working_still_action":[{"memo":{"op":"create","text":"持续任务提醒"}}]}"#,
+            1_000,
+            false,
+        )),
+        // The inline-protocol final answer without an explicit task_finished
+        // tool must pass the same guard and carry its final answer as the
+        // blocked summary in the stops_finish projection.
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"被拦截也要可见的最终总结"}"#,
+            1_100,
+            false,
+        )),
+        Ok(llm(
+            r#"{"working_still_action":[{"memo":{"op":"delete"}}]}"#,
+            1_200,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"被拦截也要可见的最终总结"}"#,
+            1_300,
+            false,
+        )),
+    ]);
+    let mut ui = RetryRecordingUi::default();
+
+    let _outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "长任务请求",
+            session: "memo_guard_stops_finish_event_inline_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    let stops_finish = ui
+        .events
+        .iter()
+        .find(|event| {
+            event.topic.name == crate::host::CORE_TOPIC_MEMO
+                && event.payload["op"] == "stops_finish"
+        })
+        .expect("the inline finish interception must emit a core.memo stops_finish event");
+    assert_eq!(
+        stops_finish.payload["summary"], "被拦截也要可见的最终总结",
+        "the blocked final answer must ride the stops_finish projection"
+    );
+    assert_eq!(stops_finish.payload["text"], "持续任务提醒");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn runtime_state_reminder_skips_work_file_already_visible() {
+    let dir = tmp_dir("runtime_state_reminder_work_file");
+    let mut core = test_core(r#"{\"role\":\"test static prompt\"}"#, test_profile(), &dir);
+    core.update_session_work_file(Some("/mem/sessions/6lal8v/Timem.md".to_string()));
+    core.update_session_mailbox_name(Some("id_testbox".to_string()));
+
+    // Cleared context: nothing visible yet, so the restatement carries the
+    // raw work-file line.
+    let lines = core.runtime_state_reminder_lines();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("session work file: /mem/sessions/6lal8v/Timem.md")),
+        "cleared context must restate the work file: {lines:?}"
+    );
+
+    // Visible context already carries the Host one-line pointer: the
+    // restatement must not duplicate it (mirrors the mailbox rule).
+    core.submit_prompt_component(
+        crate::prompt_components::PromptComponentRole::system(),
+        "runtime_note",
+        "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.",
+        "test_host_context",
+    );
+    let lines = core.runtime_state_reminder_lines();
+    assert!(
+        !lines.iter().any(|line| line.contains("session work file:")),
+        "visible work-file pointer must suppress the duplicate restatement: {lines:?}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn system_runtime_narration_kinds_render_as_runtime_notes_not_action_results() {
+    // Identity registry audit: every system narration kind must map to
+    // `runtime_note` so it renders under the RUNTIME heading without the
+    // action-result heading, and must keep the sideband byte gate. A kind
+    // falling through the `result_of_llm_action` fallback would impersonate
+    // a tool result in the prompt identity system.
+    let narration_kinds = [
+        "memo_finish_guard",
+        "forced_compaction_abandoned",
+        "user_interrupted_work",
+        "memo_interrupted_deleted",
+        "memo_forcibly_deleted",
+        "turn_progress_reminder",
+        "turn_time_reminder",
+        "turn_round_reminder",
+        "running_job_update",
+        "job_killed",
+        "disk_pressure",
+        "runtime_config_changed",
+        "user_supplement_context",
+        "user_supplement_action_dispatch_timeout",
+        "runtime_input",
+    ];
+    for kind in narration_kinds {
+        let hint = crate::prompt_components::PromptComponentRole::system().prompt_type_hint(kind);
+        assert_eq!(
+            hint, "runtime_note",
+            "kind {kind} must render as a runtime note, not an action result"
+        );
+    }
+    // Sideband members keep the bounded-ingress byte gate, and every
+    // sideband kind must itself map to the runtime-note identity so the
+    // registry stays consistent.
+    for kind in crate::prompt_components::RUNTIME_SIDEBAND_KINDS {
+        assert!(
+            crate::prompt_components::is_runtime_sideband_kind(kind),
+            "sideband kind {kind} must keep the byte gate"
+        );
+        let hint = crate::prompt_components::PromptComponentRole::system().prompt_type_hint(kind);
+        assert_eq!(
+            hint, "runtime_note",
+            "sideband kind {kind} must render as a runtime note, not an action result"
+        );
+    }
+    // Real action results keep their identity.
+    assert_eq!(
+        crate::prompt_components::PromptComponentRole::system()
+            .prompt_type_hint("result_of_llm_action"),
+        "result_of_llm_action"
+    );
+}
+
 #[test]
 fn memo_survives_context_compression_and_rides_next_prompt() {
     let dir = tmp_dir("memo_compact");
@@ -6821,7 +7367,7 @@ fn memo_survives_context_compression_and_rides_next_prompt() {
                     false,
                 )),
                 2 => Ok(llm(
-                    r#"{"free_talk":"整理上下文。","context_compress":{"summary":"保留任务目标。"}}"#,
+                    r#"{"free_talk":"整理上下文。","context_compress":{"summary":"保留任务目标。","keywords":"checkpoint keywords"}}"#,
                     3_000,
                     false,
                 )),
@@ -6875,6 +7421,210 @@ fn memo_survives_context_compression_and_rides_next_prompt() {
         "memo must ride the post-compaction prompt"
     );
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn session_work_file_content_block_is_injected_once_then_filtered() {
+    let dir = tmp_dir("work_file_block_filter");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    let pointer = "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.";
+    let block = format!(
+        "{pointer}\n\n[BEGIN SESSION INSTRUCTION file=\"/mem/sessions/6lal8v/Timem.md\"]\n## Active work\n- keep the goal anchored\n[END SESSION INSTRUCTION]"
+    );
+    struct TwoTurnModel {
+        prompts: Vec<String>,
+        calls: usize,
+    }
+    impl ModelClient for TwoTurnModel {
+        fn call_model(
+            &mut self,
+            _config: &ModelServiceConfig,
+            prompt: &str,
+            _audit_file: &Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.prompts.push(prompt.to_string());
+            self.calls += 1;
+            match self.calls {
+                1 => Ok(llm(
+                    r#"{"status":"ALL_FINISHED","final_answer":"first"}"#,
+                    1_000,
+                    false,
+                )),
+                2 => Ok(llm(
+                    r#"{"status":"ALL_FINISHED","final_answer":"second"}"#,
+                    1_100,
+                    false,
+                )),
+                _ => Err("unexpected_extra_model_call".to_string()),
+            }
+        }
+    }
+    let mut model = TwoTurnModel {
+        prompts: Vec::new(),
+        calls: 0,
+    };
+
+    let first = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "turn one",
+            session: "work_file_filter_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(block.as_str()),
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+    assert_eq!(first.text, "first");
+    assert!(
+        model.prompts[0].contains("[BEGIN SESSION INSTRUCTION"),
+        "the first turn must carry the work file content block: {}",
+        model.prompts[0]
+    );
+
+    let second = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "turn two",
+            session: "work_file_filter_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(block.as_str()),
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+    assert_eq!(second.text, "second");
+    let second_prompt = &model.prompts[1];
+    assert!(
+        second_prompt.contains("Session work file: /mem/sessions/6lal8v/Timem.md"),
+        "the pointer line must still ride the supporting context: {second_prompt}"
+    );
+    assert_eq!(
+        second_prompt.matches("[BEGIN SESSION INSTRUCTION").count(),
+        1,
+        "an identical repeat must stay filtered; only the turn-one historical copy may remain: {second_prompt}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn session_work_file_content_block_survives_compaction() {
+    let dir = tmp_dir("work_file_compact");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    let pointer = "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.";
+    let block = format!(
+        "{pointer}\n\n[BEGIN SESSION INSTRUCTION file=\"/mem/sessions/6lal8v/Timem.md\"]\n## Active work\n- keep the goal anchored\n[END SESSION INSTRUCTION]"
+    );
+    struct CompactModel {
+        prompts: Vec<String>,
+        calls: usize,
+    }
+    impl ModelClient for CompactModel {
+        fn call_model(
+            &mut self,
+            _config: &ModelServiceConfig,
+            prompt: &str,
+            _audit_file: &Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.prompts.push(prompt.to_string());
+            self.calls += 1;
+            match self.calls {
+                1 => Ok(llm(
+                    r#"{"status":"ALL_FINISHED","final_answer":"setup"}"#,
+                    1_000,
+                    false,
+                )),
+                2 => Ok(llm(
+                    r#"{"free_talk":"整理上下文。","context_compress":{"summary":"保留工作文件要点。","keywords":"checkpoint keywords"}}"#,
+                    3_000,
+                    false,
+                )),
+                3 => Ok(llm(
+                    r#"{"status":"ALL_FINISHED","final_answer":"compacted"}"#,
+                    1_300,
+                    false,
+                )),
+                _ => Err("unexpected_extra_model_call".to_string()),
+            }
+        }
+    }
+    let mut model = CompactModel {
+        prompts: Vec::new(),
+        calls: 0,
+    };
+
+    let setup = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "setup turn",
+            session: "work_file_compact_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(block.as_str()),
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+    assert_eq!(setup.text, "setup");
+    assert!(
+        model.prompts[0].contains("[BEGIN SESSION INSTRUCTION"),
+        "the first turn must register the content block: {}",
+        model.prompts[0]
+    );
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "compact turn",
+            session: "work_file_compact_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some(block.as_str()),
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+    assert_eq!(outcome.text, "compacted");
+    assert_eq!(
+        model.prompts[1]
+            .matches("[BEGIN SESSION INSTRUCTION")
+            .count(),
+        1,
+        "only the turn-one historical copy may remain before compaction: {}",
+        model.prompts[1]
+    );
+    assert!(
+        model.prompts[2].contains("[BEGIN SESSION INSTRUCTION"),
+        "the work file content must ride the post-compaction prompt: {}",
+        model.prompts[2]
+    );
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -6935,7 +7685,7 @@ fn restart_then_manual_compact_leads_with_notice_and_compact_trailer() {
     // then a final answer closes the turn.
     let mut model = ReplayModel::new([
         Ok(llm(
-            r#"{"working_still_action":{"context_compress":{"summary":"restart compact summary"}}}"#,
+            r#"{"working_still_action":{"context_compress":{"summary":"restart compact summary","keywords":"checkpoint keywords"}}}"#,
             1_000,
             false,
         )),
@@ -7016,7 +7766,7 @@ fn mailbox_only_manual_compact_is_consumed_before_model_dispatch() {
     let mut config = test_config();
     let mut model = ReplayModel::new([
         Ok(llm(
-            r#"{"working_still_action":{"context_compress":{"summary":"compacted"}}}"#,
+            r#"{"working_still_action":{"context_compress":{"summary":"compacted","keywords":"checkpoint keywords"}}}"#,
             1000,
             false,
         )),
@@ -7529,4 +8279,459 @@ fn explicit_parallel_enabled_does_not_silently_downgrade() {
     assert_eq!(outcome.stop_reason, Some(crate::TurnStopReason::ModelError));
     assert!(config.interaction.persisted_capability_probe.is_none());
     let _ = fs::remove_dir_all(dir);
+}
+
+/// Fake client that answers the primary endpoint with HTTP 429 and the
+/// failover endpoint with a normal JSON final answer.
+struct RateLimitFailoverModel {
+    limited_model: String,
+    healthy_model: String,
+    calls: Vec<String>,
+}
+
+impl ModelClient for RateLimitFailoverModel {
+    fn call_model(
+        &mut self,
+        config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.calls.push(config.model.clone());
+        if config.model == self.limited_model {
+            Err("model_http_429: rate limit exceeded".to_string())
+        } else if config.model == self.healthy_model {
+            Ok(llm(
+                r#"{"status":"ALL_FINISHED","final_answer":"failover answer"}"#,
+                1_000,
+                false,
+            ))
+        } else {
+            Err("model_http_500: unexpected endpoint".to_string())
+        }
+    }
+}
+
+struct RateLimitEverywhereModel {
+    calls: usize,
+}
+
+impl ModelClient for RateLimitEverywhereModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.calls += 1;
+        Err("model_http_429: rate limit exceeded".to_string())
+    }
+}
+
+#[test]
+fn rate_limited_endpoint_switches_to_failover_chain_and_finishes() {
+    let dir = tmp_dir("failover_switch");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    config.model = "endpoint-a".to_string();
+    let mut backup = test_config();
+    backup.model = "endpoint-b".to_string();
+    backup.interaction.model_endpoint_id = Some("endpoint-b-id".to_string());
+    let mut model = RateLimitFailoverModel {
+        limited_model: "endpoint-a".to_string(),
+        healthy_model: "endpoint-b".to_string(),
+        calls: Vec::new(),
+    };
+    let mut ui = RetryRecordingUi::default();
+    let mut failover = vec![backup];
+
+    let outcome = run_session_turn_with_model_client_and_failover(
+        &mut core,
+        &mut config,
+        &mut failover,
+        TurnInput {
+            input: "run the task",
+            session: "failover_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "failover answer");
+    // Rate-limit quota windows recover on hour scales: the endpoint backs off
+    // in place below the threshold, then hands over after three strikes.
+    assert_eq!(
+        model.calls,
+        vec!["endpoint-a", "endpoint-a", "endpoint-a", "endpoint-b"]
+    );
+    assert!(
+        failover.is_empty(),
+        "the failover entry must be consumed by the switch"
+    );
+    assert_eq!(config.model, "endpoint-b");
+    assert_eq!(
+        ui.retries.len(),
+        2,
+        "rate-limit failover must trigger after exactly three consecutive strikes: {:?}",
+        ui.retries
+    );
+    let switching = ui
+        .events
+        .iter()
+        .find(|event| event.topic.name == crate::CORE_TOPIC_MODEL_ENDPOINT_FAILOVER)
+        .expect("failover topic event must be published");
+    assert_eq!(switching.payload["phase"], "switching");
+    assert_eq!(switching.payload["model"], "endpoint-a");
+    let switched = ui
+        .events
+        .iter()
+        .filter(|event| event.topic.name == crate::CORE_TOPIC_MODEL_ENDPOINT_FAILOVER)
+        .nth(1)
+        .expect("the committed failover route must be published");
+    assert_eq!(switched.payload["phase"], "switched");
+    assert_eq!(switched.payload["endpoint_id"], "endpoint-b-id");
+    assert_eq!(switched.payload["model"], "endpoint-b");
+}
+
+#[test]
+fn exhausted_failover_chain_surfaces_model_error() {
+    let dir = tmp_dir("failover_exhausted");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    config.model = "endpoint-a".to_string();
+    let mut backup = test_config();
+    backup.model = "endpoint-b".to_string();
+    let mut model = RateLimitEverywhereModel { calls: 0 };
+    let mut ui = RetryRecordingUi::default();
+
+    let outcome = run_session_turn_with_model_client_and_failover(
+        &mut core,
+        &mut config,
+        &mut vec![backup],
+        TurnInput {
+            input: "run the task",
+            session: "failover_exhausted_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.stop_reason, Some(TurnStopReason::ModelError));
+    assert!(model.calls >= 2, "primary and failover must both be tried");
+}
+
+struct MissingKeyFailoverModel {
+    broken_model: String,
+    healthy_model: String,
+    calls: Vec<String>,
+}
+
+impl ModelClient for MissingKeyFailoverModel {
+    fn call_model(
+        &mut self,
+        config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.calls.push(config.model.clone());
+        if config.model == self.broken_model {
+            Err("missing_api_key: set TIMEM_API_KEY or configure the Session API key".to_string())
+        } else if config.model == self.healthy_model {
+            Ok(llm(
+                r#"{"status":"ALL_FINISHED","final_answer":"failover answer"}"#,
+                1_000,
+                false,
+            ))
+        } else {
+            Err("model_http_500: unexpected endpoint".to_string())
+        }
+    }
+}
+
+#[test]
+fn missing_api_key_endpoint_switches_to_failover_immediately() {
+    let dir = tmp_dir("missing_key_failover");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    config.model = "endpoint-a".to_string();
+    let mut backup = test_config();
+    backup.model = "endpoint-b".to_string();
+    backup.interaction.model_endpoint_id = Some("endpoint-b-id".to_string());
+    let mut model = MissingKeyFailoverModel {
+        broken_model: "endpoint-a".to_string(),
+        healthy_model: "endpoint-b".to_string(),
+        calls: Vec::new(),
+    };
+    let mut ui = RetryRecordingUi::default();
+    let mut failover = vec![backup];
+
+    let outcome = run_session_turn_with_model_client_and_failover(
+        &mut core,
+        &mut config,
+        &mut failover,
+        TurnInput {
+            input: "run the task",
+            session: "missing_key_failover_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "failover answer");
+    // A missing credential is deterministic: the chain hands over after a
+    // single call instead of burning threshold strikes on the broken endpoint.
+    assert_eq!(model.calls, vec!["endpoint-a", "endpoint-b"]);
+    assert!(
+        failover.is_empty(),
+        "the failover entry must be consumed by the switch"
+    );
+    assert_eq!(config.model, "endpoint-b");
+    assert!(
+        ui.retries.is_empty(),
+        "missing-key failures must not record same-endpoint retries: {:?}",
+        ui.retries
+    );
+}
+
+#[test]
+fn invalid_native_tool_call_arguments_get_a_bounded_repair_round() {
+    let dir = tmp_dir("native_invalid_tool_arguments_repair");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Xml;
+    config.interaction.tool_call_mode = crate::ToolCallMode::Native;
+    let mut model = ReplayModel::new([
+        Err(
+            "invalid_tool_call[1].arguments_json:expected `,` or `]` at line 1 column 68"
+                .to_string(),
+        ),
+        Ok(LlmResponse {
+            tool_calls: vec![crate::NativeToolCall {
+                assistant_continuation: None,
+                id: "call_finish_after_repair".to_string(),
+                name: "task_finished".to_string(),
+                arguments: serde_json::json!({"summary": "repaired answer"}),
+                raw_arguments: String::new(),
+            }],
+            content: String::new(),
+            model_name: config.model.clone(),
+            usage: usage(100, 10),
+            truncated: false,
+        }),
+    ]);
+    let mut ui = NoopTurnUi;
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "finish after a malformed native tool call",
+            session: "native_invalid_tool_arguments_repair",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "repaired answer");
+    assert_eq!(
+        model.prompts.len(),
+        2,
+        "the malformed payload must receive exactly one repair request"
+    );
+    let repair_prompt = &model.prompts[1];
+    assert!(
+        repair_prompt.contains("native tool call"),
+        "{repair_prompt}"
+    );
+    assert!(repair_prompt.contains("line_nr"), "{repair_prompt}");
+    assert!(
+        repair_prompt.contains("invalid_tool_call[1].arguments_json"),
+        "{repair_prompt}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn debug_reasoning_capture_is_bounded_and_char_safe() {
+    let mut buffer = String::new();
+    let mut truncated = false;
+    append_debug_reasoning(&mut buffer, "", &mut truncated);
+    assert!(buffer.is_empty());
+    assert!(!truncated);
+
+    append_debug_reasoning(&mut buffer, "思考abc", &mut truncated);
+    assert_eq!(buffer, "思考abc");
+    assert!(!truncated);
+
+    let mut exact = String::new();
+    let mut exact_truncated = false;
+    append_debug_reasoning(
+        &mut exact,
+        &"a".repeat(MAX_DEBUG_REASONING_BYTES),
+        &mut exact_truncated,
+    );
+    assert_eq!(exact.len(), MAX_DEBUG_REASONING_BYTES);
+    assert!(!exact_truncated);
+
+    // Multi-byte text must be cut on a character boundary and never split a
+    // UTF-8 code point while filling the remaining capacity.
+    let chunk = "中".repeat(MAX_DEBUG_REASONING_BYTES);
+    append_debug_reasoning(&mut buffer, &chunk, &mut truncated);
+    assert_eq!(buffer.len(), MAX_DEBUG_REASONING_BYTES - 1);
+    assert_eq!(buffer.chars().filter(|ch| *ch == '中').count(), 21_842);
+    assert!(truncated);
+
+    append_debug_reasoning(&mut buffer, "tail", &mut truncated);
+    assert_eq!(buffer.len(), MAX_DEBUG_REASONING_BYTES - 1);
+}
+
+type PendingRouteCell = std::cell::RefCell<Option<(ModelServiceConfig, Vec<ModelServiceConfig>)>>;
+
+struct RouteSwapUi {
+    pending: std::rc::Rc<PendingRouteCell>,
+}
+
+impl TurnUi for RouteSwapUi {
+    fn apply_pending_model_service_route(
+        &mut self,
+        _core: &mut crate::AgentCore,
+        config: &mut ModelServiceConfig,
+        failover: &mut Vec<ModelServiceConfig>,
+    ) -> bool {
+        if let Some((replacement, replacement_failover)) = self.pending.borrow_mut().take() {
+            *config = replacement;
+            *failover = replacement_failover;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+struct RateLimitedThenFinalModel {
+    seen_endpoints: Vec<String>,
+    pending_route: std::rc::Rc<PendingRouteCell>,
+    newer_active: ModelServiceConfig,
+}
+
+impl ModelClient for RateLimitedThenFinalModel {
+    fn call_model(
+        &mut self,
+        config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.seen_endpoints.push(
+            config
+                .interaction
+                .model_endpoint_id
+                .clone()
+                .unwrap_or_default(),
+        );
+        let mut pending = self.pending_route.borrow_mut();
+        if pending.is_some() || self.seen_endpoints.len() == 1 {
+            // The endpoint stays rate-limited; the Host received the user's
+            // chain reorder while the first request was in flight, and the
+            // newest route must win over the stale failover snapshot.
+            if pending.is_none() {
+                *pending = Some((self.newer_active.clone(), Vec::new()));
+            }
+            drop(pending);
+            return Err("model_http_429: rate limited".to_string());
+        }
+        drop(pending);
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"ok"}"#,
+            1_000,
+            false,
+        ))
+    }
+}
+
+#[test]
+fn rate_limited_failover_consumes_a_newer_host_route_first() {
+    let dir = tmp_dir("failover_route_swap_during_rate_limit");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+
+    let mut config = test_config();
+    config.interaction.model_endpoint_id = Some("endpoint-a".to_string());
+    let mut stale_next = test_config();
+    stale_next.interaction.model_endpoint_id = Some("endpoint-b-stale".to_string());
+    let mut newer_active = test_config();
+    newer_active.interaction.model_endpoint_id = Some("endpoint-b-new".to_string());
+
+    let pending_route: std::rc::Rc<PendingRouteCell> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let mut model = RateLimitedThenFinalModel {
+        seen_endpoints: Vec::new(),
+        pending_route: std::rc::Rc::clone(&pending_route),
+        newer_active,
+    };
+    let mut failover = vec![stale_next];
+    let mut ui = RouteSwapUi {
+        pending: pending_route,
+    };
+
+    let outcome = run_session_turn_with_model_client_and_failover(
+        &mut core,
+        &mut config,
+        &mut failover,
+        TurnInput {
+            input: "say ok",
+            session: "failover_route_swap",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "ok");
+    assert_eq!(
+        model.seen_endpoints.first().map(String::as_str),
+        Some("endpoint-a")
+    );
+    assert_eq!(
+        model.seen_endpoints.last().map(String::as_str),
+        Some("endpoint-b-new")
+    );
+    assert!(!model
+        .seen_endpoints
+        .contains(&"endpoint-b-stale".to_string()));
 }

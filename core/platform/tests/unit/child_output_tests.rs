@@ -1,8 +1,11 @@
 use super::*;
+#[cfg(unix)]
+use crate::test_support::process_lifecycle_test_lock;
 
 #[cfg(unix)]
 #[test]
 fn idle_pipe_read_is_bounded_and_reports_eof_after_child_exit() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     let mut child = std::process::Command::new("/bin/sleep")
         .arg("5")
         .stdout(std::process::Stdio::piped())
@@ -27,6 +30,7 @@ fn idle_pipe_read_is_bounded_and_reports_eof_after_child_exit() {
 #[cfg(unix)]
 #[test]
 fn pipe_hangup_preserves_buffered_output_before_eof() {
+    let _process_lifecycle = process_lifecycle_test_lock();
     let mut child = std::process::Command::new("/bin/sh")
         .args(["-c", "printf buffered; printf diagnostic >&2"])
         .stdout(std::process::Stdio::piped())

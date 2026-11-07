@@ -36,7 +36,7 @@ pub(crate) fn execute_action(
                 Some(&text),
                 if creating { "created" } else { "updated" },
             )]);
-            "Memo created.  You should work continuously without disturbing user to achieve the memo goal if steps are clear. Don't `finish` in the middle unless user asks.".to_string()
+            "Memo created. You should work continuously without disturbing user to achieve the memo goal if steps are clear. Don't `finish` in the middle unless user asks.".to_string()
         }
         "delete" => {
             core.clear_active_memo();

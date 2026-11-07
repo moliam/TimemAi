@@ -1,0 +1,279 @@
+{
+  "$schema": "provider_model_catalog.schema.json",
+  "schema_version": 2,
+  "kind": "timem.provider_model_catalog",
+  "revision": 1,
+  "activation": "runtime_supported",
+  "coverage": "specified_model_pages_only",
+  "models": [
+    {
+      "id": "ds-flash",
+      "revision": 1,
+      "provider_id": "deepseek",
+      "model_id": "deepseek-flash",
+      "label": "ds-flash",
+      "connection": {
+        "default_base_url": "https://api.deepseek.com",
+        "allow_base_url_override": true,
+        "auth_handler": "bearer_api_key"
+      },
+      "dimensions": [
+        {
+          "id": "api.protocol",
+          "label": "API 协议",
+          "type": "enum",
+          "ordered": false,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "openai-compatible",
+              "label": "Chat Completions"
+            }
+          ],
+          "default_policy": {
+            "type": "explicit",
+            "value": "openai-compatible",
+            "source": "product"
+          },
+          "handler": "api_protocol",
+          "ui": {
+            "group": "connection",
+            "order": 10
+          },
+          "source_refs": [
+            "models-pricing",
+            "chat-api"
+          ]
+        },
+        {
+          "id": "reasoning.effort",
+          "label": "推理强度",
+          "type": "enum",
+          "ordered": true,
+          "allow_unset": true,
+          "options": [
+            {
+              "id": "none",
+              "label": "none"
+            },
+            {
+              "id": "low",
+              "label": "low"
+            },
+            {
+              "id": "high",
+              "label": "high"
+            },
+            {
+              "id": "max",
+              "label": "max"
+            }
+          ],
+          "default_policy": {
+            "official_value": "high",
+            "fallback": {
+              "type": "middle_option",
+              "candidates": [
+                "low",
+                "high",
+                "max"
+              ],
+              "even_count": "lower"
+            }
+          },
+          "handler": "reasoning_effort",
+          "ui": {
+            "group": "reasoning",
+            "order": 20
+          },
+          "source_refs": [
+            "thinking-mode",
+            "chat-api"
+          ]
+        }
+      ],
+      "profiles": [
+        {
+          "protocol": "openai-compatible",
+          "route": "/chat/completions",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "required_tool_choice": false,
+          "source_refs": [
+            "chat-api",
+            "thinking-mode"
+          ],
+          "binding_status": "api_reference_reviewed",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "deepseek_chat_thinking",
+              "path": "/thinking"
+            }
+          ]
+        }
+      ],
+      "documented_facts": {
+        "source_refs": [
+          "models-pricing",
+          "thinking-mode"
+        ],
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "streaming": "supported",
+        "default_snapshot": "deepseek-flash"
+      },
+      "constraints": [],
+      "limits": {
+        "context_window_tokens": 1048576,
+        "max_input_tokens": null,
+        "max_output_tokens": 393216,
+        "source_refs": [
+          "models-pricing",
+          "chat-api"
+        ]
+      }
+    },
+    {
+      "id": "ds-v4-pro",
+      "revision": 1,
+      "provider_id": "deepseek",
+      "model_id": "deepseek-v4-pro",
+      "label": "ds-v4-pro",
+      "connection": {
+        "default_base_url": "https://api.deepseek.com",
+        "allow_base_url_override": true,
+        "auth_handler": "bearer_api_key"
+      },
+      "dimensions": [
+        {
+          "id": "api.protocol",
+          "label": "API 协议",
+          "type": "enum",
+          "ordered": false,
+          "allow_unset": false,
+          "options": [
+            {
+              "id": "openai-compatible",
+              "label": "Chat Completions"
+            }
+          ],
+          "default_policy": {
+            "type": "explicit",
+            "value": "openai-compatible",
+            "source": "product"
+          },
+          "handler": "api_protocol",
+          "ui": {
+            "group": "connection",
+            "order": 10
+          },
+          "source_refs": [
+            "models-pricing",
+            "chat-api"
+          ]
+        },
+        {
+          "id": "reasoning.effort",
+          "label": "推理强度",
+          "type": "enum",
+          "ordered": true,
+          "allow_unset": true,
+          "options": [
+            {
+              "id": "none",
+              "label": "none"
+            },
+            {
+              "id": "low",
+              "label": "low"
+            },
+            {
+              "id": "high",
+              "label": "high"
+            },
+            {
+              "id": "max",
+              "label": "max"
+            }
+          ],
+          "default_policy": {
+            "official_value": "high",
+            "fallback": {
+              "type": "middle_option",
+              "candidates": [
+                "low",
+                "high",
+                "max"
+              ],
+              "even_count": "lower"
+            }
+          },
+          "handler": "reasoning_effort",
+          "ui": {
+            "group": "reasoning",
+            "order": 20
+          },
+          "source_refs": [
+            "thinking-mode",
+            "chat-api"
+          ]
+        }
+      ],
+      "profiles": [
+        {
+          "protocol": "openai-compatible",
+          "route": "/chat/completions",
+          "dimension_ids": [
+            "reasoning.effort"
+          ],
+          "function_calling": "supported",
+          "required_tool_choice": false,
+          "source_refs": [
+            "chat-api",
+            "thinking-mode"
+          ],
+          "binding_status": "api_reference_reviewed",
+          "bindings": [
+            {
+              "dimension": "reasoning.effort",
+              "handler": "deepseek_chat_thinking",
+              "path": "/thinking"
+            }
+          ]
+        }
+      ],
+      "documented_facts": {
+        "source_refs": [
+          "models-pricing",
+          "thinking-mode"
+        ],
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "streaming": "supported",
+        "default_snapshot": "deepseek-v4-pro"
+      },
+      "constraints": [],
+      "limits": {
+        "context_window_tokens": 1048576,
+        "max_input_tokens": null,
+        "max_output_tokens": 393216,
+        "source_refs": [
+          "models-pricing",
+          "chat-api"
+        ]
+      }
+    }
+  ]
+}

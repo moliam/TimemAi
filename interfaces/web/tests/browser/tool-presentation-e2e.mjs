@@ -110,8 +110,14 @@ const makeSnapshot = (session) => ({
 function encodeFrame(event) {
   const payload = Buffer.from(JSON.stringify(event));
   if (payload.length < 126) return Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
-  const header = Buffer.alloc(4);
-  header[0] = 0x81; header[1] = 126; header.writeUInt16BE(payload.length, 2);
+  if (payload.length < 65536) {
+    const header = Buffer.alloc(4);
+    header[0] = 0x81; header[1] = 126; header.writeUInt16BE(payload.length, 2);
+    return Buffer.concat([header, payload]);
+  }
+  // Large snapshots exceed the 16-bit extended length; use the 64-bit branch.
+  const header = Buffer.alloc(10);
+  header[0] = 0x81; header[1] = 127; header.writeBigUInt64BE(BigInt(payload.length), 2);
   return Buffer.concat([header, payload]);
 }
 function makePeer(socket, onJson) {

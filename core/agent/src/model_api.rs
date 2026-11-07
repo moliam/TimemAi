@@ -521,6 +521,16 @@ fn apply_native_interaction(
     body: &mut Value,
     interaction: &ModelInteractionRequest,
 ) {
+    // Catalog-documented `required` rejections (Kimi coding Responses, K2 chat)
+    // answer 400 on the wire field; downgrade to auto and let the textual
+    // compression trailer carry the must-call-tool semantics instead.
+    let tool_choice = if interaction.tool_choice == crate::NativeToolChoice::Required
+        && !crate::model_catalog::supports_required_tool_choice(config)
+    {
+        crate::NativeToolChoice::Auto
+    } else {
+        interaction.tool_choice
+    };
     match config.api_protocol {
         ApiProtocol::OpenAiCompatible => {
             body["tools"] = Value::Array(
@@ -533,7 +543,7 @@ fn apply_native_interaction(
                     })
                     .collect(),
             );
-            body["tool_choice"] = json!(native_tool_choice_label(interaction.tool_choice));
+            body["tool_choice"] = json!(native_tool_choice_label(tool_choice));
             if interaction.send_parallel_tool_calls {
                 body["parallel_tool_calls"] = json!(interaction.parallel_tool_calls);
             }
@@ -555,7 +565,7 @@ fn apply_native_interaction(
                     })
                     .collect(),
             );
-            body["tool_choice"] = json!(native_tool_choice_label(interaction.tool_choice));
+            body["tool_choice"] = json!(native_tool_choice_label(tool_choice));
             if interaction.send_parallel_tool_calls {
                 body["parallel_tool_calls"] = json!(interaction.parallel_tool_calls);
             }
@@ -583,12 +593,12 @@ fn apply_native_interaction(
             body["tools"] = Value::Array(tools);
             body["tool_choice"] = if interaction.send_parallel_tool_calls {
                 json!({
-                    "type": anthropic_tool_choice_label(interaction.tool_choice),
+                    "type": anthropic_tool_choice_label(tool_choice),
                     "disable_parallel_tool_use": !interaction.parallel_tool_calls,
                 })
             } else {
                 json!({
-                    "type": anthropic_tool_choice_label(interaction.tool_choice),
+                    "type": anthropic_tool_choice_label(tool_choice),
                 })
             };
             if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
@@ -690,7 +700,7 @@ fn openai_chat_exchange_messages(
     let mut messages = vec![
         json!({"role":"assistant","content":optional_text(&exchange.assistant_text),"tool_calls":exchange.calls.iter().map(|call| json!({"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.raw_arguments}})).collect::<Vec<_>>()}),
     ];
-    if crate::model_catalog::uses_zhipu_chat(config) {
+    if crate::model_catalog::chat_preserves_reasoning(config) {
         if let Some(metadata) = exchange
             .calls
             .first()
@@ -1276,6 +1286,15 @@ pub fn parse_model_response(
                 .get("completion_tokens")
                 .and_then(Value::as_u64)
                 .unwrap_or(0) as u32;
+            let reasoning_tokens = [
+                "/completion_tokens_details/reasoning_tokens",
+                "/output_tokens_details/reasoning_tokens",
+                "/reasoning_tokens",
+                "/thinking_tokens",
+            ]
+            .into_iter()
+            .find_map(|path| usage.pointer(path).and_then(Value::as_u64))
+            .unwrap_or(0) as u32;
             let total_tokens = usage
                 .get("total_tokens")
                 .and_then(Value::as_u64)
@@ -1306,6 +1325,7 @@ pub fn parse_model_response(
                     llm_calls: 1,
                     prompt_tokens,
                     completion_tokens,
+                    reasoning_tokens,
                     total_tokens,
                     cached_tokens,
                     cache_created_tokens,
@@ -1330,6 +1350,14 @@ pub fn parse_model_response(
                 .get("output_tokens")
                 .and_then(Value::as_u64)
                 .unwrap_or(0) as u32;
+            let reasoning_tokens = [
+                "/output_tokens_details/reasoning_tokens",
+                "/completion_tokens_details/reasoning_tokens",
+                "/reasoning_tokens",
+            ]
+            .into_iter()
+            .find_map(|path| usage.pointer(path).and_then(Value::as_u64))
+            .unwrap_or(0) as u32;
             let total_tokens = usage
                 .get("total_tokens")
                 .and_then(Value::as_u64)
@@ -1345,6 +1373,7 @@ pub fn parse_model_response(
                     llm_calls: 1,
                     prompt_tokens,
                     completion_tokens,
+                    reasoning_tokens,
                     total_tokens,
                     cached_tokens,
                     cache_created_tokens: 0,
@@ -1382,6 +1411,10 @@ pub fn parse_model_response(
                 .get("output_tokens")
                 .and_then(Value::as_u64)
                 .unwrap_or(0) as u32;
+            let reasoning_tokens = ["/reasoning_tokens", "/thinking_tokens"]
+                .into_iter()
+                .find_map(|path| usage.pointer(path).and_then(Value::as_u64))
+                .unwrap_or(0) as u32;
             let billed_prompt_tokens = prompt_tokens + cache_read_tokens + cache_creation_tokens;
             (
                 content,
@@ -1389,6 +1422,7 @@ pub fn parse_model_response(
                     llm_calls: 1,
                     prompt_tokens: billed_prompt_tokens,
                     completion_tokens,
+                    reasoning_tokens,
                     total_tokens: billed_prompt_tokens + completion_tokens,
                     cached_tokens: cache_read_tokens,
                     cache_created_tokens: cache_creation_tokens,
@@ -1413,7 +1447,7 @@ pub fn parse_model_response(
             config.interaction.max_tool_calls_per_response
         ));
     }
-    if crate::model_catalog::uses_zhipu_chat(config) {
+    if crate::model_catalog::chat_preserves_reasoning(config) {
         if let (Some(call), Some(reasoning)) = (
             tool_calls.first_mut(),
             raw.pointer("/choices/0/message/reasoning_content")
@@ -1787,10 +1821,21 @@ fn required_tool_call_field(
 }
 
 fn looks_like_sse(body: &str) -> bool {
-    body.lines()
-        .map(str::trim_start)
-        .find(|line| !line.is_empty() && !line.starts_with(':'))
-        .is_some_and(|line| line.starts_with("data:") || line.starts_with("event:"))
+    let mut saw_any_line = false;
+    for line in body.lines().map(str::trim_start) {
+        if line.is_empty() {
+            continue;
+        }
+        saw_any_line = true;
+        if line.starts_with(':') {
+            // SSE comment lines (e.g. gateway keep-alive probes) only occur
+            // inside an SSE stream. A body made purely of comments must be
+            // interpreted as an empty SSE stream, never as plain response text.
+            continue;
+        }
+        return line.starts_with("data:") || line.starts_with("event:");
+    }
+    saw_any_line
 }
 
 const MAX_ASSISTANT_CONTINUATION_BYTES: usize = 4 * 1024 * 1024;
@@ -1806,7 +1851,7 @@ fn interpret_openai_compatible_sse(
     let mut event_count = 0_u64;
     let mut reasoning_chunk_count = 0_u64;
     let mut reasoning_content = String::new();
-    let preserve_reasoning = crate::model_catalog::uses_zhipu_chat(config);
+    let preserve_reasoning = crate::model_catalog::chat_preserves_reasoning(config);
     let mut parse_error = None;
     let mut streamed_calls: Vec<(String, String, String)> = Vec::new();
 
@@ -2048,3 +2093,9 @@ fn extract_openai_response_text(raw: &Value) -> String {
 #[cfg(test)]
 #[path = "../tests/unit/model_api_tests.rs"]
 mod tests;
+
+/// 接入点验收矩阵：新增厂商/模板必须让这里全绿。单独成模块，避免与
+/// unit 级用例混在一起时被忽略（见 docs/provider-model-descriptor.md）。
+#[cfg(test)]
+#[path = "../tests/unit/endpoint_acceptance_tests.rs"]
+mod endpoint_acceptance_checks;

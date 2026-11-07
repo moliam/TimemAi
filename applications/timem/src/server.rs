@@ -6,6 +6,8 @@ mod model_endpoint_import;
 mod model_endpoint_share;
 mod response_preview;
 mod self_upgrade;
+mod session_resource_monitor;
+mod session_work_file_monitor;
 mod websocket_delivery;
 
 #[cfg(test)]
@@ -55,13 +57,15 @@ use agent_core::session_store::{
 use agent_core::{
     apply_runtime_config_value, combine_additional_contexts,
     context_compress_requested_topic_event, create_memory_dir, default_memory_dir,
-    load_workspace_dirs_from_path, model_service_config_from_sources_allow_missing_api_key,
-    resolve_memory_dir, runtime_config_menu_report, validate_api_key, work_instruction_load_report,
+    is_model_rate_limited_error, load_workspace_dirs_from_path,
+    model_service_config_from_sources_allow_missing_api_key, resolve_memory_dir,
+    runtime_config_menu_report, validate_api_key, work_instruction_load_report,
     work_instruction_load_request, work_instruction_mode_from_sources, AgentCore, BashApprovalMode,
-    CoreSessionWorkerWorkspace, HostDecision, HostDecisionRequest, InterfacePreferences,
-    ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind, RuntimeDataLayout,
-    SessionToolRepo, TimerSpec, ToolDetail, ToolSummary, TopicReply, TurnProjection,
-    WorkInstructionLoadMode, CORE_TOPIC_ACTION, CORE_TOPIC_CONTEXT_COMPRESS,
+    CoreSessionWorkerWorkspace, HostDecision, HostDecisionRequest, HttpModelClient,
+    InterfacePreferences, ModelClient, ModelServiceConfig, ModelServiceConfigSource,
+    ResponseProtocolKind, RuntimeDataLayout, SessionToolRepo, TimerSpec, ToolDetail, ToolSummary,
+    TopicReply, TurnProjection, WorkInstructionLoadMode, CORE_TOPIC_ACTION,
+    CORE_TOPIC_CONTEXT_COMPRESS, CORE_TOPIC_MAILBOX, CORE_TOPIC_MODEL_ENDPOINT_FAILOVER,
     CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP,
     CORE_TOPIC_TIMER, CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST,
     CORE_TOPIC_WORK_INSTRUCTION_LOAD,
@@ -73,7 +77,7 @@ use agent_core::{
 use axum::{
     extract::{
         ws::{WebSocket, WebSocketUpgrade},
-        Multipart, Query, State,
+        ConnectInfo, Multipart, Query, State,
     },
     http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Response},
@@ -83,7 +87,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     io::{IsTerminal, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     path::{Path, PathBuf},
@@ -116,8 +120,8 @@ use tokio::{
 
 include!(concat!(env!("OUT_DIR"), "/embedded_web_assets.rs"));
 
-const MAX_NEXT_TURN_INTENTS: usize = 8;
-const MAX_NEXT_TURN_INTENT_FILE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_NEXT_TURN_INTENTS: usize = 128;
+const MAX_NEXT_TURN_INTENT_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
 const STATIC_PROMPT: &str = include_str!("../../../resources/system_prompt/system_prompt.md");
 const PORT_START: u16 = 12_345;
@@ -129,6 +133,10 @@ const TIMER_SCHEDULER_INTERVAL: Duration = Duration::from_millis(500);
 const TEMPORARY_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const TEMPORARY_MAINTENANCE_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const TEMPORARY_MAINTENANCE_BUSY_RETRY_INTERVAL: Duration = Duration::from_secs(60);
+/// Rolling eviction cadence for conversation history. The idle-only pass
+/// cannot serve a long-running multi-agent workload, so history is also
+/// trimmed on this cadence while sessions keep working.
+const CONVERSATION_ROLLING_INTERVAL: Duration = Duration::from_secs(60);
 // Cap on concurrent session-restore worker threads.
 const SESSION_RESTORE_WORKERS: usize = 3;
 
@@ -136,6 +144,8 @@ const SESSION_RESTORE_WORKERS: usize = 3;
 // earlier turns load lazily via the history_page command while scrolling.
 const SESSION_HISTORY_PAGE_LIMIT: usize = 30;
 const DEFAULT_MEM_TEMPORARY_RETENTION_DAYS: u16 = 5;
+const MEM_CAPACITY_32_MB: u64 = 32 * 1024 * 1024;
+const MEM_CAPACITY_64_MB: u64 = 64 * 1024 * 1024;
 const MEM_CAPACITY_128_MB: u64 = 128 * 1024 * 1024;
 const MEM_CAPACITY_256_MB: u64 = 256 * 1024 * 1024;
 const MEM_CAPACITY_512_MB: u64 = 512 * 1024 * 1024;
@@ -159,6 +169,28 @@ const MAX_BROWSER_COMMAND_BYTES: usize = 1024 * 1024;
 const BROWSER_COMMAND_QUEUE_CAPACITY: usize = 32;
 const MAX_COMMAND_ID_BYTES: usize = 256;
 const MAX_MODEL_ENDPOINT_DELETE_IDS: usize = 100;
+const MAX_MODEL_ENDPOINT_CHAIN: usize = 20;
+/// A rate-limited endpoint is skipped when selecting the active chain endpoint.
+const MODEL_ENDPOINT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(30 * 60);
+/// Background scan cadence for endpoints marked rate-limited long ago.
+const MODEL_ENDPOINT_HEALTH_SCAN_INTERVAL: Duration = Duration::from_secs(60);
+/// Endpoints unavailable for at least this long are probed proactively so a
+/// recovered endpoint drops its stale rate-limited state within minutes.
+const MODEL_ENDPOINT_AUTO_PROBE_AFTER: Duration = Duration::from_secs(5 * 60);
+/// Session env keys fully owned by the currently selected model endpoint.
+const ENDPOINT_OWNED_ENV_KEYS: [&str; 11] = [
+    "TIMEM_MODEL",
+    "TIMEM_API_PROTOCOL",
+    "TIMEM_RESPONSE_PROTOCOL",
+    "TIMEM_BASE_URL",
+    "TIMEM_MAX_LLM_INPUT",
+    "TIMEM_MAX_LLM_OUTPUT",
+    "TIMEM_MODEL_CATALOG_ID",
+    "TIMEM_MODEL_REQUIREMENTS",
+    "TIMEM_ENABLE_THINKING",
+    "TIMEM_REASONING_EFFORT",
+    "TIMEM_STREAM",
+];
 const WORK_INSTRUCTION_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 const INSTANCE_HANDOFF_TIMEOUT: Duration = Duration::from_secs(3);
 const INSTANCE_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -178,6 +210,9 @@ struct AppState {
     template: Arc<WorkerTemplate>,
     mem: Arc<Mutex<WebMemState>>,
     model_endpoint_imports: Arc<Mutex<Vec<ModelEndpointImportCandidate>>>,
+    /// In-memory availability state per model endpoint. Never persisted: a
+    /// process restart gives every endpoint a clean slate.
+    model_endpoint_health: Arc<Mutex<BTreeMap<String, ModelEndpointHealthState>>>,
     events: broadcast::Sender<WireEvent>,
     sessions: Arc<Mutex<BTreeMap<String, WebSession>>>,
     command_dedup: Arc<Mutex<CommandDedupCache>>,
@@ -202,6 +237,39 @@ struct AppState {
     /// Public access token forwarded to the replacement process so browser
     /// URLs keep working across an upgrade restart.
     restart_public_token: Option<String>,
+    mem_mail_runtime: Arc<MemMailRuntime>,
+    mailbox_state_cache: Arc<Mutex<HashMap<PathBuf, CachedMailboxState>>>,
+    /// Mail ids whose read receipt is being folded into the send action
+    /// result. mailbox_tick suppresses their terminal notice while watched,
+    /// so the receipt is not delivered twice.
+    mailbox_send_receipt_watch: Arc<Mutex<BTreeSet<(String, String)>>>,
+    /// Per-session send lanes: mailbox send handling waits synchronously for
+    /// the fast-read receipt window off the bridge loop. Cross-session sends
+    /// run in parallel (mailbox state files are per-session), while
+    /// same-session sends stay serialized because they share one state file.
+    mailbox_send_lane_locks: Arc<Mutex<HashMap<String, Arc<std::sync::Mutex<()>>>>>,
+}
+
+#[derive(Default)]
+struct MemMailRuntime {
+    io_lock: Mutex<()>,
+    usage_bytes: AtomicU64,
+    usage_files: AtomicU64,
+    usage_root: Mutex<Option<PathBuf>>,
+    usage_initialized: std::sync::atomic::AtomicBool,
+    next_maintenance_ms: AtomicU64,
+    next_capacity_maintenance_ms: AtomicU64,
+    maintenance_runs: AtomicU64,
+    reclaimed_files: AtomicU64,
+    reclaimed_bytes: AtomicU64,
+    capacity_rejections: AtomicU64,
+    index_loads: AtomicU64,
+    index_saves: AtomicU64,
+    body_reads: AtomicU64,
+    body_writes: AtomicU64,
+    /// Blocks evicted since the last mailbox tick. A tick drains this to drop
+    /// entries it had already loaded into memory before the eviction.
+    evicted_ids: Mutex<HashSet<String>>,
 }
 
 #[derive(Clone)]
@@ -213,6 +281,18 @@ struct WorkerTemplate {
     current_dir: PathBuf,
     workspace_dirs: Vec<PathBuf>,
     reminder_tips_config: agent_core::ReminderTipsConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ModelEndpointHealthState {
+    /// When the endpoint last answered with a rate-limit/quota error.
+    rate_limited_since_ms: Option<u128>,
+    /// An availability probe is currently in flight for this endpoint.
+    probing: bool,
+    /// When the last availability probe finished, regardless of its result.
+    /// Transport errors leave the judgement unchanged, so the automatic
+    /// re-probe cadence is anchored here instead of retrying every scan tick.
+    last_probe_ms: Option<u128>,
 }
 
 #[derive(Debug, Clone)]
@@ -293,10 +373,16 @@ impl WebMemState {
             temporary_retention_days: self.settings.temporary_retention_days,
             temporary_capacity_bytes: self.settings.temporary_capacity_bytes,
             conversation_capacity_bytes: self.settings.conversation_capacity_bytes,
+            mailbox_capacity_bytes: self.settings.mailbox_capacity_bytes,
             claude_codex_tool_discovery: self.settings.claude_codex_tool_discovery,
             model_tool_result_bytes: self.settings.model_tool_result_bytes,
             context_compress_threshold_percent: self.settings.context_compress_threshold_percent,
             restore_prompt_context_on_startup: self.settings.restore_prompt_context_on_startup,
+            system_cpu_cap_percent: self.settings.system_cpu_cap_percent,
+            system_mem_cap_percent: self.settings.system_mem_cap_percent,
+            system_cpu_cap_enabled: self.settings.system_cpu_cap_enabled,
+            system_mem_cap_enabled: self.settings.system_mem_cap_enabled,
+            resource_caps: resource_caps_projection(&self.settings),
         }
     }
 }
@@ -370,6 +456,10 @@ struct ModelEndpointReport {
     private_ca_configured: bool,
     reasoning_effort: Option<String>,
     function_calling: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rate_limited_since_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    probing: bool,
 }
 
 impl From<&ModelEndpointConfig> for ModelEndpointReport {
@@ -401,6 +491,8 @@ impl From<&ModelEndpointConfig> for ModelEndpointReport {
             private_ca_configured: !endpoint.private_ca_pem.is_empty(),
             reasoning_effort: endpoint.reasoning_effort.clone(),
             function_calling: endpoint.function_calling,
+            rate_limited_since_ms: None,
+            probing: false,
         }
     }
 }
@@ -564,6 +656,11 @@ struct RestartCwdDecision {
     runtime_cwd: String,
     session_cwd: String,
     session_cwd_available: bool,
+    /// Canonical filesystem path retained separately from its browser-facing
+    /// representation. Windows canonicalization may add a `\\?\` namespace
+    /// prefix that is valid internally but should not leak into ordinary UI.
+    #[serde(skip)]
+    runtime_cwd_path: PathBuf,
 }
 
 /// Host-authoritative scheduled timer. `spec` carries the Core-owned
@@ -594,6 +691,7 @@ struct WebSession {
     group_id: Option<String>,
     ordinal: u32,
     state: String,
+    #[serde(serialize_with = "serialize_path_for_user_display")]
     current_dir: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     restart_cwd_decision: Option<RestartCwdDecision>,
@@ -606,6 +704,8 @@ struct WebSession {
     mcp_config_revision: u64,
     #[serde(skip)]
     applied_mcp_config_revision: u64,
+    #[serde(skip)]
+    preview_throttle: response_preview::PreviewThrottleState,
     runtime_profile: WebSessionRuntimeProfile,
     contexts: Vec<WebContext>,
     workers: Vec<WebWorker>,
@@ -642,6 +742,7 @@ struct WebSession {
     /// before it must not feed the ctx meter.
     #[serde(skip_serializing_if = "Option::is_none")]
     context_cleared_at_ms: Option<u128>,
+    telemetry_reset_at_ms: Option<u128>,
     /// Memo text saved in the restored prompt-context snapshot. A restart
     /// makes the memo inactive; this value only feeds the resume notice.
     #[serde(skip)]
@@ -681,6 +782,7 @@ fn initial_mcp_revisions(server_ids: &[String]) -> (u64, u64) {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct WebContext {
     context_id: String,
+    #[serde(serialize_with = "serialize_path_for_user_display")]
     current_dir: String,
     worker_ids: Vec<String>,
 }
@@ -698,6 +800,17 @@ struct WebWorker {
 #[derive(Debug, Clone)]
 struct WebSessionRuntime {
     model_endpoint_id: Option<String>,
+    /// Host-observed in-flight route. This is runtime-only, not a durable binding.
+    active_model_endpoint_id: Option<String>,
+    /// Ordered failover chain; the first entry is the user's first preference.
+    model_endpoint_ids: Vec<String>,
+    /// Session-only choice layered over compatible endpoint route snapshots.
+    reasoning_effort_override: Option<String>,
+    /// Per-endpoint session reasoning selections keyed by endpoint id; they
+    /// take precedence over the session-wide override.
+    endpoint_reasoning_efforts: BTreeMap<String, String>,
+    /// Per-endpoint session input-token window overrides keyed by endpoint id.
+    endpoint_max_input_tokens: BTreeMap<String, u32>,
     settings: RuntimeSettings,
     env: BTreeMap<String, String>,
     env_overrides: BTreeMap<String, String>,
@@ -707,6 +820,17 @@ struct WebSessionRuntime {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct WebSessionRuntimeProfile {
     model_endpoint_id: Option<String>,
+    /// Host-observed route; pending binding snapshots apply before the next model API request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_model_endpoint_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    model_endpoint_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    endpoint_reasoning_efforts: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    endpoint_max_input_tokens: BTreeMap<String, u32>,
     model: String,
     api_protocol: String,
     response_protocol: String,
@@ -734,6 +858,16 @@ struct WebTurn {
     events: Vec<WebTurnEvent>,
     final_answer: Option<String>,
     completion: Option<Value>,
+    /// True when restored/snapshot events were slimmed (256-byte string cap,
+    /// core.action skeleton, snapshot tail cap). Live turns keep full events.
+    /// Clients use this flag to pull full detail via `turn_history_page`
+    /// instead of rendering `…[truncated]` previews.
+    #[serde(skip_serializing_if = "is_false")]
+    events_slimmed: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -746,6 +880,11 @@ struct WebNextTurnPayload {
     text: String,
     attachments: Vec<WebAttachment>,
     worker_roles: Vec<WorkerRole>,
+    /// Timer queue entry with queue_timeout_minutes > 0: once the wall clock
+    /// passes this deadline the entry is dispatched immediately out of queue
+    /// order instead of waiting behind pending messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dispatch_deadline_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -797,6 +936,8 @@ struct PendingWorkInstructionTurn {
     command_id: Option<String>,
     worker_roles: Vec<WorkerRole>,
     direct_resume: bool,
+    /// Preserves the runtime origin across the Host decision delay.
+    entry_kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -822,6 +963,10 @@ struct WebChatMessage {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WireEvent {
+    MailboxUpdated {
+        session_id: String,
+        mailbox: MailboxSnapshot,
+    },
     Hello {
         snapshot: WebSnapshot,
         event_cursor: u64,
@@ -849,6 +994,17 @@ enum WireEvent {
     SessionContextCleared {
         session_id: String,
         cleared_at_ms: u128,
+    },
+    SessionUsageReset {
+        session_id: String,
+        reset_at_ms: u128,
+    },
+    SessionResourceUsage {
+        session_id: String,
+        sampled_at_ms: u128,
+        usage: Option<WebSessionResourceUsage>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        system: Option<WebSystemResourceUsage>,
     },
     SessionRestartCwdResolved {
         session: Box<WebSession>,
@@ -980,10 +1136,23 @@ enum WireEvent {
         temporary_retention_days: Option<u16>,
         temporary_capacity_bytes: Option<u64>,
         conversation_capacity_bytes: Option<u64>,
+        mailbox_capacity_bytes: Option<u64>,
         claude_codex_tool_discovery: bool,
         model_tool_result_bytes: usize,
         context_compress_threshold_percent: u8,
         restore_prompt_context_on_startup: bool,
+        system_cpu_cap_percent: f64,
+        system_mem_cap_percent: f64,
+        system_cpu_cap_enabled: bool,
+        system_mem_cap_enabled: bool,
+        resource_caps: WireResourceCaps,
+    },
+    MemStorageUsage {
+        temporary_bytes: u64,
+        conversation_bytes: u64,
+        mailbox_bytes: u64,
+        mailbox_files: u64,
+        favorite_bytes: u64,
     },
     MemTemporaryItems {
         items: Vec<MemTemporaryItem>,
@@ -1065,6 +1234,45 @@ enum CommandAckStatus {
     Rejected,
 }
 
+/// Read-only resource sample for the Session Insights dashboard. `None`
+/// fields mean the platform cannot account for that dimension right now.
+#[derive(Debug, Clone, Serialize)]
+struct WebSystemResourceUsage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu_busy_ticks: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu_total_ticks: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_total_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_available_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WebSessionResourceUsage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu_usage_usec: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cpu_quota_cores: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_current_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_anon_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_file_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_file_mapped_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_peak_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    swap_current_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_high_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_max_bytes: Option<u64>,
+    oom_kill_count: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct WebSnapshot {
     server: ServerInfo,
@@ -1102,10 +1310,16 @@ struct WebMemInfo {
     temporary_retention_days: Option<u16>,
     temporary_capacity_bytes: Option<u64>,
     conversation_capacity_bytes: Option<u64>,
+    mailbox_capacity_bytes: Option<u64>,
     claude_codex_tool_discovery: bool,
     model_tool_result_bytes: usize,
     context_compress_threshold_percent: u8,
     restore_prompt_context_on_startup: bool,
+    system_cpu_cap_percent: f64,
+    system_mem_cap_percent: f64,
+    system_cpu_cap_enabled: bool,
+    system_mem_cap_enabled: bool,
+    resource_caps: WireResourceCaps,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1228,6 +1442,12 @@ struct ModelEndpointInput {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientCommand {
+    MailboxClear {
+        session_id: String,
+    },
+    MailboxGet {
+        session_id: String,
+    },
     SessionCreate {
         display_name: Option<String>,
         workspace_dir: Option<String>,
@@ -1295,6 +1515,8 @@ enum ClientCommand {
         at: Option<String>,
         #[serde(default)]
         interval_ms: Option<u64>,
+        #[serde(default)]
+        queue_timeout_minutes: u64,
     },
     TimerDelete {
         session_id: String,
@@ -1309,6 +1531,18 @@ enum ClientCommand {
         session_id: String,
         timer_id: String,
         prompt: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(default)]
+        after_ms: Option<u64>,
+        #[serde(default)]
+        at: Option<String>,
+        #[serde(default)]
+        interval_ms: Option<u64>,
+        #[serde(default)]
+        queue_timeout_minutes: Option<u64>,
     },
     SessionDelete {
         session_id: String,
@@ -1470,6 +1704,26 @@ enum ClientCommand {
         key: String,
         value: String,
     },
+    SessionReasoningEffortUpdate {
+        session_id: String,
+        reasoning_effort: String,
+    },
+    SessionEndpointReasoningEffortUpdate {
+        session_id: String,
+        endpoint_id: String,
+        reasoning_effort: String,
+    },
+    SessionEndpointMaxInputTokensUpdate {
+        session_id: String,
+        endpoint_id: String,
+        max_input_tokens: Option<u32>,
+    },
+    SessionUsageReset {
+        session_id: String,
+    },
+    SessionResourceUsageQuery {
+        session_id: String,
+    },
     ModelEndpointShareExport {
         request_id: String,
         endpoint_id: String,
@@ -1494,6 +1748,11 @@ enum ClientCommand {
         session_id: String,
         endpoint_id: String,
     },
+    ModelEndpointChainApply {
+        session_id: String,
+        endpoint_ids: Vec<String>,
+    },
+    ModelEndpointAvailabilityRefresh,
     ModelEndpointSecretReveal {
         endpoint_id: String,
     },
@@ -1539,6 +1798,10 @@ enum ClientCommand {
     MemConversationCapacityUpdate {
         max_bytes: Option<u64>,
     },
+    MemMailboxCapacityUpdate {
+        max_bytes: Option<u64>,
+    },
+    MemStorageUsageQuery,
     BetaClaudeCodexToolDiscoveryUpdate {
         enabled: bool,
     },
@@ -1550,6 +1813,19 @@ enum ClientCommand {
     },
     SystemRestorePromptContextOnStartupUpdate {
         enabled: bool,
+    },
+    SystemResourceCapsUpdate {
+        cpu_enabled: bool,
+        cpu_percent: f64,
+        mem_enabled: bool,
+        mem_percent: f64,
+    },
+    SystemResourceCapsEscalate {
+        cpu_enabled: bool,
+        cpu_percent: f64,
+        mem_enabled: bool,
+        mem_percent: f64,
+        password: String,
     },
     MemTemporaryItemsList,
     MemTemporaryItemsDelete {
@@ -1566,6 +1842,7 @@ impl ClientCommand {
             | Self::FavoritesList
             | Self::ToolRepoSearch { .. }
             | Self::ToolRepoDetail { .. }
+            | Self::MemStorageUsageQuery
             | Self::SessionApiKeyReveal { .. }
             | Self::McpServerSecretsReveal { .. }
             | Self::ModelEndpointSecretReveal { .. }
@@ -1575,10 +1852,13 @@ impl ClientCommand {
             | Self::MemSwitch { .. }
             | Self::MemTemporaryRetentionUpdate { .. }
             | Self::MemConversationCapacityUpdate { .. }
+            | Self::MemMailboxCapacityUpdate { .. }
             | Self::BetaClaudeCodexToolDiscoveryUpdate { .. }
             | Self::SystemModelToolResultBytesUpdate { .. }
             | Self::SystemContextCompressThresholdUpdate { .. }
             | Self::SystemRestorePromptContextOnStartupUpdate { .. }
+            | Self::SystemResourceCapsUpdate { .. }
+            | Self::SystemResourceCapsEscalate { .. }
             | Self::MemTemporaryItemsDelete { .. }
             | Self::McpServerDelete { .. }
             | Self::ModelEndpointUpsert { .. }
@@ -1587,6 +1867,7 @@ impl ClientCommand {
             | Self::ModelEndpointImportScan { .. }
             | Self::ModelEndpointImportApply { .. }
             | Self::ModelEndpointShareImport { .. }
+            | Self::ModelEndpointAvailabilityRefresh
             | Self::WorkerRoleCreate { .. }
             | Self::WorkerRoleUpdate { .. }
             | Self::WorkerRoleDelete { .. }
@@ -1629,12 +1910,20 @@ impl ClientCommand {
             | Self::ToolRepoOpenTerminal { session_id, .. }
             | Self::TopicReply { session_id, .. }
             | Self::SessionRuntimeUpdate { session_id, .. }
+            | Self::SessionReasoningEffortUpdate { session_id, .. }
+            | Self::SessionEndpointReasoningEffortUpdate { session_id, .. }
+            | Self::SessionEndpointMaxInputTokensUpdate { session_id, .. }
+            | Self::SessionUsageReset { session_id }
+            | Self::SessionResourceUsageQuery { session_id }
             | Self::ModelEndpointApply { session_id, .. }
+            | Self::ModelEndpointChainApply { session_id, .. }
             | Self::McpSessionToggle { session_id, .. }
             | Self::McpServerReconnect { session_id, .. }
             | Self::TimerCreate { session_id, .. }
             | Self::TimerDelete { session_id, .. }
             | Self::TimerToggle { session_id, .. }
+            | Self::MailboxClear { session_id }
+            | Self::MailboxGet { session_id }
             | Self::TimerUpdate { session_id, .. } => Some(format!("session:{session_id}")),
         }
     }
@@ -1646,10 +1935,13 @@ impl ClientCommand {
                 | Self::MemSwitch { .. }
                 | Self::MemTemporaryRetentionUpdate { .. }
                 | Self::MemConversationCapacityUpdate { .. }
+                | Self::MemMailboxCapacityUpdate { .. }
                 | Self::BetaClaudeCodexToolDiscoveryUpdate { .. }
                 | Self::SystemModelToolResultBytesUpdate { .. }
                 | Self::SystemContextCompressThresholdUpdate { .. }
                 | Self::SystemRestorePromptContextOnStartupUpdate { .. }
+                | Self::SystemResourceCapsUpdate { .. }
+                | Self::SystemResourceCapsEscalate { .. }
                 | Self::MemTemporaryItemsDelete { .. }
                 | Self::McpServerDelete { .. }
                 | Self::ModelEndpointUpsert { .. }
@@ -1658,6 +1950,7 @@ impl ClientCommand {
                 | Self::ModelEndpointImportScan { .. }
                 | Self::ModelEndpointImportApply { .. }
                 | Self::ModelEndpointShareImport { .. }
+                | Self::ModelEndpointAvailabilityRefresh
                 | Self::WorkerRoleCreate { .. }
                 | Self::WorkerRoleUpdate { .. }
                 | Self::WorkerRoleDelete { .. }
@@ -1698,6 +1991,8 @@ impl ClientCommand {
                 | Self::ModelEndpointImportScan { .. }
                 | Self::MemTemporaryItemsList
                 | Self::MemTemporaryItemsDelete { .. }
+                | Self::MemStorageUsageQuery
+                | Self::SessionResourceUsageQuery { .. }
         )
     }
 
@@ -1776,6 +2071,15 @@ pub async fn run(
         template.initial_space.clone(),
         launch.debug,
     )?;
+    // Offer a one-shot root repair before the caps apply, so the web URL is
+    // only served after the instance's caps are as enforced as the user
+    // allowed. Unattended starts skip the prompt and keep degrading loudly.
+    crate::resource_caps_prompt::prompt_escalation_and_apply_if_needed();
+    apply_instance_resource_caps_from_mem(&initial_mem);
+    // Always state the full cap picture at startup, whether or not any
+    // dimension needed root; operators should not have to open the WebUI to
+    // learn which limits are actually enforced.
+    print_instance_resource_caps_summary(&initial_mem);
     let instance_path = web_instance_path(&initial_mem);
     let web_instance = match open_web_instance_after_handoff(
         &instance_path,
@@ -1840,6 +2144,7 @@ pub async fn run(
         template: Arc::new(template),
         mem,
         model_endpoint_imports: Arc::new(Mutex::new(Vec::new())),
+        model_endpoint_health: Arc::new(Mutex::new(BTreeMap::new())),
         events: events.clone(),
         sessions,
         command_dedup: Arc::new(Mutex::new(CommandDedupCache::default())),
@@ -1857,6 +2162,10 @@ pub async fn run(
         restart_notify: Arc::new(Notify::new()),
         restart_args: Arc::new(args.to_vec()),
         restart_public_token: token.clone(),
+        mem_mail_runtime: Arc::new(MemMailRuntime::default()),
+        mailbox_state_cache: Arc::new(Mutex::new(HashMap::new())),
+        mailbox_send_receipt_watch: Arc::new(Mutex::new(BTreeSet::new())),
+        mailbox_send_lane_locks: Arc::new(Mutex::new(HashMap::new())),
     };
     // Best-effort removal of stale upgrade backups (older than one day)
     // left next to the executable by previous self upgrades.
@@ -1871,6 +2180,10 @@ pub async fn run(
     // restore finishes.
     spawn_event_bridge(state.clone());
     spawn_timer_scheduler(state.clone());
+    session_resource_monitor::spawn_session_resource_monitor(state.clone());
+    session_work_file_monitor::spawn_session_work_file_monitor(state.clone());
+    spawn_mailbox_scheduler(state.clone());
+    spawn_conversation_rolling_loop(state.clone());
 
     let listener = bind_web_listener(launch.port, launch.public_access, prefer_default_mem_port)
         .await
@@ -1916,7 +2229,7 @@ pub async fn run(
             );
         }
         println!(
-            "Public mode is enabled. Browser, API, upload, and WebSocket access require the token in the URL."
+            "Public mode is enabled. Remote browser, API, upload, and WebSocket access require the token in the URL; loopback access on this machine needs no token."
         );
         println!("Local access: {local_url}");
     }
@@ -1943,20 +2256,36 @@ pub async fn run(
     // Full MEM scans never run on startup or ordinary history writes. Settings
     // commands may run them explicitly. The fallback checkpoints a tiny cumulative
     // runtime counter every 15 minutes and scans only when due and fully idle.
+    // One-time startup sweep: legacy mb-... spool directories that no stored
+    // session claims move to their id_... location without waiting for the
+    // first UI connect. Claimed names come straight from the stored
+    // mailbox.json files, so the identity migration keeps its rename order.
+    if let Ok(store) = current_session_store(&state) {
+        let claimed = collect_stored_mailbox_names(&store);
+        crate::mailbox::migrate_unclaimed_mailbox_dirs(
+            &crate::mailbox::mailbox_spool_root(),
+            &claimed,
+        );
+    }
     spawn_idle_temporary_maintenance_loop(state.clone());
+    spawn_model_endpoint_health_scanner(state.clone());
     let shutdown_reason = Arc::new(Mutex::new(None));
-    let serve_result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(
-            shutdown_monitor,
-            Arc::clone(&shutdown_reason),
-            state.restart_notify.clone(),
-            diagnostics.clone(),
-        ))
-        .await
-        .map_err(|error| error.to_string());
+    let serve_result = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal(
+        shutdown_monitor,
+        Arc::clone(&shutdown_reason),
+        state.restart_notify.clone(),
+        diagnostics.clone(),
+    ))
+    .await
+    .map_err(|error| error.to_string());
     serve_result?;
     diagnostics.event("graceful_shutdown_cleanup_started", serde_json::Value::Null);
     cleanup_guard.cleanup()?;
+    agent_core::resource_caps::cleanup_instance_resource_limits();
     diagnostics.event("graceful_shutdown_completed", serde_json::Value::Null);
     let reason = shutdown_reason
         .lock()
@@ -2270,9 +2599,10 @@ async fn performance_trace(
     State((state, _)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
     Json(trace): Json<ClientPerformanceTrace>,
 ) -> Response {
-    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     if !state.runtime_log.enabled() {
@@ -2415,8 +2745,9 @@ async fn debug_browse(
     State((state, _)): State<(AppState, u16)>,
     Query(query): Query<DebugBrowseQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !authorized_api_request(&state, query.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, query.token.as_deref(), &headers, *connect_info) {
         // A bare 401 reads as "broken page" in the browser. Explain what
         // happened and how to recover (reopen the authenticated WebUI URL).
         return (
@@ -2550,6 +2881,10 @@ fn client_command_trace_fields(command: &ClientCommand) -> (&'static str, Option
         ClientCommand::TimerCreate { session_id, .. } => ("timer_create", Some(session_id.clone())),
         ClientCommand::TimerDelete { session_id, .. } => ("timer_delete", Some(session_id.clone())),
         ClientCommand::TimerToggle { session_id, .. } => ("timer_toggle", Some(session_id.clone())),
+        ClientCommand::MailboxClear { session_id, .. } => {
+            ("mailbox_clear", Some(session_id.clone()))
+        }
+        ClientCommand::MailboxGet { session_id, .. } => ("mailbox_get", Some(session_id.clone())),
         ClientCommand::TimerUpdate { session_id, .. } => ("timer_update", Some(session_id.clone())),
         _ => ("other", None),
     }
@@ -2559,8 +2894,9 @@ async fn debug_reset_statistics(
     State((state, _)): State<(AppState, u16)>,
     Query(query): Query<UploadQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> StatusCode {
-    if !authorized_api_request(&state, query.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, query.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED;
     }
     let Some(debug) = state.debug.as_ref() else {
@@ -2576,8 +2912,9 @@ async fn upgrade_status(
     State((state, _)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     Json(json!({
@@ -2591,8 +2928,9 @@ async fn upgrade_check(
     State((state, _)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let runtime = state.upgrade.clone();
@@ -2606,8 +2944,9 @@ async fn upgrade_apply(
     State((state, _)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let runtime = state.upgrade.clone();
@@ -2621,8 +2960,9 @@ async fn upgrade_restart(
     State((state, _)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     match self_upgrade::snapshot_phase(&state.upgrade) {
@@ -2635,6 +2975,262 @@ async fn upgrade_restart(
             Json(json!({"error": "restart_requires_pending_upgrade"})),
         )
             .into_response(),
+    }
+}
+
+/// Apply the instance resource caps recorded in the active space settings.
+/// Called after the settings load at startup and after a space switch, so
+/// the kernel bound always matches the settings the UI shows.
+fn apply_instance_resource_caps_from_mem(mem: &WebMemState) {
+    agent_core::resource_caps::configure_instance_resource_caps_from_config(
+        agent_core::resource_caps::SystemResourceCapConfig {
+            cpu_enabled: mem.settings.system_cpu_cap_enabled,
+            cpu_percent: mem.settings.system_cpu_cap_percent,
+            mem_enabled: mem.settings.system_mem_cap_enabled,
+            mem_percent: mem.settings.system_mem_cap_percent,
+        },
+    );
+}
+
+/// Trim trailing zeros from a fixed-point number ("23.80" -> "23.8").
+fn trim_float(value: String) -> String {
+    if value.contains('.') {
+        value
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
+    } else {
+        value
+    }
+}
+
+/// Render the cgroup v2 CPU "quota period" pair (microseconds) in cores.
+fn format_cpu_cores(limit: &str) -> Option<String> {
+    let mut parts = limit.split_whitespace();
+    let quota: f64 = parts.next()?.parse().ok()?;
+    let period: f64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || quota < 0.0 || period <= 0.0 {
+        return None;
+    }
+    let cores = quota / period;
+    Some(format!(
+        "{} {}",
+        trim_float(format!("{:.2}", cores)),
+        if (cores - 1.0).abs() < f64::EPSILON {
+            "core"
+        } else {
+            "cores"
+        }
+    ))
+}
+
+/// Render a byte count in MB or GB (1024-based, matching the WebUI).
+fn format_memory_bytes(bytes: u64) -> String {
+    const MB: f64 = 1024.0 * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let value = bytes as f64;
+    if value >= GB {
+        format!("{} GB", trim_float(format!("{:.2}", value / GB)))
+    } else if value >= MB {
+        format!("{} MB", trim_float(format!("{:.2}", value / MB)))
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+/// Memory limits arrive as `high=<bytes>; max=<bytes>` (or a bare byte count
+/// in older projections). Keep the labels and humanize each value.
+fn format_memory_limit(limit: &str) -> String {
+    limit
+        .split(';')
+        .map(|segment| {
+            let segment = segment.trim();
+            match segment.split_once('=') {
+                Some((key, value)) => match value.trim().parse::<u64>() {
+                    Ok(bytes) => format!("{} {}", key.trim(), format_memory_bytes(bytes)),
+                    Err(_) => segment.to_string(),
+                },
+                None => match segment.parse::<u64>() {
+                    Ok(bytes) => format_memory_bytes(bytes),
+                    Err(_) => segment.to_string(),
+                },
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One startup-log line for one cap dimension. The line always states the
+/// configured intent and the kernel outcome, including disabled/unavailable
+/// dimensions, so the startup log is a complete picture.
+fn cap_summary_line(
+    label: &str,
+    dimension: &WireResourceCapDimension,
+    render_limit: fn(&str) -> String,
+) -> String {
+    let intent = if dimension.enabled {
+        format!("{}%", dimension.percent)
+    } else {
+        "off".to_string()
+    };
+    let state = match (
+        dimension.kernel.as_str(),
+        dimension.limit.as_deref(),
+        dimension.reason.as_deref(),
+    ) {
+        ("applied", Some(limit), _) => format!("applied ({})", render_limit(limit)),
+        ("applied", None, _) => "applied".to_string(),
+        (kernel, _, Some(reason)) => format!("{kernel} ({reason})"),
+        (kernel, _, None) => kernel.to_string(),
+    };
+    format!("[resource_caps] {label} limit: {intent} {state}")
+}
+
+fn resource_caps_summary_lines(caps: &WireResourceCaps) -> Vec<String> {
+    vec![
+        cap_summary_line("CPU", &caps.cpu, |limit| {
+            format_cpu_cores(limit).unwrap_or_else(|| format!("quota period: {limit}"))
+        }),
+        cap_summary_line("MEM", &caps.mem, format_memory_limit),
+    ]
+}
+
+fn print_instance_resource_caps_summary(mem: &WebMemState) {
+    for line in resource_caps_summary_lines(&resource_caps_projection(&mem.settings)) {
+        eprintln!("{line}");
+    }
+}
+
+/// Password buffer that zeroizes its bytes on drop, so every early-return
+/// path wipes the secret instead of leaving it in freed heap memory.
+struct ZeroizingPassword(String);
+
+impl ZeroizingPassword {
+    fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl Drop for ZeroizingPassword {
+    fn drop(&mut self) {
+        // Safety: the buffer is dropped immediately after zeroizing, so the
+        // (possibly non-UTF-8) transient state is never observable.
+        unsafe { self.0.as_mut_vec() }.fill(0);
+    }
+}
+
+/// Kernel-facing projection of one cap dimension for the WebUI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct WireResourceCapDimension {
+    enabled: bool,
+    percent: f64,
+    /// applied | disabled | unavailable | unsupported
+    kernel: String,
+    /// The platform-native kernel value while applied ("quota period" or
+    /// the byte bound), for display.
+    limit: Option<String>,
+    reason: Option<String>,
+    /// Stable machine-readable blocker for locally actionable guidance.
+    /// Today: "shared-instance-root" when the login session cgroup is shared
+    /// with unrelated processes, which makes memory caps unenforceable until
+    /// Timem runs in its own scope.
+    blocker: Option<String>,
+    /// True when root can make this dimension usable right now.
+    escalation_required: bool,
+}
+
+/// Kernel-facing projection of both cap dimensions for the WebUI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct WireResourceCaps {
+    cpu: WireResourceCapDimension,
+    mem: WireResourceCapDimension,
+    scope: String,
+}
+
+fn wire_cap_dimension(
+    enabled: bool,
+    percent: f64,
+    applied: Option<&agent_core::resource_caps::ResourceCapStatus>,
+    readiness: &agent_core::resource_caps::ResourceCapReadiness,
+) -> WireResourceCapDimension {
+    let escalation_required = matches!(
+        readiness,
+        agent_core::resource_caps::ResourceCapReadiness::NeedsEscalation { .. }
+    );
+    // A structural readiness verdict is more truthful than the low-level
+    // kernel write error that follows from it (for example EACCES on a
+    // controller that the kernel cannot enable in a threaded subtree). The
+    // apply error stays the fallback when readiness itself is fine.
+    let readiness_reason = match readiness {
+        agent_core::resource_caps::ResourceCapReadiness::Unavailable { reason } => {
+            Some(reason.clone())
+        }
+        _ => None,
+    };
+    let blocker = match readiness {
+        agent_core::resource_caps::ResourceCapReadiness::Unavailable { reason }
+            if reason == agent_core::resource_caps::SHARED_INSTANCE_ROOT_REASON =>
+        {
+            Some("shared-instance-root".to_string())
+        }
+        _ => None,
+    };
+    let (kernel, reason, limit) = match applied {
+        Some(agent_core::resource_caps::ResourceCapStatus::Applied { limit }) => {
+            ("applied", None, Some(limit.clone()))
+        }
+        Some(agent_core::resource_caps::ResourceCapStatus::Disabled) => ("disabled", None, None),
+        Some(agent_core::resource_caps::ResourceCapStatus::Unsupported) => {
+            ("unsupported", None, None)
+        }
+        Some(agent_core::resource_caps::ResourceCapStatus::Unavailable { reason }) => (
+            "unavailable",
+            readiness_reason.clone().or_else(|| Some(reason.clone())),
+            None,
+        ),
+        None => (
+            "unavailable",
+            Some("caps have not been applied yet".to_string()),
+            None,
+        ),
+    };
+    WireResourceCapDimension {
+        enabled,
+        percent,
+        kernel: kernel.to_string(),
+        limit,
+        reason,
+        blocker,
+        escalation_required,
+    }
+}
+
+fn resource_caps_projection(settings: &WebMemSettings) -> WireResourceCaps {
+    let readiness = agent_core::resource_caps::probe_instance_resource_caps();
+    let application = agent_core::resource_caps::instance_resource_caps_application();
+    let (cpu_status, mem_status) = match application.as_ref() {
+        Some(application) => (Some(&application.cpu), Some(&application.mem)),
+        None => (None, None),
+    };
+    let scope = application
+        .as_ref()
+        .map(|application| application.scope.clone())
+        .filter(|scope| !scope.is_empty())
+        .unwrap_or_else(|| readiness.scope.clone());
+    WireResourceCaps {
+        cpu: wire_cap_dimension(
+            settings.system_cpu_cap_enabled,
+            settings.system_cpu_cap_percent,
+            cpu_status,
+            &readiness.cpu,
+        ),
+        mem: wire_cap_dimension(
+            settings.system_mem_cap_enabled,
+            settings.system_mem_cap_percent,
+            mem_status,
+            &readiness.mem,
+        ),
+        scope,
     }
 }
 
@@ -2669,6 +3265,7 @@ struct AttachSessionSummary {
     state: String,
     working: bool,
     active_turn_id: Option<String>,
+    #[serde(serialize_with = "serialize_path_for_user_display")]
     current_dir: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     restart_cwd_decision: Option<RestartCwdDecision>,
@@ -2719,8 +3316,9 @@ async fn attach_sessions(
     State((state, _)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     Json(json!({ "sessions": attach_sessions_snapshot(&state) })).into_response()
@@ -2730,9 +3328,10 @@ async fn upload_file(
     State((state, _)): State<(AppState, u16)>,
     Query(query): Query<UploadQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
     mut multipart: Multipart,
 ) -> Response {
-    if !authorized_api_request(&state, query.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, query.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     if let Err(error) = ensure_restart_cwd_resolved(&state, &query.session_id) {
@@ -2776,11 +3375,12 @@ async fn static_asset(
     State((state, _)): State<(AppState, u16)>,
     Query(query): Query<AuthQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
     uri: Uri,
 ) -> Response {
     let token_from_query =
         state.public_access && query.token.as_deref() == Some(state.token.as_str());
-    if !authorized_token_or_cookie(&state, query.token.as_deref(), &headers) {
+    if !authorized_token_or_cookie(&state, query.token.as_deref(), &headers, *connect_info) {
         return (
             StatusCode::UNAUTHORIZED,
             [(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"))],
@@ -2884,6 +3484,14 @@ fn mime_for_path(path: &str) -> &'static str {
         "image/png"
     } else if path.ends_with(".ico") {
         "image/x-icon"
+    } else if path.ends_with(".woff2") {
+        "font/woff2"
+    } else if path.ends_with(".woff") {
+        "font/woff"
+    } else if path.ends_with(".ttf") {
+        "font/ttf"
+    } else if path.ends_with(".otf") {
+        "font/otf"
     } else {
         "application/octet-stream"
     }
@@ -2893,8 +3501,9 @@ async fn health(
     State((state, port)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     Json(json!({ "ok": true, "port": port })).into_response()
@@ -2904,8 +3513,9 @@ async fn snapshot(
     State((state, port)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     Json(snapshot_for(&state, port)).into_response()
@@ -2916,8 +3526,9 @@ async fn websocket(
     State((state, port)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
     headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
 ) -> Response {
-    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers, *connect_info) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     ws.on_upgrade(move |socket| websocket_delivery::websocket_session(socket, state, port))
@@ -2925,11 +3536,27 @@ async fn websocket(
 
 #[cfg(test)]
 fn authorized(state: &AppState, auth: &AuthQuery, headers: &HeaderMap) -> bool {
-    authorized_token_or_cookie(state, auth.token.as_deref(), headers)
+    // Remote perspective: loopback exemption must not weaken token checks.
+    authorized_token_or_cookie(
+        state,
+        auth.token.as_deref(),
+        headers,
+        SocketAddr::from(([192, 168, 0, 10], 41000)),
+    )
 }
 
-fn authorized_token_or_cookie(state: &AppState, token: Option<&str>, headers: &HeaderMap) -> bool {
-    if !state.public_access {
+fn authorized_token_or_cookie(
+    state: &AppState,
+    token: Option<&str>,
+    headers: &HeaderMap,
+    client: SocketAddr,
+) -> bool {
+    // Public mode trusts same-machine loopback callers exactly like the
+    // default loopback-only bind: local access needs no token, so a stale
+    // token left in local browser storage must not lock the loopback UI out
+    // after the runtime rotates credentials. Remote clients must present the
+    // current rotating token (query or cookie).
+    if !state.public_access || (client.ip().is_loopback() && host_is_loopback(headers)) {
         return true;
     }
     match token {
@@ -2938,8 +3565,44 @@ fn authorized_token_or_cookie(state: &AppState, token: Option<&str>, headers: &H
     }
 }
 
-fn authorized_api_request(state: &AppState, token: Option<&str>, headers: &HeaderMap) -> bool {
-    authorized_token_or_cookie(state, token, headers) && request_origin_allowed(headers)
+/// Guards the tokenless loopback exemption against DNS rebinding: a browser
+/// page whose domain resolves to 127.0.0.1 would otherwise reach the loopback
+/// UI without a token while passing the Origin==Host check. The exemption
+/// only applies when the request itself names a loopback host.
+fn host_is_loopback(headers: &HeaderMap) -> bool {
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        // Fail closed when the Host header cannot be inspected.
+        return false;
+    };
+    let host = host.trim();
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        // IPv6 literal: [::1]:port -> ::1
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        // IPv4/name literal: strip a trailing numeric port when present.
+        match host.rsplit_once(':') {
+            Some((name, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => {
+                name
+            }
+            _ => host,
+        }
+    };
+    if name.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    name.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+fn authorized_api_request(
+    state: &AppState,
+    token: Option<&str>,
+    headers: &HeaderMap,
+    client: SocketAddr,
+) -> bool {
+    authorized_token_or_cookie(state, token, headers, client) && request_origin_allowed(headers)
 }
 
 fn current_mem_state(state: &AppState) -> Result<WebMemState, String> {
@@ -3794,6 +4457,7 @@ fn handle_command_with_id(
             after_ms,
             at,
             interval_ms,
+            queue_timeout_minutes,
         } => {
             create_session_timer(
                 state,
@@ -3804,6 +4468,7 @@ fn handle_command_with_id(
                 after_ms,
                 at,
                 interval_ms,
+                queue_timeout_minutes,
             )?;
         }
         ClientCommand::TimerDelete {
@@ -3819,12 +4484,73 @@ fn handle_command_with_id(
         } => {
             toggle_session_timer(state, &session_id, &timer_id, enabled)?;
         }
+        ClientCommand::MailboxClear { session_id } => {
+            let mut mailbox = load_mailbox_state(state, &session_id)?;
+            let self_name = mailbox.mailbox_name.clone();
+            let mut retained = Vec::new();
+            for entry in mailbox.entries.drain(..) {
+                if entry.dir == "out" {
+                    if entry.state == "sent" || !entry.notified {
+                        retained.push(entry);
+                    }
+                    continue;
+                }
+                if entry.state == "read" {
+                    // Keep acknowledgement evidence until its receipt is spooled.
+                    if !entry.receipt_sent {
+                        retained.push(entry);
+                    }
+                    continue;
+                }
+                // Human discard is a terminal non-read outcome for the sender.
+                // The body stays in the global ledger; only the index is cleared.
+                if write_mailbox_receipt(&entry.id, &self_name, &entry.peer, "discarded").is_err() {
+                    retained.push(entry);
+                }
+            }
+            mailbox.entries = retained;
+            save_mailbox_state(state, &session_id, &mailbox)?;
+            publish_semantic(
+                state,
+                WireEvent::MailboxUpdated {
+                    session_id: session_id.clone(),
+                    mailbox: mailbox_snapshot(state, &mailbox),
+                },
+            );
+        }
+        ClientCommand::MailboxGet { session_id } => {
+            let mailbox = load_mailbox_state(state, &session_id)?;
+            publish_semantic(
+                state,
+                WireEvent::MailboxUpdated {
+                    session_id: session_id.clone(),
+                    mailbox: mailbox_snapshot(state, &mailbox),
+                },
+            );
+        }
         ClientCommand::TimerUpdate {
             session_id,
             timer_id,
             prompt,
+            name,
+            mode,
+            after_ms,
+            at,
+            interval_ms,
+            queue_timeout_minutes,
         } => {
-            update_session_timer(state, &session_id, &timer_id, &prompt)?;
+            update_session_timer(
+                state,
+                &session_id,
+                &timer_id,
+                &prompt,
+                name,
+                mode,
+                after_ms,
+                at,
+                interval_ms,
+                queue_timeout_minutes,
+            )?;
         }
         ClientCommand::SessionDelete { session_id } => {
             let worker_ids = session_worker_ids(state, &session_id)?;
@@ -3845,6 +4571,11 @@ fn handle_command_with_id(
                 .map_err(|_| "session_store_poisoned")?
                 .remove(&session_id)
                 .ok_or_else(|| "session_not_found".to_string())?;
+            if let Ok(path) = mailbox_state_path(state, &session_id) {
+                if let Ok(mut cache) = state.mailbox_state_cache.lock() {
+                    cache.remove(&path);
+                }
+            }
             let event = WireEvent::SessionDeleted { session_id };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -4155,6 +4886,7 @@ fn handle_command_with_id(
                         text,
                         attachment_ids.as_deref(),
                         worker_roles,
+                        None,
                     )?;
                     return Ok(Some(WireEvent::MessageQueueUpdated {
                         session_id,
@@ -4696,6 +5428,116 @@ fn handle_command_with_id(
                 },
             );
         }
+        ClientCommand::SessionReasoningEffortUpdate {
+            session_id,
+            reasoning_effort,
+        } => {
+            let reasoning_effort = nonempty_text(reasoning_effort, "reasoning effort")?;
+            let runtime_profile =
+                update_session_reasoning_effort(state, &session_id, &reasoning_effort)?;
+            publish_semantic(
+                state,
+                WireEvent::SessionRuntimeUpdated {
+                    session_id,
+                    runtime_profile,
+                },
+            );
+        }
+        ClientCommand::SessionEndpointReasoningEffortUpdate {
+            session_id,
+            endpoint_id,
+            reasoning_effort,
+        } => {
+            let reasoning_effort = nonempty_text(reasoning_effort, "reasoning effort")?;
+            let runtime_profile = update_session_endpoint_reasoning_effort(
+                state,
+                &session_id,
+                &endpoint_id,
+                &reasoning_effort,
+            )?;
+            publish_semantic(
+                state,
+                WireEvent::SessionRuntimeUpdated {
+                    session_id,
+                    runtime_profile,
+                },
+            );
+        }
+        ClientCommand::SessionEndpointMaxInputTokensUpdate {
+            session_id,
+            endpoint_id,
+            max_input_tokens,
+        } => {
+            let runtime_profile = update_session_endpoint_max_input_tokens(
+                state,
+                &session_id,
+                &endpoint_id,
+                max_input_tokens,
+            )?;
+            publish_semantic(
+                state,
+                WireEvent::SessionRuntimeUpdated {
+                    session_id,
+                    runtime_profile,
+                },
+            );
+        }
+        ClientCommand::SessionUsageReset { session_id } => {
+            let reset_at_ms = now_ms();
+            {
+                let mut sessions = state
+                    .sessions
+                    .lock()
+                    .map_err(|_| "session_store_poisoned".to_string())?;
+                let session = sessions.get_mut(&session_id).ok_or("session_not_found")?;
+                session.telemetry_reset_at_ms = Some(reset_at_ms);
+            }
+            let stored = {
+                let sessions = state
+                    .sessions
+                    .lock()
+                    .map_err(|_| "session_store_poisoned".to_string())?;
+                let session = sessions.get(&session_id).ok_or("session_not_found")?;
+                stored_session_from_web_session(state, session)
+            };
+            current_session_store(state)?.upsert_session(&stored)?;
+            let event = WireEvent::SessionUsageReset {
+                session_id: session_id.clone(),
+                reset_at_ms,
+            };
+            publish_semantic(state, event.clone());
+        }
+        ClientCommand::SessionResourceUsageQuery { session_id } => {
+            ensure_session_exists(state, &session_id)?;
+            let usage = agent_core::resource_caps::session_resource_usage(&session_id)
+                .map_err(|error| format!("session_resource_usage_failed:{error}"))?;
+            let system = agent_core::resource_caps::system_resource_usage()
+                .map_err(|error| format!("system_resource_usage_failed:{error}"))?
+                .map(|usage| WebSystemResourceUsage {
+                    cpu_busy_ticks: usage.cpu_busy_ticks,
+                    cpu_total_ticks: usage.cpu_total_ticks,
+                    memory_total_bytes: usage.memory_total_bytes,
+                    memory_available_bytes: usage.memory_available_bytes,
+                });
+            return Ok(Some(WireEvent::SessionResourceUsage {
+                session_id,
+                sampled_at_ms: now_ms(),
+                usage: usage.map(|usage| WebSessionResourceUsage {
+                    cpu_usage_usec: usage.cpu_usage_usec,
+                    cpu_quota_cores: usage.cpu_quota_cores,
+                    memory_current_bytes: usage.memory_current_bytes,
+                    memory_anon_bytes: usage.memory_anon_bytes,
+                    memory_file_bytes: usage.memory_file_bytes,
+                    memory_file_mapped_bytes: usage.memory_file_mapped_bytes,
+                    memory_peak_bytes: usage.memory_peak_bytes,
+                    swap_current_bytes: usage.swap_current_bytes,
+                    memory_high_bytes: usage.memory_high_bytes,
+                    memory_max_bytes: usage.memory_max_bytes,
+                    oom_kill_count: usage.oom_kill_count,
+                }),
+                system,
+            }));
+        }
         ClientCommand::ModelEndpointShareExport {
             request_id,
             endpoint_id,
@@ -4753,6 +5595,7 @@ fn handle_command_with_id(
         }
         ClientCommand::ModelEndpointDelete { endpoint_id } => {
             delete_model_endpoint(state, &endpoint_id)?;
+            prune_deleted_model_endpoint_bindings(state, &BTreeSet::from([endpoint_id.clone()]))?;
             let event = WireEvent::ModelEndpointsUpdated {
                 endpoints: model_endpoint_reports(state)?,
             };
@@ -4761,6 +5604,10 @@ fn handle_command_with_id(
         }
         ClientCommand::ModelEndpointDeleteMany { endpoint_ids } => {
             delete_model_endpoints(state, &endpoint_ids)?;
+            prune_deleted_model_endpoint_bindings(
+                state,
+                &endpoint_ids.iter().cloned().collect::<BTreeSet<_>>(),
+            )?;
             let event = WireEvent::ModelEndpointsUpdated {
                 endpoints: model_endpoint_reports(state)?,
             };
@@ -4779,6 +5626,23 @@ fn handle_command_with_id(
                     runtime_profile,
                 },
             );
+        }
+        ClientCommand::ModelEndpointChainApply {
+            session_id,
+            endpoint_ids,
+        } => {
+            let runtime_profile = apply_model_endpoint_chain(state, &session_id, &endpoint_ids)?;
+            publish_semantic(
+                state,
+                WireEvent::SessionRuntimeUpdated {
+                    session_id,
+                    runtime_profile,
+                },
+            );
+        }
+        ClientCommand::ModelEndpointAvailabilityRefresh => {
+            refresh_model_endpoint_availability(state)?;
+            return Ok(None);
         }
         ClientCommand::ModelEndpointSecretReveal { endpoint_id } => {
             let secrets = model_endpoint_secrets(state, &endpoint_id)?;
@@ -4944,16 +5808,40 @@ fn handle_command_with_id(
                 temporary_retention_days: days,
                 temporary_capacity_bytes: max_bytes,
                 conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                mailbox_capacity_bytes: settings.mailbox_capacity_bytes,
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+                system_cpu_cap_percent: settings.system_cpu_cap_percent,
+                system_mem_cap_percent: settings.system_mem_cap_percent,
+                system_cpu_cap_enabled: settings.system_cpu_cap_enabled,
+                system_mem_cap_enabled: settings.system_mem_cap_enabled,
+                resource_caps: resource_caps_projection(&settings),
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::MemConversationCapacityUpdate { max_bytes } => {
             validate_mem_conversation_capacity_bytes(max_bytes)?;
+            if let Some(total_bytes) = max_bytes {
+                let stable_bytes = RollingCapacity::from_total_bytes(total_bytes)
+                    .map_err(|_| "mem_conversation_capacity_bytes_invalid".to_string())?
+                    .stable_bytes;
+                let mailbox_bytes = {
+                    let _guard = state
+                        .mem_mail_runtime
+                        .io_lock
+                        .lock()
+                        .map_err(|_| "mem_mail_runtime_poisoned")?;
+                    mem_mail_storage_usage(state)?.0
+                };
+                // Shrinking below the Mailbox footprint would leave no shared
+                // budget at all and force every piece of history to be pruned.
+                if mailbox_bytes > stable_bytes {
+                    return Err("mem_conversation_capacity_below_mailbox_usage".to_string());
+                }
+            }
             let (memory_dir, store, settings) = {
                 let mem = state
                     .mem
@@ -4974,13 +5862,85 @@ fn handle_command_with_id(
                 temporary_retention_days: settings.temporary_retention_days,
                 temporary_capacity_bytes: settings.temporary_capacity_bytes,
                 conversation_capacity_bytes: max_bytes,
+                mailbox_capacity_bytes: settings.mailbox_capacity_bytes,
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+                system_cpu_cap_percent: settings.system_cpu_cap_percent,
+                system_mem_cap_percent: settings.system_mem_cap_percent,
+                system_cpu_cap_enabled: settings.system_cpu_cap_enabled,
+                system_mem_cap_enabled: settings.system_mem_cap_enabled,
+                resource_caps: resource_caps_projection(&settings),
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
+        }
+        ClientCommand::MemMailboxCapacityUpdate { max_bytes } => {
+            validate_mem_mailbox_capacity_bytes(max_bytes)?;
+            let (memory_dir, settings) = {
+                let mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                let mut settings = mem.settings.clone();
+                settings.mailbox_capacity_bytes = max_bytes;
+                (mem.layout.memory_dir(), settings)
+            };
+            let _guard = state
+                .mem_mail_runtime
+                .io_lock
+                .lock()
+                .map_err(|_| "mem_mail_runtime_poisoned")?;
+            let (usage_bytes, _, _) = mem_mail_storage_usage(state)?;
+            if max_bytes.is_some_and(|limit| usage_bytes > limit) {
+                return Err("mem_mailbox_capacity_below_usage".to_string());
+            }
+            save_web_mem_settings(&memory_dir, &settings)?;
+            state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .settings = settings.clone();
+            let event = WireEvent::MemSettingsUpdated {
+                temporary_retention_days: settings.temporary_retention_days,
+                temporary_capacity_bytes: settings.temporary_capacity_bytes,
+                conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                mailbox_capacity_bytes: settings.mailbox_capacity_bytes,
+                claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
+                model_tool_result_bytes: settings.model_tool_result_bytes,
+                context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+                system_cpu_cap_percent: settings.system_cpu_cap_percent,
+                system_mem_cap_percent: settings.system_mem_cap_percent,
+                system_cpu_cap_enabled: settings.system_cpu_cap_enabled,
+                system_mem_cap_enabled: settings.system_mem_cap_enabled,
+                resource_caps: resource_caps_projection(&settings),
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
+        }
+        ClientCommand::MemStorageUsageQuery => {
+            let memory_dir = current_mem_state(state)?.layout.memory_dir();
+            let temporary_bytes = mem_temporary_usage_at(&memory_dir)?;
+            let favorite_bytes = ChatLibrary::new(&memory_dir).capacity()?.used_bytes;
+            let store = current_session_store(state)?;
+            let conversation_bytes = conversation_history_usage(&store)?;
+            let dir = mem_mail_dir(state)?;
+            let _guard = state
+                .mem_mail_runtime
+                .io_lock
+                .lock()
+                .map_err(|_| "mem_mail_runtime_poisoned")?;
+            refresh_mem_mail_usage(state, &dir)?;
+            let (mailbox_bytes, mailbox_files, _) = mem_mail_storage_usage(state)?;
+            return Ok(Some(WireEvent::MemStorageUsage {
+                temporary_bytes,
+                conversation_bytes,
+                mailbox_bytes,
+                mailbox_files,
+                favorite_bytes,
+            }));
         }
         ClientCommand::BetaClaudeCodexToolDiscoveryUpdate { enabled } => {
             let (memory_dir, settings) = {
@@ -5003,10 +5963,16 @@ fn handle_command_with_id(
                 temporary_retention_days: settings.temporary_retention_days,
                 temporary_capacity_bytes: settings.temporary_capacity_bytes,
                 conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                mailbox_capacity_bytes: settings.mailbox_capacity_bytes,
                 claude_codex_tool_discovery: enabled,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+                system_cpu_cap_percent: settings.system_cpu_cap_percent,
+                system_mem_cap_percent: settings.system_mem_cap_percent,
+                system_cpu_cap_enabled: settings.system_cpu_cap_enabled,
+                system_mem_cap_enabled: settings.system_mem_cap_enabled,
+                resource_caps: resource_caps_projection(&settings),
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -5033,10 +5999,16 @@ fn handle_command_with_id(
                 temporary_retention_days: settings.temporary_retention_days,
                 temporary_capacity_bytes: settings.temporary_capacity_bytes,
                 conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                mailbox_capacity_bytes: settings.mailbox_capacity_bytes,
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: max_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+                system_cpu_cap_percent: settings.system_cpu_cap_percent,
+                system_mem_cap_percent: settings.system_mem_cap_percent,
+                system_cpu_cap_enabled: settings.system_cpu_cap_enabled,
+                system_mem_cap_enabled: settings.system_mem_cap_enabled,
+                resource_caps: resource_caps_projection(&settings),
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -5063,10 +6035,16 @@ fn handle_command_with_id(
                 temporary_retention_days: settings.temporary_retention_days,
                 temporary_capacity_bytes: settings.temporary_capacity_bytes,
                 conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                mailbox_capacity_bytes: settings.mailbox_capacity_bytes,
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: percent,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+                system_cpu_cap_percent: settings.system_cpu_cap_percent,
+                system_mem_cap_percent: settings.system_mem_cap_percent,
+                system_cpu_cap_enabled: settings.system_cpu_cap_enabled,
+                system_mem_cap_enabled: settings.system_mem_cap_enabled,
+                resource_caps: resource_caps_projection(&settings),
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -5091,10 +6069,145 @@ fn handle_command_with_id(
                 temporary_retention_days: settings.temporary_retention_days,
                 temporary_capacity_bytes: settings.temporary_capacity_bytes,
                 conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                mailbox_capacity_bytes: settings.mailbox_capacity_bytes,
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
                 restore_prompt_context_on_startup: enabled,
+                system_cpu_cap_percent: settings.system_cpu_cap_percent,
+                system_mem_cap_percent: settings.system_mem_cap_percent,
+                system_cpu_cap_enabled: settings.system_cpu_cap_enabled,
+                system_mem_cap_enabled: settings.system_mem_cap_enabled,
+                resource_caps: resource_caps_projection(&settings),
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
+        }
+        ClientCommand::SystemResourceCapsUpdate {
+            cpu_enabled,
+            cpu_percent,
+            mem_enabled,
+            mem_percent,
+        } => {
+            // Kernel first: if the bound cannot be applied, nothing is saved
+            // and the UI reports the error, so the stored setting is always
+            // what the kernel enforces.
+            agent_core::resource_caps::update_system_resource_caps(
+                cpu_enabled,
+                cpu_percent,
+                mem_enabled,
+                mem_percent,
+            )
+            .map_err(|error| format!("invalid_system_resource_caps:{error}"))?;
+            let (memory_dir, settings) = {
+                let mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                let mut settings = mem.settings.clone();
+                settings.system_cpu_cap_enabled = cpu_enabled;
+                settings.system_cpu_cap_percent = cpu_percent;
+                settings.system_mem_cap_enabled = mem_enabled;
+                settings.system_mem_cap_percent = mem_percent;
+                (mem.layout.memory_dir(), settings)
+            };
+            save_web_mem_settings(&memory_dir, &settings)?;
+            state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .settings = settings.clone();
+            let event = WireEvent::MemSettingsUpdated {
+                temporary_retention_days: settings.temporary_retention_days,
+                temporary_capacity_bytes: settings.temporary_capacity_bytes,
+                conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                mailbox_capacity_bytes: settings.mailbox_capacity_bytes,
+                claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
+                model_tool_result_bytes: settings.model_tool_result_bytes,
+                context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+                system_cpu_cap_percent: settings.system_cpu_cap_percent,
+                system_mem_cap_percent: settings.system_mem_cap_percent,
+                system_cpu_cap_enabled: settings.system_cpu_cap_enabled,
+                system_mem_cap_enabled: settings.system_mem_cap_enabled,
+                resource_caps: resource_caps_projection(&settings),
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
+        }
+        ClientCommand::SystemResourceCapsEscalate {
+            cpu_enabled,
+            cpu_percent,
+            mem_enabled,
+            mem_percent,
+            password,
+        } => {
+            // Root repair first (only when the probe says root can help),
+            // then the kernel, then persistence: a stored setting must
+            // always be what the kernel enforces. The password is zeroized
+            // on drop and never logged, echoed, or persisted.
+            let password = ZeroizingPassword(password);
+            let readiness = agent_core::resource_caps::probe_instance_resource_caps();
+            let mut actions: Vec<agent_core::resource_caps::ResourceCapEscalationAction> =
+                Vec::new();
+            for status in [&readiness.cpu, &readiness.mem] {
+                if let agent_core::resource_caps::ResourceCapReadiness::NeedsEscalation {
+                    actions: plan,
+                } = status
+                {
+                    for action in plan {
+                        if !actions.contains(action) {
+                            actions.push(action.clone());
+                        }
+                    }
+                }
+            }
+            if !actions.is_empty() {
+                agent_core::resource_caps::apply_resource_cap_escalation_plan(
+                    &actions,
+                    password.as_bytes(),
+                )
+                .map_err(|error| format!("invalid_system_resource_caps:{error}"))?;
+            }
+            agent_core::resource_caps::update_system_resource_caps(
+                cpu_enabled,
+                cpu_percent,
+                mem_enabled,
+                mem_percent,
+            )
+            .map_err(|error| format!("invalid_system_resource_caps:{error}"))?;
+            let (memory_dir, settings) = {
+                let mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                let mut settings = mem.settings.clone();
+                settings.system_cpu_cap_enabled = cpu_enabled;
+                settings.system_cpu_cap_percent = cpu_percent;
+                settings.system_mem_cap_enabled = mem_enabled;
+                settings.system_mem_cap_percent = mem_percent;
+                (mem.layout.memory_dir(), settings)
+            };
+            save_web_mem_settings(&memory_dir, &settings)?;
+            state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .settings = settings.clone();
+            let event = WireEvent::MemSettingsUpdated {
+                temporary_retention_days: settings.temporary_retention_days,
+                temporary_capacity_bytes: settings.temporary_capacity_bytes,
+                conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                mailbox_capacity_bytes: settings.mailbox_capacity_bytes,
+                claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
+                model_tool_result_bytes: settings.model_tool_result_bytes,
+                context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+                system_cpu_cap_percent: settings.system_cpu_cap_percent,
+                system_mem_cap_percent: settings.system_mem_cap_percent,
+                system_cpu_cap_enabled: settings.system_cpu_cap_enabled,
+                system_mem_cap_enabled: settings.system_mem_cap_enabled,
+                resource_caps: resource_caps_projection(&settings),
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -5115,6 +6228,7 @@ fn handle_command_with_id(
                 });
         }
     }
+
     Ok(None)
 }
 
@@ -5281,6 +6395,7 @@ fn switch_mem_space(
         let data_root = current_mem_state(state)?.layout.data_root().to_path_buf();
         WebMemState::new_with_debug_defaults(data_root, path.to_string(), state.debug.is_some())?
     };
+    apply_instance_resource_caps_from_mem(&next_mem);
     let current_path = absolute_path(current_mem_state(state)?.layout.space_dir());
     let next_path = absolute_path(next_mem.layout.space_dir());
     if current_path == next_path {
@@ -5341,6 +6456,7 @@ fn switch_mem_space(
         .lock()
         .map_err(|_| "command_dedup_poisoned".to_string())?
         .clear();
+    reset_mem_mail_runtime(state)?;
     {
         let mut lease = state
             .web_instance
@@ -5854,6 +6970,45 @@ fn create_session(
     )
 }
 
+fn generate_compact_session_id(
+    state: &AppState,
+    reserved: &BTreeSet<String>,
+) -> Result<String, String> {
+    const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let store = current_session_store(state)?;
+    let spool_root = crate::mailbox::mailbox_spool_root();
+    for _ in 0..32 {
+        let mut random = [0_u8; 6];
+        agent_core::os::fill_secure_random(&mut random)
+            .map_err(|error| format!("secure_session_id_generation_failed:{error}"))?;
+        let session_id: String = random
+            .iter()
+            .map(|byte| ALPHABET[*byte as usize % ALPHABET.len()] as char)
+            .collect();
+        let live_collision = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned")?
+            .contains_key(&session_id);
+        if !live_collision
+            && !reserved.contains(&session_id)
+            && !store.sessions_dir().join(&session_id).exists()
+            && !crate::mailbox::mailbox_exists(&spool_root, &format!("id_{session_id}"))
+            // Not an input-compat path: until the one-time migration runs,
+            // pre-migration spool dirs can still be named mb-{compact}; a
+            // freshly minted id must collide with neither form on disk.
+            && !crate::mailbox::mailbox_exists(&spool_root, &format!("mb-{session_id}"))
+        {
+            return Ok(session_id);
+        }
+    }
+    Err("session_id_collision_exhausted".to_string())
+}
+
+fn generate_session_id(state: &AppState) -> Result<String, String> {
+    generate_compact_session_id(state, &BTreeSet::new())
+}
+
 fn create_session_in_group(
     state: &AppState,
     display_name: Option<String>,
@@ -5870,7 +7025,7 @@ fn create_session_in_group(
             return Err("session_group_not_found".to_string());
         }
     }
-    let session_id = unique_web_id("session");
+    let session_id = generate_session_id(state)?;
     let tool_repo = session_tool_repo(state, &session_id)?;
     let current_dir = state
         .template
@@ -5879,6 +7034,11 @@ fn create_session_in_group(
     let session_env = state.template.session_env(&settings, &env_overrides);
     let runtime = WebSessionRuntime {
         model_endpoint_id: None,
+        active_model_endpoint_id: None,
+        model_endpoint_ids: Vec::new(),
+        reasoning_effort_override: None,
+        endpoint_reasoning_efforts: BTreeMap::new(),
+        endpoint_max_input_tokens: BTreeMap::new(),
         settings,
         env: session_env,
         env_overrides,
@@ -5918,6 +7078,7 @@ fn create_session_in_group(
         sessions.insert(
             session_id.clone(),
             WebSession {
+                preview_throttle: response_preview::PreviewThrottleState::default(),
                 session_id: session_id.clone(),
                 group_id,
                 display_name: session_display_name,
@@ -5956,6 +7117,7 @@ fn create_session_in_group(
                 active_memo: None,
                 timers: Vec::new(),
                 context_cleared_at_ms: None,
+                telemetry_reset_at_ms: None,
                 previous_memo_for_notice: None,
                 message_queue: SessionMessageQueue::new(MAX_NEXT_TURN_INTENTS),
                 pending_completion_message_id: None,
@@ -6028,12 +7190,313 @@ fn restore_stored_sessions_after_runtime_restart(state: &AppState) -> Result<usi
     restore_stored_sessions_with_runtime_restart_marker(state, true)
 }
 
+fn needs_session_id_migration(session_id: &str) -> bool {
+    let Some(suffix) = session_id.strip_prefix("session_") else {
+        return false;
+    };
+    let mut parts = suffix.split('_');
+    matches!(parts.next(), Some(part) if !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+        && matches!(parts.next(), Some(part) if !part.is_empty() && part.chars().all(|ch| ch.is_ascii_digit()))
+        && parts.next().is_none()
+}
+
+fn read_mailbox_name(path: &Path) -> Option<String> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| {
+            value
+                .get("mailbox_name")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+}
+
+/// Stores a migrated body without ever overwriting a different mail that
+/// happens to have the same legacy id. Returns the id referenced by the index.
+fn store_migrated_mem_mail(state: &AppState, mail: &MemMail) -> Result<String, String> {
+    let mut candidate = mail.clone();
+    for _ in 0..32 {
+        let path = mem_mail_path(state, &candidate.id)?;
+        if !path.exists() {
+            store_mem_mail_with_budget(state, &candidate, false)?;
+            return Ok(candidate.id);
+        }
+        if let Ok(existing) = load_mem_mail(state, &candidate.id) {
+            let same_mail_reversed = existing.id == candidate.id
+                && existing.msg == candidate.msg
+                && existing.created_at_ms == candidate.created_at_ms
+                && existing.from == candidate.to
+                && existing.to == candidate.from;
+            if existing == candidate || same_mail_reversed {
+                // Legacy sender/recipient files described the same letter
+                // from opposite sides. They must converge on one global id.
+                return Ok(candidate.id);
+            }
+        }
+        candidate.id = crate::mailbox::generate_mail_id(
+            &candidate.msg,
+            candidate.created_at_ms,
+            &candidate.to,
+        );
+    }
+    Err("mem_mail_id_collision_exhausted".to_string())
+}
+
+fn migrate_mailbox_file(
+    state: &AppState,
+    path: &Path,
+    mailbox_name: &str,
+    peer_names: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let mut mailbox = match std::fs::read(path) {
+        Ok(bytes) => {
+            let value: serde_json::Value = serde_json::from_slice(&bytes)
+                .map_err(|_| "mailbox_state_parse_failed".to_string())?;
+            parse_mailbox_value(state, &value)?
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => MailboxState {
+            mailbox_name: mailbox_name.to_string(),
+            entries: Vec::new(),
+        },
+        Err(_) => return Err("mailbox_state_read_failed".to_string()),
+    };
+    mailbox.mailbox_name = mailbox_name.to_string();
+    for entry in &mut mailbox.entries {
+        if let Some(peer) = peer_names.get(&entry.peer) {
+            entry.peer = peer.clone();
+        }
+        let mut mail = load_mem_mail(state, &entry.id)?;
+        // Remap addresses without deriving direction from this entry. Sender
+        // and recipient indexes are two views of one global body, so deriving
+        // from/to here would make the final body depend on migration order.
+        if let Some(from) = peer_names.get(&mail.from) {
+            mail.from = from.clone();
+        }
+        if let Some(to) = peer_names.get(&mail.to) {
+            mail.to = to.clone();
+        }
+        // The body was collision-checked when its legacy index was converted.
+        // Address migration must keep that exact id: sender and recipient
+        // entries are two views of one global letter, not two new letters.
+        let bytes = serde_json::to_vec_pretty(&mail)
+            .map_err(|_| "mem_mail_serialize_failed".to_string())?;
+        agent_core::atomic_write_file(&mem_mail_path(state, &entry.id)?, &bytes)
+            .map_err(|_| "mem_mail_write_failed".to_string())?;
+    }
+    save_mailbox_state_at(path, &mailbox)
+}
+
+fn migrate_spool_envelopes(
+    spool_dir: &Path,
+    peer_names: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    for (_path, mut mail) in crate::mailbox::scan_mails(spool_dir) {
+        let old_from = mail.from.clone();
+        let old_to = mail.to.clone();
+        if let Some(to) = peer_names.get(&mail.to) {
+            mail.to = to.clone();
+        }
+        if let Some(from) = peer_names.get(&mail.from) {
+            mail.from = from.clone();
+        }
+        if mail.from != old_from || mail.to != old_to {
+            crate::mailbox::write_mail(&crate::mailbox::mailbox_spool_root(), &mail)?;
+        }
+    }
+    Ok(())
+}
+
+/// One-time, pre-restore conversion of ids minted by older Web Hosts. The
+/// complete old->new address map is built before any mailbox is rewritten so
+/// both sides of local conversations converge on the same new names.
+/// Mailbox names claimed by stored sessions, read straight from their
+/// mailbox.json files: cheap reads that let the startup sweep distinguish
+/// orphaned legacy directories from directories the identity migration will
+/// rename itself.
+fn collect_stored_mailbox_names(store: &SessionStore) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let Ok(entries) = std::fs::read_dir(store.sessions_dir()) else {
+        return names;
+    };
+    for entry in entries.flatten() {
+        if let Some(name) = read_mailbox_name(&entry.path().join("mailbox.json")) {
+            names.insert(name);
+        }
+    }
+    names
+}
+
+fn migrate_legacy_session_ids(
+    state: &AppState,
+    store: &SessionStore,
+    stored_sessions: &mut [StoredSession],
+) -> Result<(), String> {
+    let mut id_map = BTreeMap::new();
+    let mut peer_names = BTreeMap::new();
+    let mut reserved = BTreeSet::new();
+    for stored in stored_sessions.iter() {
+        let old_path = store.metadata_path_for_session(&stored.session_id);
+        let old_mailbox = read_mailbox_name(&old_path.with_file_name("mailbox.json"));
+        if needs_session_id_migration(&stored.session_id) {
+            let new_id = generate_compact_session_id(state, &reserved)?;
+            reserved.insert(new_id.clone());
+            if let Some(old_mailbox) = old_mailbox {
+                peer_names.insert(old_mailbox, format!("id_{new_id}"));
+            }
+            id_map.insert(stored.session_id.clone(), new_id);
+        } else if is_compact_session_id(&stored.session_id) {
+            let new_name = format!("id_{}", stored.session_id);
+            if let Some(old_mailbox) = old_mailbox {
+                if old_mailbox != new_name {
+                    peer_names.insert(old_mailbox, new_name);
+                }
+            }
+        }
+    }
+    let mailbox_needs_conversion = |stored: &StoredSession| {
+        let path = store
+            .metadata_path_for_session(&stored.session_id)
+            .with_file_name("mailbox.json");
+        let Ok(bytes) = std::fs::read(path) else {
+            return is_compact_session_id(&stored.session_id);
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return false;
+        };
+        value.get("entries").is_none()
+            || (is_compact_session_id(&stored.session_id)
+                && value
+                    .get("mailbox_name")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(format!("id_{}", stored.session_id).as_str()))
+    };
+    if id_map.is_empty()
+        && peer_names.is_empty()
+        && !stored_sessions.iter().any(mailbox_needs_conversion)
+    {
+        return Ok(());
+    }
+
+    // Convert every legacy index before rewriting any address. This preserves
+    // the original sender/recipient view of shared mail; otherwise whichever
+    // session happened to migrate first could make the other side look like a
+    // different letter and trigger an unnecessary id redraw.
+    for stored in stored_sessions.iter() {
+        let path = store
+            .metadata_path_for_session(&stored.session_id)
+            .with_file_name("mailbox.json");
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| "mailbox_state_parse_failed".to_string())?;
+        if value.get("entries").is_some() {
+            continue;
+        }
+        let mailbox = parse_mailbox_value(state, &value)?;
+        save_mailbox_state_at(&path, &mailbox)?;
+    }
+
+    // Phase 1: move every legacy session and publish its new metadata. Old
+    // directories are renamed, not deleted, and a failed metadata write is
+    // rolled back before restoration starts.
+    for stored in stored_sessions.iter_mut() {
+        let Some(new_id) = id_map.get(&stored.session_id).cloned() else {
+            continue;
+        };
+        let old_id = stored.session_id.clone();
+        let old_dir = store
+            .metadata_path_for_session(&old_id)
+            .parent()
+            .ok_or_else(|| "session_data_path_invalid".to_string())?
+            .to_path_buf();
+        let new_dir = store
+            .metadata_path_for_session(&new_id)
+            .parent()
+            .ok_or_else(|| "session_data_path_invalid".to_string())?
+            .to_path_buf();
+        std::fs::rename(&old_dir, &new_dir).map_err(|error| {
+            format!("legacy_session_directory_migration_failed:{old_id}:{error}")
+        })?;
+        let mut migrated = stored.clone();
+        migrated.session_id = new_id.clone();
+        migrated.raw_chat_history_path = store
+            .history_path_for_session(&new_id)
+            .display()
+            .to_string();
+        if let Err(error) = store.upsert_session(&migrated) {
+            let _ = std::fs::rename(&new_dir, &old_dir);
+            return Err(error);
+        }
+        *stored = migrated;
+    }
+
+    // Phase 2: only now rewrite indexes/bodies, after all local peers exist at
+    // their final ids. Compact-id sessions with an older mailbox are included.
+    for stored in stored_sessions.iter() {
+        let path = store
+            .metadata_path_for_session(&stored.session_id)
+            .with_file_name("mailbox.json");
+        let compact = is_compact_session_id(&stored.session_id);
+        if !compact && !path.is_file() {
+            continue;
+        }
+        let new_name = if compact {
+            format!("id_{}", stored.session_id)
+        } else {
+            read_mailbox_name(&path).ok_or_else(|| "mailbox_name_missing".to_string())?
+        };
+        migrate_mailbox_file(state, &path, &new_name, &peer_names)?;
+    }
+
+    // Preserve pending hand-offs while renaming their mailbox dirs. New names
+    // were collision-checked before any directory move.
+    let spool_root = crate::mailbox::mailbox_spool_root();
+    for (old_name, new_name) in &peer_names {
+        if old_name == new_name {
+            continue;
+        }
+        let old_dir = crate::mailbox::mailbox_spool_dir(&spool_root, old_name);
+        let new_dir = crate::mailbox::mailbox_spool_dir(&spool_root, new_name);
+        if old_dir.is_dir() {
+            if new_dir.exists() {
+                return Err("legacy_mailbox_spool_target_exists".to_string());
+            }
+            std::fs::rename(&old_dir, &new_dir)
+                .map_err(|_| "legacy_mailbox_spool_migration_failed".to_string())?;
+        }
+    }
+    for stored in stored_sessions.iter() {
+        let mailbox_path = store
+            .metadata_path_for_session(&stored.session_id)
+            .with_file_name("mailbox.json");
+        let Some(name) = read_mailbox_name(&mailbox_path) else {
+            continue;
+        };
+        std::fs::create_dir_all(crate::mailbox::mailbox_spool_dir(&spool_root, &name))
+            .map_err(|_| "mailbox_spool_create_failed".to_string())?;
+        migrate_spool_envelopes(
+            &crate::mailbox::mailbox_spool_dir(&spool_root, &name),
+            &peer_names,
+        )?;
+    }
+    Ok(())
+}
+
 fn restore_stored_sessions_with_runtime_restart_marker(
     state: &AppState,
     record_runtime_restart: bool,
 ) -> Result<usize, String> {
     let store = current_session_store(state)?;
     let mut stored_sessions = list_stored_sessions_resilient(&store)?;
+    migrate_legacy_session_ids(state, &store, &mut stored_sessions)?;
+    // One-time spool sweep, strictly after identity migration: a legacy
+    // session's acquired address (mb-{compact}) looks identical to a compact
+    // session's pre-migration directory, and only the identity pass knows
+    // which session claims it. Running the sweep first would strand that
+    // session's envelopes in a renamed orphan directory.
+    crate::mailbox::migrate_prefixed_mailbox_dirs(&crate::mailbox::mailbox_spool_root());
     // Restore newest sessions first: the user's most relevant page comes back
     // fastest while older sessions continue restoring in the background.
     // The worker queue pops from the end, so sort ascending to pop newest.
@@ -6233,33 +7696,42 @@ fn sync_state_parent_directory(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn restart_cwd_decision(
-    state: &AppState,
-    session_cwd: &Path,
-    record_runtime_restart: bool,
-) -> Option<RestartCwdDecision> {
-    if !record_runtime_restart {
-        return None;
-    }
-    let runtime_cwd = std::fs::canonicalize(&state.template.current_dir).ok()?;
-    let session_cwd = std::fs::canonicalize(session_cwd).ok()?;
-    (runtime_cwd != session_cwd).then(|| RestartCwdDecision {
-        runtime_cwd: runtime_cwd.display().to_string(),
-        session_cwd: session_cwd.display().to_string(),
-        session_cwd_available: true,
-    })
+fn serialize_path_for_user_display<S>(path: &str, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&windows_verbatim_path_for_user_display(path))
 }
 
-fn missing_session_cwd_decision(
-    state: &AppState,
-    session_cwd: &Path,
-) -> Option<RestartCwdDecision> {
-    let runtime_cwd = std::fs::canonicalize(&state.template.current_dir).ok()?;
-    Some(RestartCwdDecision {
-        runtime_cwd: runtime_cwd.display().to_string(),
-        session_cwd: session_cwd.display().to_string(),
-        session_cwd_available: false,
-    })
+/// User-facing display form of a path: hides Windows verbatim prefixes
+/// while keeping the rendered text canonicalizable back to the same path.
+#[cfg(all(windows, test))]
+pub(crate) fn path_for_user_display(path: &std::path::Path) -> String {
+    windows_verbatim_path_for_user_display(&path.to_string_lossy())
+}
+
+/// Converts canonical Windows drive and UNC paths out of the Win32 verbatim
+/// namespace for presentation. Other namespace paths remain untouched because
+/// removing their prefix could change their meaning.
+fn windows_verbatim_path_for_user_display(path: &str) -> String {
+    if let Some(unc_path) = path.strip_prefix(r"\\?\UNC\") {
+        if !unc_path.is_empty() {
+            return format!(r"\\{}", unc_path);
+        }
+    }
+
+    if let Some(drive_path) = path.strip_prefix(r"\\?\") {
+        let bytes = drive_path.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/')
+        {
+            return drive_path.to_string();
+        }
+    }
+
+    path.to_string()
 }
 
 fn ensure_restart_cwd_resolved(state: &AppState, session_id: &str) -> Result<(), String> {
@@ -6331,7 +7803,7 @@ fn resolve_restart_cwd_decision(
                     .map(|worker| worker.worker_id.clone())
                     .collect::<Vec<_>>()
             };
-            let runtime_cwd = PathBuf::from(&pending.runtime_cwd);
+            let runtime_cwd = pending.runtime_cwd_path.clone();
             let manager = state
                 .manager
                 .lock()
@@ -6350,10 +7822,11 @@ fn resolve_restart_cwd_decision(
             let session = sessions
                 .get_mut(session_id)
                 .ok_or_else(|| "session_not_found".to_string())?;
+            let runtime_cwd = pending.runtime_cwd_path.display().to_string();
             for context in &mut session.contexts {
-                context.current_dir = pending.runtime_cwd.clone();
+                context.current_dir = runtime_cwd.clone();
             }
-            session.current_dir = pending.runtime_cwd;
+            session.current_dir = runtime_cwd;
             session.restart_cwd_decision = None;
             drop(sessions);
             persist_web_session(state, session_id)
@@ -6407,6 +7880,7 @@ fn interrupted_turn_from_queued_message(
             events: Vec::new(),
             final_answer: None,
             completion: None,
+            events_slimmed: false,
         },
     )
 }
@@ -6468,6 +7942,11 @@ fn restore_stored_session(
     let session_env = state.template.session_env(&settings, &cached_env);
     let runtime = WebSessionRuntime {
         model_endpoint_id: stored.model_endpoint_id.clone(),
+        active_model_endpoint_id: stored.model_endpoint_id.clone(),
+        model_endpoint_ids: stored.model_endpoint_ids.clone(),
+        reasoning_effort_override: stored.reasoning_effort_override.clone(),
+        endpoint_reasoning_efforts: stored.endpoint_reasoning_efforts.clone(),
+        endpoint_max_input_tokens: stored.endpoint_max_input_tokens.clone(),
         settings,
         env: session_env,
         env_overrides: stored.env_overrides.clone().unwrap_or_default(),
@@ -6574,6 +8053,7 @@ fn restore_stored_session(
         sessions.insert(
             stored.session_id.clone(),
             WebSession {
+                preview_throttle: response_preview::PreviewThrottleState::default(),
                 session_id: stored.session_id.clone(),
                 group_id: stored.group_id.clone(),
                 display_name: stored.display_name.clone(),
@@ -6585,11 +8065,13 @@ fn restore_stored_session(
                 }
                 .to_string(),
                 current_dir: current_dir.display().to_string(),
-                restart_cwd_decision: if stored_workspace_available {
-                    restart_cwd_decision(state, &current_dir, record_runtime_restart)
-                } else {
-                    missing_session_cwd_decision(state, &stored_current_dir)
-                },
+                // Restored sessions keep their stored working directory by
+                // default: no user-facing cwd gate, and no switch to the
+                // runtime directory. When the stored directory no longer
+                // exists, keeping it is impossible, so the restored session
+                // silently uses the runtime directory that `current_dir`
+                // already fell back to above.
+                restart_cwd_decision: None,
                 debug_dir,
                 max_llm_input_tokens,
                 tools,
@@ -6616,6 +8098,9 @@ fn restore_stored_session(
                 active_memo: None,
                 timers,
                 context_cleared_at_ms: None,
+                telemetry_reset_at_ms: stored
+                    .telemetry_reset_at_ms
+                    .and_then(|value| u128::try_from(value).ok()),
                 previous_memo_for_notice: None,
                 message_queue,
                 pending_completion_message_id: None,
@@ -6995,8 +8480,25 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     events: Vec::new(),
                     final_answer: None,
                     completion: None,
+                    events_slimmed: false,
                 });
                 turn.created_at_ms = turn.created_at_ms.min(created_at_ms as u128);
+                // Older builds recorded the work-file notice as a user entry.
+                // It is a system annotation, not user input: restore it into
+                // the work-stream event chain so both shapes render alike.
+                if role == ChatHistoryRole::User
+                    && kind.as_deref()
+                        == Some(session_work_file_monitor::LEGACY_WORK_FILE_UPDATE_ENTRY_KIND)
+                {
+                    turn.events.push(WebTurnEvent {
+                        event_id: format!("history_event_{turn_id}_{created_at_ms}_work_file"),
+                        source: "ui_activity".to_string(),
+                        payload: session_work_file_monitor::work_file_notice_payload(),
+                        created_at_ms: created_at_ms as u128,
+                        timeline_seq: Some(next_turn_timeline_seq(turn)),
+                    });
+                    continue;
+                }
                 match role {
                     ChatHistoryRole::User => turn.user_entries.push(WebTurnUserEntry {
                         kind: history_user_entry_kind(kind.as_deref()).to_string(),
@@ -7058,9 +8560,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     }
                     continue;
                 }
-                if kind == ChatHistoryEventKind::RuntimeNotice
-                    && extra.get("kind").and_then(Value::as_str) == Some("command_delivery")
-                {
+                if kind == ChatHistoryEventKind::CommandDelivery {
                     if let (Some(command_id), Some(delivery_state)) = (
                         extra.get("command_id").and_then(Value::as_str),
                         extra
@@ -7080,10 +8580,14 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                 let completion = (kind == ChatHistoryEventKind::Stats)
                     .then(|| extra.get("completion").cloned())
                     .flatten();
-                let payload = extra
+                let raw_payload = extra
                     .remove("payload")
                     .unwrap_or_else(|| json!({"kind": format!("{kind:?}")}));
-                let payload = slim_restored_action_event(truncate_restored_event_value(payload, 0));
+                let payload = slim_restored_action_event(truncate_restored_event_value(
+                    raw_payload.clone(),
+                    0,
+                ));
+                let events_slimmed = payload != raw_payload;
                 let source = extra
                     .remove("source")
                     .and_then(|value| value.as_str().map(str::to_string))
@@ -7098,12 +8602,14 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     events: Vec::new(),
                     final_answer: None,
                     completion: None,
+                    events_slimmed: false,
                 });
                 turn.created_at_ms = turn.created_at_ms.min(created_at_ms as u128);
                 if let Some(completion) = completion {
                     turn.state = "completed".to_string();
                     turn.completion = Some(completion);
                 }
+                turn.events_slimmed = turn.events_slimmed || events_slimmed;
                 turn.events.push(WebTurnEvent {
                     event_id: format!(
                         "history_event_{turn_id}_{created_at_ms}_{}",
@@ -7176,6 +8682,12 @@ fn web_message_from_history_record(record: ChatHistoryRecord) -> Option<WebChatM
             content,
             ..
         } => {
+            if role == ChatHistoryRole::User
+                && kind.as_deref()
+                    == Some(session_work_file_monitor::LEGACY_WORK_FILE_UPDATE_ENTRY_KIND)
+            {
+                return None;
+            }
             let role = match role {
                 ChatHistoryRole::User => "user",
                 ChatHistoryRole::Assistant => "assistant",
@@ -7199,9 +8711,28 @@ fn web_message_from_history_record(record: ChatHistoryRecord) -> Option<WebChatM
     }
 }
 
+/// Entry kinds the runtime itself produces (mailbox delivery, timer fire,
+/// queued interruption, resource observation). Their text must render as a
+/// runtime observation, not as a user question.
+fn entry_kind_is_system_input(kind: &str) -> bool {
+    matches!(
+        kind,
+        "mailbox" | "mailbox_status" | "timer" | "queued_interrupted"
+    ) || kind == session_resource_monitor::RESOURCE_OBSERVATION_ENTRY_KIND
+}
+
 fn history_user_entry_kind(kind: Option<&str>) -> &str {
     match kind {
-        Some(kind @ ("task" | "supplement" | "approval" | "queued_interrupted" | "timer")) => kind,
+        Some(
+            kind @ ("task"
+            | "supplement"
+            | "approval"
+            | "queued_interrupted"
+            | "timer"
+            | "mailbox"
+            | "mailbox_status"
+            | "resource_observation"),
+        ) => kind,
         _ => "task",
     }
 }
@@ -7293,6 +8824,13 @@ fn next_free_timer_name(timers: &[WebTimer]) -> String {
 /// Core timer topics carry the full authoritative set (user timers were
 /// synced into Core beforehand). Replace-all while preserving host-owned
 /// metadata (created_at_ms, enabled, fire bookkeeping) for known ids.
+///
+/// The Host is also authoritative for the spec content (prompt, name,
+/// schedule, delivery) of timers it already knows: Core never mutates a known
+/// spec in place (the model tool only creates and deletes, and renames onto an
+/// existing name are rejected), so a differing Core spec is always a stale
+/// projection whose `TimerSync` is still queued behind a turn. Adopting it
+/// here would silently revert a user edit made moments ago.
 fn merge_session_timers_from_core(
     state: &AppState,
     session_id: &str,
@@ -7314,11 +8852,9 @@ fn merge_session_timers_from_core(
                 .iter()
                 .find(|timer| timer.spec.timer_id == spec.timer_id)
             {
-                Some(existing) => {
-                    let mut updated = existing.clone();
-                    updated.spec = spec.clone();
-                    updated
-                }
+                // Known id: keep the host spec verbatim; Core reports it only
+                // as a possibly stale mirror.
+                Some(existing) => existing.clone(),
                 None => {
                     let next_fire_ms = match compute_next_fire_ms(spec, now) {
                         Ok(value) => value,
@@ -7480,6 +9016,7 @@ fn create_session_timer(
     after_ms: Option<u64>,
     at: Option<String>,
     interval_ms: Option<u64>,
+    queue_timeout_minutes: u64,
 ) -> Result<(), String> {
     let prompt = prompt.trim().to_string();
     if prompt.is_empty() {
@@ -7502,6 +9039,7 @@ fn create_session_timer(
         after_ms,
         at,
         interval_ms,
+        queue_timeout_minutes,
         created_by: "user".to_string(),
     };
     let next_fire_ms = compute_next_fire_ms(&spec, now)?;
@@ -7600,14 +9138,25 @@ fn toggle_session_timer(
     Ok(())
 }
 
-/// Prompt-only edits keep schedule state (enabled/next_fire) untouched: the
-/// firing payload changes, not the calendar. Re-projects into Core so the
-/// timer tool view and compression confirmations stay truthful.
+/// Edits keep unspecified fields untouched, so a prompt-only client keeps the
+/// old contract. Providing any schedule field (mode/after_ms/at/interval_ms)
+/// replaces the whole schedule: omitted members are cleared, the combined
+/// input is validated before anything mutates, and the next fire is
+/// recomputed from now. Name and delivery changes never touch the calendar;
+/// enabled state and fire history survive every edit. Re-projects into Core
+/// so the timer tool view and compression confirmations stay truthful.
+#[allow(clippy::too_many_arguments)]
 fn update_session_timer(
     state: &AppState,
     session_id: &str,
     timer_id: &str,
     prompt: &str,
+    name: Option<String>,
+    mode: Option<String>,
+    after_ms: Option<u64>,
+    at: Option<String>,
+    interval_ms: Option<u64>,
+    queue_timeout_minutes: Option<u64>,
 ) -> Result<(), String> {
     let prompt = prompt.trim().to_string();
     if prompt.is_empty() {
@@ -7616,6 +9165,11 @@ fn update_session_timer(
     if prompt.len() > 8000 {
         return Err("timer_prompt_too_long".to_string());
     }
+    let schedule_update =
+        mode.is_some() || after_ms.is_some() || at.is_some() || interval_ms.is_some();
+    let at = at
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     {
         let mut sessions = state
             .sessions
@@ -7624,15 +9178,63 @@ fn update_session_timer(
         let session = sessions
             .get_mut(session_id)
             .ok_or_else(|| "session_not_found".to_string())?;
+        // A renamed timer must not collide with a sibling (itself excluded).
+        let desired_name = name
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if let Some(new_name) = &desired_name {
+            if session
+                .timers
+                .iter()
+                .any(|timer| timer.spec.timer_id != timer_id && timer.spec.name == *new_name)
+            {
+                return Err(format!("name_exists:{new_name}"));
+            }
+        }
         let timer = session
             .timers
             .iter_mut()
             .find(|timer| timer.spec.timer_id == timer_id)
             .ok_or_else(|| "timer_not_found".to_string())?;
-        if timer.spec.prompt == prompt {
+        let new_mode = mode.unwrap_or_else(|| timer.spec.mode.clone());
+        if schedule_update {
+            // Validate before mutating so a rejected edit leaves no partial
+            // in-memory change behind.
+            validate_user_timer_input(&new_mode, after_ms, at.as_deref(), interval_ms)?;
+        }
+        let mut changed = false;
+        if timer.spec.prompt != prompt {
+            timer.spec.prompt = prompt;
+            changed = true;
+        }
+        if let Some(new_name) = desired_name {
+            if timer.spec.name != new_name {
+                timer.spec.name = new_name;
+                changed = true;
+            }
+        }
+        if let Some(queue_timeout_minutes) = queue_timeout_minutes {
+            if timer.spec.queue_timeout_minutes != queue_timeout_minutes {
+                timer.spec.queue_timeout_minutes = queue_timeout_minutes;
+                changed = true;
+            }
+        }
+        if schedule_update
+            && (timer.spec.mode != new_mode
+                || timer.spec.after_ms != after_ms
+                || timer.spec.at != at
+                || timer.spec.interval_ms != interval_ms)
+        {
+            timer.spec.mode = new_mode;
+            timer.spec.after_ms = after_ms;
+            timer.spec.at = at;
+            timer.spec.interval_ms = interval_ms;
+            timer.next_fire_ms = compute_next_fire_ms(&timer.spec, now_ms())?;
+            changed = true;
+        }
+        if !changed {
             return Ok(());
         }
-        timer.spec.prompt = prompt;
     }
     persist_timers(state, session_id)?;
     sync_worker_timers(state, session_id);
@@ -7662,8 +9264,8 @@ fn fire_due_timers(state: &AppState) {
         return;
     }
     let now = now_ms();
-    // (session_id, timer_id, fire_text)
-    let due: Vec<(String, String, String)> = {
+    // (session_id, timer_id, fire_text, queue_timeout_minutes)
+    let due: Vec<(String, String, String, u64)> = {
         let Ok(sessions) = state.sessions.lock() else {
             return;
         };
@@ -7680,13 +9282,20 @@ fn fire_due_timers(state: &AppState) {
                             session.session_id.clone(),
                             timer.spec.timer_id.clone(),
                             format!("[timer:{}] {}", timer.spec.name, timer.spec.prompt),
+                            timer.spec.queue_timeout_minutes,
                         )
                     })
             })
             .collect()
     };
-    for (session_id, timer_id, fire_text) in due {
-        let delivered = deliver_timer_fire(state, &session_id, &timer_id, &fire_text);
+    for (session_id, timer_id, fire_text, queue_timeout_minutes) in due {
+        let delivered = deliver_timer_fire(
+            state,
+            &session_id,
+            &timer_id,
+            &fire_text,
+            queue_timeout_minutes,
+        );
         let fired_at = now_ms();
         {
             let Ok(mut sessions) = state.sessions.lock() else {
@@ -7729,17 +9338,2112 @@ fn fire_due_timers(state: &AppState) {
     }
 }
 
-fn deliver_timer_fire(state: &AppState, session_id: &str, timer_id: &str, fire_text: &str) -> bool {
-    let idle = state
+/// One received mail in a session's mailbox, as surfaced to the WebUI.
+/// This remains a wire projection; persisted mail bodies live in `.mem/mail`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WebMailboxMail {
+    id: String,
+    from: String,
+    msg: String,
+    created_at_ms: u128,
+    #[serde(default = "default_queue_timeout", alias = "max_wait_secs")]
+    queue_timeout_secs: i64,
+    #[serde(default = "default_mail_kind")]
+    kind: String,
+    #[serde(default)]
+    receipt_for: Option<String>,
+    #[serde(default)]
+    delivered: bool,
+    #[serde(default)]
+    read: bool,
+    #[serde(default)]
+    receipt_sent: bool,
+}
+
+fn default_mail_kind() -> String {
+    "mail".to_string()
+}
+
+/// Outgoing wire projection. The persisted representation is MailboxEntry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SentMail {
+    id: String,
+    to: String,
+    msg: String,
+    created_at_ms: u128,
+    status: String,
+    #[serde(default = "default_resp_timeout")]
+    resp_timeout_secs: i64,
+    #[serde(default = "default_true")]
+    notified: bool,
+}
+
+fn default_resp_timeout() -> i64 {
+    agent_core::host::MAILBOX_DEFAULT_RESP_TIMEOUT_SECS
+}
+
+fn default_queue_timeout() -> i64 {
+    agent_core::host::MAILBOX_DEFAULT_QUEUE_TIMEOUT_SECS
+}
+
+/// The single durable home of a mail body. Both peers in one .mem may refer
+/// to the same record; the spool envelope remains only a transient hand-off.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct MemMail {
+    id: String,
+    from: String,
+    to: String,
+    msg: String,
+    created_at_ms: u128,
+}
+
+/// Body-free mailbox index. Incoming states are queued/read; outgoing states
+/// are sent/read/timeout/discarded/failed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MailboxEntry {
+    id: String,
+    dir: String,
+    peer: String,
+    created_at_ms: u128,
+    state: String,
+    #[serde(default)]
+    notified: bool,
+    #[serde(default)]
+    receipt_sent: bool,
+    #[serde(default = "default_resp_timeout")]
+    resp_timeout_secs: i64,
+}
+
+/// Host-authoritative, body-free mailbox index persisted in mailbox.json.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MailboxState {
+    mailbox_name: String,
+    #[serde(default)]
+    entries: Vec<MailboxEntry>,
+}
+
+#[derive(Clone)]
+struct CachedMailboxState {
+    modified: SystemTime,
+    len: u64,
+    mailbox: MailboxState,
+}
+
+/// Snapshot projected to interfaces on mailbox changes.
+#[derive(Debug, Clone, Serialize)]
+struct MailboxSnapshot {
+    mailbox_name: String,
+    mails: Vec<WebMailboxMail>,
+    sent: Vec<SentMail>,
+    unread: usize,
+}
+
+const MEM_MAIL_DEFAULT_MAX_BYTES: u64 = 128 * 1024 * 1024;
+const MEM_MAIL_DEFAULT_MAX_FILES: u64 = 8192;
+const MEM_MAIL_DEFAULT_ORPHAN_GRACE_SECS: u64 = 24 * 60 * 60;
+const MEM_MAIL_MAINTENANCE_INTERVAL_MS: u64 = 15 * 60 * 1000;
+const MEM_MAIL_CAPACITY_MAINTENANCE_INTERVAL_MS: u64 = 60 * 1000;
+const MAILBOX_STATE_CACHE_LIMIT: usize = 256;
+
+fn mem_mail_max_bytes_for(state: &AppState) -> Result<u64, String> {
+    if let Some(value) = std::env::var("TIMEM_MAILBOX_MAX_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+    {
+        return Ok(value);
+    }
+    Ok(current_mem_state(state)?
+        .settings
+        .mailbox_capacity_bytes
+        .unwrap_or(u64::MAX))
+}
+
+fn mem_mail_max_bytes() -> u64 {
+    std::env::var("TIMEM_MAILBOX_MAX_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(MEM_MAIL_DEFAULT_MAX_BYTES)
+}
+
+fn mem_mail_max_files() -> u64 {
+    std::env::var("TIMEM_MAILBOX_MAX_FILES")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(MEM_MAIL_DEFAULT_MAX_FILES)
+}
+
+fn mem_mail_orphan_grace_ms() -> u128 {
+    std::env::var("TIMEM_MAILBOX_ORPHAN_GRACE_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|value| (value as u128).saturating_mul(1000))
+        .unwrap_or((MEM_MAIL_DEFAULT_ORPHAN_GRACE_SECS as u128) * 1000)
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).ok().is_some_and(|value| {
+        let value = value.trim();
+        value == "1"
+            || value.eq_ignore_ascii_case("true")
+            || value.eq_ignore_ascii_case("yes")
+            || value.eq_ignore_ascii_case("on")
+    })
+}
+
+/// Routine maintenance runs on every start and then every fifteen minutes.
+/// Its summary is only actionable when files were actually reclaimed; the rest
+/// of the time it must stay out of the terminal. Set
+/// `TIMEM_MAILBOX_MAINTENANCE_LOG=1` to restore the full per-run summary.
+fn mailbox_maintenance_should_log(verbose: bool) -> bool {
+    // Orphan reclamation is the routine outcome of the mailbox write/cleanup
+    // cadence, not an actionable anomaly: printing a per-run summary every
+    // maintenance tick floods the debug UI. Real anomalies keep their own
+    // dedicated logs (`mailbox_capacity_backpressure`,
+    // `mailbox_maintenance_failed`); operators opt into the full per-run
+    // summary via TIMEM_MAILBOX_MAINTENANCE_LOG=1.
+    verbose
+}
+
+fn reset_mem_mail_runtime(state: &AppState) -> Result<(), String> {
+    let _io_guard = state
+        .mem_mail_runtime
+        .io_lock
+        .lock()
+        .map_err(|_| "mem_mail_runtime_poisoned")?;
+    state
+        .mailbox_state_cache
+        .lock()
+        .map_err(|_| "mailbox_state_cache_poisoned")?
+        .clear();
+    state
+        .mem_mail_runtime
+        .usage_root
+        .lock()
+        .map_err(|_| "mem_mail_runtime_poisoned")?
+        .take();
+    state
+        .mem_mail_runtime
+        .usage_initialized
+        .store(false, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .usage_bytes
+        .store(0, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .usage_files
+        .store(0, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .next_maintenance_ms
+        .store(0, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .next_capacity_maintenance_ms
+        .store(0, Ordering::Relaxed);
+    Ok(())
+}
+
+fn mem_mail_dir(state: &AppState) -> Result<PathBuf, String> {
+    current_session_store(state)?
+        .sessions_dir()
+        .parent()
+        .map(|root| root.join("mail"))
+        .ok_or_else(|| "mem_mail_path_invalid".to_string())
+}
+
+fn mem_mail_path_in_dir(dir: &Path, id: &str) -> PathBuf {
+    dir.join(format!("mail_{id}.json"))
+}
+
+fn mem_mail_path(state: &AppState, id: &str) -> Result<PathBuf, String> {
+    Ok(mem_mail_path_in_dir(&mem_mail_dir(state)?, id))
+}
+
+fn mem_mail_exists(state: &AppState, id: &str) -> bool {
+    mem_mail_path(state, id)
+        .map(|path| path.is_file())
+        .unwrap_or(false)
+}
+
+fn scan_mem_mail_usage(dir: &Path) -> Result<(u64, u64), String> {
+    let mut bytes = 0_u64;
+    let mut files = 0_u64;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(_) => return Err("mem_mail_usage_read_failed".to_string()),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|_| "mem_mail_usage_read_failed".to_string())?;
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if !name.starts_with("mail_") || !name.ends_with(".json") {
+            continue;
+        }
+        let file_type = entry
+            .file_type()
+            .map_err(|_| "mem_mail_usage_read_failed".to_string())?;
+        if !file_type.is_file() {
+            return Err("mem_mail_usage_read_failed".to_string());
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|_| "mem_mail_usage_read_failed".to_string())?;
+        bytes = bytes.saturating_add(metadata.len());
+        files = files.saturating_add(1);
+    }
+    Ok((bytes, files))
+}
+
+fn mem_mail_index_usage(state: &AppState) -> Result<u64, String> {
+    let sessions_dir = current_session_store(state)?.sessions_dir();
+    let entries = match std::fs::read_dir(sessions_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(_) => return Err("mem_mail_index_usage_read_failed".to_string()),
+    };
+    let mut bytes = 0_u64;
+    for entry in entries {
+        let entry = entry.map_err(|_| "mem_mail_index_usage_read_failed".to_string())?;
+        if !entry
+            .file_type()
+            .map_err(|_| "mem_mail_index_usage_read_failed".to_string())?
+            .is_dir()
+        {
+            continue;
+        }
+        match std::fs::metadata(entry.path().join("mailbox.json")) {
+            Ok(metadata) if metadata.is_file() => bytes = bytes.saturating_add(metadata.len()),
+            Ok(_) => return Err("mem_mail_index_usage_read_failed".to_string()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("mem_mail_index_usage_read_failed".to_string()),
+        }
+    }
+    Ok(bytes)
+}
+
+fn mem_mail_storage_usage(state: &AppState) -> Result<(u64, u64, u64), String> {
+    let (body_bytes, files) = scan_mem_mail_usage(&mem_mail_dir(state)?)?;
+    let index_bytes = mem_mail_index_usage(state)?;
+    Ok((body_bytes.saturating_add(index_bytes), files, index_bytes))
+}
+
+fn refresh_mem_mail_usage(state: &AppState, dir: &Path) -> Result<(u64, u64), String> {
+    let (bytes, files) = scan_mem_mail_usage(dir)?;
+    state
+        .mem_mail_runtime
+        .usage_bytes
+        .store(bytes, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .usage_files
+        .store(files, Ordering::Relaxed);
+    {
+        let mut root = state
+            .mem_mail_runtime
+            .usage_root
+            .lock()
+            .map_err(|_| "mem_mail_runtime_poisoned")?;
+        if root.as_deref() != Some(dir) {
+            *root = Some(dir.to_path_buf());
+        }
+    }
+    state
+        .mem_mail_runtime
+        .usage_initialized
+        .store(true, Ordering::Relaxed);
+    Ok((bytes, files))
+}
+
+fn ensure_mem_mail_usage(state: &AppState, dir: &Path) -> Result<(u64, u64), String> {
+    let root_matches = state
+        .mem_mail_runtime
+        .usage_root
+        .lock()
+        .map_err(|_| "mem_mail_runtime_poisoned")?
+        .as_deref()
+        == Some(dir);
+    if state
+        .mem_mail_runtime
+        .usage_initialized
+        .load(Ordering::Relaxed)
+        && root_matches
+    {
+        return Ok((
+            state.mem_mail_runtime.usage_bytes.load(Ordering::Relaxed),
+            state.mem_mail_runtime.usage_files.load(Ordering::Relaxed),
+        ));
+    }
+    refresh_mem_mail_usage(state, dir)
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MemMailMaintenanceReport {
+    referenced_files: usize,
+    orphan_files: usize,
+    evicted_files: u64,
+    evicted_bytes: u64,
+    reclaimed_files: u64,
+    reclaimed_bytes: u64,
+    usage_files: u64,
+    usage_bytes: u64,
+}
+
+fn file_modified_ms(metadata: &std::fs::Metadata) -> Result<u128, String> {
+    metadata
+        .modified()
+        .map_err(|_| "mem_mail_usage_read_failed".to_string())?
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .map_err(|_| "mem_mail_usage_read_failed".to_string())
+}
+
+fn mem_mail_references(state: &AppState) -> Result<HashSet<String>, String> {
+    let sessions_dir = current_session_store(state)?.sessions_dir();
+    let entries = match std::fs::read_dir(sessions_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(HashSet::new());
+        }
+        Err(_) => return Err("mem_mail_reference_scan_failed".to_string()),
+    };
+    let mut references = HashSet::new();
+    for entry in entries {
+        let entry = entry.map_err(|_| "mem_mail_reference_scan_failed".to_string())?;
+        if !entry
+            .file_type()
+            .map_err(|_| "mem_mail_reference_scan_failed".to_string())?
+            .is_dir()
+        {
+            continue;
+        }
+        let path = entry.path().join("mailbox.json");
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err("mem_mail_reference_scan_failed".to_string()),
+        };
+        // A malformed index fails closed: without its references, reclamation
+        // cannot prove that a body is unreachable.
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|_| "mem_mail_reference_parse_failed".to_string())?;
+        let Some(mailbox_name) = value.get("mailbox_name").and_then(Value::as_str) else {
+            return Err("mem_mail_reference_parse_failed".to_string());
+        };
+        if mailbox_name.is_empty() {
+            return Err("mem_mail_reference_parse_failed".to_string());
+        }
+        if let Some(entries) = value.get("entries") {
+            let entries = entries
+                .as_array()
+                .ok_or_else(|| "mem_mail_reference_parse_failed".to_string())?;
+            for entry in entries {
+                let Some(entry) = entry.as_object() else {
+                    return Err("mem_mail_reference_parse_failed".to_string());
+                };
+                let id = entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| "mem_mail_reference_parse_failed".to_string())?;
+                let direction = entry
+                    .get("dir")
+                    .and_then(Value::as_str)
+                    .filter(|dir| matches!(*dir, "in" | "out"))
+                    .ok_or_else(|| "mem_mail_reference_parse_failed".to_string())?;
+                for key in ["peer", "state"] {
+                    if entry.get(key).and_then(Value::as_str).is_none() {
+                        return Err("mem_mail_reference_parse_failed".to_string());
+                    }
+                }
+                if entry.get("created_at_ms").and_then(Value::as_u64).is_none()
+                    || entry.get("notified").and_then(Value::as_bool).is_none()
+                    || entry.get("receipt_sent").and_then(Value::as_bool).is_none()
+                    || entry
+                        .get("resp_timeout_secs")
+                        .and_then(Value::as_i64)
+                        .is_none()
+                {
+                    return Err("mem_mail_reference_parse_failed".to_string());
+                }
+                let _ = direction;
+                references.insert(id.to_string());
+            }
+        } else {
+            // Startup and lazy migration can overlap maintenance. Legacy
+            // indexes still provide authoritative liveness evidence.
+            if value.get("mails").is_none() && value.get("sent").is_none() {
+                return Err("mem_mail_reference_parse_failed".to_string());
+            }
+            for key in ["mails", "sent"] {
+                let Some(mails) = value.get(key) else {
+                    continue;
+                };
+                let mails = mails
+                    .as_array()
+                    .ok_or_else(|| "mem_mail_reference_parse_failed".to_string())?;
+                for mail in mails {
+                    let Some(mail) = mail.as_object() else {
+                        return Err("mem_mail_reference_parse_failed".to_string());
+                    };
+                    let id = mail
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        .ok_or_else(|| "mem_mail_reference_parse_failed".to_string())?;
+                    let peer_key = if key == "mails" { "from" } else { "to" };
+                    if mail.get(peer_key).and_then(Value::as_str).is_none()
+                        || mail.get("msg").and_then(Value::as_str).is_none()
+                        || mail.get("created_at_ms").and_then(Value::as_u64).is_none()
+                    {
+                        return Err("mem_mail_reference_parse_failed".to_string());
+                    }
+                    if key == "mails" && mail.get("kind").and_then(Value::as_str) == Some("receipt")
+                    {
+                        continue;
+                    }
+                    references.insert(id.to_string());
+                }
+            }
+        }
+    }
+    Ok(references)
+}
+
+/// Deletes the oldest archived mail blocks (ordered by archive time) until the
+/// requested byte and file targets are met, then drops the matching entries
+/// from every mailbox index. Unlike orphan reclamation this also evicts blocks
+/// that are still referenced: the mailbox budget is rolling, so an old block
+/// always yields to a newly arriving one instead of the new mail being refused.
+/// Caller holds mem_mail_runtime.io_lock.
+fn evict_oldest_mem_mail_locked(
+    state: &AppState,
+    dir: &Path,
+    bytes_to_free: u64,
+    files_to_free: u64,
+) -> Result<(u64, u64), String> {
+    if bytes_to_free == 0 && files_to_free == 0 {
+        return Ok((0, 0));
+    }
+    let references = mem_mail_references(state)?;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(_) => return Err("mem_mail_usage_read_failed".to_string()),
+    };
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|_| "mem_mail_usage_read_failed".to_string())?;
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if !name.starts_with("mail_") || !name.ends_with(".json") {
+            continue;
+        }
+        if !entry
+            .file_type()
+            .map_err(|_| "mem_mail_usage_read_failed".to_string())?
+            .is_file()
+        {
+            continue;
+        }
+        let id = name
+            .strip_prefix("mail_")
+            .and_then(|name| name.strip_suffix(".json"))
+            .unwrap_or("");
+        // Bodies that are not indexed yet are handled by the grace-protected
+        // orphan pass; eviction only removes established blocks.
+        if id.is_empty() || !references.contains(id) {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|_| "mem_mail_usage_read_failed".to_string())?;
+        candidates.push((
+            file_modified_ms(&metadata)?,
+            id.to_string(),
+            path,
+            metadata.len(),
+        ));
+    }
+    candidates.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+    let mut evicted = HashSet::new();
+    let mut freed_bytes = 0_u64;
+    let mut freed_files = 0_u64;
+    for (_, id, path, bytes) in candidates {
+        if freed_bytes >= bytes_to_free && freed_files >= files_to_free {
+            break;
+        }
+        std::fs::remove_file(&path).map_err(|_| "mem_mail_reclaim_failed".to_string())?;
+        evicted.insert(id);
+        freed_bytes = freed_bytes.saturating_add(bytes);
+        freed_files = freed_files.saturating_add(1);
+    }
+    if evicted.is_empty() {
+        return Ok((0, 0));
+    }
+    drop_mem_mail_index_entries(state, &evicted)?;
+    if let Ok(mut pending) = state.mem_mail_runtime.evicted_ids.lock() {
+        pending.extend(evicted.iter().cloned());
+        // The notification set only bridges one tick; bound it defensively so a
+        // stopped scheduler cannot grow it without limit.
+        if pending.len() > 64 * 1024 {
+            pending.clear();
+        }
+    }
+    refresh_mem_mail_usage(state, dir)?;
+    state
+        .mem_mail_runtime
+        .reclaimed_files
+        .fetch_add(freed_files, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .reclaimed_bytes
+        .fetch_add(freed_bytes, Ordering::Relaxed);
+    Ok((freed_bytes, freed_files))
+}
+
+/// Drops index entries whose body block has been evicted. Every mailbox index
+/// in this MEM is reconciled in one pass so a deleted block cannot stay visible
+/// in a session that is not currently ticking.
+fn drop_mem_mail_index_entries(state: &AppState, ids: &HashSet<String>) -> Result<(), String> {
+    let sessions_dir = current_session_store(state)?.sessions_dir();
+    let entries = match std::fs::read_dir(sessions_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("mem_mail_reference_scan_failed".to_string()),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|_| "mem_mail_reference_scan_failed".to_string())?;
+        if !entry
+            .file_type()
+            .map_err(|_| "mem_mail_reference_scan_failed".to_string())?
+            .is_dir()
+        {
+            continue;
+        }
+        let path = entry.path().join("mailbox.json");
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err("mem_mail_reference_scan_failed".to_string()),
+        };
+        let mut value: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| "mem_mail_reference_parse_failed".to_string())?;
+        let mut changed = false;
+        for key in ["entries", "mails", "sent"] {
+            let Some(items) = value.get_mut(key).and_then(Value::as_array_mut) else {
+                continue;
+            };
+            let before = items.len();
+            items.retain(|item| {
+                item.get("id")
+                    .and_then(Value::as_str)
+                    .is_none_or(|id| !ids.contains(id))
+            });
+            changed |= items.len() != before;
+        }
+        if !changed {
+            continue;
+        }
+        let encoded = serde_json::to_vec_pretty(&value)
+            .map_err(|_| "mailbox_state_serialize_failed".to_string())?;
+        agent_core::atomic_write_file(&path, &encoded)
+            .map_err(|_| "mailbox_state_write_failed".to_string())?;
+        if let Ok(mut cache) = state.mailbox_state_cache.lock() {
+            cache.remove(&path);
+        }
+    }
+    Ok(())
+}
+
+/// Caller holds mem_mail_runtime.io_lock. Reconcile usage from disk on every
+/// run so out-of-band file changes cannot make the cached budget drift.
+fn maintain_mem_mail_locked(
+    state: &AppState,
+    dir: &Path,
+    now_ms: u128,
+) -> Result<MemMailMaintenanceReport, String> {
+    let references = mem_mail_references(state)?;
+    let mut report = MemMailMaintenanceReport::default();
+    let mut candidates = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            refresh_mem_mail_usage(state, dir)?;
+            return Ok(report);
+        }
+        Err(_) => return Err("mem_mail_usage_read_failed".to_string()),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|_| "mem_mail_usage_read_failed".to_string())?;
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if !name.starts_with("mail_") || !name.ends_with(".json") {
+            continue;
+        }
+        let file_type = entry
+            .file_type()
+            .map_err(|_| "mem_mail_usage_read_failed".to_string())?;
+        if !file_type.is_file() {
+            return Err("mem_mail_usage_read_failed".to_string());
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|_| "mem_mail_usage_read_failed".to_string())?;
+        report.usage_files = report.usage_files.saturating_add(1);
+        report.usage_bytes = report.usage_bytes.saturating_add(metadata.len());
+        let id = name
+            .strip_prefix("mail_")
+            .and_then(|name| name.strip_suffix(".json"))
+            .unwrap_or("");
+        if references.contains(id) {
+            report.referenced_files += 1;
+        } else {
+            report.orphan_files += 1;
+            candidates.push((file_modified_ms(&metadata)?, path, metadata.len()));
+        }
+    }
+    candidates.sort_by_key(|(modified_ms, _, _)| *modified_ms);
+    let grace_ms = mem_mail_orphan_grace_ms();
+    for (modified_ms, path, bytes) in candidates {
+        if now_ms.saturating_sub(modified_ms) < grace_ms {
+            continue;
+        }
+        std::fs::remove_file(path).map_err(|_| "mem_mail_reclaim_failed".to_string())?;
+        report.reclaimed_files = report.reclaimed_files.saturating_add(1);
+        report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(bytes);
+        report.usage_files = report.usage_files.saturating_sub(1);
+        report.usage_bytes = report.usage_bytes.saturating_sub(bytes);
+    }
+    let index_bytes = mem_mail_index_usage(state)?;
+    let budget = mem_mail_max_bytes_for(state)?;
+    let file_budget = mem_mail_max_files();
+    // The index is not evictable, so byte pressure only triggers block
+    // eviction when the index alone can still fit under the budget.
+    let over_bytes = if index_bytes >= budget {
+        0
+    } else {
+        report
+            .usage_bytes
+            .saturating_add(index_bytes)
+            .saturating_sub(budget)
+    };
+    let over_files = report.usage_files.saturating_sub(file_budget);
+    if over_bytes > 0 || over_files > 0 {
+        let (freed_bytes, freed_files) =
+            evict_oldest_mem_mail_locked(state, dir, over_bytes, over_files)?;
+        report.evicted_files = freed_files;
+        report.evicted_bytes = freed_bytes;
+        report.reclaimed_files = report.reclaimed_files.saturating_add(freed_files);
+        report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(freed_bytes);
+        report.usage_files = report.usage_files.saturating_sub(freed_files);
+        report.usage_bytes = report.usage_bytes.saturating_sub(freed_bytes);
+    }
+    refresh_mem_mail_usage(state, dir)?;
+    state
+        .mem_mail_runtime
+        .maintenance_runs
+        .fetch_add(1, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .reclaimed_files
+        .fetch_add(report.reclaimed_files, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .reclaimed_bytes
+        .fetch_add(report.reclaimed_bytes, Ordering::Relaxed);
+    Ok(report)
+}
+
+/// Drains block ids evicted since the previous mailbox tick so an already
+/// loaded mailbox can drop entries whose body block is gone.
+fn take_evicted_mem_mail_ids(state: &AppState) -> HashSet<String> {
+    state
+        .mem_mail_runtime
+        .evicted_ids
+        .lock()
+        .map(|mut pending| std::mem::take(&mut *pending))
+        .unwrap_or_default()
+}
+
+fn maybe_maintain_mem_mail(state: &AppState, now_ms: u128) {
+    let due = state
+        .mem_mail_runtime
+        .next_maintenance_ms
+        .load(Ordering::Relaxed);
+    if (now_ms as u64) < due {
+        return;
+    }
+    let Ok(_io_guard) = state.mem_mail_runtime.io_lock.try_lock() else {
+        return;
+    };
+    state.mem_mail_runtime.next_maintenance_ms.store(
+        (now_ms as u64).saturating_add(MEM_MAIL_MAINTENANCE_INTERVAL_MS),
+        Ordering::Relaxed,
+    );
+    let Ok(dir) = mem_mail_dir(state) else {
+        return;
+    };
+    let verbose = env_flag("TIMEM_MAILBOX_MAINTENANCE_LOG");
+    match maintain_mem_mail_locked(state, &dir, now_ms) {
+        Ok(report) if mailbox_maintenance_should_log(verbose) => eprintln!(
+            "[timem_web_mailbox_maintenance] maintenance_runs={} referenced_files={} orphan_files={} reclaimed_files={} reclaimed_bytes={} usage_files={} usage_bytes={} budget_files={} budget_bytes={} capacity_rejections={} index_loads={} index_saves={} body_reads={} body_writes={}",
+            state.mem_mail_runtime.maintenance_runs.load(Ordering::Relaxed),
+            report.referenced_files,
+            report.orphan_files,
+            report.reclaimed_files,
+            report.reclaimed_bytes,
+            report.usage_files,
+            report.usage_bytes,
+            mem_mail_max_files(),
+            mem_mail_max_bytes_for(state).unwrap_or(mem_mail_max_bytes()),
+            state.mem_mail_runtime.capacity_rejections.load(Ordering::Relaxed),
+            state.mem_mail_runtime.index_loads.load(Ordering::Relaxed),
+            state.mem_mail_runtime.index_saves.load(Ordering::Relaxed),
+            state.mem_mail_runtime.body_reads.load(Ordering::Relaxed),
+            state.mem_mail_runtime.body_writes.load(Ordering::Relaxed)
+        ),
+        Ok(_) => {}
+        Err(error) => eprintln!("[timem_web_warning] mailbox_maintenance_failed reason={error}"),
+    }
+}
+
+fn store_mem_mail_with_budget(
+    state: &AppState,
+    mail: &MemMail,
+    enforce_budget: bool,
+) -> Result<(), String> {
+    let dir = mem_mail_dir(state)?;
+    let _io_guard = state
+        .mem_mail_runtime
+        .io_lock
+        .lock()
+        .map_err(|_| "mem_mail_runtime_poisoned")?;
+    ensure_mem_mail_usage(state, &dir)?;
+    let path = mem_mail_path_in_dir(&dir, &mail.id);
+    if path.exists() {
+        return match load_mem_mail(state, &mail.id) {
+            Ok(existing) if existing == *mail => Ok(()),
+            _ => Err("mem_mail_id_conflict".to_string()),
+        };
+    }
+    let bytes =
+        serde_json::to_vec_pretty(mail).map_err(|_| "mem_mail_serialize_failed".to_string())?;
+    let budget = mem_mail_max_bytes_for(state)?;
+    let file_budget = mem_mail_max_files();
+    let mut usage = state.mem_mail_runtime.usage_bytes.load(Ordering::Relaxed);
+    let mut files = state.mem_mail_runtime.usage_files.load(Ordering::Relaxed);
+    if enforce_budget && (usage.saturating_add(bytes.len() as u64) > budget || files >= file_budget)
+    {
+        // Do not rescan every session for every rejected envelope while the
+        // budget remains full. Fresh bodies are grace-protected until their
+        // index is saved; a later pass can reclaim newly orphaned history.
+        let now = now_ms();
+        let due = state
+            .mem_mail_runtime
+            .next_capacity_maintenance_ms
+            .load(Ordering::Relaxed);
+        if (now as u64) >= due {
+            state.mem_mail_runtime.next_capacity_maintenance_ms.store(
+                (now as u64).saturating_add(MEM_MAIL_CAPACITY_MAINTENANCE_INTERVAL_MS),
+                Ordering::Relaxed,
+            );
+            maintain_mem_mail_locked(state, &dir, now)?;
+            usage = state.mem_mail_runtime.usage_bytes.load(Ordering::Relaxed);
+            files = state.mem_mail_runtime.usage_files.load(Ordering::Relaxed);
+        }
+    }
+    // Mail storage is a transfer channel, not a second copy of conversation
+    // history. Judging it against the conversation-history budget let a long
+    // running session block every mailbox send while the history that caused
+    // the overflow kept growing untouched. The mailbox therefore answers only
+    // to its own budget, and exhausting that budget reclaims space instead of
+    // refusing the new mail.
+    let mailbox_full = |usage: u64, files: u64| -> Result<bool, String> {
+        Ok(files >= file_budget
+            || usage
+                .saturating_add(mem_mail_index_usage(state)?)
+                .saturating_add(bytes.len() as u64)
+                > budget)
+    };
+    if enforce_budget && mailbox_full(usage, files)? {
+        let _ = maintain_mem_mail_locked(state, &dir, now_ms());
+        usage = state.mem_mail_runtime.usage_bytes.load(Ordering::Relaxed);
+        files = state.mem_mail_runtime.usage_files.load(Ordering::Relaxed);
+        if mailbox_full(usage, files)? {
+            // Reclaim exactly the room this body needs from the oldest blocks.
+            let index_bytes = mem_mail_index_usage(state)?;
+            let need_bytes = usage
+                .saturating_add(index_bytes)
+                .saturating_add(bytes.len() as u64)
+                .saturating_sub(budget);
+            let need_files = if files >= file_budget {
+                files.saturating_sub(file_budget).saturating_add(1)
+            } else {
+                0
+            };
+            let _ = evict_oldest_mem_mail_locked(state, &dir, need_bytes, need_files);
+            usage = state.mem_mail_runtime.usage_bytes.load(Ordering::Relaxed);
+            files = state.mem_mail_runtime.usage_files.load(Ordering::Relaxed);
+        }
+        if mailbox_full(usage, files)? {
+            state
+                .mem_mail_runtime
+                .capacity_rejections
+                .fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "[timem_web_warning] mailbox_capacity_backpressure mail_id={:?} usage_files={} usage_bytes={} requested_bytes={} budget_files={} budget_bytes={}",
+                mail.id,
+                files,
+                usage,
+                bytes.len(),
+                file_budget,
+                budget
+            );
+            return Err("mem_mail_capacity_exceeded".to_string());
+        }
+    }
+    std::fs::create_dir_all(&dir).map_err(|_| "mem_mail_dir_create_failed".to_string())?;
+    agent_core::atomic_write_file(&path, &bytes)
+        .map_err(|_| "mem_mail_write_failed".to_string())?;
+    state
+        .mem_mail_runtime
+        .usage_bytes
+        .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .usage_files
+        .fetch_add(1, Ordering::Relaxed);
+    state
+        .mem_mail_runtime
+        .body_writes
+        .fetch_add(1, Ordering::Relaxed);
+    Ok(())
+}
+
+fn store_mem_mail(state: &AppState, mail: &MemMail) -> Result<(), String> {
+    store_mem_mail_with_budget(state, mail, true)
+}
+
+fn load_mem_mail_from_dir(dir: &Path, id: &str) -> Result<MemMail, String> {
+    let bytes = std::fs::read(mem_mail_path_in_dir(dir, id))
+        .map_err(|_| "mem_mail_read_failed".to_string())?;
+    serde_json::from_slice(&bytes).map_err(|_| "mem_mail_parse_failed".to_string())
+}
+
+fn load_mem_mail(state: &AppState, id: &str) -> Result<MemMail, String> {
+    let mail = load_mem_mail_from_dir(&mem_mail_dir(state)?, id)?;
+    state
+        .mem_mail_runtime
+        .body_reads
+        .fetch_add(1, Ordering::Relaxed);
+    Ok(mail)
+}
+
+fn entry_mem_mail(
+    state: &AppState,
+    dir: &Path,
+    mailbox_name: &str,
+    entry: &MailboxEntry,
+) -> MemMail {
+    load_mem_mail_from_dir(dir, &entry.id)
+        .inspect(|_| {
+            state
+                .mem_mail_runtime
+                .body_reads
+                .fetch_add(1, Ordering::Relaxed);
+        })
+        .unwrap_or_else(|_| MemMail {
+            id: entry.id.clone(),
+            from: if entry.dir == "in" {
+                entry.peer.clone()
+            } else {
+                mailbox_name.to_string()
+            },
+            to: if entry.dir == "in" {
+                mailbox_name.to_string()
+            } else {
+                entry.peer.clone()
+            },
+            msg: format!("[mail body unavailable: {}]", entry.id),
+            created_at_ms: entry.created_at_ms,
+        })
+}
+
+fn mailbox_snapshot(state: &AppState, mailbox: &MailboxState) -> MailboxSnapshot {
+    let mut mails = Vec::new();
+    let mut sent = Vec::new();
+    let mut unread = 0;
+    let dir = mem_mail_dir(state).unwrap_or_default();
+    for entry in &mailbox.entries {
+        let mail = entry_mem_mail(state, &dir, &mailbox.mailbox_name, entry);
+        if entry.dir == "in" {
+            if entry.state != "read" {
+                unread += 1;
+            }
+            mails.push(WebMailboxMail {
+                id: entry.id.clone(),
+                from: mail.from,
+                msg: mail.msg,
+                created_at_ms: entry.created_at_ms,
+                queue_timeout_secs: default_queue_timeout(),
+                kind: default_mail_kind(),
+                receipt_for: None,
+                delivered: entry.state == "read",
+                read: entry.state == "read",
+                receipt_sent: entry.receipt_sent,
+            });
+        } else {
+            sent.push(SentMail {
+                id: entry.id.clone(),
+                to: mail.to,
+                msg: mail.msg,
+                created_at_ms: entry.created_at_ms,
+                status: entry.state.clone(),
+                resp_timeout_secs: entry.resp_timeout_secs,
+                notified: entry.notified,
+            });
+        }
+    }
+    MailboxSnapshot {
+        mailbox_name: mailbox.mailbox_name.clone(),
+        mails,
+        sent,
+        unread,
+    }
+}
+
+/// Upper bound for each persisted index direction. Bodies remain in the
+/// global mail ledger even after an index entry is pruned.
+const MAILBOX_LIST_LIMIT: usize = 200;
+const MAILBOX_MAX_MSG_BYTES: usize = 64 * 1024;
+
+fn prune_mailbox_entries(entries: &mut Vec<MailboxEntry>) -> bool {
+    let before = entries.len();
+    for direction in ["in", "out"] {
+        let mut excess = entries
+            .iter()
+            .filter(|entry| entry.dir == direction)
+            .count()
+            .saturating_sub(MAILBOX_LIST_LIMIT);
+        if excess == 0 {
+            continue;
+        }
+        // Entries are append-ordered, so one retain pass removes the oldest
+        // settled history while preserving every pending delivery receipt or
+        // terminal notice. No Vec::remove loop and no quadratic shifting.
+        entries.retain(|entry| {
+            if excess == 0 || entry.dir != direction {
+                return true;
+            }
+            let removable = if direction == "in" {
+                entry.state == "read" && entry.receipt_sent
+            } else {
+                entry.state != "sent" && entry.notified
+            };
+            if removable {
+                excess -= 1;
+                false
+            } else {
+                true
+            }
+        });
+    }
+    before != entries.len()
+}
+
+fn mailbox_state_path(state: &AppState, session_id: &str) -> Result<PathBuf, String> {
+    let store = current_session_store(state)?;
+    let metadata = store.metadata_path_for_session(session_id);
+    metadata
+        .parent()
+        .map(|parent| parent.join("mailbox.json"))
+        .ok_or_else(|| "mailbox_path_invalid".to_string())
+}
+
+/// Persistent work file of a session: lives next to the session metadata
+/// in its mem storage and holds the guidance, plans, and progress of
+/// durable, complex work assigned to this session.
+fn session_work_file_path(state: &AppState, session_id: &str) -> Result<PathBuf, String> {
+    let store = current_session_store(state)?;
+    let metadata = store.metadata_path_for_session(session_id);
+    metadata
+        .parent()
+        .map(|parent| parent.join("Timem.md"))
+        .ok_or_else(|| "session_work_file_path_invalid".to_string())
+}
+
+fn is_compact_session_id(session_id: &str) -> bool {
+    crate::mailbox::is_compact_mailbox_id(session_id)
+}
+
+fn mint_mailbox_name(session_id: &str) -> String {
+    if is_compact_session_id(session_id) {
+        format!("id_{session_id}")
+    } else {
+        crate::mailbox::acquire_mailbox_name(&crate::mailbox::mailbox_spool_root())
+    }
+}
+
+fn migrate_legacy_mailbox_value(
+    state: &AppState,
+    value: &serde_json::Value,
+    mailbox_name: String,
+) -> Result<MailboxState, String> {
+    let mut entries = Vec::new();
+    for mail in value
+        .get("mails")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if mail.get("kind").and_then(serde_json::Value::as_str) == Some("receipt") {
+            continue;
+        }
+        let legacy: WebMailboxMail = serde_json::from_value(mail.clone())
+            .map_err(|_| "mailbox_legacy_mail_parse_failed".to_string())?;
+        let id = store_migrated_mem_mail(
+            state,
+            &MemMail {
+                id: legacy.id,
+                from: legacy.from.clone(),
+                to: mailbox_name.clone(),
+                msg: legacy.msg,
+                created_at_ms: legacy.created_at_ms,
+            },
+        )?;
+        entries.push(MailboxEntry {
+            id,
+            dir: "in".to_string(),
+            peer: legacy.from,
+            created_at_ms: legacy.created_at_ms,
+            state: if legacy.read { "read" } else { "queued" }.to_string(),
+            notified: true,
+            receipt_sent: legacy.receipt_sent,
+            resp_timeout_secs: default_resp_timeout(),
+        });
+    }
+    for mail in value
+        .get("sent")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let legacy: SentMail = serde_json::from_value(mail.clone())
+            .map_err(|_| "mailbox_legacy_sent_parse_failed".to_string())?;
+        let id = store_migrated_mem_mail(
+            state,
+            &MemMail {
+                id: legacy.id,
+                from: mailbox_name.clone(),
+                to: legacy.to.clone(),
+                msg: legacy.msg,
+                created_at_ms: legacy.created_at_ms,
+            },
+        )?;
+        entries.push(MailboxEntry {
+            id,
+            dir: "out".to_string(),
+            peer: legacy.to,
+            created_at_ms: legacy.created_at_ms,
+            state: legacy.status,
+            notified: legacy.notified,
+            receipt_sent: true,
+            resp_timeout_secs: legacy.resp_timeout_secs,
+        });
+    }
+    Ok(MailboxState {
+        mailbox_name,
+        entries,
+    })
+}
+
+fn parse_mailbox_value(
+    state: &AppState,
+    value: &serde_json::Value,
+) -> Result<MailboxState, String> {
+    let mailbox_name = value
+        .get("mailbox_name")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if value.get("entries").is_some() {
+        serde_json::from_value(value.clone()).map_err(|_| "mailbox_state_parse_failed".to_string())
+    } else if value.get("mails").is_some() || value.get("sent").is_some() {
+        migrate_legacy_mailbox_value(state, value, mailbox_name)
+    } else {
+        Err("mailbox_state_parse_failed".to_string())
+    }
+}
+
+/// Loads the body-free index, migrating legacy envelopes before treating a
+/// malformed file as corrupt. The spool remains derived, self-healing state.
+fn load_mailbox_state(state: &AppState, session_id: &str) -> Result<MailboxState, String> {
+    let path = mailbox_state_path(state, session_id)?;
+    if let Ok(metadata) = std::fs::metadata(&path) {
+        if let Ok(modified) = metadata.modified() {
+            let cached = state
+                .mailbox_state_cache
+                .lock()
+                .ok()
+                .and_then(|cache| cache.get(&path).cloned())
+                .filter(|cached| cached.modified == modified && cached.len == metadata.len());
+            if let Some(cached) = cached {
+                let _ = std::fs::create_dir_all(crate::mailbox::mailbox_spool_dir(
+                    &crate::mailbox::mailbox_spool_root(),
+                    &cached.mailbox.mailbox_name,
+                ));
+                return Ok(cached.mailbox);
+            }
+        }
+    }
+    if let Ok(bytes) = std::fs::read(&path) {
+        state
+            .mem_mail_runtime
+            .index_loads
+            .fetch_add(1, Ordering::Relaxed);
+        let parsed = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map_err(|_| "mailbox_state_parse_failed".to_string())
+            .and_then(|value| parse_mailbox_value(state, &value));
+        match parsed {
+            Ok(mailbox) => {
+                let was_legacy = serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .ok()
+                    .is_some_and(|value| value.get("entries").is_none());
+                if was_legacy {
+                    save_mailbox_state_at(&path, &mailbox)?;
+                }
+                let _ = std::fs::create_dir_all(crate::mailbox::mailbox_spool_dir(
+                    &crate::mailbox::mailbox_spool_root(),
+                    &mailbox.mailbox_name,
+                ));
+                if mailbox
+                    .entries
+                    .iter()
+                    .any(|entry| entry.dir != "in" && entry.dir != "out")
+                {
+                    return Err("mailbox_entry_direction_invalid".to_string());
+                }
+                cache_mailbox_state(state, &path, &mailbox);
+                return Ok(mailbox);
+            }
+            Err(error) => {
+                let was_legacy = serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .ok()
+                    .is_some_and(|value| {
+                        value.get("entries").is_none()
+                            && (value.get("mails").is_some() || value.get("sent").is_some())
+                    });
+                if was_legacy {
+                    return Err(error);
+                }
+                let backup = path.with_extension("json.corrupt");
+                let _ = std::fs::rename(&path, &backup);
+                eprintln!(
+                    "[timem_web_warning] mailbox_state_corrupt backup={backup:?} reason={error}"
+                );
+            }
+        }
+    }
+    let mailbox = MailboxState {
+        mailbox_name: mint_mailbox_name(session_id),
+        entries: Vec::new(),
+    };
+    std::fs::create_dir_all(crate::mailbox::mailbox_spool_dir(
+        &crate::mailbox::mailbox_spool_root(),
+        &mailbox.mailbox_name,
+    ))
+    .map_err(|_| "mailbox_spool_create_failed".to_string())?;
+    save_mailbox_state_at(&path, &mailbox)?;
+    cache_mailbox_state(state, &path, &mailbox);
+    Ok(mailbox)
+}
+
+fn cache_mailbox_state(state: &AppState, path: &Path, mailbox: &MailboxState) {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return;
+    };
+    if let Ok(mut cache) = state.mailbox_state_cache.lock() {
+        if cache.len() >= MAILBOX_STATE_CACHE_LIMIT && !cache.contains_key(path) {
+            if let Some(oldest) = cache.keys().next().cloned() {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(
+            path.to_path_buf(),
+            CachedMailboxState {
+                modified,
+                len: metadata.len(),
+                mailbox: mailbox.clone(),
+            },
+        );
+    }
+}
+
+fn save_mailbox_state_at(path: &Path, mailbox: &MailboxState) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(mailbox)
+        .map_err(|_| "mailbox_state_serialize_failed".to_string())?;
+    agent_core::atomic_write_file(path, &bytes)
+        .map_err(|_| "mailbox_state_write_failed".to_string())
+}
+
+fn save_mailbox_state(
+    state: &AppState,
+    session_id: &str,
+    mailbox: &MailboxState,
+) -> Result<(), String> {
+    let path = mailbox_state_path(state, session_id)?;
+    save_mailbox_state_at(&path, mailbox)?;
+    state
+        .mem_mail_runtime
+        .index_saves
+        .fetch_add(1, Ordering::Relaxed);
+    cache_mailbox_state(state, &path, mailbox);
+    Ok(())
+}
+
+fn apply_mailbox_receipt_to_entry(
+    sent: &mut MailboxEntry,
+    receipt: &crate::mailbox::MailboxMail,
+) -> bool {
+    let status = receipt.receipt_status.as_deref().unwrap_or("read");
+    if !matches!(status, "read" | "timeout" | "discarded" | "failed") {
+        return false;
+    }
+    let should_update = if status == "read" {
+        sent.state != "read"
+    } else {
+        sent.state == "sent"
+    };
+    if !should_update {
+        return false;
+    }
+    sent.state = status.to_string();
+    sent.notified = false;
+    true
+}
+
+#[cfg(test)]
+fn apply_mailbox_receipt(
+    mailbox: &mut MailboxState,
+    receipt: &crate::mailbox::MailboxMail,
+) -> bool {
+    let Some(receipt_for) = receipt.receipt_for.as_deref() else {
+        return false;
+    };
+    let Some(sent) = mailbox
+        .entries
+        .iter_mut()
+        .find(|entry| entry.dir == "out" && entry.id == receipt_for)
+    else {
+        return false;
+    };
+    apply_mailbox_receipt_to_entry(sent, receipt)
+}
+
+fn mailbox_terminal_notice(sent: &MailboxEntry) -> Option<String> {
+    if sent.notified || sent.dir != "out" {
+        return None;
+    }
+    let text = match sent.state.as_str() {
+        "read" => format!("[mailbox] 邮件 {} 已被 {} 读取", sent.id, sent.peer),
+        "timeout" => format!(
+            "[mailbox] 邮件 {} 未被 {} 读取（已读超时）",
+            sent.id, sent.peer
+        ),
+        "discarded" => format!("[mailbox] 邮件 {} 被 {} 丢弃（未读取）", sent.id, sent.peer),
+        "failed" => format!("[mailbox] 邮件 {} 投递到 {} 失败", sent.id, sent.peer),
+        _ => return None,
+    };
+    Some(text)
+}
+
+const MAILBOX_SCHEDULER_INTERVAL: std::time::Duration = std::time::Duration::from_millis(600);
+
+fn spawn_mailbox_scheduler(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            mailbox_tick(&state);
+            sleep(MAILBOX_SCHEDULER_INTERVAL).await;
+        }
+    });
+}
+
+fn mailbox_receipt(
+    mail_id: &str,
+    from: &str,
+    to: &str,
+    status: &str,
+) -> crate::mailbox::MailboxMail {
+    crate::mailbox::MailboxMail {
+        id: unique_web_id("receipt"),
+        from: from.to_string(),
+        to: to.to_string(),
+        msg: format!("mail {mail_id}: {status}"),
+        created_at_ms: now_ms(),
+        queue_timeout_secs: 0,
+        resp_timeout_secs: -1,
+        kind: "receipt".to_string(),
+        receipt_for: Some(mail_id.to_string()),
+        receipt_status: Some(status.to_string()),
+    }
+}
+
+fn write_mailbox_receipt(mail_id: &str, from: &str, to: &str, status: &str) -> Result<(), String> {
+    crate::mailbox::write_mail(
+        &crate::mailbox::mailbox_spool_root(),
+        &mailbox_receipt(mail_id, from, to, status),
+    )
+}
+
+fn mailbox_deadline_reached(created_at_ms: u128, timeout_secs: i64, now: u128) -> bool {
+    timeout_secs >= 0
+        && now.saturating_sub(created_at_ms) >= (timeout_secs as u128).saturating_mul(1000)
+}
+
+/// Scans every live session's spool, persists bodies and indexes before
+/// unlinking envelopes, then surfaces queued mail and terminal notices.
+fn mailbox_tick(state: &AppState) {
+    if state
+        .session_restore_in_progress
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
+    let now = now_ms();
+    maybe_maintain_mem_mail(state, now);
+    let targets: Vec<String> = {
+        let Ok(sessions) = state.sessions.lock() else {
+            return;
+        };
+        sessions
+            .values()
+            .filter(|session| !session.workers.is_empty())
+            .map(|session| session.session_id.clone())
+            .collect()
+    };
+    for session_id in targets {
+        let mut mailbox = match load_mailbox_state(state, &session_id) {
+            Ok(mailbox) => mailbox,
+            Err(error) => {
+                eprintln!(
+                    "[timem_web_warning] mailbox_state_load_failed session_id={session_id:?} reason={error}"
+                );
+                continue;
+            }
+        };
+        let spool_dir = crate::mailbox::mailbox_spool_dir(
+            &crate::mailbox::mailbox_spool_root(),
+            &mailbox.mailbox_name,
+        );
+        let mut changed = false;
+        let mut intake_paths = Vec::new();
+        let mut known_ids: HashSet<String> = mailbox
+            .entries
+            .iter()
+            .map(|entry| entry.id.clone())
+            .collect();
+        let outgoing_ids: HashMap<String, usize> = mailbox
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.dir == "out")
+            .map(|(index, entry)| (entry.id.clone(), index))
+            .collect();
+        for (path, mail) in crate::mailbox::scan_mails(&spool_dir) {
+            if mail.kind == "receipt" {
+                if let Some(index) = mail
+                    .receipt_for
+                    .as_deref()
+                    .and_then(|id| outgoing_ids.get(id).copied())
+                {
+                    changed |= apply_mailbox_receipt_to_entry(&mut mailbox.entries[index], &mail);
+                }
+            } else if !known_ids.contains(&mail.id) {
+                let stored = store_mem_mail(
+                    state,
+                    &MemMail {
+                        id: mail.id.clone(),
+                        from: mail.from.clone(),
+                        to: mail.to.clone(),
+                        msg: mail.msg,
+                        created_at_ms: mail.created_at_ms,
+                    },
+                );
+                if let Err(error) = stored {
+                    eprintln!(
+                        "[timem_web_warning] mailbox_intake_body_save_failed session_id={session_id:?} mail_id={:?} reason={error}",
+                        mail.id
+                    );
+                    // Keep the envelope: capacity pressure or an I/O failure
+                    // must retry later rather than silently dropping mail.
+                    continue;
+                }
+                known_ids.insert(mail.id.clone());
+                mailbox.entries.push(MailboxEntry {
+                    id: mail.id,
+                    dir: "in".to_string(),
+                    peer: mail.from,
+                    created_at_ms: mail.created_at_ms,
+                    state: "queued".to_string(),
+                    notified: true,
+                    receipt_sent: false,
+                    resp_timeout_secs: default_resp_timeout(),
+                });
+                changed = true;
+            }
+            intake_paths.push(path);
+        }
+        for sent in mailbox
+            .entries
+            .iter_mut()
+            .filter(|entry| entry.dir == "out")
+        {
+            if sent.state == "sent"
+                && mailbox_deadline_reached(sent.created_at_ms, sent.resp_timeout_secs, now)
+            {
+                sent.state = "timeout".to_string();
+                sent.notified = false;
+                changed = true;
+            }
+        }
+        changed |= prune_mailbox_entries(&mut mailbox.entries);
+        let evicted_ids = take_evicted_mem_mail_ids(state);
+        if !evicted_ids.is_empty() {
+            let before = mailbox.entries.len();
+            mailbox
+                .entries
+                .retain(|entry| !evicted_ids.contains(&entry.id));
+            changed |= mailbox.entries.len() != before;
+        }
+        if changed {
+            if let Err(error) = save_mailbox_state(state, &session_id, &mailbox) {
+                eprintln!(
+                    "[timem_web_warning] mailbox_state_save_failed session_id={session_id:?} reason={error}"
+                );
+                continue;
+            }
+        }
+        let intake_changed = changed;
+        changed = false;
+        for path in intake_paths {
+            // Save precedes unlink. A crash replays envelopes and the id set
+            // deduplicates intake without duplicate bodies or entries.
+            let _ = std::fs::remove_file(path);
+        }
+
+        // Deliver in-place, then persist all read transitions before writing
+        // any corresponding receipt. This preserves the crash guarantee while
+        // requiring only one read-state save for the entire burst.
+        let self_name = mailbox.mailbox_name.clone();
+        for index in 0..mailbox.entries.len() {
+            if mailbox.entries[index].dir != "in" || mailbox.entries[index].state != "queued" {
+                continue;
+            }
+            let entry = &mailbox.entries[index];
+            let mail = match load_mem_mail(state, &entry.id) {
+                Ok(mail) => mail,
+                Err(error) => {
+                    eprintln!(
+                        "[timem_web_warning] mailbox_delivery_body_load_failed session_id={session_id:?} mail_id={:?} reason={error}",
+                        entry.id
+                    );
+                    continue;
+                }
+            };
+            let prompt = format!("[mailbox] {} 发来 mail:\n{}", mail.from, mail.msg);
+            if deliver_mailbox_prompt(state, &session_id, &prompt, "mailbox").is_ok() {
+                mailbox.entries[index].state = "read".to_string();
+                changed = true;
+            }
+        }
+        if changed {
+            if let Err(error) = save_mailbox_state(state, &session_id, &mailbox) {
+                eprintln!(
+                    "[timem_web_warning] mailbox_read_state_save_failed session_id={session_id:?} reason={error}"
+                );
+                // No receipts for these in-memory-only read transitions.
+                continue;
+            }
+        }
+        let delivery_changed = changed;
+        changed = false;
+        for index in 0..mailbox.entries.len() {
+            let entry = &mailbox.entries[index];
+            if entry.dir != "in" || entry.state != "read" || entry.receipt_sent {
+                continue;
+            }
+            if write_mailbox_receipt(&entry.id, &self_name, &entry.peer, "read").is_ok() {
+                mailbox.entries[index].receipt_sent = true;
+                changed = true;
+            }
+        }
+        // Mail ids folded into a send action result must not also surface as
+        // a terminal notice (double delivery).
+        let send_receipt_watched = |mail_id: &str| {
+            state
+                .mailbox_send_receipt_watch
+                .lock()
+                .map(|watch| watch.contains(&(session_id.clone(), mail_id.to_string())))
+                .unwrap_or(false)
+        };
+        let notices: Vec<String> = mailbox
+            .entries
+            .iter()
+            .filter(|entry| entry.dir == "out" && entry.state != "sent")
+            .filter(|entry| !send_receipt_watched(&entry.id))
+            .filter_map(mailbox_terminal_notice)
+            .collect();
+        if !notices.is_empty()
+            && deliver_mailbox_prompt(state, &session_id, &notices.join("\n"), "mailbox_status")
+                .is_ok()
+        {
+            for sent in mailbox
+                .entries
+                .iter_mut()
+                .filter(|entry| entry.dir == "out" && entry.state != "sent" && !entry.notified)
+                .filter(|entry| !send_receipt_watched(&entry.id))
+            {
+                sent.notified = true;
+                changed = true;
+            }
+        }
+        changed |= prune_mailbox_entries(&mut mailbox.entries);
+        if changed {
+            if let Err(error) = save_mailbox_state(state, &session_id, &mailbox) {
+                eprintln!(
+                    "[timem_web_warning] mailbox_state_save_failed session_id={session_id:?} reason={error}"
+                );
+                continue;
+            }
+        }
+        if intake_changed || delivery_changed || changed {
+            publish_semantic(
+                state,
+                WireEvent::MailboxUpdated {
+                    session_id,
+                    mailbox: mailbox_snapshot(state, &mailbox),
+                },
+            );
+        }
+    }
+}
+
+/// Mailbox delivery mirrors the timer immediate branch: an active turn
+/// receives the prompt as a supplement; an idle session starts a fresh turn.
+fn deliver_mailbox_prompt(
+    state: &AppState,
+    session_id: &str,
+    text: &str,
+    entry_kind: &str,
+) -> Result<(), String> {
+    let turn_active = state
         .sessions
         .lock()
         .ok()
         .and_then(|sessions| {
-            sessions.get(session_id).map(|session| {
-                current_turn_id(session).is_none() && session.message_queue.is_empty()
-            })
+            sessions
+                .get(session_id)
+                .map(|session| current_turn_id(session).is_some())
         })
         .unwrap_or(false);
+    if turn_active {
+        if let Ok(Some(turn)) = try_append_turn_supplement_with_kind(
+            state,
+            session_id,
+            text.to_string(),
+            None,
+            None,
+            Vec::new(),
+            entry_kind,
+        ) {
+            publish_semantic(
+                state,
+                WireEvent::TurnUpdated {
+                    session_id: session_id.to_string(),
+                    turn,
+                },
+            );
+            return Ok(());
+        }
+    }
+    submit_turn_with_selected_attachments_and_kind(
+        state,
+        session_id,
+        text.to_string(),
+        None,
+        None,
+        Vec::new(),
+        entry_kind,
+    )
+    .map(|_| ())
+}
+
+/// Reads a session's minted mailbox name without side effects: sessions that
+/// never touched their mailbox are skipped (lookup must not mint addresses).
+fn read_local_mailbox_name(state: &AppState, session_id: &str) -> Option<String> {
+    let bytes = std::fs::read(mailbox_state_path(state, session_id).ok()?).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value
+        .get("mailbox_name")?
+        .as_str()
+        .map(std::string::ToString::to_string)
+}
+
+/// Mirrors the Host-owned mailbox address into the worker so Core can restate
+/// it once after a compaction or a context clear. Read-only: a session that
+/// never used its mailbox is not minted here.
+fn sync_worker_mailbox_name(
+    state: &AppState,
+    session_id: &str,
+    worker: &CoreSessionWorkerHandle,
+) -> Result<(), String> {
+    let name = read_local_mailbox_name(state, session_id);
+    worker.update_mailbox_name(name)
+}
+
+/// Mirrors this session's persistent work file path into the worker so the
+/// Core can restate it after a compaction or a context clear.
+fn sync_worker_session_work_file(
+    state: &AppState,
+    session_id: &str,
+    worker: &CoreSessionWorkerHandle,
+) -> Result<(), String> {
+    let path = session_work_file_path(state, session_id)
+        .map(|path| path.display().to_string())
+        .ok();
+    worker.update_session_work_file(path)
+}
+
+/// Resolves a mailbox name to a session of this very instance, if any.
+fn find_local_session_by_mailbox(state: &AppState, mailbox_name: &str) -> Option<String> {
+    let session_ids: Vec<String> = {
+        let sessions = state.sessions.lock().ok()?;
+        sessions
+            .values()
+            .map(|session| session.session_id.clone())
+            .collect()
+    };
+    let bare_recipient = crate::mailbox::normalize_mailbox_id(mailbox_name);
+    session_ids.into_iter().find(|session_id| {
+        read_local_mailbox_name(state, session_id)
+            .map(|name| crate::mailbox::normalize_mailbox_id(&name))
+            .as_deref()
+            == Some(bare_recipient.as_str())
+    })
+}
+
+/// In-process delivery for local recipients: no spool envelope or receipt is
+/// created. Injection counts as read, matching the cross-instance intake.
+fn deliver_local_mailbox_mail(
+    state: &AppState,
+    recipient_session_id: &str,
+    mail: &MemMail,
+) -> Result<(), String> {
+    let prompt = format!("[mailbox] {} 发来 mail:\n{}", mail.from, mail.msg);
+    deliver_mailbox_prompt(state, recipient_session_id, &prompt, "mailbox")?;
+    let mut mailbox = load_mailbox_state(state, recipient_session_id)
+        .map_err(|error| format!("recipient_mailbox_state_load_failed:{error}"))?;
+    mailbox.entries.push(MailboxEntry {
+        id: mail.id.clone(),
+        dir: "in".to_string(),
+        peer: mail.from.clone(),
+        created_at_ms: mail.created_at_ms,
+        state: "read".to_string(),
+        notified: true,
+        receipt_sent: true,
+        resp_timeout_secs: default_resp_timeout(),
+    });
+    if let Err(error) = save_mailbox_state(state, recipient_session_id, &mailbox) {
+        eprintln!(
+            "[timem_web_warning] mailbox_local_intake_save_failed session_id={recipient_session_id:?} reason={error}"
+        );
+        return Err(format!("recipient_mailbox_state_save_failed:{error}"));
+    }
+    publish_semantic(
+        state,
+        WireEvent::MailboxUpdated {
+            session_id: recipient_session_id.to_string(),
+            mailbox: mailbox_snapshot(state, &mailbox),
+        },
+    );
+    Ok(())
+}
+
+fn write_mail_envelope(
+    spool_root: &Path,
+    mail: &MemMail,
+    queue_timeout_secs: i64,
+    resp_timeout_secs: i64,
+) -> Result<(), String> {
+    crate::mailbox::write_mail(
+        spool_root,
+        &crate::mailbox::MailboxMail {
+            id: mail.id.clone(),
+            from: mail.from.clone(),
+            to: mail.to.clone(),
+            msg: mail.msg.clone(),
+            created_at_ms: mail.created_at_ms,
+            queue_timeout_secs,
+            resp_timeout_secs,
+            kind: "mail".to_string(),
+            receipt_for: None,
+            receipt_status: None,
+        },
+    )
+}
+
+fn valid_mail_id(value: &str) -> bool {
+    value.len() >= 6
+        && value.len() <= 64
+        && value.starts_with("mail_")
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+/// Post-send wait for a fast read receipt. Configurable so tests can skip
+/// the window (`TIMEM_MAILBOX_RECEIPT_WAIT_MS=0`) or shorten it.
+fn mailbox_receipt_wait_ms() -> u64 {
+    std::env::var("TIMEM_MAILBOX_RECEIPT_WAIT_MS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(2000)
+}
+
+fn handle_mailbox_send_topic(
+    state: &AppState,
+    session_id: &str,
+    payload: &serde_json::Value,
+) -> Option<(String, bool)> {
+    // Accept canonical id_ addresses plus legacy mb- and bare ids: normalize
+    // first so one id keeps addressing the same session and spool resources.
+    let to = crate::mailbox::canonical_mailbox_id(payload["to"].as_str().unwrap_or(""));
+    let msg = payload["msg"].as_str().unwrap_or("").to_string();
+    let queue_timeout_secs = payload["queue_timeout_secs"]
+        .as_i64()
+        .or_else(|| payload["max_wait_secs"].as_i64())
+        .unwrap_or(agent_core::host::MAILBOX_DEFAULT_QUEUE_TIMEOUT_SECS);
+    let resp_timeout_secs = payload["resp_timeout_secs"]
+        .as_i64()
+        .unwrap_or(agent_core::host::MAILBOX_DEFAULT_RESP_TIMEOUT_SECS);
+    if to.is_empty() || msg.is_empty() {
+        return None;
+    }
+    let Ok(mut sender_mailbox) = load_mailbox_state(state, session_id) else {
+        return None;
+    };
+    let spool_root = crate::mailbox::mailbox_spool_root();
+    let mut msg = msg;
+    let mut status = "sent";
+    if msg.len() > MAILBOX_MAX_MSG_BYTES {
+        status = "failed";
+        msg = format!("[refused oversized body: {} bytes]", msg.len());
+    }
+    let local_recipient = if status == "sent" {
+        find_local_session_by_mailbox(state, &to)
+    } else {
+        None
+    };
+    let created_at_ms = now_ms();
+    // The mailbox tool generates the id and reports it in its action result.
+    // Topic delivery is asynchronous, so the Host must adopt that id instead of
+    // minting a second one; otherwise later receipts name an id the model has
+    // never seen. Older callers without an id keep the host-generated path.
+    let provided_mail_id = payload["mail_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|value| valid_mail_id(value))
+        .map(str::to_string);
+    let mut mail_id = provided_mail_id
+        .clone()
+        .unwrap_or_else(|| crate::mailbox::generate_mail_id(&msg, created_at_ms, &to));
+    let mut unique = false;
+    for _ in 0..8 {
+        let taken = mem_mail_exists(state, &mail_id)
+            || sender_mailbox
+                .entries
+                .iter()
+                .any(|entry| entry.id == mail_id)
+            || crate::mailbox::spool_contains_mail(&spool_root, &to, &mail_id);
+        if !taken {
+            unique = true;
+            break;
+        }
+        if provided_mail_id.is_some() {
+            break;
+        }
+        mail_id = crate::mailbox::generate_mail_id(&msg, created_at_ms, &to);
+    }
+    if !unique {
+        if provided_mail_id.is_none() {
+            eprintln!("[timem_web_warning] mailbox_send_failed to={to:?} reason=mail_id_collision");
+            return Some((mail_id, false));
+        }
+        // Keep the caller's id so the failure notice matches the action result;
+        // never fabricate a body or spool envelope under a duplicate id.
+        status = "failed";
+    }
+    // Watch the mail id before any delivery attempt: mailbox_tick must
+    // suppress the terminal notice while this handler folds the receipt into
+    // the action result.
+    let watch_registered = if status == "sent" {
+        if let Ok(mut watch) = state.mailbox_send_receipt_watch.lock() {
+            watch.insert((session_id.to_string(), mail_id.clone()))
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    let mail = MemMail {
+        id: mail_id.clone(),
+        from: sender_mailbox.mailbox_name.clone(),
+        to: to.clone(),
+        msg,
+        created_at_ms,
+    };
+    let body_stored = if unique {
+        match store_mem_mail(state, &mail) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("[timem_web_warning] mailbox_send_failed to={to:?} reason={error}");
+                status = "failed";
+                false
+            }
+        }
+    } else {
+        false
+    };
+    if !body_stored {
+        // Keep a terminal metadata entry so the sending session receives a
+        // failure notice; no body or spool envelope is fabricated at capacity.
+    } else if let Some(recipient_session_id) = local_recipient.as_deref() {
+        match deliver_local_mailbox_mail(state, recipient_session_id, &mail) {
+            Ok(()) => status = "read",
+            Err(reason) => {
+                eprintln!(
+                    "[timem_web_warning] mailbox_local_delivery_deferred to={to:?} mail_id={mail_id:?} reason={reason}"
+                );
+                state.lifecycle_diagnostics.checkpoint(
+                    "mailbox_local_delivery_deferred",
+                    serde_json::json!({
+                        "to": &to,
+                        "mail_id": &mail_id,
+                        "reason": &reason,
+                    }),
+                );
+                if let Err(error) =
+                    write_mail_envelope(&spool_root, &mail, queue_timeout_secs, resp_timeout_secs)
+                {
+                    eprintln!("[timem_web_warning] mailbox_send_failed to={to:?} reason={error}");
+                    status = "failed";
+                }
+            }
+        }
+        // A deferred local hand-off (active turn ending, worker not ready,
+        // restart cwd decision pending) leaves the envelope spooled; the
+        // recipient's mailbox scheduler retries it instead of losing the mail.
+    } else if status == "sent" {
+        if !crate::mailbox::mailbox_exists(&spool_root, &to) {
+            status = "failed";
+        } else if let Err(error) =
+            write_mail_envelope(&spool_root, &mail, queue_timeout_secs, resp_timeout_secs)
+        {
+            eprintln!("[timem_web_warning] mailbox_send_failed to={to:?} reason={error}");
+            status = "failed";
+        }
+    }
+    sender_mailbox.entries.push(MailboxEntry {
+        id: mail_id.clone(),
+        dir: "out".to_string(),
+        peer: to,
+        created_at_ms,
+        state: status.to_string(),
+        notified: false,
+        receipt_sent: true,
+        resp_timeout_secs,
+    });
+    prune_mailbox_entries(&mut sender_mailbox.entries);
+    if let Err(error) = save_mailbox_state(state, session_id, &sender_mailbox) {
+        eprintln!(
+            "[timem_web_warning] mailbox_sent_ledger_save_failed session_id={session_id:?} reason={error}"
+        );
+    }
+    publish_semantic(
+        state,
+        WireEvent::MailboxUpdated {
+            session_id: session_id.to_string(),
+            mailbox: mailbox_snapshot(state, &sender_mailbox),
+        },
+    );
+    // Give a fast receiver a moment to consume the mail: fold the read
+    // receipt into the action result instead of a separate [mailbox] notice.
+    let mut initially_read = false;
+    if watch_registered {
+        let deadline = std::time::Instant::now() + Duration::from_millis(mailbox_receipt_wait_ms());
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+            let Ok(mailbox) = load_mailbox_state(state, session_id) else {
+                break;
+            };
+            match mailbox
+                .entries
+                .iter()
+                .find(|entry| entry.dir == "out" && entry.id == mail_id)
+                .map(|entry| entry.state.as_str())
+            {
+                Some("read") => {
+                    initially_read = true;
+                    break;
+                }
+                Some("timeout" | "discarded" | "failed") => break,
+                _ => {}
+            }
+        }
+        // Ordering matters at this boundary: the entry must be marked as
+        // notified (and saved) BEFORE the watch is released. Releasing first
+        // would let mailbox_tick deliver the notice in the gap and duplicate
+        // the receipt that already rides the action result. The scheduler
+        // runs on its own task: a stale snapshot it loaded before our mark
+        // and saved after (carrying unrelated entry changes) can roll
+        // `notified` back, so release only after a verified mark — re-marking
+        // once if the flag was lost. The residual exposure shrinks to the
+        // microseconds between the verified save and the watch removal.
+        if initially_read {
+            for _ in 0..2 {
+                let marked = load_mailbox_state(state, session_id)
+                    .ok()
+                    .and_then(|mut mailbox| {
+                        let entry = mailbox
+                            .entries
+                            .iter_mut()
+                            .find(|entry| entry.dir == "out" && entry.id == mail_id)?;
+                        if entry.notified {
+                            return Some(());
+                        }
+                        entry.notified = true;
+                        save_mailbox_state(state, session_id, &mailbox).ok()?;
+                        Some(())
+                    });
+                if marked == Some(()) {
+                    break;
+                }
+            }
+        }
+        if let Ok(mut watch) = state.mailbox_send_receipt_watch.lock() {
+            watch.remove(&(session_id.to_string(), mail_id.clone()));
+        }
+    }
+    Some((mail_id, initially_read))
+}
+
+fn deliver_timer_fire(
+    state: &AppState,
+    session_id: &str,
+    timer_id: &str,
+    fire_text: &str,
+    queue_timeout_minutes: u64,
+) -> bool {
+    let turn_active = state
+        .sessions
+        .lock()
+        .ok()
+        .and_then(|sessions| {
+            sessions
+                .get(session_id)
+                .map(|session| current_turn_id(session).is_some())
+        })
+        .unwrap_or(false);
+    if queue_timeout_minutes == 0 {
+        // Immediate mode mirrors the user typing right now: an active turn
+        // receives the prompt as a supplement; an idle session starts a new
+        // turn even when queued messages are still waiting.
+        if turn_active {
+            match try_append_turn_supplement(
+                state,
+                session_id,
+                fire_text.to_string(),
+                None,
+                None,
+                Vec::new(),
+            ) {
+                Ok(Some(turn)) => {
+                    publish_semantic(
+                        state,
+                        WireEvent::TurnUpdated {
+                            session_id: session_id.to_string(),
+                            turn,
+                        },
+                    );
+                    return true;
+                }
+                // The turn closed between the check and the append: fall
+                // through and start a fresh turn below.
+                Ok(None) => {}
+                Err(error) => {
+                    log_timer_fire_failure(state, session_id, timer_id, &error);
+                    return enqueue_timer_fire(
+                        state,
+                        session_id,
+                        timer_id,
+                        fire_text.to_string(),
+                        queue_timeout_minutes,
+                    );
+                }
+            }
+        }
+        return match submit_turn_with_selected_attachments_and_kind(
+            state,
+            session_id,
+            fire_text.to_string(),
+            None,
+            None,
+            Vec::new(),
+            "timer",
+        ) {
+            Ok(_) => true,
+            Err(error) => {
+                log_timer_fire_failure(state, session_id, timer_id, &error);
+                // Never drop or park the fired prompt behind a delivery
+                // hiccup; queue delivery is the lossless fallback.
+                enqueue_timer_fire(
+                    state,
+                    session_id,
+                    timer_id,
+                    fire_text.to_string(),
+                    queue_timeout_minutes,
+                )
+            }
+        };
+    }
+    let idle = !turn_active
+        && state
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|sessions| {
+                sessions
+                    .get(session_id)
+                    .map(|session| session.message_queue.is_empty())
+            })
+            .unwrap_or(false);
     if idle {
         return match submit_turn_with_selected_attachments_and_kind(
             state,
@@ -7765,7 +11469,13 @@ fn deliver_timer_fire(state: &AppState, session_id: &str, timer_id: &str, fire_t
                     })
                     .unwrap_or(false);
                 if turn_active {
-                    enqueue_timer_fire(state, session_id, timer_id, fire_text.to_string())
+                    enqueue_timer_fire(
+                        state,
+                        session_id,
+                        timer_id,
+                        fire_text.to_string(),
+                        queue_timeout_minutes,
+                    )
                 } else {
                     log_timer_fire_failure(state, session_id, timer_id, &error);
                     false
@@ -7773,7 +11483,13 @@ fn deliver_timer_fire(state: &AppState, session_id: &str, timer_id: &str, fire_t
             }
         };
     }
-    enqueue_timer_fire(state, session_id, timer_id, fire_text.to_string())
+    enqueue_timer_fire(
+        state,
+        session_id,
+        timer_id,
+        fire_text.to_string(),
+        queue_timeout_minutes,
+    )
 }
 
 fn enqueue_timer_fire(
@@ -7781,9 +11497,27 @@ fn enqueue_timer_fire(
     session_id: &str,
     timer_id: &str,
     fire_text: String,
+    queue_timeout_minutes: u64,
 ) -> bool {
     let command_id = unique_web_id("timer_fire");
-    match enqueue_next_turn_intent(state, session_id, &command_id, fire_text, None, Vec::new()) {
+    // The wait cap is anchored at fire time: once the wall clock passes the
+    // deadline the queued entry is dispatched immediately out of order.
+    let dispatch_deadline_ms = if queue_timeout_minutes == 0 {
+        None
+    } else {
+        let deadline =
+            now_ms().saturating_add(u128::from(queue_timeout_minutes).saturating_mul(60_000));
+        u64::try_from(deadline).ok()
+    };
+    match enqueue_next_turn_intent(
+        state,
+        session_id,
+        &command_id,
+        fire_text,
+        None,
+        Vec::new(),
+        dispatch_deadline_ms,
+    ) {
         Ok(_) => true,
         Err(error) => {
             log_timer_fire_failure(state, session_id, timer_id, &error);
@@ -8017,7 +11751,10 @@ fn load_message_queue(
     // One-time migration from the former Bridge-owned transport FIFO.
     let legacy: NextTurnIntentQueue<WebNextTurnPayload> = serde_json::from_slice(&raw)
         .map_err(|error| format!("message_queue_parse_failed:{error}"))?;
-    if legacy.capacity() != MAX_NEXT_TURN_INTENTS || legacy.len() > MAX_NEXT_TURN_INTENTS {
+    // A persisted legacy Bridge FIFO may carry any historical capacity
+    // (e.g. 8); only an oversized queue is invalid. A smaller legacy capacity
+    // must not orphan previously persisted user intents.
+    if legacy.capacity() > MAX_NEXT_TURN_INTENTS || legacy.len() > MAX_NEXT_TURN_INTENTS {
         return Err("message_queue_shape_invalid".to_string());
     }
     let snapshot = legacy.snapshot();
@@ -8136,6 +11873,7 @@ fn enqueue_next_turn_intent(
     text: String,
     attachment_ids: Option<&[String]>,
     worker_roles: Vec<WorkerRole>,
+    dispatch_deadline_ms: Option<u64>,
 ) -> Result<MessageQueueProjection<WebNextTurnPayload>, String> {
     if queued_payload_for_command_id(state, session_id, command_id)?.is_some() {
         dispatch_next_turn_intent_if_ready(state, session_id);
@@ -8170,6 +11908,7 @@ fn enqueue_next_turn_intent(
             text,
             attachments,
             worker_roles,
+            dispatch_deadline_ms,
         };
         session
             .message_queue
@@ -8211,7 +11950,26 @@ fn dispatch_next_turn_intent_if_ready(state: &AppState, session_id: &str) {
             .first()
             .filter(|item| item.payload.send_after_cancel)
             .map(|item| item.command_id.clone());
+        // A queued timer entry whose queue timeout has expired is delivered
+        // immediately, out of queue order: the wait cap beats the order.
+        let timed_out = session
+            .message_queue
+            .projection()
+            .items
+            .iter()
+            .find(|item| {
+                item.payload
+                    .dispatch_deadline_ms
+                    .is_some_and(|deadline| now_ms() >= u128::from(deadline))
+            })
+            .map(|item| item.command_id.clone());
         let item = if let Some(command_id) = explicit_after_stop {
+            session
+                .message_queue
+                .begin_immediate_dispatch(&command_id)
+                .ok()?
+                .clone()
+        } else if let Some(command_id) = timed_out {
             session
                 .message_queue
                 .begin_immediate_dispatch(&command_id)
@@ -8316,6 +12074,13 @@ fn stored_session_from_web_session_with_store(
 ) -> StoredSession {
     StoredSession {
         model_endpoint_id: session.runtime.model_endpoint_id.clone(),
+        model_endpoint_ids: session.runtime.model_endpoint_ids.clone(),
+        reasoning_effort_override: session.runtime.reasoning_effort_override.clone(),
+        endpoint_reasoning_efforts: session.runtime.endpoint_reasoning_efforts.clone(),
+        endpoint_max_input_tokens: session.runtime.endpoint_max_input_tokens.clone(),
+        telemetry_reset_at_ms: session
+            .telemetry_reset_at_ms
+            .and_then(|value| i64::try_from(value).ok()),
         session_id: session.session_id.clone(),
         display_name: session.display_name.clone(),
         created_at_ms: session
@@ -8500,6 +12265,26 @@ fn try_append_turn_supplement(
     command_id: Option<&str>,
     worker_roles: Vec<WorkerRole>,
 ) -> Result<Option<WebTurn>, String> {
+    try_append_turn_supplement_with_kind(
+        state,
+        session_id,
+        text,
+        attachment_ids,
+        command_id,
+        worker_roles,
+        "supplement",
+    )
+}
+
+fn try_append_turn_supplement_with_kind(
+    state: &AppState,
+    session_id: &str,
+    text: String,
+    attachment_ids: Option<&[String]>,
+    command_id: Option<&str>,
+    worker_roles: Vec<WorkerRole>,
+    entry_kind: &str,
+) -> Result<Option<WebTurn>, String> {
     if !session_has_active_turn(state, session_id)? {
         state.runtime_log.record(
             "supplement_no_active_turn",
@@ -8518,6 +12303,8 @@ fn try_append_turn_supplement(
         }),
     );
     let worker_handle = primary_worker_handle(state, session_id)?;
+    sync_worker_mailbox_name(state, session_id, &worker_handle)?;
+    sync_worker_session_work_file(state, session_id, &worker_handle)?;
     let selected_attachments = {
         let sessions = state
             .sessions
@@ -8549,22 +12336,34 @@ fn try_append_turn_supplement(
     let additional_context =
         combine_additional_contexts([uploaded_context.as_deref(), role_context.as_deref()]);
     let mut appended_turn = None;
-    let accepted = worker_handle.try_add_user_supplement_with_context_and_command_id_after(
-        text.clone(),
-        additional_context,
-        command_id.map(str::to_string),
-        || {
-            appended_turn = Some(append_turn_supplement_with_selected_attachments(
-                state,
-                session_id,
-                text.clone(),
-                attachment_ids,
-                command_id,
-                worker_roles.clone(),
-            )?);
-            Ok(())
-        },
-    )?;
+    let system_input = entry_kind_is_system_input(entry_kind);
+    let before_enqueue = || {
+        appended_turn = Some(append_turn_supplement_with_selected_attachments(
+            state,
+            session_id,
+            text.clone(),
+            attachment_ids,
+            command_id,
+            worker_roles.clone(),
+            entry_kind,
+        )?);
+        Ok(())
+    };
+    let accepted = if system_input {
+        worker_handle.try_add_system_supplement_with_context_and_command_id_after(
+            text.clone(),
+            additional_context,
+            command_id.map(str::to_string),
+            before_enqueue,
+        )?
+    } else {
+        worker_handle.try_add_user_supplement_with_context_and_command_id_after(
+            text.clone(),
+            additional_context,
+            command_id.map(str::to_string),
+            before_enqueue,
+        )?
+    };
     if !accepted {
         state.runtime_log.record(
             "supplement_core_rejected_closed_turn",
@@ -8600,7 +12399,7 @@ fn settle_closed_primary_turn(state: &AppState, session_id: &str) -> Result<(), 
         let events = drain_worker_events(state);
         drained_events += events.len();
         for (event_session_id, context_id, worker_id, event) in events {
-            handle_scoped_worker_event(state, &event_session_id, &context_id, &worker_id, event);
+            dispatch_mailbox_send_event(state, &event_session_id, &context_id, &worker_id, event);
         }
         if !session_has_active_turn(state, session_id)? {
             break;
@@ -8840,6 +12639,27 @@ fn request_session_context_compress(
             event: wire_payload,
         },
     );
+    // Re-read the idle resume turn after the "requested" event append: the
+    // pre-append snapshot carries no events and the web timeline filters
+    // empty pending turns out, which dropped the visible "compacting" notice.
+    let idle_turn = if idle_turn.is_some() {
+        state
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|sessions| {
+                let session = sessions.get(session_id)?;
+                let turn_id = current_turn_id(session)?;
+                session
+                    .turns
+                    .iter()
+                    .find(|turn| turn.turn_id == turn_id)
+                    .cloned()
+            })
+            .or(idle_turn)
+    } else {
+        None
+    };
     if let Some(turn) = idle_turn {
         publish_semantic(
             state,
@@ -9154,6 +12974,7 @@ fn submit_turn_with_selected_attachments_and_kind(
                 command_id: command_id.map(str::to_string),
                 worker_roles,
                 direct_resume: entry_kind == "resume_directly",
+                entry_kind: entry_kind.to_string(),
             });
         }
         let wire_payload = event.wire_payload();
@@ -9226,10 +13047,18 @@ fn submit_turn_with_selected_attachments_and_kind(
     );
     let enqueue_started = std::time::Instant::now();
     let worker = primary_worker_handle(state, session_id)?;
+    sync_worker_mailbox_name(state, session_id, &worker)?;
+    sync_worker_session_work_file(state, session_id, &worker)?;
     let additional_context =
         session_context_with_roles(state, session_id, &attachments, &worker_roles)?;
     let enqueue_result = if entry_kind == "resume_directly" {
         worker.resume_turn_directly_with_command_id(
+            additional_context,
+            command_id.map(str::to_string),
+        )
+    } else if entry_kind_is_system_input(entry_kind) {
+        worker.run_system_turn_with_command_id(
+            text,
             additional_context,
             command_id.map(str::to_string),
         )
@@ -9375,6 +13204,8 @@ fn resolve_work_instruction_decision(
         }
     }
     let worker = primary_worker_handle(state, session_id)?;
+    sync_worker_mailbox_name(state, session_id, &worker)?;
+    sync_worker_session_work_file(state, session_id, &worker)?;
     let additional_context = session_context_with_roles(
         state,
         session_id,
@@ -9383,6 +13214,12 @@ fn resolve_work_instruction_decision(
     )?;
     if pending.direct_resume {
         worker.resume_turn_directly_with_command_id(additional_context, pending.command_id)?;
+    } else if entry_kind_is_system_input(&pending.entry_kind) {
+        worker.run_system_turn_with_command_id(
+            pending.text,
+            additional_context,
+            pending.command_id,
+        )?;
     } else {
         let images = turn_image_parts(&pending.attachments)?;
         worker.run_turn_with_command_id_and_images(
@@ -9763,10 +13600,21 @@ fn model_endpoint_reports(state: &AppState) -> Result<Vec<ModelEndpointReport>, 
         .mem
         .lock()
         .map_err(|_| "mem_state_poisoned".to_string())?;
+    let health = state
+        .model_endpoint_health
+        .lock()
+        .map_err(|_| "model_endpoint_health_poisoned".to_string())?;
     Ok(mem
         .model_endpoints
         .iter()
-        .map(ModelEndpointReport::from)
+        .map(|endpoint| {
+            let mut report = ModelEndpointReport::from(endpoint);
+            if let Some(health_state) = health.get(&endpoint.id) {
+                report.rate_limited_since_ms = health_state.rate_limited_since_ms;
+                report.probing = health_state.probing;
+            }
+            report
+        })
         .collect())
 }
 
@@ -9940,6 +13788,17 @@ fn model_endpoint_config(
 
 fn session_uses_model_endpoint(session: &WebSession, endpoint: &ModelEndpointConfig) -> bool {
     let config = &session.runtime.settings.config;
+    let mut expected_reasoning = endpoint.reasoning_effort.clone();
+    if let Some(reasoning_override) = session.runtime.reasoning_effort_override.as_deref() {
+        let mut expected = config.clone();
+        if project_endpoint_onto_config(&mut expected, endpoint).is_ok()
+            && supported_reasoning_levels(&expected)
+                .iter()
+                .any(|level| level == reasoning_override)
+        {
+            expected_reasoning = Some(reasoning_override.to_string());
+        }
+    }
     config.model == endpoint.model
         && config.openai_compatible.catalog_id == endpoint.catalog_id
         && config.openai_compatible.requirements == endpoint.requirements
@@ -9950,7 +13809,7 @@ fn session_uses_model_endpoint(session: &WebSession, endpoint: &ModelEndpointCon
         && config.max_llm_output_tokens == endpoint.max_llm_output_tokens
         && config.openai_compatible.stream == endpoint.stream
         && config.openai_compatible.enable_thinking.is_none()
-        && config.openai_compatible.reasoning_effort == endpoint.reasoning_effort
+        && config.openai_compatible.reasoning_effort == expected_reasoning
         && config.api_key == endpoint.api_key
         && config.http_headers == endpoint.http_headers
         && config.request_fields == endpoint.request_fields
@@ -9976,7 +13835,7 @@ fn sync_endpoint_runtime_fields(
             .cloned()
             .collect::<Vec<_>>()
     };
-    let session_ids = {
+    let session_bindings = {
         let sessions = state
             .sessions
             .lock()
@@ -9985,30 +13844,34 @@ fn sync_endpoint_runtime_fields(
             .iter()
             .filter(|(_, session)| {
                 session.runtime.model_endpoint_id.as_deref() == Some(previous.id.as_str())
+                    || session.runtime.model_endpoint_ids.contains(&previous.id)
                     || (session.runtime.model_endpoint_id.is_none()
                         && session_uses_model_endpoint(session, previous)
                         && !other_endpoints
                             .iter()
                             .any(|endpoint| session_uses_model_endpoint(session, endpoint)))
             })
-            .map(|(id, _)| id.clone())
+            .map(|(id, session)| (id.clone(), session.runtime.model_endpoint_ids.clone()))
             .collect::<Vec<_>>()
     };
     let mut updates = Vec::new();
-    for session_id in session_ids {
-        updates.push((
-            session_id.clone(),
-            apply_model_endpoint(state, &session_id, &updated.id)?,
-        ));
+    for (session_id, chain) in session_bindings {
+        // Editing an endpoint must never collapse or otherwise rewrite the
+        // user's chain. Busy Sessions take the durable-only path; idle Workers
+        // receive a full fresh chain snapshot.
+        let runtime_profile = if chain.is_empty() {
+            apply_model_endpoint(state, &session_id, &updated.id)?
+        } else {
+            apply_model_endpoint_chain(state, &session_id, &chain)?
+        };
+        updates.push((session_id, runtime_profile));
     }
     Ok(updates)
 }
 
-// Resolve the binding at the new-Turn boundary, never during an active request.
+// Resolve and publish the latest binding snapshot. A running worker applies
+// it best-effort immediately before its next model API request.
 fn refresh_bound_model_endpoint(state: &AppState, session_id: &str) -> Result<(), String> {
-    if session_has_active_turn(state, session_id)? {
-        return Ok(());
-    }
     let unbound = {
         let sessions = state
             .sessions
@@ -10020,6 +13883,9 @@ fn refresh_bound_model_endpoint(state: &AppState, session_id: &str) -> Result<()
             .runtime
             .model_endpoint_id
             .is_none()
+            && sessions
+                .get(session_id)
+                .is_some_and(|session| session.runtime.active_model_endpoint_id.is_none())
     };
     let mut migrated = false;
     if unbound {
@@ -10056,6 +13922,49 @@ fn refresh_bound_model_endpoint(state: &AppState, session_id: &str) -> Result<()
             .model_endpoint_id
             .clone()
     };
+    let chain = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions.get(session_id).ok_or("session_not_found")?;
+        session.runtime.model_endpoint_ids.clone()
+    };
+    if !chain.is_empty() {
+        // The primary equality check cannot observe edits to standby entries:
+        // their configs live only in the Worker failover snapshot. Rebuild the
+        // complete chain whenever the binding is refreshed.
+        let runtime_profile = apply_model_endpoint_chain(state, session_id, &chain)?;
+        publish_semantic(
+            state,
+            WireEvent::SessionRuntimeUpdated {
+                session_id: session_id.to_string(),
+                runtime_profile,
+            },
+        );
+        return Ok(());
+    }
+    if id.is_none() {
+        let needs_unbind = {
+            let sessions = state
+                .sessions
+                .lock()
+                .map_err(|_| "session_store_poisoned".to_string())?;
+            sessions
+                .get(session_id)
+                .is_some_and(|session| session.runtime.active_model_endpoint_id.is_some())
+        };
+        if needs_unbind {
+            let runtime_profile = unbind_session_model_endpoint(state, session_id)?;
+            publish_semantic(
+                state,
+                WireEvent::SessionRuntimeUpdated {
+                    session_id: session_id.to_string(),
+                    runtime_profile,
+                },
+            );
+        }
+    }
     if let Some(id) = id {
         if migrated {
             persist_web_session(state, session_id)?;
@@ -10206,6 +14115,7 @@ fn project_model_endpoint_capability(
 ) {
     let knowledge = model_endpoint_native_tools_knowledge(endpoint);
     config.interaction.native_tools_supported = knowledge;
+    config.interaction.model_endpoint_id = Some(endpoint.id.clone());
     config.interaction.capability_probe_endpoint_id =
         knowledge.is_none().then(|| endpoint.id.clone());
     let identity = agent_core::capability_probe_identity(config);
@@ -10229,51 +14139,109 @@ fn model_endpoint_capability_projection_matches(
             == expected.interaction.persisted_capability_probe
 }
 
+fn project_endpoint_onto_config(
+    config: &mut ModelServiceConfig,
+    endpoint: &ModelEndpointConfig,
+) -> Result<(), String> {
+    config.model = endpoint.model.clone();
+    config.api_protocol = agent_core::parse_api_protocol(&endpoint.api_protocol)?;
+    config.response_protocol = ResponseProtocolKind::from_name(&endpoint.response_protocol);
+    config.base_url = endpoint.base_url.clone();
+    config.max_llm_input_tokens = endpoint.max_llm_input_tokens;
+    config.max_llm_output_tokens = endpoint.max_llm_output_tokens;
+    config.openai_compatible.catalog_id = endpoint.catalog_id.clone();
+    config.openai_compatible.requirements = endpoint.requirements.clone();
+    config.openai_compatible.enable_thinking = None;
+    config.openai_compatible.reasoning_effort = endpoint.reasoning_effort.clone();
+    config.openai_compatible.stream = endpoint.stream;
+    config.api_key = endpoint.api_key.clone();
+    config.http_headers = endpoint.http_headers.clone();
+    config.request_fields = endpoint.request_fields.clone();
+    config.http_transport = agent_core::ModelHttpTransportOptions {
+        allow_cross_origin_redirects: endpoint.allow_cross_origin_redirects,
+        private_ca_pem: (!endpoint.private_ca_pem.is_empty())
+            .then_some(endpoint.private_ca_pem.clone()),
+    };
+    project_model_endpoint_capability(config, endpoint);
+    Ok(())
+}
+
+fn supported_reasoning_levels(config: &ModelServiceConfig) -> Vec<String> {
+    if let Some(levels) = &config.openai_compatible.requirements.allowed_reasoning {
+        return levels.clone();
+    }
+    agent_core::model_requirements::capabilities(config)
+        .map(|model| model.efforts.clone())
+        .unwrap_or_default()
+}
+
+fn apply_session_reasoning_override(
+    config: &mut ModelServiceConfig,
+    reasoning_effort_override: Option<&str>,
+) {
+    let Some(effort) = reasoning_effort_override else {
+        return;
+    };
+    if supported_reasoning_levels(config)
+        .iter()
+        .any(|level| level == effort)
+    {
+        config.openai_compatible.enable_thinking = None;
+        config.openai_compatible.reasoning_effort = Some(effort.to_string());
+    }
+}
+
+/// Effective session reasoning selection for one endpoint: the per-endpoint
+/// override wins, then falls back to the session-wide choice.
+fn session_endpoint_reasoning_override<'a>(
+    runtime: &'a WebSessionRuntime,
+    endpoint_id: &str,
+) -> Option<&'a str> {
+    runtime
+        .endpoint_reasoning_efforts
+        .get(endpoint_id)
+        .map(String::as_str)
+        .or(runtime.reasoning_effort_override.as_deref())
+}
+
+/// Per-endpoint session input-token window; keeps the projected endpoint
+/// default when no session override exists.
+fn apply_session_endpoint_input_override(
+    config: &mut ModelServiceConfig,
+    runtime: &WebSessionRuntime,
+    endpoint_id: &str,
+) {
+    if let Some(tokens) = runtime.endpoint_max_input_tokens.get(endpoint_id) {
+        config.max_llm_input_tokens = *tokens;
+    }
+}
+
 fn model_endpoint_session_candidate(
     session: &WebSession,
     endpoint: &ModelEndpointConfig,
 ) -> Result<WebSession, String> {
     let mut candidate = session.clone();
-    {
-        let config = &mut candidate.runtime.settings.config;
-        config.model = endpoint.model.clone();
-        config.api_protocol = agent_core::parse_api_protocol(&endpoint.api_protocol)?;
-        config.response_protocol = ResponseProtocolKind::from_name(&endpoint.response_protocol);
-        config.base_url = endpoint.base_url.clone();
-        config.max_llm_input_tokens = endpoint.max_llm_input_tokens;
-        config.max_llm_output_tokens = endpoint.max_llm_output_tokens;
-        config.openai_compatible.catalog_id = endpoint.catalog_id.clone();
-        config.openai_compatible.requirements = endpoint.requirements.clone();
-        config.openai_compatible.enable_thinking = None;
-        config.openai_compatible.reasoning_effort = endpoint.reasoning_effort.clone();
-        config.openai_compatible.stream = endpoint.stream;
-        config.api_key = endpoint.api_key.clone();
-        config.http_headers = endpoint.http_headers.clone();
-        config.request_fields = endpoint.request_fields.clone();
-        config.http_transport = agent_core::ModelHttpTransportOptions {
-            allow_cross_origin_redirects: endpoint.allow_cross_origin_redirects,
-            private_ca_pem: (!endpoint.private_ca_pem.is_empty())
-                .then_some(endpoint.private_ca_pem.clone()),
-        };
-        project_model_endpoint_capability(config, endpoint);
+    project_endpoint_onto_config(&mut candidate.runtime.settings.config, endpoint)?;
+    let max_input_override = candidate
+        .runtime
+        .endpoint_max_input_tokens
+        .get(&endpoint.id)
+        .copied();
+    let reasoning_override =
+        session_endpoint_reasoning_override(&candidate.runtime, &endpoint.id).map(str::to_string);
+    if let Some(tokens) = max_input_override {
+        candidate.runtime.settings.config.max_llm_input_tokens = tokens;
     }
+    apply_session_reasoning_override(
+        &mut candidate.runtime.settings.config,
+        reasoning_override.as_deref(),
+    );
 
     candidate.runtime.model_endpoint_id = Some(endpoint.id.clone());
+    candidate.runtime.active_model_endpoint_id = Some(endpoint.id.clone());
     let endpoint_env = session_cached_env_values(&candidate.runtime.settings);
     candidate.runtime.env.extend(endpoint_env.clone());
-    for key in [
-        "TIMEM_MODEL",
-        "TIMEM_API_PROTOCOL",
-        "TIMEM_RESPONSE_PROTOCOL",
-        "TIMEM_BASE_URL",
-        "TIMEM_MAX_LLM_INPUT",
-        "TIMEM_MAX_LLM_OUTPUT",
-        "TIMEM_MODEL_CATALOG_ID",
-        "TIMEM_MODEL_REQUIREMENTS",
-        "TIMEM_ENABLE_THINKING",
-        "TIMEM_REASONING_EFFORT",
-        "TIMEM_STREAM",
-    ] {
+    for key in ENDPOINT_OWNED_ENV_KEYS {
         if let Some(value) = endpoint_env.get(key).cloned() {
             candidate
                 .runtime
@@ -10292,13 +14260,55 @@ fn model_endpoint_session_candidate(
     Ok(candidate)
 }
 
+#[derive(Clone)]
+struct WorkerModelServiceRoute {
+    config: ModelServiceConfig,
+    failover: Vec<ModelServiceConfig>,
+}
+
+fn worker_model_service_route_for_session(
+    state: &AppState,
+    session: &WebSession,
+) -> Result<WorkerModelServiceRoute, String> {
+    let config = session.runtime.settings.config.clone();
+    let active_endpoint_id = config.interaction.model_endpoint_id.as_deref();
+    let endpoints = state
+        .mem
+        .lock()
+        .map_err(|_| "mem_state_poisoned".to_string())?
+        .model_endpoints
+        .clone();
+    let mut failover = Vec::new();
+    for endpoint_id in &session.runtime.model_endpoint_ids {
+        if active_endpoint_id == Some(endpoint_id.as_str()) {
+            continue;
+        }
+        let endpoint = endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == *endpoint_id)
+            .ok_or_else(|| "model_endpoint_not_found".to_string())?;
+        let mut fallback = config.clone();
+        project_endpoint_onto_config(&mut fallback, endpoint)?;
+        apply_session_endpoint_input_override(&mut fallback, &session.runtime, endpoint_id);
+        apply_session_reasoning_override(
+            &mut fallback,
+            session_endpoint_reasoning_override(&session.runtime, endpoint_id),
+        );
+        failover.push(fallback);
+    }
+    Ok(WorkerModelServiceRoute { config, failover })
+}
+
 fn rollback_worker_model_service_configs(
     handles: &[timem_session::CoreSessionWorkerHandle],
-    config: &ModelServiceConfig,
+    route: &WorkerModelServiceRoute,
 ) -> Result<(), String> {
     let mut first_error = None;
     for handle in handles.iter().rev() {
-        if let Err(error) = handle.replace_model_service_config(config.clone()) {
+        if let Err(error) = handle.replace_model_service_config_with_failover(
+            route.config.clone(),
+            route.failover.clone(),
+        ) {
             first_error.get_or_insert(error);
         }
     }
@@ -10307,7 +14317,7 @@ fn rollback_worker_model_service_configs(
 
 fn endpoint_apply_error_with_rollback(
     handles: &[timem_session::CoreSessionWorkerHandle],
-    previous: &ModelServiceConfig,
+    previous: &WorkerModelServiceRoute,
     error: String,
 ) -> String {
     match rollback_worker_model_service_configs(handles, previous) {
@@ -10320,7 +14330,7 @@ fn commit_model_endpoint_candidate(
     state: &AppState,
     session_id: &str,
     candidate: WebSession,
-    previous_config: ModelServiceConfig,
+    previous_route: WorkerModelServiceRoute,
     handles: &[timem_session::CoreSessionWorkerHandle],
 ) -> Result<WebSessionRuntimeProfile, String> {
     let mut sessions = state
@@ -10330,14 +14340,14 @@ fn commit_model_endpoint_candidate(
     if !sessions.contains_key(session_id) {
         return Err(endpoint_apply_error_with_rollback(
             handles,
-            &previous_config,
+            &previous_route,
             "session_not_found".to_string(),
         ));
     }
     if let Err(error) = persist_web_session_candidate(state, &candidate) {
         return Err(endpoint_apply_error_with_rollback(
             handles,
-            &previous_config,
+            &previous_route,
             error,
         ));
     }
@@ -10356,57 +14366,471 @@ fn apply_model_endpoint(
     session_id: &str,
     endpoint_id: &str,
 ) -> Result<WebSessionRuntimeProfile, String> {
-    let endpoint = state
-        .mem
-        .lock()
-        .map_err(|_| "mem_state_poisoned".to_string())?
-        .model_endpoints
+    let chain = vec![endpoint_id.to_string()];
+    apply_model_endpoint_chain(state, session_id, &chain)
+}
+
+fn endpoint_in_rate_limit_cooldown(health: &ModelEndpointHealthState, now: u128) -> bool {
+    health.rate_limited_since_ms.is_some_and(|since| {
+        now.saturating_sub(since) < MODEL_ENDPOINT_RATE_LIMIT_COOLDOWN.as_millis()
+    })
+}
+
+/// Whether the automatic scanner should re-probe this endpoint now. The
+/// cadence is anchored on the last completed probe as well as the rate-limit
+/// age, so a probe that ends in a transport error is retried on the same
+/// bounded interval instead of on every scan tick.
+fn endpoint_due_for_auto_probe(entry: &ModelEndpointHealthState, now: u128) -> bool {
+    if entry.probing {
+        return false;
+    }
+    let threshold = MODEL_ENDPOINT_AUTO_PROBE_AFTER.as_millis();
+    let Some(since) = entry.rate_limited_since_ms else {
+        return false;
+    };
+    now.saturating_sub(since) >= threshold
+        && entry
+            .last_probe_ms
+            .is_none_or(|last| now.saturating_sub(last) >= threshold)
+}
+
+/// First chain entry that exists and is outside its rate-limit cooldown.
+/// When every entry is cooling down, the first existing entry is returned so
+/// the turn still attempts the user's first preference (and surfaces its
+/// error) instead of failing without a model call.
+fn first_available_chain_endpoint<'a>(
+    chain: &[String],
+    endpoints: &'a [ModelEndpointConfig],
+    health: &BTreeMap<String, ModelEndpointHealthState>,
+    now: u128,
+) -> Option<&'a ModelEndpointConfig> {
+    let mut first_existing = None;
+    let mut first_available = None;
+    for endpoint in chain
         .iter()
-        .find(|item| item.id == endpoint_id)
-        .cloned()
-        .ok_or_else(|| "model_endpoint_not_found".to_string())?;
-    let (candidate, previous_config) = {
+        .filter_map(|id| endpoints.iter().find(|candidate| candidate.id == *id))
+    {
+        if first_existing.is_none() {
+            first_existing = Some(endpoint);
+        }
+        let cooled_down = health
+            .get(&endpoint.id)
+            .is_none_or(|state| !endpoint_in_rate_limit_cooldown(state, now));
+        if first_available.is_none() && cooled_down {
+            first_available = Some(endpoint);
+        }
+    }
+    first_available.or(first_existing)
+}
+
+fn apply_model_endpoint_chain(
+    state: &AppState,
+    session_id: &str,
+    endpoint_ids: &[String],
+) -> Result<WebSessionRuntimeProfile, String> {
+    if endpoint_ids.is_empty() {
+        return unbind_session_model_endpoint(state, session_id);
+    }
+    if endpoint_ids.len() > MAX_MODEL_ENDPOINT_CHAIN
+        || endpoint_ids.iter().collect::<BTreeSet<_>>().len() != endpoint_ids.len()
+    {
+        return Err("model_endpoint_chain_invalid".to_string());
+    }
+    let endpoints = {
+        let mem = state
+            .mem
+            .lock()
+            .map_err(|_| "mem_state_poisoned".to_string())?;
+        endpoint_ids
+            .iter()
+            .map(|endpoint_id| {
+                mem.model_endpoints
+                    .iter()
+                    .find(|item| &item.id == endpoint_id)
+                    .cloned()
+                    .ok_or_else(|| "model_endpoint_not_found".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let active = {
+        let health = state
+            .model_endpoint_health
+            .lock()
+            .map_err(|_| "model_endpoint_health_poisoned".to_string())?;
+        let Some(active) =
+            first_available_chain_endpoint(endpoint_ids, &endpoints, &health, now_ms())
+        else {
+            return Err("model_endpoint_not_found".to_string());
+        };
+        active.clone()
+    };
+    let (mut candidate, previous_route, base_config) = {
         let sessions = state
             .sessions
             .lock()
             .map_err(|_| "session_store_poisoned".to_string())?;
         let session = sessions.get(session_id).ok_or("session_not_found")?;
         (
-            model_endpoint_session_candidate(session, &endpoint)?,
+            model_endpoint_session_candidate(session, &active)?,
+            worker_model_service_route_for_session(state, session)?,
             session.runtime.settings.config.clone(),
         )
     };
+    candidate.runtime.model_endpoint_ids = endpoint_ids.to_vec();
+    candidate.runtime_profile = WebSessionRuntimeProfile::from_runtime(&candidate.runtime);
+    let mut failover = Vec::new();
+    for endpoint in &endpoints {
+        if endpoint.id == active.id {
+            continue;
+        }
+        let mut config = base_config.clone();
+        project_endpoint_onto_config(&mut config, endpoint)?;
+        apply_session_endpoint_input_override(&mut config, &candidate.runtime, &endpoint.id);
+        apply_session_reasoning_override(
+            &mut config,
+            session_endpoint_reasoning_override(&candidate.runtime, &endpoint.id),
+        );
+        failover.push(config);
+    }
 
-    if session_has_active_turn(state, session_id)? {
-        // Switching while a Turn is active changes only the durable binding.
-        // The running Turn keeps its complete start snapshot; the normal
-        // new-Turn refresh applies this endpoint before the next request.
-        let mut binding_candidate = {
-            let sessions = state
-                .sessions
-                .lock()
-                .map_err(|_| "session_store_poisoned".to_string())?;
-            sessions.get(session_id).ok_or("session_not_found")?.clone()
-        };
-        binding_candidate.runtime.model_endpoint_id = Some(endpoint.id.clone());
-        binding_candidate.runtime_profile =
-            WebSessionRuntimeProfile::from_runtime(&binding_candidate.runtime);
-        let profile = binding_candidate.runtime_profile.clone();
-        let mut sessions = state
+    let worker_ids = session_worker_ids(state, session_id)?;
+    let handles = {
+        let manager = state
+            .manager
+            .lock()
+            .map_err(|_| "worker_manager_poisoned".to_string())?;
+        worker_ids
+            .iter()
+            .map(|worker_id| {
+                manager
+                    .handle(worker_id)
+                    .ok_or_else(|| "session_worker_not_found".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut applied = Vec::new();
+    for handle in &handles {
+        if let Err(error) = handle.replace_model_service_config_with_failover(
+            candidate.runtime.settings.config.clone(),
+            failover.clone(),
+        ) {
+            return Err(endpoint_apply_error_with_rollback(
+                &applied,
+                &previous_route,
+                error,
+            ));
+        }
+        applied.push(handle.clone());
+    }
+    commit_model_endpoint_candidate(state, session_id, candidate, previous_route, &applied)
+}
+
+fn update_session_reasoning_effort(
+    state: &AppState,
+    session_id: &str,
+    reasoning_effort: &str,
+) -> Result<WebSessionRuntimeProfile, String> {
+    let (mut candidate, previous_route, active_endpoint) = {
+        let sessions = state
             .sessions
             .lock()
             .map_err(|_| "session_store_poisoned".to_string())?;
-        if !sessions.contains_key(session_id) {
-            return Err("session_not_found".to_string());
-        }
-        persist_web_session_candidate(state, &binding_candidate)?;
-        let session = sessions
-            .get_mut(session_id)
-            .expect("session presence checked before persistence");
-        session.runtime.model_endpoint_id = Some(endpoint.id);
-        session.runtime_profile = profile.clone();
-        return Ok(profile);
+        let session = sessions.get(session_id).ok_or("session_not_found")?;
+        let active_endpoint_id = session
+            .runtime
+            .active_model_endpoint_id
+            .as_deref()
+            .or(session.runtime.model_endpoint_id.as_deref())
+            .ok_or("session_model_endpoint_not_bound")?;
+        let endpoint = state
+            .mem
+            .lock()
+            .map_err(|_| "mem_state_poisoned".to_string())?
+            .model_endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == active_endpoint_id)
+            .cloned()
+            .ok_or("model_endpoint_not_found")?;
+        (
+            session.clone(),
+            worker_model_service_route_for_session(state, session)?,
+            endpoint,
+        )
+    };
+
+    let mut active_config = candidate.runtime.settings.config.clone();
+    project_endpoint_onto_config(&mut active_config, &active_endpoint)?;
+    // An empty selection means "follow the model default": drop the session
+    // override instead of validating it as a concrete level. Re-projecting
+    // above already restored the endpoint's own reasoning configuration.
+    let clear_override = reasoning_effort.trim().is_empty();
+    if !clear_override
+        && !supported_reasoning_levels(&active_config)
+            .iter()
+            .any(|level| level == reasoning_effort)
+    {
+        return Err("session_reasoning_effort_unsupported".to_string());
     }
+    candidate.runtime.reasoning_effort_override = if clear_override {
+        None
+    } else {
+        Some(reasoning_effort.to_string())
+    };
+    apply_session_reasoning_override(
+        &mut active_config,
+        session_endpoint_reasoning_override(&candidate.runtime, &active_endpoint.id),
+    );
+    candidate.runtime.settings.config = active_config;
+    candidate
+        .runtime
+        .env
+        .extend(session_cached_env_values(&candidate.runtime.settings));
+    candidate.runtime_profile = WebSessionRuntimeProfile::from_runtime(&candidate.runtime);
+    let next_route = worker_model_service_route_for_session(state, &candidate)?;
+
+    let worker_ids = session_worker_ids(state, session_id)?;
+    let handles = {
+        let manager = state
+            .manager
+            .lock()
+            .map_err(|_| "worker_manager_poisoned".to_string())?;
+        worker_ids
+            .iter()
+            .map(|worker_id| {
+                manager
+                    .handle(worker_id)
+                    .ok_or_else(|| "session_worker_not_found".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut applied = Vec::new();
+    for handle in &handles {
+        if let Err(error) = handle.replace_model_service_config_with_failover(
+            next_route.config.clone(),
+            next_route.failover.clone(),
+        ) {
+            return Err(endpoint_apply_error_with_rollback(
+                &applied,
+                &previous_route,
+                error,
+            ));
+        }
+        applied.push(handle.clone());
+    }
+    commit_model_endpoint_candidate(state, session_id, candidate, previous_route, &applied)
+}
+
+/// Shared apply path for per-endpoint session overrides: refreshes the live
+/// route of the targeted endpoint when it is active and persists the updated
+/// runtime. The override must target an endpoint in the session chain.
+fn update_session_endpoint_override(
+    state: &AppState,
+    session_id: &str,
+    endpoint_id: &str,
+    mutate: impl FnOnce(&mut WebSession) -> Result<(), String>,
+) -> Result<WebSessionRuntimeProfile, String> {
+    let endpoint_id = endpoint_id.to_string();
+    let (mut candidate, previous_route, active_endpoint) = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions.get(session_id).ok_or("session_not_found")?;
+        if !session.runtime.model_endpoint_ids.contains(&endpoint_id) {
+            return Err("session_model_endpoint_not_in_chain".to_string());
+        }
+        let active_id = session
+            .runtime
+            .active_model_endpoint_id
+            .as_deref()
+            .or(session.runtime.model_endpoint_id.as_deref())
+            .ok_or("session_model_endpoint_not_bound")?;
+        let endpoint = state
+            .mem
+            .lock()
+            .map_err(|_| "mem_state_poisoned".to_string())?
+            .model_endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == active_id)
+            .cloned()
+            .ok_or("model_endpoint_not_found")?;
+        (
+            session.clone(),
+            worker_model_service_route_for_session(state, session)?,
+            endpoint,
+        )
+    };
+
+    mutate(&mut candidate)?;
+
+    // Re-project the live config when the override targets the active route so
+    // the change takes effect before the next model API request.
+    let active_id = candidate
+        .runtime
+        .active_model_endpoint_id
+        .as_deref()
+        .or(candidate.runtime.model_endpoint_id.as_deref());
+    if active_id == Some(endpoint_id.as_str()) {
+        let mut active_config = candidate.runtime.settings.config.clone();
+        project_endpoint_onto_config(&mut active_config, &active_endpoint)?;
+        apply_session_endpoint_input_override(&mut active_config, &candidate.runtime, &endpoint_id);
+        apply_session_reasoning_override(
+            &mut active_config,
+            session_endpoint_reasoning_override(&candidate.runtime, &endpoint_id),
+        );
+        candidate.runtime.settings.config = active_config;
+        candidate
+            .runtime
+            .env
+            .extend(session_cached_env_values(&candidate.runtime.settings));
+    }
+    candidate.max_llm_input_tokens = candidate.runtime.settings.config.max_llm_input_tokens;
+    candidate.runtime_profile = WebSessionRuntimeProfile::from_runtime(&candidate.runtime);
+    let next_route = worker_model_service_route_for_session(state, &candidate)?;
+
+    let worker_ids = session_worker_ids(state, session_id)?;
+    let handles = {
+        let manager = state
+            .manager
+            .lock()
+            .map_err(|_| "worker_manager_poisoned".to_string())?;
+        worker_ids
+            .iter()
+            .map(|worker_id| {
+                manager
+                    .handle(worker_id)
+                    .ok_or_else(|| "session_worker_not_found".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut applied = Vec::new();
+    for handle in &handles {
+        if let Err(error) = handle.replace_model_service_config_with_failover(
+            next_route.config.clone(),
+            next_route.failover.clone(),
+        ) {
+            return Err(endpoint_apply_error_with_rollback(
+                &applied,
+                &previous_route,
+                error,
+            ));
+        }
+        applied.push(handle.clone());
+    }
+    commit_model_endpoint_candidate(state, session_id, candidate, previous_route, &applied)
+}
+
+/// Per-endpoint session reasoning effort. An empty selection clears the
+/// per-endpoint override so the endpoint falls back to the session-wide
+/// choice, mirroring `update_session_reasoning_effort`.
+fn update_session_endpoint_reasoning_effort(
+    state: &AppState,
+    session_id: &str,
+    endpoint_id: &str,
+    reasoning_effort: &str,
+) -> Result<WebSessionRuntimeProfile, String> {
+    let effort = reasoning_effort.trim().to_string();
+    let endpoint_id_owned = endpoint_id.to_string();
+    update_session_endpoint_override(state, session_id, endpoint_id, |candidate| {
+        let clear_override = effort.is_empty();
+        if !clear_override {
+            // Validate against a freshly projected config for this endpoint.
+            let endpoint = state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .model_endpoints
+                .iter()
+                .find(|endpoint| endpoint.id == endpoint_id_owned.as_str())
+                .cloned()
+                .ok_or("model_endpoint_not_found")?;
+            let mut projected = candidate.runtime.settings.config.clone();
+            project_endpoint_onto_config(&mut projected, &endpoint)?;
+            if !supported_reasoning_levels(&projected).contains(&effort) {
+                return Err("session_reasoning_effort_unsupported".to_string());
+            }
+        }
+        if clear_override {
+            candidate
+                .runtime
+                .endpoint_reasoning_efforts
+                .remove(&endpoint_id_owned);
+        } else {
+            candidate
+                .runtime
+                .endpoint_reasoning_efforts
+                .insert(endpoint_id_owned, effort.clone());
+        }
+        Ok(())
+    })
+}
+
+/// Per-endpoint session input-token window. `None` clears the override so the
+/// endpoint falls back to its configured default.
+fn update_session_endpoint_max_input_tokens(
+    state: &AppState,
+    session_id: &str,
+    endpoint_id: &str,
+    max_input_tokens: Option<u32>,
+) -> Result<WebSessionRuntimeProfile, String> {
+    if max_input_tokens == Some(0) {
+        return Err("session_max_input_tokens_invalid".to_string());
+    }
+    let endpoint_id_owned = endpoint_id.to_string();
+    update_session_endpoint_override(state, session_id, endpoint_id, |candidate| {
+        match max_input_tokens {
+            Some(tokens) => {
+                candidate
+                    .runtime
+                    .endpoint_max_input_tokens
+                    .insert(endpoint_id_owned, tokens);
+            }
+            None => {
+                candidate
+                    .runtime
+                    .endpoint_max_input_tokens
+                    .remove(&endpoint_id_owned);
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Removes any endpoint binding and restores the template default
+/// model-service configuration for the Session.
+fn unbind_session_model_endpoint(
+    state: &AppState,
+    session_id: &str,
+) -> Result<WebSessionRuntimeProfile, String> {
+    let (previous_route, mut candidate, overrides) = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions.get(session_id).ok_or("session_not_found")?;
+        (
+            worker_model_service_route_for_session(state, session)?,
+            session.clone(),
+            session.runtime.env_overrides.clone(),
+        )
+    };
+    let mut filtered_overrides = overrides;
+    for key in ENDPOINT_OWNED_ENV_KEYS {
+        filtered_overrides.remove(key);
+    }
+    let settings = state.template.session_settings(&filtered_overrides)?;
+    let session_env = state.template.session_env(&settings, &filtered_overrides);
+    candidate.runtime.settings = settings;
+    candidate.runtime.env = session_env;
+    candidate.runtime.env_overrides = filtered_overrides;
+    for key in CACHED_MODEL_HTTP_TRANSPORT_ENV_KEYS {
+        candidate.runtime.forward_compatible_cache.remove(*key);
+    }
+    candidate.runtime.model_endpoint_id = None;
+    candidate.runtime.active_model_endpoint_id = None;
+    candidate.runtime.model_endpoint_ids = Vec::new();
+    candidate.max_llm_input_tokens = candidate.runtime.settings.config.max_llm_input_tokens;
+    candidate.runtime_profile = WebSessionRuntimeProfile::from_runtime(&candidate.runtime);
 
     let worker_ids = session_worker_ids(state, session_id)?;
     let handles = {
@@ -10430,13 +14854,295 @@ fn apply_model_endpoint(
         {
             return Err(endpoint_apply_error_with_rollback(
                 &applied,
-                &previous_config,
+                &previous_route,
                 error,
             ));
         }
         applied.push(handle.clone());
     }
-    commit_model_endpoint_candidate(state, session_id, candidate, previous_config, &applied)
+    commit_model_endpoint_candidate(state, session_id, candidate, previous_route, &applied)
+}
+
+fn mark_endpoint_rate_limited(state: &AppState, endpoint_id: &str, now: u128) -> bool {
+    match state.model_endpoint_health.lock() {
+        Ok(mut health) => {
+            let entry = health.entry(endpoint_id.to_string()).or_default();
+            let changed = entry.rate_limited_since_ms != Some(now);
+            entry.rate_limited_since_ms = Some(now);
+            entry.probing = false;
+            changed
+        }
+        Err(_) => false,
+    }
+}
+
+/// Probes one endpoint. Ok(true) = available, Ok(false) = rate-limited,
+/// Err = other transport error (availability judgement unchanged).
+fn probe_model_endpoint(
+    endpoint: &ModelEndpointConfig,
+    base_config: &ModelServiceConfig,
+) -> Result<bool, String> {
+    let mut config = base_config.clone();
+    project_endpoint_onto_config(&mut config, endpoint)?;
+    let mut client = HttpModelClient::default();
+    let request = agent_core::negotiation::model_availability_probe_request();
+    let audit_file =
+        std::env::temp_dir().join(format!("timem_model_endpoint_probe_{}.jsonl", endpoint.id));
+    match client.call_model_interaction(&config, &request, &audit_file, &mut || false) {
+        Ok(_) => Ok(true),
+        Err(error) => {
+            if is_model_rate_limited_error(&error) {
+                Ok(false)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+fn apply_model_endpoint_probe_result(
+    state: &AppState,
+    endpoint_id: &str,
+    result: Result<bool, String>,
+) {
+    let now = now_ms();
+    if let Ok(mut health) = state.model_endpoint_health.lock() {
+        let entry = health.entry(endpoint_id.to_string()).or_default();
+        entry.probing = false;
+        entry.last_probe_ms = Some(now);
+        match result {
+            Ok(true) => entry.rate_limited_since_ms = None,
+            Ok(false) => entry.rate_limited_since_ms = Some(now),
+            Err(_) => {}
+        }
+    }
+}
+
+/// Commits one probe result and immediately re-resolves Sessions bound to the
+/// endpoint. A recovered higher-priority entry therefore switches back before
+/// the remaining probes finish; transport errors leave the availability
+/// judgement unchanged and need no re-selection.
+fn commit_model_endpoint_probe_result(
+    state: &AppState,
+    endpoint_id: &str,
+    result: Result<bool, String>,
+) {
+    let availability_changed = result.is_ok();
+    apply_model_endpoint_probe_result(state, endpoint_id, result);
+    if availability_changed {
+        refresh_sessions_bound_to_endpoints(state, &[endpoint_id.to_string()]);
+    }
+}
+
+fn refresh_sessions_bound_to_endpoints(state: &AppState, endpoint_ids: &[String]) {
+    let session_ids = state
+        .sessions
+        .lock()
+        .ok()
+        .map(|sessions| {
+            sessions
+                .iter()
+                .filter(|(_, session)| {
+                    session
+                        .runtime
+                        .model_endpoint_ids
+                        .iter()
+                        .any(|id| endpoint_ids.contains(id))
+                })
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for session_id in session_ids {
+        if let Err(error) = refresh_bound_model_endpoint(state, &session_id) {
+            eprintln!(
+                "[timem_web_debug_error] session_id={session_id:?} reason=model_endpoint_refresh_failed:{error}"
+            );
+        }
+    }
+}
+
+/// Marks every endpoint as probing, broadcasts, and probes them
+/// sequentially on a dedicated thread. Completion re-broadcasts the merged
+/// availability report and refreshes bound Sessions.
+fn refresh_model_endpoint_availability(state: &AppState) -> Result<(), String> {
+    let endpoints = {
+        let mem = state
+            .mem
+            .lock()
+            .map_err(|_| "mem_state_poisoned".to_string())?;
+        mem.model_endpoints.clone()
+    };
+    {
+        let mut health = state
+            .model_endpoint_health
+            .lock()
+            .map_err(|_| "model_endpoint_health_poisoned".to_string())?;
+        for endpoint in &endpoints {
+            health.entry(endpoint.id.clone()).or_default().probing = true;
+        }
+    }
+    publish_semantic(
+        state,
+        WireEvent::ModelEndpointsUpdated {
+            endpoints: model_endpoint_reports(state)?,
+        },
+    );
+    let state = state.clone();
+    std::thread::Builder::new()
+        .name("timem-model-endpoint-probe".to_string())
+        .spawn(move || {
+            let base_config = state
+                .template
+                .settings
+                .lock()
+                .map(|settings| settings.config.clone())
+                .ok();
+            for endpoint in &endpoints {
+                let result = base_config
+                    .as_ref()
+                    .ok_or_else(|| "template_settings_poisoned".to_string())
+                    .and_then(|base| probe_model_endpoint(endpoint, base));
+                commit_model_endpoint_probe_result(&state, &endpoint.id, result);
+                if let Ok(updated) = model_endpoint_reports(&state) {
+                    publish_semantic(
+                        &state,
+                        WireEvent::ModelEndpointsUpdated { endpoints: updated },
+                    );
+                }
+            }
+        })
+        .map_err(|_| "model_endpoint_probe_spawn_failed".to_string())?;
+    Ok(())
+}
+
+/// Periodically re-probes endpoints that have stayed rate-limited long past
+/// the auto-probe threshold so recovered endpoints return to rotation.
+fn spawn_model_endpoint_health_scanner(state: AppState) {
+    let _ = std::thread::Builder::new()
+        .name("timem-model-endpoint-health".to_string())
+        .spawn(move || loop {
+            std::thread::sleep(MODEL_ENDPOINT_HEALTH_SCAN_INTERVAL);
+            let candidate_ids = state
+                .model_endpoint_health
+                .lock()
+                .ok()
+                .map(|health| {
+                    let now = now_ms();
+                    health
+                        .iter()
+                        .filter(|(_, entry)| endpoint_due_for_auto_probe(entry, now))
+                        .map(|(id, _)| id.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if candidate_ids.is_empty() {
+                continue;
+            }
+            {
+                let Ok(mut health) = state.model_endpoint_health.lock() else {
+                    continue;
+                };
+                for id in &candidate_ids {
+                    health.entry(id.clone()).or_default().probing = true;
+                }
+            }
+            if let Ok(updated) = model_endpoint_reports(&state) {
+                publish_semantic(
+                    &state,
+                    WireEvent::ModelEndpointsUpdated { endpoints: updated },
+                );
+            }
+            let base_config = state
+                .template
+                .settings
+                .lock()
+                .ok()
+                .map(|settings| settings.config.clone());
+            for endpoint_id in &candidate_ids {
+                let endpoint = match model_endpoint_config_if_exists(&state, endpoint_id) {
+                    Ok(Some(endpoint)) => endpoint,
+                    Ok(None) => {
+                        apply_model_endpoint_probe_result(&state, endpoint_id, Ok(true));
+                        continue;
+                    }
+                    Err(_) => continue,
+                };
+                let result = base_config
+                    .as_ref()
+                    .ok_or_else(|| "template_settings_poisoned".to_string())
+                    .and_then(|base| probe_model_endpoint(&endpoint, base));
+                commit_model_endpoint_probe_result(&state, endpoint_id, result);
+                if let Ok(updated) = model_endpoint_reports(&state) {
+                    publish_semantic(
+                        &state,
+                        WireEvent::ModelEndpointsUpdated { endpoints: updated },
+                    );
+                }
+            }
+        });
+}
+
+/// Removes deleted endpoint ids from every bound Session chain and re-applies
+/// the remaining chain (or unbinds when the chain empties).
+fn prune_deleted_model_endpoint_bindings(
+    state: &AppState,
+    deleted: &BTreeSet<String>,
+) -> Result<(), String> {
+    let affected = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        sessions
+            .iter()
+            .filter(|(_, session)| {
+                session
+                    .runtime
+                    .model_endpoint_ids
+                    .iter()
+                    .any(|id| deleted.contains(id))
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>()
+    };
+    for session_id in affected {
+        let remaining = {
+            let sessions = state
+                .sessions
+                .lock()
+                .map_err(|_| "session_store_poisoned".to_string())?;
+            sessions
+                .get(&session_id)
+                .map(|session| {
+                    session
+                        .runtime
+                        .model_endpoint_ids
+                        .iter()
+                        .filter(|id| !deleted.contains(*id))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        // Best-effort: a busy Session keeps its durable-only binding update
+        // path, and the next turn boundary reconciles the worker chain.
+        let profile = if remaining.is_empty() {
+            unbind_session_model_endpoint(state, &session_id).ok()
+        } else {
+            apply_model_endpoint_chain(state, &session_id, &remaining).ok()
+        };
+        if let Some(runtime_profile) = profile {
+            publish_semantic(
+                state,
+                WireEvent::SessionRuntimeUpdated {
+                    session_id,
+                    runtime_profile,
+                },
+            );
+        }
+    }
+    Ok(())
 }
 
 fn update_session_api_key(
@@ -11034,6 +15740,7 @@ fn start_web_turn_with_selected_attachments_and_roles(
         events: Vec::new(),
         final_answer: None,
         completion: None,
+        events_slimmed: false,
     };
     session.pending_turn_id = Some(turn.turn_id.clone());
     session.turns.push(turn.clone());
@@ -11205,6 +15912,7 @@ fn start_web_toolgen_turn(
         events: Vec::new(),
         final_answer: None,
         completion: None,
+        events_slimmed: false,
     };
     session.pending_turn_id = Some(turn.turn_id.clone());
     session.pending_completion_message_id = None;
@@ -11282,6 +15990,7 @@ fn append_turn_supplement_with_pending_attachments(
         None,
         command_id,
         Vec::new(),
+        "supplement",
     )
 }
 
@@ -11292,12 +16001,13 @@ fn append_turn_supplement_with_selected_attachments(
     attachment_ids: Option<&[String]>,
     command_id: Option<&str>,
     worker_roles: Vec<WorkerRole>,
+    kind: &str,
 ) -> Result<WebTurn, String> {
     append_turn_user_entry_with_attachments(
         state,
         session_id,
         TurnUserEntryInput {
-            kind: "supplement",
+            kind,
             text,
             attachments: Vec::new(),
             attachment_ids,
@@ -11718,6 +16428,43 @@ fn session_context(
     session_context_with_roles(state, session_id, attachments, &[])
 }
 
+/// Pointer to this session's persistent work file plus its bounded current
+/// content: durable, complex work assigned to this session records its
+/// guidance, plans, and progress there, so a compaction or a context clear
+/// can re-anchor the work from it. The injected content is capped so a
+/// runaway work file cannot inflate every prompt.
+fn session_work_file_context(state: &AppState, session_id: &str) -> Result<Option<String>, String> {
+    const SESSION_WORK_FILE_CONTEXT_CONTENT_LIMIT: usize = 16 * 1024;
+    let path = session_work_file_path(state, session_id)?;
+    let pointer = format!(
+        "Session work file: {}. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.",
+        path.display()
+    );
+    // Content injection is best-effort: a missing or unreadable work file
+    // still leaves the pointer line, and the block markers let Core dedupe
+    // repeats and re-inject the last accepted block after a compaction.
+    let body = match std::fs::read_to_string(&path) {
+        Ok(content) if !content.trim().is_empty() => {
+            let mut content = content.trim().to_string();
+            if content.len() > SESSION_WORK_FILE_CONTEXT_CONTENT_LIMIT {
+                let mut end = SESSION_WORK_FILE_CONTEXT_CONTENT_LIMIT;
+                while end > 0 && !content.is_char_boundary(end) {
+                    end -= 1;
+                }
+                content.truncate(end);
+                content.push_str("\n... [truncated]");
+            }
+            format!(
+                "\n\n[BEGIN SESSION INSTRUCTION file=\"{}\"]\n{}\n[END SESSION INSTRUCTION]",
+                path.display(),
+                content
+            )
+        }
+        _ => String::new(),
+    };
+    Ok(Some(format!("{pointer}{body}")))
+}
+
 fn session_context_with_roles(
     state: &AppState,
     session_id: &str,
@@ -11803,9 +16550,11 @@ fn session_context_with_roles(
         ))
     };
     let worker_roles = worker_roles_context(worker_roles);
+    let session_work_file = session_work_file_context(state, session_id)?;
     Ok(combine_additional_contexts([
         resume_notice.as_deref(),
         instructions.as_deref(),
+        session_work_file.as_deref(),
         uploaded_files.as_deref(),
         image_note.as_deref(),
         worker_roles.as_deref(),
@@ -12153,12 +16902,74 @@ fn work_instruction_notice_event(state: &AppState, session_id: &str) -> Option<W
     })
 }
 
+/// True when every topic carried by the event is a mailbox send handshake.
+/// Workers emit one topic per event, so this covers every send; mixed events
+/// keep the synchronous bridge path.
+fn event_is_mailbox_send(event: &CoreSessionWorkerEvent) -> bool {
+    match event {
+        CoreSessionWorkerEvent::Topics(topics) => {
+            !topics.is_empty()
+                && topics
+                    .iter()
+                    .all(|topic| topic.topic.name == CORE_TOPIC_MAILBOX)
+        }
+        _ => false,
+    }
+}
+
+/// Mailbox send waits synchronously for the fast-read receipt window (up to
+/// TIMEM_MAILBOX_RECEIPT_WAIT_MS). Running that wait inside the event bridge
+/// would let one session's wait delay every other session's bridging, so
+/// mailbox-send events are dispatched off the loop: cross-session waits run
+/// in parallel, same-session waits stay serialized on a per-session lane
+/// (they share one mailbox state file). The reply is relayed inside the
+/// dispatched task; without a tokio runtime (tests) the call falls back to
+/// the synchronous path.
+fn dispatch_mailbox_send_event(
+    state: &AppState,
+    session_id: &str,
+    context_id: &str,
+    worker_id: &str,
+    event: CoreSessionWorkerEvent,
+) {
+    if !event_is_mailbox_send(&event) {
+        handle_scoped_worker_event(state, session_id, context_id, worker_id, event);
+        return;
+    }
+    let lane = {
+        let Ok(mut lanes) = state.mailbox_send_lane_locks.lock() else {
+            handle_scoped_worker_event(state, session_id, context_id, worker_id, event);
+            return;
+        };
+        lanes
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+            .clone()
+    };
+    let state = state.clone();
+    let session_id = session_id.to_string();
+    let context_id = context_id.to_string();
+    let worker_id = worker_id.to_string();
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn_blocking(move || {
+                let _lane = lane.lock();
+                handle_scoped_worker_event(&state, &session_id, &context_id, &worker_id, event);
+            });
+        }
+        Err(_) => {
+            let _lane = lane.lock();
+            handle_scoped_worker_event(&state, &session_id, &context_id, &worker_id, event);
+        }
+    }
+}
+
 fn spawn_event_bridge(state: AppState) {
     tokio::spawn(async move {
         loop {
             let pending = drain_worker_events(&state);
             for (session_id, context_id, worker_id, event) in pending {
-                handle_scoped_worker_event(&state, &session_id, &context_id, &worker_id, event);
+                dispatch_mailbox_send_event(&state, &session_id, &context_id, &worker_id, event);
             }
             sleep(EVENT_POLL_INTERVAL).await;
         }
@@ -12287,7 +17098,6 @@ fn mark_core_command_accepted(state: &AppState, session_id: &str, command_id: &s
     };
 
     let mut extra = BTreeMap::new();
-    extra.insert("kind".to_string(), json!("command_delivery"));
     extra.insert("command_id".to_string(), json!(command_id));
     extra.insert("delivery_state".to_string(), json!("core_accepted"));
     let persist_result = append_history_record(
@@ -12297,7 +17107,7 @@ fn mark_core_command_accepted(state: &AppState, session_id: &str, command_id: &s
             role: ChatHistoryRole::System,
             turn_id,
             created_at_ms: now_ms_i64(),
-            kind: ChatHistoryEventKind::RuntimeNotice,
+            kind: ChatHistoryEventKind::CommandDelivery,
             content: "Core accepted command.".to_string(),
             extra,
         },
@@ -12379,6 +17189,7 @@ fn activate_core_started_turn(
                 events: Vec::new(),
                 final_answer: None,
                 completion: None,
+                events_slimmed: false,
             };
             session.turns.push(turn);
             if session.turns.len() > MAX_SESSION_TURNS {
@@ -12657,6 +17468,74 @@ fn handle_scoped_worker_event(
                         }
                     }
                 }
+                if event.topic.name == CORE_TOPIC_MODEL_ENDPOINT_FAILOVER {
+                    if event.payload.get("phase").and_then(Value::as_str) == Some("switched")
+                        && is_primary_worker(state, session_id, worker_id)
+                    {
+                        if let Some(endpoint_id) =
+                            event.payload.get("endpoint_id").and_then(Value::as_str)
+                        {
+                            let profile = state.sessions.lock().ok().and_then(|mut sessions| {
+                                let session = sessions.get_mut(session_id)?;
+                                session.runtime.active_model_endpoint_id =
+                                    Some(endpoint_id.to_string());
+                                session.runtime_profile.active_model_endpoint_id =
+                                    Some(endpoint_id.to_string());
+                                Some(session.runtime_profile.clone())
+                            });
+                            if let Some(runtime_profile) = profile {
+                                publish_semantic(
+                                    state,
+                                    WireEvent::SessionRuntimeUpdated {
+                                        session_id: session_id.to_string(),
+                                        runtime_profile,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    let endpoint_id = event
+                        .payload
+                        .get("endpoint_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or_else(|| {
+                            let model = event.payload.get("model").and_then(Value::as_str)?;
+                            let base_url = event.payload.get("base_url").and_then(Value::as_str)?;
+                            state
+                                .mem
+                                .lock()
+                                .ok()?
+                                .model_endpoints
+                                .iter()
+                                .find(|endpoint| {
+                                    endpoint.model == model && endpoint.base_url == base_url
+                                })
+                                .map(|endpoint| endpoint.id.clone())
+                        });
+                    if event.payload.get("phase").and_then(Value::as_str) == Some("switching") {
+                        if let Some(endpoint_id) = endpoint_id {
+                            // Only rate-limit failures mark the cooldown state;
+                            // transient system errors switch without cooling the
+                            // endpoint out of future chains.
+                            let rate_limit_switch = event
+                                .payload
+                                .get("error")
+                                .and_then(Value::as_str)
+                                .is_some_and(is_model_rate_limited_error);
+                            if rate_limit_switch
+                                && mark_endpoint_rate_limited(state, &endpoint_id, now_ms())
+                            {
+                                if let Ok(endpoints) = model_endpoint_reports(state) {
+                                    publish_semantic(
+                                        state,
+                                        WireEvent::ModelEndpointsUpdated { endpoints },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
                 if event.topic.name == CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP {
                     if let Some(debug) = state.debug.as_ref() {
                         if let Err(error) =
@@ -12720,6 +17599,7 @@ fn handle_scoped_worker_event(
                     );
                     continue;
                 }
+                response_preview::flush_pending(state, session_id);
                 if event.topic.name == "core.model.preview" {
                     if !toolgen_scoped {
                         response_preview::publish(state, session_id, worker_id, &event);
@@ -12848,6 +17728,26 @@ fn handle_scoped_worker_event(
                         serde_json::from_value::<Vec<TimerSpec>>(event.payload["timers"].clone())
                     {
                         let _ = merge_session_timers_from_core(state, session_id, &topic_timers);
+                    }
+                }
+                if event.topic.name == CORE_TOPIC_MAILBOX {
+                    let sent = handle_mailbox_send_topic(state, session_id, &event.payload);
+                    if let (Some(request_id), Some((mail_id, initially_read))) =
+                        (event.request_id(), sent)
+                    {
+                        let reply = TopicReply::new(
+                            session_id.to_string(),
+                            event.topic.name.clone(),
+                            HostDecision::Accept,
+                            json!({ "mail_id": mail_id, "initially_read": initially_read }),
+                        )
+                        .with_request_id(request_id);
+                        let _ = relay_topic_reply_to_requesting_worker(
+                            state,
+                            session_id,
+                            Some(worker_id),
+                            reply,
+                        );
                     }
                 }
                 if event.topic.name == CORE_TOPIC_TOOLGEN {
@@ -13031,12 +17931,28 @@ fn handle_scoped_worker_event(
                 json!({"kind":"reasoning_upgrade", "from":upgrade.from, "to":upgrade.to}),
             );
         }
-        CoreSessionWorkerEvent::ModelRequestCompleted { latency } => {
+        CoreSessionWorkerEvent::ModelRequestCompleted {
+            round,
+            latency,
+            ttft,
+        } => {
             if let Some(debug) = state.debug.as_ref() {
-                if let Err(error) = debug.record_llm_latency(session_id, worker_id, latency) {
+                if let Err(error) = debug.record_llm_latency(session_id, worker_id, latency, ttft) {
                     eprintln!("[timem_web_debug_error] session_id={session_id:?} reason={error}");
                 }
             }
+            emit_worker_activity(
+                state,
+                session_id,
+                context_id,
+                worker_id,
+                json!({
+                    "kind": "model_request_completed",
+                    "round": round,
+                    "latency_ms": latency.as_millis(),
+                    "ttft_ms": ttft.map(|value| value.as_millis()),
+                }),
+            );
         }
         CoreSessionWorkerEvent::ModelResponseParsed { tool_count } => {
             if let Some(debug) = state.debug.as_ref() {
@@ -13051,6 +17967,8 @@ fn handle_scoped_worker_event(
             round,
             usage,
             content,
+            reasoning,
+            reasoning_truncated,
             tool_calls,
             truncated,
             runtime_phase,
@@ -13063,6 +17981,8 @@ fn handle_scoped_worker_event(
                     crate::debug_session::DebugLlmResponse {
                         usage: &usage,
                         content: &content,
+                        reasoning: &reasoning,
+                        reasoning_truncated,
                         tool_calls: &tool_calls,
                         truncated,
                     },
@@ -13397,6 +18317,13 @@ fn submit_unconsumed_supplement_handoff(
         .cloned()
         .collect::<Vec<_>>();
     let supplements = text_supplements.as_slice();
+    // A handoff replay must keep the runtime origin: mailbox deliveries and
+    // timer fires queued as system supplements would otherwise downgrade into
+    // user questions (## USER plus a user timestamp) when the Host re-submits
+    // them after the finishing turn. A batch mixed with real user input stays
+    // on the user channel.
+    let system_handoff =
+        !supplements.is_empty() && supplements.iter().all(|supplement| supplement.system_input);
     validate_session_model_service_config(state, session_id)?;
     apply_pending_session_mcp(state, session_id)?;
     let previous_session;
@@ -13427,7 +18354,13 @@ fn submit_unconsumed_supplement_handoff(
                 })
             });
             user_entries.push(WebTurnUserEntry {
-                kind: if index == 0 { "task" } else { "supplement" }.to_string(),
+                kind: if system_handoff {
+                    "mailbox".to_string()
+                } else if index == 0 {
+                    "task".to_string()
+                } else {
+                    "supplement".to_string()
+                },
                 text: supplement.text.clone(),
                 attachments: original
                     .as_ref()
@@ -13450,6 +18383,7 @@ fn submit_unconsumed_supplement_handoff(
             events: Vec::new(),
             final_answer: None,
             completion: None,
+            events_slimmed: false,
         };
         session.pending_turn_id = Some(turn.turn_id.clone());
         session.turns.push(turn.clone());
@@ -13466,7 +18400,11 @@ fn submit_unconsumed_supplement_handoff(
                 .collect::<Vec<_>>()
                 .join("\n\n"),
             created_at_ms,
-            kind: None,
+            kind: if system_handoff {
+                Some("mailbox".to_string())
+            } else {
+                None
+            },
             completion: None,
         });
     }
@@ -13528,13 +18466,21 @@ fn submit_unconsumed_supplement_handoff(
         .collect::<Vec<_>>()
         .join("\n\n");
     let enqueue = primary_worker_handle(state, session_id).and_then(|worker| {
-        turn_image_parts(&attachments).and_then(|images| {
-            // The original command IDs were already accepted by Core when the
-            // supplements entered the finishing turn. Preserve them on the Web
-            // entries, but use an internal handoff (no external command ID) for
-            // this new Core turn so deduplication cannot suppress it.
-            worker.run_turn_with_command_id_and_images(input, additional_context, None, images)
-        })
+        if system_handoff {
+            // Runtime-originated supplements replay through the system turn
+            // channel so they still render under ## RUNTIME, never as a user
+            // question. Mailbox/timer handoffs carry no images.
+            worker.run_system_turn_with_command_id(input, additional_context, None)
+        } else {
+            turn_image_parts(&attachments).and_then(|images| {
+                // The original command IDs were already accepted by Core when
+                // the supplements entered the finishing turn. Preserve them on
+                // the Web entries, but use an internal handoff (no external
+                // command ID) for this new Core turn so deduplication cannot
+                // suppress it.
+                worker.run_turn_with_command_id_and_images(input, additional_context, None, images)
+            })
+        }
     });
     if let Err(error) = enqueue {
         if let Ok(mut sessions) = state.sessions.lock() {
@@ -13599,25 +18545,30 @@ fn set_worker_state(state: &AppState, session_id: &str, worker_id: &str, worker_
 /// small hello frame. The active/working turn keeps full fidelity.
 fn slim_restored_turn_for_snapshot(turn: &WebTurn) -> WebTurn {
     let mut slim = turn.clone();
+    let mut events_slimmed = slim.events_slimmed;
     slim.events = slim
         .events
         .iter()
-        .map(|event| WebTurnEvent {
-            event_id: event.event_id.clone(),
-            source: event.source.clone(),
-            payload: slim_restored_action_event(truncate_restored_event_value(
-                event.payload.clone(),
-                0,
-            )),
-            created_at_ms: event.created_at_ms,
-            timeline_seq: event.timeline_seq,
+        .map(|event| {
+            let payload =
+                slim_restored_action_event(truncate_restored_event_value(event.payload.clone(), 0));
+            events_slimmed = events_slimmed || payload != event.payload;
+            WebTurnEvent {
+                event_id: event.event_id.clone(),
+                source: event.source.clone(),
+                payload,
+                created_at_ms: event.created_at_ms,
+                timeline_seq: event.timeline_seq,
+            }
         })
         .collect();
     const SNAPSHOT_TURN_EVENT_LIMIT: usize = 40;
     if slim.events.len() > SNAPSHOT_TURN_EVENT_LIMIT {
         let excess = slim.events.len() - SNAPSHOT_TURN_EVENT_LIMIT;
         slim.events.drain(0..excess);
+        events_slimmed = true;
     }
+    slim.events_slimmed = events_slimmed;
     slim
 }
 
@@ -13690,8 +18641,14 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
                 MEM_CAPACITY_128_MB
             }),
             conversation_capacity_bytes: Some(MEM_CAPACITY_128_MB),
+            mailbox_capacity_bytes: default_mem_mailbox_capacity_bytes(),
             claude_codex_tool_discovery: false,
             model_tool_result_bytes: default_model_tool_result_bytes(),
+            system_cpu_cap_percent: agent_core::resource_caps::DEFAULT_SYSTEM_CPU_CAP_PERCENT,
+            system_mem_cap_percent: agent_core::resource_caps::DEFAULT_SYSTEM_MEM_CAP_PERCENT,
+            system_cpu_cap_enabled: true,
+            system_mem_cap_enabled: true,
+            resource_caps: resource_caps_projection(&WebMemSettings::default()),
             context_compress_threshold_percent: default_context_compress_threshold_percent(),
             restore_prompt_context_on_startup: default_restore_prompt_context_on_startup(),
         });
@@ -14403,12 +19360,21 @@ impl WebSessionRuntimeProfile {
     fn from_runtime(runtime: &WebSessionRuntime) -> Self {
         let mut profile = Self::from_settings(&runtime.settings);
         profile.model_endpoint_id = runtime.model_endpoint_id.clone();
+        profile.active_model_endpoint_id = runtime.active_model_endpoint_id.clone();
+        profile.model_endpoint_ids = runtime.model_endpoint_ids.clone();
+        profile.endpoint_reasoning_efforts = runtime.endpoint_reasoning_efforts.clone();
+        profile.endpoint_max_input_tokens = runtime.endpoint_max_input_tokens.clone();
         profile
     }
 
     fn from_settings(settings: &RuntimeSettings) -> Self {
         Self {
             model_endpoint_id: None,
+            active_model_endpoint_id: None,
+            model_endpoint_ids: Vec::new(),
+            endpoint_reasoning_efforts: BTreeMap::new(),
+            endpoint_max_input_tokens: BTreeMap::new(),
+            reasoning_effort: settings.config.openai_compatible.reasoning_effort.clone(),
             model: settings.config.model.clone(),
             api_protocol: settings.config.api_protocol.label().to_string(),
             response_protocol: settings.config.response_protocol.name().to_string(),
@@ -14874,7 +19840,7 @@ fn highlighted_browser_url(browser_url: &str, use_color: bool) -> String {
 }
 
 fn print_help() {
-    println!("Timem Web\n\nUsage: timem [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; browser/API/WebSocket/upload require the access token\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default under the user home\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --timeout <seconds>          model connect/inactivity timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
+    println!("Timem Web\n\nUsage: timem [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; remote access requires the token, loopback access needs none\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default under the user home\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --timeout <seconds>          model connect/inactivity timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
 }
 
 fn public_access_url(configured_host: Option<&str>, port: u16, token: &str) -> Option<String> {

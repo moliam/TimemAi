@@ -1,7 +1,10 @@
 mod debug_session;
 mod lifecycle_diagnostics;
+mod mailbox;
 mod os;
+mod resource_caps_prompt;
 mod runtime_log;
+mod scope_isolation;
 mod semantic_delivery;
 mod server;
 mod session_groups;
@@ -60,8 +63,14 @@ fn exit_with_process_cleanup(code: i32) -> ! {
 }
 
 pub fn run_web(args: Vec<String>) {
+    // A login session cgroup is shared with unrelated processes, which makes
+    // memory controllers structurally unusable. Relaunch into a private user
+    // scope before any process-wide state is touched; a failed relaunch falls
+    // back to the current scope with a visible warning.
+    scope_isolation::relaunch_if_needed(&args);
     // Best-effort orphan safety net. Exact ownership still requires a writable,
-    // delegated cgroup-v2 subtree; unsupported environments use process groups.
+    // delegated resource-control subtree (cgroup v2 on Linux); unsupported
+    // environments use process groups.
     let _process_safety_net = agent_core::os::ensure_process_safety_net();
     let memory_root = match lifecycle_diagnostics::memory_root_from_args(&args) {
         Ok(path) => path,

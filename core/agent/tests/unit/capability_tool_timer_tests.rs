@@ -260,7 +260,8 @@ fn timer_snapshot_roundtrip_restores_timers() {
     assert!(!snapshot.is_empty());
 
     core.clear_dynamic_context();
-    // Timers survive a plain clear, unlike the memo.
+    // Timers and the memo survive a plain clear; the runtime restates
+    // them once on the next request.
     assert_eq!(core.timers().len(), 1);
 
     // Import wholesale-replaces: empty snapshot removes them.
@@ -300,6 +301,7 @@ fn timer_confirmation_line_marks_created_by() {
         after_ms: Some(5000),
         at: None,
         interval_ms: Some(900000),
+        queue_timeout_minutes: u64::MAX,
         created_by: "user".into(),
     };
     let mut timers = core.timers().to_vec();
@@ -311,6 +313,26 @@ fn timer_confirmation_line_marks_created_by() {
     // Empty set produces no line at all.
     core.replace_timers(vec![]);
     assert!(core.active_timers_confirmation_line().is_empty());
+    drop(core);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn timer_new_accepts_queue_timeout_minutes() {
+    let (mut core, dir) = setup("immediate_flag");
+    let out = run(
+        &mut core,
+        json!({"op": "new", "prompt": "urgent check", "name": "now1", "after_ms": 1000}),
+    );
+    assert!(!out.contains("Queue delivery"), "{out}");
+    assert_eq!(core.timers()[0].queue_timeout_minutes, 0);
+    let out = run(
+        &mut core,
+        json!({"op": "new", "prompt": "patient check", "name": "later1", "after_ms": 1000, "queue_timeout": 3}),
+    );
+    assert!(out.contains("Queue delivery"), "{out}");
+    assert!(out.contains("up to 3 minute(s)"), "{out}");
+    assert_eq!(core.timers()[1].queue_timeout_minutes, 3);
     drop(core);
     std::fs::remove_dir_all(dir).unwrap();
 }

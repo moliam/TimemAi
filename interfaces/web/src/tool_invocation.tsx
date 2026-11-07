@@ -1,7 +1,7 @@
 import { DatabaseSearch } from "./database_search_icon";
-import { CalendarClock, createLucideIcon, Database, Eye, PenLine } from "lucide-react";
+import { CalendarClock, createLucideIcon, Database, Eye, Mail, PenLine } from "lucide-react";
 import { t } from "./i18n";
-import type { FileSelector, MemorySearchPresentation, ReadFilePresentation, RunBashEditPresentation, SelfToolPresentation, TimerPresentation } from "./tool_presentation";
+import type { FileSelector, MailboxPresentation, MemorySearchPresentation, ReadFilePresentation, RunBashEditPresentation, SelfToolPresentation, TimerPresentation } from "./tool_presentation";
 import { formatTimerAt, timerDelayParts } from "./tool_presentation";
 
 const SquareText = createLucideIcon("SquareText", [
@@ -146,4 +146,35 @@ export function TimerInvocation({ timer }: { timer: TimerPresentation }) {
   >
     {t("tools.timerNew")}{name}，{mode}，{schedule}，{t("tools.timerTask")}: {timer.prompt}
   </span>;
+}
+
+
+export function MailboxIcon() {
+  return <span className="mailbox-tool-icon" title="mailbox"><Mail size={14} aria-hidden="true" /><span className="sr-only">mailbox</span></span>;
+}
+
+export function MailboxInvocation({ mailbox }: { mailbox: MailboxPresentation }) {
+  if (mailbox.kind === "send")
+    return (
+      <span
+        className="mailbox-tool-preview tool-invocation-preview"
+        title={[t("tools.mailboxSendTo", { to: mailbox.to }), mailbox.msg].join("\n")}
+      >
+        <span className="mailbox-tool-action">{t("tools.mailboxSendTo", { to: mailbox.to })}</span>
+        <span className="mailbox-tool-body">{mailbox.msg}</span>
+      </span>
+    );
+  if (mailbox.kind === "read")
+    return (
+      <span className="mailbox-tool-preview tool-invocation-preview" title={mailbox.mailId}>
+        {t("tools.mailboxReadMail")}
+      </span>
+    );
+  if (mailbox.kind === "search")
+    return (
+      <span className="mailbox-tool-preview tool-invocation-preview" title={mailbox.query}>
+        {t("tools.mailboxSearchMail", { query: mailbox.query })}
+      </span>
+    );
+  return <span className="mailbox-tool-preview tool-invocation-preview">{t("tools.mailboxListMail")}</span>;
 }

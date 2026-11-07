@@ -8,23 +8,52 @@ use timem_ui_contract::preferences::{AssistantResponseFormat, InterfacePreferenc
 pub(crate) const RESPONSE_TRAILER: &str =
     "Please continue the work and respond as protocol requires in user's language:";
 pub(crate) const NATIVE_RESPONSE_TRAILER: &str = "Continue the work and express thought in the user's language.  Use tools smartly. When all work is genuinely done, call the task_finished tool with the complete final answer as its summary:";
-pub(crate) const CONTEXT_COMPRESS_REQUIRED_TRAILER: &str =
-    "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:";
-pub(crate) const MANUAL_CONTEXT_COMPRESS_TRAILER: &str =
-    "User manually requests context compression. Please compress it now (see the `context_compress` tool description), before further work. Carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:";
+/// Caution shared by every compression trailer. Compression drops detail and
+/// easily drifts away from the primary objective, so the model must re-anchor
+/// on the overarching workflow cadence and the user's own inputs while
+/// compacting.
+macro_rules! context_compress_caution {
+    () => {
+        "Compression is an operation prone to data loss and directional drift. So be careful, and step back to evaluate the overarching workflow cadence and strictly avoid deviating from the primary objective. Synthesize historical memos—especially the ##USER inputs history—when executing context compression. After compression the runtime automatically re-provides the session work file, the project work-directory instructions (e.g. AGENTS.md), the current working directory, the active memo, timers, the mailbox address, running background jobs, and process scopes—do not spend summary space copying them; preserve your own work state instead. "
+    };
+}
+/// Canonical copy of the caution for assertions; production trailers embed it
+/// through `context_compress_caution!` at compile time.
+#[cfg(test)]
+pub(crate) const CONTEXT_COMPRESS_CAUTION: &str = context_compress_caution!();
+pub(crate) const CONTEXT_COMPRESS_REQUIRED_TRAILER: &str = concat!(
+    "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve work blueprint, directions, decisions, unfinished work, etc. ",
+    context_compress_caution!(),
+    "Your tool calls must start with context_compress:"
+);
+pub(crate) const MANUAL_CONTEXT_COMPRESS_TRAILER: &str = concat!(
+    "User manually requests context compression. Please compress it now (see the `context_compress` tool description), before further work. Carefully review the context and preserve work blueprint, directions, decisions, unfinished work, etc. ",
+    context_compress_caution!(),
+    "Your tool calls must start with context_compress:"
+);
 const NATIVE_PROTOCOL_SECTION: &str = "## Tool Calling\n\nCapabilities are provided through the model API. Call them through the API tool-call channel. You may request independent calls together. Text accompanying calls is a user-visible progress note. A response without tool calls does not finish the turn; explicitly call the task_finished tool with the final answer to end it. `context_compress` may be followed by other capability calls in the same response, but it must be the first call. Later calls run only after compression succeeds.";
 const NATIVE_RESPONSE_MODE_INSTRUCTION: &str = "Use the API tool-call channel for runtime capabilities. Ordinary response text is user-visible, you should report to user your progress often, or answer questions while working; text without tool calls keeps the loop running; call task_finished to end it.";
 const INLINE_RESPONSE_MODE_INSTRUCTION: &str =
     "Your response MUST be exactly protocol-compliant in the response protocol below.";
 const INLINE_TOOL_CATALOG_SECTION_HEADING: &str = "## Actions\n\nGenerate actions to drive the runtime to do things for you. There are several builtin actions:\n\n### Available capabilities";
-const NATIVE_BUILTIN_TOOL_DESCRIPTIONS_HEADING: &str =
-    "## Built-in Tool Descriptions\n\nBuilt-in tool parameter schemas are provided separately through the model API. One response can reasonably contain multiple tool calls for better performance.";
+const NATIVE_BUILTIN_TOOLS_HEADING: &str =
+    "## Built-in Tools\n\nBuilt-in tool parameter schemas and descriptions are provided separately through the model API. One response can reasonably contain multiple tool calls for better performance.";
 pub(crate) const MAX_ACTION_RESULT_PROMPT_BYTES: usize =
     tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES;
 pub(crate) const REASONING_INTENSITY_UPGRADE_TRAILER: &str = "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. Please continue the work and respond as protocol requires in user's language:";
 pub(crate) const NATIVE_REASONING_INTENSITY_UPGRADE_TRAILER: &str = "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. Continue the work and express thought in the user's language. Use tools smartly. When all work is genuinely done, call the task_finished tool with the complete final answer as its summary:";
-pub(crate) const REASONING_UPGRADED_CONTEXT_COMPRESS_TRAILER: &str = "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. [Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:";
-pub(crate) const REASONING_UPGRADED_MANUAL_CONTEXT_COMPRESS_TRAILER: &str = "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. User manually requests context compression. Please compress it now (see the `context_compress` tool description), before further work. Carefully review the context and preserve essential decisions, constraints, and unfinished work. Your tool calls must start with context_compress:";
+pub(crate) const REASONING_UPGRADED_CONTEXT_COMPRESS_TRAILER: &str = concat!(
+    "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. ",
+    "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Carefully review the context and preserve work blueprint, directions, decisions, unfinished work, etc. ",
+    context_compress_caution!(),
+    "Your tool calls must start with context_compress:"
+);
+pub(crate) const REASONING_UPGRADED_MANUAL_CONTEXT_COMPRESS_TRAILER: &str = concat!(
+    "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. ",
+    "User manually requests context compression. Please compress it now (see the `context_compress` tool description), before further work. Carefully review the context and preserve work blueprint, directions, decisions, unfinished work, etc. ",
+    context_compress_caution!(),
+    "Your tool calls must start with context_compress:"
+);
 
 pub(crate) fn is_structured_action_result_envelope(text: &str) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text.trim()) else {
@@ -188,9 +217,9 @@ fn render_prompt_context_structure(
         "Each `<prompt_delta>` is an outer dynamic transport container that may wrap `<USER>`, \
 `<ASSISTANT>`, and `<RUNTIME>` entries in chronological order. Initial \
 user input uses `<USER>` and later input in the same turn uses \
-`<USER kind=\"supplement\">`. Explicit direct resume uses `<USER kind=\"user resume directly\">` with an empty body. User-kind attributes describe structured behavior, not user-authored text. Readable UTC input timestamps annotate non-empty user questions and supplements only, never synthetic transport messages. Restart/supporting context precedes the user entry; later runtime observations remain after it. Static system content is separate in `<Timem System Prompt>`."
+`<USER kind=\"supplement\">`. Explicit direct resume uses `<USER kind=\"user resume directly\">` with an empty body. User-kind attributes describe structured behavior, not user-authored text. Readable UTC input timestamps annotate non-empty user questions and supplements only, never synthetic transport messages. Restart/supporting context and admission-time runtime notes precede the user entry, which closes its delta; later runtime observations follow in subsequent deltas. Static system content is separate in `<Timem System Prompt>`."
     } else {
-        "A dynamic delta starts with `[BEGIN DELTA delta_id: <id>]` and extends through every following provider-native message until the next BEGIN DELTA marker or the end of the current model input. Deltas are transport batches, not user turns. Initial user input uses `## USER`; later input in the same turn uses `## USER (supplement)`. Explicit direct resume uses the header `## USER (user resume directly)` with an empty body (XML: `<USER kind=\"user resume directly\">`). These annotations describe structured user behavior, not user-authored text. Readable UTC input timestamps annotate non-empty user questions and supplements only, never synthetic transport messages. Restart/supporting context precedes the user entry; later runtime observations remain after it. There is no END DELTA marker. Static system content is enclosed separately by the system-prompt boundaries."
+        "A dynamic delta starts with `[BEGIN DELTA delta_id: <id>]` and extends through every following provider-native message until the next BEGIN DELTA marker or the end of the current model input. Deltas are transport batches, not user turns. Initial user input uses `## USER`; later input in the same turn uses `## USER (supplement)`. Explicit direct resume uses the header `## USER (user resume directly)` with an empty body (XML: `<USER kind=\"user resume directly\">`). These annotations describe structured user behavior, not user-authored text. Readable UTC input timestamps annotate non-empty user questions and supplements only, never synthetic transport messages. Restart/supporting context and admission-time runtime notes precede the user entry, which closes its delta; later runtime observations follow in subsequent deltas. There is no END DELTA marker. Static system content is enclosed separately by the system-prompt boundaries."
     }
 }
 
@@ -339,7 +368,7 @@ pub(crate) fn render_static_prompt_for_mode_with_preferences(
     let with_protocol = with_protocol.replace("{{ASSSISTANT_ID}}", assistant_heading);
     let with_protocol = with_protocol.replace("ASSSISTANT_ID", assistant_heading);
     let tool_catalog_heading = if tool_call_mode == ToolCallMode::Native {
-        NATIVE_BUILTIN_TOOL_DESCRIPTIONS_HEADING
+        NATIVE_BUILTIN_TOOLS_HEADING
     } else {
         INLINE_TOOL_CATALOG_SECTION_HEADING
     };
@@ -349,10 +378,17 @@ pub(crate) fn render_static_prompt_for_mode_with_preferences(
     let with_caps = if tool_call_mode == ToolCallMode::Native {
         with_protocol.replace(
             "{{TOOL_CATALOG}}",
-            &capabilities.render_native_builtin_tool_descriptions_markdown(),
+            &capabilities.render_native_builtin_tool_names_markdown(),
         )
     } else {
         capabilities.enrich_static_prompt_for_protocol(&with_protocol, protocol_suite.lang_format())
+    };
+    // A containment note is appended only when the platform actually runs
+    // inside a managed facility (cgroup scope / job object); platforms
+    // without one keep the catalog untouched.
+    let with_caps = match crate::resource_caps::instance_containment_prompt_note() {
+        Some(note) => format!("{with_caps}\n\n{note}"),
+        None => with_caps,
     };
     // 3. Fill {{RESPONSE_V1_SCHEMA}} from prompt_spec
     let static_prompt = prompt_spec::enrich_static_prompt_with_response_schema(

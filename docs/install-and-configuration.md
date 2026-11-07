@@ -172,14 +172,31 @@ are only needed for frontend development.
 
 ### Session endpoint binding and editor
 
-Selecting an endpoint persists its stable ID in the Session. The Web header,
-Session list and selector render that binding, so renaming or editing an endpoint
-does not turn a bound Session into a custom configuration. Idle Sessions receive
-the complete updated route, including model, URL, protocols, credentials, headers
-and transport options. Active Turns keep their current configuration; the latest
-endpoint is resolved before the next Turn (including ToolGen) starts and when an
-idle Session is restored. A deleted binding is shown as `接入点已删除` and blocks
-new requests until another endpoint is selected; cached credentials are not a fallback.
+The endpoint picker builds an ordered failover chain. Selecting, removing, and
+reordering entries commits immediately (no separate confirm step). A model API
+request that is already in flight keeps its immutable route. The newest complete
+route snapshot is applied best-effort immediately before the next model API
+request, including a protocol-repair or later round in the same Turn. The header,
+Session list, and chain badges use the Host-observed active endpoint ID. After a
+rate-limit failover, Core reports the committed route and the Host updates that ID
+without rewriting the user's ordered chain.
+
+Every route snapshot includes the complete primary and standby configurations:
+model, URL, protocols, token budgets, credentials, headers, request fields and
+transport options. Edits, additions, deletions, reordering and chain clearing all
+use the same next-request boundary. Clearing restores the unbound Host template
+rather than reviving an old endpoint through legacy migration. Editing an
+endpoint preserves the rest of its chain. A deleted binding is shown as
+`接入点已删除` and blocks new requests until another endpoint is selected; cached
+credentials are not a fallback.
+
+Below the model ID, the Web header renders only `推理：` and a Session-scoped
+reasoning selector; it does not render the API protocol there. Its choices come
+from the current model's declared supported levels. If no levels are declared,
+the field displays `无`. A selection is persisted with the Session and layered
+over compatible primary and standby route snapshots without modifying any
+shared endpoint configuration. It takes effect at the same next-model-request
+boundary as endpoint edits and switches.
 
 Legacy Sessions without an ID migrate only on a unique full configuration match,
 including secrets. Diverged or ambiguous legacy configurations require explicit
@@ -255,7 +272,9 @@ timem
 ```
 
 The loopback-only local UI opens without an access token or model credentials at
-process startup. Only `--public` access requires the token printed in its URL.
+process startup. `--public` binds on all interfaces and requires the token printed
+in its URL for every remote client; requests from the same machine over loopback
+(`127.0.0.1` / `::1`) stay tokenless, exactly like the default local mode.
 Click the current model name in the upper-left header and configure
 the API key, model, API protocol, Base URL, and token limits for the selected
 Session. Configuration is Session-owned: changing one Session does not change
