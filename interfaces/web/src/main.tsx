@@ -5354,11 +5354,18 @@ function TimemApp() {
                     onClear={
                       activeSession && !sessionBusy
                         ? () => {
-                            if (window.confirm(t("context.clearConfirm")))
-                              sendCommand({
-                                type: "session_clear_context",
-                                session_id: activeSession.session_id,
-                              });
+                            if (!window.confirm(t("context.clearConfirm"))) return;
+                            const accepted = sendCommand({
+                              type: "session_clear_context",
+                              session_id: activeSession.session_id,
+                            });
+                            if (!accepted) {
+                              reportUiError(
+                                "Context clear failed",
+                                t("errors.checkConnection"),
+                                activeSession.session_id,
+                              );
+                            }
                           }
                         : null
                     }

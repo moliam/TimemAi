@@ -51,6 +51,12 @@ describe("header endpoint selector", () => {
     expect(source).toContain('aria-busy={compressing}');
   });
 
+  it("reports a failed context clear instead of silently dropping it", () => {
+    expect(source).toContain('"Context clear failed"');
+    expect(source).toContain('const accepted = sendCommand({');
+    expect(source).toContain('type: "session_clear_context"');
+  });
+
   it("shows the current endpoint name in the collapsed control tooltip", () => {
     expect(source).toContain("const endpointName = endpointLabel.trim();");
     expect(source).toContain('endpointName !== collapsedName ? endpointName : ""');
