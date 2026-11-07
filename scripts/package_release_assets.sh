@@ -89,7 +89,17 @@ stage_common() {
 }
 
 write_readme() {
-  local stage="$1" version="$2"
+  local stage="$1" version="$2" target="$3"
+  local requirements=""
+  case "$target" in
+    *-linux-*)
+      requirements="
+Requirements (Linux build):
+- glibc 2.31 or newer (Ubuntu 20.04 LTS or any distro shipping glibc >= 2.31)
+- bash (shell-related capabilities invoke it)
+"
+      ;;
+  esac
   cat > "$stage/README-ASSETS.txt" <<EOF
 TimemAi $version prebuilt package
 
@@ -100,7 +110,7 @@ Contents:
   timem-web.cmd on Windows)
 - reminder_tips.json: shipped default reminder schedules; user-level overrides
   under the OS configuration directory are never touched
-
+${requirements}
 Install:
 1. Extract this archive anywhere, for example ~/timem-bin.
 2. Add that directory to PATH.
@@ -132,7 +142,7 @@ package() {
     *-windows-*)
       kind="windows"
       stage_common "$stage" "$bin_dir" "$kind" "$target"
-      write_readme "$stage" "$version"
+      write_readme "$stage" "$version" "$target"
       assets="$out_dir/timem-v$version-$target.zip $out_dir/timem-v$version-$target.tar.gz"
       make_zip "$stage" "$out_dir/timem-v$version-$target.zip" timem.exe timem-web.cmd reminder_tips.json README-ASSETS.txt
       (cd "$stage" && tar -czf "$out_dir/timem-v$version-$target.tar.gz" timem.exe timem-web.cmd reminder_tips.json README-ASSETS.txt)
@@ -140,7 +150,7 @@ package() {
     *-apple-darwin | *-linux-*)
       kind="unix"
       stage_common "$stage" "$bin_dir" "$kind" "$target"
-      write_readme "$stage" "$version"
+      write_readme "$stage" "$version" "$target"
       assets="$out_dir/timem-v$version-$target.tar.gz"
       (cd "$stage" && tar -czf "$out_dir/timem-v$version-$target.tar.gz" timem timem-web reminder_tips.json README-ASSETS.txt)
       ;;
@@ -172,6 +182,7 @@ self_test() {
 
   package x86_64-pc-windows-msvc "$tmp/windows-bin" "$tmp/out" >/dev/null
   package aarch64-apple-darwin "$tmp/unix-bin" "$tmp/out" >/dev/null
+  package x86_64-unknown-linux-gnu "$tmp/unix-bin" "$tmp/out" >/dev/null
 
   local version zip_asset tar_asset
   version="$(workspace_version)"
@@ -208,6 +219,22 @@ PYEOF
   actual_digest="$(cd "$tmp/out" && checksum_file "$(basename "$zip_asset")" | awk '{print $1}')"
   if [ "$expected_digest" != "$actual_digest" ]; then
     echo "sha256 sidecar mismatch for $zip_asset" >&2
+    exit 1
+  fi
+
+  tar -xzf "$tar_asset" -C "$tmp/out" README-ASSETS.txt
+  if grep -q "glibc 2.31" "$tmp/out/README-ASSETS.txt"; then
+    echo "darwin README must not carry the Linux requirements section" >&2
+    exit 1
+  fi
+
+  tar -xzf "$tmp/out/timem-v$version-x86_64-unknown-linux-gnu.tar.gz" -C "$tmp/out" README-ASSETS.txt
+  if ! grep -q "glibc 2.31 or newer" "$tmp/out/README-ASSETS.txt"; then
+    echo "linux README must document the glibc 2.31 requirement" >&2
+    exit 1
+  fi
+  if ! grep -q "Requirements (Linux build):" "$tmp/out/README-ASSETS.txt"; then
+    echo "linux README must carry the requirements section heading" >&2
     exit 1
   fi
 
