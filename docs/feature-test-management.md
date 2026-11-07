@@ -313,7 +313,7 @@ Retired stream tools fold away completely under the collapsed Tools control as ~
 - Stream completed-dot removal, adjacent success/failure grouping with **Tools** N Succ | M Failed, reopening diagnostics, and dark/light user-colored supplement bubbles.
 - Deterministic Chrome stream performance window: 120 updates at 40 ms plus 1500 ms settling; main-thread TaskDuration < 4 seconds and LayoutCount < 500. These generous regression ceilings are not a CPU percentage or a guarantee for all content; failure must be investigated rather than raising limits to pass.
 
-`scripts/performance_guard.sh` additionally checks 20,000 mixed activities through stream retention and ordinary grouping within 1500 ms, with correctness assertions, alongside lifecycle/event-queue/scroll guards.
+`scripts/performance_guard.sh` additionally checks 20,000 mixed activities through stream retention and ordinary grouping within 1500 ms, with correctness assertions, alongside lifecycle/event-queue/scroll guards. The browser budget stage also runs the real-Chrome multi-session streaming benchmark (`multi-session-cpu.mjs`, 4 sessions x 60 turns at a 25 ms cadence): zero page errors, at most 5 long tasks, and main-thread TaskDuration under 6 s for the 8 s window; these are regression ceilings calibrated on Apple Silicon, not guarantees, so failures are investigated rather than raised.
 Long-text browser acceptance retains 180 paragraphs; its 60-second bounded wait accommodates the 240 UTF-16 units/second progressive reveal cap without reducing the fixture or skipping clipboard/scroll checks.
 Generated dist changes are rebuilt main JavaScript and CSS plus index.html hashed references; dependency chunks and fonts remain unchanged.
 

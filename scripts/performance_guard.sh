@@ -39,4 +39,7 @@ cargo test --release -p timem_shell performance_guard --quiet
 echo "performance_guard: timem browser hot paths"
 pnpm --dir interfaces/web exec vitest run tests/performance_guard.test.ts
 
+echo "performance_guard: timem browser multi-session streaming CPU budget"
+pnpm --dir interfaces/web exec node tests/browser/multi-session-cpu.mjs --label perf-guard-multi-session-cpu
+
 echo "performance_guard: ok"

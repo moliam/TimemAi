@@ -22,6 +22,7 @@ const intervalMs = Number(arg("interval-ms", "25"));
 const turnsPerSession = Number(arg("turns", "60"));
 const chromeCandidates = [
   process.env.CHROME_BIN,
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "/usr/bin/google-chrome",
   "/usr/bin/google-chrome-stable",
   "/usr/bin/chromium",
@@ -154,10 +155,19 @@ const snapshot = {
 function encodeFrame(event) {
   const payload = Buffer.from(JSON.stringify(event));
   if (payload.length < 126) return Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
-  const header = Buffer.alloc(4);
+  // The default 4-session benchmark hello snapshot exceeds 64 KiB, so the
+  // 16-bit length branch must not be used for large payloads.
+  if (payload.length < 65536) {
+    const header = Buffer.alloc(4);
+    header[0] = 0x81;
+    header[1] = 126;
+    header.writeUInt16BE(payload.length, 2);
+    return Buffer.concat([header, payload]);
+  }
+  const header = Buffer.alloc(10);
   header[0] = 0x81;
-  header[1] = 126;
-  header.writeUInt16BE(payload.length, 2);
+  header[1] = 127;
+  header.writeBigUInt64BE(BigInt(payload.length), 2);
   return Buffer.concat([header, payload]);
 }
 function makePeer(socket) {
@@ -267,6 +277,12 @@ const child = spawn(chrome, [
   "--window-size=1440,1000",
   "about:blank",
 ], { stdio: ["ignore", "ignore", "pipe"] });
+// An uncaught exception inside async socket callbacks bypasses the finally
+// cleanup and would orphan the spawned Chrome. Kill it before rethrowing.
+process.on("uncaughtException", (error) => {
+  try { if (child.exitCode === null) child.kill("SIGKILL"); } catch {}
+  throw error;
+});
 let socket;
 let browser;
 try {
@@ -417,6 +433,19 @@ try {
       cpuRatio: Number((taskMs / wallMs).toFixed(3)),
     })}`,
   );
+  // Regression budgets calibrated on Apple Silicon (macOS 26, Chrome 156):
+  // typical taskMs is ~1.9s with cpuRatio ~0.25 and 0-1 long tasks. These are
+  // generous regression ceilings, not performance guarantees; investigate a
+  // failure instead of raising the limits to pass.
+  if (pageErrors.length > 0) {
+    throw new Error(`benchmark page errors: ${pageErrors.join(" | ")}`);
+  }
+  if (longTasks > 5) {
+    throw new Error(`benchmark long-task budget exceeded: ${longTasks} > 5`);
+  }
+  if (taskMs >= 6000) {
+    throw new Error(`benchmark main-thread budget exceeded: taskMs=${taskMs} >= 6000`);
+  }
 } finally {
   try { browser?.close(); } catch {}
   for (const peer of peers) { try { peer.close(); } catch {} }
