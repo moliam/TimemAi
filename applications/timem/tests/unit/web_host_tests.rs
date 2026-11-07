@@ -20292,9 +20292,11 @@ fn web_timer_merge_from_core_preserves_host_metadata() {
         let mut sessions = state.sessions.lock().unwrap();
         sessions.get_mut("session_a").unwrap().timers = vec![seeded];
     }
-    // Core reports the existing timer (prompt changed) plus a new model timer.
-    let mut updated = existing_spec.clone();
-    updated.prompt = "changed by model".into();
+    // Core reports the existing timer with a differing spec. Core never
+    // mutates a known spec (its tool only creates and deletes), so a differing
+    // spec is a stale projection: the host keeps its own spec content.
+    let mut stale = existing_spec.clone();
+    stale.prompt = "stale core mirror".into();
     let model_timer = TimerSpec {
         timer_id: "timer_model_1".into(),
         name: "timer0".into(),
@@ -20306,14 +20308,17 @@ fn web_timer_merge_from_core_preserves_host_metadata() {
         queue_timeout_minutes: u64::MAX,
         created_by: "model".into(),
     };
-    merge_session_timers_from_core(&state, "session_a", &[updated, model_timer]).unwrap();
+    merge_session_timers_from_core(&state, "session_a", &[stale, model_timer]).unwrap();
     let timers = state.sessions.lock().unwrap()["session_a"].timers.clone();
     assert_eq!(timers.len(), 2);
     let kept = timers
         .iter()
         .find(|t| t.spec.timer_id == existing_id)
         .unwrap();
-    assert_eq!(kept.spec.prompt, "changed by model");
+    assert_eq!(
+        kept.spec.prompt, existing_spec.prompt,
+        "a stale Core mirror must never overwrite the host spec"
+    );
     assert_eq!(kept.created_at_ms, 42);
     assert!(!kept.enabled);
     assert_eq!(kept.last_fired_ms, Some(7));
@@ -20326,6 +20331,75 @@ fn web_timer_merge_from_core_preserves_host_metadata() {
     assert!(fresh.enabled);
     assert!(fresh.next_fire_ms > now_ms() as u64);
     assert_eq!(fresh.last_fired_ms, None);
+}
+
+#[test]
+fn web_timer_merge_from_core_never_reverts_user_edited_prompt() {
+    // Regression: a user edit is applied on the Host and persisted, but the
+    // worker's TimerSync queues behind a running turn. If the model then calls
+    // the timer tool, Core reports its stale full set and the merge must not
+    // roll the edit back (in memory or in timers.json).
+    let state = routing_test_state();
+    create_session_timer(
+        &state,
+        "session_a",
+        Some("userjob".into()),
+        "original prompt".into(),
+        Some("once".into()),
+        Some(60_000),
+        None,
+        None,
+        u64::MAX,
+    )
+    .unwrap();
+    let timer_id = state.sessions.lock().unwrap()["session_a"].timers[0]
+        .spec
+        .timer_id
+        .clone();
+    update_session_timer(
+        &state,
+        "session_a",
+        &timer_id,
+        "edited prompt",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let stale = {
+        let sessions = state.sessions.lock().unwrap();
+        let mut spec = sessions["session_a"].timers[0].spec.clone();
+        spec.prompt = "original prompt".into();
+        spec
+    };
+    let model_timer = TimerSpec {
+        timer_id: "timer_model_1".into(),
+        name: "timer0".into(),
+        prompt: "model job".into(),
+        mode: "once".into(),
+        after_ms: Some(2000),
+        at: None,
+        interval_ms: None,
+        queue_timeout_minutes: u64::MAX,
+        created_by: "model".into(),
+    };
+    merge_session_timers_from_core(&state, "session_a", &[stale, model_timer]).unwrap();
+
+    let timers = state.sessions.lock().unwrap()["session_a"].timers.clone();
+    let kept = timers.iter().find(|t| t.spec.timer_id == timer_id).unwrap();
+    assert_eq!(kept.spec.prompt, "edited prompt");
+    assert!(timers.iter().any(|t| t.spec.timer_id == "timer_model_1"));
+    let persisted = std::fs::read(timers_path(&state, "session_a").unwrap()).unwrap();
+    let persisted = String::from_utf8_lossy(&persisted);
+    assert!(
+        persisted.contains("edited prompt"),
+        "the stale merge must not repersist the pre-edit prompt"
+    );
+    assert!(!persisted.contains("original prompt"));
 }
 
 #[test]

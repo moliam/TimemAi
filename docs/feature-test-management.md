@@ -906,7 +906,7 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 ## 2026-10 Timer 面板 prompt 展开/编辑
 
 - 触发背景：用户反馈面板只见名字不见内容，prompt 是触发时投递给会话的核心载荷，需要可见、可核对、可修改。澄清：产品面板本有删除按钮与 prompt 全文（用户看到的是示意网页的简化画法），但「编辑 prompt」是真实产品缺口。
-- Host：新增 `timer_update` 命令（per-session lane）：trim 后非空、上限 8000 字符、session/timer 不存在失败关闭；同文 prompt 幂等返回；更新 spec.prompt 后持久化 timers.json、`sync_worker_timers` 重投影 Core（工具视图与压缩确认保持真实）、广播 core.timer notice 与 timers_updated。**调度状态（enabled/next_fire_ms/last_fired_ms）原样保留**——改的是触发载荷不是日历。
+- Host：新增 `timer_update` 命令（per-session lane）：trim 后非空、上限 8000 字符、session/timer 不存在失败关闭；同文 prompt 幂等返回；更新 spec.prompt 后持久化 timers.json、`sync_worker_timers` 重投影 Core（工具视图与压缩确认保持真实）、广播 core.timer notice 与 timers_updated。**调度状态（enabled/next_fire_ms/last_fired_ms）原样保留**——改的是触发载荷不是日历。Core 的 `core.timer` topic 回流合并时，Host 已知 timer 的 spec 内容（prompt/name/schedule/delivery）以 Host 为权威、原样保留：Core 工具只创建/删除、从不原地修改已知 spec，故差异的 Core spec 只能是 `TimerSync` 仍排在 turn 后面的陈旧投影，采纳它会静默回滚用户刚做的编辑（2026-11-07 回归修复，见 `web_timer_merge_from_core_never_reverts_user_edited_prompt`）。
 - Web：长 prompt（>80 字符或含换行）两行 line-clamp 截断 + 「+/−」展开收起（aria-expanded）；铅笔按钮进入编辑态（textarea 预填、可拉伸），保存按钮空文案禁用，保存发 `timer_update` 后退出编辑，取消丢弃草稿；会话切换时编辑态与展开集重置。i18n zh/en；深浅主题样式。
 - 测试看护：`web_timer_update_prompt_preserves_schedule_and_persists` 覆盖空/超长/不存在 id 拒绝、trim、调度字段不变、幂等、持久化；timer-ui-acceptance e2e 扩展——clamp 几何（scrollHeight>clientHeight）、展开后全文可见、编辑预填/空禁用/保存命令与主机回显/调度行不变/取消丢弃，1440/390 × 明暗全过。
 - 验证：timem lib 380、vitest 716、timer e2e 全绿；module_boundary/test_contract/diff 检查通过；dist 重建。

@@ -8819,6 +8819,13 @@ fn next_free_timer_name(timers: &[WebTimer]) -> String {
 /// Core timer topics carry the full authoritative set (user timers were
 /// synced into Core beforehand). Replace-all while preserving host-owned
 /// metadata (created_at_ms, enabled, fire bookkeeping) for known ids.
+///
+/// The Host is also authoritative for the spec content (prompt, name,
+/// schedule, delivery) of timers it already knows: Core never mutates a known
+/// spec in place (the model tool only creates and deletes, and renames onto an
+/// existing name are rejected), so a differing Core spec is always a stale
+/// projection whose `TimerSync` is still queued behind a turn. Adopting it
+/// here would silently revert a user edit made moments ago.
 fn merge_session_timers_from_core(
     state: &AppState,
     session_id: &str,
@@ -8840,11 +8847,9 @@ fn merge_session_timers_from_core(
                 .iter()
                 .find(|timer| timer.spec.timer_id == spec.timer_id)
             {
-                Some(existing) => {
-                    let mut updated = existing.clone();
-                    updated.spec = spec.clone();
-                    updated
-                }
+                // Known id: keep the host spec verbatim; Core reports it only
+                // as a possibly stale mirror.
+                Some(existing) => existing.clone(),
                 None => {
                     let next_fire_ms = match compute_next_fire_ms(spec, now) {
                         Ok(value) => value,
