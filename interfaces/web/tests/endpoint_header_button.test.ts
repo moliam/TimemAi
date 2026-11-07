@@ -51,6 +51,16 @@ describe("header endpoint selector", () => {
     expect(source).toContain('aria-busy={compressing}');
   });
 
+  it("guards context apply against duplicate in-flight submissions", () => {
+    expect(source).toContain("appliedContextValueRef");
+    expect(source).toContain("draftValue !== appliedContextValueRef.current");
+  });
+
+  it("applies socket backpressure before sending commands", () => {
+    expect(source).toContain("MAX_SOCKET_BUFFERED_BYTES");
+    expect(source).toContain("bufferedAmount > MAX_SOCKET_BUFFERED_BYTES");
+  });
+
   it("reports a failed context clear instead of silently dropping it", () => {
     expect(source).toContain('"Context clear failed"');
     expect(source).toContain('const accepted = sendCommand({');

@@ -1298,6 +1298,10 @@ function TimemApp() {
     (command: ClientCommand, requestedCommandId?: string) => {
       if (socket.current?.readyState !== WebSocket.OPEN || !snapshotReady)
         return false;
+      // The socket is shared by every session; a burst of high-frequency
+      // commands must fail fast instead of buffering unbounded payloads.
+      if (socket.current.bufferedAmount > MAX_SOCKET_BUFFERED_BYTES)
+        return false;
       const commandId =
         requestedCommandId ??
         (commandNeedsReliableDelivery(command)
@@ -12014,6 +12018,10 @@ function TimemThread({
   );
 }
 
+// Shared by every session's commands; bursts must fail fast instead of
+// buffering unbounded payloads on the socket.
+const MAX_SOCKET_BUFFERED_BYTES = 1_048_576;
+
 function countTurnModelRequests(turn: WebTurn): number {
   return turn.events.reduce(
     (count, event) =>
@@ -14222,12 +14230,18 @@ function HeaderModelControl({
   };
   const compressing = compressPending || compactRequested;
   const savedLimitRef = useRef<number | undefined>(contextLimit);
+  // Guards against duplicate submissions while one apply is in flight; the
+  // Host projection (or a rejected command) clears it via the effect below.
+  const appliedContextValueRef = useRef<number | undefined>(undefined);
   const draftValue = Number(lengthDraft.trim());
   const draftValid =
     Number.isInteger(draftValue) &&
     draftValue > 0 &&
     draftValue <= MAX_LLM_INPUT_TOKENS_CEILING;
-  const draftDirty = draftValid && draftValue !== contextLimit;
+  const draftDirty =
+    draftValid &&
+    draftValue !== contextLimit &&
+    draftValue !== appliedContextValueRef.current;
   const resetDraft = () => setLengthDraft(contextLimit ? String(contextLimit) : "");
   const closePopover = () => {
     setOpen(false);
@@ -14249,6 +14263,11 @@ function HeaderModelControl({
           : ""
         : draft,
     );
+  }, [contextLimit, open]);
+  useEffect(() => {
+    // The Host projection settled (or the popover reopened); allow applying
+    // the current draft again.
+    appliedContextValueRef.current = undefined;
   }, [contextLimit, open]);
   useEffect(() => {
     if (!open) return;
@@ -14293,6 +14312,7 @@ function HeaderModelControl({
     .join(" · ");
   const applyContextLength = () => {
     if (!draftValid || !draftDirty) return;
+    appliedContextValueRef.current = draftValue;
     onContextLimitChange(draftValue);
   };
   return (
