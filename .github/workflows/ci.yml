@@ -33,6 +33,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # macos-15-intel is intentionally excluded from the gate matrix: the shared
+  # Intel runner repeatedly failed on unrelated timing-sensitive tests and
+  # browser acceptances while the same commit stayed green on ubuntu and both
+  # arm64 macOS runners. x86_64-macOS artifacts are still built (and smoke
+  # tested) by release-assets.yml.
   ci:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -43,7 +48,6 @@ jobs:
           - ubuntu-latest
           - macos-latest
           - macos-15
-          - macos-15-intel
     steps:
       - name: Checkout
         uses: actions/checkout@v5
