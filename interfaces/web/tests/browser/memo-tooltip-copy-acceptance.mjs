@@ -17,6 +17,7 @@ import { createStartupDiagnostics } from "./browser-startup.mjs";
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const chromeCandidates = [
   process.env.CHROME_BIN,
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "/usr/bin/google-chrome",
   "/usr/bin/google-chrome-stable",
   "/usr/bin/chromium",
@@ -354,6 +355,11 @@ async function main() {
       return !!hit && !!hit.closest('.thread-memo-copy');
     })()`), "elementFromPoint lands on the portal copy button");
     await click(browser, portalCopy);
+    // Copy feedback is asynchronous (writeText -> setState -> re-render); the
+    // clipboard-content assertion below still proves the copy itself. This
+    // wait only removes the immediate poll-read race inside the 1400 ms
+    // feedback window.
+    await waitFor(() => browser.evaluate(`document.querySelector('.thread-working-memo-tooltip.is-portal .thread-memo-copy')?.className.includes("copy-success")`), "portal copy feedback shows copy-success", 1500);
     const portalFeedback = await browser.evaluate(`document.querySelector('.thread-working-memo-tooltip.is-portal .thread-memo-copy').className`);
     assert(portalFeedback.includes("copy-success"), "portal copy feedback shows copy-success, got: " + portalFeedback);
     const clipboardText = await browser.evaluate(`navigator.clipboard.readText()`);
@@ -426,6 +432,7 @@ async function main() {
       return !!hit && !!hit.closest('.thread-memo-copy');
     })()`), "elementFromPoint lands on the css tooltip copy button (pointer-events: auto)");
     await click(browser, cssCopy);
+    await waitFor(() => browser.evaluate(`document.querySelector('.thread-memo-indicator .thread-memo-copy')?.className.includes("copy-success")`), "css tooltip copy feedback shows copy-success", 1500);
     const cssFeedback = await browser.evaluate(`document.querySelector('.thread-memo-indicator .thread-memo-copy').className`);
     assert(cssFeedback.includes("copy-success"), "css tooltip copy feedback shows copy-success, got: " + cssFeedback);
     const gap = await browser.evaluate(`(() => {

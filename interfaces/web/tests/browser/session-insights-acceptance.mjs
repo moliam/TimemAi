@@ -15,6 +15,7 @@ import { createStartupDiagnostics } from "./browser-startup.mjs";
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const chromeCandidates = [
   process.env.CHROME_BIN,
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "/usr/bin/google-chrome",
   "/usr/bin/google-chrome-stable",
   "/usr/bin/chromium",
