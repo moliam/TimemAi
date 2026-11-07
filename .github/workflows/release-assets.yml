@@ -28,6 +28,8 @@ jobs:
             os: macos-15-intel
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
     steps:
       - name: Resolve latest release tag (manual runs)
         if: github.event_name != 'release'
@@ -62,12 +64,22 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Install cargo-zigbuild (Linux glibc 2.31 baseline)
+        if: matrix.os == 'ubuntu-latest'
+        run: pip install --quiet cargo-zigbuild ziglang
+
       - name: Build release binary
         shell: bash
         run: |
           set -euo pipefail
           cargo fetch --locked
-          cargo build --locked --release --target ${{ matrix.target }} --bin timem
+          if [[ "${{ matrix.os }}" == "ubuntu-latest" ]]; then
+            # The Linux baseline is Ubuntu 20.04 (glibc 2.31); zig cc pins the
+            # GLIBC symbol set so newer build runners stay compatible.
+            cargo zigbuild --locked --release --target ${{ matrix.target }}.2.31 --bin timem
+          else
+            cargo build --locked --release --target ${{ matrix.target }} --bin timem
+          fi
 
       - name: Package release assets
         shell: bash
@@ -91,6 +103,8 @@ jobs:
           # Smoke: the packaged executable must at least print usage.
           if [[ "${{ matrix.target }}" == *windows* ]]; then
             target/${{ matrix.target }}/release/timem.exe --help >/dev/null
+          elif [[ "${{ matrix.target }}" == aarch64-* ]]; then
+            echo "cross-built binary; host execution smoke runs in release validation"
           else
             target/${{ matrix.target }}/release/timem --help >/dev/null
           fi
