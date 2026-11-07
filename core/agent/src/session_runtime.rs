@@ -824,51 +824,95 @@ fn run_session_turn_with_model_client_and_reminder_override(
                         // rate-limit quota windows, looser for transient system
                         // errors), switch and retry this round on the next
                         // endpoint.
-                        if !failover.is_empty()
-                            && (is_retryable_model_system_error(&err)
-                                || is_endpoint_unavailable_error(&err))
+                        if is_retryable_model_system_error(&err)
+                            || is_endpoint_unavailable_error(&err)
                         {
-                            ui.on_core_topic_events(&[
-                                crate::host::model_endpoint_failover_topic_event(
+                            // A Host route update queued while this request
+                            // was in flight (e.g. the user reordering the
+                            // chain during rate-limit retries) must win over
+                            // the stale snapshot before the failover advances
+                            // through it.
+                            let failed_endpoint = config.interaction.model_endpoint_id.clone();
+                            let route_changed =
+                                ui.apply_pending_model_service_route(core, config, failover);
+                            if route_changed
+                                && config.interaction.model_endpoint_id.as_deref()
+                                    != failed_endpoint.as_deref()
+                            {
+                                consecutive_endpoint_failures = 0;
+                                ui.on_core_topic_events(&[
+                                    crate::host::model_endpoint_failover_topic_event(
+                                        request.session,
+                                        "switched",
+                                        config.interaction.model_endpoint_id.as_deref(),
+                                        Some(config.model.as_str()),
+                                        Some(config.base_url.as_str()),
+                                        None,
+                                    ),
+                                ]);
+                                core.set_response_protocol(config.response_protocol);
+                                core.set_max_llm_input_tokens(config.max_llm_input_tokens);
+                                profile = negotiate_interaction_for_turn(
+                                    model_client,
+                                    config,
+                                    request.audit_file,
+                                    ui,
                                     request.session,
-                                    "switching",
-                                    config.interaction.model_endpoint_id.as_deref(),
-                                    Some(config.model.as_str()),
-                                    Some(config.base_url.as_str()),
-                                    Some(&err),
-                                ),
-                            ]);
-                            *config = failover.remove(0);
-                            consecutive_endpoint_failures = 0;
-                            ui.on_core_topic_events(&[
-                                crate::host::model_endpoint_failover_topic_event(
+                                    false,
+                                )
+                                .profile;
+                                core.set_interaction_profile(&profile);
+                                ui.on_interaction_profile(&profile);
+                                rounds = rounds.saturating_sub(1);
+                                step = CoreStep::NeedModel {
+                                    prompt: core.build_next_prompt(),
+                                    rounds_remaining: core.remaining_rounds(),
+                                };
+                                continue;
+                            }
+                            if !failover.is_empty() {
+                                ui.on_core_topic_events(&[
+                                    crate::host::model_endpoint_failover_topic_event(
+                                        request.session,
+                                        "switching",
+                                        config.interaction.model_endpoint_id.as_deref(),
+                                        Some(config.model.as_str()),
+                                        Some(config.base_url.as_str()),
+                                        Some(&err),
+                                    ),
+                                ]);
+                                *config = failover.remove(0);
+                                consecutive_endpoint_failures = 0;
+                                ui.on_core_topic_events(&[
+                                    crate::host::model_endpoint_failover_topic_event(
+                                        request.session,
+                                        "switched",
+                                        config.interaction.model_endpoint_id.as_deref(),
+                                        Some(config.model.as_str()),
+                                        Some(config.base_url.as_str()),
+                                        None,
+                                    ),
+                                ]);
+                                core.set_response_protocol(config.response_protocol);
+                                core.set_max_llm_input_tokens(config.max_llm_input_tokens);
+                                profile = negotiate_interaction_for_turn(
+                                    model_client,
+                                    config,
+                                    request.audit_file,
+                                    ui,
                                     request.session,
-                                    "switched",
-                                    config.interaction.model_endpoint_id.as_deref(),
-                                    Some(config.model.as_str()),
-                                    Some(config.base_url.as_str()),
-                                    None,
-                                ),
-                            ]);
-                            core.set_response_protocol(config.response_protocol);
-                            core.set_max_llm_input_tokens(config.max_llm_input_tokens);
-                            profile = negotiate_interaction_for_turn(
-                                model_client,
-                                config,
-                                request.audit_file,
-                                ui,
-                                request.session,
-                                false,
-                            )
-                            .profile;
-                            core.set_interaction_profile(&profile);
-                            ui.on_interaction_profile(&profile);
-                            rounds = rounds.saturating_sub(1);
-                            step = CoreStep::NeedModel {
-                                prompt: core.build_next_prompt(),
-                                rounds_remaining: core.remaining_rounds(),
-                            };
-                            continue;
+                                    false,
+                                )
+                                .profile;
+                                core.set_interaction_profile(&profile);
+                                ui.on_interaction_profile(&profile);
+                                rounds = rounds.saturating_sub(1);
+                                step = CoreStep::NeedModel {
+                                    prompt: core.build_next_prompt(),
+                                    rounds_remaining: core.remaining_rounds(),
+                                };
+                                continue;
+                            }
                         }
                         if is_model_input_too_large_error(&err) {
                             if let Some(recovery) = core.recover_from_model_input_too_large(&err) {

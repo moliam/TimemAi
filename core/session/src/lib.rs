@@ -2827,11 +2827,10 @@ impl TurnUi for WorkerTurnUi {
                     let (deferred, applicable) = std::mem::take(&mut *updates)
                         .into_iter()
                         .partition(|update| {
-                            matches!(
-                                update,
-                                PendingRuntimeUpdate::ModelToolResultBytes(_)
-                                    | PendingRuntimeUpdate::ModelServiceRoute { .. }
-                            )
+                            // Model routes are consumed atomically by the
+                            // dedicated request-boundary hook; draining them
+                            // here would silently drop a user reorder.
+                            matches!(update, PendingRuntimeUpdate::ModelToolResultBytes(_))
                         });
                     *updates = deferred;
                     applicable

@@ -8597,3 +8597,124 @@ fn debug_reasoning_capture_is_bounded_and_char_safe() {
     append_debug_reasoning(&mut buffer, "tail", &mut truncated);
     assert_eq!(buffer.len(), MAX_DEBUG_REASONING_BYTES - 1);
 }
+
+type PendingRouteCell = std::cell::RefCell<Option<(ModelServiceConfig, Vec<ModelServiceConfig>)>>;
+
+struct RouteSwapUi {
+    pending: std::rc::Rc<PendingRouteCell>,
+}
+
+impl TurnUi for RouteSwapUi {
+    fn apply_pending_model_service_route(
+        &mut self,
+        _core: &mut crate::AgentCore,
+        config: &mut ModelServiceConfig,
+        failover: &mut Vec<ModelServiceConfig>,
+    ) -> bool {
+        if let Some((replacement, replacement_failover)) = self.pending.borrow_mut().take() {
+            *config = replacement;
+            *failover = replacement_failover;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+struct RateLimitedThenFinalModel {
+    seen_endpoints: Vec<String>,
+    pending_route: std::rc::Rc<PendingRouteCell>,
+    newer_active: ModelServiceConfig,
+}
+
+impl ModelClient for RateLimitedThenFinalModel {
+    fn call_model(
+        &mut self,
+        config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.seen_endpoints.push(
+            config
+                .interaction
+                .model_endpoint_id
+                .clone()
+                .unwrap_or_default(),
+        );
+        let mut pending = self.pending_route.borrow_mut();
+        if pending.is_some() || self.seen_endpoints.len() == 1 {
+            // The endpoint stays rate-limited; the Host received the user's
+            // chain reorder while the first request was in flight, and the
+            // newest route must win over the stale failover snapshot.
+            if pending.is_none() {
+                *pending = Some((self.newer_active.clone(), Vec::new()));
+            }
+            drop(pending);
+            return Err("model_http_429: rate limited".to_string());
+        }
+        drop(pending);
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"ok"}"#,
+            1_000,
+            false,
+        ))
+    }
+}
+
+#[test]
+fn rate_limited_failover_consumes_a_newer_host_route_first() {
+    let dir = tmp_dir("failover_route_swap_during_rate_limit");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+
+    let mut config = test_config();
+    config.interaction.model_endpoint_id = Some("endpoint-a".to_string());
+    let mut stale_next = test_config();
+    stale_next.interaction.model_endpoint_id = Some("endpoint-b-stale".to_string());
+    let mut newer_active = test_config();
+    newer_active.interaction.model_endpoint_id = Some("endpoint-b-new".to_string());
+
+    let pending_route: std::rc::Rc<PendingRouteCell> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let mut model = RateLimitedThenFinalModel {
+        seen_endpoints: Vec::new(),
+        pending_route: std::rc::Rc::clone(&pending_route),
+        newer_active,
+    };
+    let mut failover = vec![stale_next];
+    let mut ui = RouteSwapUi {
+        pending: pending_route,
+    };
+
+    let outcome = run_session_turn_with_model_client_and_failover(
+        &mut core,
+        &mut config,
+        &mut failover,
+        TurnInput {
+            input: "say ok",
+            session: "failover_route_swap",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "ok");
+    assert_eq!(
+        model.seen_endpoints.first().map(String::as_str),
+        Some("endpoint-a")
+    );
+    assert_eq!(
+        model.seen_endpoints.last().map(String::as_str),
+        Some("endpoint-b-new")
+    );
+    assert!(!model
+        .seen_endpoints
+        .contains(&"endpoint-b-stale".to_string()));
+}
