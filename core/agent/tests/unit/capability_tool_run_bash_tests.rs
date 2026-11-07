@@ -2853,3 +2853,28 @@ fn incomplete_capture_preserves_launcher_exit_without_reporting_success() {
     assert_eq!(event.payload["exit_status"], "0");
     assert_eq!(event.payload["capture_error"], "output_capture_incomplete");
 }
+
+#[cfg(unix)]
+#[test]
+fn background_spawn_rejects_when_job_cap_is_reached() {
+    let memory_dir = std::env::temp_dir().join(format!(
+        "timem-shell-job-cap-{}-{}",
+        std::process::id(),
+        now_ms()
+    ));
+    fs::create_dir_all(&memory_dir).unwrap();
+    let mut manager = ShellJobManager::new(&memory_dir);
+    manager.set_max_jobs_for_tests(2);
+    let cwd = std::env::temp_dir();
+    let first = manager.spawn_background("sleep 30", &cwd, "cap-session", "turn-cap-1");
+    assert!(first.contains("pid="), "{first}");
+    let second = manager.spawn_background("sleep 30", &cwd, "cap-session", "turn-cap-2");
+    assert!(second.contains("pid="), "{second}");
+    let third = manager.spawn_background("sleep 30", &cwd, "cap-session", "turn-cap-3");
+    assert!(
+        third.contains("too many background shell jobs"),
+        "third: {third}"
+    );
+    drop(manager);
+    let _ = fs::remove_dir_all(&memory_dir);
+}
