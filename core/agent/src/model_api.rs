@@ -1821,10 +1821,21 @@ fn required_tool_call_field(
 }
 
 fn looks_like_sse(body: &str) -> bool {
-    body.lines()
-        .map(str::trim_start)
-        .find(|line| !line.is_empty() && !line.starts_with(':'))
-        .is_some_and(|line| line.starts_with("data:") || line.starts_with("event:"))
+    let mut saw_any_line = false;
+    for line in body.lines().map(str::trim_start) {
+        if line.is_empty() {
+            continue;
+        }
+        saw_any_line = true;
+        if line.starts_with(':') {
+            // SSE comment lines (e.g. gateway keep-alive probes) only occur
+            // inside an SSE stream. A body made purely of comments must be
+            // interpreted as an empty SSE stream, never as plain response text.
+            continue;
+        }
+        return line.starts_with("data:") || line.starts_with("event:");
+    }
+    saw_any_line
 }
 
 const MAX_ASSISTANT_CONTINUATION_BYTES: usize = 4 * 1024 * 1024;

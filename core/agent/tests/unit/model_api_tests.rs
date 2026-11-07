@@ -614,6 +614,21 @@ fn model_http_response_interpretation_is_core_owned() {
 }
 
 #[test]
+fn comment_only_sse_body_is_not_treated_as_plain_text_content() {
+    let config = config(ApiProtocol::OpenAiCompatible);
+    let body = ": keep-alive\n\n".repeat(30);
+    let interpreted = interpret_model_http_response(&config, 200, &body, "");
+    // Keep-alive comments belong to the SSE framing. They must never leak
+    // into the assistant text (and from there into the chat UI).
+    assert!(interpreted.raw_json.get("raw_text").is_none());
+    let text = match &interpreted.result {
+        Ok(response) => response.content.clone(),
+        Err(error) => error.clone(),
+    };
+    assert!(!text.contains("keep-alive"));
+}
+
+#[test]
 fn openai_compatible_sse_collects_content_and_usage_without_exposing_reasoning() {
     let config = config(ApiProtocol::OpenAiCompatible);
     let body = concat!(
