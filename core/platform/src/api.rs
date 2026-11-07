@@ -427,8 +427,13 @@ pub fn register_managed_child(pid: u32) -> ManagedChildRegistration {
 /// owner, so the Runtime fallback reaper cannot consume it.
 pub fn command_status(command: &mut Command) -> std::io::Result<ExitStatus> {
     let mut child = command.spawn()?;
+    // The registration guard only carries reaper semantics on unix; the
+    // non-unix registration is an empty value with no Drop, so binding it
+    // would trip clippy::drop_non_drop on Windows targets.
+    #[cfg(unix)]
     let registration = register_managed_child(child.id());
     let status = child.wait();
+    #[cfg(unix)]
     drop(registration);
     status
 }
@@ -438,8 +443,10 @@ pub fn command_status(command: &mut Command) -> std::io::Result<ExitStatus> {
 pub fn command_output(command: &mut Command) -> std::io::Result<Output> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let child = command.spawn()?;
+    #[cfg(unix)]
     let registration = register_managed_child(child.id());
     let output = child.wait_with_output();
+    #[cfg(unix)]
     drop(registration);
     output
 }
