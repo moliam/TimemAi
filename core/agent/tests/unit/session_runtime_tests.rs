@@ -196,6 +196,12 @@ fn every_context_compression_trailer_carries_the_data_loss_caution() {
         crate::prompt_render::REASONING_UPGRADED_MANUAL_CONTEXT_COMPRESS_TRAILER,
     ] {
         assert!(trailer.contains(caution), "{trailer}");
+        // Natural order: the trigger instruction first, then the caution, and
+        // the mandatory-call sentence last.
+        assert!(
+            trailer.find("compress it now").unwrap() < trailer.find("prone to data loss").unwrap(),
+            "{trailer}"
+        );
         assert!(
             trailer.ends_with("Your tool calls must start with context_compress:"),
             "{trailer}"
@@ -2012,8 +2018,13 @@ fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
     assert_eq!(outcome.text, "已根据上下文预算停止回填大输出。");
     assert_eq!(model.prompts.len(), 3);
     assert!(model.prompts[1].contains("Your action's output is too large:"));
-    assert!(model.prompts[1]
-        .ends_with("[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve work blueprint, directions, decisions, unfinished work, etc. Your tool calls must start with context_compress:"));
+    assert!(model.prompts[1].contains("[Context WARN] Context near limit"));
+    assert!(model.prompts[1].contains("prone to data loss and directional drift"));
+    assert!(
+        model.prompts[1].find("[Context WARN]").unwrap()
+            < model.prompts[1].find("prone to data loss").unwrap()
+    );
+    assert!(model.prompts[1].ends_with("Your tool calls must start with context_compress:"));
     assert!(model.prompts[2].contains("context compressed successfully."));
     assert!(model.prompts[1].contains("optimize your action or compress context"));
     assert!(!model.prompts[1].contains(&"0".repeat(1_000)));

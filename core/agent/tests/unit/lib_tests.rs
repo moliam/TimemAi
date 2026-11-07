@@ -122,8 +122,13 @@ fn forced_compaction_preserves_native_history_and_restricts_model_request() {
     let request_prompt = core.build_model_request_prompt(&prompt);
     assert!(!request_prompt.contains("Long-context maintenance:"));
     assert!(!request_prompt.contains("[BEGIN THRESHOLD COMPRESSION GUIDANCE]"));
-    assert!(request_prompt
-        .ends_with("[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve work blueprint, directions, decisions, unfinished work, etc. Your tool calls must start with context_compress:"));
+    assert!(request_prompt.contains("[Context WARN] Context near limit"));
+    assert!(request_prompt.contains("prone to data loss and directional drift"));
+    assert!(
+        request_prompt.find("[Context WARN]").unwrap()
+            < request_prompt.find("prone to data loss").unwrap()
+    );
+    assert!(request_prompt.ends_with("Your tool calls must start with context_compress:"));
     let request = core.model_interaction_request(request_prompt);
     assert_eq!(request.tool_choice, NativeToolChoice::Required);
     assert!(request

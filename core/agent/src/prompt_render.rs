@@ -22,12 +22,14 @@ macro_rules! context_compress_caution {
 #[cfg(test)]
 pub(crate) const CONTEXT_COMPRESS_CAUTION: &str = context_compress_caution!();
 pub(crate) const CONTEXT_COMPRESS_REQUIRED_TRAILER: &str = concat!(
+    "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve work blueprint, directions, decisions, unfinished work, etc. ",
     context_compress_caution!(),
-    "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve work blueprint, directions, decisions, unfinished work, etc. Your tool calls must start with context_compress:"
+    "Your tool calls must start with context_compress:"
 );
 pub(crate) const MANUAL_CONTEXT_COMPRESS_TRAILER: &str = concat!(
+    "User manually requests context compression. Please compress it now (see the `context_compress` tool description), before further work. Carefully review the context and preserve work blueprint, directions, decisions, unfinished work, etc. ",
     context_compress_caution!(),
-    "User manually requests context compression. Please compress it now (see the `context_compress` tool description), before further work. Carefully review the context and preserve work blueprint, directions, decisions, unfinished work, etc. Your tool calls must start with context_compress:"
+    "Your tool calls must start with context_compress:"
 );
 const NATIVE_PROTOCOL_SECTION: &str = "## Tool Calling\n\nCapabilities are provided through the model API. Call them through the API tool-call channel. You may request independent calls together. Text accompanying calls is a user-visible progress note. A response without tool calls does not finish the turn; explicitly call the task_finished tool with the final answer to end it. `context_compress` may be followed by other capability calls in the same response, but it must be the first call. Later calls run only after compression succeeds.";
 const NATIVE_RESPONSE_MODE_INSTRUCTION: &str = "Use the API tool-call channel for runtime capabilities. Ordinary response text is user-visible, you should report to user your progress often, or answer questions while working; text without tool calls keeps the loop running; call task_finished to end it.";
@@ -42,13 +44,15 @@ pub(crate) const REASONING_INTENSITY_UPGRADE_TRAILER: &str = "This request is us
 pub(crate) const NATIVE_REASONING_INTENSITY_UPGRADE_TRAILER: &str = "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. Continue the work and express thought in the user's language. Use tools smartly. When all work is genuinely done, call the task_finished tool with the complete final answer as its summary:";
 pub(crate) const REASONING_UPGRADED_CONTEXT_COMPRESS_TRAILER: &str = concat!(
     "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. ",
+    "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Carefully review the context and preserve work blueprint, directions, decisions, unfinished work, etc. ",
     context_compress_caution!(),
-    "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Carefully review the context and preserve work blueprint, directions, decisions, unfinished work, etc. Your tool calls must start with context_compress:"
+    "Your tool calls must start with context_compress:"
 );
 pub(crate) const REASONING_UPGRADED_MANUAL_CONTEXT_COMPRESS_TRAILER: &str = concat!(
     "This request is using stronger reasoning than the normal H0 baseline. Use this opportunity to provide more direction and methodology for the work, and to identify and correct possible mistakes or weak assumptions through reflection. ",
+    "User manually requests context compression. Please compress it now (see the `context_compress` tool description), before further work. Carefully review the context and preserve work blueprint, directions, decisions, unfinished work, etc. ",
     context_compress_caution!(),
-    "User manually requests context compression. Please compress it now (see the `context_compress` tool description), before further work. Carefully review the context and preserve work blueprint, directions, decisions, unfinished work, etc. Your tool calls must start with context_compress:"
+    "Your tool calls must start with context_compress:"
 );
 
 pub(crate) fn is_structured_action_result_envelope(text: &str) -> bool {

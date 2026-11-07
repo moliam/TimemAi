@@ -2161,9 +2161,10 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.ends_with(
-        "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve work blueprint, directions, decisions, unfinished work, etc. Your tool calls must start with context_compress:"
-    ));
+    assert!(prompt.contains("[Context WARN] Context near limit"));
+    assert!(prompt.contains("prone to data loss and directional drift"));
+    assert!(prompt.find("[Context WARN]").unwrap() < prompt.find("prone to data loss").unwrap());
+    assert!(prompt.ends_with("Your tool calls must start with context_compress:"));
     let (_, threshold, quality_target) = core
         .take_pending_compact_request_notice()
         .expect("threshold crossing notice");
@@ -2232,9 +2233,10 @@ fn runtime_host_configuration_sync_is_core_owned() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.ends_with(
-        "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve work blueprint, directions, decisions, unfinished work, etc. Your tool calls must start with context_compress:"
-    ));
+    assert!(prompt.contains("[Context WARN] Context near limit"));
+    assert!(prompt.contains("prone to data loss and directional drift"));
+    assert!(prompt.find("[Context WARN]").unwrap() < prompt.find("prone to data loss").unwrap());
+    assert!(prompt.ends_with("Your tool calls must start with context_compress:"));
     assert!(!prompt.contains("Long-context maintenance:"));
     let (estimated, threshold, quality_target) = core
         .take_pending_compact_request_notice()
@@ -3702,9 +3704,10 @@ fn long_context_uses_observed_model_prompt_tokens_plus_new_delta_estimate() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.ends_with(
-        "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve work blueprint, directions, decisions, unfinished work, etc. Your tool calls must start with context_compress:"
-    ));
+    assert!(prompt.contains("[Context WARN] Context near limit"));
+    assert!(prompt.contains("prone to data loss and directional drift"));
+    assert!(prompt.find("[Context WARN]").unwrap() < prompt.find("prone to data loss").unwrap());
+    assert!(prompt.ends_with("Your tool calls must start with context_compress:"));
     assert!(!prompt.contains("Long-context maintenance:"));
     let (estimated, threshold, quality_target) = core
         .take_pending_compact_request_notice()
@@ -3732,9 +3735,10 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.ends_with(
-        "[Context WARN] Context near limit. Please compress it now (see the `context_compress` tool description). Use this reasoning pass to carefully review the context and preserve work blueprint, directions, decisions, unfinished work, etc. Your tool calls must start with context_compress:"
-    ));
+    assert!(prompt.contains("[Context WARN] Context near limit"));
+    assert!(prompt.contains("prone to data loss and directional drift"));
+    assert!(prompt.find("[Context WARN]").unwrap() < prompt.find("prone to data loss").unwrap());
+    assert!(prompt.ends_with("Your tool calls must start with context_compress:"));
     for redundant in [
         "Long-context maintenance:",
         "mode=force_shrink_required",
