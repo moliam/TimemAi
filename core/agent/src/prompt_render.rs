@@ -14,7 +14,7 @@ pub(crate) const NATIVE_RESPONSE_TRAILER: &str = "Continue the work and express 
 /// compacting.
 macro_rules! context_compress_caution {
     () => {
-        "Compression is an operation prone to data loss and directional drift. So be careful, and step back to evaluate the overarching workflow cadence and strictly avoid deviating from the primary objective. Synthesize historical memos—especially the ##USER inputs history—when executing context compression. After compression the runtime automatically re-provides the session work file, the project work-directory instructions (e.g. AGENTS.md and module boundaries), the current working directory, the active memo, timers, the mailbox address, running background jobs, and process scopes—do not spend summary space copying them; preserve your own work state instead. "
+        "Compression is an operation prone to data loss and directional drift. So be careful, and step back to evaluate the overarching workflow cadence and strictly avoid deviating from the primary objective. Synthesize historical memos—especially the ##USER inputs history—when executing context compression. After compression the runtime automatically re-provides the session work file, the project work-directory instructions (e.g. AGENTS.md), the current working directory, the active memo, timers, the mailbox address, running background jobs, and process scopes—do not spend summary space copying them; preserve your own work state instead. "
     };
 }
 /// Canonical copy of the caution for assertions; production trailers embed it
