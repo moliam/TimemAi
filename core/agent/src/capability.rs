@@ -603,7 +603,17 @@ impl CapabilityRegistry {
         if let Some(object) = input.as_object() {
             for key in object.keys() {
                 if !input_property_declared(&manifest.input_schema.properties, key) {
-                    return Err(format!("input.{key}_unsupported"));
+                    let mut allowed: Vec<&str> = manifest
+                        .input_schema
+                        .properties
+                        .keys()
+                        .map(String::as_str)
+                        .collect();
+                    allowed.sort_unstable();
+                    return Err(format!(
+                        "input.{key}_unsupported; allowed keys: {}",
+                        allowed.join(", ")
+                    ));
                 }
             }
         }

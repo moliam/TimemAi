@@ -745,7 +745,7 @@ impl PendingApprovedAction {
                 tail_out,
                 edited_files,
             } => json!({
-                "command": command,
+                "cmd": command,
                 "background": background,
                 "timeout_ms": timeout_ms,
                 "interval_ms": interval_ms,

@@ -403,7 +403,8 @@ fn registry_validates_required_input_fields_from_manifest() {
                 ]),
             )
             .unwrap_err();
-        assert_eq!(error, format!("input.{field}_unsupported"));
+        assert!(error.starts_with(&format!("input.{field}_unsupported")));
+        assert!(error.contains("allowed keys"));
     }
     assert!(registry
         .validate_action_input(
@@ -584,6 +585,15 @@ fn registry_validates_required_input_fields_from_manifest() {
         )
         .unwrap_err()
         .contains("input.read_back_command_unsupported"));
+    let legacy_command_error = registry
+        .validate_action_input(
+            "run_bash",
+            &json_object([("command", Value::String("pwd".to_string()))]),
+        )
+        .unwrap_err();
+    assert!(legacy_command_error.contains("input.command_unsupported"));
+    assert!(legacy_command_error.contains("allowed keys"));
+    assert!(legacy_command_error.contains("cmd"));
     assert!(registry
         .validate_action_input(
             "run_bash",
