@@ -152,7 +152,22 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
                     );
                 }
             };
-            let delta_rows = core.query_prompt_slices(&search_text, limit, after_ms, before_ms);
+            let delta_rows = core
+                .query_prompt_slices(
+                    &search_text,
+                    limit.saturating_mul(4).clamp(4, 50),
+                    after_ms,
+                    before_ms,
+                )
+                .into_iter()
+                .filter(|slice| {
+                    matches!(
+                        slice.prompt_type.as_str(),
+                        "user_question" | "user_supplement" | "user_resume_directly"
+                    )
+                })
+                .take(limit)
+                .collect::<Vec<_>>();
             if rows.is_empty() && delta_rows.is_empty() {
                 ActionOutcome::completed(format!(
                     "Action result: memmgr\ntype: raw_chat\nop: search\nsearch_text: {}\nresults: none",
