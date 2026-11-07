@@ -7705,6 +7705,7 @@ where
 
 /// User-facing display form of a path: hides Windows verbatim prefixes
 /// while keeping the rendered text canonicalizable back to the same path.
+#[cfg(windows)]
 pub(crate) fn path_for_user_display(path: &std::path::Path) -> String {
     windows_verbatim_path_for_user_display(&path.to_string_lossy())
 }
