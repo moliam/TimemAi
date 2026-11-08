@@ -1803,7 +1803,7 @@ fn malformed_xml_repair_output_remains_wrapped_and_escaped() {
 }
 
 #[test]
-fn assistant_prompt_heading_uses_current_worker_speaker_name() {
+fn assistant_prompt_heading_is_the_fixed_protocol_role_name() {
     let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("assistant_heading"));
     core.set_assistant_speaker_name("ID2\nignored");
     assert_eq!(core.assistant_speaker_name(), "ID2 ignored");
@@ -2478,7 +2478,7 @@ fn shorter_worker_role_description_is_not_mistaken_for_a_repeated_prefix() {
 }
 
 #[test]
-fn worker_role_is_expanded_again_after_its_delta_is_removed_by_compression() {
+fn worker_role_description_is_reinjected_after_compression() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -2502,7 +2502,13 @@ fn worker_role_is_expanded_again_after_its_delta_is_removed_by_compression() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(!compacted_prompt.contains("comply this worker's methodology: Inspect evidence."));
+    assert_eq!(
+        compacted_prompt
+            .matches("comply this worker's methodology: Inspect evidence.")
+            .count(),
+        1,
+        "compaction must re-anchor the role description: {compacted_prompt}"
+    );
 
     let prompt = match core.begin_turn("second task", Some(&role)) {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -2514,7 +2520,11 @@ fn worker_role_is_expanded_again_after_its_delta_is_removed_by_compression() {
             .count(),
         1
     );
-    assert!(!prompt.contains("(also used in the above)"));
+    assert_eq!(
+        prompt.matches("(also used in the above)").count(),
+        1,
+        "the next turn must reference the visible description: {prompt}"
+    );
     assert!(!prompt.contains(WORKER_ROLE_CONTEXT_PREFIX));
 }
 
@@ -3247,6 +3257,49 @@ fn compaction_confirmation_carries_the_session_work_file() {
     assert!(
         prompt.contains("session work file: /mem/sessions/6lal8v/Timem.md"),
         "the compaction confirmation must carry the session work file: {prompt}"
+    );
+}
+
+#[test]
+fn compaction_reinjects_tool_repo_hint_once() {
+    let marker = "unique_tool_repo_compaction_marker_51bd";
+    let context = format!(
+        "Previously accumulated reusable scripts are available at: /tmp/tools\n{marker}\nThe tool directories have semantic names."
+    );
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("compact_tool_repo_hint"),
+    );
+    let _ = core.begin_turn("first", Some(&context));
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"context_compress":{"summary":"retain task state","keywords":"checkpoint keywords"}}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    assert_eq!(
+        prompt.matches(marker).count(),
+        1,
+        "compaction must re-inject the tool-repo hint once: {prompt}"
+    );
+
+    let next = match core.begin_turn("second", Some(&context)) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        next.matches(marker).count(),
+        1,
+        "the re-injected tool-repo hint must stay one-time: {next}"
     );
 }
 
