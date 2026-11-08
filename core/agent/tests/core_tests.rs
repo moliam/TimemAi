@@ -1306,7 +1306,7 @@ fn prompt_is_append_only_and_segmented() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(second.contains("[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]"));
-    assert!(second.contains("## TIMEM_ASSISTANT"));
+    assert!(second.contains("## ASSISTANT"));
     assert!(second.contains(r#"{"status":"ALL_FINISHED","final_answer":"你好"}"#));
     assert!(!second.contains("All previous pending open tasks are completed."));
     assert!(second.contains("\n\n继续"));
@@ -1362,7 +1362,7 @@ fn extracted_assistant_replay_mode_keeps_legacy_free_talk_and_final_answer_shape
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("## TIMEM_ASSISTANT"));
+    assert!(prompt.contains("## ASSISTANT"));
     assert!(prompt.contains("先分析"));
     assert!(prompt.contains(
         "All previous pending open tasks are completed. Do not repeat this previous answer unless the user asks to quote it. Final Answer:\n你好"
@@ -1677,7 +1677,7 @@ fn raw_assistant_replay_is_included_before_action_results_for_working_turns() {
         other => panic!("unexpected step: {other:?}"),
     };
 
-    let assistant = prompt.find("## TIMEM_ASSISTANT").unwrap();
+    let assistant = prompt.find("## ASSISTANT").unwrap();
     let raw = prompt.find(raw_response).unwrap();
     let system_result = prompt
         .find("The following are results of the actions generated in response:")
@@ -1685,7 +1685,7 @@ fn raw_assistant_replay_is_included_before_action_results_for_working_turns() {
     assert!(assistant < raw);
     assert!(raw < system_result);
     assert!(!action_results(&prompt).is_empty());
-    assert!(!prompt.contains("## TIMEM_ASSISTANT\n\n需要读取自身信息。"));
+    assert!(!prompt.contains("## ASSISTANT\n\n需要读取自身信息。"));
 }
 
 #[test]
@@ -1822,8 +1822,8 @@ fn assistant_prompt_heading_uses_current_worker_speaker_name() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("## ID2 ignored"));
-    assert!(!prompt.contains("## TIMEM_ASSISTANT\n\nAll previous"));
+    assert!(prompt.contains("\n## ASSISTANT\n"));
+    assert!(!prompt.contains("## ID2 ignored"));
 }
 
 #[test]
@@ -1841,7 +1841,7 @@ fn assistant_name_is_not_explained_in_static_prompt_and_action_results_remain_cl
     };
 
     assert!(!prompt.contains("Your identity in prompt history"));
-    assert!(prompt.contains("## Ai4"));
+    assert!(prompt.contains("## ASSISTANT"));
     assert!(!prompt.contains("ASSSISTANT_ID"));
     assert!(!prompt.contains("{{ASSSISTANT_ID}}"));
     assert!(!prompt.contains("CURRENT_ASSISTANT_NAME"));
@@ -3326,7 +3326,7 @@ fn context_compress_summary_only_removes_all_existing_deltas() {
     assert!(!prompt.contains("Context compress summary replacing"));
     assert_eq!(prompt.matches("remove stale test delta").count(), 1);
     let assistant = prompt
-        .find("## TIMEM_ASSISTANT (context compression summary)")
+        .find("## ASSISTANT (context compression summary)")
         .unwrap();
     let compact_request = prompt.find("remove stale test delta").unwrap();
     let compact_result = prompt.find("context compressed successfully.").unwrap();
@@ -3374,7 +3374,7 @@ fn extracted_replay_keeps_compact_summary_once_as_assistant_before_system_result
 
     assert_eq!(prompt.matches("retain extracted compact state").count(), 1);
     let assistant = prompt
-        .find("## TIMEM_ASSISTANT (context compression summary)")
+        .find("## ASSISTANT (context compression summary)")
         .unwrap();
     let summary = prompt.find("retain extracted compact state").unwrap();
     let compact_result = prompt.find("context compressed successfully.").unwrap();
@@ -3484,7 +3484,7 @@ fn response_context_compress_hides_refs_and_appends_summary_slice() {
     };
 
     assert!(prompt.contains("## RUNTIME"));
-    assert!(prompt.contains("## TIMEM_ASSISTANT (context compression summary)"));
+    assert!(prompt.contains("## ASSISTANT (context compression summary)"));
     assert!(prompt.contains("旧任务已经完成，只保留 compact 后的测试摘要"));
     assert!(prompt.contains("context compressed successfully."));
     assert!(prompt.contains("CWD: "));
@@ -4847,7 +4847,7 @@ fn protocol_repair_delta_separates_previous_output_from_system_error() {
     };
 
     let assistant_pos = prompt
-        .find("## TIMEM_ASSISTANT")
+        .find("## ASSISTANT")
         .expect("missing assistant repair slice");
     let raw_pos = prompt
         .find(raw_response)
@@ -5187,7 +5187,7 @@ fn model_repair_audit_is_core_owned_when_applying_response() {
     assert!(records[0]["rendered"]
         .as_str()
         .unwrap()
-        .contains("## ASSISTANT:\n"));
+        .contains("## ASSISTANT\n"));
     assert!(records[0]["rendered"]
         .as_str()
         .unwrap()
@@ -6183,10 +6183,10 @@ fn context_compress_offload_rejects_invalid_prompt_refs_without_writing() {
         .is_none());
     assert!(prompt.contains("checking compact refs"));
     assert!(prompt.contains("bad refs should not write scratch"));
-    let assistant = prompt.find("## TIMEM_ASSISTANT").unwrap();
+    let assistant = prompt.find("## ASSISTANT").unwrap();
     let action_result = prompt.find(r#"{"action_result":"#).unwrap();
     assert!(assistant < action_result);
-    assert!(!prompt.contains("## TIMEM_ASSISTANT (context compression summary)"));
+    assert!(!prompt.contains("## ASSISTANT (context compression summary)"));
     assert!(!core.scratch_file().exists());
 }
 
@@ -8854,7 +8854,7 @@ fn free_talk_field_is_persisted_as_llm_free_talk_slice() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("## TIMEM_ASSISTANT"));
+    assert!(prompt.contains("## ASSISTANT"));
     assert!(prompt.contains("推导一下"));
     assert!(!prompt.contains("Free_talk:"));
 }
@@ -11542,7 +11542,7 @@ fn include_reasoning_replays_on_native_tool_rounds() {
         "native tool-round reasoning must replay into the next prompt: {prompt}"
     );
     let assistant_pos = prompt
-        .find("## TIMEM_ASSISTANT (thinking)")
+        .find("## ASSISTANT (thinking)")
         .unwrap_or_else(|| panic!("dedicated thinking heading missing: {prompt}"));
     let reasoning_pos = prompt.find("NATIVE ROUND REASONING CHAIN").unwrap();
     assert!(

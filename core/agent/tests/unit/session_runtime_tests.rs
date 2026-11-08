@@ -4197,7 +4197,7 @@ fn session_turn_replays_previous_assistant_components_before_next_user_input() {
     assert!(previous_answer < user);
     assert!(previous_answer < runtime_note);
     assert!(runtime_note < user);
-    assert!(prompt.contains("## Ai4"));
+    assert!(prompt.contains("## ASSISTANT"));
     assert!(!prompt.contains("created_at_ms"));
     assert!(!prompt.contains("batch_id"));
 }

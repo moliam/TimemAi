@@ -847,7 +847,7 @@ pub fn model_repair_output_event(
         "repair_calls": repair_calls,
         "repair_calls_delta": repair_calls_delta,
         "rendered": format!(
-            "---- {} / {} ----\n## {}:\n{}\n\n## {}\n{}",
+            "---- {} / {} ----\n## {}\n{}\n\n## {}\n{}",
             time_ms, turn_id, spec.assistant_role, assistant_response, spec.runtime_role, system_message
         ),
         "summary": format!("{} repair for {}", issue_text, turn_id),

@@ -84,10 +84,7 @@ pub(crate) fn truncate_action_result_for_prompt(text: &str) -> String {
     }
 }
 
-pub(crate) fn formatted_response_trailer(
-    _response_shape_hint: &str,
-    _assistant_heading: &str,
-) -> String {
+pub(crate) fn formatted_response_trailer() -> String {
     RESPONSE_TRAILER.to_string()
 }
 
@@ -147,17 +144,7 @@ impl VisiblePromptRole {
         }
     }
 
-    fn assistant_id(self, assistant_heading: &str) -> Option<&str> {
-        matches!(
-            self,
-            VisiblePromptRole::You
-                | VisiblePromptRole::Thinking
-                | VisiblePromptRole::ContextCompressionSummary
-        )
-        .then_some(assistant_heading)
-    }
-
-    fn render_open(self, spec: &PromptBoundarySpec, assistant_heading: &str) -> String {
+    fn render_open(self, spec: &PromptBoundarySpec) -> String {
         if self == VisiblePromptRole::UserResumeDirectly {
             if spec.uses_xml_role_elements() {
                 format!("<{} kind=\"user resume directly\">", spec.user_role)
@@ -174,7 +161,7 @@ impl VisiblePromptRole {
             if spec.uses_xml_role_elements() {
                 format!("<{} kind=\"thinking\">", spec.assistant_role)
             } else {
-                format!("## {} (thinking)", assistant_heading)
+                format!("## {} (thinking)", spec.assistant_role)
             }
         } else if self == VisiblePromptRole::ContextCompressionSummary {
             if spec.uses_xml_role_elements() {
@@ -183,10 +170,10 @@ impl VisiblePromptRole {
                     spec.assistant_role
                 )
             } else {
-                format!("## {} (context compression summary)", assistant_heading)
+                format!("## {} (context compression summary)", spec.assistant_role)
             }
         } else {
-            spec.render_role_open(self.label(spec), self.assistant_id(assistant_heading))
+            spec.render_role_open(self.label(spec))
         }
     }
 }
@@ -222,21 +209,24 @@ fn escape_xml_text(text: &str) -> String {
 
 fn render_prompt_context_structure(
     boundaries: crate::response_protocol::PromptBoundarySpec,
-) -> &'static str {
+) -> String {
     if boundaries.uses_xml_role_elements() {
         "Each `<prompt_delta>` is an outer dynamic transport container that may wrap `<USER>`, \
 `<ASSISTANT>`, and `<RUNTIME>` entries in chronological order. Initial \
 user input uses `<USER>` and later input in the same turn uses \
-`<USER kind=\"supplement\">`. Explicit direct resume uses `<USER kind=\"user resume directly\">` with an empty body. User-kind attributes describe structured behavior, not user-authored text. Readable UTC input timestamps annotate non-empty user questions and supplements only, never synthetic transport messages. Restart/supporting context and admission-time runtime notes precede the user entry, which closes its delta; later runtime observations follow in subsequent deltas. Static system content is separate in `<Timem System Prompt>`."
+`<USER kind=\"supplement\">`. Explicit direct resume uses `<USER kind=\"user resume directly\">` with an empty body. Assistant entries may carry a `kind` attribute such as `thinking` or `context_compression_summary`. User-kind attributes describe structured behavior, not user-authored text. Readable UTC input timestamps annotate non-empty user questions and supplements only, never synthetic transport messages. Restart/supporting context and admission-time runtime notes precede the user entry, which closes its delta; later runtime observations follow in subsequent deltas. Static system content is separate in `<Timem System Prompt>`."
+            .to_string()
     } else {
-        "A dynamic delta starts with `[BEGIN DELTA delta_id: <id>]` and extends through every following provider-native message until the next BEGIN DELTA marker or the end of the current model input. Deltas are transport batches, not user turns. Initial user input uses `## USER`; later input in the same turn uses `## USER (supplement)`. Explicit direct resume uses the header `## USER (user resume directly)` with an empty body (XML: `<USER kind=\"user resume directly\">`). These annotations describe structured user behavior, not user-authored text. Readable UTC input timestamps annotate non-empty user questions and supplements only, never synthetic transport messages. Restart/supporting context and admission-time runtime notes precede the user entry, which closes its delta; later runtime observations follow in subsequent deltas. There is no END DELTA marker. Static system content is enclosed separately by the system-prompt boundaries."
+        format!(
+            "A dynamic delta starts with `[BEGIN DELTA delta_id: <id>]` and extends through every following provider-native message until the next BEGIN DELTA marker or the end of the current model input. Deltas are transport batches, not user turns. Initial user input uses `## {user_role}`; later input in the same turn uses `## {user_role} (supplement)`. Explicit direct resume uses the header `## {user_role} (user resume directly)` with an empty body. Assistant entries use the heading `## {assistant_role}`; its thinking and context compression checkpoints use `## {assistant_role} (thinking)` and `## {assistant_role} (context compression summary)`. Runtime entries use `## {runtime_role}`. These annotations describe structured behavior, not user-authored text. Readable UTC input timestamps annotate non-empty user questions and supplements only, never synthetic transport messages. Restart/supporting context and admission-time runtime notes precede the user entry, which closes its delta; later runtime observations follow in subsequent deltas. There is no END DELTA marker. Static system content is enclosed separately by the system-prompt boundaries.",
+            user_role = boundaries.user_role,
+            assistant_role = boundaries.assistant_role,
+            runtime_role = boundaries.runtime_role,
+        )
     }
 }
 
-fn render_prompt_delta_example(
-    boundaries: crate::response_protocol::PromptBoundarySpec,
-    assistant_heading: &str,
-) -> String {
+fn render_prompt_delta_example(boundaries: crate::response_protocol::PromptBoundarySpec) -> String {
     let mut example = boundaries.render_delta_open("pd_1", 123);
     let roles = [
         (
@@ -263,16 +253,10 @@ fn render_prompt_delta_example(
     example.push_str("\nUse the delta `id` for context maintenance when needed.\n");
     for (role, body) in roles {
         example.push('\n');
-        example.push_str(&boundaries.render_role_open(
-            role.label(&boundaries),
-            role.assistant_id(assistant_heading),
-        ));
+        example.push_str(&boundaries.render_role_open(role.label(&boundaries)));
         example.push('\n');
         example.push_str(body);
-        if let Some(close) = boundaries.render_role_close(
-            role.label(&boundaries),
-            role.assistant_id(assistant_heading),
-        ) {
+        if let Some(close) = boundaries.render_role_close(role.label(&boundaries)) {
             example.push('\n');
             example.push_str(&close);
         }
@@ -365,14 +349,11 @@ pub(crate) fn render_static_prompt_for_mode_with_preferences(
         with_protocol.replace("{{CURRENT_PROTOCOL_LANG}}", protocol_suite.lang_format());
     let with_protocol = with_protocol.replace(
         "{{PROMPT_CONTEXT_STRUCTURE}}",
-        render_prompt_context_structure(*protocol_suite.prompt_boundaries()),
+        &render_prompt_context_structure(*protocol_suite.prompt_boundaries()),
     );
     let with_protocol = with_protocol.replace(
         "{{PROMPT_DELTA_EXAMPLE}}",
-        &render_prompt_delta_example(
-            *protocol_suite.prompt_boundaries(),
-            assistant_heading.trim(),
-        ),
+        &render_prompt_delta_example(*protocol_suite.prompt_boundaries()),
     );
     let assistant_heading = assistant_heading.trim();
     let with_protocol = with_protocol.replace("{{ASSSISTANT_ID}}", assistant_heading);
@@ -415,13 +396,11 @@ pub(crate) fn render_static_prompt_for_mode_with_preferences(
 pub(crate) fn render_prompt_with_rendered_static(
     rendered_static_prompt: &str,
     deltas: &[PromptDelta],
-    assistant_heading: &str,
     protocol_suite: &dyn ResponseProtocolSuite,
 ) -> String {
     render_prompt_with_rendered_static_for_mode(
         rendered_static_prompt,
         deltas,
-        assistant_heading,
         protocol_suite,
         ToolCallMode::Inline,
     )
@@ -430,26 +409,20 @@ pub(crate) fn render_prompt_with_rendered_static(
 pub(crate) fn render_prompt_with_rendered_static_for_mode(
     rendered_static_prompt: &str,
     deltas: &[PromptDelta],
-    assistant_heading: &str,
     protocol_suite: &dyn ResponseProtocolSuite,
     tool_call_mode: ToolCallMode,
 ) -> String {
     let mut out = rendered_static_prompt.to_string();
-    append_rendered_deltas_for_mode(
-        &mut out,
-        deltas,
-        assistant_heading,
-        protocol_suite,
-        tool_call_mode,
+    append_rendered_deltas_for_mode(&mut out, deltas, protocol_suite, tool_call_mode);
+    out.push_str(
+        "
+
+",
     );
-    out.push_str("\n\n");
     if tool_call_mode == ToolCallMode::Native {
         out.push_str(NATIVE_RESPONSE_TRAILER);
     } else {
-        out.push_str(&formatted_response_trailer(
-            protocol_suite.response_shape_hint(),
-            assistant_heading,
-        ));
+        out.push_str(&formatted_response_trailer());
     }
     out
 }
@@ -457,7 +430,6 @@ pub(crate) fn render_prompt_with_rendered_static_for_mode(
 pub(crate) fn append_rendered_deltas_for_mode(
     out: &mut String,
     deltas: &[PromptDelta],
-    assistant_heading: &str,
     protocol_suite: &dyn ResponseProtocolSuite,
     tool_call_mode: ToolCallMode,
 ) {
@@ -475,10 +447,9 @@ pub(crate) fn append_rendered_deltas_for_mode(
         for slice in slices {
             if is_raw_xml_assistant_response(&slice.prompt_type, boundaries) {
                 if let Some(previous_role) = last_role.take() {
-                    if let Some(close) = boundaries.render_role_close(
-                        previous_role.label(boundaries),
-                        previous_role.assistant_id(assistant_heading),
-                    ) {
+                    if let Some(close) =
+                        boundaries.render_role_close(previous_role.label(boundaries))
+                    {
                         out.push_str(&close);
                         out.push('\n');
                     }
@@ -498,16 +469,15 @@ pub(crate) fn append_rendered_deltas_for_mode(
             let role = visible_role(&slice.prompt_type);
             if last_role != Some(role) {
                 if let Some(previous_role) = last_role {
-                    if let Some(close) = boundaries.render_role_close(
-                        previous_role.label(boundaries),
-                        previous_role.assistant_id(assistant_heading),
-                    ) {
+                    if let Some(close) =
+                        boundaries.render_role_close(previous_role.label(boundaries))
+                    {
                         out.push_str(&close);
                         out.push('\n');
                     }
                 }
                 out.push('\n');
-                out.push_str(&role.render_open(boundaries, assistant_heading));
+                out.push_str(&role.render_open(boundaries));
                 out.push('\n');
                 last_role = Some(role);
                 last_was_action_result = false;
@@ -556,9 +526,7 @@ pub(crate) fn append_rendered_deltas_for_mode(
             out.push('\n');
         }
         if let Some(role) = last_role {
-            if let Some(close) = boundaries
-                .render_role_close(role.label(boundaries), role.assistant_id(assistant_heading))
-            {
+            if let Some(close) = boundaries.render_role_close(role.label(boundaries)) {
                 out.push_str(&close);
                 out.push('\n');
             }

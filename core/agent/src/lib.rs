@@ -3218,7 +3218,6 @@ impl AgentCore {
         let rendered = prompt_render::render_prompt_with_rendered_static_for_mode(
             &self.rendered_static_prompt,
             deltas,
-            &self.assistant_speaker_name,
             self.response_protocol.suite(),
             self.resolved_tool_call_mode,
         );

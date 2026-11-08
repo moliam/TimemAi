@@ -297,7 +297,7 @@ fn anthropic_request_maps_cache_strategy_blocks_to_content_blocks() {
     let mut config = config(ApiProtocol::Anthropic);
     config.model = "claude-sonnet-4-20250514".to_string();
     config.max_llm_output_tokens = 2048;
-    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## TIMEM_ASSISTANT\ndelta1\n[END DELTA]\n[BEGIN DELTA]\ndelta_id: pd_2\n\n## USER\ndelta2\n[END DELTA]";
+    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## ASSISTANT\ndelta1\n[END DELTA]\n[BEGIN DELTA]\ndelta_id: pd_2\n\n## USER\ndelta2\n[END DELTA]";
 
     let prepared = prepare_model_request(&config, prompt);
     let body = prepared.body;
@@ -465,7 +465,7 @@ fn openai_compatible_request_maps_cache_strategy_to_messages() {
     let mut prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n".to_string();
     for idx in 1..=5 {
         prompt.push_str(&format!(
-            "[BEGIN DELTA]\ndelta_id: pd_{idx}\n\n## TIMEM_ASSISTANT\ndelta {idx}\n[END DELTA]\n"
+            "[BEGIN DELTA]\ndelta_id: pd_{idx}\n\n## ASSISTANT\ndelta {idx}\n[END DELTA]\n"
         ));
     }
 
@@ -1429,7 +1429,7 @@ fn anthropic_native_cache_marks_never_exceed_bedrock_limit() {
     request.rendered_prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n".to_string();
     for idx in 1..=5 {
         request.rendered_prompt.push_str(&format!(
-            "[BEGIN DELTA]\ndelta_id: pd_{idx}\n\n## TIMEM_ASSISTANT\ndelta {idx}\n[END DELTA]\n"
+            "[BEGIN DELTA]\ndelta_id: pd_{idx}\n\n## ASSISTANT\ndelta {idx}\n[END DELTA]\n"
         ));
     }
 

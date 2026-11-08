@@ -50,12 +50,7 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
         &JsonSuiteV1,
         "TIMEM_ASSISTANT",
     );
-    let rendered = render_prompt_with_rendered_static(
-        &rendered_static,
-        &[delta],
-        "TIMEM_ASSISTANT",
-        &JsonSuiteV1,
-    );
+    let rendered = render_prompt_with_rendered_static(&rendered_static, &[delta], &JsonSuiteV1);
     assert!(rendered.contains("Response Protocol"));
     assert!(rendered.contains("memmgr"));
     assert!(rendered.contains("hello"));
@@ -109,7 +104,6 @@ fn user_supplement_has_an_explicit_visible_marker() {
     let json = render_prompt_with_rendered_static(
         "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]",
         &[delta("user_supplement")],
-        "TIMEM_ASSISTANT",
         &JsonSuiteV1,
     );
     assert!(
@@ -124,7 +118,6 @@ fn user_supplement_has_an_explicit_visible_marker() {
     let xml = render_prompt_with_rendered_static(
         "<Timem System Prompt>\nSTATIC\n</Timem System Prompt>",
         &[delta("user_supplement")],
-        "TIMEM_ASSISTANT",
         &XmlSuiteV1,
     );
     assert!(
@@ -188,7 +181,6 @@ fn xml_protocol_uses_xml_style_prompt_delta_boundaries() {
     let rendered = render_prompt_with_rendered_static(
         "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]",
         &[delta],
-        "TIMEM_ASSISTANT",
         &XmlSuiteV1,
     );
 
@@ -242,7 +234,6 @@ fn xml_dynamic_roles_are_elements_and_untrusted_text_cannot_inject_boundaries() 
     let rendered = render_prompt_with_rendered_static(
         "<Timem System Prompt>\nSTATIC\n</Timem System Prompt>",
         &[delta],
-        r#"ASSISTANT_of_研发 "A&B" <session>"#,
         &XmlSuiteV1,
     );
 
@@ -311,7 +302,6 @@ fn validated_xml_model_response_is_replayed_without_wrapper_or_entity_escaping()
     let rendered = render_prompt_with_rendered_static(
         "<Timem System Prompt>\nSTATIC\n</Timem System Prompt>",
         &[delta],
-        "ASSISTANT_of_Session0",
         &XmlSuiteV1,
     );
 
@@ -344,7 +334,6 @@ fn unvalidated_xml_shaped_llm_response_remains_wrapped_and_escaped() {
     let rendered = render_prompt_with_rendered_static(
         "<Timem System Prompt>\nSTATIC\n</Timem System Prompt>",
         &[delta],
-        "ASSISTANT_of_Session0",
         &XmlSuiteV1,
     );
 
@@ -376,7 +365,6 @@ fn json_dynamic_roles_and_text_remain_heading_based_and_unescaped() {
     let rendered = render_prompt_with_rendered_static(
         "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]",
         &[delta],
-        "Ai7",
         &JsonSuiteV1,
     );
 
@@ -438,7 +426,6 @@ fn prompt_renderer_preserves_structured_action_result_envelopes() {
     let rendered = render_prompt_with_rendered_static(
         "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]",
         &[delta],
-        "Ai7",
         &JsonSuiteV1,
     );
     assert!(rendered.contains(&envelope));
@@ -469,7 +456,6 @@ fn prompt_renderer_defensively_truncates_legacy_action_result_slices() {
     let rendered = render_prompt_with_rendered_static(
         "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]",
         &[delta],
-        "Ai7",
         &JsonSuiteV1,
     );
     assert!(rendered.contains("words truncated. Generate more actions if necessary !!!"));
@@ -479,7 +465,7 @@ fn prompt_renderer_defensively_truncates_legacy_action_result_slices() {
 fn formatted_response_trailer_parser_extracts_heading_free_trailer() {
     let prompt = format!(
         "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n\n{}",
-        formatted_response_trailer("one-root label <ASSISTANT>...</ASSISTANT>", "Ai7")
+        formatted_response_trailer()
     );
     let (prefix, trailer) = split_formatted_response_trailer(&prompt);
     assert_eq!(prefix, "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]");
@@ -492,15 +478,15 @@ fn formatted_response_trailer_parser_extracts_heading_free_trailer() {
 #[test]
 fn formatted_response_trailer_is_protocol_neutral_and_does_not_repeat_the_shape() {
     assert_eq!(
-        formatted_response_trailer("one-root label <ASSISTANT>...</ASSISTANT>", "Ai7"),
+        formatted_response_trailer(),
         "Please continue the work and respond as protocol requires in user's language:"
     );
     assert_eq!(
-        formatted_response_trailer("one JSON object {...}", "Ai7"),
+        formatted_response_trailer(),
         "Please continue the work and respond as protocol requires in user's language:"
     );
     assert_eq!(
-        formatted_response_trailer("one JSON object {...}", "Ai7"),
+        formatted_response_trailer(),
         "Please continue the work and respond as protocol requires in user's language:"
     );
 }
@@ -615,7 +601,7 @@ fn prompt_renderer_injects_only_the_active_protocol_delta_example() {
     assert!(!json.contains("<prompt_delta "));
     assert!(!json.contains("</prompt_delta>"));
     assert!(json.contains("## USER"));
-    assert!(json.contains("## Ai7"));
+    assert!(json.contains("## ASSISTANT"));
     assert!(json.contains("## RUNTIME"));
     assert!(json.contains("RUNTIME's 'TIPS'"));
     assert!(!json.contains("## SYSTEM"));
@@ -689,14 +675,12 @@ fn empty_delta_boundary_is_visible_only_in_native_mode() {
     let native = render_prompt_with_rendered_static_for_mode(
         "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]",
         std::slice::from_ref(&delta),
-        "TIMEM_ASSISTANT",
         &JsonSuiteV1,
         ToolCallMode::Native,
     );
     let inline = render_prompt_with_rendered_static_for_mode(
         "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]",
         &[delta],
-        "TIMEM_ASSISTANT",
         &JsonSuiteV1,
         ToolCallMode::Inline,
     );
@@ -826,15 +810,11 @@ fn context_compression_summary_has_an_explicit_assistant_heading() {
         &JsonSuiteV1,
         "TIMEM_ASSISTANT",
     );
-    let rendered = render_prompt_with_rendered_static(
-        &rendered_static,
-        &[delta],
-        "TIMEM_ASSISTANT",
-        &JsonSuiteV1,
-    );
+    let rendered = render_prompt_with_rendered_static(&rendered_static, &[delta], &JsonSuiteV1);
 
-    assert!(rendered
-        .contains("## TIMEM_ASSISTANT (context compression summary)\n\nkeep active task state"));
+    assert!(
+        rendered.contains("## ASSISTANT (context compression summary)\n\nkeep active task state")
+    );
 }
 
 #[test]
@@ -862,12 +842,7 @@ fn xml_context_compression_summary_uses_an_assistant_kind_attribute() {
         &XmlSuiteV1,
         "TIMEM_ASSISTANT",
     );
-    let rendered = render_prompt_with_rendered_static(
-        &rendered_static,
-        &[delta],
-        "TIMEM_ASSISTANT",
-        &XmlSuiteV1,
-    );
+    let rendered = render_prompt_with_rendered_static(&rendered_static, &[delta], &XmlSuiteV1);
 
     assert!(rendered.contains(
         "<ASSISTANT kind=\"context_compression_summary\">\n\nkeep active task state\n</ASSISTANT>"
@@ -907,18 +882,8 @@ fn prompt_serialization_is_byte_stable_and_append_only_before_trailer() {
         delta("pd_2", 200, "llm_response", "first answer"),
     ];
 
-    let first = render_prompt_with_rendered_static(
-        &rendered_static,
-        &first_deltas,
-        "TIMEM_ASSISTANT",
-        &XmlSuiteV1,
-    );
-    let repeated = render_prompt_with_rendered_static(
-        &rendered_static,
-        &first_deltas,
-        "TIMEM_ASSISTANT",
-        &XmlSuiteV1,
-    );
+    let first = render_prompt_with_rendered_static(&rendered_static, &first_deltas, &XmlSuiteV1);
+    let repeated = render_prompt_with_rendered_static(&rendered_static, &first_deltas, &XmlSuiteV1);
     assert_eq!(
         first, repeated,
         "serializing unchanged structured context must be byte stable"
@@ -926,12 +891,8 @@ fn prompt_serialization_is_byte_stable_and_append_only_before_trailer() {
 
     let mut appended_deltas = first_deltas;
     appended_deltas.push(delta("pd_3", 300, "user_supplement", "second question"));
-    let appended = render_prompt_with_rendered_static(
-        &rendered_static,
-        &appended_deltas,
-        "TIMEM_ASSISTANT",
-        &XmlSuiteV1,
-    );
+    let appended =
+        render_prompt_with_rendered_static(&rendered_static, &appended_deltas, &XmlSuiteV1);
 
     let (first_prefix, first_trailer) = split_formatted_response_trailer(&first);
     let (appended_prefix, appended_trailer) = split_formatted_response_trailer(&appended);
@@ -974,13 +935,7 @@ fn input_time_is_semantic_not_a_transport_role_and_uses_slice_time() {
                 }],
             };
             let mut rendered = String::new();
-            append_rendered_deltas_for_mode(
-                &mut rendered,
-                &[delta],
-                "TIMEM_ASSISTANT",
-                suite,
-                ToolCallMode::Native,
-            );
+            append_rendered_deltas_for_mode(&mut rendered, &[delta], suite, ToolCallMode::Native);
             assert_eq!(
                 rendered.contains("[User input time: 1970-01-01 00:00:01 UTC]"),
                 expected,
@@ -1037,15 +992,12 @@ fn model_reasoning_slice_renders_as_a_dedicated_thinking_section() {
     let rendered = render_prompt_with_rendered_static(
         "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]",
         std::slice::from_ref(&delta),
-        "TIMEM_ASSISTANT",
         &JsonSuiteV1,
     );
     let user_pos = rendered.find("## USER").expect("user heading");
-    let thinking_pos = rendered
-        .find("## TIMEM_ASSISTANT (thinking)")
-        .unwrap_or_else(|| {
-            panic!("reasoning must render under a dedicated thinking heading: {rendered}")
-        });
+    let thinking_pos = rendered.find("## ASSISTANT (thinking)").unwrap_or_else(|| {
+        panic!("reasoning must render under a dedicated thinking heading: {rendered}")
+    });
     let reasoning_pos = rendered.find("THINKING TEXT").expect("reasoning text");
     assert!(
         user_pos < thinking_pos && thinking_pos < reasoning_pos,
@@ -1058,7 +1010,7 @@ fn model_reasoning_slice_renders_as_a_dedicated_thinking_section() {
     // The plain reply must be a separate assistant section, distinct from the
     // thinking one; the thinking text must not leak into it.
     let reply_heading_pos = rendered[reasoning_pos..]
-        .find("\n## TIMEM_ASSISTANT\n")
+        .find("\n## ASSISTANT\n")
         .map(|offset| reasoning_pos + offset)
         .unwrap_or_else(|| panic!("reply must render under its own assistant heading: {rendered}"));
     let reply_pos = rendered.find("REPLY TEXT").expect("reply text");
@@ -1071,7 +1023,6 @@ fn model_reasoning_slice_renders_as_a_dedicated_thinking_section() {
     let xml_rendered = render_prompt_with_rendered_static(
         "<Timem System Prompt>\nSTATIC\n</Timem System Prompt>",
         std::slice::from_ref(&delta),
-        "TIMEM_ASSISTANT",
         &XmlSuiteV1,
     );
     assert!(
@@ -1079,4 +1030,82 @@ fn model_reasoning_slice_renders_as_a_dedicated_thinking_section() {
         "{xml_rendered}"
     );
     assert!(xml_rendered.contains("THINKING TEXT"), "{xml_rendered}");
+}
+
+#[test]
+fn prompt_structure_documentation_matches_rendered_assistant_headings() {
+    let capabilities = CapabilityRegistry::builtin_for_host(
+        crate::capability::CapabilityHostProfile::with_local_command_execution(),
+    );
+    let rendered = render_static_prompt(
+        "HEAD\n\n{{PROMPT_CONTEXT_STRUCTURE}}\n\n{{PROMPT_DELTA_EXAMPLE}}\n\nTAIL",
+        &capabilities,
+        &JsonSuiteV1,
+        "TIMEM_ASSISTANT",
+    );
+    assert!(
+        rendered.contains("Assistant entries use the heading `## ASSISTANT`;"),
+        "context structure must document the fixed assistant heading:\n{}",
+        rendered
+    );
+    assert!(rendered.contains("`## ASSISTANT (thinking)`"));
+    assert!(rendered.contains("`## ASSISTANT (context compression summary)`"));
+    assert!(rendered.contains("`## RUNTIME`"));
+    assert!(
+        rendered.contains("\n## ASSISTANT\nyour response in this round"),
+        "delta example assistant heading must match the documented heading:\n{}",
+        rendered
+    );
+    let xml_doc = render_static_prompt(
+        "{{PROMPT_CONTEXT_STRUCTURE}}",
+        &capabilities,
+        &XmlSuiteV1,
+        "TIMEM_ASSISTANT",
+    );
+    assert!(
+        xml_doc.contains("`kind` attribute such as `thinking` or `context_compression_summary`")
+    );
+
+    // Rendered output must stay consistent with what the documentation promises:
+    // thinking and reply segments both use the fixed protocol role heading.
+    let delta = PromptDelta {
+        delta_id: "pd_doc_guard".to_string(),
+        time_ms: 1,
+        hidden_slice_ids: Vec::new(),
+        slices: vec![
+            PromptSlice {
+                delta_id: "pd_doc_guard".to_string(),
+                slice_id: "ps_doc_guard_s001".to_string(),
+                component_id: "reasoning".to_string(),
+                prompt_type: "model_reasoning".to_string(),
+                time_ms: 1,
+                text: "THINKING TEXT".to_string(),
+                slice_index: 1,
+                slice_count: 2,
+            },
+            PromptSlice {
+                delta_id: "pd_doc_guard".to_string(),
+                slice_id: "ps_doc_guard_s002".to_string(),
+                component_id: "response".to_string(),
+                prompt_type: "llm_response".to_string(),
+                time_ms: 2,
+                text: "FINAL REPLY".to_string(),
+                slice_index: 2,
+                slice_count: 2,
+            },
+        ],
+    };
+    let mut markdown_out = String::new();
+    append_rendered_deltas_for_mode(
+        &mut markdown_out,
+        std::slice::from_ref(&delta),
+        &JsonSuiteV1,
+        ToolCallMode::Inline,
+    );
+    assert!(markdown_out.contains("\n## ASSISTANT (thinking)\n"));
+    assert!(markdown_out.contains("\n## ASSISTANT\n"));
+    let mut xml_out = String::new();
+    append_rendered_deltas_for_mode(&mut xml_out, &[delta], &XmlSuiteV1, ToolCallMode::Inline);
+    assert!(xml_out.contains("<ASSISTANT kind=\"thinking\">"));
+    assert!(xml_out.contains("</ASSISTANT>"));
 }

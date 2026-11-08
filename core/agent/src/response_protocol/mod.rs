@@ -67,24 +67,18 @@ impl PromptBoundarySpec {
         format!("## {}", self.runtime_role)
     }
 
-    pub fn assistant_heading_line(&self, id: &str) -> String {
-        format!("## {}", id)
-    }
-
     pub fn uses_xml_role_elements(self) -> bool {
         self.role_boundary == PromptRoleBoundary::XmlElement
     }
 
-    pub fn render_role_open(self, role: &str, assistant_id: Option<&str>) -> String {
+    pub fn render_role_open(self, role: &str) -> String {
         match self.role_boundary {
-            PromptRoleBoundary::MarkdownHeading => {
-                format!("## {}", assistant_id.unwrap_or(role))
-            }
+            PromptRoleBoundary::MarkdownHeading => format!("## {role}"),
             PromptRoleBoundary::XmlElement => format!("<{role}>"),
         }
     }
 
-    pub fn render_role_close(self, role: &str, _assistant_id: Option<&str>) -> Option<String> {
+    pub fn render_role_close(self, role: &str) -> Option<String> {
         match self.role_boundary {
             PromptRoleBoundary::MarkdownHeading => None,
             PromptRoleBoundary::XmlElement => Some(format!("</{role}>")),

@@ -923,7 +923,7 @@ fn native_context_compress_persists_summary_after_replacing_all_old_deltas() {
 
     assert!(!prompt.contains("OLD NATIVE CONTEXT"));
     assert_eq!(prompt.matches(summary).count(), 1);
-    assert!(prompt.contains("## TIMEM_ASSISTANT (context compression summary)"));
+    assert!(prompt.contains("## ASSISTANT (context compression summary)"));
     assert!(prompt.contains("context compressed successfully."));
     assert_eq!(core.deltas.len(), 1, "summary must live in a fresh delta");
     assert_ne!(core.deltas[0].delta_id, old_delta_id);
@@ -1029,7 +1029,7 @@ fn native_context_compress_summary_does_not_depend_on_removed_owning_delta() {
     assert!(prompt.contains("KEEP ME"));
     assert!(!prompt.contains("DISCARD OWNING DELTA"));
     assert_eq!(prompt.matches(summary).count(), 1);
-    assert!(prompt.contains("## TIMEM_ASSISTANT (context compression summary)"));
+    assert!(prompt.contains("## ASSISTANT (context compression summary)"));
     // The summary slice now carries the runtime-echoed Thought pieces section
     // after the summary text, so match by prefix instead of full equality.
     assert!(core.deltas.iter().any(|delta| {
