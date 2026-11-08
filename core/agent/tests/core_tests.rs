@@ -11644,6 +11644,55 @@ fn include_reasoning_precedes_the_compaction_summary_and_runtime_confirmation() 
 }
 
 #[test]
+fn include_reasoning_is_attached_exactly_once_across_rounds() {
+    // Guard against future double-attach regressions: the take() semantics
+    // must keep exactly one copy of a given reasoning chain in the prompt no
+    // matter how many later rounds or turns re-render the context.
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("include_reasoning_once"),
+    );
+    core.set_model_reasoning("ONCE_ONLY_REASONING_MARKER", false);
+    let _ = core.begin_turn("round one", None);
+    for round in 1..=3 {
+        let step = core.apply_model_response(LlmResponse {
+            tool_calls: Vec::new(),
+            content: scored(r#"{"working_still_action":{"self_tool":{"type":"cwd"}}}"#),
+            model_name: "qwen-plus".to_string(),
+            usage: usage(),
+            truncated: false,
+        });
+        let prompt = match step {
+            CoreStep::NeedModel { prompt, .. } => prompt,
+            other => panic!("round {round} unexpected step: {other:?}"),
+        };
+        assert_eq!(
+            prompt.matches("ONCE_ONLY_REASONING_MARKER").count(),
+            1,
+            "round {round} must carry the reasoning exactly once: {prompt}"
+        );
+    }
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"done"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+    let prompt = match core.begin_turn("later turn", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        prompt.matches("ONCE_ONLY_REASONING_MARKER").count(),
+        1,
+        "later turns must keep exactly one copy: {prompt}"
+    );
+}
+
+#[test]
 fn reasoning_input_downgrade_strips_continuations_from_later_requests() {
     let mut core = test_core(
         "STATIC",
