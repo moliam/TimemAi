@@ -2630,7 +2630,7 @@ fn session_turn_xml_invalid_native_action_still_repairs() {
     assert_eq!(repair_topics.len(), 1);
     assert_eq!(
         repair_topics[0].issue,
-        "actions[0][0].input.any_required:cmd|loop_cmd"
+        "actions[0][0].input.any_required:cmd|command|loop_cmd"
     );
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "model_repair_request"), 1);

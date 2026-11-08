@@ -7735,19 +7735,23 @@ Runtime tool_call ids:",
             let wall_start = Instant::now();
             let loop_command = action.input_str("loop_cmd");
             let is_regular_command = loop_command.is_empty();
-            let cmd_command = action.input_str("cmd");
-            let command = if is_regular_command {
-                cmd_command.clone()
-            } else {
-                loop_command.clone()
+            let regular_command = shell_exec::regular_command_from_action(&action);
+            let validation_error = match &regular_command {
+                Err(reason) => Some(reason.clone()),
+                Ok(regular_command) if !loop_command.is_empty() && !regular_command.is_empty() => {
+                    Some("The action provided both cmd/command and loop_cmd. Use cmd (or its alias command) for a normal/background command, or loop_cmd with interval_ms for polling.".to_string())
+                }
+                _ => None,
             };
-            let result = if !loop_command.is_empty() && !cmd_command.is_empty() {
-                ActionExecution::Completed(ActionOutcome::failed(
-                    format!(
-                        "Action result: {}\nThe command was not executed.\nReason: The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.",
-                        action.action
-                    ),
-                ))
+            let command = match &regular_command {
+                Ok(regular_command) if is_regular_command => regular_command.clone(),
+                _ => loop_command.clone(),
+            };
+            let result = if let Some(reason) = validation_error {
+                ActionExecution::Completed(ActionOutcome::failed(format!(
+                    "Action result: {}\nThe command was not executed.\nReason: {}",
+                    action.action, reason
+                )))
             } else {
                 let mut should_cancel = || cancel_requested.load(Ordering::SeqCst);
                 let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);

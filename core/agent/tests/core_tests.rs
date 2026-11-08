@@ -8429,7 +8429,7 @@ fn run_bash_missing_command_returns_tool_input_error() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("response is not protocol compliant"));
-    assert!(prompt.contains("actions[0].input.any_required:cmd|loop_cmd"));
+    assert!(prompt.contains("actions[0].input.any_required:cmd|command|loop_cmd"));
     assert!(!prompt.contains("Action result: run_bash"));
 }
 

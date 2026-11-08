@@ -527,7 +527,7 @@ fn registry_validates_required_input_fields_from_manifest() {
     assert!(registry
         .validate_action_input("run_bash", &json_object([]))
         .unwrap_err()
-        .contains("input.any_required:cmd|loop_cmd"));
+        .contains("input.any_required:cmd|command|loop_cmd"));
     assert!(registry
         .validate_action_input("self_tool", &json_object([]))
         .unwrap_err()
@@ -585,15 +585,21 @@ fn registry_validates_required_input_fields_from_manifest() {
         )
         .unwrap_err()
         .contains("input.read_back_command_unsupported"));
-    let legacy_command_error = registry
+    assert!(registry
         .validate_action_input(
             "run_bash",
             &json_object([("command", Value::String("pwd".to_string()))]),
         )
-        .unwrap_err();
-    assert!(legacy_command_error.contains("input.command_unsupported"));
-    assert!(legacy_command_error.contains("allowed keys"));
-    assert!(legacy_command_error.contains("cmd"));
+        .is_ok());
+    assert!(registry
+        .validate_action_input(
+            "run_bash",
+            &json_object([
+                ("cmd", Value::String("pwd".to_string())),
+                ("command", Value::String("pwd".to_string())),
+            ]),
+        )
+        .is_ok());
     assert!(registry
         .validate_action_input(
             "run_bash",
@@ -766,7 +772,7 @@ fn run_bash_idl_uses_cmd_loop_cmd_without_removed_expect_fields() {
     assert!(input_properties.contains_key("loop_cmd"));
     assert!(input_properties.contains_key("loop_timeout_ms"));
     assert!(input_properties.contains_key("once_timeout_ms"));
-    assert!(!input_properties.contains_key("command"));
+    assert!(input_properties.contains_key("command"));
     assert!(!input_properties.contains_key("read_back_command"));
     assert!(!input_properties.contains_key("large_readback_opt_in"));
     assert!(!input_properties.contains_key("check_timeout_ms"));
@@ -1226,9 +1232,17 @@ fn native_schema_generation_synthesizes_required_any_without_decoration() {
     assert_eq!(
         run_bash.input_schema["allOf"],
         serde_json::json!([
-            {"anyOf": [{"required": ["cmd"]}, {"required": ["loop_cmd"]}]}
+            {"anyOf": [
+                {"required": ["cmd"]},
+                {"required": ["command"]},
+                {"required": ["loop_cmd"]}
+            ]}
         ]),
-        "cmd/loop_cmd exclusivity must survive via the synthesized x-required-any rule"
+        "cmd/command/loop_cmd exclusivity must survive via the synthesized x-required-any rule"
+    );
+    assert!(
+        run_bash.input_schema["properties"].get("command").is_some(),
+        "the command alias must be visible in the native schema"
     );
 
     let compact = tools

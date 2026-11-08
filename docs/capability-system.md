@@ -104,7 +104,9 @@ Normal/background execution is part of the capability interface:
 
 - Built-in tools can own specialized lifecycle semantics when needed. `run_bash`
   keeps a dedicated path because it includes approval policy and local shell
-  safety checks.
+  safety checks. Its manifest declares both `cmd` and its alias `command`;
+  either name is accepted, and supplying both with different values is rejected
+  as invalid input instead of silently choosing one.
 - Command-bound registered tools run in normal mode by default. If their
   YAML declares `background` in `input_schema`, core may
   start the command as a background `tool_job`, persist its status under the

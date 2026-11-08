@@ -122,7 +122,7 @@ fn action_kind(action: &ParsedAction) -> CoreActionKind {
             let interval_ms = action.input_u64("interval_ms");
             let loop_command = action.input_str("loop_cmd");
             let command = if loop_command.is_empty() {
-                action.input_str("cmd")
+                crate::shell_exec::display_regular_command(action)
             } else {
                 loop_command
             };
