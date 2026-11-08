@@ -162,7 +162,7 @@ root 修复，动作只有两类白名单操作：
 
 ## 4. 可观测性
 
-- RUNTIME_INFO 新增 `resource` reporter（`core/agent/src/runtime_info.rs`）：
+- `## RUNTIME` 新增 `resource` reporter（`core/agent/src/runtime_info.rs`）：
   - 完整生效：报告 caps、换算值（核数/GiB）与 cgroup scope，每次 host 启动后只呈现一次。
   - 未完整生效（部分失败、平台不支持、配置非法）：每次请求持续呈现，并提示模型在此期间
     少派、派轻量 shell job——这是内核围栏缺失时唯一的软补偿。
@@ -201,7 +201,7 @@ root 修复，动作只有两类白名单操作：
   缺字段时用环境变量/85 种子）。host 启动加载 MEM 设置后、以及 MEM 空间切换后，都会
   以当前设置重新应用一次 caps（`apply_instance_resource_caps_from_mem`），因此重启后
   保存值继续生效；环境变量仅作为首次种子。
-- **可观测性联动**：RUNTIME_INFO 的 `resource` 段在 caps 值变化后会再次呈现一次新状态。
+- **可观测性联动**：`## RUNTIME` 的 `resource` 段在 caps 值变化后会再次呈现一次新状态。
 - **UI 细节**：每个维度一行 = 开关（`role="switch"`，on=内核管控）+ 档位下拉
   （10/25/50/70/85/100），不再渲染内核状态徽标或技术文案，只按能力四态呈现
   （`resourceCapability`，`interfaces/web/src/runtime_settings.ts`）：
@@ -277,7 +277,7 @@ user@1000.service 委托,此前 `cgroup.controllers` 仅为 `memory pids`)。CPU
   `..` 与越界拒绝）、探测分层（Ready / NeedsEscalation / Unavailable / Unsupported）、
   `sudo -S` 流透传（PATH 注入假 sudo 记录 argv 与 stdin，断言密码只经 stdin 流入且
   不进日志）、`enabled=false` 写回 `max`（写失败但已为 max 时判 `Disabled`）。
-- `agent_core` 925 项全绿：系统 caps 环境变量/设置解析、`Disabled` 的 RUNTIME_INFO
+- `agent_core` 925 项全绿：系统 caps 环境变量/设置解析、`Disabled` 的 `## RUNTIME`
   渲染（intentionally unbounded 文案）。
 - `timem` lib 471 项 + embedded_assets 2 项全绿；前端 882 项全绿，
   `pnpm build` 重建并提交 `interfaces/web/dist`。

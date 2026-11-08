@@ -4279,8 +4279,9 @@ fn model_prompt_reports_setsid_escaped_process_as_runtime_info() {
         name: "jobmanager",
         report: crate::runtime_info::jobmanager_report,
     });
-    let out = registry.render(&inputs).expect("expected RUNTIME_INFO");
-    assert!(out.starts_with("### RUNTIME_INFO"), "{out}");
+    let out = registry.render(&inputs).expect("expected RUNTIME");
+    assert!(out.starts_with("## RUNTIME"), "{out}");
+    assert!(!out.contains("### RUNTIME_INFO"), "{out}");
     assert!(out.contains("unowned child processes"), "{out}");
     assert!(out.contains("`active`"), "{out}");
     assert!(out.contains(&escapee.to_string()), "{out}");
@@ -4299,7 +4300,7 @@ fn model_prompt_reports_setsid_escaped_process_as_runtime_info() {
 #[test]
 fn model_prompt_reports_sigkilled_job_in_runtime_info_sysstat() {
     // Real process killed by SIGKILL: the exit update must reach the
-    // model as a sysstat JOB_KILLED field inside RUNTIME_INFO, because the
+    // model as a sysstat JOB_KILLED field inside the RUNTIME observation, because the
     // job's own output cannot explain the kill.
     use std::process::{Command, Stdio};
     let mut core = test_core("runtime_info_sigkill");
@@ -4325,7 +4326,8 @@ fn model_prompt_reports_sigkilled_job_in_runtime_info_sysstat() {
         (Vec::new(), vec![update]),
         || (Vec::new(), Vec::new()),
     );
-    assert!(prompt.contains("### RUNTIME_INFO"), "{prompt}");
+    assert!(prompt.contains("## RUNTIME"), "{prompt}");
+    assert!(!prompt.contains("RUNTIME_INFO"), "{prompt}");
     assert!(prompt.contains("#### sysstat"), "{prompt}");
     assert!(prompt.contains("JOB_KILLED"), "{prompt}");
     assert!(prompt.contains("pid=777"), "{prompt}");
@@ -4391,7 +4393,7 @@ fn disk_pressure_notice_rides_runtime_info_after_window_with_stub_sample() {
         "stable level must not repeatedly alert: {notices}"
     );
     // Window 3: 300MB drop (above the 200MB threshold) triggers and is
-    // delivered through RUNTIME_INFO or the persisted component.
+    // delivered through the RUNTIME observation or the persisted component.
     core.disk_free_override = Some((dropped, cap));
     let mut delivered = false;
     for _ in 0..10 {

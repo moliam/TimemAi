@@ -771,7 +771,8 @@ fn every_model_request_lists_still_running_commands_with_the_creating_tool_call_
     assert_eq!(model.prompts.len(), 2);
     assert!(!model.prompts[0].contains("#### jobmanager"));
     let second = &model.prompts[1];
-    assert!(second.contains("### RUNTIME_INFO"), "{second}");
+    assert!(second.contains("## RUNTIME"), "{second}");
+    assert!(!second.contains("RUNTIME_INFO"), "{second}");
     assert!(second.contains("#### jobmanager"), "{second}");
     assert!(
         second.contains("| pid | elapsed | created by tool_call id | command | notes |"),

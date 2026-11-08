@@ -2854,7 +2854,7 @@ impl AgentCore {
                 status: update.status.clone(),
             })
             .collect();
-        // RUNTIME_INFO is request-local. It is built only when a registered
+        // The RUNTIME observation is request-local. It is built only when a registered
         // reporter has important state and is never persisted into history.
         // Model API request observation point for disk pressure sampling.
         let api_disk_notice = self.observe_disk_pressure(&running_snapshot_for_info);
