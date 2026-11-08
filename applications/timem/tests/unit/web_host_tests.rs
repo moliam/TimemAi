@@ -17964,6 +17964,33 @@ fn debug_browse_listing_renders_links_and_parent() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn debug_browse_file_previews_head_of_oversized_file_with_download_link() {
+    let dir = std::env::temp_dir().join("timem_debug_browse_oversize_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut oversized = String::from("record newest received_at\n");
+    while (oversized.len() as u64) <= MAX_DEBUG_FILE_PREVIEW_BYTES {
+        oversized.push_str("padding line 0123456789abcdef\n");
+    }
+    oversized.push_str("record tail beyond_preview_marker\n");
+    let oversized_path = dir.join("llm_response.dump");
+    std::fs::write(&oversized_path, &oversized).unwrap();
+    let html = debug_browse_file("session_1", "llm_response.dump", &oversized_path);
+    assert!(html.contains("record newest received_at"));
+    assert!(html.contains("truncated at a line boundary"));
+    assert!(html.contains(&format!("File is {} bytes", oversized.len())));
+    assert!(html.contains("download=1"));
+    assert!(!html.contains("beyond_preview_marker"));
+
+    let small_path = dir.join("small.txt");
+    std::fs::write(&small_path, "small body\n").unwrap();
+    let full = debug_browse_file("session_1", "small.txt", &small_path);
+    assert!(full.contains("<pre>small body\n</pre>"));
+    assert!(!full.contains("truncated"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // --- task_finished summary persists as final answer across Host restore ---
 
 #[test]

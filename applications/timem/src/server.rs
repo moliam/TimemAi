@@ -2741,18 +2741,46 @@ fn debug_browse_listing(session_id: &str, sub_path: &str, dir: &Path) -> String 
 }
 
 fn debug_browse_file(session_id: &str, sub_path: &str, file: &Path) -> String {
-    let body = match std::fs::metadata(file) {
-        Ok(meta) if meta.len() > MAX_DEBUG_FILE_PREVIEW_BYTES => format!(
-            "<p class=\"err\">File is {} bytes; preview is capped at {} bytes. <a href=\"?session_id={session}&amp;path={path}&amp;download=1\">Download the file</a> instead.</p>",
-            meta.len(),
-            MAX_DEBUG_FILE_PREVIEW_BYTES,
-            session = html_escape(session_id),
-            path = html_escape(sub_path),
-        ),
-        _ => match std::fs::read(file) {
-            Ok(bytes) => format!("<pre>{}</pre>", html_escape(&String::from_utf8_lossy(&bytes))),
-            Err(_) => "<p class=\"err\">debug_file_read_failed</p>".to_string(),
-        },
+    let total_bytes = std::fs::metadata(file).map(|meta| meta.len()).unwrap_or(0);
+    // Oversized files still preview their head, cut at a line boundary:
+    // dump files append records newest-first, so the head already shows
+    // the freshest entries a reader is looking for, and the full file
+    // stays one click away through the download link.
+    let truncated = total_bytes > MAX_DEBUG_FILE_PREVIEW_BYTES;
+    let mut head: Vec<u8> = Vec::new();
+    let mut read_failed = false;
+    match std::fs::File::open(file) {
+        Ok(opened) => {
+            let mut limited = std::io::Read::take(opened, MAX_DEBUG_FILE_PREVIEW_BYTES);
+            if std::io::Read::read_to_end(&mut limited, &mut head).is_err() {
+                read_failed = true;
+            }
+        }
+        Err(_) => read_failed = true,
+    }
+    if truncated {
+        if let Some(line_end) = head.iter().rposition(|byte| *byte == b'\n') {
+            head.truncate(line_end + 1);
+        }
+    }
+    let body = if read_failed {
+        "<p class=\"err\">debug_file_read_failed</p>".to_string()
+    } else {
+        let notice = if truncated {
+            format!(
+                "<p class=\"err\">File is {total} bytes; showing the first {shown} bytes (truncated at a line boundary). <a href=\"?session_id={session}&amp;path={path}&amp;download=1\">Download the full file</a>.</p>",
+                total = total_bytes,
+                shown = head.len(),
+                session = html_escape(session_id),
+                path = html_escape(sub_path),
+            )
+        } else {
+            String::new()
+        };
+        format!(
+            "{notice}<pre>{}</pre>",
+            html_escape(&String::from_utf8_lossy(&head))
+        )
     };
     debug_browse_page(session_id, sub_path, &body)
 }
