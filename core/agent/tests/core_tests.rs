@@ -3756,6 +3756,94 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
 }
 
 #[test]
+fn observed_tokens_above_budget_retries_compaction_after_exhausted_followup() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("observed_retry_after_exhausted"),
+    );
+    core.set_max_llm_input_tokens(3_000);
+    let _ = core.begin_turn("seed", None);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"seeded"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(3_500),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    // Hard over budget (observed 3500 >= max 3000) forces the compaction
+    // requirement even though the local chars/4 estimate stays far below it.
+    let prompt = match core.begin_turn("next", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Your tool calls must start with context_compress:"));
+
+    // The model ignores the compaction requirement -> follow-up exhausted.
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"still not compacted"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(3_600),
+        truncated: false,
+    });
+    // First refusal: the bounded forced-compaction loop retries (1/2).
+    let retry_prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(retry_prompt.contains("context_compress"));
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"still not compacted"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(3_700),
+        truncated: false,
+    });
+    // Second refusal reaches the bound: abandoned, the response is honored,
+    // and the follow-up latch becomes Exhausted.
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    // Fail closed: even with the exhausted latch, a hard over-budget prompt
+    // must retry the compaction requirement on the next turn.
+    let prompt = match core.begin_turn("next again", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Your tool calls must start with context_compress:"));
+}
+
+#[test]
+fn chinese_content_local_estimate_below_budget_with_observed_over_budget_triggers_compaction() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("chinese_observed_over_budget"),
+    );
+    core.set_max_llm_input_tokens(3_000);
+    // Chinese content: the local chars/4 estimate stays far below the budget
+    // while the provider tokenizer counts far more tokens for it.
+    let _ = core.begin_turn(&"检查构建结果并汇报系统状态。".repeat(30), None);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"seeded"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(3_500),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    let prompt = match core.begin_turn("下一轮", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("Your tool calls must start with context_compress:"));
+}
+
+#[test]
 fn successful_prompt_shrink_invalidates_stale_observed_prompt_tokens() {
     let mut core = test_core(
         "STATIC",

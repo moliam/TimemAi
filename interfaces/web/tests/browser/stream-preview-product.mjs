@@ -34,6 +34,15 @@ async function waitFor(check, message, timeout = 10000) {
   throw new Error(typeof message === "function" ? await message() : message);
 }
 
+// Abortive TCP reset for the network-outage scenario: the host must observe a
+// mid-stream connection failure. A graceful close can surface as a clean
+// stream end, parse as an incomplete model response, and take the
+// repair/retry path that masks the network-error interruption UX.
+const abortNetwork = (res) => {
+  const socket = res.socket;
+  if (socket && typeof socket.resetAndDestroy === "function") socket.resetAndDestroy();
+  else res.destroy();
+};
 const worker = (state) => ({
   worker_id: "worker-1", context_id: "context-1", display_name: "Primary",
   ordinal: 0, state, parent_worker_id: null,
@@ -427,12 +436,16 @@ async function main() {
       const interactionXml = protocol === "xml" && scenario === "interaction";
       write(protocol === "json" ? '{"status":"working","free_talk":"HTTP early response","working_still_action":[{"readfile":{"path":"Cargo.toml","ender":{"byte_nr":199}}}' : interactionXml ? '<ASSISTANT><free_talk>HTTP early response' : '<ASSISTANT><free_talk>HTTP early response</free_talk><actions><readfile><path>Cargo.toml</path><ender><byte_nr>199</byte_nr></ender>');
       await new Promise(resolve => { release = resolve; });
-      if (scenario === 'network') { res.destroy(); return; }
+      if (scenario === 'network') { abortNetwork(res); return; }
       if (scenario === 'invalid') write('</readfile></actions><invalid></ASSISTANT>');
       else if (interactionXml) write('</free_talk><actions><readfile><path>Cargo.toml</path><ender><byte_nr>199</byte_nr></ender></readfile></actions></ASSISTANT>');
       else if (scenario === "tools") write('</readfile><readfile><path>Cargo.toml</path><ender><byte_nr>199</byte_nr></ender></readfile><readfile><path>Cargo.toml</path><ender><byte_nr>99</byte_nr></ender></readfile></actions></ASSISTANT>');
       else write(protocol === "json" ? ']}' : '</readfile></actions></ASSISTANT>');
     } else {
+      // A persistent outage: retried/repaired model requests must fail too,
+      // or one successful retry would complete the turn and never surface the
+      // network-error interruption this scenario verifies.
+      if (scenario === 'network') { abortNetwork(res); return; }
       if (scenario === "normal" || scenario === "tools") await new Promise(resolve => { releaseFinal = resolve; });
       write(protocol === "json" ? JSON.stringify({status:"all_finished",final_answer:"HTTP final"}) : "<ASSISTANT><finish_confirm>Now let me think seriously twice before I announce stop. Review user's task list. Is my delivery consistent with user's demand?</finish_confirm><final_answer>HTTP final</final_answer></ASSISTANT>");
     }

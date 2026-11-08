@@ -520,7 +520,7 @@ fn successful_threshold_compression_schedules_only_one_forced_followup() {
     core.set_max_llm_input_tokens(4_000);
     core.append_delta(vec![(
         "user_question".to_string(),
-        "retained active context ".repeat(700),
+        "retained active context ".repeat(500),
     )]);
     assert!(core.dynamic_context_estimated_tokens() > core.max_llm_input_tokens / 4);
 

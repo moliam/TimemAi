@@ -6630,20 +6630,34 @@ Runtime tool_call ids:",
             .saturating_mul(u32::from(self.context_compress_threshold_percent))
             / 100;
         let threshold_crossed = estimated_prompt_tokens >= force_threshold;
-        if !threshold_crossed && !self.context_compress_required {
+        // Hard over-budget: the provider-reported or locally-estimated prompt
+        // already reached the full input budget. An exhausted quality follow-up
+        // may only suppress repeats below the budget; at or above it the
+        // compaction must be retried every turn (fail closed). Otherwise a
+        // tokenizer estimate drift on non-English content can grow the prompt
+        // without bound while every further request fails against the model.
+        // The dynamic (compressible) context and the provider-reported usage
+        // drive the hard retry; the static system portion cannot shrink, so
+        // counting it here would fire the retry on every small-budget test.
+        let hard_over_budget = self.last_observed_prompt_tokens >= self.max_llm_input_tokens
+            || self.dynamic_context_estimated_tokens() >= self.max_llm_input_tokens;
+        let effective_prompt_tokens = estimated_prompt_tokens.max(self.last_observed_prompt_tokens);
+        if !threshold_crossed && !hard_over_budget && !self.context_compress_required {
             self.threshold_compaction_followup_state = ThresholdCompactionFollowupState::Available;
             return;
         }
         if self.render_prompt_slices().is_empty() {
             return;
         }
-        if threshold_crossed {
+        if threshold_crossed || hard_over_budget {
             // A manual request keeps its user-facing wording, but crossing the
             // automatic threshold still upgrades the model request to critical
             // reasoning and subjects the result to the bounded quality
-            // follow-up. The exhausted latch blocks only a new automatic cycle;
-            // it must never block an explicit user request.
-            if !self.manual_compact_trailer_pending
+            // follow-up. The exhausted latch blocks only a new automatic cycle
+            // below the budget; it must never block an explicit user request
+            // or a hard over-budget retry.
+            if !hard_over_budget
+                && !self.manual_compact_trailer_pending
                 && !self.context_compress_required
                 && self.threshold_compaction_followup_state
                     == ThresholdCompactionFollowupState::Exhausted
@@ -6652,7 +6666,7 @@ Runtime tool_call ids:",
             }
             if !self.manual_compact_trailer_pending && !self.context_compress_required {
                 self.pending_compact_request_notice =
-                    Some((estimated_prompt_tokens, force_threshold, None));
+                    Some((effective_prompt_tokens, force_threshold, None));
             }
             self.threshold_compaction_reasoning_required = true;
         }

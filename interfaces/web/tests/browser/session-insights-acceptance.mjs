@@ -1086,7 +1086,12 @@ async function main() {
     assert(lightShield.background === 'rgba(0, 0, 0, 0)' && lightShield.fill === 'rgb(22, 163, 74)' && lightShield.color === 'rgb(255, 255, 255)', `light theme keeps the green silhouette only: ${JSON.stringify(lightShield)}`);
     const lightShieldPoint = await center(browser, ".session-insights-shield.full");
     await browser.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: lightShieldPoint.x, y: lightShieldPoint.y });
-    await sleep(260);
+    // The hover surface cross-fades in; wait for the transition to settle so
+    // slow runners do not sample the mid-fade alpha instead of the endpoint.
+    await waitFor(
+      () => browser.evaluate(`getComputedStyle(document.querySelector('.session-insights-shield.full')).backgroundColor === 'rgb(238, 245, 247)'`),
+      "light hover settles on the neutral surface",
+    );
     const lightHover = await browser.evaluate(`(() => {
       const el = document.querySelector('.session-insights-shield.full');
       return { background: getComputedStyle(el).backgroundColor, fill: getComputedStyle(el.querySelector('svg path')).fill };
