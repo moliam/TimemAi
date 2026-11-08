@@ -178,6 +178,25 @@ export function dedupeFreeTalkItems<T extends { activity: Activity | null }>(
 }
 
 /**
+ * Whether a live answer-preview paragraph repeats commentary the process
+ * stream already retains. The model occasionally re-states an earlier
+ * free-talk paragraph verbatim around a tool round; the stream keeps the
+ * first copy and dedupeFreeTalkItems drops later ones, so the provisional
+ * answer preview must not surface the same text a second time — it would
+ * read as a duplicate paragraph that then retracts again. Trim both sides:
+ * trailing whitespace differences are presentation noise, not new
+ * information.
+ */
+export function repeatsRetainedFreeTalk(
+  previewText: string,
+  retainedFreeTalkTexts: ReadonlySet<string>,
+): boolean {
+  const trimmed = previewText.trim();
+  if (!trimmed) return false;
+  return retainedFreeTalkTexts.has(trimmed);
+}
+
+/**
  * Collapses each consecutive run of free-talk snapshots (null activities are
  * transparent) into its latest item, so both the frame and the stream show
  * one growing thought instead of stacking redundant snapshots.

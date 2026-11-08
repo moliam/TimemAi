@@ -338,6 +338,7 @@ import {
 import {
   computeStreamRetention,
   dedupeFreeTalkItems,
+  repeatsRetainedFreeTalk,
   streamToolHandoffIds,
   summarizeConsecutiveToolActivities,
   ToolActivitySummary,
@@ -13303,7 +13304,25 @@ function TurnAnswerDelivery({
   const preview = streamUiMode ? turn.preview : undefined;
   const retainedThought = [...streamTools].reverse().find((activity) => activity.kind === "free_talk");
   const intermediate = preview?.response?.status === "intermediate";
-  const previewText = intermediate ? "" : preview?.response?.text ?? "";
+  const rawPreviewText = intermediate ? "" : preview?.response?.text ?? "";
+  // The model occasionally re-states an earlier free-talk paragraph verbatim
+  // around a tool round. The process stream keeps the first copy and
+  // dedupeFreeTalkItems drops later ones, so surfacing the same text again in
+  // the provisional answer preview only shows a paragraph that is about to
+  // disappear once the response lands ("a duplicate that then retracts").
+  // Suppress the live preview while it repeats retained commentary.
+  const retainedFreeTalkTexts = useMemo(
+    () =>
+      new Set(
+        streamTools
+          .filter((activity) => activity.kind === "free_talk")
+          .map((activity) => (activity.detail ?? "").trim()),
+      ),
+    [streamTools],
+  );
+  const previewText = repeatsRetainedFreeTalk(rawPreviewText, retainedFreeTalkTexts)
+    ? ""
+    : rawPreviewText;
   // A response has one text home: live preview supersedes the retained thought.
   const thoughtText = previewText ? "" : retainedThought?.detail ??
     (streamWorking && intermediate ? preview?.response?.text ?? "" : "");
@@ -15027,6 +15046,11 @@ function activityFromTurnEvent(
       kind: "model_service_issue",
       createdAt: event.created_at_ms,
     };
+  }
+  if (kind === "unconsumed_supplements") {
+    // The worker re-submits pending supplements as a new turn right after
+    // TurnFinished; broadcasting the raw payload is transient technical noise.
+    return null;
   }
   const detail = Object.entries(event.payload)
     .filter(

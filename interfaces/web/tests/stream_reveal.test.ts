@@ -52,7 +52,10 @@ describe("stream reveal integration", () => {
     expect(mainSource).not.toContain('token.turn_id === turn.turn_id');
     expect(mainSource).toContain('previous.turnProjection !== next.turnProjection');
     expect(mainSource).not.toContain("isStreamToolRunning");
-    expect(mainSource).toContain('const previewText = intermediate ? ""');
+    expect(mainSource).toContain('const rawPreviewText = intermediate ? ""');
+    // A repeated free-talk paragraph is suppressed in the provisional preview
+    // (the process stream keeps the first copy; see repeatsRetainedFreeTalk).
+    expect(mainSource).toContain("repeatsRetainedFreeTalk(rawPreviewText, retainedFreeTalkTexts)");
     expect(mainSource).toContain("activity.detail && <UserText text={activity.detail}");
   });
 
