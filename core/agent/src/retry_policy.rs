@@ -63,6 +63,10 @@ pub struct ModelCallOutcome<T> {
     /// parallel-tool control field. The caller must keep native tools enabled
     /// but schedule returned sibling calls sequentially.
     pub parallel_tool_control_omitted: bool,
+    /// The formal request succeeded only after stripping the provider-specific
+    /// reasoning continuation (`reasoning_content`) the catalog predicted as
+    /// supported. The caller latches the downgrade for later requests.
+    pub reasoning_input_rejected: bool,
     /// Provider reasoning/thinking text observed while streaming this response.
     /// Diagnostics only; never rendered as assistant content.
     pub reasoning: String,
@@ -274,6 +278,43 @@ pub fn is_explicit_parallel_tool_control_unsupported(error: &str) -> bool {
     .iter()
     .any(|signal| lower.contains(signal));
     names_parallel_field && explicitly_rejects_field
+}
+
+/// True when the provider rejected the request because of the provider-specific
+/// reasoning continuation field (`reasoning_content`). The catalog predicted
+/// support, but the provider refuses the field at runtime. The caller retries
+/// the same round without it and latches the downgrade for later requests.
+pub fn is_reasoning_content_input_rejected(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    let Some(status_text) = lower.strip_prefix("model_http_") else {
+        return false;
+    };
+    let status: u16 = status_text
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0);
+    if !(400..500).contains(&status) || matches!(status, 401 | 403 | 408 | 409 | 413 | 425 | 429) {
+        return false;
+    }
+    let names_reasoning_field = lower.contains("reasoning_content");
+    let explicitly_rejects_field = [
+        "unsupported",
+        "not supported",
+        "does not support",
+        "unknown field",
+        "unknown parameter",
+        "unrecognized",
+        "unexpected field",
+        "unexpected parameter",
+        "not allowed",
+        "not permitted",
+        "extra inputs are not permitted",
+    ]
+    .iter()
+    .any(|signal| lower.contains(signal));
+    names_reasoning_field && explicitly_rejects_field
 }
 
 /// True when a native model response carried a tool call that cannot be

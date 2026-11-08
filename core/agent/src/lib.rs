@@ -162,10 +162,10 @@ pub use host::{
     DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT, USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT,
 };
 pub use interaction::{
-    parse_parallel_tool_calls, parse_tool_call_mode, CapabilityProbeIdentity,
-    CapabilityProbeSource, InteractionConfig, InteractionProfile, ModelImagePart,
-    ModelInteractionRequest, NativeExchange, NativeToolCall, NativeToolChoice, NativeToolResult,
-    ParallelToolCalls, PersistedCapabilityProbe, ToolCallMode, ToolDefinition,
+    parse_parallel_tool_calls, parse_tool_call_mode, AssistantContinuation,
+    CapabilityProbeIdentity, CapabilityProbeSource, InteractionConfig, InteractionProfile,
+    ModelImagePart, ModelInteractionRequest, NativeExchange, NativeToolCall, NativeToolChoice,
+    NativeToolResult, ParallelToolCalls, PersistedCapabilityProbe, ToolCallMode, ToolDefinition,
     DEFAULT_MAX_TOOL_CALLS_PER_RESPONSE,
 };
 pub use model_api::{
@@ -1986,6 +1986,10 @@ pub struct AgentCore {
     /// Captured provider reasoning of the latest model response, consumed by
     /// the next deferred response-slice batch. `(text, truncated)`.
     pending_model_reasoning: Option<(String, bool)>,
+    /// Provider accepted reasoning-continuation input so far. A runtime
+    /// rejection of the `reasoning_content` field flips this off so later
+    /// requests are built without it until the session restarts.
+    reasoning_input_supported: bool,
     /// Consecutive model responses that ignored the forced-compaction
     /// requirement. Reaching MAX_CONSECUTIVE_FORCED_COMPACTION_REFUSALS
     /// abandons the automatic requirement instead of looping forever.
@@ -2171,6 +2175,7 @@ impl AgentCore {
             context_compress_required: false,
             context_include_reasoning: true,
             pending_model_reasoning: None,
+            reasoning_input_supported: true,
             forced_compaction_refusals: 0,
             threshold_compaction_reasoning_required: false,
             manual_compact_trailer_pending: false,
@@ -2253,6 +2258,26 @@ impl AgentCore {
         self.refresh_rendered_static_prompt();
     }
 
+    /// Provider-replay view of the registered native exchanges. When the
+    /// provider rejected reasoning input, the continuation metadata is
+    /// stripped so later requests stay compliant while the textual reasoning
+    /// replay in the deltas is kept.
+    fn native_exchange_request_view(&self) -> Vec<NativeExchange> {
+        if self.reasoning_input_supported {
+            return self.native_exchanges.clone();
+        }
+        self.native_exchanges
+            .iter()
+            .map(|exchange| {
+                let mut exchange = exchange.clone();
+                for call in exchange.calls.iter_mut() {
+                    call.assistant_continuation = None;
+                }
+                exchange
+            })
+            .collect()
+    }
+
     pub fn model_interaction_request(
         &self,
         rendered_prompt: impl Into<String>,
@@ -2272,7 +2297,7 @@ impl AgentCore {
             images: Vec::new(),
             static_tool_count,
             tools,
-            native_exchanges: self.native_exchanges.clone(),
+            native_exchanges: self.native_exchange_request_view(),
             resolved_mode: ToolCallMode::Native,
             parallel_tool_calls: self.native_parallel_tool_calls,
             send_parallel_tool_calls: self.send_native_parallel_tool_control,
@@ -2458,6 +2483,15 @@ impl AgentCore {
 
     /// Runtime opt-in toggling whether the captured provider reasoning of the
     /// latest model response is replayed into the next prompt delta. Default on.
+    /// Latches that the provider rejected the provider-specific reasoning
+    /// continuation input (`reasoning_content`) after the catalog predicted
+    /// support. Later requests are built without the field; the visible
+    /// textual reasoning replay in deltas is unaffected. Session-scoped: a
+    /// restart re-probes according to the catalog.
+    pub fn note_reasoning_input_rejected(&mut self) {
+        self.reasoning_input_supported = false;
+    }
+
     pub fn set_include_reasoning_in_context(&mut self, on: bool) {
         self.context_include_reasoning = on;
     }
@@ -3500,7 +3534,7 @@ impl AgentCore {
     pub fn export_dynamic_context(&self) -> DynamicContextSnapshot {
         DynamicContextSnapshot {
             deltas: self.deltas.clone(),
-            native_exchanges: self.native_exchanges.clone(),
+            native_exchanges: self.native_exchange_request_view(),
             last_observed_prompt_tokens: self.last_observed_prompt_tokens,
             active_memo: self.active_memo.clone(),
             pending_forcible_memo_note: self.pending_forcible_memo_note.clone(),

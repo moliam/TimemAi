@@ -8735,3 +8735,109 @@ fn rate_limited_failover_consumes_a_newer_host_route_first() {
         .seen_endpoints
         .contains(&"endpoint-b-stale".to_string()));
 }
+
+struct ReasoningRejectThenSucceedModel {
+    continuations: Vec<bool>,
+}
+
+impl ModelClient for ReasoningRejectThenSucceedModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        Err("unexpected_non_streaming_call".to_string())
+    }
+
+    fn call_model_interaction_streaming(
+        &mut self,
+        config: &ModelServiceConfig,
+        request: &ModelInteractionRequest,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+        _on_content: &mut dyn FnMut(&serde_json::Value),
+    ) -> Result<LlmResponse, String> {
+        let has_continuation = request
+            .native_exchanges
+            .first()
+            .and_then(|exchange| exchange.calls.first())
+            .map(|call| call.assistant_continuation.is_some())
+            .unwrap_or(false);
+        self.continuations.push(has_continuation);
+        if self.continuations.len() == 1 {
+            return Err("model_http_400: unknown parameter: reasoning_content".to_string());
+        }
+        Ok(LlmResponse {
+            tool_calls: vec![crate::NativeToolCall {
+                assistant_continuation: None,
+                id: "call_finish_downgrade".to_string(),
+                name: "task_finished".to_string(),
+                arguments: serde_json::json!({"summary": "downgraded retry finished"}),
+                raw_arguments: String::new(),
+            }],
+            content: String::new(),
+            model_name: config.model.clone(),
+            usage: usage(100, 10),
+            truncated: false,
+        })
+    }
+}
+
+#[test]
+fn reasoning_content_rejection_downgrades_and_retries_without_the_field() {
+    let dir = tmp_dir("reasoning_reject_downgrade");
+    let audit = dir.join("audit.json");
+    let mut core = test_core("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    config.interaction.tool_call_mode = crate::ToolCallMode::Native;
+
+    // Seed one completed native exchange carrying the continuation metadata a
+    // reasoning-preserving catalog entry would replay on the next request.
+    core.append_delta(vec![("user_question".to_string(), "seed".to_string())]);
+    core.native_exchanges.push(crate::NativeExchange {
+        delta_id: core.deltas[0].delta_id.clone(),
+        assistant_text: String::new(),
+        calls: vec![crate::NativeToolCall {
+            assistant_continuation: Some(crate::AssistantContinuation {
+                catalog_id: String::new(),
+                model: "test-model".to_string(),
+                reasoning_content: "SECRET CONTINUATION".to_string(),
+            }),
+            id: "call_seed".to_string(),
+            name: "self_tool".to_string(),
+            arguments: serde_json::json!({"type": "cwd"}),
+            raw_arguments: String::new(),
+        }],
+        results: Vec::new(),
+    });
+
+    let mut model = ReasoningRejectThenSucceedModel {
+        continuations: Vec::new(),
+    };
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "answer in one shot",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    // First attempt carried the continuation, the provider rejected it, and
+    // the immediate retry succeeded without the field.
+    assert_eq!(model.continuations, vec![true, false]);
+    assert_eq!(outcome.text, "downgraded retry finished");
+    // The downgrade is latched for the rest of the session.
+    assert!(!core.reasoning_input_supported);
+    let _ = fs::remove_dir_all(dir);
+}

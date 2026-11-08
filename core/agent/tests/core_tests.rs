@@ -11644,50 +11644,57 @@ fn include_reasoning_precedes_the_compaction_summary_and_runtime_confirmation() 
 }
 
 #[test]
-fn include_reasoning_is_attached_exactly_once_across_rounds() {
-    // Guard against future double-attach regressions: the take() semantics
-    // must keep exactly one copy of a given reasoning chain in the prompt no
-    // matter how many later rounds or turns re-render the context.
+fn reasoning_input_downgrade_strips_continuations_from_later_requests() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
-        tmp_dir("include_reasoning_once"),
+        tmp_dir("reasoning_input_downgrade"),
     );
-    core.set_model_reasoning("ONCE_ONLY_REASONING_MARKER", false);
-    let _ = core.begin_turn("round one", None);
-    for round in 1..=3 {
-        let step = core.apply_model_response(LlmResponse {
-            tool_calls: Vec::new(),
-            content: scored(r#"{"working_still_action":{"self_tool":{"type":"cwd"}}}"#),
-            model_name: "qwen-plus".to_string(),
-            usage: usage(),
-            truncated: false,
-        });
-        let prompt = match step {
-            CoreStep::NeedModel { prompt, .. } => prompt,
-            other => panic!("round {round} unexpected step: {other:?}"),
-        };
-        assert_eq!(
-            prompt.matches("ONCE_ONLY_REASONING_MARKER").count(),
-            1,
-            "round {round} must carry the reasoning exactly once: {prompt}"
-        );
-    }
+    core.set_interaction_profile(&agent_core::InteractionProfile {
+        api_protocol: "openai_compatible".to_string(),
+        model: "model".to_string(),
+        gateway: "https://gateway.example.test/v1".to_string(),
+        requested_mode: agent_core::ToolCallMode::Auto,
+        resolved_mode: agent_core::ToolCallMode::Native,
+        active_prompt_protocol: "json".to_string(),
+        parallel_supported: true,
+        parallel_enabled: true,
+        source: agent_core::CapabilityProbeSource::Probe,
+        reason: "test".to_string(),
+        probe_latency_ms: Some(1),
+        observed_tool_calls: 2,
+    });
+    let _ = core.begin_turn("inspect cwd", None);
+    let arguments = json!({"type": "cwd"});
     let step = core.apply_model_response(LlmResponse {
-        tool_calls: Vec::new(),
-        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"done"}"#),
+        content: String::new(),
+        tool_calls: vec![agent_core::NativeToolCall {
+            assistant_continuation: Some(agent_core::AssistantContinuation {
+                catalog_id: "cap".to_string(),
+                model: "qwen-plus".to_string(),
+                reasoning_content: "PROVIDER REASONING".to_string(),
+            }),
+            id: "call_cont_1".to_string(),
+            name: "self_tool".to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
     });
-    assert!(matches!(step, CoreStep::Final(_)));
-    let prompt = match core.begin_turn("later turn", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("unexpected step: {other:?}"),
-    };
-    assert_eq!(
-        prompt.matches("ONCE_ONLY_REASONING_MARKER").count(),
-        1,
-        "later turns must keep exactly one copy: {prompt}"
-    );
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
+
+    let prompt = core.render_prompt();
+    let request = core.model_interaction_request(prompt);
+    assert!(request.native_exchanges[0].calls[0]
+        .assistant_continuation
+        .is_some());
+
+    core.note_reasoning_input_rejected();
+    let prompt = core.build_next_prompt();
+    let request = core.model_interaction_request(prompt);
+    assert!(request.native_exchanges[0].calls[0]
+        .assistant_continuation
+        .is_none());
 }

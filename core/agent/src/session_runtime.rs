@@ -721,6 +721,9 @@ fn run_session_turn_with_model_client_and_reminder_override(
                                 ui.on_persisted_capability_probe(&identity, Some(&record));
                             }
                         }
+                        if response.reasoning_input_rejected {
+                            core.note_reasoning_input_rejected();
+                        }
                         latest_usage = Some(response.response.usage.clone());
                         ui.on_model_interaction_reasoning(
                             rounds,
@@ -1324,6 +1327,7 @@ fn call_model_with_system_retries(
     let mut total_retry_wait = Duration::ZERO;
     let mut effective_request = request.clone();
     let mut parallel_tool_control_omitted = false;
+    let mut reasoning_input_rejected = false;
     // Streaming deltas arrive far faster than anyone reads; coalescing the
     // preview publishes to ~10x/second cuts wire traffic and, more
     // importantly, the client-side markdown re-render cost per arrival.
@@ -1446,6 +1450,7 @@ fn call_model_with_system_retries(
                     model_wait: total_model_wait,
                     retry_wait: total_retry_wait,
                     parallel_tool_control_omitted,
+                    reasoning_input_rejected,
                     reasoning,
                     reasoning_truncated,
                 });
@@ -1462,6 +1467,24 @@ fn call_model_with_system_retries(
                     effective_request.send_parallel_tool_calls = false;
                     effective_request.parallel_tool_calls = false;
                     parallel_tool_control_omitted = true;
+                    continue;
+                }
+                if !reasoning_input_rejected
+                    && effective_request.is_native()
+                    && crate::retry_policy::is_reasoning_content_input_rejected(&err)
+                {
+                    // Retry the same formal round once without the provider
+                    // specific reasoning continuation: the catalog predicted
+                    // reasoning_content support, but the provider rejects the
+                    // field at runtime. Strip it for the immediate retry; the
+                    // downgrade is latched on the core below so later requests
+                    // are built without it from the start.
+                    for exchange in effective_request.native_exchanges.iter_mut() {
+                        for call in exchange.calls.iter_mut() {
+                            call.assistant_continuation = None;
+                        }
+                    }
+                    reasoning_input_rejected = true;
                     continue;
                 }
                 if let Some(profiler) = profiler.as_deref_mut() {
