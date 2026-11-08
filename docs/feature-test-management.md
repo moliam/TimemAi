@@ -1027,3 +1027,9 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 背景：`[timem_web_history_rolling] reclaimed_bytes=... budget_bytes=...` 在每个滚动 tick（60 秒间隔）实际回收非零字节时写 stderr；繁忙的多 agent 工作负载每个 tick 都有回收，长驻实例持续刷屏，与已静默的 mailbox 例行维护日志同性质。
 - 改动：`applications/timem/src/server/mem_maintenance.rs` 的 `spawn_conversation_rolling_loop` 默认不再输出例行回收摘要；需要观察时设置 `TIMEM_WEB_HISTORY_ROLLING_LOG=1`（也接受 true/yes/on）。真实失败仍以 `[timem_web_warning] conversation_rolling_eviction_failed` 输出。
 - 测试看护：`conversation_rolling_eviction_deletes_oldest_blocks_first` 复核回收行为不变；timem lib 全量 467 过（1 ignored）。
+
+### Global hover tooltip scroll survival
+
+- 现象：全局即时 title 提示（GlobalTitleTip）在消息流、会话列表等 autoscroll 区域 hover 时一帧内消失且不再出现，点击（focusin）才显示。根因是 scroll 捕获监听把任何滚动（含流式输出与列表锚定的程序性滚动）都当作 viewport 变化无条件隐藏 tip，而指针静止时没有 pointerover 复活路径。
+- 修复：scroll/resize 改为重锚定——活动元素仍在指针下方且连接在 DOM 时更新 tip 位置跟随元素；元素离开指针或被移除 DOM 才隐藏；窗口失焦仍直接隐藏。指针位置由 pointerover/pointermove 统一记录。
+- 测试看护：新增真实 Chrome e2e `global-title-tip-scroll-acceptance.mjs`（已挂入 `test:browser`）：teleport 悬停即时出现提示、注入 12 次 scroll 提示存活、列表真实滚动 5px 提示重锚定（8px gap 校验）、滚动 60px 元素离开指针后隐藏、指针移出隐藏、程序化 focus（focusin 路径，键盘导航等价）出现提示，全程无页面异常。修复前对照（同一探针）在旧逻辑上 scroll 注入后 tip 即死，确认因果。

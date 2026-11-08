@@ -20803,10 +20803,20 @@ function InlineDecision({
 const GLOBAL_TITLE_TIP_MARGIN = 8;
 const GLOBAL_TITLE_TIP_GAP = 8;
 
+const pointerOutsideRect = (p: { x: number; y: number }, r: DOMRect) =>
+  p.x < r.left - 1 ||
+  p.x > r.right + 1 ||
+  p.y < r.top - 1 ||
+  p.y > r.bottom + 1;
+
+const sameDomRect = (a: DOMRect, b: DOMRect) =>
+  a.left === b.left && a.top === b.top && a.width === b.width && a.height === b.height;
+
 function GlobalTitleTip() {
   const [tip, setTip] = useState<{ text: string; rect: DOMRect } | null>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const activeRef = useRef<{ el: Element; title: string } | null>(null);
+  const pointerRef = useRef<{ x: number; y: number } | null>(null);
   const tipRef = useRef<HTMLDivElement | null>(null);
 
   const deactivate = useCallback(() => {
@@ -20839,6 +20849,7 @@ function GlobalTitleTip() {
       node instanceof Element ? node.closest("[title]") : null;
 
     const onPointerOver = (event: PointerEvent) => {
+      pointerRef.current = { x: event.clientX, y: event.clientY };
       const active = activeRef.current;
       if (
         active &&
@@ -20861,6 +20872,7 @@ function GlobalTitleTip() {
       deactivate();
     };
     const onPointerMove = (event: PointerEvent) => {
+      pointerRef.current = { x: event.clientX, y: event.clientY };
       const active = activeRef.current;
       if (!active) return;
       if (!active.el.isConnected) {
@@ -20897,6 +20909,30 @@ function GlobalTitleTip() {
       if (event.relatedTarget instanceof Node && active.el.contains(event.relatedTarget)) return;
       deactivate();
     };
+    // Autoscrolling regions (streaming thread output, anchored lists) emit
+    // scroll events every frame. Hiding the tip on any scroll killed it within
+    // one activation frame, and with the pointer at rest no pointerover ever
+    // revives it: hover hints silently disappeared in exactly those busy
+    // regions while click (focusin) still worked. Re-anchor the tip to the
+    // hovered element instead; hide only when the element left the pointer or
+    // was removed from the document.
+    const reconcileTipForViewportChange = () => {
+      const active = activeRef.current;
+      if (!active) return;
+      if (!active.el.isConnected) {
+        deactivate();
+        return;
+      }
+      const r = active.el.getBoundingClientRect();
+      const pointer = pointerRef.current;
+      if (pointer && pointerOutsideRect(pointer, r)) {
+        deactivate();
+        return;
+      }
+      setTip((prev) =>
+        prev && sameDomRect(prev.rect, r) ? prev : { text: active.title, rect: r },
+      );
+    };
     const hideForViewportChange = () => {
       if (activeRef.current) deactivate();
     };
@@ -20906,8 +20942,8 @@ function GlobalTitleTip() {
     document.addEventListener("pointermove", onPointerMove, true);
     document.addEventListener("focusin", onFocusIn, true);
     document.addEventListener("focusout", onFocusOut, true);
-    document.addEventListener("scroll", hideForViewportChange, true);
-    window.addEventListener("resize", hideForViewportChange);
+    document.addEventListener("scroll", reconcileTipForViewportChange, true);
+    window.addEventListener("resize", reconcileTipForViewportChange);
     window.addEventListener("blur", hideForViewportChange);
     return () => {
       deactivate();
@@ -20916,8 +20952,8 @@ function GlobalTitleTip() {
       document.removeEventListener("pointermove", onPointerMove, true);
       document.removeEventListener("focusin", onFocusIn, true);
       document.removeEventListener("focusout", onFocusOut, true);
-      document.removeEventListener("scroll", hideForViewportChange, true);
-      window.removeEventListener("resize", hideForViewportChange);
+      document.removeEventListener("scroll", reconcileTipForViewportChange, true);
+      window.removeEventListener("resize", reconcileTipForViewportChange);
       window.removeEventListener("blur", hideForViewportChange);
     };
   }, [activate, deactivate]);
