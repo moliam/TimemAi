@@ -129,6 +129,7 @@ enum VisiblePromptRole {
     UserSupplement,
     UserResumeDirectly,
     You,
+    Thinking,
     ContextCompressionSummary,
     Runtime,
 }
@@ -139,9 +140,9 @@ impl VisiblePromptRole {
             VisiblePromptRole::User
             | VisiblePromptRole::UserSupplement
             | VisiblePromptRole::UserResumeDirectly => spec.user_role,
-            VisiblePromptRole::You | VisiblePromptRole::ContextCompressionSummary => {
-                spec.assistant_role
-            }
+            VisiblePromptRole::You
+            | VisiblePromptRole::Thinking
+            | VisiblePromptRole::ContextCompressionSummary => spec.assistant_role,
             VisiblePromptRole::Runtime => spec.runtime_role,
         }
     }
@@ -149,7 +150,9 @@ impl VisiblePromptRole {
     fn assistant_id(self, assistant_heading: &str) -> Option<&str> {
         matches!(
             self,
-            VisiblePromptRole::You | VisiblePromptRole::ContextCompressionSummary
+            VisiblePromptRole::You
+                | VisiblePromptRole::Thinking
+                | VisiblePromptRole::ContextCompressionSummary
         )
         .then_some(assistant_heading)
     }
@@ -166,6 +169,12 @@ impl VisiblePromptRole {
                 format!("<{} kind=\"supplement\">", spec.user_role)
             } else {
                 format!("## {} (supplement)", spec.user_role)
+            }
+        } else if self == VisiblePromptRole::Thinking {
+            if spec.uses_xml_role_elements() {
+                format!("<{} kind=\"thinking\">", spec.assistant_role)
+            } else {
+                format!("## {} (thinking)", assistant_heading)
             }
         } else if self == VisiblePromptRole::ContextCompressionSummary {
             if spec.uses_xml_role_elements() {
@@ -187,9 +196,8 @@ fn visible_role(prompt_type: &str) -> VisiblePromptRole {
         "user_question" => VisiblePromptRole::User,
         "user_supplement" => VisiblePromptRole::UserSupplement,
         "user_resume_directly" => VisiblePromptRole::UserResumeDirectly,
-        "llm_response" | "llm_response_raw_xml" | "llm_free_talk" | "model_reasoning" => {
-            VisiblePromptRole::You
-        }
+        "llm_response" | "llm_response_raw_xml" | "llm_free_talk" => VisiblePromptRole::You,
+        "model_reasoning" => VisiblePromptRole::Thinking,
         "context_compression_summary" => VisiblePromptRole::ContextCompressionSummary,
         "result_of_llm_action" | "response_repair" | "context_compressed" => {
             VisiblePromptRole::Runtime

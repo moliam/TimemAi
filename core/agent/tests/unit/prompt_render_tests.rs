@@ -996,7 +996,7 @@ fn input_time_is_semantic_not_a_transport_role_and_uses_slice_time() {
 }
 
 #[test]
-fn model_reasoning_slice_renders_under_the_assistant_role() {
+fn model_reasoning_slice_renders_as_a_dedicated_thinking_section() {
     let delta = PromptDelta {
         delta_id: "pd_reason_role".to_string(),
         time_ms: 1,
@@ -1010,7 +1010,7 @@ fn model_reasoning_slice_renders_under_the_assistant_role() {
                 time_ms: 1,
                 text: "original question".to_string(),
                 slice_index: 1,
-                slice_count: 2,
+                slice_count: 3,
             },
             PromptSlice {
                 delta_id: "pd_reason_role".to_string(),
@@ -1020,27 +1020,63 @@ fn model_reasoning_slice_renders_under_the_assistant_role() {
                 time_ms: 2,
                 text: "THINKING TEXT".to_string(),
                 slice_index: 2,
-                slice_count: 2,
+                slice_count: 3,
+            },
+            PromptSlice {
+                delta_id: "pd_reason_role".to_string(),
+                slice_id: "ps_reason_role_s003".to_string(),
+                component_id: "response".to_string(),
+                prompt_type: "llm_response".to_string(),
+                time_ms: 3,
+                text: "REPLY TEXT".to_string(),
+                slice_index: 3,
+                slice_count: 3,
             },
         ],
     };
     let rendered = render_prompt_with_rendered_static(
         "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]",
-        &[delta],
+        std::slice::from_ref(&delta),
         "TIMEM_ASSISTANT",
         &JsonSuiteV1,
     );
     let user_pos = rendered.find("## USER").expect("user heading");
-    let assistant_pos = rendered
-        .find("## TIMEM_ASSISTANT")
-        .unwrap_or_else(|| panic!("reasoning must render under the assistant role: {rendered}"));
+    let thinking_pos = rendered
+        .find("## TIMEM_ASSISTANT (thinking)")
+        .unwrap_or_else(|| {
+            panic!("reasoning must render under a dedicated thinking heading: {rendered}")
+        });
     let reasoning_pos = rendered.find("THINKING TEXT").expect("reasoning text");
     assert!(
-        user_pos < assistant_pos && assistant_pos < reasoning_pos,
+        user_pos < thinking_pos && thinking_pos < reasoning_pos,
         "{rendered}"
     );
     match rendered.find("## RUNTIME") {
         None => {}
         Some(runtime_pos) => assert!(runtime_pos > reasoning_pos, "{rendered}"),
     }
+    // The plain reply must be a separate assistant section, distinct from the
+    // thinking one; the thinking text must not leak into it.
+    let reply_heading_pos = rendered[reasoning_pos..]
+        .find("\n## TIMEM_ASSISTANT\n")
+        .map(|offset| reasoning_pos + offset)
+        .unwrap_or_else(|| panic!("reply must render under its own assistant heading: {rendered}"));
+    let reply_pos = rendered.find("REPLY TEXT").expect("reply text");
+    assert!(
+        reasoning_pos < reply_heading_pos && reply_heading_pos < reply_pos,
+        "{rendered}"
+    );
+
+    // XML boundaries mark the thinking section with a kind attribute instead.
+    let xml_rendered = render_prompt_with_rendered_static(
+        "<Timem System Prompt>\nSTATIC\n</Timem System Prompt>",
+        std::slice::from_ref(&delta),
+        "TIMEM_ASSISTANT",
+        &XmlSuiteV1,
+    );
+    assert!(
+        xml_rendered.contains("<ASSISTANT kind=\"thinking\">"),
+        "{xml_rendered}"
+    );
+    assert!(xml_rendered.contains("THINKING TEXT"), "{xml_rendered}");
 }

@@ -11542,12 +11542,12 @@ fn include_reasoning_replays_on_native_tool_rounds() {
         "native tool-round reasoning must replay into the next prompt: {prompt}"
     );
     let assistant_pos = prompt
-        .find("## TIMEM_ASSISTANT")
-        .unwrap_or_else(|| panic!("assistant heading missing: {prompt}"));
+        .find("## TIMEM_ASSISTANT (thinking)")
+        .unwrap_or_else(|| panic!("dedicated thinking heading missing: {prompt}"));
     let reasoning_pos = prompt.find("NATIVE ROUND REASONING CHAIN").unwrap();
     assert!(
         reasoning_pos > assistant_pos,
-        "reasoning must render under the assistant role: {prompt}"
+        "reasoning must render under the dedicated thinking heading: {prompt}"
     );
     assert!(
         !prompt.contains("## RUNTIME\n\nNATIVE ROUND REASONING"),
