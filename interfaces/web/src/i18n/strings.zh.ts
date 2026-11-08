@@ -717,7 +717,7 @@ export const zh = {
     upgradeRecheck: "再次检查",
     upgradeChecking: "正在检查更新…",
     upgradeUpToDate: "当前已是最新版本 v{version}。",
-    upgradeAvailable: "发现新版本 {next}（当前 v{current}）。",
+    upgradeAvailable: "发现新版本 v{next}（当前 v{current}）。",
     upgradeApply: "立即升级",
     upgradeDownloading: "正在下载 v{version}…",
     upgradeVerifying: "正在校验完整性…",

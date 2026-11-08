@@ -15,6 +15,14 @@ type UpgradePhase =
 
 type UpgradeStatus = { phase: UpgradePhase; current_version: string };
 
+// Remote release tags carry a leading "v" (e.g. "v3.0.1") while Host-side
+// current versions are bare; templates render their own "v" prefix, so
+// normalize every version to bare form at the display boundary to avoid a
+// doubled prefix ("vv3.0.1").
+function bareVersion(version: string): string {
+  return version.startsWith("v") || version.startsWith("V") ? version.slice(1) : version;
+}
+
 function queryToken() {
   try {
     return window.sessionStorage.getItem("timem-web-access-token") ?? "";
@@ -153,7 +161,7 @@ export function SelfUpgradeSetting() {
             <span>
               {t("system.upgradeAvailable", {
                 current: currentVersion,
-                next: phase.remote_version,
+                next: bareVersion(phase.remote_version),
               })}
             </span>
             <button
@@ -169,7 +177,7 @@ export function SelfUpgradeSetting() {
         {phaseName === "downloading" && (
           <div className="system-upgrade-status" role="status" aria-live="polite">
             <span>
-              {t("system.upgradeDownloading", { version: phase.remote_version })}
+              {t("system.upgradeDownloading", { version: bareVersion(phase.remote_version) })}
             </span>
             <span className="system-upgrade-progress">
               <span style={{ width: `${Math.min(100, Math.max(0, phase.percent))}%` }} />
@@ -189,7 +197,7 @@ export function SelfUpgradeSetting() {
         {phaseName === "pending_restart" && (
           <div className="system-upgrade-status ok" role="status" aria-live="polite">
             <span>
-              {t("system.upgradePendingRestart", { version: phase.pending_version })}
+              {t("system.upgradePendingRestart", { version: bareVersion(phase.pending_version) })}
             </span>
             <button
               type="button"

@@ -720,7 +720,7 @@ export const en: Strings = {
     upgradeRecheck: "Check again",
     upgradeChecking: "Checking for updates…",
     upgradeUpToDate: "Version v{version} is up to date.",
-    upgradeAvailable: "Version {next} is available (current v{current}).",
+    upgradeAvailable: "Version v{next} is available (current v{current}).",
     upgradeApply: "Upgrade now",
     upgradeDownloading: "Downloading v{version}…",
     upgradeVerifying: "Verifying integrity…",
