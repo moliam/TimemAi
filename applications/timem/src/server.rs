@@ -16578,7 +16578,7 @@ fn session_work_file_context(state: &AppState, session_id: &str) -> Result<Optio
     const SESSION_WORK_FILE_CONTEXT_CONTENT_LIMIT: usize = 16 * 1024;
     let path = session_work_file_path(state, session_id)?;
     let pointer = format!(
-        "Session work file: {}. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.",
+        "Session work file: {}. You SHOULD update/condense this file iteratively and keep only valid info, to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.",
         path.display()
     );
     // Content injection is best-effort: a missing or unreadable work file

@@ -7275,7 +7275,7 @@ fn runtime_state_reminder_skips_work_file_already_visible() {
     core.submit_prompt_component(
         crate::prompt_components::PromptComponentRole::system(),
         "runtime_note",
-        "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.",
+        "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update/condense this file iteratively and keep only valid info, to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.",
         "test_host_context",
     );
     let lines = core.runtime_state_reminder_lines();
@@ -7430,7 +7430,7 @@ fn session_work_file_content_block_is_injected_once_then_filtered() {
     let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
-    let pointer = "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.";
+    let pointer = "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update/condense this file iteratively and keep only valid info, to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.";
     let block = format!(
         "{pointer}\n\n[BEGIN SESSION INSTRUCTION file=\"/mem/sessions/6lal8v/Timem.md\"]\n## Active work\n- keep the goal anchored\n[END SESSION INSTRUCTION]"
     );
@@ -7528,7 +7528,7 @@ fn session_work_file_content_block_survives_compaction() {
     let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
-    let pointer = "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update this file occasionally to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.";
+    let pointer = "Session work file: /mem/sessions/6lal8v/Timem.md. You SHOULD update/condense this file iteratively and keep only valid info, to maintain your long-task ability, avoid deviating from user's goal or other requirement, etc. This file MUST be focused on active, up-to-date task, and avoid piling up old legacy content.";
     let block = format!(
         "{pointer}\n\n[BEGIN SESSION INSTRUCTION file=\"/mem/sessions/6lal8v/Timem.md\"]\n## Active work\n- keep the goal anchored\n[END SESSION INSTRUCTION]"
     );
