@@ -1393,6 +1393,14 @@ fn strip_heredoc_bodies(command: &str) -> String {
             if strip_tabs {
                 cursor += 1;
             }
+            // POSIX allows blanks between `<<`/`<<-` and the delimiter word;
+            // a newline never starts a delimiter, so only spaces and tabs
+            // are skipped here. Without this, `<< 'EOF'` style heredocs kept
+            // their bodies visible to the background detector and a body
+            // `&` was misrejected as an unmanaged background process.
+            while matches!(chars.get(cursor).copied(), Some(' ') | Some('\t')) {
+                cursor += 1;
+            }
             let delimiter_start = cursor;
             while cursor < chars.len() && !chars[cursor].is_whitespace() && chars[cursor] != ';' {
                 cursor += 1;

@@ -1894,6 +1894,18 @@ fn shell_lifecycle_validation_ignores_heredoc_body_content() {
         false
     )
     .is_ok());
+    // POSIX allows blanks between `<<`/`<<-` and the delimiter word; the
+    // body stays data and its `&` must not reach the background detector.
+    assert!(validate_bash_lifecycle(
+        "cat > /tmp/t.py << 'EOF'\ns = &format!(\"{stamp}\")\nsetsid & sleep 30\nEOF\necho done",
+        false
+    )
+    .is_ok());
+    assert!(validate_bash_lifecycle(
+        "cat <<- 'EOF'\n\tdata with & and setsid\n\tEOF\necho ok",
+        false
+    )
+    .is_ok());
     // A real background launch after a heredoc is still rejected.
     assert_eq!(
         validate_bash_lifecycle("cat <<'EOF'\nbody\nEOF\nsleep 30 &", false),
