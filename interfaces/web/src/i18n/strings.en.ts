@@ -676,7 +676,6 @@ export const en: Strings = {
     contextCompressThresholdDesc: "Start automatic compression when context usage reaches the selected percentage. Saved by the current MEM and effective from the next model request.",
     contextCompressThresholdAria: "Choose context compression threshold",
     thinkingChainTitle: "Thinking chain",
-    thinkingChainDesc: "Controls how the model's reasoning appears in the UI and whether it is replayed into the next request's context. Applies to every session of this instance.",
     thinkingChainToggle: "Show thinking chain",
     thinkingChainAria: "Show the thinking chain window",
     reasoningContextToggle: "Add thinking chain to context",

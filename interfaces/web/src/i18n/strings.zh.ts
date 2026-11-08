@@ -673,7 +673,6 @@ export const zh = {
     contextCompressThresholdDesc: "上下文使用量达到所选比例时开始自动压缩。设置由当前 MEM 保存，并从下一次模型请求开始生效。",
     contextCompressThresholdAria: "选择上下文压缩阈值",
     thinkingChainTitle: "思考链",
-    thinkingChainDesc: "控制模型思考内容在界面中的显示方式，以及是否把它回放进下一次请求的上下文。对本实例的所有会话生效。",
     thinkingChainToggle: "显示思考链",
     thinkingChainAria: "显示思考链窗口",
     reasoningContextToggle: "思维链加入上下文",

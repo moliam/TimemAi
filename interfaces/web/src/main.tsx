@@ -16754,7 +16754,6 @@ const SettingsCenter = memo(function SettingsCenter(
                   <div className="settings-group-heading">
                     <div>
                       <strong>{t("system.thinkingChainTitle")}</strong>
-                      <p>{t("system.thinkingChainDesc")}</p>
                     </div>
                   </div>
                   <label className="resource-cap-switch thinking-chain-switch">
