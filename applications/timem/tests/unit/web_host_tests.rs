@@ -3959,6 +3959,7 @@ fn workspace_snapshot_deduplicates_registered_current_directory() {
             },
             bash_approval_mode: BashApprovalMode::Ask,
             work_instruction_mode: WorkInstructionLoadMode::Off,
+            include_reasoning_in_context: true,
             max_rounds: agent_core::UNLIMITED_ROUND_BUDGET,
         })),
         data_dir: PathBuf::from("/tmp/data"),
@@ -8297,6 +8298,7 @@ fn routing_test_state() -> AppState {
             config,
             bash_approval_mode: BashApprovalMode::Ask,
             work_instruction_mode: WorkInstructionLoadMode::Off,
+            include_reasoning_in_context: true,
             max_rounds: agent_core::UNLIMITED_ROUND_BUDGET,
         })),
         data_dir: std::env::temp_dir().join(unique_web_id("timem_web_data_test")),
@@ -8545,6 +8547,7 @@ fn test_runtime_settings() -> RuntimeSettings {
         },
         bash_approval_mode: BashApprovalMode::Ask,
         work_instruction_mode: WorkInstructionLoadMode::Off,
+        include_reasoning_in_context: true,
         max_rounds: agent_core::UNLIMITED_ROUND_BUDGET,
     }
 }
@@ -8568,6 +8571,7 @@ fn test_runtime_profile() -> WebSessionRuntimeProfile {
         max_rounds: "unlimited".to_string(),
         bash_approval: "ask".to_string(),
         work_instructions: "off".to_string(),
+        include_reasoning_in_context: true,
         api_key_configured: true,
     }
 }
