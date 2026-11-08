@@ -3599,6 +3599,10 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .settings-group-heading strong { font-size: 13px; }
 .settings-group-heading p { margin: 5px 0 0; color: #7f8b86; font-size: 11px; line-height: 1.45; }
 .settings-group-heading > svg { flex: none; color: #72837d; }
+.system-thinking-chain { display: grid; gap: 12px; }
+.thinking-chain-context-option { display: grid; gap: 6px; }
+.thinking-chain-context-desc { margin: 0; padding-left: 42px; color: #7f8b86; font-size: 11px; line-height: 1.45; }
+:root[data-theme="light"] .thinking-chain-context-desc { color: #6c7a75; }
 .system-resource-caps { scroll-margin-top: 8px; }
 .settings-field { display: grid; gap: 7px; margin-top: 15px; color: #a7b2ad; font-size: 11px; font-weight: 700; }
 .settings-field input, .settings-field select { width: 100%; min-width: 0; height: 38px; border: 1px solid #3a4541; border-radius: 7px; padding: 0 10px; outline: none; background: #111513; color: #e3e9e6; }

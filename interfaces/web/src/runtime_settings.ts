@@ -9,6 +9,7 @@ type SessionRuntimeProfile = {
   max_rounds: string;
   bash_approval: string;
   work_instructions: string;
+  include_reasoning_in_context: boolean;
 };
 
 export function sessionRuntimeOptions(
@@ -25,6 +26,9 @@ export function sessionRuntimeOptions(
     TIMEM_MAX_ROUNDS: profile.max_rounds,
     TIMEM_BASH_APPROVAL: profile.bash_approval,
     TIMEM_WORK_INSTRUCTIONS: profile.work_instructions,
+    TIMEM_INCLUDE_REASONING_IN_CONTEXT: profile.include_reasoning_in_context
+      ? "on"
+      : "off",
   };
   return available.flatMap((option) => option.key in values
     ? [{ ...option, value: values[option.key] }]
@@ -33,6 +37,7 @@ export function sessionRuntimeOptions(
 
 export function runtimeOptionLabel(key: string): string {
   if (key === "TIMEM_MAX_ROUNDS") return "MAX STEPS";
+  if (key === "TIMEM_INCLUDE_REASONING_IN_CONTEXT") return "CONTEXT REASONING";
   return key.startsWith("TIMEM_") ? key.slice("TIMEM_".length) : key;
 }
 

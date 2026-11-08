@@ -169,6 +169,15 @@ pub fn run(args: Vec<String>) {
         bash_approval_mode_from_sources(options.bash_approval.as_deref(), &session_env);
     let mut work_instruction_mode =
         work_instruction_mode_from_sources(options.work_instructions.as_deref(), &session_env);
+    let mut include_reasoning_in_context = session_env
+        .get("TIMEM_INCLUDE_REASONING_IN_CONTEXT")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "on" | "true" | "1" | "enabled"
+            )
+        })
+        .unwrap_or(false);
     let current_work_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut profiler = RuntimeProfiler::default();
     let mut stored_session = restored_session.unwrap_or_else(|| {
@@ -177,6 +186,7 @@ pub fn run(args: Vec<String>) {
             &config,
             bash_approval_mode,
             work_instruction_mode,
+            include_reasoning_in_context,
             &current_work_dir,
         )
     });
@@ -197,6 +207,7 @@ pub fn run(args: Vec<String>) {
         &config,
         bash_approval_mode,
         work_instruction_mode,
+        include_reasoning_in_context,
         &session_work_dir,
     );
     if let Err(error) = session_store.upsert_session(&stored_session) {
@@ -207,6 +218,7 @@ pub fn run(args: Vec<String>) {
         &config,
         bash_approval_mode,
         work_instruction_mode,
+        include_reasoning_in_context,
     ));
     let mut core = AgentCore::new_with_interface_preferences(
         STATIC_PROMPT,
@@ -239,7 +251,7 @@ pub fn run(args: Vec<String>) {
             }
         }
     }
-    core.configure_runtime_from_host(&config, bash_approval_mode);
+    core.configure_runtime_from_host(&config, bash_approval_mode, include_reasoning_in_context);
     let _ = core.change_prompt_cwd(session_work_dir.to_string_lossy());
     let (mut work_instruction_context, work_instruction_notice) = match work_instruction_mode {
         WorkInstructionLoadMode::Silent => load_work_instructions_for_shell(&session_work_dir),
@@ -305,6 +317,7 @@ pub fn run(args: Vec<String>) {
             &config,
             bash_approval_mode,
             work_instruction_mode,
+            include_reasoning_in_context,
             core.current_prompt_cwd(),
         );
         return;
@@ -432,6 +445,7 @@ pub fn run(args: Vec<String>) {
                 &mut core,
                 &mut bash_approval_mode,
                 &mut work_instruction_mode,
+                &mut include_reasoning_in_context,
                 &mut work_instruction_context,
                 &prompt_cwd,
             ) {
@@ -440,6 +454,7 @@ pub fn run(args: Vec<String>) {
                     &config,
                     bash_approval_mode,
                     work_instruction_mode,
+                    include_reasoning_in_context,
                     &prompt_cwd,
                 );
                 if let Err(error) = session_store.upsert_session(&stored_session) {
@@ -596,6 +611,7 @@ pub fn run(args: Vec<String>) {
             &config,
             bash_approval_mode,
             work_instruction_mode,
+            include_reasoning_in_context,
             core.current_prompt_cwd(),
         );
         queued_questions.extend(newly_queued_questions);
@@ -623,6 +639,7 @@ fn load_or_create_shell_session(
     config: &timem_in_process::agent_api::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
+    include_reasoning_in_context: bool,
     current_dir: &Path,
 ) -> StoredSession {
     if let Some(session) = load_resumable_shell_session(session_store) {
@@ -633,6 +650,7 @@ fn load_or_create_shell_session(
         config,
         bash_approval_mode,
         work_instruction_mode,
+        include_reasoning_in_context,
         current_dir,
     )
 }
@@ -667,6 +685,7 @@ fn new_shell_session(
     config: &timem_in_process::agent_api::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
+    include_reasoning_in_context: bool,
     current_dir: &Path,
 ) -> StoredSession {
     let session_id = "shell_default".to_string();
@@ -685,7 +704,12 @@ fn new_shell_session(
         updated_at_ms: now_ms_i64(),
         current_dir: current_dir.display().to_string(),
         profile: shell_session_profile(config),
-        env: shell_session_env_values(config, bash_approval_mode, work_instruction_mode),
+        env: shell_session_env_values(
+            config,
+            bash_approval_mode,
+            work_instruction_mode,
+            include_reasoning_in_context,
+        ),
         env_overrides: None,
         mcp_server_ids: Vec::new(),
         state: StoredSessionState::Ready,
@@ -740,6 +764,7 @@ fn shell_session_env_values(
     config: &timem_in_process::agent_api::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
+    include_reasoning_in_context: bool,
 ) -> BTreeMap<String, String> {
     let mut env = BTreeMap::from([
         ("TIMEM_MODEL".to_string(), config.model.clone()),
@@ -769,6 +794,14 @@ fn shell_session_env_values(
             "TIMEM_WORK_INSTRUCTIONS".to_string(),
             timem_in_process::agent_api::work_instruction_mode_label(work_instruction_mode)
                 .to_string(),
+        ),
+        (
+            "TIMEM_INCLUDE_REASONING_IN_CONTEXT".to_string(),
+            if include_reasoning_in_context {
+                "on".to_string()
+            } else {
+                "off".to_string()
+            },
         ),
         ("TIMEM_API_KEY".to_string(), config.api_key.clone()),
         (
@@ -815,13 +848,18 @@ fn cache_shell_session_runtime(
     config: &timem_in_process::agent_api::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
+    include_reasoning_in_context: bool,
     current_dir: &Path,
 ) {
     stored_session.updated_at_ms = now_ms_i64();
     stored_session.current_dir = current_dir.display().to_string();
     stored_session.profile = shell_session_profile(config);
-    stored_session.env =
-        shell_session_env_values(config, bash_approval_mode, work_instruction_mode);
+    stored_session.env = shell_session_env_values(
+        config,
+        bash_approval_mode,
+        work_instruction_mode,
+        include_reasoning_in_context,
+    );
 }
 
 fn take_shell_resume_notice(
@@ -876,6 +914,7 @@ fn append_shell_turn_result(
     config: &timem_in_process::agent_api::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
+    include_reasoning_in_context: bool,
     current_dir: &Path,
 ) {
     append_shell_history_message(
@@ -911,6 +950,7 @@ fn append_shell_turn_result(
         config,
         bash_approval_mode,
         work_instruction_mode,
+        include_reasoning_in_context,
         current_dir,
     );
     stored_session.state = if outcome.stop_reason.is_some() {
@@ -2076,15 +2116,26 @@ fn run_config_menu(
     core: &mut AgentCore,
     bash_approval_mode: &mut BashApprovalMode,
     work_instruction_mode: &mut WorkInstructionLoadMode,
+    include_reasoning_in_context: &mut bool,
     work_instruction_context: &mut Option<String>,
     current_work_dir: &Path,
 ) -> bool {
-    let Some(field) = choose_config_field(config, *bash_approval_mode, *work_instruction_mode)
-    else {
+    let Some(field) = choose_config_field(
+        config,
+        *bash_approval_mode,
+        *work_instruction_mode,
+        *include_reasoning_in_context,
+    ) else {
         println!("已取消配置修改。");
         return false;
     };
-    let current = config_field_value(config, *bash_approval_mode, *work_instruction_mode, field);
+    let current = config_field_value(
+        config,
+        *bash_approval_mode,
+        *work_instruction_mode,
+        *include_reasoning_in_context,
+        field,
+    );
     println!("\n{} 当前值：{}", field.label(), current);
     print!("请输入新值（留空取消）：");
     let _ = io::stdout().flush();
@@ -2102,6 +2153,7 @@ fn run_config_menu(
         core,
         bash_approval_mode,
         work_instruction_mode,
+        include_reasoning_in_context,
         field,
         value,
     ) {
@@ -2344,13 +2396,18 @@ fn choose_config_field(
     config: &crate::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
+    include_reasoning_in_context: bool,
 ) -> Option<ConfigField> {
     let mut input = ShellInputSource::open().ok()?;
     let (mut terminal_mode, mut nonblocking_mode) = os::enter_interactive_mode(&input).ok()?;
     println!("\n选择要修改的配置，使用 ↑/↓ 选择，回车确认，Esc/Ctrl+C 取消。\n");
     let mut selected = 0usize;
-    let report =
-        crate::runtime_config_menu_report(config, bash_approval_mode, work_instruction_mode);
+    let report = crate::runtime_config_menu_report(
+        config,
+        bash_approval_mode,
+        work_instruction_mode,
+        include_reasoning_in_context,
+    );
     print!("{}", render_config_menu(&report, selected));
     let _ = io::stdout().flush();
     let result = loop {
@@ -2420,6 +2477,9 @@ fn render_config_apply_error(error: RuntimeConfigApplyError) -> String {
         RuntimeConfigApplyError::InvalidWorkInstructions => {
             "配置无效：工作目录指令加载策略只能是 silent、ask 或 off。".to_string()
         }
+        RuntimeConfigApplyError::InvalidIncludeReasoningInContext => {
+            "配置无效：上下文思维链回放只能填 on 或 off（true/false 也可以）。".to_string()
+        }
     }
 }
 
@@ -2459,6 +2519,7 @@ fn config_field_value(
     config: &crate::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
+    include_reasoning_in_context: bool,
     field: ConfigField,
 ) -> String {
     config_display_value(
@@ -2467,6 +2528,7 @@ fn config_field_value(
             config,
             bash_approval_mode,
             work_instruction_mode,
+            include_reasoning_in_context,
             field,
         ),
     )
@@ -2494,6 +2556,9 @@ fn config_field_row_kind(field: ConfigField) -> crate::RuntimeConfigRowKind {
         RuntimeConfigField::MaxOutput => crate::RuntimeConfigRowKind::MaxLlmOutput,
         RuntimeConfigField::BashApproval => crate::RuntimeConfigRowKind::BashApproval,
         RuntimeConfigField::WorkInstructions => crate::RuntimeConfigRowKind::WorkInstructions,
+        RuntimeConfigField::IncludeReasoningInContext => {
+            crate::RuntimeConfigRowKind::IncludeReasoningInContext
+        }
     }
 }
 
@@ -2502,6 +2567,7 @@ fn apply_config_value(
     core: &mut AgentCore,
     bash_approval_mode: &mut BashApprovalMode,
     work_instruction_mode: &mut WorkInstructionLoadMode,
+    include_reasoning_in_context: &mut bool,
     field: ConfigField,
     value: &str,
 ) -> Result<RuntimeConfigApplyReport, RuntimeConfigApplyError> {
@@ -2509,6 +2575,7 @@ fn apply_config_value(
         config,
         bash_approval_mode,
         work_instruction_mode,
+        include_reasoning_in_context,
         field,
         value,
     )
@@ -3664,6 +3731,7 @@ fn config_row_description(kind: crate::RuntimeConfigRowKind) -> &'static str {
         crate::RuntimeConfigRowKind::MaxLlmOutput => "最大输出 token",
         crate::RuntimeConfigRowKind::BashApproval => "bash 允许策略，approve/ask",
         crate::RuntimeConfigRowKind::WorkInstructions => "AGENTS/CLAUDE 自动加载，silent/ask/off",
+        crate::RuntimeConfigRowKind::IncludeReasoningInContext => "上下文思维链回放，on/off",
         crate::RuntimeConfigRowKind::Space => "记忆空间",
         crate::RuntimeConfigRowKind::ApiAudit => "payload 记录",
         crate::RuntimeConfigRowKind::ActionAudit => "action 记录",

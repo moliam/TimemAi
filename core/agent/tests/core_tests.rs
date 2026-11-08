@@ -2132,12 +2132,14 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
     };
     let mut bash = BashApprovalMode::Ask;
     let mut work = agent_core::WorkInstructionLoadMode::Silent;
+    let mut include_reasoning = false;
 
     let report = core
         .apply_runtime_config_update(
             &mut config,
             &mut bash,
             &mut work,
+            &mut include_reasoning,
             RuntimeConfigField::MaxInput,
             "3K",
         )
@@ -2176,6 +2178,7 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
             &mut config,
             &mut bash,
             &mut work,
+            &mut include_reasoning,
             RuntimeConfigField::BashApproval,
             "approve",
         )
@@ -2189,6 +2192,7 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
             &mut config,
             &mut bash,
             &mut work,
+            &mut include_reasoning,
             RuntimeConfigField::WorkInstructions,
             "off",
         )
@@ -2196,6 +2200,36 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
     assert_eq!(report.key, "TIMEM_WORK_INSTRUCTIONS");
     assert_eq!(report.value, "off");
     assert_eq!(work, agent_core::WorkInstructionLoadMode::Off);
+
+    let report = core
+        .apply_runtime_config_update(
+            &mut config,
+            &mut bash,
+            &mut work,
+            &mut include_reasoning,
+            RuntimeConfigField::IncludeReasoningInContext,
+            "on",
+        )
+        .unwrap();
+    assert_eq!(report.key, "TIMEM_INCLUDE_REASONING_IN_CONTEXT");
+    assert_eq!(report.value, "on");
+    assert!(include_reasoning);
+
+    let report = core
+        .apply_runtime_config_update(
+            &mut config,
+            &mut bash,
+            &mut work,
+            &mut include_reasoning,
+            RuntimeConfigField::IncludeReasoningInContext,
+            "bogus",
+        )
+        .unwrap_err();
+    assert_eq!(
+        report,
+        agent_core::RuntimeConfigApplyError::InvalidIncludeReasoningInContext
+    );
+    assert!(include_reasoning);
 }
 
 #[test]
@@ -2218,7 +2252,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
         http_transport: Default::default(),
     };
 
-    core.configure_runtime_from_host(&config, BashApprovalMode::Approve);
+    core.configure_runtime_from_host(&config, BashApprovalMode::Approve, false);
 
     let _ = core.begin_turn("seed", None);
     let step = core.apply_model_response(LlmResponse {
@@ -11289,4 +11323,129 @@ fn serial_tool_action_counts_toward_turn_stats_tool_calls() {
         ),
         other => panic!("expected final step, got {other:?}"),
     }
+}
+
+#[test]
+fn include_reasoning_opted_out_omits_captured_reasoning() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("include_reasoning_opted_out"),
+    );
+    // The runtime option defaults on; an explicit opt-out must suppress the
+    // replay for every later response while still consuming the capture.
+    core.set_include_reasoning_in_context(false);
+    core.set_model_reasoning("SECRET REASONING CHAIN", false);
+    let _ = core.begin_turn("seed", None);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"seeded"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(1_000),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    let prompt = match core.begin_turn("next", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(!prompt.contains("SECRET REASONING CHAIN"));
+
+    // The pending capture is consumed even when the opt-in is off, so a later
+    // enablement must never replay stale reasoning.
+    core.set_include_reasoning_in_context(true);
+    let prompt = match core.begin_turn("again", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(!prompt.contains("SECRET REASONING CHAIN"));
+}
+
+#[test]
+fn include_reasoning_defaults_on_and_replays_without_explicit_enablement() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("include_reasoning_default_on"),
+    );
+    core.set_model_reasoning("DEFAULT ON REASONING", false);
+    let _ = core.begin_turn("seed", None);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"seeded"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(1_000),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    let prompt = match core.begin_turn("next", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(
+        prompt.contains("DEFAULT ON REASONING"),
+        "reasoning replay must default on: {prompt}"
+    );
+}
+
+#[test]
+fn include_reasoning_replays_captured_reasoning_before_final_answer() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("include_reasoning_replay"),
+    );
+    core.set_include_reasoning_in_context(true);
+    core.set_model_reasoning(
+        "STEP ONE inspect the build.\nSTEP TWO verify the output.",
+        true,
+    );
+    let _ = core.begin_turn("seed", None);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"seeded answer"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(1_000),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    let prompt = match core.begin_turn("next", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("STEP ONE inspect the build."));
+    assert!(prompt.contains("STEP TWO verify the output."));
+    assert!(prompt.contains("[reasoning truncated]"));
+    let reasoning_pos = prompt.find("STEP ONE inspect the build.").unwrap();
+    let answer_pos = prompt.find("seeded answer").unwrap();
+    assert!(reasoning_pos < answer_pos);
+}
+
+#[test]
+fn include_reasoning_without_captured_reasoning_omits_the_slice() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("include_reasoning_no_capture"),
+    );
+    core.set_include_reasoning_in_context(true);
+    let _ = core.begin_turn("seed", None);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"plain finish"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(1_000),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    let prompt = match core.begin_turn("next", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(!prompt.contains("[reasoning truncated]"));
+    assert!(!prompt.contains("model_reasoning"));
 }

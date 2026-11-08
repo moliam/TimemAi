@@ -182,6 +182,7 @@ export type Session = {
     max_rounds: string;
     bash_approval: string;
     work_instructions: string;
+    include_reasoning_in_context: boolean;
     api_key_configured: boolean;
   };
   contexts: SessionContext[];
@@ -624,6 +625,7 @@ export type Snapshot = {
       claude_codex_tool_discovery: boolean;
       model_tool_result_bytes: ModelToolResultBytes;
       context_compress_threshold_percent: ContextCompressThresholdPercent;
+      include_reasoning_in_context: boolean;
       restore_prompt_context_on_startup: boolean;
       system_cpu_cap_percent: number;
       system_mem_cap_percent: number;
@@ -818,6 +820,7 @@ export type WireEvent =
       claude_codex_tool_discovery: boolean;
       model_tool_result_bytes: ModelToolResultBytes;
       context_compress_threshold_percent: ContextCompressThresholdPercent;
+      include_reasoning_in_context: boolean;
       restore_prompt_context_on_startup: boolean;
       system_cpu_cap_percent: number;
       system_mem_cap_percent: number;
@@ -1151,6 +1154,7 @@ export type ClientCommand =
       type: "system_context_compress_threshold_update";
       percent: ContextCompressThresholdPercent;
     }
+  | { type: "system_include_reasoning_in_context_update"; enabled: boolean }
   | {
       type: "system_resource_caps_update";
       cpu_enabled: boolean;

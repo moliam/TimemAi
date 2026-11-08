@@ -187,7 +187,9 @@ fn visible_role(prompt_type: &str) -> VisiblePromptRole {
         "user_question" => VisiblePromptRole::User,
         "user_supplement" => VisiblePromptRole::UserSupplement,
         "user_resume_directly" => VisiblePromptRole::UserResumeDirectly,
-        "llm_response" | "llm_response_raw_xml" | "llm_free_talk" => VisiblePromptRole::You,
+        "llm_response" | "llm_response_raw_xml" | "llm_free_talk" | "model_reasoning" => {
+            VisiblePromptRole::You
+        }
         "context_compression_summary" => VisiblePromptRole::ContextCompressionSummary,
         "result_of_llm_action" | "response_repair" | "context_compressed" => {
             VisiblePromptRole::Runtime

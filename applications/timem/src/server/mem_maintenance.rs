@@ -115,6 +115,10 @@ pub(super) struct WebMemSettings {
     pub(super) context_compress_threshold_percent: u8,
     #[serde(default = "default_restore_prompt_context_on_startup")]
     pub(super) restore_prompt_context_on_startup: bool,
+    /// Replay the model reasoning into the next prompt context. Default on:
+    /// the reasoning strengthens the task, at the cost of extra tokens.
+    #[serde(default = "default_include_reasoning_in_context")]
+    pub(super) include_reasoning_in_context: bool,
     #[serde(default = "default_system_cpu_cap_percent")]
     pub(super) system_cpu_cap_percent: f64,
     #[serde(default = "default_system_mem_cap_percent")]
@@ -146,6 +150,7 @@ impl WebMemSettings {
             model_tool_result_bytes: default_model_tool_result_bytes(),
             context_compress_threshold_percent: default_context_compress_threshold_percent(),
             restore_prompt_context_on_startup: default_restore_prompt_context_on_startup(),
+            include_reasoning_in_context: default_include_reasoning_in_context(),
             system_cpu_cap_percent: default_system_cpu_cap_percent(),
             system_mem_cap_percent: default_system_mem_cap_percent(),
             system_cpu_cap_enabled: default_system_cap_enabled(),
@@ -192,6 +197,10 @@ fn validate_system_resource_cap_percent(percent: f64, field: &str) -> Result<(),
 
 pub(super) const fn default_restore_prompt_context_on_startup() -> bool {
     false
+}
+
+pub(super) const fn default_include_reasoning_in_context() -> bool {
+    true
 }
 
 pub(super) fn validate_context_compress_threshold_percent(percent: u8) -> Result<(), String> {

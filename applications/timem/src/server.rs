@@ -377,6 +377,7 @@ impl WebMemState {
             claude_codex_tool_discovery: self.settings.claude_codex_tool_discovery,
             model_tool_result_bytes: self.settings.model_tool_result_bytes,
             context_compress_threshold_percent: self.settings.context_compress_threshold_percent,
+            include_reasoning_in_context: self.settings.include_reasoning_in_context,
             restore_prompt_context_on_startup: self.settings.restore_prompt_context_on_startup,
             system_cpu_cap_percent: self.settings.system_cpu_cap_percent,
             system_mem_cap_percent: self.settings.system_mem_cap_percent,
@@ -648,6 +649,7 @@ struct RuntimeSettings {
     config: ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
+    include_reasoning_in_context: bool,
     max_rounds: u32,
 }
 
@@ -842,6 +844,7 @@ struct WebSessionRuntimeProfile {
     max_rounds: String,
     bash_approval: String,
     work_instructions: String,
+    include_reasoning_in_context: bool,
     api_key_configured: bool,
 }
 
@@ -1140,6 +1143,7 @@ enum WireEvent {
         claude_codex_tool_discovery: bool,
         model_tool_result_bytes: usize,
         context_compress_threshold_percent: u8,
+        include_reasoning_in_context: bool,
         restore_prompt_context_on_startup: bool,
         system_cpu_cap_percent: f64,
         system_mem_cap_percent: f64,
@@ -1314,6 +1318,7 @@ struct WebMemInfo {
     claude_codex_tool_discovery: bool,
     model_tool_result_bytes: usize,
     context_compress_threshold_percent: u8,
+    include_reasoning_in_context: bool,
     restore_prompt_context_on_startup: bool,
     system_cpu_cap_percent: f64,
     system_mem_cap_percent: f64,
@@ -1811,6 +1816,9 @@ enum ClientCommand {
     SystemContextCompressThresholdUpdate {
         percent: u8,
     },
+    SystemIncludeReasoningInContextUpdate {
+        enabled: bool,
+    },
     SystemRestorePromptContextOnStartupUpdate {
         enabled: bool,
     },
@@ -1856,6 +1864,7 @@ impl ClientCommand {
             | Self::BetaClaudeCodexToolDiscoveryUpdate { .. }
             | Self::SystemModelToolResultBytesUpdate { .. }
             | Self::SystemContextCompressThresholdUpdate { .. }
+            | Self::SystemIncludeReasoningInContextUpdate { .. }
             | Self::SystemRestorePromptContextOnStartupUpdate { .. }
             | Self::SystemResourceCapsUpdate { .. }
             | Self::SystemResourceCapsEscalate { .. }
@@ -1939,6 +1948,7 @@ impl ClientCommand {
                 | Self::BetaClaudeCodexToolDiscoveryUpdate { .. }
                 | Self::SystemModelToolResultBytesUpdate { .. }
                 | Self::SystemContextCompressThresholdUpdate { .. }
+                | Self::SystemIncludeReasoningInContextUpdate { .. }
                 | Self::SystemRestorePromptContextOnStartupUpdate { .. }
                 | Self::SystemResourceCapsUpdate { .. }
                 | Self::SystemResourceCapsEscalate { .. }
@@ -2101,6 +2111,12 @@ pub async fn run(
             ));
         }
     };
+    // A persisted MEM setting outranks the launch-time default, so a system
+    // toggle survives restarts and new Sessions inherit it.
+    if let Ok(mut template_settings) = template.settings.lock() {
+        template_settings.include_reasoning_in_context =
+            initial_mem.settings.include_reasoning_in_context;
+    }
     let mem = Arc::new(Mutex::new(initial_mem));
     let diagnostic_root = if launch.debug {
         Some(Arc::new(TemporaryDebugRoot::create()?))
@@ -5812,6 +5828,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                include_reasoning_in_context: settings.include_reasoning_in_context,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
                 system_cpu_cap_percent: settings.system_cpu_cap_percent,
                 system_mem_cap_percent: settings.system_mem_cap_percent,
@@ -5866,6 +5883,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                include_reasoning_in_context: settings.include_reasoning_in_context,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
                 system_cpu_cap_percent: settings.system_cpu_cap_percent,
                 system_mem_cap_percent: settings.system_mem_cap_percent,
@@ -5910,6 +5928,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                include_reasoning_in_context: settings.include_reasoning_in_context,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
                 system_cpu_cap_percent: settings.system_cpu_cap_percent,
                 system_mem_cap_percent: settings.system_mem_cap_percent,
@@ -5967,6 +5986,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: enabled,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                include_reasoning_in_context: settings.include_reasoning_in_context,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
                 system_cpu_cap_percent: settings.system_cpu_cap_percent,
                 system_mem_cap_percent: settings.system_mem_cap_percent,
@@ -6003,6 +6023,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: max_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                include_reasoning_in_context: settings.include_reasoning_in_context,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
                 system_cpu_cap_percent: settings.system_cpu_cap_percent,
                 system_mem_cap_percent: settings.system_mem_cap_percent,
@@ -6039,6 +6060,48 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: percent,
+                include_reasoning_in_context: settings.include_reasoning_in_context,
+                restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
+                system_cpu_cap_percent: settings.system_cpu_cap_percent,
+                system_mem_cap_percent: settings.system_mem_cap_percent,
+                system_cpu_cap_enabled: settings.system_cpu_cap_enabled,
+                system_mem_cap_enabled: settings.system_mem_cap_enabled,
+                resource_caps: resource_caps_projection(&settings),
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
+        }
+        ClientCommand::SystemIncludeReasoningInContextUpdate { enabled } => {
+            let (memory_dir, settings) = {
+                let mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                let mut settings = mem.settings.clone();
+                settings.include_reasoning_in_context = enabled;
+                (mem.layout.memory_dir(), settings)
+            };
+            save_web_mem_settings(&memory_dir, &settings)?;
+            state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .settings = settings.clone();
+            // The persisted system setting outranks the launch default so new
+            // and restored Sessions inherit it.
+            if let Ok(mut template_settings) = state.template.settings.lock() {
+                template_settings.include_reasoning_in_context = enabled;
+            }
+            update_all_worker_include_reasoning_in_context(state, enabled)?;
+            let event = WireEvent::MemSettingsUpdated {
+                temporary_retention_days: settings.temporary_retention_days,
+                temporary_capacity_bytes: settings.temporary_capacity_bytes,
+                conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                mailbox_capacity_bytes: settings.mailbox_capacity_bytes,
+                claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
+                model_tool_result_bytes: settings.model_tool_result_bytes,
+                context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                include_reasoning_in_context: enabled,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
                 system_cpu_cap_percent: settings.system_cpu_cap_percent,
                 system_mem_cap_percent: settings.system_mem_cap_percent,
@@ -6073,6 +6136,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                include_reasoning_in_context: settings.include_reasoning_in_context,
                 restore_prompt_context_on_startup: enabled,
                 system_cpu_cap_percent: settings.system_cpu_cap_percent,
                 system_mem_cap_percent: settings.system_mem_cap_percent,
@@ -6125,6 +6189,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                include_reasoning_in_context: settings.include_reasoning_in_context,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
                 system_cpu_cap_percent: settings.system_cpu_cap_percent,
                 system_mem_cap_percent: settings.system_mem_cap_percent,
@@ -6202,6 +6267,7 @@ fn handle_command_with_id(
                 claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
                 model_tool_result_bytes: settings.model_tool_result_bytes,
                 context_compress_threshold_percent: settings.context_compress_threshold_percent,
+                include_reasoning_in_context: settings.include_reasoning_in_context,
                 restore_prompt_context_on_startup: settings.restore_prompt_context_on_startup,
                 system_cpu_cap_percent: settings.system_cpu_cap_percent,
                 system_mem_cap_percent: settings.system_mem_cap_percent,
@@ -13264,6 +13330,42 @@ fn update_all_worker_context_compress_threshold_percent(
     Ok(())
 }
 
+fn update_all_worker_include_reasoning_in_context(
+    state: &AppState,
+    enabled: bool,
+) -> Result<(), String> {
+    let worker_ids = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?
+        .values()
+        .flat_map(|session| {
+            session
+                .workers
+                .iter()
+                .map(|worker| worker.worker_id.clone())
+        })
+        .collect::<Vec<_>>();
+    let manager = state
+        .manager
+        .lock()
+        .map_err(|_| "worker_manager_poisoned".to_string())?;
+    let value = if enabled { "on" } else { "off" }.to_string();
+    for worker_id in worker_ids {
+        if let Some(handle) = manager.handle(&worker_id) {
+            match handle.update_runtime_config(
+                agent_core::RuntimeConfigField::IncludeReasoningInContext,
+                value.clone(),
+            ) {
+                Ok(()) => {}
+                Err(error) if error == "core_session_worker_stopped" => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
+}
+
 fn update_all_worker_model_tool_result_bytes(
     state: &AppState,
     max_bytes: usize,
@@ -13521,6 +13623,7 @@ fn normalize_model_endpoint_input(
             &mut settings.config,
             &mut settings.bash_approval_mode,
             &mut settings.work_instruction_mode,
+            &mut settings.include_reasoning_in_context,
             field,
             value,
         )
@@ -13591,6 +13694,7 @@ fn testable_endpoint_validation_settings() -> RuntimeSettings {
         },
         bash_approval_mode: BashApprovalMode::Ask,
         work_instruction_mode: WorkInstructionLoadMode::Silent,
+        include_reasoning_in_context: false,
         max_rounds: 50,
     }
 }
@@ -15331,6 +15435,7 @@ fn update_session_runtime_setting(
         &mut settings.config,
         &mut settings.bash_approval_mode,
         &mut settings.work_instruction_mode,
+        &mut settings.include_reasoning_in_context,
         field,
         value,
     )
@@ -15339,6 +15444,7 @@ fn update_session_runtime_setting(
         &settings.config,
         settings.bash_approval_mode,
         settings.work_instruction_mode,
+        settings.include_reasoning_in_context,
         field,
         effect,
     );
@@ -15412,6 +15518,7 @@ fn propagate_runtime_config_to_sessions(
                     &mut settings.config,
                     &mut settings.bash_approval_mode,
                     &mut settings.work_instruction_mode,
+                    &mut settings.include_reasoning_in_context,
                     field,
                     value,
                 );
@@ -18604,6 +18711,7 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
                 &settings.config,
                 settings.bash_approval_mode,
                 settings.work_instruction_mode,
+                settings.include_reasoning_in_context,
             )
             .items
             .into_iter()
@@ -18650,6 +18758,7 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
             system_mem_cap_enabled: true,
             resource_caps: resource_caps_projection(&WebMemSettings::default()),
             context_compress_threshold_percent: default_context_compress_threshold_percent(),
+            include_reasoning_in_context: default_include_reasoning_in_context(),
             restore_prompt_context_on_startup: default_restore_prompt_context_on_startup(),
         });
     let (role_library, session_groups) = current_mem_state(state)
@@ -18761,12 +18870,14 @@ fn update_runtime_setting(
         config,
         bash_approval_mode,
         work_instruction_mode,
+        include_reasoning_in_context,
         ..
     } = &mut *settings;
     let effect = apply_runtime_config_value(
         config,
         bash_approval_mode,
         work_instruction_mode,
+        include_reasoning_in_context,
         field,
         value,
     )
@@ -18775,6 +18886,7 @@ fn update_runtime_setting(
         config,
         *bash_approval_mode,
         *work_instruction_mode,
+        *include_reasoning_in_context,
         field,
         effect,
     ))
@@ -18790,6 +18902,9 @@ fn runtime_config_field_from_key(key: &str) -> Result<agent_core::RuntimeConfigF
         "TIMEM_MAX_LLM_OUTPUT" => agent_core::RuntimeConfigField::MaxOutput,
         "TIMEM_BASH_APPROVAL" => agent_core::RuntimeConfigField::BashApproval,
         "TIMEM_WORK_INSTRUCTIONS" => agent_core::RuntimeConfigField::WorkInstructions,
+        "TIMEM_INCLUDE_REASONING_IN_CONTEXT" => {
+            agent_core::RuntimeConfigField::IncludeReasoningInContext
+        }
         _ => return Err("unsupported_runtime_config_key".to_string()),
     })
 }
@@ -18854,6 +18969,15 @@ impl WorkerTemplate {
                     launch.work_instructions.as_deref(),
                     &env,
                 ),
+                include_reasoning_in_context: env
+                    .get("TIMEM_INCLUDE_REASONING_IN_CONTEXT")
+                    .map(|value| {
+                        matches!(
+                            value.trim().to_ascii_lowercase().as_str(),
+                            "on" | "true" | "1" | "enabled"
+                        )
+                    })
+                    .unwrap_or(true),
                 max_rounds: env
                     .get("TIMEM_MAX_ROUNDS")
                     .and_then(|value| parse_round_budget(value).ok())
@@ -18894,7 +19018,11 @@ impl WorkerTemplate {
         core.set_context_compress_threshold_percent(
             mem.settings.context_compress_threshold_percent,
         )?;
-        core.configure_runtime_from_host(&settings.config, settings.bash_approval_mode);
+        core.configure_runtime_from_host(
+            &settings.config,
+            settings.bash_approval_mode,
+            settings.include_reasoning_in_context,
+        );
         core.set_max_rounds(settings.max_rounds);
         core.set_reminder_tips_config(self.reminder_tips_config.clone());
         core.configure_self_tool_runtime(
@@ -19012,6 +19140,7 @@ impl WorkerTemplate {
             "TIMEM_MAX_LLM_OUTPUT",
             "TIMEM_BASH_APPROVAL",
             "TIMEM_WORK_INSTRUCTIONS",
+            "TIMEM_INCLUDE_REASONING_IN_CONTEXT",
         ] {
             if let Some(value) = env_overrides.get(key) {
                 apply_session_runtime_field(
@@ -19254,6 +19383,7 @@ const SESSION_ENV_KEYS: &[&str] = &[
     "TIMEM_MAX_ROUNDS",
     "TIMEM_BASH_APPROVAL",
     "TIMEM_WORK_INSTRUCTIONS",
+    "TIMEM_INCLUDE_REASONING_IN_CONTEXT",
     "TIMEM_MODEL_CATALOG_ID",
     "TIMEM_MODEL_REQUIREMENTS",
     "TIMEM_ENABLE_THINKING",
@@ -19349,6 +19479,7 @@ fn apply_session_runtime_field(
         &mut settings.config,
         &mut settings.bash_approval_mode,
         &mut settings.work_instruction_mode,
+        &mut settings.include_reasoning_in_context,
         field,
         value,
     )
@@ -19390,6 +19521,7 @@ impl WebSessionRuntimeProfile {
                 settings.work_instruction_mode,
             )
             .to_string(),
+            include_reasoning_in_context: settings.include_reasoning_in_context,
             api_key_configured: !settings.config.api_key.is_empty(),
         }
     }
@@ -19433,6 +19565,14 @@ fn session_env_values(settings: &RuntimeSettings) -> BTreeMap<String, String> {
         (
             "TIMEM_WORK_INSTRUCTIONS".to_string(),
             agent_core::work_instruction_mode_label(settings.work_instruction_mode).to_string(),
+        ),
+        (
+            "TIMEM_INCLUDE_REASONING_IN_CONTEXT".to_string(),
+            if settings.include_reasoning_in_context {
+                "on".to_string()
+            } else {
+                "off".to_string()
+            },
         ),
         (
             "TIMEM_TOOL_CALL_MODE".to_string(),

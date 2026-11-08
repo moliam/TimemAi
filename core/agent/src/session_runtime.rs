@@ -727,6 +727,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
                             &response.reasoning,
                             response.reasoning_truncated,
                         );
+                        core.set_model_reasoning(&response.reasoning, response.reasoning_truncated);
                         if !core.should_suppress_model_response(&response.response) {
                             ui.on_model_interaction_response(rounds, &response.response);
                         }

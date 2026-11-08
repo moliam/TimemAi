@@ -78,9 +78,10 @@ fn applies_model_token_and_bash_updates() {
     let mut config = test_config();
     let mut bash = BashApprovalMode::Ask;
     let mut work = WorkInstructionLoadMode::Silent;
+    let mut include_reasoning = false;
 
     assert_eq!(
-        runtime_config_field_value(&config, bash, work, RuntimeConfigField::MaxInput),
+        runtime_config_field_value(&config, bash, work, false, RuntimeConfigField::MaxInput),
         "100000"
     );
     assert_eq!(
@@ -88,6 +89,7 @@ fn applies_model_token_and_bash_updates() {
             &mut config,
             &mut bash,
             &mut work,
+            &mut include_reasoning,
             RuntimeConfigField::MaxOutput,
             "20K"
         )
@@ -99,6 +101,7 @@ fn applies_model_token_and_bash_updates() {
             &mut config,
             &mut bash,
             &mut work,
+            &mut include_reasoning,
             RuntimeConfigField::MaxInput,
             "120K"
         )
@@ -110,6 +113,7 @@ fn applies_model_token_and_bash_updates() {
             &mut config,
             &mut bash,
             &mut work,
+            &mut include_reasoning,
             RuntimeConfigField::WorkInstructions,
             "ask",
         )
@@ -121,6 +125,7 @@ fn applies_model_token_and_bash_updates() {
             &mut config,
             &mut bash,
             &mut work,
+            &mut include_reasoning,
             RuntimeConfigField::BashApproval,
             "approve",
         )
@@ -141,6 +146,7 @@ fn config_menu_report_is_ui_neutral_command_data() {
         &config,
         BashApprovalMode::Approve,
         WorkInstructionLoadMode::Ask,
+        false,
     );
     let debug = format!("{report:?}");
     for forbidden in ["\x1b[", "▶", "Add..."] {
@@ -175,16 +181,24 @@ fn config_apply_report_is_ui_neutral_command_data() {
     let mut config = test_config();
     let mut bash = BashApprovalMode::Ask;
     let mut work = WorkInstructionLoadMode::Silent;
+    let mut include_reasoning = false;
     let effect = apply_runtime_config_value(
         &mut config,
         &mut bash,
         &mut work,
+        &mut include_reasoning,
         RuntimeConfigField::MaxInput,
         "120K",
     )
     .unwrap();
-    let report =
-        runtime_config_apply_report(&config, bash, work, RuntimeConfigField::MaxInput, effect);
+    let report = runtime_config_apply_report(
+        &config,
+        bash,
+        work,
+        false,
+        RuntimeConfigField::MaxInput,
+        effect,
+    );
 
     assert_eq!(report.field, RuntimeConfigField::MaxInput);
     assert_eq!(report.key, "TIMEM_MAX_LLM_INPUT");
@@ -214,12 +228,14 @@ fn config_apply_errors_are_structured_and_ui_neutral() {
     let mut config = test_config();
     let mut bash = BashApprovalMode::Ask;
     let mut work = WorkInstructionLoadMode::Silent;
+    let mut include_reasoning = false;
 
     assert_eq!(
         apply_runtime_config_value(
             &mut config,
             &mut bash,
             &mut work,
+            &mut include_reasoning,
             RuntimeConfigField::ApiProtocol,
             "bad-protocol",
         ),
@@ -230,6 +246,7 @@ fn config_apply_errors_are_structured_and_ui_neutral() {
             &mut config,
             &mut bash,
             &mut work,
+            &mut include_reasoning,
             RuntimeConfigField::MaxInput,
             "not-a-number",
         ),
@@ -242,6 +259,7 @@ fn config_apply_errors_are_structured_and_ui_neutral() {
             &mut config,
             &mut bash,
             &mut work,
+            &mut include_reasoning,
             RuntimeConfigField::WorkInstructions,
             "maybe",
         ),
@@ -252,6 +270,7 @@ fn config_apply_errors_are_structured_and_ui_neutral() {
             &mut config,
             &mut bash,
             &mut work,
+            &mut include_reasoning,
             RuntimeConfigField::BashApproval,
             "always",
         ),
@@ -282,11 +301,13 @@ fn api_protocol_update_changes_only_a_default_base_url() {
     let mut config = test_config();
     let mut bash = BashApprovalMode::Ask;
     let mut work = WorkInstructionLoadMode::Silent;
+    let mut include_reasoning = false;
 
     apply_runtime_config_value(
         &mut config,
         &mut bash,
         &mut work,
+        &mut include_reasoning,
         RuntimeConfigField::ApiProtocol,
         "anthropic",
     )
@@ -298,6 +319,7 @@ fn api_protocol_update_changes_only_a_default_base_url() {
         &mut config,
         &mut bash,
         &mut work,
+        &mut include_reasoning,
         RuntimeConfigField::BaseUrl,
         "https://private.example/v1",
     )
@@ -307,6 +329,7 @@ fn api_protocol_update_changes_only_a_default_base_url() {
         &mut config,
         &mut bash,
         &mut work,
+        &mut include_reasoning,
         RuntimeConfigField::ApiProtocol,
         "openai-responses",
     )
@@ -320,10 +343,12 @@ fn response_protocol_is_a_runtime_config_field() {
     let mut config = test_config();
     let mut bash = BashApprovalMode::Ask;
     let mut work = WorkInstructionLoadMode::Off;
+    let mut include_reasoning = false;
     let effect = apply_runtime_config_value(
         &mut config,
         &mut bash,
         &mut work,
+        &mut include_reasoning,
         RuntimeConfigField::ResponseProtocol,
         "json",
     )
@@ -334,4 +359,103 @@ fn response_protocol_is_a_runtime_config_field() {
         RuntimeConfigField::ResponseProtocol.label(),
         "TIMEM_RESPONSE_PROTOCOL"
     );
+}
+
+#[test]
+fn include_reasoning_field_parses_on_off_and_reports_labels() {
+    let mut config = test_config();
+    let mut bash = BashApprovalMode::Approve;
+    let mut work = WorkInstructionLoadMode::Silent;
+    let mut include_reasoning = false;
+
+    assert_eq!(
+        RuntimeConfigField::IncludeReasoningInContext.label(),
+        "TIMEM_INCLUDE_REASONING_IN_CONTEXT"
+    );
+    assert_eq!(
+        runtime_config_field_value(
+            &config,
+            bash,
+            work,
+            include_reasoning,
+            RuntimeConfigField::IncludeReasoningInContext,
+        ),
+        "off"
+    );
+
+    for value in ["on", "true", "1", "enabled", " ON "] {
+        let effect = apply_runtime_config_value(
+            &mut config,
+            &mut bash,
+            &mut work,
+            &mut include_reasoning,
+            RuntimeConfigField::IncludeReasoningInContext,
+            value,
+        )
+        .unwrap();
+        assert_eq!(
+            effect,
+            RuntimeConfigEffect::IncludeReasoningInContextChanged(true),
+            "value {value:?} must enable reasoning replay"
+        );
+        assert!(include_reasoning);
+    }
+    for value in ["off", "false", "0", "disabled", " OFF "] {
+        let effect = apply_runtime_config_value(
+            &mut config,
+            &mut bash,
+            &mut work,
+            &mut include_reasoning,
+            RuntimeConfigField::IncludeReasoningInContext,
+            value,
+        )
+        .unwrap();
+        assert_eq!(
+            effect,
+            RuntimeConfigEffect::IncludeReasoningInContextChanged(false),
+            "value {value:?} must disable reasoning replay"
+        );
+        assert!(!include_reasoning);
+    }
+    assert_eq!(
+        apply_runtime_config_value(
+            &mut config,
+            &mut bash,
+            &mut work,
+            &mut include_reasoning,
+            RuntimeConfigField::IncludeReasoningInContext,
+            "maybe",
+        )
+        .unwrap_err(),
+        RuntimeConfigApplyError::InvalidIncludeReasoningInContext
+    );
+    assert_eq!(
+        runtime_config_field_value(
+            &config,
+            bash,
+            work,
+            include_reasoning,
+            RuntimeConfigField::IncludeReasoningInContext,
+        ),
+        "off"
+    );
+}
+
+#[test]
+fn config_menu_report_exposes_the_include_reasoning_option() {
+    let config = test_config();
+    let report = runtime_config_menu_report(
+        &config,
+        BashApprovalMode::Approve,
+        WorkInstructionLoadMode::Silent,
+        true,
+    );
+    let item = report
+        .items
+        .iter()
+        .find(|item| item.field == RuntimeConfigField::IncludeReasoningInContext)
+        .expect("include reasoning option in menu");
+    assert_eq!(item.key, "TIMEM_INCLUDE_REASONING_IN_CONTEXT");
+    assert_eq!(item.value, "on");
+    assert_eq!(report.items.len(), 9);
 }

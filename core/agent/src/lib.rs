@@ -1978,6 +1978,13 @@ pub struct AgentCore {
     context_compress_threshold_percent: u8,
     last_observed_prompt_tokens: u32,
     context_compress_required: bool,
+    /// Runtime opt-in: when on, the captured provider reasoning of the latest
+    /// model response is replayed into the next prompt delta. Default on: the
+    /// reasoning strengthens the next request, at the cost of extra tokens.
+    context_include_reasoning: bool,
+    /// Captured provider reasoning of the latest model response, consumed by
+    /// the next deferred response-slice batch. `(text, truncated)`.
+    pending_model_reasoning: Option<(String, bool)>,
     /// Consecutive model responses that ignored the forced-compaction
     /// requirement. Reaching MAX_CONSECUTIVE_FORCED_COMPACTION_REFUSALS
     /// abandons the automatic requirement instead of looping forever.
@@ -2161,6 +2168,8 @@ impl AgentCore {
             context_compress_threshold_percent: DEFAULT_CONTEXT_COMPRESS_THRESHOLD_PERCENT,
             last_observed_prompt_tokens: 0,
             context_compress_required: false,
+            context_include_reasoning: true,
+            pending_model_reasoning: None,
             forced_compaction_refusals: 0,
             threshold_compaction_reasoning_required: false,
             manual_compact_trailer_pending: false,
@@ -2444,6 +2453,23 @@ impl AgentCore {
         if let Some(component) = self.pending_prompt_components.last_mut() {
             component.created_at_ms = logical_time_ms;
         }
+    }
+
+    /// Runtime opt-in toggling whether the captured provider reasoning of the
+    /// latest model response is replayed into the next prompt delta. Default on.
+    pub fn set_include_reasoning_in_context(&mut self, on: bool) {
+        self.context_include_reasoning = on;
+    }
+
+    /// Captures the provider reasoning of the latest model response so the
+    /// response slices can replay it into the prompt context when the runtime
+    /// opt-in is enabled. Empty or blank reasoning clears the pending capture.
+    pub fn set_model_reasoning(&mut self, reasoning: &str, truncated: bool) {
+        self.pending_model_reasoning = if reasoning.trim().is_empty() {
+            None
+        } else {
+            Some((reasoning.to_string(), truncated))
+        };
     }
 
     pub fn set_bash_approval_mode(&mut self, mode: BashApprovalMode) {
@@ -2932,15 +2958,18 @@ impl AgentCore {
         &mut self,
         config: &ModelServiceConfig,
         bash_approval_mode: BashApprovalMode,
+        include_reasoning_in_context: bool,
     ) {
         self.set_max_llm_input_tokens(config.max_llm_input_tokens);
         self.set_bash_approval_mode(bash_approval_mode);
+        self.set_include_reasoning_in_context(include_reasoning_in_context);
     }
     pub fn apply_runtime_config_update(
         &mut self,
         config: &mut ModelServiceConfig,
         bash_approval_mode: &mut BashApprovalMode,
         work_instruction_mode: &mut WorkInstructionLoadMode,
+        include_reasoning_in_context: &mut bool,
         field: RuntimeConfigField,
         value: &str,
     ) -> Result<RuntimeConfigApplyReport, RuntimeConfigApplyError> {
@@ -2948,6 +2977,7 @@ impl AgentCore {
             config,
             bash_approval_mode,
             work_instruction_mode,
+            include_reasoning_in_context,
             field,
             value,
         )?;
@@ -2956,11 +2986,15 @@ impl AgentCore {
             RuntimeConfigEffect::MaxInputChanged(tokens) => self.set_max_llm_input_tokens(tokens),
             RuntimeConfigEffect::BashApprovalChanged(mode) => self.set_bash_approval_mode(mode),
             RuntimeConfigEffect::WorkInstructionsChanged(_) => {}
+            RuntimeConfigEffect::IncludeReasoningInContextChanged(on) => {
+                self.set_include_reasoning_in_context(on);
+            }
         }
         let report = runtime_config_apply_report(
             config,
             *bash_approval_mode,
             *work_instruction_mode,
+            *include_reasoning_in_context,
             field,
             effect,
         );
@@ -4370,7 +4404,7 @@ impl AgentCore {
                 && protocol_suite.can_show_plain_text_after_repair_failure(&response.content)
             {
                 let final_text = response.content.trim().to_string();
-                slices.extend(self.assistant_replay_slices(
+                slices.extend(self.assistant_response_slices(
                     &raw_model_output,
                     None,
                     Some(&final_text),
@@ -4404,7 +4438,7 @@ impl AgentCore {
                     )),
                 }));
             }
-            slices.extend(self.assistant_replay_slices(
+            slices.extend(self.assistant_response_slices(
                 &raw_model_output,
                 Some(&parsed),
                 Some(&final_text),
@@ -4446,7 +4480,7 @@ impl AgentCore {
             && self.resolved_tool_call_mode != ToolCallMode::Native
             && !deferred_compact_replay
         {
-            slices.extend(self.assistant_replay_slices(&raw_model_output, Some(&parsed), None));
+            slices.extend(self.assistant_response_slices(&raw_model_output, Some(&parsed), None));
         }
         let compact_result_slice_start = slices.len();
         let mut compacted_successfully = false;
@@ -4683,7 +4717,7 @@ impl AgentCore {
             // Validation or offload failure must not erase the assistant request
             // that produced the runtime error evidence.
             let assistant_slices =
-                self.assistant_replay_slices(&raw_model_output, Some(&parsed), None);
+                self.assistant_response_slices(&raw_model_output, Some(&parsed), None);
             slices.splice(
                 compact_result_slice_start..compact_result_slice_start,
                 assistant_slices,
@@ -4771,7 +4805,7 @@ impl AgentCore {
                         &memo,
                         &final_text,
                     )]);
-                    slices.extend(self.assistant_replay_slices(
+                    slices.extend(self.assistant_response_slices(
                         &raw_model_output,
                         Some(&parsed),
                         Some(&final_text),
@@ -4792,7 +4826,7 @@ impl AgentCore {
             if self.active_memo.is_some() {
                 self.force_close_memo_on_finish(runtime);
             }
-            slices.extend(self.assistant_replay_slices(
+            slices.extend(self.assistant_response_slices(
                 &raw_model_output,
                 Some(&parsed),
                 Some(&final_text),
@@ -4879,7 +4913,7 @@ impl AgentCore {
                         // already carries it verbatim, so the delta text must
                         // not duplicate the model's own words.
                         if native_calls.is_empty() {
-                            slices.extend(self.assistant_replay_slices(
+                            slices.extend(self.assistant_response_slices(
                                 &raw_model_output,
                                 Some(&parsed),
                                 Some(&stop_summary),
@@ -4928,7 +4962,7 @@ impl AgentCore {
                 // protocol replays the narrative as delta text; native mode
                 // carries it verbatim inside the structured exchange only.
                 if native_calls.is_empty() {
-                    slices.extend(self.assistant_replay_slices(
+                    slices.extend(self.assistant_response_slices(
                         &raw_model_output,
                         Some(&parsed),
                         Some(&stop_summary),
@@ -5025,7 +5059,7 @@ impl AgentCore {
             // Native mode: a plain-text response without tool calls no longer
             // finishes the turn. Keep the text as visible thought and ask the
             // model to either continue working or call task_finished.
-            slices.extend(self.assistant_replay_slices(
+            slices.extend(self.assistant_response_slices(
                 &raw_model_output,
                 Some(&parsed),
                 Some(&response.content),
@@ -5057,7 +5091,7 @@ impl AgentCore {
         } else {
             final_text
         };
-        slices.extend(self.assistant_replay_slices(
+        slices.extend(self.assistant_response_slices(
             &raw_model_output,
             Some(&parsed),
             Some(&final_text),
@@ -6262,6 +6296,40 @@ Runtime tool_call ids:",
 - {call_id}: {action}"
             ));
         }
+    }
+
+    /// Drains the captured reasoning of the latest model response into a
+    /// prompt slice when the runtime opt-in is on. `take` semantics keep the
+    /// reasoning attached exactly once, next to the response it explains.
+    fn take_reasoning_slice(&mut self) -> Option<(String, String)> {
+        let (mut reasoning_text, truncated) = self.pending_model_reasoning.take()?;
+        if !self.context_include_reasoning {
+            return None;
+        }
+        if truncated {
+            reasoning_text.push_str("\n[reasoning truncated]");
+        }
+        if reasoning_text.trim().is_empty() {
+            return None;
+        }
+        Some(("model_reasoning".to_string(), reasoning_text))
+    }
+
+    /// Model-response replay slices plus, when enabled, the captured reasoning
+    /// of that same response. Every response path (mid-turn action
+    /// continuations included) funnels through here so the reasoning reaches
+    /// the very next prompt instead of only turn boundaries.
+    fn assistant_response_slices(
+        &mut self,
+        raw_response: &str,
+        parsed: Option<&ParsedEnvelope>,
+        final_text: Option<&str>,
+    ) -> Vec<(String, String)> {
+        let mut slices = self.assistant_replay_slices(raw_response, parsed, final_text);
+        if let Some(reasoning) = self.take_reasoning_slice() {
+            slices.insert(0, reasoning);
+        }
+        slices
     }
 
     fn assistant_replay_slices(

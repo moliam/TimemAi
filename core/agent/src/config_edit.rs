@@ -15,6 +15,7 @@ pub enum RuntimeConfigField {
     MaxOutput,
     BashApproval,
     WorkInstructions,
+    IncludeReasoningInContext,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,6 +24,7 @@ pub enum RuntimeConfigEffect {
     MaxInputChanged(u32),
     BashApprovalChanged(BashApprovalMode),
     WorkInstructionsChanged(WorkInstructionLoadMode),
+    IncludeReasoningInContextChanged(bool),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +53,7 @@ pub enum RuntimeConfigApplyError {
     InvalidTokenCount { field: RuntimeConfigField },
     InvalidBashApproval,
     InvalidWorkInstructions,
+    InvalidIncludeReasoningInContext,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,7 +80,7 @@ impl RuntimeConfigApplyReport {
     }
 }
 
-pub const RUNTIME_CONFIG_FIELDS: [RuntimeConfigField; 8] = [
+pub const RUNTIME_CONFIG_FIELDS: [RuntimeConfigField; 9] = [
     RuntimeConfigField::Model,
     RuntimeConfigField::ApiProtocol,
     RuntimeConfigField::ResponseProtocol,
@@ -86,6 +89,7 @@ pub const RUNTIME_CONFIG_FIELDS: [RuntimeConfigField; 8] = [
     RuntimeConfigField::MaxOutput,
     RuntimeConfigField::BashApproval,
     RuntimeConfigField::WorkInstructions,
+    RuntimeConfigField::IncludeReasoningInContext,
 ];
 
 pub fn bash_approval_mode_from_sources(
@@ -126,6 +130,7 @@ impl RuntimeConfigField {
             RuntimeConfigField::MaxOutput => "TIMEM_MAX_LLM_OUTPUT",
             RuntimeConfigField::BashApproval => "TIMEM_BASH_APPROVAL",
             RuntimeConfigField::WorkInstructions => "TIMEM_WORK_INSTRUCTIONS",
+            RuntimeConfigField::IncludeReasoningInContext => "TIMEM_INCLUDE_REASONING_IN_CONTEXT",
         }
     }
 }
@@ -134,6 +139,7 @@ pub fn runtime_config_field_value(
     config: &ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
+    include_reasoning_in_context: bool,
     field: RuntimeConfigField,
 ) -> String {
     match field {
@@ -149,6 +155,13 @@ pub fn runtime_config_field_value(
         RuntimeConfigField::WorkInstructions => {
             work_instruction_mode_label(work_instruction_mode).to_string()
         }
+        RuntimeConfigField::IncludeReasoningInContext => {
+            if include_reasoning_in_context {
+                "on".to_string()
+            } else {
+                "off".to_string()
+            }
+        }
     }
 }
 
@@ -156,6 +169,7 @@ pub fn runtime_config_menu_report(
     config: &ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
+    include_reasoning_in_context: bool,
 ) -> RuntimeConfigMenuReport {
     RuntimeConfigMenuReport {
         items: RUNTIME_CONFIG_FIELDS
@@ -167,6 +181,7 @@ pub fn runtime_config_menu_report(
                     config,
                     bash_approval_mode,
                     work_instruction_mode,
+                    include_reasoning_in_context,
                     *field,
                 ),
             })
@@ -178,13 +193,20 @@ pub fn runtime_config_apply_report(
     config: &ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
+    include_reasoning_in_context: bool,
     field: RuntimeConfigField,
     effect: RuntimeConfigEffect,
 ) -> RuntimeConfigApplyReport {
     RuntimeConfigApplyReport {
         field,
         key: field.label(),
-        value: runtime_config_field_value(config, bash_approval_mode, work_instruction_mode, field),
+        value: runtime_config_field_value(
+            config,
+            bash_approval_mode,
+            work_instruction_mode,
+            include_reasoning_in_context,
+            field,
+        ),
         effect,
     }
 }
@@ -193,6 +215,7 @@ pub fn apply_runtime_config_value(
     config: &mut ModelServiceConfig,
     bash_approval_mode: &mut BashApprovalMode,
     work_instruction_mode: &mut WorkInstructionLoadMode,
+    include_reasoning_in_context: &mut bool,
     field: RuntimeConfigField,
     value: &str,
 ) -> Result<RuntimeConfigEffect, RuntimeConfigApplyError> {
@@ -258,6 +281,15 @@ pub fn apply_runtime_config_value(
             };
             *work_instruction_mode = mode;
             Ok(RuntimeConfigEffect::WorkInstructionsChanged(mode))
+        }
+        RuntimeConfigField::IncludeReasoningInContext => {
+            let on = match value.trim().to_ascii_lowercase().as_str() {
+                "on" | "true" | "1" | "enabled" => true,
+                "off" | "false" | "0" | "disabled" => false,
+                _ => return Err(RuntimeConfigApplyError::InvalidIncludeReasoningInContext),
+            };
+            *include_reasoning_in_context = on;
+            Ok(RuntimeConfigEffect::IncludeReasoningInContextChanged(on))
         }
     }
 }

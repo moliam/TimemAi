@@ -860,6 +860,8 @@ function TimemApp() {
     useState(false);
   const [pendingContextCompressThreshold, setPendingContextCompressThreshold] =
     useState(false);
+  const [pendingIncludeReasoningInContext, setPendingIncludeReasoningInContext] =
+    useState(false);
   const [pendingResourceCaps, setPendingResourceCaps] = useState(false);
   const [pendingRestorePromptContext, setPendingRestorePromptContext] =
     useState(false);
@@ -1603,6 +1605,25 @@ function TimemApp() {
     },
     [reportUiError, sendCommand],
   );
+  const saveIncludeReasoningInContext = useCallback(
+    (enabled: boolean) => {
+      setPendingIncludeReasoningInContext(true);
+      if (
+        !sendCommand({
+          type: "system_include_reasoning_in_context_update",
+          enabled,
+        })
+      ) {
+        setPendingIncludeReasoningInContext(false);
+        reportUiError(
+          "System setting failed",
+          "Reconnect to Timem Web before changing the thinking-chain context setting.",
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand],
+  );
   const saveResourceCaps = useCallback(
     (
       cpu_enabled: boolean,
@@ -2208,6 +2229,8 @@ function TimemApp() {
             setPendingModelToolResultBytes(false);
           if (completed?.type === "system_context_compress_threshold_update")
             setPendingContextCompressThreshold(false);
+          if (completed?.type === "system_include_reasoning_in_context_update")
+            setPendingIncludeReasoningInContext(false);
           if (completed?.type === "system_restore_prompt_context_on_startup_update")
             setPendingRestorePromptContext(false);
           if (completed?.type === "system_resource_caps_update")
@@ -2325,6 +2348,7 @@ function TimemApp() {
         setPendingClaudeCodexToolDiscovery(false);
         setPendingModelToolResultBytes(false);
         setPendingContextCompressThreshold(false);
+        setPendingIncludeReasoningInContext(false);
         setPendingRestorePromptContext(false);
         setPendingResourceCaps(false);
         setServer((current) =>
@@ -2343,6 +2367,8 @@ function TimemApp() {
                   model_tool_result_bytes: event.model_tool_result_bytes,
                   context_compress_threshold_percent:
                     event.context_compress_threshold_percent,
+                  include_reasoning_in_context:
+                    event.include_reasoning_in_context,
                   restore_prompt_context_on_startup:
                     event.restore_prompt_context_on_startup,
                   system_cpu_cap_percent: event.system_cpu_cap_percent,
@@ -5552,6 +5578,11 @@ function TimemApp() {
               }
               contextCompressThresholdPending={pendingContextCompressThreshold}
               onContextCompressThresholdChange={saveContextCompressThreshold}
+              includeReasoningInContext={
+                server?.mem?.include_reasoning_in_context ?? true
+              }
+              includeReasoningInContextPending={pendingIncludeReasoningInContext}
+              onIncludeReasoningInContextChange={saveIncludeReasoningInContext}
               systemCpuCapPercent={
                 server?.mem?.system_cpu_cap_percent ?? 85
               }
@@ -15930,6 +15961,9 @@ type SettingsCenterProps = {
   onContextCompressThresholdChange: (
     percent: ContextCompressThresholdPercent,
   ) => void;
+  includeReasoningInContext: boolean;
+  includeReasoningInContextPending: boolean;
+  onIncludeReasoningInContextChange: (enabled: boolean) => void;
   systemCpuCapPercent: number;
   systemMemCapPercent: number;
   systemCpuCapEnabled: boolean;
@@ -16025,6 +16059,9 @@ const SettingsCenter = memo(function SettingsCenter(
     contextCompressThresholdPercent,
     contextCompressThresholdPending,
     onContextCompressThresholdChange,
+    includeReasoningInContext,
+    includeReasoningInContextPending,
+    onIncludeReasoningInContextChange,
     systemCpuCapPercent,
     systemMemCapPercent,
     systemCpuCapEnabled,
@@ -16253,6 +16290,7 @@ const SettingsCenter = memo(function SettingsCenter(
     mailboxCapacityPending ||
     modelToolResultBytesPending ||
     contextCompressThresholdPending ||
+    includeReasoningInContextPending ||
     resourceCapsPending ||
     restorePromptContextPending ||
     claudeCodexToolDiscoveryPending ||
@@ -16734,6 +16772,32 @@ const SettingsCenter = memo(function SettingsCenter(
                       {t("system.thinkingChainToggle")}
                     </span>
                   </label>
+                  <div className="thinking-chain-context-option">
+                    <label className="resource-cap-switch thinking-chain-switch">
+                      <input
+                        type="checkbox"
+                        role="switch"
+                        checked={includeReasoningInContext}
+                        aria-label={t("system.reasoningContextAria")}
+                        disabled={
+                          includeReasoningInContextPending || !connected
+                        }
+                        onChange={(event) =>
+                          onIncludeReasoningInContextChange(event.target.checked)
+                        }
+                      />
+                      <span
+                        className="resource-cap-slider"
+                        aria-hidden="true"
+                      />
+                      <span className="resource-cap-name">
+                        {t("system.reasoningContextToggle")}
+                      </span>
+                    </label>
+                    <p className="thinking-chain-context-desc">
+                      {t("system.reasoningContextDesc")}
+                    </p>
+                  </div>
                 </section>
                 <section className="settings-group system-resource-caps">
                   <div className="settings-group-heading">
@@ -19738,6 +19802,8 @@ function runtimeSelectOptions(key: string): readonly string[] | null {
       return ["approve", "ask"];
     case "TIMEM_WORK_INSTRUCTIONS":
       return ["silent", "ask", "off"];
+    case "TIMEM_INCLUDE_REASONING_IN_CONTEXT":
+      return ["off", "on"];
     case "TIMEM_MAX_ROUNDS":
       return ["50", "200", "500", "unlimited"];
     case "TIMEM_ENABLE_THINKING":
@@ -19759,6 +19825,7 @@ const SESSION_RUNTIME_FIELDS = [
   ["TIMEM_MAX_LLM_OUTPUT", "Max output tokens", "text"],
   ["TIMEM_BASH_APPROVAL", "Bash approval", "bash_approval"],
   ["TIMEM_WORK_INSTRUCTIONS", "AGENTS/CLAUDE loading", "work_instructions"],
+  ["TIMEM_INCLUDE_REASONING_IN_CONTEXT", "Replay reasoning in context", "include_reasoning"],
   ["TIMEM_ENABLE_THINKING", "Enable thinking", "boolean"],
   ["TIMEM_REASONING_EFFORT", "Reasoning effort", "text"],
   ["TIMEM_STREAM", "Stream response", "boolean"],
@@ -20166,6 +20233,18 @@ function NewSessionDialog({
                         </option>
                         <option value="silent">silent</option>
                         <option value="ask">ask</option>
+                        <option value="off">off</option>
+                      </select>
+                    ) : kind === "include_reasoning" ? (
+                      <select
+                        value={env[key] ?? ""}
+                        disabled={creating}
+                        onChange={(event) => updateEnv(key, event.target.value)}
+                      >
+                        <option value="">
+                          Inherit · {runtimeDefaults[key] ?? "off"}
+                        </option>
+                        <option value="on">on</option>
                         <option value="off">off</option>
                       </select>
                     ) : kind === "boolean" ? (
