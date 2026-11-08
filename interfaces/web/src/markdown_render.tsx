@@ -84,7 +84,7 @@ export const MarkdownContent = memo(function MarkdownContent({ text, headingIdPr
         return safeSrc ? <img {...props} src={safeSrc} alt={alt ?? ""}/> : null;
       },
       pre: CodeBlock,
-      table: ({ node: _node, ...props }) => <div className="table-scroll" role="region" tabIndex={0} aria-label="Scrollable table. Use horizontal scroll to inspect all columns."><table {...props}/></div>,
+      table: ({ node: _node, ...props }) => <div className="table-scroll"><table {...props}/></div>,
     }}
   >{normalized}</ReactMarkdown></div>;
 });
@@ -93,6 +93,7 @@ export function CodeBlock({ children }: React.ComponentPropsWithoutRef<"pre">) {
   const child = Children.count(children) === 1 ? Children.only(children) : null;
   const className = isValidElement<{ className?: string }>(child) ? child.props.className ?? "" : "";
   const language = className.match(/(?:^|\s)language-([^\s]+)/)?.[1] ?? "text";
+  const isPlainText = ["text", "plaintext", "txt"].includes(language.toLowerCase());
   const code = textFromNode(children).replace(/\n$/, "");
   const codeCopySubject = `${language} code`;
   const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(code, {
@@ -100,7 +101,7 @@ export function CodeBlock({ children }: React.ComponentPropsWithoutRef<"pre">) {
     copied: `${codeCopySubject} copied`,
     failed: `Copy ${codeCopySubject} failed`,
   });
-  return <figure className="code-block">
+  return <figure className={`code-block${isPlainText ? " code-block-text" : ""}`}>
     <figcaption><span title={language}>{language}</span><button type="button" className={copyClass} onClick={() => void copy()} title={copyLabel} aria-label={copyLabel}>{copyState === "copied" ? <CheckCheck size={14}/> : <Copy size={14}/>}</button></figcaption>
     <pre>{children}</pre>
   </figure>;

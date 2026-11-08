@@ -23,9 +23,8 @@ describe("MarkdownContent rendered output", () => {
   it("renders GFM tables, task lists, deletion and autolinks accessibly", () => {
     const html = render("| A | B |\n|---|---|\n| 1 | 2 |\n\n- [x] done\n\n~~old~~\n\nhttps://example.com/path");
     expect(html).toContain('class="table-scroll"');
-    expect(html).toContain('role="region"');
-    expect(html).toContain('tabindex="0"');
-    expect(html).toContain('aria-label="Scrollable table. Use horizontal scroll to inspect all columns."');
+    expect(html).not.toContain('role="region"');
+    expect(html).not.toContain("Scrollable table");
     expect(html).toContain("<table>");
     expect(html).toMatch(/<input type="checkbox"[^>]*disabled=""[^>]*checked=""/);
     expect(html).toContain("<del>old</del>");
@@ -67,9 +66,17 @@ describe("MarkdownContent rendered output", () => {
     expect(titledJavascript).toContain('class="hljs-literal"');
 
     const plain = render("```\nraw & <safe>\n```");
+    expect(plain).toContain('<figure class="code-block code-block-text">');
     expect(plain).toContain('<span title="text">text</span>');
     expect(plain).toContain('aria-label="Copy text code"');
     expect(plain).toContain("raw &amp; &lt;safe&gt;");
+
+    for (const language of ["text", "Text", "plaintext", "txt"]) {
+      const textFence = render(`\`\`\`${language}\nplain text\n\`\`\``);
+      expect(textFence).toContain('<figure class="code-block code-block-text">');
+    }
+    const jsFence = render("```js\nconst value = 1;\n```");
+    expect(jsFence).not.toContain("code-block-text");
   });
 
   it("renders inline and display math while tolerating malformed formulas", () => {
