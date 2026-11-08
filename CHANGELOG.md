@@ -1,5 +1,31 @@
 # Changelog
 
+## [3.0.1] - 2026-11-08
+
+### Fixed
+
+- Long-session context compaction now fails closed. When the
+  provider-reported prompt token usage or the dynamic compressible estimate
+  reaches the full `max_llm_input_tokens` budget, the compaction requirement
+  is re-raised on every turn, bypassing the exhausted-latch suppression.
+  Previously a chars/4 estimate drift on non-English content could grow the
+  prompt past the budget while one exhausted quality follow-up permanently
+  suppressed the automatic compaction, leaving every further request failing
+  against the model.
+
+### Tests
+
+- Regression coverage: the compaction requirement survives the exhausted
+  follow-up latch when the provider-reported usage is over budget, and
+  Chinese content whose local chars/4 estimate stays below the budget still
+  triggers compaction once the provider reports an over-budget prompt.
+- Browser acceptance hardening for slow runners: session-insights samples
+  the light-theme hover only after the cross-fade settles; the sticky
+  composer assertion tolerates 1.5px of subpixel scroll rounding; the tool
+  self-test entrypoint budget covers nested PowerShell cold starts (30s);
+  the streaming network-outage scenario resets the connection abortively on
+  every attempt so the network-error interruption stays observable.
+
 ## [3.0.0] - 2026-11-07
 
 ### Added
