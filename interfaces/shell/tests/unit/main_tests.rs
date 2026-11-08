@@ -716,15 +716,16 @@ fn config_menu_renders_effective_values_and_can_apply_updates() {
     );
     let mut bash = BashApprovalMode::Ask;
     let mut work = WorkInstructionLoadMode::Silent;
+    let mut include_reasoning = false;
 
-    let menu_report = timem_shell::runtime_config_menu_report(&config, bash, work);
+    let menu_report = timem_shell::runtime_config_menu_report(&config, bash, work, false);
     let menu = render_config_menu(&menu_report, 5);
     assert!(menu.contains("TIMEM_MAX_LLM_OUTPUT"));
     assert!(menu.contains("TIMEM_WORK_INSTRUCTIONS"));
     assert!(menu.contains("10K"));
     assert!(menu.contains("\x1b[7m"));
     assert_eq!(
-        config_field_value(&config, bash, work, ConfigField::MaxInput),
+        config_field_value(&config, bash, work, false, ConfigField::MaxInput),
         "100K"
     );
 
@@ -733,6 +734,7 @@ fn config_menu_renders_effective_values_and_can_apply_updates() {
         &mut core,
         &mut bash,
         &mut work,
+        &mut include_reasoning,
         ConfigField::MaxOutput,
         "20K",
     )
@@ -748,6 +750,7 @@ fn config_menu_renders_effective_values_and_can_apply_updates() {
         &mut core,
         &mut bash,
         &mut work,
+        &mut include_reasoning,
         ConfigField::MaxInput,
         "120K",
     )
@@ -759,6 +762,7 @@ fn config_menu_renders_effective_values_and_can_apply_updates() {
         &mut core,
         &mut bash,
         &mut work,
+        &mut include_reasoning,
         ConfigField::WorkInstructions,
         "off",
     )
@@ -768,6 +772,7 @@ fn config_menu_renders_effective_values_and_can_apply_updates() {
         &mut core,
         &mut bash,
         &mut work,
+        &mut include_reasoning,
         ConfigField::BashApproval,
         "approve",
     )
@@ -808,12 +813,14 @@ fn config_response_protocol_update_is_supported_by_terminal_host() {
     );
     let mut bash = BashApprovalMode::Ask;
     let mut work = WorkInstructionLoadMode::Silent;
+    let mut include_reasoning = false;
 
     apply_config_value(
         &mut config,
         &mut core,
         &mut bash,
         &mut work,
+        &mut include_reasoning,
         ConfigField::ResponseProtocol,
         "json",
     )
@@ -852,12 +859,14 @@ fn config_protocol_update_keeps_endpoint_defaults_consistent() {
     );
     let mut bash = BashApprovalMode::Ask;
     let mut work = WorkInstructionLoadMode::Silent;
+    let mut include_reasoning = false;
 
     apply_config_value(
         &mut config,
         &mut core,
         &mut bash,
         &mut work,
+        &mut include_reasoning,
         ConfigField::ApiProtocol,
         "anthropic",
     )
@@ -871,6 +880,7 @@ fn config_protocol_update_keeps_endpoint_defaults_consistent() {
         &mut core,
         &mut bash,
         &mut work,
+        &mut include_reasoning,
         ConfigField::BaseUrl,
         "https://private.example/v1",
     )
@@ -880,6 +890,7 @@ fn config_protocol_update_keeps_endpoint_defaults_consistent() {
         &mut core,
         &mut bash,
         &mut work,
+        &mut include_reasoning,
         ConfigField::ApiProtocol,
         "openai-responses",
     )
@@ -917,12 +928,14 @@ fn config_protocol_update_preserves_explicit_endpoint() {
     );
     let mut bash = BashApprovalMode::Ask;
     let mut work = WorkInstructionLoadMode::Silent;
+    let mut include_reasoning = false;
 
     apply_config_value(
         &mut config,
         &mut core,
         &mut bash,
         &mut work,
+        &mut include_reasoning,
         ConfigField::ApiProtocol,
         "openai-compatible",
     )
@@ -1423,6 +1436,7 @@ fn shell_and_session_env_keep_openai_thinking_stream_options() {
         &config,
         BashApprovalMode::Ask,
         WorkInstructionLoadMode::Silent,
+        false,
     );
     assert_eq!(
         stored.get("TIMEM_ENABLE_THINKING").map(String::as_str),
@@ -2336,6 +2350,7 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
             &config,
             BashApprovalMode::Approve,
             WorkInstructionLoadMode::Silent,
+            false,
         ),
         env_overrides: None,
         mcp_server_ids: Vec::new(),
@@ -2356,6 +2371,7 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
         &config,
         BashApprovalMode::Approve,
         WorkInstructionLoadMode::Silent,
+        false,
         &workspace,
     );
     assert_eq!(loaded.session_id, "web_session_1");
@@ -2438,6 +2454,7 @@ fn shell_start_recovers_valid_session_from_partially_corrupt_index() {
         &config,
         BashApprovalMode::Approve,
         WorkInstructionLoadMode::Silent,
+        false,
         &workspace,
     );
     assert_eq!(loaded.session_id, "shell_recovered");
@@ -2496,6 +2513,7 @@ fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
                 &config,
                 BashApprovalMode::Approve,
                 WorkInstructionLoadMode::Silent,
+                false,
             ),
             env_overrides: None,
             mcp_server_ids: Vec::new(),
@@ -2516,6 +2534,7 @@ fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
         &config,
         BashApprovalMode::Approve,
         WorkInstructionLoadMode::Silent,
+        false,
         &launch_dir,
     );
     let work_dir = shell_session_work_dir(&loaded, &launch_dir);
@@ -2694,6 +2713,7 @@ fn shell_resume_selects_the_most_recent_valid_session() {
         &config,
         BashApprovalMode::Approve,
         WorkInstructionLoadMode::Silent,
+        false,
         &workspace,
     );
     older.session_id = "older".to_string();
@@ -2715,6 +2735,7 @@ fn shell_resume_selects_the_most_recent_valid_session() {
         &config,
         BashApprovalMode::Approve,
         WorkInstructionLoadMode::Silent,
+        false,
         &workspace,
     );
     assert_eq!(restored.session_id, "newer");
@@ -2748,19 +2769,21 @@ fn shell_runtime_config_changes_are_cached_before_another_turn_runs() {
     };
     let mut bash = BashApprovalMode::Approve;
     let mut work = WorkInstructionLoadMode::Silent;
+    let mut include_reasoning = false;
     let mut core = AgentCore::new(STATIC_PROMPT, config.core_profile(), root.join("memory"));
-    let mut stored = new_shell_session(&store, &config, bash, work, &workspace);
+    let mut stored = new_shell_session(&store, &config, bash, work, false, &workspace);
 
     apply_config_value(
         &mut config,
         &mut core,
         &mut bash,
         &mut work,
+        &mut include_reasoning,
         ConfigField::Model,
         "new-model",
     )
     .unwrap();
-    cache_shell_session_runtime(&mut stored, &config, bash, work, &workspace);
+    cache_shell_session_runtime(&mut stored, &config, bash, work, false, &workspace);
     store.upsert_session(&stored).unwrap();
 
     let restored = store.load_session(&stored.session_id).unwrap().unwrap();
@@ -2815,6 +2838,7 @@ fn shell_can_resume_web_style_session_history() {
                 &config,
                 BashApprovalMode::Approve,
                 WorkInstructionLoadMode::Silent,
+                false,
             ),
             env_overrides: None,
             mcp_server_ids: Vec::new(),
@@ -2879,6 +2903,7 @@ fn shell_can_resume_web_style_session_history() {
         &config,
         BashApprovalMode::Approve,
         WorkInstructionLoadMode::Silent,
+        false,
         &workspace,
     );
     assert_eq!(loaded.session_id, session_id);
