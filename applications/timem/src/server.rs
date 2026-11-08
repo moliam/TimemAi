@@ -2758,19 +2758,25 @@ fn debug_browse_file(session_id: &str, sub_path: &str, file: &Path) -> String {
         }
         Err(_) => read_failed = true,
     }
+    let mut cut_note = String::new();
     if truncated {
-        if let Some(line_end) = head.iter().rposition(|byte| *byte == b'\n') {
-            head.truncate(line_end + 1);
-        }
+        cut_note = match head.iter().rposition(|byte| *byte == b'\n') {
+            Some(line_end) => {
+                head.truncate(line_end + 1);
+                " (truncated at a line boundary)".to_string()
+            }
+            None => " (truncated)".to_string(),
+        };
     }
     let body = if read_failed {
         "<p class=\"err\">debug_file_read_failed</p>".to_string()
     } else {
         let notice = if truncated {
             format!(
-                "<p class=\"err\">File is {total} bytes; showing the first {shown} bytes (truncated at a line boundary). <a href=\"?session_id={session}&amp;path={path}&amp;download=1\">Download the full file</a>.</p>",
+                "<p class=\"err\">File is {total} bytes; showing the first {shown} bytes{cut}. <a href=\"?session_id={session}&amp;path={path}&amp;download=true\">Download the full file</a>.</p>",
                 total = total_bytes,
                 shown = head.len(),
+                cut = cut_note,
                 session = html_escape(session_id),
                 path = html_escape(sub_path),
             )

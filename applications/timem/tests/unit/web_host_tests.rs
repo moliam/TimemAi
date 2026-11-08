@@ -17980,7 +17980,7 @@ fn debug_browse_file_previews_head_of_oversized_file_with_download_link() {
     assert!(html.contains("record newest received_at"));
     assert!(html.contains("truncated at a line boundary"));
     assert!(html.contains(&format!("File is {} bytes", oversized.len())));
-    assert!(html.contains("download=1"));
+    assert!(html.contains("download=true"));
     assert!(!html.contains("beyond_preview_marker"));
 
     let small_path = dir.join("small.txt");
@@ -17988,6 +17988,79 @@ fn debug_browse_file_previews_head_of_oversized_file_with_download_link() {
     let full = debug_browse_file("session_1", "small.txt", &small_path);
     assert!(full.contains("<pre>small body\n</pre>"));
     assert!(!full.contains("truncated"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn debug_browse_file_boundary_cases_stay_well_formed() {
+    let dir = std::env::temp_dir().join("timem_debug_browse_boundary_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Exactly at the cap: full render, no truncation notice.
+    let exact = "x".repeat(MAX_DEBUG_FILE_PREVIEW_BYTES as usize);
+    let exact_path = dir.join("exact.txt");
+    std::fs::write(&exact_path, &exact).unwrap();
+    let html = debug_browse_file("session_1", "exact.txt", &exact_path);
+    assert!(html.contains("<pre>xxx"));
+    assert!(!html.contains("truncated"));
+
+    // One byte over the cap: head preview plus notice, tail not shown.
+    let over = format!(
+        "{}tail\n",
+        "y".repeat(MAX_DEBUG_FILE_PREVIEW_BYTES as usize)
+    );
+    let over_path = dir.join("over.txt");
+    std::fs::write(&over_path, &over).unwrap();
+    let html = debug_browse_file("session_1", "over.txt", &over_path);
+    assert!(html.contains("showing the first"));
+    assert!(html.contains("truncated"));
+    assert!(!html.contains(">tail"));
+
+    // Single line larger than the cap (no newline inside the head): the
+    // notice must not claim a line-boundary cut.
+    let single = "z".repeat(MAX_DEBUG_FILE_PREVIEW_BYTES as usize + 4096);
+    let single_path = dir.join("single.txt");
+    std::fs::write(&single_path, &single).unwrap();
+    let html = debug_browse_file("session_1", "single.txt", &single_path);
+    assert!(html.contains("truncated"));
+    assert!(!html.contains("truncated at a line boundary"));
+
+    // Multi-byte UTF-8 content cut at a line boundary stays char-clean.
+    let mut utf8 = String::new();
+    let line = "思维链思考记录一行中文内容用于边界测试\n";
+    while utf8.len() <= MAX_DEBUG_FILE_PREVIEW_BYTES as usize {
+        utf8.push_str(line);
+    }
+    utf8.push_str("final tail line beyond_preview\n");
+    let utf8_path = dir.join("utf8.txt");
+    std::fs::write(&utf8_path, &utf8).unwrap();
+    let html = debug_browse_file("session_1", "utf8.txt", &utf8_path);
+    assert!(!html.contains('\u{FFFD}'));
+    assert!(!html.contains("beyond_preview"));
+    assert!(html.contains("思维链思考记录一行中文内容用于边界测试"));
+
+    // Binary bytes neither panic nor break the page structure.
+    let mut binary = vec![0u8; 1024];
+    binary.extend_from_slice([0xFF, 0xFE, 0x00, 0x01].as_slice());
+    let binary_path = dir.join("binary.bin");
+    std::fs::write(&binary_path, &binary).unwrap();
+    let html = debug_browse_file("session_1", "binary.bin", &binary_path);
+    assert!(html.contains("<pre>"));
+
+    // Empty file renders an empty preview block.
+    let empty_path = dir.join("empty.txt");
+    std::fs::write(&empty_path, b"").unwrap();
+    let html = debug_browse_file("session_1", "empty.txt", &empty_path);
+    assert!(html.contains("<pre></pre>"));
+
+    // Markup in file content stays escaped inside the text preview.
+    let evil_path = dir.join("evil.txt");
+    std::fs::write(&evil_path, "<script>alert(1)</script>\n").unwrap();
+    let html = debug_browse_file("session_1", "evil.txt", &evil_path);
+    assert!(!html.contains("<script>alert"));
+    assert!(html.contains("&lt;script&gt;"));
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 
