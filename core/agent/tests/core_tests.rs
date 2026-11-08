@@ -8376,7 +8376,7 @@ fn run_bash_missing_command_returns_tool_input_error() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("response is not protocol compliant"));
-    assert!(prompt.contains("actions[0].input.any_required:cmd|loop_cmd"));
+    assert!(prompt.contains("actions[0].input.any_required:cmd|command|loop_cmd"));
     assert!(!prompt.contains("Action result: run_bash"));
 }
 
@@ -11448,4 +11448,46 @@ fn include_reasoning_without_captured_reasoning_omits_the_slice() {
     };
     assert!(!prompt.contains("[reasoning truncated]"));
     assert!(!prompt.contains("model_reasoning"));
+}
+
+#[test]
+fn include_reasoning_stays_in_context_across_later_turns() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("include_reasoning_persistent"),
+    );
+    core.set_model_reasoning("PERSISTENT_REASONING_CHAIN", false);
+    let _ = core.begin_turn("first", None);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"first answer"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(1_000),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    // Second turn: the model returns no reasoning at all. The first turn's
+    // reasoning must still be rendered because it lives in the context deltas.
+    let _ = core.begin_turn("second", None);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(r#"{"status":"ALL_FINISHED","final_answer":"second answer"}"#),
+        model_name: "qwen-plus".to_string(),
+        usage: usage_with_prompt_tokens(1_000),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::Final(_)));
+
+    let prompt = match core.begin_turn("third", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(
+        prompt.contains("PERSISTENT_REASONING_CHAIN"),
+        "reasoning must persist in the context after later turns: {prompt}"
+    );
+    assert!(prompt.contains("first answer"));
+    assert!(prompt.contains("second answer"));
 }
