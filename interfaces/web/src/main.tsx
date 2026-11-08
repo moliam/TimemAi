@@ -20969,10 +20969,21 @@ function GlobalTitleTip() {
     };
     const onPointerMove = (event: PointerEvent) => {
       rememberPointer(event);
-      const active = activeRef.current;
+      let active = activeRef.current;
+      if (!active) {
+        // `pointerover` can be missed when React replaces the node under a
+        // stationary pointer (for example during a streaming re-render).
+        // pointermove is the reliable fallback for entering a titled element,
+        // so hover must not depend on pointerover alone.
+        const el = titleHolder(event.target);
+        if (el) activate(el);
+        active = activeRef.current;
+      }
       if (!active) return;
       if (!active.el.isConnected) {
         deactivate();
+        const el = titleHolder(event.target);
+        if (el) activate(el);
         return;
       }
       const r = active.el.getBoundingClientRect();
@@ -20983,6 +20994,8 @@ function GlobalTitleTip() {
         event.clientY > r.bottom + 1
       ) {
         deactivate();
+        const el = titleHolder(event.target);
+        if (el) activate(el);
         return;
       }
       // React re-renders may rewrite `title` while hovering; keep it removed
@@ -20997,12 +21010,22 @@ function GlobalTitleTip() {
         return;
       }
       const pointer = pointerRef.current;
-      const target = pointer ? document.elementFromPoint(pointer.x, pointer.y) : null;
-      // A scroll elsewhere on the page (for example the chat viewport
-      // auto-scrolling while a response streams) must not dismiss a tooltip
-      // that is still anchored under the pointer. Only close it when the
-      // active element actually moved away from the pointer.
-      if (!target || (target !== active.el && !active.el.contains(target))) {
+      if (!pointer) {
+        deactivate();
+        return;
+      }
+      // Hit testing can disagree with the hovered node (overlays, shadow
+      // roots, or a re-rendered subtree). The active element's live rect is
+      // the source of truth: a scroll elsewhere on the page must not dismiss
+      // a tooltip that is still anchored under the pointer. Close only when
+      // the active element actually moved away from the pointer.
+      const rect = active.el.getBoundingClientRect();
+      if (
+        pointer.x < rect.left - 1 ||
+        pointer.x > rect.right + 1 ||
+        pointer.y < rect.top - 1 ||
+        pointer.y > rect.bottom + 1
+      ) {
         deactivate();
         return;
       }
