@@ -994,3 +994,53 @@ fn input_time_is_semantic_not_a_transport_role_and_uses_slice_time() {
         }
     }
 }
+
+#[test]
+fn model_reasoning_slice_renders_under_the_assistant_role() {
+    let delta = PromptDelta {
+        delta_id: "pd_reason_role".to_string(),
+        time_ms: 1,
+        hidden_slice_ids: Vec::new(),
+        slices: vec![
+            PromptSlice {
+                delta_id: "pd_reason_role".to_string(),
+                slice_id: "ps_reason_role_s001".to_string(),
+                component_id: "question".to_string(),
+                prompt_type: "user_question".to_string(),
+                time_ms: 1,
+                text: "original question".to_string(),
+                slice_index: 1,
+                slice_count: 2,
+            },
+            PromptSlice {
+                delta_id: "pd_reason_role".to_string(),
+                slice_id: "ps_reason_role_s002".to_string(),
+                component_id: "model_reasoning".to_string(),
+                prompt_type: "model_reasoning".to_string(),
+                time_ms: 2,
+                text: "THINKING TEXT".to_string(),
+                slice_index: 2,
+                slice_count: 2,
+            },
+        ],
+    };
+    let rendered = render_prompt_with_rendered_static(
+        "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]",
+        &[delta],
+        "TIMEM_ASSISTANT",
+        &JsonSuiteV1,
+    );
+    let user_pos = rendered.find("## USER").expect("user heading");
+    let assistant_pos = rendered
+        .find("## TIMEM_ASSISTANT")
+        .unwrap_or_else(|| panic!("reasoning must render under the assistant role: {rendered}"));
+    let reasoning_pos = rendered.find("THINKING TEXT").expect("reasoning text");
+    assert!(
+        user_pos < assistant_pos && assistant_pos < reasoning_pos,
+        "{rendered}"
+    );
+    match rendered.find("## RUNTIME") {
+        None => {}
+        Some(runtime_pos) => assert!(runtime_pos > reasoning_pos, "{rendered}"),
+    }
+}

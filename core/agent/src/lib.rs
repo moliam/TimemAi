@@ -397,6 +397,7 @@ fn role_for_prompt_type(prompt_type: &str, assistant_speaker_name: &str) -> Prom
         "llm_response"
         | "llm_response_raw_xml"
         | "llm_free_talk"
+        | "model_reasoning"
         | "context_compression_summary" => {
             PromptComponentRole::assistant(assistant_speaker_name.to_string())
         }
@@ -6484,6 +6485,14 @@ Runtime tool_call ids:",
         &mut self,
         mut slice_texts: Vec<(String, String)>,
     ) -> bool {
+        // Every model-response delta funnels through here (inline rounds,
+        // native tool rounds, and task_finished exchanges alike). Prepending
+        // the captured reasoning at this single choke point keeps the chain
+        // next to the response it explains without double-attaching it on
+        // paths that already took it via assistant_response_slices.
+        if let Some(reasoning) = self.take_reasoning_slice() {
+            slice_texts.insert(0, reasoning);
+        }
         let action_output_bytes = slice_texts
             .iter()
             .filter(|(prompt_type, _)| prompt_type == "result_of_llm_action")
