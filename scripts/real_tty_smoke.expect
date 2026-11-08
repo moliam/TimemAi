@@ -497,75 +497,36 @@ proc run_wrapped_edit_cancel_smoke {} {
 proc run_config_value_cancel_smoke {} {
     spawn_timem
     send "/config\r"
-    expect {
-        -re "\033\\\[6n" {
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "选择要修改的配置" {}
-        timeout {
-            error "timeout waiting for /config menu"
-        }
-        eof {
-            error "unexpected EOF waiting for /config menu"
-        }
-    }
+    wait_for_text \
+        "config menu for value cancel" \
+        "Timem settings" \
+        "timeout waiting for /config menu for value cancel" \
+        "unexpected EOF waiting for /config menu for value cancel"
     send "\r"
-    expect {
-        -re "\033\\\[6n" {
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "请输入新值" {}
-        timeout {
-            error "timeout waiting for /config value prompt"
-        }
-        eof {
-            error "unexpected EOF waiting for /config value prompt"
-        }
-    }
+    wait_for_text \
+        "config value prompt for Ctrl+C cancel" \
+        "请输入新值（留空取消）" \
+        "timeout waiting for config value prompt for Ctrl+C cancel" \
+        "unexpected EOF waiting for config value prompt for Ctrl+C cancel"
     send "\003"
     wait_for_text \
         "config value Ctrl+C cancel" \
-        "已取消配置修改" \
+        "Timem settings" \
         "timeout waiting for Ctrl+C config cancellation" \
         "Ctrl+C exited Timem while editing config value"
-    wait_prompt
-
-    send "/config\r"
-    expect {
-        -re "\033\\\[6n" {
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "选择要修改的配置" {}
-        timeout {
-            error "timeout waiting for second /config menu"
-        }
-        eof {
-            error "unexpected EOF waiting for second /config menu"
-        }
-    }
     send "\r"
-    expect {
-        -re "\033\\\[6n" {
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "请输入新值" {}
-        timeout {
-            error "timeout waiting for second /config value prompt"
-        }
-        eof {
-            error "unexpected EOF waiting for second /config value prompt"
-        }
-    }
+    wait_for_text \
+        "config value prompt for Esc cancel" \
+        "请输入新值（留空取消）" \
+        "timeout waiting for config value prompt for Esc cancel" \
+        "unexpected EOF waiting for config value prompt for Esc cancel"
     send "\033"
     wait_for_text \
         "config value Esc cancel" \
-        "已取消配置修改" \
+        "Timem settings" \
         "timeout waiting for Esc config cancellation" \
         "Esc exited Timem while editing config value"
+    send "\033"
     wait_prompt
     exit_timem
 }
@@ -573,47 +534,20 @@ proc run_config_value_cancel_smoke {} {
 proc run_config_menu_cancel_smoke {} {
     spawn_timem
     send "/config\r"
-    expect {
-        -re "\033\\\[6n" {
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "选择要修改的配置" {}
-        timeout {
-            error "timeout waiting for /config menu before menu cancel"
-        }
-        eof {
-            error "unexpected EOF waiting for /config menu before menu cancel"
-        }
-    }
+    wait_for_text \
+        "config menu before Ctrl+C cancel" \
+        "Timem settings" \
+        "timeout waiting for /config menu before Ctrl+C cancel" \
+        "unexpected EOF waiting for /config menu before Ctrl+C cancel"
     send "\003"
-    wait_for_text \
-        "config menu Ctrl+C cancel" \
-        "已取消配置修改" \
-        "timeout waiting for Ctrl+C config menu cancellation" \
-        "Ctrl+C exited Timem while selecting config field"
     wait_prompt
-
     send "/config\r"
-    expect {
-        -re "\033\\\[6n" {
-            send "\033\[24;1R"
-            exp_continue
-        }
-        -re "选择要修改的配置" {}
-        timeout {
-            error "timeout waiting for second /config menu before menu cancel"
-        }
-        eof {
-            error "unexpected EOF waiting for second /config menu before menu cancel"
-        }
-    }
-    send "\033"
     wait_for_text \
-        "config menu Esc cancel" \
-        "已取消配置修改" \
-        "timeout waiting for Esc config menu cancellation" \
-        "Esc exited Timem while selecting config field"
+        "config menu before Esc cancel" \
+        "Timem settings" \
+        "timeout waiting for /config menu before Esc cancel" \
+        "unexpected EOF waiting for /config menu before Esc cancel"
+    send "\033"
     wait_prompt
     exit_timem
 }
@@ -623,13 +557,13 @@ proc run_config_base_url_update_after_idle_smoke {} {
     send "/config\r"
     wait_for_text \
         "config menu before base-url update" \
-        "选择要修改的配置" \
+        "Timem settings" \
         "timeout waiting for /config menu before base-url update" \
         "unexpected EOF waiting for /config menu before base-url update"
     send "\033\[B\033\[B\033\[B\r"
     wait_for_text \
         "TIMEM_BASE_URL value prompt" \
-        "TIMEM_BASE_URL 当前值" \
+        "请输入新值（留空取消）" \
         "timeout waiting for TIMEM_BASE_URL value prompt" \
         "unexpected EOF waiting for TIMEM_BASE_URL value prompt"
     after 1000
@@ -639,6 +573,7 @@ proc run_config_base_url_update_after_idle_smoke {} {
         "已更新 TIMEM_BASE_URL" \
         "timeout waiting for TIMEM_BASE_URL update after idle" \
         "unexpected EOF during TIMEM_BASE_URL update after idle"
+    send "\033"
     wait_prompt
     exit_timem
 }
@@ -648,21 +583,23 @@ proc run_config_protocol_switch_smoke {} {
     send "/config\r"
     wait_for_text \
         "config menu before protocol switch" \
-        "选择要修改的配置" \
+        "Timem settings" \
         "timeout waiting for /config menu before protocol switch" \
         "unexpected EOF waiting for /config menu before protocol switch"
     send "\033\[B\r"
     wait_for_text \
-        "TIMEM_API_PROTOCOL value prompt" \
-        "TIMEM_API_PROTOCOL 当前值" \
-        "timeout waiting for TIMEM_API_PROTOCOL value prompt" \
-        "unexpected EOF waiting for TIMEM_API_PROTOCOL value prompt"
-    send "anthropic\r"
-    wait_for_text \
-        "protocol update with explicit URL preserved" \
+        "protocol switch first cycle" \
         "已更新 TIMEM_API_PROTOCOL" \
-        "timeout waiting for protocol update" \
+        "timeout waiting for protocol switch" \
         "unexpected EOF during protocol switch"
+    after 300
+    send "\r"
+    wait_for_text \
+        "protocol switch second cycle" \
+        "已更新 TIMEM_API_PROTOCOL" \
+        "timeout waiting for second protocol switch" \
+        "unexpected EOF during second protocol switch"
+    send "\033"
     wait_prompt
     exit_timem
 }
