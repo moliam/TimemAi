@@ -18969,8 +18969,13 @@ impl WorkerTemplate {
                     launch.work_instructions.as_deref(),
                     &env,
                 ),
-                include_reasoning_in_context: env
-                    .get("TIMEM_INCLUDE_REASONING_IN_CONTEXT")
+                include_reasoning_in_context: launch
+                    .include_reasoning_in_context
+                    .as_deref()
+                    .or_else(|| {
+                        env.get("TIMEM_INCLUDE_REASONING_IN_CONTEXT")
+                            .map(String::as_str)
+                    })
                     .map(|value| {
                         matches!(
                             value.trim().to_ascii_lowercase().as_str(),
@@ -19696,6 +19701,7 @@ struct WebLaunchOptions {
     max_llm_output_tokens: Option<u32>,
     bash_approval: Option<String>,
     work_instructions: Option<String>,
+    include_reasoning_in_context: Option<String>,
     debug: bool,
     open_browser: bool,
 }
@@ -19717,6 +19723,7 @@ impl Default for WebLaunchOptions {
             max_llm_output_tokens: None,
             bash_approval: None,
             work_instructions: None,
+            include_reasoning_in_context: None,
             debug: false,
             open_browser: true,
         }
@@ -19762,6 +19769,9 @@ impl WebLaunchOptions {
                 "--base-url" => string(&mut options.base_url)?,
                 "--bash-approval" => string(&mut options.bash_approval)?,
                 "--work-instructions" => string(&mut options.work_instructions)?,
+                "--include-reasoning-in-context" => {
+                    string(&mut options.include_reasoning_in_context)?
+                }
                 "--debug" => {
                     options.debug = true;
                     index += 1;
@@ -19980,7 +19990,7 @@ fn highlighted_browser_url(browser_url: &str, use_color: bool) -> String {
 }
 
 fn print_help() {
-    println!("Timem Web\n\nUsage: timem [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; remote access requires the token, loopback access needs none\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default under the user home\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --timeout <seconds>          model connect/inactivity timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
+    println!("Timem Web\n\nUsage: timem [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; remote access requires the token, loopback access needs none\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default under the user home\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --timeout <seconds>          model connect/inactivity timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n  --include-reasoning-in-context <mode>  replay model reasoning into the context: on|off (default on)\n");
 }
 
 fn public_access_url(configured_host: Option<&str>, port: u16, token: &str) -> Option<String> {

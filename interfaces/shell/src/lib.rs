@@ -598,6 +598,8 @@ pub struct CliOptions {
     pub supporting_context: Option<String>,
     pub bash_approval: Option<String>,
     pub work_instructions: Option<String>,
+    /// Replay the model reasoning into the prompt context: `on`/`off`.
+    pub include_reasoning_in_context: Option<String>,
 }
 
 const CLI_VALUE_OPTIONS: &[&str] = &[
@@ -618,6 +620,7 @@ const CLI_VALUE_OPTIONS: &[&str] = &[
     "--supporting-context",
     "--bash-approval",
     "--work-instructions",
+    "--include-reasoning-in-context",
 ];
 
 pub fn validate_cli_value_args(args: &[String]) -> Result<(), String> {
@@ -716,6 +719,10 @@ pub fn parse_cli_args(args: &[String]) -> CliOptions {
             }
             ("--work-instructions", Some(v)) => {
                 options.work_instructions = Some(v);
+                idx += 2;
+            }
+            ("--include-reasoning-in-context", Some(v)) => {
+                options.include_reasoning_in_context = Some(v);
                 idx += 2;
             }
             _ => {

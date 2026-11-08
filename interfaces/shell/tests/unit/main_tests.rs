@@ -2,27 +2,28 @@ use super::{
     active_elapsed_secs, apply_config_value, boxed_config_table_at_width,
     cache_shell_session_runtime, cli_help_text, config_field_row_kind, config_field_value,
     consume_turn_cancel_request, display_width, load_or_create_shell_session, merge_queued_input,
-    model_service_config_from_env, new_shell_session, next_paste_recovery_choice,
-    normalize_newlines, paste_marker_ranges, paste_marker_segments,
-    paste_recovery_return_edit_clear_lines, paste_recovery_summary_from_markers, pasted_line_count,
-    prev_paste_recovery_choice, push_thinking_queue_bytes, queued_input_drain_from_bytes,
-    queued_text_to_questions, random_spinner_tick, raw_multiline_paste_display,
-    raw_multiline_paste_needs_confirmation, read_approval_key, read_approval_key_until,
-    read_menu_key, read_paste_recovery_key, reedline_keyboard_protocol_enter_sequence,
-    reedline_keyboard_protocol_exit_sequence, render_approval_choices, render_config_apply_report,
-    render_config_menu, render_direct_resume_choices, render_direct_resume_prompt,
-    render_expand_output_choices, render_expand_output_prompt, render_note_box_at_width,
-    render_paste_recovery_choices, render_paste_recovery_prompt, render_queued_user_line,
-    render_raw_multiline_paste_submit_choices, render_raw_multiline_paste_submit_prompt,
-    render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
+    model_service_config_from_env, new_shell_session, next_choice_value,
+    next_paste_recovery_choice, normalize_newlines, parse_include_reasoning_in_context,
+    paste_marker_ranges, paste_marker_segments, paste_recovery_return_edit_clear_lines,
+    paste_recovery_summary_from_markers, pasted_line_count, prev_paste_recovery_choice,
+    push_thinking_queue_bytes, queued_input_drain_from_bytes, queued_text_to_questions,
+    random_spinner_tick, raw_multiline_paste_display, raw_multiline_paste_needs_confirmation,
+    read_approval_key, read_approval_key_until, read_menu_key, read_paste_recovery_key,
+    reedline_keyboard_protocol_enter_sequence, reedline_keyboard_protocol_exit_sequence,
+    render_approval_choices, render_config_apply_report, render_direct_resume_choices,
+    render_direct_resume_prompt, render_expand_output_choices, render_expand_output_prompt,
+    render_note_box_at_width, render_paste_recovery_choices, render_paste_recovery_prompt,
+    render_queued_user_line, render_raw_multiline_paste_submit_choices,
+    render_raw_multiline_paste_submit_prompt, render_round_limit_choices,
+    render_round_limit_prompt, render_settings_menu, render_stale_context_choices,
     render_stale_context_prompt, render_startup_banner_at_width, render_startup_status_block,
     render_submitted_user_line_rewrite, render_user_approval_prompt, render_user_input_prompt,
     render_work_instructions_load_choices, render_work_instructions_load_prompt,
     render_workspace_command_report, render_workspace_delete_choices, render_workspace_menu,
     rendered_terminal_rows, resolve_paste_markers, resolve_work_instruction_context_for_turn,
-    runtime_help_text, sanitize_user_input, shell_session_effective_env, shell_session_env_values,
-    shell_session_profile, shell_session_work_dir, startup_control_hint, strip_ansi,
-    strip_paste_markers, submitted_input_rows, take_shell_resume_notice,
+    runtime_help_text, sanitize_user_input, settings_menu_rows, shell_session_effective_env,
+    shell_session_env_values, shell_session_profile, shell_session_work_dir, startup_control_hint,
+    strip_ansi, strip_paste_markers, submitted_input_rows, take_shell_resume_notice,
     timem_reedline_keybindings, utf8_expected_len, work_instruction_shell_load_result,
     workspace_menu_line_count, wrapped_terminal_rows, ApprovalChoice, ApprovalKey, CliTurnUi,
     ConfigField, ConfigRow, ConfigTableItem, CoreTopicEvent, HostDecision, HostDecisionRequest,
@@ -718,10 +719,26 @@ fn config_menu_renders_effective_values_and_can_apply_updates() {
     let mut work = WorkInstructionLoadMode::Silent;
     let mut include_reasoning = false;
 
-    let menu_report = timem_shell::runtime_config_menu_report(&config, bash, work, false);
-    let menu = render_config_menu(&menu_report, 5);
+    // menuconfig-style menu: grouped rows, enumerated selects, highlighted row.
+    let rows = settings_menu_rows(&config, bash, work, include_reasoning);
+    assert_eq!(rows.len(), 9);
+    for section in ["MODEL", "RUNTIME", "CONTEXT"] {
+        assert!(
+            rows.iter().any(|row| row.section == section),
+            "missing section {section}"
+        );
+    }
+    let context_row = rows
+        .iter()
+        .find(|row| row.field == ConfigField::IncludeReasoningInContext)
+        .expect("context reasoning row");
+    assert_eq!(context_row.section, "CONTEXT");
+    assert_eq!(context_row.choices, Some(&["on", "off"][..]));
+    assert_eq!(context_row.value, "off");
+    let menu = render_settings_menu(&rows, 5);
     assert!(menu.contains("TIMEM_MAX_LLM_OUTPUT"));
     assert!(menu.contains("TIMEM_WORK_INSTRUCTIONS"));
+    assert!(menu.contains("TIMEM_INCLUDE_REASONING_IN_CONTEXT"));
     assert!(menu.contains("10K"));
     assert!(menu.contains("\x1b[7m"));
     assert_eq!(
@@ -2927,4 +2944,51 @@ fn shell_can_resume_web_style_session_history() {
     assert!(notice.contains("raw_chat_history.jsonl"));
 
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn settings_menu_cycles_enum_choices_in_place() {
+    assert_eq!(
+        next_choice_value(&["on", "off"], "on"),
+        Some("off".to_string())
+    );
+    assert_eq!(
+        next_choice_value(&["on", "off"], "off"),
+        Some("on".to_string())
+    );
+    assert_eq!(
+        next_choice_value(&["ask", "approve"], "ask"),
+        Some("approve".to_string())
+    );
+    assert_eq!(
+        next_choice_value(&["silent", "ask", "off"], "off"),
+        Some("silent".to_string())
+    );
+    // Unknown current values restart at the first declared choice.
+    assert_eq!(
+        next_choice_value(&["on", "off"], "bogus"),
+        Some("off".to_string())
+    );
+    assert_eq!(next_choice_value(&[], "on"), None);
+}
+
+#[test]
+fn include_reasoning_prefers_cli_option_then_env_and_defaults_on() {
+    let mut env = std::collections::HashMap::new();
+    env.insert(
+        "TIMEM_INCLUDE_REASONING_IN_CONTEXT".to_string(),
+        "off".to_string(),
+    );
+    // CLI option wins over the environment.
+    assert!(parse_include_reasoning_in_context(Some("on"), &env));
+    assert!(!parse_include_reasoning_in_context(Some("off"), &env));
+    // Environment covers the omitted option.
+    assert!(!parse_include_reasoning_in_context(None, &env));
+    // Product default is on.
+    assert!(parse_include_reasoning_in_context(
+        None,
+        &std::collections::HashMap::new()
+    ));
+    assert!(parse_include_reasoning_in_context(Some(" TRUE "), &env));
+    assert!(!parse_include_reasoning_in_context(Some("bogus"), &env));
 }
