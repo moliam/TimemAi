@@ -2447,6 +2447,55 @@ fn parses_basic_web_launch_options() {
 }
 
 #[test]
+fn parses_space_option_with_equals_form() {
+    let options = WebLaunchOptions::parse(&["--space=/tmp/timem-equals".to_string()]).unwrap();
+    assert_eq!(options.space.as_deref(), Some("/tmp/timem-equals"));
+}
+
+#[test]
+fn preflight_classifies_help_version_and_run_without_eager_value_validation() {
+    assert_eq!(
+        preflight_web_args(&["--help".to_string()]).unwrap(),
+        WebPreflight::Help
+    );
+    assert_eq!(
+        preflight_web_args(&["-V".to_string()]).unwrap(),
+        WebPreflight::Version
+    );
+    assert_eq!(
+        preflight_web_args(&["--public".to_string()]).unwrap(),
+        WebPreflight::Run
+    );
+    // Port range is checked after diagnostics are installed so a startup
+    // configuration failure can still be recorded.
+    assert_eq!(
+        preflight_web_args(&["--port".to_string(), "1".to_string()]).unwrap(),
+        WebPreflight::Run
+    );
+    assert!(WebLaunchOptions::parse(&["--port".to_string(), "1".to_string()]).is_err());
+}
+
+#[test]
+fn preflight_rejects_usage_errors_before_memory_side_effects() {
+    assert_eq!(
+        preflight_web_args(&["--space".to_string()]).unwrap_err(),
+        "missing_value:--space"
+    );
+    assert_eq!(
+        preflight_web_args(&["--bogus".to_string()]).unwrap_err(),
+        "unknown_option:--bogus"
+    );
+    for args in [
+        vec!["--data-dir".to_string(), "/tmp/x".to_string()],
+        vec!["--data-dir=/tmp/x".to_string()],
+    ] {
+        assert!(preflight_web_args(&args)
+            .unwrap_err()
+            .contains("unsupported_option:--data-dir"));
+    }
+}
+
+#[test]
 fn public_url_uses_explicit_host_without_placeholder() {
     assert_eq!(
         public_access_url(Some("10.125.112.83"), 14983, "token"),

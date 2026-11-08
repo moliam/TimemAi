@@ -2018,6 +2018,7 @@ impl ClientCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WebExitReason {
     HelpRequested,
+    VersionRequested,
     CtrlC,
     #[cfg(unix)]
     Sigterm,
@@ -2034,6 +2035,7 @@ impl WebExitReason {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::HelpRequested => "help_requested",
+            Self::VersionRequested => "version_requested",
             Self::CtrlC => "ctrl_c",
             #[cfg(unix)]
             Self::Sigterm => "sigterm",
@@ -2053,6 +2055,10 @@ pub async fn run(
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_help();
         return Ok(WebExitReason::HelpRequested);
+    }
+    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+        print_version();
+        return Ok(WebExitReason::VersionRequested);
     }
 
     let launch = WebLaunchOptions::parse(args)?;
@@ -19798,8 +19804,32 @@ impl Default for WebLaunchOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebPreflight {
+    Help,
+    Version,
+    Run,
+}
+
+pub(crate) fn preflight_web_args(args: &[String]) -> Result<WebPreflight, String> {
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        return Ok(WebPreflight::Help);
+    }
+    if args.iter().any(|arg| arg == "--version" || arg == "-V") {
+        return Ok(WebPreflight::Version);
+    }
+    WebLaunchOptions::parse_syntax(args)?;
+    Ok(WebPreflight::Run)
+}
+
 impl WebLaunchOptions {
     fn parse(args: &[String]) -> Result<Self, String> {
+        let options = Self::parse_syntax(args)?;
+        options.validate()?;
+        Ok(options)
+    }
+
+    fn parse_syntax(args: &[String]) -> Result<Self, String> {
         let mut options = Self::default();
         let mut index = 0;
         while index < args.len() {
@@ -19830,6 +19860,10 @@ impl WebLaunchOptions {
                 }
                 "--public-host" => string(&mut options.public_host)?,
                 "--space" => string(&mut options.space)?,
+                argument if argument.starts_with("--space=") => {
+                    options.space = Some(argument["--space=".len()..].to_string());
+                    index += 1;
+                }
                 "--api-protocol" => string(&mut options.api_protocol)?,
                 "--response-protocol" => string(&mut options.response_protocol)?,
                 "--api-key" => string(&mut options.api_key)?,
@@ -19848,7 +19882,7 @@ impl WebLaunchOptions {
                     options.open_browser = false;
                     index += 1;
                 }
-                "--data-dir" => {
+                argument if argument == "--data-dir" || argument.starts_with("--data-dir=") => {
                     return Err(
                         "unsupported_option:--data-dir; MEM is the complete workspace".to_string(),
                     );
@@ -19892,14 +19926,18 @@ impl WebLaunchOptions {
                 _ => index += 1,
             }
         }
-        if let Some(port) = options.port {
+        Ok(options)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if let Some(port) = self.port {
             if !(PORT_START..=PORT_END).contains(&port) {
                 return Err(format!(
                     "port_out_of_range:{port}; expected {PORT_START}..={PORT_END}"
                 ));
             }
         }
-        Ok(options)
+        Ok(())
     }
 
     fn model_service_source(&self) -> ModelServiceConfigSource {
@@ -20057,8 +20095,12 @@ fn highlighted_browser_url(browser_url: &str, use_color: bool) -> String {
     }
 }
 
+pub(crate) fn print_version() {
+    println!("Timem Web {}", env!("CARGO_PKG_VERSION"));
+}
+
 fn print_help() {
-    println!("Timem Web\n\nUsage: timem [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; remote access requires the token, loopback access needs none\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default under the user home\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --timeout <seconds>          model connect/inactivity timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n  --include-reasoning-in-context <mode>  replay model reasoning into the context: on|off (default on)\n");
+    println!("Timem Web\n\nUsage: timem [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; remote access requires the token, loopback access needs none\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default under the user home\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --timeout <seconds>          model connect/inactivity timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n  --include-reasoning-in-context <mode>  replay model reasoning into the context: on|off (default on)\n  --debug                      keep up to 512 MiB of audit data for debugging\n  -V, --version                print version and exit\n  -h, --help                   print this help and exit\n");
 }
 
 fn public_access_url(configured_host: Option<&str>, port: u16, token: &str) -> Option<String> {

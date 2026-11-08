@@ -389,18 +389,28 @@ pub(crate) fn memory_root_from_args(args: &[String]) -> Result<PathBuf, String> 
     if std::env::var_os("TIMEM_DATA_DIR").is_some() {
         return Err("unsupported_env:TIMEM_DATA_DIR; MEM is the complete workspace".to_string());
     }
-    for (index, argument) in args.iter().enumerate() {
+    let mut space: Option<String> = None;
+    let mut index = 0;
+    while index < args.len() {
+        let argument = &args[index];
         if argument == "--data-dir" || argument.starts_with("--data-dir=") {
             return Err("unsupported_option:--data-dir; MEM is the complete workspace".to_string());
         }
         if argument == "--space" {
-            return agent_core::resolve_memory_dir(args.get(index + 1).map(String::as_str));
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| "missing_value:--space".to_string())?;
+            space = Some(value.clone());
+            index += 2;
+            continue;
         }
         if let Some(value) = argument.strip_prefix("--space=") {
-            return agent_core::resolve_memory_dir(Some(value));
+            space = Some(value.to_string());
         }
+        index += 1;
     }
-    agent_core::resolve_memory_dir(std::env::var("TIMEM_SPACE").ok().as_deref())
+    let env_space = std::env::var("TIMEM_SPACE").ok();
+    agent_core::resolve_memory_dir(space.as_deref().or(env_space.as_deref()))
 }
 
 fn sanitized_option_names(args: &[String]) -> Vec<String> {

@@ -63,6 +63,20 @@ fn exit_with_process_cleanup(code: i32) -> ! {
 }
 
 pub fn run_web(args: Vec<String>) {
+    // Validate CLI syntax before any process-wide or filesystem side effect.
+    // Otherwise a typo is masked by the workspace lock and can create an
+    // otherwise unused MEM/diagnostics directory before failing.
+    let preflight = match server::preflight_web_args(&args) {
+        Ok(preflight) => preflight,
+        Err(error) => {
+            eprintln!("[config_error] {error}");
+            exit_with_process_cleanup(2);
+        }
+    };
+    if preflight == server::WebPreflight::Version {
+        server::print_version();
+        exit_with_process_cleanup(0);
+    }
     // A login session cgroup is shared with unrelated processes, which makes
     // memory controllers structurally unusable. Relaunch into a private user
     // scope before any process-wide state is touched; a failed relaunch falls
@@ -79,8 +93,11 @@ pub fn run_web(args: Vec<String>) {
             exit_with_process_cleanup(2);
         }
     };
-    let help_requested = args.iter().any(|arg| arg == "--help" || arg == "-h");
-    let workspace_lock = if help_requested {
+    let help_or_version_requested = matches!(
+        preflight,
+        server::WebPreflight::Help | server::WebPreflight::Version
+    );
+    let workspace_lock = if help_or_version_requested {
         None
     } else {
         if let Err(error) = agent_core::create_memory_dir(&memory_root) {
