@@ -1117,7 +1117,10 @@ button:disabled { cursor: not-allowed; }
 .mailbox-address code { flex: 1; min-width: 0; border: 1px solid #243040; border-radius: 6px; padding: 4px 8px; background: #131c26; color: #8fd3c0; font-size: 11px; font-weight: 700; }
 .mailbox-session-id code { color: #9fc1ef; letter-spacing: 0.4px; font-weight: 500; }
 .mailbox-section-title { margin-top: 4px; color: #6f8491; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
-.mailbox-item-line { min-width: 0; overflow: hidden; container-type: inline-size; border: 1px solid #243040; border-radius: 6px; background: #131c26; }
+/* Do not clip the <details> itself. Chromium collapses a closed details box
+   to its border height when overflow is hidden, leaving only a 3px line and
+   hiding the summary content. The summary and body clamp their own overflow. */
+.mailbox-item-line { min-width: 0; overflow: visible; container-type: inline-size; border: 1px solid #243040; border-radius: 6px; background: #131c26; }
 .mailbox-item-line summary { display: flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; padding: 7px 10px; font-size: 12px; color: #d3e0e8; cursor: pointer; list-style: none; user-select: none; }
 .mailbox-item-line summary::-webkit-details-marker { display: none; }
 .mailbox-item-line summary:hover { background: #182430; border-radius: 6px; }

@@ -35,10 +35,10 @@ describe("mailbox panel one-line lists", () => {
   });
 
   it("styles the line rows and the more fold for both themes", () => {
-    expect(styles).toMatch(/\.mailbox-item-line \{ min-width: 0; overflow: hidden; container-type: inline-size; border: 1px solid #243040/);
+    expect(styles).toMatch(/\.mailbox-item-line \{ min-width: 0; overflow: visible; container-type: inline-size; border: 1px solid #243040/);
     expect(styles).toMatch(/\.mailbox-list \{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
     expect(styles).toMatch(/\.mailbox-list \{[^}]*overflow-x: hidden;/);
-    expect(styles).toMatch(/\.mailbox-item-line \{ min-width: 0; overflow: hidden; container-type: inline-size;/);
+    expect(styles).toMatch(/\.mailbox-item-line \{ min-width: 0; overflow: visible; container-type: inline-size;/);
     expect(styles).toMatch(/\.mailbox-item-preview \{ flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;/);
     expect(styles).toContain("@container (max-width: 320px)");
     expect(styles).toMatch(/\.mailbox-item-state \{ width: 7px; height: 7px;/);
