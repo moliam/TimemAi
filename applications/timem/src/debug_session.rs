@@ -37,9 +37,20 @@ window.__timemStatsSchedule=()=>{
   if(document.hidden)return;
   window.__timemStatsRefresh=setTimeout(refresh,__REFRESH_MS__);
 };
+function currentStatsVersion(){
+  const main=document.querySelector('main.shell');
+  return main?main.dataset.statsVersion||'':null;
+}
 async function refresh(){
   if(document.hidden){window.__timemStatsSchedule();return;}
   try{
+    const params=new URLSearchParams(location.search);
+    params.delete('path');params.delete('download');
+    const probe=await fetch('/api/debug/stats-version?'+params.toString(),{cache:'no-store'});
+    if(probe.ok){
+      const data=await probe.json();
+      if(String(data.version)===String(currentStatsVersion())){window.__timemStatsSchedule();return;}
+    }
     const res=await fetch(location.href,{cache:'no-store'});
     if(res.ok){
       const doc=new DOMParser().parseFromString(await res.text(),'text/html');
@@ -114,6 +125,10 @@ pub(crate) struct DebugStore {
     sessions: Mutex<BTreeMap<String, SessionDebug>>,
     file_render_lock: Mutex<()>,
     persistence_path: Option<std::path::PathBuf>,
+    /// Bumped every time the statistics page file is re-rendered, so the
+    /// page's refresh probe can skip the full-document fetch when nothing
+    /// changed. Never persisted: a process restart starts at 1.
+    stats_version: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Debug)]
@@ -290,6 +305,7 @@ impl DebugStore {
             sessions: Mutex::new(BTreeMap::new()),
             file_render_lock: Mutex::new(()),
             persistence_path: None,
+            stats_version: std::sync::atomic::AtomicU64::new(1),
         };
         if let Some(path) = persistence_path.as_ref() {
             store.load_persisted(path);
@@ -439,6 +455,15 @@ impl DebugStore {
             let _ = fs::create_dir_all(parent);
         }
         let _ = atomic_private_write(path, text.as_bytes());
+    }
+
+    /// Current revision of the rendered statistics page. The page's refresh
+    /// probe compares this against the version embedded in its
+    /// `data-stats-version` attribute and skips the full-document fetch when
+    /// both agree. Never persisted: a process restart starts at 1.
+    pub(crate) fn stats_version(&self) -> u64 {
+        self.stats_version
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Clears cumulative statistics for one session (reset button).
@@ -795,6 +820,13 @@ impl DebugStore {
             .lock()
             .map_err(|_| "debug_file_render_lock_poisoned".to_string())?;
         let dir = self.root.path().join(safe_session_component(session_id)?);
+        // Every re-render is a new version: the page's refresh probe compares
+        // this value against the one embedded in the served document, so a
+        // quiet page never re-fetches the full document.
+        let stats_version = self
+            .stats_version
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
         let body = {
             let sessions = self
                 .sessions
@@ -803,7 +835,7 @@ impl DebugStore {
             let stats = sessions
                 .get(session_id)
                 .ok_or_else(|| "debug_session_not_found".to_string())?;
-            render_statistics_html(session_id, stats)
+            render_statistics_html(session_id, stats, stats_version)
         };
         atomic_private_write(&dir.join("statistics.html"), body.as_bytes())?;
         self.save_persisted();
@@ -1128,7 +1160,7 @@ fn render_llm_response_dump(
     out
 }
 
-fn render_statistics_html(session_id: &str, stats: &SessionDebug) -> String {
+fn render_statistics_html(session_id: &str, stats: &SessionDebug, stats_version: u64) -> String {
     let total_requests = stats
         .endpoints
         .values()
@@ -1155,7 +1187,9 @@ fn render_statistics_html(session_id: &str, stats: &SessionDebug) -> String {
     out.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
     out.push_str("<title>Timem Session Statistics</title><style>");
     out.push_str(STATISTICS_CSS);
-    out.push_str("</style></head><body><main class=\"shell\">");
+    out.push_str(&format!(
+        "</style></head><body><main class=\"shell\" data-stats-version=\"{stats_version}\">"
+    ));
     out.push_str("<header class=\"page-head\"><div><p class=\"eyebrow\">TIMEM DEBUG TELEMETRY</p><h1>Session Statistics</h1><p class=\"subtitle\">");
     html_text(&mut out, session_id);
     out.push_str(
@@ -1878,6 +1912,43 @@ mod tests {
         assert!(script.contains("fresh.innerHTML!==current.innerHTML"));
         assert!(script.contains("__timemStatsSchedule"));
         assert!(script.contains(&format!("setTimeout(refresh,{STATISTICS_REFRESH_MS})")));
+        // The probe skips the full-document fetch while the rendered version
+        // is unchanged, and the served document carries it on main.shell.
+        assert!(script.contains("/api/debug/stats-version?"));
+        assert!(script.contains("currentStatsVersion()"));
+        // The probe reads the rendered revision from main.shell's data
+        // attribute through the DOM dataset API.
+        assert!(script.contains("main.dataset.statsVersion"));
+    }
+
+    #[test]
+    fn statistics_version_bumps_on_every_statistics_render() {
+        let _guard = debug_store_test_guard();
+        let store = DebugStore::create().unwrap();
+        let before = store.stats_version();
+        store
+            .record_prompt("session_probe", "worker_probe", 0, "p", None, None)
+            .unwrap();
+        assert!(store.stats_version() > before);
+        store.reset_statistics("session_probe").unwrap();
+        assert!(store.stats_version() > before + 1);
+    }
+
+    #[test]
+    fn statistics_html_embeds_the_rendered_version_on_main_shell() {
+        let guard = debug_store_test_guard();
+        let store =
+            DebugStore::with_root(std::sync::Arc::new(TemporaryDebugRoot::create().unwrap()));
+        store
+            .record_prompt("session_embed", "worker_embed", 0, "p", None, None)
+            .unwrap();
+        let version = store.stats_version();
+        let sessions = store.sessions.lock().unwrap();
+        let stats = sessions.get("session_embed").unwrap();
+        let html = render_statistics_html("session_embed", stats, version);
+        drop(sessions);
+        drop(guard);
+        assert!(html.contains(&format!("data-stats-version=\"{version}\"")));
     }
 
     static DEBUG_STORE_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -2448,7 +2519,7 @@ mod tests {
                 ..EndpointDebug::default()
             },
         );
-        let html = render_statistics_html("session_native", &stats);
+        let html = render_statistics_html("session_native", &stats, 7);
         assert!(html.starts_with("<!doctype html>"));
         assert!(html.contains("Endpoint matrix"));
         assert_eq!(html.matches("role=\"tabpanel\"").count(), 2);

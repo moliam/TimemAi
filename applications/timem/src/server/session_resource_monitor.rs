@@ -17,13 +17,14 @@
 //! blamed on an arbitrary Session.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use agent_core::resource_caps::SessionResourceUsage;
+use agent_core::resource_caps::{SessionResourceUsage, SystemResourceUsage};
 
 use super::{
-    primary_worker_handle, session_has_active_turn, submit_turn_with_selected_attachments_and_kind,
-    AppState,
+    now_ms, primary_worker_handle, session_has_active_turn,
+    submit_turn_with_selected_attachments_and_kind, AppState,
 };
 
 /// History/entry kind for a runtime observation that started its own turn.
@@ -35,6 +36,57 @@ const CPU_RESET_WINDOW: Duration = Duration::from_secs(6);
 const CPU_HIGH_RATIO: f64 = 0.9;
 const CPU_LOW_RATIO: f64 = 0.6;
 const MAX_NAMED_OOM_JOBS: usize = 4;
+
+/// The monitor's latest sweep, shared by every `session_resource_usage_query`.
+/// Browser tabs (Insights panel, header chip) all read one kernel-level
+/// sample per 2s sweep instead of each re-reading cgroupfs and /proc. Only
+/// the newest sweep is retained and it is replaced atomically, so sessions
+/// that leave the live set simply stop appearing and the cache can never
+/// grow.
+pub(super) struct ResourceSampleCache {
+    latest: Mutex<Option<Arc<CachedResourceSweep>>>,
+}
+
+/// One complete monitor sweep: one timestamp, the machine-wide snapshot, and
+/// the successful per-session samples. A session without a usable scope (or
+/// with a transient read error) is absent, so its queries keep the
+/// direct-probe fallback with unchanged semantics instead of caching a
+/// failure.
+pub(super) struct CachedResourceSweep {
+    pub sampled_at_ms: u128,
+    pub system: Option<SystemResourceUsage>,
+    pub sessions: HashMap<String, SessionResourceUsage>,
+}
+
+impl ResourceSampleCache {
+    pub(super) fn new() -> Self {
+        Self {
+            latest: Mutex::new(None),
+        }
+    }
+
+    /// Snapshot of the latest sweep for one session: `(sampled_at_ms, session
+    /// usage, machine-wide usage)`. `None` when no sweep has run yet, the
+    /// session left the live set, its sample failed, or the machine-wide
+    /// snapshot is unavailable — the caller then falls back to a direct
+    /// probe with unchanged semantics.
+    pub(super) fn lookup_sweep(
+        &self,
+        session_id: &str,
+    ) -> Option<(u128, SessionResourceUsage, SystemResourceUsage)> {
+        let sweep = self.latest.lock().ok()?.as_ref().cloned()?;
+        let usage = sweep.sessions.get(session_id)?.clone();
+        let system = sweep.system.clone()?;
+        Some((sweep.sampled_at_ms, usage, system))
+    }
+
+    /// Publish a completed sweep, replacing the previous one atomically.
+    pub(super) fn publish_sweep(&self, sweep: CachedResourceSweep) {
+        if let Ok(mut slot) = self.latest.lock() {
+            *slot = Some(Arc::new(sweep));
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum ResourceObservation {
@@ -452,10 +504,14 @@ async fn sample_sessions(state: &AppState, states: &mut HashMap<String, SessionO
     let alive: HashSet<&str> = session_ids.iter().map(String::as_str).collect();
     states.retain(|session_id, _| alive.contains(session_id.as_str()));
     let ids = session_ids.clone();
-    let Ok((host_cores, total_memory_bytes, usage_by_session)) =
+    let sampled_at_ms = now_ms();
+    let Ok((host_cores, total_memory_bytes, system, usage_by_session)) =
         tokio::task::spawn_blocking(move || {
             let host_cores = agent_core::resource_caps::system_cpu_cores();
             let total_memory_bytes = agent_core::resource_caps::system_mem_total_bytes();
+            let system = agent_core::resource_caps::system_resource_usage()
+                .ok()
+                .flatten();
             let usages = ids
                 .into_iter()
                 .map(|session_id| {
@@ -463,12 +519,17 @@ async fn sample_sessions(state: &AppState, states: &mut HashMap<String, SessionO
                     (session_id, usage)
                 })
                 .collect::<Vec<_>>();
-            (host_cores, total_memory_bytes, usages)
+            (host_cores, total_memory_bytes, system, usages)
         })
         .await
     else {
         return;
     };
+    // Successful samples are collected into one sweep and published for
+    // `session_resource_usage_query` after the loop: every connected browser
+    // tab shares this single kernel-level sample instead of each re-reading
+    // cgroupfs and /proc.
+    let mut sweep_sessions: HashMap<String, SessionResourceUsage> = HashMap::new();
     let mut samples = Vec::with_capacity(usage_by_session.len());
     for (session_id, usage) in usage_by_session {
         let usage = match usage {
@@ -480,6 +541,7 @@ async fn sample_sessions(state: &AppState, states: &mut HashMap<String, SessionO
                 continue;
             }
         };
+        sweep_sessions.insert(session_id.clone(), usage.clone());
         let now = Instant::now();
         let observation_state = states.entry(session_id.clone()).or_default();
         let dt = observation_state
@@ -494,6 +556,11 @@ async fn sample_sessions(state: &AppState, states: &mut HashMap<String, SessionO
             observations,
         });
     }
+    state.resource_samples.publish_sweep(CachedResourceSweep {
+        sampled_at_ms,
+        system,
+        sessions: sweep_sessions,
+    });
 
     let oom_happened = samples.iter().any(|sample| {
         sample

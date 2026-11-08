@@ -172,6 +172,15 @@ root 修复，动作只有两类白名单操作：
   内存主值取 `memory.stat` 的 `anon + file_mapped`（真实占用），`file` 中未映射的
   可回收页缓存单列显示，避免把 page cache 误当成真实占用；平台无 cgroup 记账时返回
   `usage: null`，前端显示“不可用”而不是伪造 0。
+- Insights 采样合流（2026-11-07）：`session_resource_usage_query` 优先复用监控循环
+  最新一轮完整 sweep（`ResourceSampleCache` 单槽、每轮整体原子替换、只保留最新一轮，
+  天然有界）：多个浏览器标签（Insights 看板、头部芯片）共享同一份内核级采样，不再
+  各自直读 cgroupfs 与 /proc；缓存未命中（监控恢复中、两轮 sweep 之间、无记账
+  scope、瞬时读取失败或系统快照缺失）时回退现场直采，语义不变；失败样本不入缓存。
+- 统计页刷新探针（2026-11-07）：统计页每次重渲染时版本号 +1 并以 `data-stats-version`
+  嵌入 `<main class="shell">`；页面轮询先请求 `GET /api/debug/stats-version`
+  （只读版本号，认证与现有 debug API 相同），版本一致则跳过整页 fetch，减少无谓
+  传输；版本不一致或探针失败才拉取全页并做 innerHTML 对比替换。
 
 ## 5. WebUI 系统设置接口
 

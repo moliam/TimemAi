@@ -248,6 +248,10 @@ struct AppState {
     /// run in parallel (mailbox state files are per-session), while
     /// same-session sends stay serialized because they share one state file.
     mailbox_send_lane_locks: Arc<Mutex<HashMap<String, Arc<std::sync::Mutex<()>>>>>,
+    /// Latest monitor sweep shared by every `session_resource_usage_query`:
+    /// browser tabs (Insights panel, header chip) read one kernel-level
+    /// sample per 2s sweep instead of each re-reading cgroupfs and /proc.
+    resource_samples: Arc<session_resource_monitor::ResourceSampleCache>,
 }
 
 #[derive(Default)]
@@ -2182,6 +2186,7 @@ pub async fn run(
         mailbox_state_cache: Arc::new(Mutex::new(HashMap::new())),
         mailbox_send_receipt_watch: Arc::new(Mutex::new(BTreeSet::new())),
         mailbox_send_lane_locks: Arc::new(Mutex::new(HashMap::new())),
+        resource_samples: Arc::new(session_resource_monitor::ResourceSampleCache::new()),
     };
     // Best-effort removal of stale upgrade backups (older than one day)
     // left next to the executable by previous self upgrades.
@@ -2958,6 +2963,21 @@ async fn debug_reset_statistics(
     }
 }
 
+async fn debug_stats_version(
+    State((state, _)): State<(AppState, u16)>,
+    Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
+    connect_info: ConnectInfo<SocketAddr>,
+) -> Response {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers, *connect_info) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(debug) = state.debug.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    Json(json!({ "version": debug.stats_version() })).into_response()
+}
+
 async fn upgrade_status(
     State((state, _)): State<(AppState, u16)>,
     Query(auth): Query<AuthQuery>,
@@ -3295,6 +3315,7 @@ fn build_router(state: AppState, port: u16) -> Router {
             performance_trace: post(performance_trace),
             debug_browse: get(debug_browse),
             debug_reset_statistics: post(debug_reset_statistics),
+            debug_stats_version: get(debug_stats_version),
             upgrade_status: get(upgrade_status),
             upgrade_check: post(upgrade_check),
             upgrade_apply: post(upgrade_apply),
@@ -5559,19 +5580,32 @@ fn handle_command_with_id(
         }
         ClientCommand::SessionResourceUsageQuery { session_id } => {
             ensure_session_exists(state, &session_id)?;
-            let usage = agent_core::resource_caps::session_resource_usage(&session_id)
-                .map_err(|error| format!("session_resource_usage_failed:{error}"))?;
-            let system = agent_core::resource_caps::system_resource_usage()
-                .map_err(|error| format!("system_resource_usage_failed:{error}"))?
-                .map(|usage| WebSystemResourceUsage {
-                    cpu_busy_ticks: usage.cpu_busy_ticks,
-                    cpu_total_ticks: usage.cpu_total_ticks,
-                    memory_total_bytes: usage.memory_total_bytes,
-                    memory_available_bytes: usage.memory_available_bytes,
-                });
+            // Fast path: share the monitor's latest 2s sweep, so every
+            // connected browser tab (Insights panel, header chip) reads one
+            // kernel-level sample instead of each re-reading cgroupfs and
+            // /proc. A cache miss (restore in progress, monitor between
+            // sweeps, no accounting scope, or a transient read error) falls
+            // back to the direct probe below with unchanged semantics.
+            let sweep = state.resource_samples.lookup_sweep(&session_id);
+            let (sampled_at_ms, usage, system) = match sweep {
+                Some((sampled_at_ms, usage, system)) => (sampled_at_ms, Some(usage), Some(system)),
+                _ => {
+                    let usage = agent_core::resource_caps::session_resource_usage(&session_id)
+                        .map_err(|error| format!("session_resource_usage_failed:{error}"))?;
+                    let system = agent_core::resource_caps::system_resource_usage()
+                        .map_err(|error| format!("system_resource_usage_failed:{error}"))?;
+                    (now_ms(), usage, system)
+                }
+            };
+            let system = system.map(|usage| WebSystemResourceUsage {
+                cpu_busy_ticks: usage.cpu_busy_ticks,
+                cpu_total_ticks: usage.cpu_total_ticks,
+                memory_total_bytes: usage.memory_total_bytes,
+                memory_available_bytes: usage.memory_available_bytes,
+            });
             return Ok(Some(WireEvent::SessionResourceUsage {
                 session_id,
-                sampled_at_ms: now_ms(),
+                sampled_at_ms,
                 usage: usage.map(|usage| WebSessionResourceUsage {
                     cpu_usage_usec: usage.cpu_usage_usec,
                     cpu_quota_cores: usage.cpu_quota_cores,

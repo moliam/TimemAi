@@ -8357,6 +8357,7 @@ fn routing_test_state() -> AppState {
         mailbox_state_cache: Arc::new(Mutex::new(HashMap::new())),
         mailbox_send_receipt_watch: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
         mailbox_send_lane_locks: Arc::new(Mutex::new(HashMap::new())),
+        resource_samples: Arc::new(session_resource_monitor::ResourceSampleCache::new()),
     }
 }
 
@@ -23897,11 +23898,12 @@ fn settled_final_preview_bypasses_broadcast_throttle_and_keeps_wire_order() {
 }
 
 mod session_resource_observation_tests {
+    use super::{handle_command, routing_test_state, ClientCommand, WireEvent, TEST_PORT};
     use crate::server::session_resource_monitor::{
-        dominant_memory_session, dominant_share_suffix, render_observation, ResourceObservation,
-        SessionObservationState,
+        dominant_memory_session, dominant_share_suffix, render_observation, CachedResourceSweep,
+        ResourceObservation, ResourceSampleCache, SessionObservationState,
     };
-    use agent_core::resource_caps::{JobResourceUsage, SessionResourceUsage};
+    use agent_core::resource_caps::{JobResourceUsage, SessionResourceUsage, SystemResourceUsage};
 
     fn usage(
         cpu_usage_usec: u64,
@@ -23952,6 +23954,104 @@ mod session_resource_observation_tests {
             oom_kill_count,
             memory_current_bytes: Some(1024),
         }
+    }
+
+    #[test]
+    fn resource_usage_query_shares_the_monitor_sweep_across_tabs() {
+        let state = routing_test_state();
+        let cached = SessionResourceUsage {
+            memory_current_bytes: Some(4_000),
+            memory_anon_bytes: Some(3_000),
+            cpu_usage_usec: Some(1_000_000),
+            ..Default::default()
+        };
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert("session_a".to_string(), cached);
+        state.resource_samples.publish_sweep(CachedResourceSweep {
+            sampled_at_ms: 12345,
+            system: Some(SystemResourceUsage {
+                cpu_busy_ticks: Some(10),
+                cpu_total_ticks: Some(20),
+                memory_total_bytes: Some(32 * 1024 * 1024 * 1024),
+                memory_available_bytes: Some(16 * 1024 * 1024 * 1024),
+            }),
+            sessions,
+        });
+
+        let event = handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::SessionResourceUsageQuery {
+                session_id: "session_a".to_string(),
+            },
+        )
+        .unwrap()
+        .unwrap();
+        let WireEvent::SessionResourceUsage {
+            sampled_at_ms,
+            usage,
+            system,
+            ..
+        } = event
+        else {
+            panic!("expected a session resource usage event")
+        };
+        // The cached sweep timestamp, not a fresh wall-clock sample: every
+        // tab reads the same monitor sweep.
+        assert_eq!(sampled_at_ms, 12345);
+        let usage = usage.expect("cached session sample must surface");
+        assert_eq!(usage.memory_current_bytes, Some(4_000));
+        assert_eq!(usage.memory_anon_bytes, Some(3_000));
+        let system = system.expect("cached system sample must surface");
+        assert_eq!(system.cpu_total_ticks, Some(20));
+    }
+
+    #[test]
+    fn resource_sample_cache_replaces_the_whole_sweep_atomically() {
+        let cache = ResourceSampleCache::new();
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert("a".to_string(), SessionResourceUsage::default());
+        sessions.insert("b".to_string(), SessionResourceUsage::default());
+        // A sweep without a usable machine-wide snapshot is never served:
+        // queries keep their direct-probe fallback.
+        cache.publish_sweep(CachedResourceSweep {
+            sampled_at_ms: 1,
+            system: None,
+            sessions,
+        });
+        assert!(cache.lookup_sweep("a").is_none());
+
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert("a".to_string(), SessionResourceUsage::default());
+        sessions.insert("b".to_string(), SessionResourceUsage::default());
+        cache.publish_sweep(CachedResourceSweep {
+            sampled_at_ms: 2,
+            system: Some(SystemResourceUsage {
+                cpu_busy_ticks: Some(1),
+                cpu_total_ticks: Some(2),
+                memory_total_bytes: Some(8),
+                memory_available_bytes: Some(4),
+            }),
+            sessions,
+        });
+        assert!(cache.lookup_sweep("a").is_some());
+        assert!(cache.lookup_sweep("b").is_some());
+
+        // A later sweep only contains sessions still in the live set, so
+        // replacing it drops everything that left — atomically, with no
+        // per-session bookkeeping and no way for the cache to grow.
+        cache.publish_sweep(CachedResourceSweep {
+            sampled_at_ms: 3,
+            system: Some(SystemResourceUsage {
+                cpu_busy_ticks: Some(1),
+                cpu_total_ticks: Some(2),
+                memory_total_bytes: Some(8),
+                memory_available_bytes: Some(4),
+            }),
+            sessions: std::collections::HashMap::new(),
+        });
+        assert!(cache.lookup_sweep("a").is_none());
+        assert!(cache.lookup_sweep("b").is_none());
     }
 
     #[test]
