@@ -457,6 +457,53 @@ async function main() {
     await browser.call("Page.bringToFront");
     await waitFor(() => browser.evaluate(`document.body.textContent.includes('Insights acceptance turn')`), "initial snapshot");
 
+    // Regression: the chat viewport auto-scrolls while a response streams.
+    // GlobalTitleTip used to close every tooltip on any document scroll, so
+    // hovering a title appeared dead until focus/click. An unrelated scroll
+    // must leave a tooltip anchored under the pointer, and leaving the title
+    // must still dismiss it.
+    const assertTooltipSurvivesUnrelatedScroll = async (selector, label) => {
+      const point = await center(browser, selector);
+      assert(point, `${label} is visible for hover`);
+      await browser.call("Input.dispatchMouseEvent", {
+        type: "mouseMoved", x: 2, y: 2, button: "none", buttons: 0,
+      });
+      await sleep(60);
+      await browser.call("Input.dispatchMouseEvent", {
+        type: "mouseMoved", x: point.x, y: point.y, button: "none", buttons: 0,
+      });
+      await waitFor(
+        () => browser.evaluate(`!!document.querySelector('.global-title-tip')`),
+        `${label} tooltip appears on hover`,
+      );
+      const before = await browser.evaluate(
+        `document.querySelector('.global-title-tip')?.textContent ?? ''`,
+      );
+      await browser.evaluate(`(() => {
+        const scroll = document.querySelector('.chat-scroll');
+        scroll.dispatchEvent(new Event('scroll'));
+      })()`);
+      await sleep(120);
+      const after = await browser.evaluate(`(() => {
+        const tip = document.querySelector('.global-title-tip');
+        return tip ? { text: tip.textContent, visibility: getComputedStyle(tip).visibility } : null;
+      })()`);
+      assert(
+        after && after.visibility === 'visible' && after.text === before,
+        `${label} tooltip survives unrelated scroll: ${JSON.stringify({ before, after })}`,
+      );
+      await browser.call("Input.dispatchMouseEvent", {
+        type: "mouseMoved", x: 2, y: 2, button: "none", buttons: 0,
+      });
+      await waitFor(
+        () => browser.evaluate(`!document.querySelector('.global-title-tip')`),
+        `${label} tooltip closes after the pointer leaves`,
+      );
+    };
+    await assertTooltipSurvivesUnrelatedScroll('.session-name', 'session name');
+    await assertTooltipSurvivesUnrelatedScroll('.session-insights-chip', 'insights chip');
+    await assertTooltipSurvivesUnrelatedScroll('.header-model-control', 'header model');
+
     // Responsive sidebar regression: at desktop widths the collapsed role
     // panel is the 44px right rail; below 1051px it must become a fixed
     // off-canvas drawer instead of wrapping into a grid row under the left

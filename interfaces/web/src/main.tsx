@@ -20909,6 +20909,7 @@ function GlobalTitleTip() {
   const [tip, setTip] = useState<{ text: string; rect: DOMRect } | null>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   const activeRef = useRef<{ el: Element; title: string } | null>(null);
+  const pointerRef = useRef<{ x: number; y: number } | null>(null);
   const tipRef = useRef<HTMLDivElement | null>(null);
 
   const deactivate = useCallback(() => {
@@ -20939,8 +20940,12 @@ function GlobalTitleTip() {
   useEffect(() => {
     const titleHolder = (node: EventTarget | null): Element | null =>
       node instanceof Element ? node.closest("[title]") : null;
+    const rememberPointer = (event: PointerEvent) => {
+      pointerRef.current = { x: event.clientX, y: event.clientY };
+    };
 
     const onPointerOver = (event: PointerEvent) => {
+      rememberPointer(event);
       const active = activeRef.current;
       if (
         active &&
@@ -20963,6 +20968,7 @@ function GlobalTitleTip() {
       deactivate();
     };
     const onPointerMove = (event: PointerEvent) => {
+      rememberPointer(event);
       const active = activeRef.current;
       if (!active) return;
       if (!active.el.isConnected) {
@@ -20982,6 +20988,37 @@ function GlobalTitleTip() {
       // React re-renders may rewrite `title` while hovering; keep it removed
       // so the delayed native bubble can never fight the instant one.
       if (active.el.hasAttribute("title")) active.el.removeAttribute("title");
+    };
+    const onScroll = () => {
+      const active = activeRef.current;
+      if (!active) return;
+      if (!active.el.isConnected) {
+        deactivate();
+        return;
+      }
+      const pointer = pointerRef.current;
+      const target = pointer ? document.elementFromPoint(pointer.x, pointer.y) : null;
+      // A scroll elsewhere on the page (for example the chat viewport
+      // auto-scrolling while a response streams) must not dismiss a tooltip
+      // that is still anchored under the pointer. Only close it when the
+      // active element actually moved away from the pointer.
+      if (!target || (target !== active.el && !active.el.contains(target))) {
+        deactivate();
+        return;
+      }
+      setTip((current) => {
+        if (!current) return current;
+        const next = active.el.getBoundingClientRect();
+        if (
+          current.rect.left === next.left &&
+          current.rect.top === next.top &&
+          current.rect.width === next.width &&
+          current.rect.height === next.height
+        ) {
+          return current;
+        }
+        return { ...current, rect: next };
+      });
     };
     const onFocusIn = (event: FocusEvent) => {
       const el = titleHolder(event.target);
@@ -21008,7 +21045,7 @@ function GlobalTitleTip() {
     document.addEventListener("pointermove", onPointerMove, true);
     document.addEventListener("focusin", onFocusIn, true);
     document.addEventListener("focusout", onFocusOut, true);
-    document.addEventListener("scroll", hideForViewportChange, true);
+    document.addEventListener("scroll", onScroll, true);
     window.addEventListener("resize", hideForViewportChange);
     window.addEventListener("blur", hideForViewportChange);
     return () => {
@@ -21018,7 +21055,7 @@ function GlobalTitleTip() {
       document.removeEventListener("pointermove", onPointerMove, true);
       document.removeEventListener("focusin", onFocusIn, true);
       document.removeEventListener("focusout", onFocusOut, true);
-      document.removeEventListener("scroll", hideForViewportChange, true);
+      document.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", hideForViewportChange);
       window.removeEventListener("blur", hideForViewportChange);
     };
