@@ -1091,7 +1091,17 @@ fn prompt_structure_documentation_matches_rendered_assistant_headings() {
                 time_ms: 2,
                 text: "FINAL REPLY".to_string(),
                 slice_index: 2,
-                slice_count: 2,
+                slice_count: 3,
+            },
+            PromptSlice {
+                delta_id: "pd_doc_guard".to_string(),
+                slice_id: "ps_doc_guard_s003".to_string(),
+                component_id: "compression".to_string(),
+                prompt_type: "context_compression_summary".to_string(),
+                time_ms: 3,
+                text: "COMPRESSION SUMMARY TEXT".to_string(),
+                slice_index: 3,
+                slice_count: 3,
             },
         ],
     };
@@ -1104,8 +1114,10 @@ fn prompt_structure_documentation_matches_rendered_assistant_headings() {
     );
     assert!(markdown_out.contains("\n## ASSISTANT (thinking)\n"));
     assert!(markdown_out.contains("\n## ASSISTANT\n"));
+    assert!(markdown_out.contains("\n## ASSISTANT (context compression summary)\n"));
     let mut xml_out = String::new();
     append_rendered_deltas_for_mode(&mut xml_out, &[delta], &XmlSuiteV1, ToolCallMode::Inline);
     assert!(xml_out.contains("<ASSISTANT kind=\"thinking\">"));
+    assert!(xml_out.contains("<ASSISTANT kind=\"context_compression_summary\">"));
     assert!(xml_out.contains("</ASSISTANT>"));
 }
