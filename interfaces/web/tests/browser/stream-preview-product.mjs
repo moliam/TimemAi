@@ -524,7 +524,9 @@ async function main() {
     assert(requests===1,"response finished before browser observed preview");
     if (scenario === "interaction") {
       appendStreaming("\n\n" + Array.from({length:180}, (_,i) => `Paragraph ${i} streaming text.`).join("\n\n"));
-      await waitFor(() => browser.evaluate(`document.querySelector('.response-preview')?.textContent.includes('Paragraph 179')`), "long streamed response missing", 60000);
+      // streamReveal renders at a fixed pace; on throttled runners
+      // 180 paragraphs can exceed 60s, so give the reveal a wider window.
+      await waitFor(() => browser.evaluate(`document.querySelector('.response-preview')?.textContent.includes('Paragraph 179')`), "long streamed response missing", 120000);
       await browser.call("Browser.grantPermissions", {origin:"http://127.0.0.1:18987", permissions:["clipboardReadWrite", "clipboardSanitizedWrite"]});
       await browser.evaluate(`(() => { const node=document.querySelector('.response-preview .markdown-body p');const r=document.createRange();r.selectNodeContents(node);const sel=window.getSelection();sel.removeAllRanges();sel.addRange(r); })()`);
       await browser.call("Input.dispatchKeyEvent", {type:"keyDown",key:"c",code:"KeyC",modifiers:4,commands:["copy"]});
@@ -643,7 +645,10 @@ async function main() {
       assert(modelInputs.slice(1).some(body => body.includes("SUPPLEMENT_STREAM_CHECK")), "next request did not consume supplement");
     }
     if (scenario === "invalid") {
-      assert(received.some(raw => { const e = raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.model.preview" && e.event.payload.attempt === 1 && e.event.payload.response === null; }), "invalid attempt did not retract all previews");
+      // The retract event rides the websocket asynchronously; a synchronous
+      // check races event delivery on slow runners (macOS flake). Converge
+      // with waitFor instead of asserting the instantaneous snapshot.
+      await waitFor(() => received.some(raw => { const e = raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.model.preview" && e.event.payload.attempt === 1 && e.event.payload.response === null; }), "invalid attempt did not retract all previews");
     }
     const persistedFinal = async (dir) => {
       for (const entry of await readdir(dir, {withFileTypes:true})) {
