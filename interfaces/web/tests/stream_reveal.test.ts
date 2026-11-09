@@ -47,6 +47,9 @@ describe("stream reveal integration", () => {
     expect(mainSource).not.toContain("stream-reading-hold");
     expect(mainSource).not.toContain("stream-thought-card");
     expect(mainSource).toContain('className={`stream-working-trailer${modelPhase ? " model-waiting" : " tool-active"}`}');
+    expect(mainSource).toContain("streamModelPhase(");
+    expect(mainSource).toContain('<span className="stream-working-calls">AI {countTurnModelRequests(turn)}</span>');
+    expect(mainSource).not.toContain('✦ {countTurnModelRequests(turn)}');
     expect(mainSource).toContain('turnProjection?.projection.state === "active" &&');
     expect(mainSource).toContain('turnProjection.projection.activity.kind === "waiting_model"');
     expect(mainSource).not.toContain('token.turn_id === turn.turn_id');

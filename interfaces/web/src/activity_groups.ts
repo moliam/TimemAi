@@ -18,6 +18,19 @@ export function isRunningToolActivity(
   );
 }
 
+/**
+ * The star names the model as the active worker: the Host has published a
+ * waiting_model projection, or response text is actively streaming. A local
+ * background tool never suppresses a genuinely working model; when both are
+ * active the model is primary. A local-only wait falls back to the wrench.
+ */
+export function streamModelPhase(
+  waitingModel: boolean,
+  previewStatus: string | undefined,
+): boolean {
+  return waitingModel || previewStatus === "streaming";
+}
+
 export type ToolActivityGroupStatus = "running" | "failed" | "completed";
 
 export type ToolActivityCount = {

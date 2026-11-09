@@ -339,6 +339,7 @@ import {
   computeStreamRetention,
   dedupeFreeTalkItems,
   repeatsRetainedFreeTalk,
+  streamModelPhase,
   streamToolHandoffIds,
   summarizeConsecutiveToolActivities,
   ToolActivitySummary,
@@ -13308,10 +13309,6 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
     JSON.stringify(a.run_bash_edit) === JSON.stringify(b.run_bash_edit);
 });
 
-function modelPhaseForStream(waitingModel: boolean, status?: string): boolean {
-  return waitingModel || status === "streaming";
-}
-
 const ThinkingPreviewWindow = memo(function ThinkingPreviewWindow({
   text,
 }: {
@@ -13405,10 +13402,12 @@ function TurnAnswerDelivery({
   );
   const thinkingTailShown = preview?.thinking_tail ?? "";
   const showThinkingChain = useShowThinkingChain();
-  const isThinking = modelPhaseForStream(waitingModel, preview?.response?.status) &&
-    preview?.stream_phase === "thinking";
-  const isWaiting = !!modelRetryStatus && waitingModel && !preview?.stream_phase;
-  const modelPhase = modelPhaseForStream(waitingModel, preview?.response?.status);
+  const modelPhase = streamModelPhase(
+    waitingModel,
+    preview?.response?.status,
+  );
+  const isThinking = modelPhase && preview?.stream_phase === "thinking";
+  const isWaiting = !!modelRetryStatus && modelPhase && !preview?.stream_phase;
   const phase = modelPhase ? "model" : "local";
   const phaseBoundary = turnWorkPhaseBoundary(turn, phase);
   const phaseStartedAt = useMemo(
@@ -13516,7 +13515,7 @@ function TurnAnswerDelivery({
           <span className="stream-working-total" aria-hidden="true">
             <Clock8 size={12} />
             <WorkingElapsed createdAtMs={turn.created_at_ms} liveFormat className="stream-working-turn-elapsed" />
-            <span className="stream-working-calls">✦ {countTurnModelRequests(turn)}</span>
+            <span className="stream-working-calls">AI {countTurnModelRequests(turn)}</span>
           </span>
         </div>
       )}

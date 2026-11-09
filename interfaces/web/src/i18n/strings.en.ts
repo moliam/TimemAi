@@ -318,7 +318,7 @@ export const en: Strings = {
     openInTerminal: "Open directory in terminal",
     done: "Done",
     running: "running",
-    waitingModel: "Waiting for model response",
+    waitingModel: "Model is working",
     localWorking: "Working locally",
     thinkingWords: "{count} words",
     thinkingModel: "Model is thinking",

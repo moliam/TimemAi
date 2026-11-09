@@ -315,7 +315,7 @@ export const zh = {
     openInTerminal: "在命令行中打开目录",
     done: "已完成",
     running: "运行中",
-    waitingModel: "等待模型回复",
+    waitingModel: "模型正在工作",
     localWorking: "本地工作中",
     thinkingWords: "{count} words",
     thinkingModel: "模型正在思考",

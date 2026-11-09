@@ -1069,3 +1069,10 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 背景：`[timem_web_history_rolling] reclaimed_bytes=... budget_bytes=...` 在每个滚动 tick（60 秒间隔）实际回收非零字节时写 stderr；繁忙的多 agent 工作负载每个 tick 都有回收，长驻实例持续刷屏，与已静默的 mailbox 例行维护日志同性质。
 - 改动：`applications/timem/src/server/mem_maintenance.rs` 的 `spawn_conversation_rolling_loop` 默认不再输出例行回收摘要；需要观察时设置 `TIMEM_WEB_HISTORY_ROLLING_LOG=1`（也接受 true/yes/on）。真实失败仍以 `[timem_web_warning] conversation_rolling_eviction_failed` 输出。
 - 测试看护：`conversation_rolling_eviction_deletes_oldest_blocks_first` 复核回收行为不变；timem lib 全量 467 过（1 ignored）。
+
+## 2026-11 工作状态星标归属
+
+- 背景：工作尾部同时可能出现模型等待/流式状态与后台本地工具状态，右侧模型请求计数又固定带 `✦`，导致本地任务运行时仍看到星号，无法判断是模型还是本地在工作。
+- 规则：只有 Host 的 `waiting_model` 活跃投影，或 preview 的 `response.status === "streaming"`，才显示模型星标；模型与后台本地任务同时活跃时模型优先。模型未工作时才显示本地扳手。
+- 展示：工作尾部模型请求计数改为 `AI N`，不再复用 `✦`，让星号只承担“模型正在工作”的语义；`waiting_model` 的 tooltip/aria 改为“模型正在工作 / Model is working”。
+- 测试看护：`activity_groups.test.ts` 覆盖等待、流式、中间态与空闲的纯相位；`stream-preview-acceptance.mjs` 在真实 Chrome 覆盖本地-only、`waiting_model + background_running`、`streaming + background_running`，并断言计数不再包含 `✦`；`stream_reveal.test.ts` 守卫相位接线与计数文案。

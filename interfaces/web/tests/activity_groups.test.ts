@@ -8,6 +8,7 @@ import {
   streamToolHandoffIds,
   computeStreamRetention,
   isRunningToolActivity,
+  streamModelPhase,
   summarizeConsecutiveToolActivities,
   summarizeToolActivities,
 } from "../src/activity_groups";
@@ -23,6 +24,21 @@ function activity(tool_name: string, tool_status: string): Activity {
     createdAt: 1,
   };
 }
+
+describe("stream model phase", () => {
+  it("keeps the model phase while waiting for or actively receiving a response", () => {
+    expect(streamModelPhase(true, undefined)).toBe(true);
+    expect(streamModelPhase(true, "intermediate")).toBe(true);
+    expect(streamModelPhase(false, "streaming")).toBe(true);
+    expect(streamModelPhase(true, "streaming")).toBe(true);
+  });
+
+  it("falls back to the local phase only when the model is not working", () => {
+    expect(streamModelPhase(false, undefined)).toBe(false);
+    expect(streamModelPhase(false, "intermediate")).toBe(false);
+    expect(streamModelPhase(false, "final")).toBe(false);
+  });
+});
 
 describe("tool activity grouping", () => {
   it("counts tools in first-seen order", () => {
