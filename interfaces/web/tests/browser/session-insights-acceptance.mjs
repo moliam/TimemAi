@@ -1280,13 +1280,20 @@ async function main() {
     assert(rowActionsAtRest.visibility === 'hidden' && parseFloat(rowActionsAtRest.opacity) === 0, `endpoint row actions stay hidden until hover: ${JSON.stringify(rowActionsAtRest)}`);
     const rowPoint = await center(browser, ".endpoint-settings-row");
     await browser.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: rowPoint.x, y: rowPoint.y });
-    await sleep(280);
-    const rowActionsHovered = await browser.evaluate(`(() => {
+    // The reveal is a CSS transition; on throttled runners the fade can take
+    // longer than any fixed sleep, so converge on the settled state.
+    await waitFor(() => browser.evaluate(`(() => {
       const actions = document.querySelector('.endpoint-settings-row .endpoint-settings-actions');
       const style = getComputedStyle(actions);
-      return { visibility: style.visibility, opacity: style.opacity };
-    })()`);
-    assert(rowActionsHovered.visibility === 'visible' && parseFloat(rowActionsHovered.opacity) === 1, `hovering the endpoint row reveals its actions: ${JSON.stringify(rowActionsHovered)}`);
+      return style.visibility === 'visible' && parseFloat(style.opacity) === 1;
+    })()`), async () => {
+      const state = await browser.evaluate(`(() => {
+        const actions = document.querySelector('.endpoint-settings-row .endpoint-settings-actions');
+        const style = getComputedStyle(actions);
+        return { visibility: style.visibility, opacity: style.opacity };
+      })()`);
+      return `hovering the endpoint row reveals its actions: ${JSON.stringify(state)}`;
+    }, 10000);
     const rowSurfaceHovered = await browser.evaluate(`(() => {
       const row = document.querySelector('.endpoint-settings-row');
       const style = getComputedStyle(row);
@@ -1493,7 +1500,8 @@ async function main() {
     const chipZh = await center(browser, ".session-insights-chip");
     await click(browser, chipZh);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.session-insights-panel')`), "panel opens in Chinese");
-    assert(await browser.evaluate(`(() => {
+    // Rows render as sampling data arrives; converge instead of racing one snapshot.
+    await waitFor(() => browser.evaluate(`(() => {
       const rows = [...document.querySelectorAll('.session-insight-row')];
       const cpu = rows.find(r => r.textContent.includes('CPU 消耗'));
       const mem = rows.find(r => r.textContent.includes('内存消耗'));
