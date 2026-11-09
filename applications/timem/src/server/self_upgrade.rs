@@ -678,6 +678,14 @@ pub(crate) fn replace_executable(staged: &Path, executable: &Path) -> Result<(),
 /// Best-effort removal of upgrade leftovers (`.bak.*` / `.old.*`) next to the
 /// running executable. Backups newer than the retention window are kept for
 /// manual rollback.
+///
+/// The age is taken from the timestamp embedded in the backup file name (the
+/// `<timestamp_label>` recorded when the backup was created). File mtimes are
+/// inherited from the source binary by copy/rename, so a backup of a release
+/// binary built days ago would otherwise look expired the moment it is
+/// created, destroying the rollback path of the upgrade that just produced
+/// it. File mtimes are only used for foreign names without a valid embedded
+/// stamp.
 pub(crate) fn cleanup_upgrade_leftovers(executable: &Path) {
     let Some(parent) = executable.parent() else {
         return;
@@ -698,15 +706,34 @@ pub(crate) fn cleanup_upgrade_leftovers(executable: &Path) {
         if !name.starts_with(stem) || (!name.contains(".bak.") && !name.contains(".old.")) {
             continue;
         }
-        if let Ok(metadata) = entry.metadata() {
-            if let Ok(modified) = metadata.modified() {
-                if modified >= cutoff {
-                    continue;
-                }
+        let entry_time = match name
+            .split_once(".bak.")
+            .or_else(|| name.split_once(".old."))
+            .and_then(|(_, stamp)| backup_stamp_system_time(stamp))
+        {
+            Some(stamped_time) => Some(stamped_time),
+            None => entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok()),
+        };
+        if let Some(modified) = entry_time {
+            if modified >= cutoff {
+                continue;
             }
         }
         let _ = std::fs::remove_file(entry.path());
     }
+}
+
+/// Parses the `%Y%m%d-%H%M%S` label embedded in a backup file name into a
+/// `SystemTime` in the local time zone. Returns `None` for foreign names so
+/// callers fall back to the file mtime.
+fn backup_stamp_system_time(stamp: &str) -> Option<std::time::SystemTime> {
+    let naive = chrono::NaiveDateTime::parse_from_str(stamp, "%Y%m%d-%H%M%S").ok()?;
+    use chrono::TimeZone;
+    let local = chrono::Local.from_local_datetime(&naive).single()?;
+    Some(local.into())
 }
 
 #[cfg(test)]
@@ -724,6 +751,42 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn cleanup_keeps_backups_whose_filename_stamp_is_fresh_despite_stale_mtime() {
+        let dir = temp_dir("cleanup-fresh-stamp");
+        let executable = dir.join("timem.exe");
+        std::fs::write(&executable, b"#!/bin/sh\necho current\n").unwrap();
+        // Simulate an externally created backup: copy/rename inherits the file
+        // mtime from a binary built far in the past, while the embedded
+        // filename stamp records the real creation moment (now).
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+        let fresh_backup = dir.join(format!("timem.exe.bak.{stamp}"));
+        std::fs::write(&fresh_backup, b"#!/bin/sh\necho old\n").unwrap();
+        let stale_time =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(30 * 24 * 60 * 60);
+        {
+            let handle = std::fs::File::options()
+                .write(true)
+                .open(&fresh_backup)
+                .unwrap();
+            handle
+                .set_times(std::fs::FileTimes::new().set_modified(stale_time))
+                .unwrap();
+        }
+        let stale_backup = dir.join("timem.exe.bak.20200101-000000");
+        std::fs::write(&stale_backup, b"#!/bin/sh\necho stale\n").unwrap();
+        cleanup_upgrade_leftovers(&executable);
+        assert!(
+            fresh_backup.exists(),
+            "a backup whose embedded stamp is fresh must survive cleanup"
+        );
+        assert!(
+            !stale_backup.exists(),
+            "a backup with an expired embedded stamp must be pruned"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
