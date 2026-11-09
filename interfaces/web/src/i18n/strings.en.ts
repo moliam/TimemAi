@@ -833,6 +833,7 @@ export const en: Strings = {
     queueLabel: "Queue timeout (minutes, 0 delivers immediately)",
     queueHint: "When busy at fire time, the prompt joins the message queue in order for at most this many minutes, then is delivered directly; 0 never queues (merged into the active turn or starting a new one immediately)",
     queued: "Queued",
+    queueNoDeadline: "No timeout",
     timerTag: "Timer",
     headPrefix: "Timer:",
     triggerTag: "Trigger:",

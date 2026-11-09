@@ -1,4 +1,12 @@
 import { t } from "./i18n";
+import { isTimerEntryText, parseTimerEntryText } from "./view_model";
+
+export type QueuedTimerInfo = {
+  name: string | null;
+  prompt: string;
+  /** Host queue-wait deadline; absent for legacy unlimited entries. */
+  deadlineMs?: number;
+};
 
 export type QueuedMessage = {
  id: string;
@@ -9,7 +17,28 @@ export type QueuedMessage = {
  /** Legacy queue compatibility. */
  roleId?: string;
  deliveryError?: string;
+ /** Host-authored timer entry metadata, when this row is timer-fired. */
+ timer?: QueuedTimerInfo;
 };
+
+export function queuedMessageTimer(
+  text: string,
+  dispatchDeadlineMs?: number | null,
+): QueuedTimerInfo | null {
+  if (!isTimerEntryText(text)) return null;
+  const parsed = parseTimerEntryText(text);
+  const deadlineMs =
+    typeof dispatchDeadlineMs === "number" &&
+    Number.isFinite(dispatchDeadlineMs) &&
+    dispatchDeadlineMs >= 0
+      ? dispatchDeadlineMs
+      : undefined;
+  return {
+    name: parsed.name,
+    prompt: parsed.prompt,
+    ...(deadlineMs === undefined ? {} : { deadlineMs }),
+  };
+}
 
 const STORAGE_PREFIX = "timem-web-queued-messages:v2";
 const MAX_STORED_QUEUE_ITEMS = 2_000;

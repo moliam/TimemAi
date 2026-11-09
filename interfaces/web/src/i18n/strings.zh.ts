@@ -839,6 +839,7 @@ export const zh = {
     queueLabel: "排队超时（分钟，0 为立即投递）",
     queueHint: "到点时会话忙碌时先进入消息队列按序投递，最多等待该分钟数后直接投递；0 表示不排队、立即投递（并入当前对话或立即开启新对话）",
     queued: "排队",
+    queueNoDeadline: "无限等待",
     timerTag: "定时",
     headPrefix: "定时:",
     triggerTag: "触发:",

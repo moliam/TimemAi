@@ -1556,6 +1556,12 @@ button:disabled { cursor: not-allowed; }
 .queued-message-role > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .queued-message-role-separator { flex: 0 0 auto; margin: 0 4px; color: #6f9187; font-style: normal; font-weight: 500; }
 .queued-message-roles svg { flex: 0 0 auto; }
+.queued-message-timer { max-width: 100%; display: inline-flex; align-items: center; gap: 4px; overflow: hidden; border: 1px solid #3d5c78; border-radius: 999px; padding: 1px 6px; background: #223447; color: #b8d9f1; font-size: 9px; font-weight: 700; line-height: 13px; box-shadow: 0 1px 3px #0004; }
+.queued-message-timer-icon { flex: 0 0 auto; display: inline-flex; color: #82b9df; }
+.queued-message-timer-kind { flex: 0 0 auto; }
+.queued-message-timer-name { max-width: min(180px, 32vw); min-width: 0; overflow: hidden; color: #e1f0fb; text-overflow: ellipsis; white-space: nowrap; }
+.queued-message-timer-countdown { flex: 0 0 auto; color: #9fc7e2; font-size: 9px; font-variant-numeric: tabular-nums; }
+.queued-message-summary .queued-message-timer { flex: 0 1 auto; max-width: 48%; }
 .queued-message-attachments { display: inline-flex; align-items: center; gap: 3px; margin-top: 2px; color: #9fc9bb; font-size: 10px; font-weight: 600; }
 .queued-message.delivery-error { border-color: color-mix(in srgb, #d85c52 48%, #404040); }
 .queued-message.editing { grid-template-columns: 19px minmax(0, 1fr); align-items: start; column-gap: 9px; row-gap: 8px; padding: 9px 10px; }
@@ -1597,6 +1603,10 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .queued-message-drag { color: #87979e; }
 :root[data-theme="light"] .queued-message-drag:hover { background: #edf1f3; color: #536870; }
 :root[data-theme="light"] .queued-message-order { background: #e6ecef; color: #5f727b; }
+:root[data-theme="light"] .queued-message-timer { border-color: #b7cfe0; background: #e8f3fb; color: #2d6488; box-shadow: 0 1px 3px #294a5814; }
+:root[data-theme="light"] .queued-message-timer-icon { color: #3c7ea8; }
+:root[data-theme="light"] .queued-message-timer-name { color: #174b6d; }
+:root[data-theme="light"] .queued-message-timer-countdown { color: #4e7690; }
 :root[data-theme="light"] .queued-message p { color: #27343a; }
 :root[data-theme="light"] .queued-message-error { color: #a53d35; }
 :root[data-theme="light"] .queued-message-roles { border-color: #9bc1b5; background: #e4f1ed; color: #416d60; box-shadow: 0 1px 3px #48685c20; }

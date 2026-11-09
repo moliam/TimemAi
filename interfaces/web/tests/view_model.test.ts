@@ -32,6 +32,7 @@ import {
   coalesceActionLifecycle,
   completedModelEventsByRound,
   compareTurnTimelineItems,
+  isTimerEntryText,
   parseMailboxEntryText,
   parseTimerEntryText,
   compareTurnStreamItems,
@@ -5093,6 +5094,13 @@ describe("parseTimerEntryText", () => {
   it("does not strip a prefix that is not at the start", () => {
     const text = "正文 [timer:late] 不是前缀";
     expect(parseTimerEntryText(text)).toEqual({ name: null, prompt: text });
+  });
+
+  it("recognizes only a leading timer marker", () => {
+    expect(isTimerEntryText("[timer:name] prompt")).toBe(true);
+    expect(isTimerEntryText("[timer:] prompt")).toBe(true);
+    expect(isTimerEntryText("正文 [timer:late] 不是前缀")).toBe(false);
+    expect(isTimerEntryText("[timer:name")).toBe(false);
   });
 });
 

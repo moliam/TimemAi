@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches, clearQueuedMessagesPause, loadQueuedMessagesPause, queuedMessagesPauseSessionId, queuedMessagesPauseStorageKey, saveQueuedMessagesPause, shouldDirectManualMessage, stopQueuedAutoSend, unclaimedQueuedMessages } from "../src/queued_messages";
+import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessageTimer, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches, clearQueuedMessagesPause, loadQueuedMessagesPause, queuedMessagesPauseSessionId, queuedMessagesPauseStorageKey, saveQueuedMessagesPause, shouldDirectManualMessage, stopQueuedAutoSend, unclaimedQueuedMessages } from "../src/queued_messages";
 
 const messages: QueuedMessage[] = ["a", "b", "c", "d", "e"].map((id, index) => ({
   id,
@@ -31,6 +31,23 @@ describe("queued messages", () => {
   it("hands a working-session message directly to Host ownership", () => {
     expect(shouldDirectManualMessage("ready", 0, false)).toBe(true);
     expect(shouldDirectManualMessage("working", 0, false)).toBe(true);
+  });
+
+  it("extracts timer queue metadata without exposing the host prefix", () => {
+    expect(queuedMessageTimer("[timer:每日提醒] 检查构建结果", 1234)).toEqual({
+      name: "每日提醒",
+      prompt: "检查构建结果",
+      deadlineMs: 1234,
+    });
+    expect(queuedMessageTimer("[timer:] 无名称任务", null)).toEqual({
+      name: null,
+      prompt: "无名称任务",
+    });
+    expect(queuedMessageTimer("[timer:legacy] 旧队列", -1)).toEqual({
+      name: "legacy",
+      prompt: "旧队列",
+    });
+    expect(queuedMessageTimer("普通排队消息", 1234)).toBeNull();
   });
 
   it("changes automatic sending only from an explicit user switch action", () => {

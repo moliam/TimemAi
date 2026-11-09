@@ -937,6 +937,14 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 测试看护：`real_worker_timer_queue_timeout_appends_to_active_turn_without_turn_boundary`（真实 worker + 阻塞模型：active turn 中到期项无需结束 turn 即成为 supplement，重复扫描恰好一次，且进入下一次模型请求）；`timer_immediate_delivery_queue_fallback_has_retry_deadline`（立即投递回退条目携带 deadline）。
 - 验证：`cargo test -p timem --lib timer` 16 passed；`cargo test -p timem --lib` 516 passed / 1 ignored；fmt/diff 与模块边界/契约守卫通过。未改 Web 源码，无需重建 dist。
 
+## 2026-11 Timer 排队消息徽标与倒计时
+
+- 触发背景：用户要求排队中的 timer 消息显示特殊小 logo，并注明尚余倒计时。
+- Web 投影：`MessageQueuePayload` 接收 Host 已序列化的 `dispatch_deadline_ms`；`queuedMessageTimer` 只识别 Host-authored 的 `[timer:name]` 前缀，提取名称、裸正文与有限 deadline。旧条目无 deadline 显示「无限等待」，普通排队消息不渲染 timer 徽标。
+- 呈现：`QueuedMessageTimerBadge` 使用 AlarmClock + 「定时」+ 可选名称 + 每秒更新的倒计时（复用 `formatRemainingDuration` / `FlippingTime` / `tools.remaining`）；正文剥离原始前缀，编辑 textarea 仍保留原文。展开队列、折叠摘要、拖拽浮层统一呈现，深色/浅色与 390px 窄屏样式独立。
+- 测试看护：`queued_messages.test.ts` 覆盖名称、空名称、非法 deadline、普通消息；`view_model.test.ts` 覆盖前缀边界；`timer-ui-acceptance.mjs` 用真实 Chrome 断言 logo、名称、正文去前缀、倒计时按秒变化、折叠摘要徽标、1440/900/390 × 明暗布局不溢出。
+- 验证：`pnpm --dir interfaces/web test` 959 passed；`timer-ui-acceptance.mjs` 全过；`tsc --noEmit` 与 `pnpm build` 通过；Web performance guard 6/6（含 50k 事件批次 159ms）、multi-session CPU `cpuRatio=0.106`；`dist` 重建；module_boundary / test_contract / architecture_guard self-test / `git diff --check` 全绿。
+
 ## 2026-10 Timer 面板 prompt 展开/编辑
 
 - 触发背景：用户反馈面板只见名字不见内容，prompt 是触发时投递给会话的核心载荷，需要可见、可核对、可修改。澄清：产品面板本有删除按钮与 prompt 全文（用户看到的是示意网页的简化画法），但「编辑 prompt」是真实产品缺口。

@@ -130,6 +130,8 @@ export type MessageQueuePayload = {
   text: string;
   attachments: Attachment[];
   worker_roles: WorkerRole[];
+  /** Timer-fired entries: wall-clock queue-wait deadline. */
+  dispatch_deadline_ms?: number | null;
 };
 
 export type MessageQueueProjection = {

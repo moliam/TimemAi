@@ -345,6 +345,7 @@ import {
 } from "./activity_groups";
 import {
   QueuedMessage,
+  queuedMessageTimer,
   reorderQueuedMessages,
   reservedQueuedAttachmentIds,
 } from "./queued_messages";
@@ -9878,6 +9879,51 @@ function SortableQueuedMessage({
   });
 }
 
+function QueuedMessageTimerBadge({
+  timer,
+}: {
+  timer: NonNullable<QueuedMessage["timer"]>;
+}) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (timer.deadlineMs === undefined) return;
+    setNowMs(Date.now());
+    const interval = window.setInterval(() => setNowMs(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [timer.deadlineMs]);
+  const time =
+    timer.deadlineMs === undefined
+      ? undefined
+      : formatRemainingDuration(Math.max(0, timer.deadlineMs - nowMs));
+  const countdownLabel =
+    time === undefined ? undefined : t("tools.remaining", { time });
+  return (
+    <small className="queued-message-timer" title={t("timer.queueHint")}>
+      <span className="queued-message-timer-icon" aria-hidden="true">
+        <AlarmClock size={11} />
+      </span>
+      <span className="queued-message-timer-kind">{t("timer.timerTag")}</span>
+      {timer.name && (
+        <b className="queued-message-timer-name" title={timer.name}>
+          {timer.name}
+        </b>
+      )}
+      {time === undefined ? (
+        <span className="queued-message-timer-countdown">
+          {t("timer.queueNoDeadline")}
+        </span>
+      ) : (
+        <span
+          className="queued-message-timer-countdown"
+          aria-label={countdownLabel}
+        >
+          <LocalizedFlippingTime message="tools.remaining" time={time} />
+        </span>
+      )}
+    </small>
+  );
+}
+
 function TimemThread({
   activeSession,
   sessions,
@@ -10159,15 +10205,22 @@ function TimemThread({
     applyAuthoritativeComposerText(composerExpandedBaseRef.current);
   }, [applyAuthoritativeComposerText]);
   const queuedMessages: QueuedMessage[] =
-    activeSession?.message_queue.items.map((item) => ({
-      id: item.command_id,
-      text: item.payload.text,
-      createdAtMs: item.payload.created_at_ms,
-      attachmentIds: item.payload.attachments.map(
-        (attachment) => attachment.id,
-      ),
-      roleIds: item.payload.worker_roles.map((role) => role.id),
-    })) ?? [];
+    activeSession?.message_queue.items.map((item) => {
+      const timer = queuedMessageTimer(
+        item.payload.text,
+        item.payload.dispatch_deadline_ms,
+      );
+      return {
+        id: item.command_id,
+        text: item.payload.text,
+        createdAtMs: item.payload.created_at_ms,
+        attachmentIds: item.payload.attachments.map(
+          (attachment) => attachment.id,
+        ),
+        roleIds: item.payload.worker_roles.map((role) => role.id),
+        ...(timer ? { timer } : {}),
+      };
+    }) ?? [];
   const displayQueuedMessages = queuedMessages;
   const queuePanelCollapsed =
     !!activeSessionId && collapsedQueuePanelSessionIds.has(activeSessionId);
@@ -11254,10 +11307,14 @@ function TimemThread({
                     className={`queued-message-summary ${firstQueuedMessage?.deliveryError ? "delivery-error" : ""}`}
                     title={
                       firstQueuedMessage?.deliveryError ||
+                      firstQueuedMessage?.timer?.prompt ||
                       firstQueuedMessage?.text
                     }
                   >
-                    <p>{firstQueuedMessage?.text}</p>
+                    {firstQueuedMessage?.timer && (
+                      <QueuedMessageTimerBadge timer={firstQueuedMessage.timer} />
+                    )}
+                    <p>{firstQueuedMessage?.timer?.prompt ?? firstQueuedMessage?.text}</p>
                     {firstQueuedMessage &&
                       firstQueuedMessage.attachmentIds.length > 0 && (
                         <small className="queued-message-summary-attachments">
@@ -11407,6 +11464,9 @@ function TimemThread({
                                   {index + 1}
                                 </span>
                                 <div className="queued-message-preview">
+                                  {message.timer && (
+                                    <QueuedMessageTimerBadge timer={message.timer} />
+                                  )}
                                   {messageRoleNames.length > 0 && (
                                     <small
                                       className="queued-message-roles"
@@ -11464,10 +11524,12 @@ function TimemThread({
                                   ) : (
                                     <p
                                       title={
-                                        message.deliveryError || message.text
+                                        message.deliveryError ||
+                                        message.timer?.prompt ||
+                                        message.text
                                       }
                                     >
-                                      {message.text}
+                                      {message.timer?.prompt ?? message.text}
                                     </p>
                                   )}
                                   {message.attachmentIds.length > 0 && (
@@ -11600,7 +11662,10 @@ function TimemThread({
                           {draggedQueuedMessagePosition}
                         </span>
                         <div className="queued-message-preview">
-                          <p>{draggedQueuedMessage.text}</p>
+                          {draggedQueuedMessage.timer && (
+                            <QueuedMessageTimerBadge timer={draggedQueuedMessage.timer} />
+                          )}
+                          <p>{draggedQueuedMessage.timer?.prompt ?? draggedQueuedMessage.text}</p>
                           {draggedQueuedMessage.attachmentIds.length > 0 && (
                             <small className="queued-message-attachments">
                               <Paperclip size={11} />
