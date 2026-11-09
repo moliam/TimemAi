@@ -928,6 +928,15 @@ Native 模式下，动态上下文估算按保留的 delta 边界统计所属工
 - 测试看护：`resource_usage_query_shares_the_monitor_sweep_across_tabs`（多标签共享同一时间戳与样本）、`resource_sample_cache_replaces_the_whole_sweep_atomically`（system 缺失不服务、整体替换淘汰离开会话）、`statistics_version_bumps_on_every_statistics_render`、`statistics_html_embeds_the_rendered_version_on_main_shell`、`statistics_refresh_script_pauses_hidden_tabs_and_skips_unchanged_dom`（探针 URL、版本对比与 dataset 读取）。
 - 验证：timem lib `resource_` 14 passed、`statistics` 9 passed、timem_http_websocket 11 passed；fmt/clippy/architecture/module_boundary/test_contract/diff 全绿；未改 `interfaces/web` 源码，无需重建 dist。
 
+## 2026-11 Timer 排队超时到点立即进入聊天
+
+- 触发背景：用户明确 `queue_timeout` 的“超时”是到达上限后立即进入聊天，而不是继续排在一个可能永不结束的 turn 后面。
+- 根因：`dispatch_deadline_ms` 只由 turn 完成/队列变更触发检查，timer scheduler 只发 timer、不扫描队列 deadline；长 turn 下正数超时永不兑现。`queue_timeout=0` 的立即投递在 supplement 边界失败后回退队列时也未带 deadline。
+- Host：`spawn_timer_scheduler` 每 tick 额外执行 `dispatch_timed_out_queue_intents`。空闲会话按到期项优先启动新 turn；有 Core 权威 active turn 时复用 `send_queued_message_now`，把到期项作为当前 turn supplement 立即追加；`pending_turn_id` 尚未 TurnStarted 时下一 tick 重试。重复扫描依靠队列移除与 command id 保证幂等；item-not-found / dispatch-in-progress / supplement-rejected 属瞬时边界，不刷错误日志。
+- 立即投递回退：`enqueue_timer_fire` 对 `queue_timeout=0` 也写入 fire-time deadline，使调度器下一 tick 可重试，不再无限等待 turn 边界。
+- 测试看护：`real_worker_timer_queue_timeout_appends_to_active_turn_without_turn_boundary`（真实 worker + 阻塞模型：active turn 中到期项无需结束 turn 即成为 supplement，重复扫描恰好一次，且进入下一次模型请求）；`timer_immediate_delivery_queue_fallback_has_retry_deadline`（立即投递回退条目携带 deadline）。
+- 验证：`cargo test -p timem --lib timer` 16 passed；`cargo test -p timem --lib` 516 passed / 1 ignored；fmt/diff 与模块边界/契约守卫通过。未改 Web 源码，无需重建 dist。
+
 ## 2026-10 Timer 面板 prompt 展开/编辑
 
 - 触发背景：用户反馈面板只见名字不见内容，prompt 是触发时投递给会话的核心载荷，需要可见、可核对、可修改。澄清：产品面板本有删除按钮与 prompt 全文（用户看到的是示意网页的简化画法），但「编辑 prompt」是真实产品缺口。

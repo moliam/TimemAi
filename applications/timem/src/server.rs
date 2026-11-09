@@ -887,9 +887,10 @@ struct WebNextTurnPayload {
     text: String,
     attachments: Vec<WebAttachment>,
     worker_roles: Vec<WorkerRole>,
-    /// Timer queue entry with queue_timeout_minutes > 0: once the wall clock
-    /// passes this deadline the entry is dispatched immediately out of queue
-    /// order instead of waiting behind pending messages.
+    /// Timer queue entry's wall-clock retry deadline. A positive
+    /// `queue_timeout_minutes` caps FIFO waiting; an immediate-delivery
+    /// fallback uses fire time so the scheduler retries it on its next tick.
+    /// Once reached, the entry is dispatched immediately out of queue order.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dispatch_deadline_ms: Option<u64>,
 }
@@ -9391,6 +9392,7 @@ fn spawn_timer_scheduler(state: AppState) {
     tokio::spawn(async move {
         loop {
             fire_due_timers(&state);
+            dispatch_timed_out_queue_intents(&state);
             sleep(TIMER_SCHEDULER_INTERVAL).await;
         }
     });
@@ -9476,6 +9478,83 @@ fn fire_due_timers(state: &AppState) {
         sync_worker_timers(state, &session_id);
         publish_timers_updated(state, &session_id);
     }
+}
+
+/// The timer scheduler is also the wall-clock owner for queued timer prompts.
+/// Turn completion normally pumps the queue, but a long-running turn may never
+/// produce that boundary. Re-check deadlines every tick so an expired wait cap
+/// is honored even while the current turn is still running.
+fn dispatch_timed_out_queue_intents(state: &AppState) {
+    if state
+        .session_restore_in_progress
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
+    let now = now_ms();
+    let due = {
+        let Ok(sessions) = state.sessions.lock() else {
+            return;
+        };
+        sessions
+            .values()
+            .filter(|session| !session.workers.is_empty())
+            .filter_map(|session| {
+                let timed_out = session
+                    .message_queue
+                    .projection()
+                    .items
+                    .iter()
+                    .filter(|item| payload_dispatch_deadline_reached(&item.payload, now))
+                    .map(|item| item.command_id.clone())
+                    .collect::<Vec<_>>();
+                if timed_out.is_empty() {
+                    return None;
+                }
+                Some((
+                    session.session_id.clone(),
+                    current_turn_id(session).map(str::to_string),
+                    timed_out,
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
+    for (session_id, turn_id, command_ids) in due {
+        if turn_id.is_none() {
+            // The ordinary pump already prefers timed-out entries over FIFO
+            // order; this call is the missing wall-clock trigger while idle.
+            dispatch_next_turn_intent_if_ready(state, &session_id);
+            continue;
+        }
+        // `pending_turn_id` is set before Core emits TurnStarted. Only append
+        // to a Core-authoritative active turn; otherwise the next tick retries.
+        if !session_has_active_turn(state, &session_id).unwrap_or(false) {
+            continue;
+        }
+        for command_id in command_ids {
+            if let Err(error) = send_queued_message_now(state, &session_id, &command_id) {
+                if !is_transient_queue_timeout_dispatch_error(&error) {
+                    state.runtime_log.record(
+                        "timer_queue_timeout_dispatch_failed",
+                        json!({
+                            "session_id": session_id,
+                            "command_id": command_id,
+                            "error": error,
+                        }),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn is_transient_queue_timeout_dispatch_error(error: &str) -> bool {
+    matches!(
+        error,
+        "message_queue_item_not_found"
+            | "message_queue_dispatch_in_progress"
+            | "message_queue_supplement_rejected"
+    )
 }
 
 /// One received mail in a session's mailbox, as surfaced to the WebUI.
@@ -11641,14 +11720,14 @@ fn enqueue_timer_fire(
 ) -> bool {
     let command_id = unique_web_id("timer_fire");
     // The wait cap is anchored at fire time: once the wall clock passes the
-    // deadline the queued entry is dispatched immediately out of order.
-    let dispatch_deadline_ms = if queue_timeout_minutes == 0 {
-        None
-    } else {
-        let deadline =
-            now_ms().saturating_add(u128::from(queue_timeout_minutes).saturating_mul(60_000));
-        u64::try_from(deadline).ok()
-    };
+    // deadline the queued entry is dispatched immediately out of order. Even
+    // immediate delivery can fall back here when the active turn closes at the
+    // append boundary; use fire time as the deadline so the scheduler retries
+    // on its next tick instead of waiting for a turn boundary that may never
+    // come.
+    let deadline =
+        now_ms().saturating_add(u128::from(queue_timeout_minutes).saturating_mul(60_000));
+    let dispatch_deadline_ms = u64::try_from(deadline).ok();
     match enqueue_next_turn_intent(
         state,
         session_id,
@@ -12077,6 +12156,12 @@ fn enqueue_next_turn_intent(
     message_queue_projection(state, session_id)
 }
 
+fn payload_dispatch_deadline_reached(payload: &WebNextTurnPayload, now: u128) -> bool {
+    payload
+        .dispatch_deadline_ms
+        .is_some_and(|deadline| now >= u128::from(deadline))
+}
+
 fn dispatch_next_turn_intent_if_ready(state: &AppState, session_id: &str) {
     let intent = state.sessions.lock().ok().and_then(|mut sessions| {
         let session = sessions.get_mut(session_id)?;
@@ -12097,11 +12182,7 @@ fn dispatch_next_turn_intent_if_ready(state: &AppState, session_id: &str) {
             .projection()
             .items
             .iter()
-            .find(|item| {
-                item.payload
-                    .dispatch_deadline_ms
-                    .is_some_and(|deadline| now_ms() >= u128::from(deadline))
-            })
+            .find(|item| payload_dispatch_deadline_reached(&item.payload, now_ms()))
             .map(|item| item.command_id.clone());
         let item = if let Some(command_id) = explicit_after_stop {
             session

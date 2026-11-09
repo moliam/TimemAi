@@ -20621,6 +20621,29 @@ fn web_timer_fire_due_enqueues_into_active_turn() {
 }
 
 #[test]
+fn timer_immediate_delivery_queue_fallback_has_retry_deadline() {
+    let state = routing_test_state();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions.get_mut("session_a").unwrap().pending_turn_id = Some("turn_fake_active".into());
+    }
+    assert!(enqueue_timer_fire(
+        &state,
+        "session_a",
+        "timer_immediate",
+        "[timer:immediate] retry me".to_string(),
+        0,
+    ));
+    let sessions = state.sessions.lock().unwrap();
+    let item = &sessions["session_a"].message_queue.projection().items[0];
+    let deadline = item
+        .payload
+        .dispatch_deadline_ms
+        .expect("immediate fallback must not wait for a turn boundary");
+    assert!(deadline <= now_ms() as u64 + 1_000);
+}
+
+#[test]
 fn web_timer_fire_due_idle_session_starts_new_timer_turn() {
     let state = routing_test_state();
     create_session_timer(
@@ -20693,6 +20716,44 @@ impl ModelClient for TimerPromptCaptureModel {
         Ok(LlmResponse {
             tool_calls: Vec::new(),
             content: confirmed_xml_response("<final_answer>timer turn done</final_answer>"),
+            model_name: "test-model".to_string(),
+            usage: UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                total_tokens: 12,
+                ..UsageStats::zero()
+            },
+            truncated: false,
+        })
+    }
+}
+
+struct BlockingTimerQueueModel {
+    calls: Arc<AtomicUsize>,
+    prompts: Arc<Mutex<Vec<String>>>,
+    release: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl ModelClient for BlockingTimerQueueModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let (lock, release) = &*self.release;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = release.wait(released).unwrap();
+            }
+        }
+        Ok(LlmResponse {
+            tool_calls: Vec::new(),
+            content: confirmed_xml_response("<final_answer>timer queue delivered</final_answer>"),
             model_name: "test-model".to_string(),
             usage: UsageStats {
                 llm_calls: 1,
@@ -20888,6 +20949,144 @@ fn real_worker_timer_fire_delivers_prompt_and_completes_turn() {
             .iter()
             .any(|turn| { turn.user_entries.iter().any(|entry| entry.kind == "timer") }));
     }
+    shutdown_timer_workers(&state);
+}
+
+#[test]
+fn real_worker_timer_queue_timeout_appends_to_active_turn_without_turn_boundary() {
+    let state = routing_test_state();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let prompts = Arc::new(Mutex::new(Vec::<String>::new()));
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let session_id = register_timer_model_worker(
+        &state,
+        BlockingTimerQueueModel {
+            calls: Arc::clone(&calls),
+            prompts: Arc::clone(&prompts),
+            release: Arc::clone(&release),
+        },
+        "queue_timeout",
+    );
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "hold the turn".to_string(),
+            input_kind: None,
+            source_turn_id: None,
+            attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap();
+    drain_until(
+        &state,
+        20_000,
+        || {
+            let sessions = state.sessions.lock().unwrap();
+            sessions[&session_id].active_turn_id.is_some() && calls.load(Ordering::SeqCst) > 0
+        },
+        "blocking active turn",
+    );
+
+    create_session_timer(
+        &state,
+        &session_id,
+        Some("deadline".into()),
+        "deliver at deadline".into(),
+        None,
+        Some(60_000),
+        None,
+        None,
+        1,
+    )
+    .unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions.get_mut(&session_id).unwrap().timers[0].next_fire_ms = 0;
+    }
+    fire_due_timers(&state);
+    let (command_id, mut payload) = {
+        let sessions = state.sessions.lock().unwrap();
+        let queue = &sessions[&session_id].message_queue;
+        assert_eq!(queue.len(), 1, "active timer must wait in the queue");
+        let item = &queue.projection().items[0];
+        assert!(
+            item.payload.dispatch_deadline_ms.is_some(),
+            "positive queue timeout must carry a wall-clock deadline"
+        );
+        (item.command_id.clone(), item.payload.clone())
+    };
+    payload.dispatch_deadline_ms = Some(1);
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions
+            .get_mut(&session_id)
+            .unwrap()
+            .message_queue
+            .update_payload(&command_id, payload)
+            .unwrap();
+    }
+    dispatch_timed_out_queue_intents(&state);
+    // The scheduler runs repeatedly; a delivered entry must not be appended twice.
+    dispatch_timed_out_queue_intents(&state);
+    let (queue_empty, timer_entry_count) = {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        let active_turn_id = session.active_turn_id.as_deref().unwrap_or_default();
+        let count = session
+            .turns
+            .iter()
+            .find(|turn| turn.turn_id == active_turn_id)
+            .map(|turn| {
+                turn.user_entries
+                    .iter()
+                    .filter(|entry| {
+                        entry.kind == "supplement"
+                            && entry.text == "[timer:deadline] deliver at deadline"
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        (session.message_queue.is_empty(), count)
+    };
+    {
+        let (lock, release) = &*release;
+        *lock.lock().unwrap() = true;
+        release.notify_all();
+    }
+    assert!(
+        queue_empty,
+        "expired timer must leave the queue without waiting for turn completion"
+    );
+    assert_eq!(
+        timer_entry_count, 1,
+        "expired timer must enter the active turn immediately exactly once"
+    );
+    drain_until(
+        &state,
+        20_000,
+        || {
+            let sessions = state.sessions.lock().unwrap();
+            let session = &sessions[&session_id];
+            session.state == "ready"
+                && session
+                    .turns
+                    .iter()
+                    .any(|turn| turn.final_answer.as_deref() == Some("timer queue delivered"))
+        },
+        "timer queue supplement to finish",
+    );
+    assert!(
+        prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|prompt| prompt.contains("[timer:deadline] deliver at deadline")),
+        "the supplement must reach a model request"
+    );
     shutdown_timer_workers(&state);
 }
 
